@@ -825,6 +825,7 @@ def test_step_types_deduplicates_same_commit_across_producers():
             {
                 "kind": "pull_request",
                 "value": "https://github.com/gptme/gptme/pull/3646",
+                "evidence": {"commit_sha": "48225d823eba894164b90290cb7a6d2ecfaf3508"},
             },
         ],
     )
@@ -992,7 +993,7 @@ def test_step_types_grok_leading_sha_not_overridden_by_message_paren():
 
 
 def test_step_types_pr_url_and_text_same_pr_is_single():
-    """URL and ``PR #N`` forms of the same PR are one delivery.
+    """URL and merge evidence for ``PR #N`` are one delivery.
 
     Regression for gptme/gptme-contrib#1565 Greptile P1 (round 2): when
     merge-SHA resolution fails, ``owner/repo#N`` and ``#N`` were counted
@@ -1011,13 +1012,69 @@ def test_step_types_pr_url_and_text_same_pr_is_single():
                 "kind": "pull_request",
                 "value": "https://github.com/gptme/gptme/pull/42",
             },
-            {"kind": "pull_request", "value": "merge PR #42"},
+            {
+                "kind": "pull_request",
+                "value": "merge PR #42",
+                "evidence": {"action": "gh_pr_merge"},
+            },
         ],
     )
     r.populate_step_types()
     labels = r.step_types or []
     assert "single_commit" in labels
     assert "multi_commit" not in labels
+
+
+def test_step_types_unqualified_pr_without_merge_evidence_stays_distinct():
+    """An unqualified PR must not absorb a qualified cross-repo PR."""
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/gptme/gptme/pull/42",
+            },
+            {"kind": "pull_request", "value": "PR #42"},
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
+    assert "single_commit" not in labels
+
+
+def test_step_types_same_number_qualified_cross_repo_prs_stay_distinct():
+    """gh_pr_merge evidence must not merge two qualified cross-repo PRs."""
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/org-a/repo-a/pull/42",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/org-b/repo-b/pull/42",
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
+    assert "single_commit" not in labels
 
 
 def test_step_types_two_pr_only_is_multi():
@@ -1116,8 +1173,8 @@ def test_step_types_pr_merge_pair_plus_commit_is_multi():
     assert "single_commit" not in labels
 
 
-def test_step_types_pr_metadata_does_not_inflate_merge_commit():
-    """PR metadata beside one merge commit remains one logical delivery."""
+def test_step_types_pr_metadata_does_not_inflate_matching_commit():
+    """A PR explicitly tied to a commit remains one logical delivery."""
     r = SessionRecord(
         session_id="step-types",
         span_aggregates={
@@ -1127,7 +1184,11 @@ def test_step_types_pr_metadata_does_not_inflate_merge_commit():
             "retry_depth": 0,
         },
         deliverable_details=[
-            {"kind": "pull_request", "value": "https://github.com/org/repo/pull/99"},
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/org/repo/pull/99",
+                "evidence": {"commit_sha": "abc1234"},
+            },
             {"kind": "merge_commit", "value": "merge-commit (abc1234)"},
         ],
     )
@@ -1135,6 +1196,188 @@ def test_step_types_pr_metadata_does_not_inflate_merge_commit():
     labels = r.step_types or []
     assert "single_commit" in labels
     assert "multi_commit" not in labels
+
+
+def test_step_types_unpaired_pr_plus_commit_is_multi():
+    """A PR without matching commit or merge evidence is count-bearing."""
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {"kind": "commit", "value": "abc1234"},
+            {"kind": "pull_request", "value": "https://github.com/org/repo/pull/99"},
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
+    assert "single_commit" not in labels
+
+
+def test_step_types_two_gh_pr_merge_one_commit_is_multi():
+    """Two PRs merged via gh pr merge with only one merge_commit recorded.
+
+    Regression for gptme/gptme-contrib#1599 AI review P1: the old any()-based
+    skip dropped ALL gh_pr_merge PR entries when any merge_commit with
+    gh_pr_merge evidence existed, so 2 PRs + 1 merge_commit → single_commit.
+    The budget counter (skip at most N, where N = number of merge_commits)
+    lets the second PR count as a distinct delivery.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "pull_request",
+                "value": "merge PR #42",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+            {
+                "kind": "pull_request",
+                "value": "merge PR #43",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+            {
+                "kind": "merge_commit",
+                "value": "merge-commit (abc1234)",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels, f"expected multi_commit, got {labels}"
+    assert "single_commit" not in labels
+
+
+def test_step_types_duplicate_gh_pr_merge_commits_do_not_double_budget():
+    """Duplicate producer records for one merge commit buy one PR pairing."""
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "pull_request",
+                "value": "merge PR #42",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+            {
+                "kind": "pull_request",
+                "value": "merge PR #43",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+            {
+                "kind": "merge_commit",
+                "value": "merge-commit (abc1234)",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+            {
+                "kind": "merge_commit",
+                "value": "merge-commit (abc1234)",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels
+    assert "single_commit" not in labels
+
+
+def test_step_types_gh_pr_merge_url_and_text_and_commit_is_single():
+    """A qualified URL, gh_pr_merge text, and its merge_commit are one delivery.
+
+    Regression for gptme/gptme-contrib#1599 AI review P1 (round 2): the
+    budget skip ran before PR-identity aliasing, so an unaliased qualified
+    URL for the same PR number was counted separately from the (budget-
+    skipped) gh_pr_merge text, over-counting a single merged PR as two
+    deliveries.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "pull_request",
+                "value": "https://github.com/gptme/gptme/pull/42",
+            },
+            {
+                "kind": "pull_request",
+                "value": "merge PR #42",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+            {
+                "kind": "merge_commit",
+                "value": "merge-commit (abc1234)",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "single_commit" in labels, f"expected single_commit, got {labels}"
+    assert "multi_commit" not in labels
+
+
+def test_step_types_two_gh_pr_merge_prs_one_sha_paired_is_multi():
+    """Two merged PRs, one commit recorded, one explicitly sha-paired.
+
+    Regression for gptme/gptme-contrib#1599 AI review P1 (round 2): the sha
+    match and the gh_pr_merge budget both drew from the same commit without
+    tracking that it had already been spent, so the sha-paired PR's commit
+    could *also* pay for the other, unrelated gh_pr_merge PR — undercounting
+    two real deliveries as one.
+    """
+    r = SessionRecord(
+        session_id="step-types",
+        span_aggregates={
+            "total_spans": 20,
+            "error_spans": 0,
+            "tool_counts": {"Bash": 20},
+            "retry_depth": 0,
+        },
+        deliverable_details=[
+            {
+                "kind": "pull_request",
+                "value": "merge PR #42",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+            {
+                "kind": "pull_request",
+                "value": "merge PR #43",
+                "evidence": {"action": "gh_pr_merge", "commit_sha": "abc1234"},
+            },
+            {
+                "kind": "merge_commit",
+                "value": "merge-commit (abc1234)",
+                "evidence": {"action": "gh_pr_merge"},
+            },
+        ],
+    )
+    r.populate_step_types()
+    labels = r.step_types or []
+    assert "multi_commit" in labels, f"expected multi_commit, got {labels}"
+    assert "single_commit" not in labels
 
 
 def test_step_types_zero_spans_not_shallow():
