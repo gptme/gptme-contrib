@@ -95,7 +95,7 @@ class HistogramEmbedder:
         norm = np.linalg.norm(vec)
         if norm > 0:
             vec /= norm
-        return vec  # type: ignore[no-any-return]
+        return vec
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
