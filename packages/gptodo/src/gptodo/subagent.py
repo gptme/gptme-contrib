@@ -321,6 +321,9 @@ def spawn_agent(
         env_exports.append("export BOB_DISPATCH_KIND=gptodo-spawn")
         if _parent_session_id:
             env_exports.append(f"export BOB_PARENT_SESSION_ID={shlex.quote(_parent_session_id)}")
+        else:
+            # Do not leak an inherited grandparent ID into a standalone spawn.
+            env_unsets.append("BOB_PARENT_SESSION_ID")
 
         # Build env setup: unsets first (if any), then exports
         env_commands = []
@@ -405,6 +408,9 @@ def spawn_agent(
     env["BOB_DISPATCH_KIND"] = "gptodo-spawn"
     if _parent_session_id:
         env["BOB_PARENT_SESSION_ID"] = _parent_session_id
+    else:
+        # Do not leak an inherited grandparent ID into a standalone spawn.
+        env.pop("BOB_PARENT_SESSION_ID", None)
 
     combined_output = ""
     try:

@@ -560,6 +560,47 @@ def test_loop_counts_auth_failed_as_failure(sessions_dir, monkeypatch):
 # ── Dispatch lineage tests (BOB_PARENT_SESSION_ID / BOB_DISPATCH_KIND) ────────
 
 
+def test_spawn_agent_background_sets_dispatch_lineage(sessions_dir, monkeypatch):
+    """Background tmux commands export dispatch kind and parent session ID."""
+    monkeypatch.setenv("CC_SESSION_ID", "cc-parent-abc123")
+    monkeypatch.delenv("BOB_SESSION_ID", raising=False)
+
+    with patch("gptodo.subagent.subprocess.run", return_value=_make_proc(returncode=0)) as mock_run:
+        spawn_agent(
+            task_id="t-bg-lineage",
+            prompt="work",
+            backend="claude",
+            background=True,
+            workspace=sessions_dir,
+        )
+
+    tmux_cmd = mock_run.call_args.args[0]
+    assert tmux_cmd[:4] == ["tmux", "new-session", "-d", "-s"]
+    assert tmux_cmd[4].startswith("gptodo_agent_")
+    assert "export BOB_DISPATCH_KIND=gptodo-spawn" in tmux_cmd[-1]
+    assert "export BOB_PARENT_SESSION_ID=cc-parent-abc123" in tmux_cmd[-1]
+
+
+def test_spawn_agent_background_clears_inherited_parent_session_id(sessions_dir, monkeypatch):
+    """Background tmux commands do not inherit a stale grandparent ID."""
+    monkeypatch.delenv("CC_SESSION_ID", raising=False)
+    monkeypatch.delenv("BOB_SESSION_ID", raising=False)
+    monkeypatch.setenv("BOB_PARENT_SESSION_ID", "stale-grandparent")
+
+    with patch("gptodo.subagent.subprocess.run", return_value=_make_proc(returncode=0)) as mock_run:
+        spawn_agent(
+            task_id="t-bg-no-parent",
+            prompt="work",
+            backend="claude",
+            background=True,
+            workspace=sessions_dir,
+        )
+
+    tmux_cmd = mock_run.call_args.args[0]
+    assert "BOB_PARENT_SESSION_ID" in tmux_cmd[-1]
+    assert "export BOB_PARENT_SESSION_ID=" not in tmux_cmd[-1]
+
+
 @pytest.mark.parametrize("backend", ["gptme", "claude", "codex"])
 def test_spawn_agent_foreground_sets_dispatch_kind(sessions_dir, backend):
     """BOB_DISPATCH_KIND=gptodo-spawn is injected for every backend, foreground."""
@@ -637,6 +678,7 @@ def test_spawn_agent_foreground_no_parent_session_id_when_env_absent(sessions_di
     """No BOB_PARENT_SESSION_ID key when neither CC_SESSION_ID nor BOB_SESSION_ID is set."""
     monkeypatch.delenv("CC_SESSION_ID", raising=False)
     monkeypatch.delenv("BOB_SESSION_ID", raising=False)
+    monkeypatch.setenv("BOB_PARENT_SESSION_ID", "stale-grandparent")
 
     captured_env: dict = {}
 
