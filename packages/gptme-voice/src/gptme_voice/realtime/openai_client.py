@@ -39,6 +39,9 @@ _MAX_INSTRUCTIONS_LEN = 4096
 # than enough for any realistic session-handshake delay while still capping
 # memory growth if the provider never confirms the session.
 _MAX_PENDING_AUDIO_CHUNKS = 500
+# A provider handshake should normally complete in under a second. Bound text
+# turns so a missing ready event cannot pin a /local connection forever.
+_SESSION_READY_TIMEOUT_SECONDS = 10.0
 # OpenAI's model catalog currently markets `gpt-realtime-2`, while the
 # Realtime API reference may still enumerate the older generic alias instead.
 # Keep the newer default, but retry once with the generic alias if the
@@ -643,6 +646,38 @@ class OpenAIRealtimeClient:
 
         # Start receiving messages
         self._receive_task = asyncio.create_task(self._receive_loop())
+
+    async def send_text_message(self, text: str) -> None:
+        """Send a caller utterance as text and trigger a response.
+
+        Text equivalent of a spoken turn: unlike :meth:`inject_message` (which
+        tags the content as an async subagent result), this delivers ``text``
+        verbatim as the user's own turn. Used by the ``/local`` test endpoint so
+        a headless client can drive a full turn — including tool calls — without
+        a microphone.
+        """
+        if self._session_ready is None:
+            raise RuntimeError("Not connected to OpenAI Realtime API")
+        try:
+            await asyncio.wait_for(
+                self._session_ready.wait(),
+                timeout=_SESSION_READY_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("Realtime session was not ready in time") from exc
+
+        logger.info("Sending text message: %s...", text[:100])
+        await self._send_event(
+            "conversation.item.create",
+            {
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                }
+            },
+        )
+        await self._send_event("response.create", {})
 
     async def inject_message(self, text: str) -> None:
         """Inject a message into the conversation and trigger a response.
