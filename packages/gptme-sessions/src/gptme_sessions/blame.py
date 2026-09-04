@@ -160,10 +160,45 @@ def commits_for_path(path: str, limit: int = 10) -> list[Attribution]:
     return result
 
 
+def _uncommitted_attribution(porcelain: str, sha: str) -> Attribution:
+    """Build an Attribution for a working-tree line from ``git blame`` porcelain.
+
+    ``git blame`` still emits ``author-time``/``author-tz`` for uncommitted
+    lines, so the edit can be placed on the session timeline even though no
+    commit exists to attribute it to.
+    """
+    fields: dict[str, str] = {}
+    for raw in porcelain.split("\n")[1:]:
+        if raw.startswith("\t"):
+            break
+        key, _, value = raw.partition(" ")
+        fields.setdefault(key, value)
+
+    try:
+        when = datetime.fromtimestamp(int(fields.get("author-time", "")), tz=timezone.utc)
+    except ValueError:
+        when = datetime.now(tz=timezone.utc)
+
+    return Attribution(
+        sha=sha,
+        when=when,
+        author=fields.get("author") or "Not Committed Yet",
+        subject="(uncommitted change in working tree)",
+        trailer_session_id=None,
+    )
+
+
 def commit_for_line(path: str, line: int) -> list[Attribution]:
-    """Return the single commit that last touched ``path`` line ``line``."""
+    """Return the single commit that last touched ``path`` line ``line``.
+
+    A line that is only in the working tree has no commit; it is returned as an
+    uncommitted Attribution timestamped from the blame porcelain so window
+    attribution still works.
+    """
     out = _run(["git", "blame", "-L", f"{line},{line}", "--porcelain", "--", path])
-    sha = out.splitlines()[0].split(" ", 1)[0]
+    sha = out.split("\n", 1)[0].split(" ", 1)[0]
+    if sha and set(sha) == {"0"}:
+        return [_uncommitted_attribution(out, sha)]
     meta = _run(
         [
             "git",
