@@ -3773,6 +3773,57 @@ def test_detect_format_codex_interactive():
     assert detect_format(msgs) == "codex"
 
 
+@pytest.mark.parametrize(
+    "originator",
+    [
+        "codex_exec",
+        "codex_interactive",
+        "codex-tui",
+        "codex_cli_rs",
+    ],
+)
+def test_extract_from_path_codex_all_originators(tmp_path: Path, originator: str) -> None:
+    """All known Codex originators route through end-to-end extraction."""
+    from gptme_sessions.signals import extract_from_path
+
+    trajectory_file = tmp_path / f"{originator}.jsonl"
+    msgs = [
+        {
+            "timestamp": "2026-08-31T20:00:00.000Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "test-session",
+                "originator": originator,
+                "cwd": "/workspace",
+            },
+        },
+        {
+            "timestamp": "2026-08-31T20:00:01.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "patch_apply_end",
+                "call_id": "call_patch",
+                "success": True,
+                "changes": {
+                    "/workspace/src/fix.py": {"type": "update"},
+                    "/workspace/src/helper.py": {"type": "add"},
+                },
+            },
+        },
+    ]
+    trajectory_file.write_text("".join(json.dumps(msg) + "\n" for msg in msgs), encoding="utf-8")
+
+    assert detect_format(msgs) == "codex"
+    assert _detect_format(msgs) == "codex"
+    result = extract_from_path(trajectory_file)
+    assert result["format"] == "codex"
+    assert result["file_writes"] == [
+        "/workspace/src/fix.py",
+        "/workspace/src/helper.py",
+    ]
+    assert result["productive"] is True
+
+
 def test_extract_signals_codex_basic():
     """Extract signals from a minimal Codex trajectory.
 
