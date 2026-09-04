@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Sequence
 from datetime import date, datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -57,6 +58,66 @@ def _get_cc_projects_dir() -> Path:
     if env_dir:
         return Path(env_dir) / "projects"
     return DEFAULT_CC_PROJECTS_DIR
+
+
+def _get_cc_extra_projects_dirs() -> list[Path]:
+    """Additional roots laid out like ``~/.claude/projects`` (archived sessions).
+
+    Operators that rotate closed Claude Code sessions out of the live projects
+    directory (so CC startup and scanners stop walking tens of thousands of
+    files) keep the same ``<root>/<project-slug>/<session-id>.jsonl`` layout in
+    an archive root. Set ``GPTME_CC_EXTRA_PROJECTS_DIRS`` (``os.pathsep``-
+    separated) so discovery and session-id lookups keep seeing them.
+    """
+    raw = os.environ.get("GPTME_CC_EXTRA_PROJECTS_DIRS", "")
+    return [Path(part).expanduser() for part in raw.split(os.pathsep) if part.strip()]
+
+
+def _cc_roots(cc_dir: Path | None, extra_dirs: Sequence[Path] | None) -> list[Path]:
+    """Live projects dir first, then archive roots; duplicates removed."""
+    roots: list[Path] = [cc_dir if cc_dir is not None else _get_cc_projects_dir()]
+    roots.extend(extra_dirs if extra_dirs is not None else _get_cc_extra_projects_dirs())
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for root in roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        out.append(root)
+    return out
+
+
+def find_cc_session_file(
+    session_id: str,
+    cc_dir: Path | None = None,
+    extra_dirs: Sequence[Path] | None = None,
+    project: str | None = None,
+) -> Path | None:
+    """Locate ``<root>/<project>/<session_id>.jsonl`` across live + archive roots.
+
+    The live projects dir wins over archive roots. When *project* (the CC
+    project slug, e.g. ``-home-user-repo``) is known it is probed directly;
+    otherwise every project dir under each root is checked. Never picks by
+    mtime — a session id names exactly one file.
+    """
+    if not session_id:
+        return None
+    name = f"{session_id}.jsonl"
+    for root in _cc_roots(cc_dir, extra_dirs):
+        if project:
+            candidate = root / project / name
+            if candidate.is_file():
+                return candidate
+            continue
+        try:
+            project_dirs = sorted(p for p in root.iterdir() if p.is_dir())
+        except OSError:
+            continue
+        for project_dir in project_dirs:
+            candidate = project_dir / name
+            if candidate.is_file():
+                return candidate
+    return None
 
 
 def _get_codex_sessions_dir() -> Path:
@@ -352,6 +413,7 @@ def resolve_cc_session_model(
     session_id: str,
     project_dir: Path | None = None,
     tmp_dir: Path | None = None,
+    extra_dirs: Sequence[Path] | None = None,
 ) -> str | None:
     """Resolve the model actually used by a Claude Code session.
 
@@ -383,6 +445,10 @@ def resolve_cc_session_model(
         If ``None``, only the stream log is consulted.
     :param tmp_dir: directory containing the ``cc-session-log-ref-*.txt``
         pointer files. Defaults to ``/tmp``.
+    :param extra_dirs: archive roots laid out like ``~/.claude/projects``
+        (default ``GPTME_CC_EXTRA_PROJECTS_DIRS``); consulted for
+        ``<root>/<project_dir.name>/<session_id>.jsonl`` when the trajectory
+        has been rotated out of *project_dir*.
     """
     if not session_id:
         return None
@@ -406,6 +472,14 @@ def resolve_cc_session_model(
         trajectory = project_dir / f"{session_id}.jsonl"
         if trajectory.is_file():
             return extract_cc_model(trajectory)
+        archived = find_cc_session_file(
+            session_id,
+            cc_dir=project_dir.parent,
+            extra_dirs=extra_dirs,
+            project=project_dir.name,
+        )
+        if archived is not None:
+            return extract_cc_model(archived)
 
     return None
 
@@ -490,40 +564,46 @@ def discover_cc_sessions(
     end: date,
     cc_dir: Path | None = None,
     min_size: int = CC_MIN_SESSION_SIZE,
+    extra_dirs: Sequence[Path] | None = None,
 ) -> list[Path]:
     """Find Claude Code session JSONL files within a date range.
 
     Scans ``~/.claude/projects/`` (or ``CLAUDE_HOME/projects/``) for
-    session ``.jsonl`` files. Uses quick first-line timestamp extraction
-    for fast date filtering.
+    session ``.jsonl`` files, then any archive roots with the same layout
+    (*extra_dirs*, default ``GPTME_CC_EXTRA_PROJECTS_DIRS``). A session id
+    present in more than one root is reported once, from the first root.
+    Uses quick first-line timestamp extraction for fast date filtering.
 
     Files smaller than *min_size* bytes are skipped — these are typically
     stub sessions that never received an assistant response.
 
     Returns sorted list of session JSONL file paths.
     """
-    if cc_dir is None:
-        cc_dir = _get_cc_projects_dir()
-    if not cc_dir.exists():
-        logger.debug("CC projects directory does not exist: %s", cc_dir)
-        return []
-
     sessions_with_dates: list[tuple[date, Path]] = []
-    try:
-        for project_dir in sorted(cc_dir.iterdir()):
-            if not project_dir.is_dir():
-                continue
-            for jsonl_file in sorted(project_dir.glob("*.jsonl")):
-                # Skip stub sessions (metadata-only, no assistant response)
-                if min_size > 0 and jsonl_file.stat().st_size < min_size:
+    seen: set[tuple[str, str]] = set()
+    for root in _cc_roots(cc_dir, extra_dirs):
+        if not root.exists():
+            logger.debug("CC projects directory does not exist: %s", root)
+            continue
+        try:
+            for project_dir in sorted(root.iterdir()):
+                if not project_dir.is_dir():
                     continue
-                session_date = _quick_date_from_jsonl(jsonl_file)
-                if session_date is None:
-                    continue
-                if start <= session_date <= end:
-                    sessions_with_dates.append((session_date, jsonl_file))
-    except PermissionError:
-        logger.debug("Permission denied reading: %s", cc_dir)
+                for jsonl_file in sorted(project_dir.glob("*.jsonl")):
+                    key = (project_dir.name, jsonl_file.name)
+                    if key in seen:
+                        continue
+                    # Skip stub sessions (metadata-only, no assistant response)
+                    if min_size > 0 and jsonl_file.stat().st_size < min_size:
+                        continue
+                    session_date = _quick_date_from_jsonl(jsonl_file)
+                    if session_date is None:
+                        continue
+                    seen.add(key)
+                    if start <= session_date <= end:
+                        sessions_with_dates.append((session_date, jsonl_file))
+        except PermissionError:
+            logger.debug("Permission denied reading: %s", root)
     return [path for _, path in sorted(sessions_with_dates)]
 
 
