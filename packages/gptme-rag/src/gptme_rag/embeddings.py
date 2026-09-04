@@ -133,6 +133,15 @@ class _SQLiteEmbeddingCache:
         self.max_rows = max_rows
         _ensure_private_cache_file(path)
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
+        # busy_timeout must come before journal_mode=WAL: if two processes
+        # race to open a brand-new file and set WAL simultaneously, the loser
+        # raises OperationalError immediately without a timeout.  5 s is
+        # enough for any realistic cold-start contention.
+        self.conn.execute("PRAGMA busy_timeout=5000")
+        # WAL mode allows concurrent readers while a writer holds the lock,
+        # and prevents "database is locked" errors when multiple processes
+        # (e.g. parallel indexing runs) read the cache simultaneously.
+        self.conn.execute("PRAGMA journal_mode=WAL")
         os.chmod(path, 0o600)
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS embeddings ("
