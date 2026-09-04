@@ -1950,7 +1950,7 @@ async function runSearch(q, typeFilter) {
           const input = document.getElementById('global-search-input');
           const liveQuery = input ? input.value.trim() : '';
           const liveFilter = document.getElementById('search-type-filter').value;
-          if (liveQuery.length >= 2) runSearch(liveQuery, liveFilter);
+          if (Array.isArray(_staticSearchIndex) && liveQuery.length >= 2) runSearch(liveQuery, liveFilter);
         });
       }
       return;

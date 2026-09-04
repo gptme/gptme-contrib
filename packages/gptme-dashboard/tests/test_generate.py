@@ -4103,6 +4103,26 @@ def test_static_search_failed_load_sentinel(workspace: Path, tmp_path: Path):
     ), "user must see a retry message when static index load failed"
 
 
+def test_static_search_failed_load_no_infinite_retry(workspace: Path, tmp_path: Path):
+    """After a failed data.json load, the .then() callback must NOT call runSearch
+    unconditionally — doing so creates an infinite retry loop because _staticSearchIndex
+    stays false and _staticSearchIndexPromise is cleared, so each runSearch call
+    re-triggers _loadStaticSearchIndex immediately.  The guard must be Array.isArray."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # Find the .then() callback attached to _loadStaticSearchIndex()
+    then_idx = html.index("_loadStaticSearchIndex().then(")
+    # There must be an Array.isArray guard before runSearch inside that callback
+    close_then_idx = html.index("});", then_idx)
+    callback_body = html[then_idx:close_then_idx]
+    assert "Array.isArray(_staticSearchIndex)" in callback_body, (
+        "The .then() callback after _loadStaticSearchIndex() must guard runSearch "
+        "with Array.isArray(_staticSearchIndex) to prevent infinite retry loops when "
+        "the fetch fails (sets _staticSearchIndex=false and clears the promise)."
+    )
+
+
 def test_static_search_selfheal_retrigger(workspace: Path, tmp_path: Path):
     """initDynamic must re-trigger runSearch if overlay is open when API probe completes."""
     output = tmp_path / "site"
