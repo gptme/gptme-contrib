@@ -51,7 +51,7 @@ def resolve_replay_target(target: str, *, sessions_dir: Path) -> SessionTranscri
         return read_transcript(path)
 
     store = SessionStore(sessions_dir=sessions_dir)
-    record = resolve_session_record_prefix(store.load_all(), target)
+    record = resolve_session_record_prefix(store.load_all(include_archives=True), target)
     if not record.trajectory_path:
         raise ValueError(f"Session '{record.session_id}' has no trajectory_path; cannot replay it.")
     return read_transcript(Path(record.trajectory_path).expanduser())

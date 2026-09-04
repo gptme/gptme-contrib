@@ -66,11 +66,11 @@ def test_rotate_is_idempotent(store):
     assert len(archive.read_text().strip().splitlines()) == 1
 
 
-def test_rotate_re_archives_a_reappended_session_without_duplicating(store):
-    """A record re-added to the active file after rotation must not double in the archive."""
+def test_rotate_skips_an_identical_reappended_record(store):
+    """Crash recovery may leave an exact copy active; do not archive it twice."""
     store.append(_rec("old", 60))
     store.rotate(keep_days=30, now=NOW)
-    store.append(_rec("old", 60))  # e.g. an upsert that resurrected it
+    store.append(_rec("old", 60))
 
     stats = store.rotate(keep_days=30, now=NOW)
 
@@ -78,6 +78,37 @@ def test_rotate_re_archives_a_reappended_session_without_duplicating(store):
     assert stats["skipped_duplicate"] == 1
     archive = store.archive_paths()[0]
     assert len(archive.read_text().strip().splitlines()) == 1
+
+
+def test_rotate_preserves_distinct_records_with_the_same_session_id(store):
+    """Deduplication must never discard changed or genuinely duplicate rows."""
+    first = _rec("old", 60)
+    second = _rec("old", 59)
+    store.append(first)
+    store.rotate(keep_days=30, now=NOW)
+    store.append(second)
+
+    stats = store.rotate(keep_days=30, now=NOW)
+
+    assert stats["archived"] == 1
+    assert stats["skipped_duplicate"] == 0
+    archived = store.load_all(include_archives=True)
+    assert [(r.session_id, r.timestamp) for r in archived] == [
+        ("old", first.timestamp),
+        ("old", second.timestamp),
+    ]
+
+    # Identical rows in one active batch represent two historical events. They
+    # are both retained on the first rotation; hash dedup only suppresses lines
+    # already durable in the archive from a previous partial rotation.
+    twin = _rec("twin", 58)
+    store.append(twin)
+    store.append(twin)
+    stats = store.rotate(keep_days=30, now=NOW)
+
+    assert stats["archived"] == 2
+    assert stats["skipped_duplicate"] == 0
+    assert [r.session_id for r in store.load_all(include_archives=True)].count("twin") == 2
 
 
 def test_rotate_keeps_records_without_a_usable_timestamp(store):

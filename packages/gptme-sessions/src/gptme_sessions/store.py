@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -305,9 +306,10 @@ class SessionStore:
 
         **Move, never delete.**  Archives are appended and fsynced *before*
         the active file is replaced, so a crash at any point leaves records
-        duplicated (recoverable) rather than lost.  Re-running is safe:
-        records whose ``session_id`` is already present in the target archive
-        are not appended twice.
+        duplicated (recoverable) rather than lost. Re-running is safe: exact
+        JSONL lines already present in the target archive are not appended
+        twice. Distinct rows are preserved even when they share a
+        ``session_id``.
 
         Records with a missing or unparseable ``timestamp`` are **kept
         active** — guessing an age for them risks archiving something a
@@ -326,7 +328,7 @@ class SessionStore:
                 return {"archived": 0, "kept": 0, "skipped_duplicate": 0}
 
             keep_lines: list[str] = []
-            by_month: dict[str, list[tuple[str, str]]] = {}  # month -> [(session_id, raw)]
+            by_month: dict[str, list[str]] = {}
             with open(self.path, encoding="utf-8") as f:
                 for raw in f:
                     raw = raw.strip()
@@ -336,12 +338,7 @@ class SessionStore:
                     if month is None:
                         keep_lines.append(raw)
                         continue
-                    try:
-                        session_id = str(json.loads(raw).get("session_id", ""))
-                    except (json.JSONDecodeError, TypeError, AttributeError):
-                        keep_lines.append(raw)
-                        continue
-                    by_month.setdefault(month, []).append((session_id, raw))
+                    by_month.setdefault(month, []).append(raw)
 
             if not by_month:
                 return {"archived": 0, "kept": len(keep_lines), "skipped_duplicate": 0}
@@ -352,16 +349,17 @@ class SessionStore:
                 archive_path = (
                     self.sessions_dir / f"{self.path.name[: -len('.jsonl')]}-archive-{month}.jsonl"
                 )
-                existing = self._archive_session_ids(archive_path)
+                existing = self._archive_line_hashes(archive_path)
                 # Append first, fsync, and only then drop from the active file.
+                # Do not add this batch's hashes to ``existing``: duplicate
+                # active rows are distinct historical records and must survive.
                 with open(archive_path, "a", encoding="utf-8") as af:
-                    for session_id, raw in entries:
-                        if session_id and session_id in existing:
+                    for raw in entries:
+                        line_hash = hashlib.sha256(raw.encode()).digest()
+                        if line_hash in existing:
                             skipped += 1
                             continue
                         af.write(raw + "\n")
-                        if session_id:
-                            existing.add(session_id)
                         archived += 1
                     af.flush()
                     os.fsync(af.fileno())
@@ -371,8 +369,7 @@ class SessionStore:
             )
             try:
                 with open(tmp_path, "w", encoding="utf-8") as f:
-                    for line in keep_lines:
-                        f.write(line + "\n")
+                    f.writelines(f"{line}\n" for line in keep_lines)
                     f.flush()
                     os.fsync(f.fileno())
                 tmp_path.replace(self.path)
@@ -413,23 +410,23 @@ class SessionStore:
         return parsed.strftime("%Y-%m")
 
     @staticmethod
-    def _archive_session_ids(archive_path: Path) -> set[str]:
-        """session_ids already present in an archive file (for idempotent rotation)."""
-        ids: set[str] = set()
+    def _archive_line_hashes(archive_path: Path) -> set[bytes]:
+        """Hashes of raw records already archived, for crash-safe idempotency.
+
+        A ``session_id`` is not a unique row identity: stores can legitimately
+        contain duplicate IDs, and an updated record can reuse an archived ID.
+        Hashing the raw JSONL text skips only an exact copy left active after a
+        crash between archive fsync and active-file replacement.
+        """
+        hashes: set[bytes] = set()
         if not archive_path.exists():
-            return ids
+            return hashes
         with open(archive_path, encoding="utf-8") as f:
             for raw in f:
                 raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    sid = json.loads(raw).get("session_id")
-                except (json.JSONDecodeError, TypeError, AttributeError):
-                    continue
-                if sid:
-                    ids.add(str(sid))
-        return ids
+                if raw:
+                    hashes.add(hashlib.sha256(raw.encode()).digest())
+        return hashes
 
     def stamp_attempt_kind(self, session_id: str, attempt_kind: str) -> bool:
         """Stamp the eval attempt classification onto an already-written record.
@@ -478,9 +475,15 @@ class SessionStore:
         outcome: str | None = None,
         since_days: float | None = None,
         project: str | None = None,
+        include_archives: bool = True,
     ) -> list[SessionRecord]:
-        """Filter session records by criteria."""
-        records = self.load_all()
+        """Filter session records by criteria.
+
+        Queries are read-only history consumers, so they include archives by
+        default. Mutation paths must pass ``include_archives=False`` to keep
+        archived records out of active-file rewrites.
+        """
+        records = self.load_all(include_archives=include_archives)
         if model:
             records = [r for r in records if r.model_normalized == model or r.model == model]
         if run_type:
@@ -512,7 +515,7 @@ class SessionStore:
     ) -> dict:
         """Compute summary statistics from session records."""
         if records is None:
-            records = self.load_all()
+            records = self.load_all(include_archives=True)
         if not records:
             return {"total": 0}
 

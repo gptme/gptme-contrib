@@ -294,7 +294,7 @@ def detect_harm_revert(
             deliverables = []
         else:
             store = SessionStore(resolved_store)
-            records = {r.session_id: r for r in store.load_all()}
+            records = {r.session_id: r for r in store.load_all(include_archives=True)}
             record = records.get(session_id)
             if record is None:
                 logger.debug("Session %s not found in store", session_id)
@@ -346,7 +346,11 @@ def batch_detect_harm_revert(
         if resolved_store is not None and resolved_store.exists()
         else None
     )
-    records = {r.session_id: r for r in store.load_all()} if store is not None else {}
+    records = (
+        {r.session_id: r for r in store.load_all(include_archives=True)}
+        if store is not None
+        else {}
+    )
     resolved_repos = _resolve_repos(repos)
 
     results: dict[str, float] = {}

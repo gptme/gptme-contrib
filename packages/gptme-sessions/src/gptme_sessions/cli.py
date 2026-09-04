@@ -873,7 +873,7 @@ def cli(ctx: click.Context, sessions_dir: Path | None) -> None:
         _unsync_window = 14  # days to scan for unsynced sessions
         _default_since = 30  # default stats window
         store = SessionStore(sessions_dir=sessions_dir)
-        records = store.load_all()
+        records = store.load_all(include_archives=True)
 
         # Default to last 30 days for top-level stats
         recent = store.query(since_days=_default_since)
@@ -1138,7 +1138,7 @@ def show(ctx: click.Context, session_id: str, as_json: bool) -> None:
         raise click.UsageError("Session ID must not be empty.")
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     try:
-        record = resolve_session_record_prefix(store.load_all(), session_id)
+        record = resolve_session_record_prefix(store.load_all(include_archives=True), session_id)
     except ValueError as exc:
         raise click.ClickException(str(exc))
 
@@ -1227,7 +1227,7 @@ def stats(
         has_filters = any([model, run_type, category, harness, outcome, project, since])
         if has_filters:
             click.echo("No records match your filters.")
-        elif store.load_all():
+        elif store.load_all(include_archives=True):
             # Records exist but all fall outside the implicit 30-day window
             click.echo(
                 f"No records in the last {_fmt_since(since_days)}. Use --since all for all-time data."
@@ -2654,6 +2654,7 @@ def regrade(
         harness=harness,
         outcome=effective_outcome,
         since_days=since_days,
+        include_archives=False,
     )
 
     if not candidates:
