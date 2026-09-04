@@ -163,6 +163,21 @@ class TestQueryCommand:
         assert len(data) == 1
         assert data[0]["outcome"] == "productive"
 
+    def test_query_includes_rotated_records(self, tmp_path: Path):
+        """Read-only queries retain all-time visibility after rotation."""
+        store = SessionStore(sessions_dir=tmp_path)
+        archived = SessionRecord(
+            session_id="archived-session",
+            timestamp="2026-01-01T00:00:00+00:00",
+        )
+        store.append(archived)
+        store.rotate(keep_days=30, now=datetime(2026, 9, 3, tzinfo=timezone.utc))
+
+        rc, out = _invoke(["query", "--json"], tmp_path)
+
+        assert rc == 0
+        assert [row["session_id"] for row in json.loads(out)] == [archived.session_id]
+
 
 # -- export ------------------------------------------------------------------
 
@@ -344,6 +359,21 @@ class TestExportCommand:
         assert rc != 0
         assert "invalid choice" in out.lower() or "xml" in out.lower()
 
+    def test_export_includes_rotated_records(self, tmp_path: Path):
+        """Backups and audits include archived records by default."""
+        store = SessionStore(sessions_dir=tmp_path)
+        archived = SessionRecord(
+            session_id="archived-session",
+            timestamp="2026-01-01T00:00:00+00:00",
+        )
+        store.append(archived)
+        store.rotate(keep_days=30, now=datetime(2026, 9, 3, tzinfo=timezone.utc))
+
+        rc, out = _invoke(["export", "--format", "json"], tmp_path)
+
+        assert rc == 0
+        assert [row["session_id"] for row in json.loads(out)] == [archived.session_id]
+
 
 # -- cost --------------------------------------------------------------------
 
@@ -407,8 +437,23 @@ class TestShowCommand:
     def test_show_not_found(self, tmp_path: Path):
         """show with unknown ID exits with error."""
         _seed_store(tmp_path)
-        rc, out = _invoke(["show", "nonexistent000"], tmp_path)
+        rc, _out = _invoke(["show", "nonexistent000"], tmp_path)
         assert rc != 0
+
+    def test_show_finds_a_rotated_record(self, tmp_path: Path):
+        """A session ID remains addressable after its record is archived."""
+        store = SessionStore(sessions_dir=tmp_path)
+        archived = SessionRecord(
+            session_id="archived-session",
+            timestamp="2026-01-01T00:00:00+00:00",
+        )
+        store.append(archived)
+        store.rotate(keep_days=30, now=datetime(2026, 9, 3, tzinfo=timezone.utc))
+
+        rc, out = _invoke(["show", archived.session_id], tmp_path)
+
+        assert rc == 0
+        assert archived.session_id in out
 
     def test_show_displays_deliverables(self, tmp_path: Path):
         """show includes deliverables in output."""
