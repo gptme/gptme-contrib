@@ -106,14 +106,23 @@ def _default_openrouter_cache_path() -> Path:
 
 
 def _ensure_private_cache_file(path: Path) -> None:
-    """Create ``path`` with 0600 mode before sqlite opens it."""
+    """Create ``path`` with 0600 mode before sqlite opens it.
+
+    For a *new* file, permissions are set via :func:`os.fchmod` on the open
+    file descriptor *before* closing it.  This is race-free: no window exists
+    between creation and the first chmod in which another process could read the
+    file at the wrong permissions.  The unconditional :func:`os.chmod` afterward
+    corrects *existing* files whose permissions may have drifted (e.g. created
+    by an older version of this code).
+    """
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
         pass
     else:
+        os.fchmod(fd, 0o600)  # race-free: set perms on fd before closing
         os.close(fd)
-    os.chmod(path, 0o600)
+    os.chmod(path, 0o600)  # correct existing files whose perms may have drifted
 
 
 class _SQLiteEmbeddingCache:
@@ -129,7 +138,9 @@ class _SQLiteEmbeddingCache:
 
     def __init__(self, path: Path, max_rows: int = DEFAULT_MAX_ROWS):
         path = path.expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # 0o700: cache directory is owner-only; defence-in-depth alongside
+        # the per-file 0o600 set by _ensure_private_cache_file.
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.max_rows = max_rows
         _ensure_private_cache_file(path)
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
