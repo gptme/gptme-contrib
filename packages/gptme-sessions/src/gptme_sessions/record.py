@@ -360,6 +360,11 @@ class SessionRecord:
     # directed join instead of timestamp-proximity guessing.
     parent_session_id: str | None = None
     dispatch_kind: str | None = None
+    # Dispatcher-run id for dispatchers that are not recorded sessions themselves
+    # (e.g. project-monitoring slots: PM_DISPATCH_ID = the slot unit name).
+    # Complements ``parent_session_id``; use for dispatcher-run→child joins when
+    # the dispatcher has no session_id of its own.
+    dispatch_id: str | None = None
 
     # Work classification
     category: str | None = None  # inferred from commits/files (what actually happened)

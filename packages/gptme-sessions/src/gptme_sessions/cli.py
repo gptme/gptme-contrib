@@ -2818,6 +2818,11 @@ def repair_grades(ctx: click.Context, dry_run: bool) -> None:
     type=click.Choice(sorted(DISPATCH_KINDS)),
     help="How this session was spawned (default: $BOB_DISPATCH_KIND)",
 )
+@click.option(
+    "--dispatch-id",
+    default=None,
+    help="Run-id of the dispatcher (e.g. PM slot unit name; default: $PM_DISPATCH_ID)",
+)
 @click.option("--category", default=None, help="Work category (code, triage, ...)")
 @click.option(
     "--recommended-category",
@@ -2875,6 +2880,7 @@ def post_session_cmd(
     trigger: str | None,
     parent_session_id: str | None,
     dispatch_kind: str | None,
+    dispatch_id: str | None,
     category: str | None,
     recommended_category: str | None,
     selector_mode: str | None,
@@ -2902,6 +2908,7 @@ def post_session_cmd(
         trigger=trigger,
         parent_session_id=parent_session_id,
         dispatch_kind=dispatch_kind,
+        dispatch_id=dispatch_id,
         category=category,
         recommended_category=recommended_category,
         selector_mode=selector_mode,

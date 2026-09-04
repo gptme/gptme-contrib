@@ -130,3 +130,91 @@ def test_stale_env_parent_matching_own_id_is_dropped(tmp_path: Path, monkeypatch
         duration_seconds=10,
     )
     assert result.record.parent_session_id is None
+
+
+# --- dispatch_id (PM slot unit name, non-session dispatcher) ----------------
+
+
+def test_record_keeps_dispatch_id():
+    """dispatch_id is stored as-is (no validation, any non-empty string is valid)."""
+    record = SessionRecord(session_id="child1", dispatch_id="bob-pm-gptme-gptme-slot-0")
+    assert record.dispatch_id == "bob-pm-gptme-gptme-slot-0"
+
+
+def test_record_dispatch_id_default_none():
+    record = SessionRecord(session_id="child1")
+    assert record.dispatch_id is None
+
+
+def test_post_session_records_dispatch_id_from_argument(tmp_path: Path):
+    """Explicit dispatch_id argument is stored in the session record."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="sonnet",
+        session_id="pm-child",
+        dispatch_kind="pm-dispatch",
+        dispatch_id="bob-pm-gptme-gptme-slot-3",
+        duration_seconds=10,
+    )
+    assert result.record.dispatch_id == "bob-pm-gptme-gptme-slot-3"
+
+
+def test_post_session_reads_dispatch_id_from_env(tmp_path: Path, monkeypatch):
+    """PM_DISPATCH_ID env var is the fallback when no explicit dispatch_id given."""
+    monkeypatch.setenv("PM_DISPATCH_ID", "bob-pm-activitywatch-aw-webui-slot-1")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        session_id="pm-child2",
+        dispatch_kind="pm-dispatch",
+        duration_seconds=10,
+    )
+    assert result.record.dispatch_id == "bob-pm-activitywatch-aw-webui-slot-1"
+
+
+def test_explicit_dispatch_id_beats_env(tmp_path: Path, monkeypatch):
+    """Explicit argument takes priority over the PM_DISPATCH_ID env var."""
+    monkeypatch.setenv("PM_DISPATCH_ID", "env-value")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        session_id="pm-child3",
+        dispatch_id="explicit-value",
+        duration_seconds=10,
+    )
+    assert result.record.dispatch_id == "explicit-value"
+
+
+def test_no_dispatch_id_without_env_or_argument(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("PM_DISPATCH_ID", raising=False)
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="sonnet",
+        session_id="top-level",
+        duration_seconds=10,
+    )
+    assert result.record.dispatch_id is None
+
+
+def test_dispatch_id_roundtrips_through_store(tmp_path: Path):
+    """dispatch_id survives serialization to JSONL and back."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        session_id="pm-child4",
+        dispatch_id="bob-pm-gptme-gptme-slot-7",
+        duration_seconds=10,
+    )
+    assert result.record.dispatch_id == "bob-pm-gptme-gptme-slot-7"
+    reloaded = store.load_all()
+    assert any(r.dispatch_id == "bob-pm-gptme-gptme-slot-7" for r in reloaded)
