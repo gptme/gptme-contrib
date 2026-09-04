@@ -314,11 +314,15 @@ def spawn_agent(
             env_exports.append(f"export COORDINATION_DB={shlex.quote(coord_db_path)}")
 
         # Inject dispatch lineage vars — always, regardless of clear_keys.
-        # BOB_DISPATCH_KIND tells the child which path spawned it so its
-        # session-records row can be joined back to the parent.
-        # BOB_PARENT_SESSION_ID is the caller's session id (may be absent for
-        # standalone gptodo CLI invocations outside an autonomous run).
-        env_exports.append("export BOB_DISPATCH_KIND=gptodo-spawn")
+        # BOB_SESSION_ID identifies this child so a nested spawn can use it as
+        # its immediate parent. BOB_PARENT_SESSION_ID identifies this child's
+        # caller (and may be absent for standalone gptodo CLI invocations).
+        env_exports.extend(
+            [
+                f"export BOB_SESSION_ID={shlex.quote(session_id)}",
+                "export BOB_DISPATCH_KIND=gptodo-spawn",
+            ]
+        )
         if _parent_session_id:
             env_exports.append(f"export BOB_PARENT_SESSION_ID={shlex.quote(_parent_session_id)}")
         else:
@@ -401,10 +405,11 @@ def spawn_agent(
 
     # Inject dispatch lineage vars — always, regardless of clear_keys.
     # These are Bob-internal signals; they must override whatever the *parent*
-    # process inherited (e.g. its own BOB_DISPATCH_KIND=worker should not
-    # propagate to a gptodo-spawn child as-is).
+    # process inherited. BOB_SESSION_ID identifies this child so a nested spawn
+    # can use it as its immediate parent.
     if env is None:
         env = os.environ.copy()
+    env["BOB_SESSION_ID"] = session_id
     env["BOB_DISPATCH_KIND"] = "gptodo-spawn"
     if _parent_session_id:
         env["BOB_PARENT_SESSION_ID"] = _parent_session_id

@@ -577,6 +577,7 @@ def test_spawn_agent_background_sets_dispatch_lineage(sessions_dir, monkeypatch)
     tmux_cmd = mock_run.call_args.args[0]
     assert tmux_cmd[:4] == ["tmux", "new-session", "-d", "-s"]
     assert tmux_cmd[4].startswith("gptodo_agent_")
+    assert "export BOB_SESSION_ID=agent_" in tmux_cmd[-1]
     assert "export BOB_DISPATCH_KIND=gptodo-spawn" in tmux_cmd[-1]
     assert "export BOB_PARENT_SESSION_ID=cc-parent-abc123" in tmux_cmd[-1]
 
@@ -602,8 +603,8 @@ def test_spawn_agent_background_clears_inherited_parent_session_id(sessions_dir,
 
 
 @pytest.mark.parametrize("backend", ["gptme", "claude", "codex"])
-def test_spawn_agent_foreground_sets_dispatch_kind(sessions_dir, backend):
-    """BOB_DISPATCH_KIND=gptodo-spawn is injected for every backend, foreground."""
+def test_spawn_agent_foreground_sets_child_session_lineage(sessions_dir, backend):
+    """Every foreground backend receives its own ID and gptodo-spawn kind."""
     captured_env: dict = {}
 
     def _fake_run(cmd, **kwargs):
@@ -611,7 +612,7 @@ def test_spawn_agent_foreground_sets_dispatch_kind(sessions_dir, backend):
         return _make_proc(returncode=0, stdout="done")
 
     with patch("gptodo.subagent.subprocess.run", side_effect=_fake_run):
-        spawn_agent(
+        session = spawn_agent(
             task_id="t-dk",
             prompt="work",
             backend=backend,
@@ -619,6 +620,7 @@ def test_spawn_agent_foreground_sets_dispatch_kind(sessions_dir, backend):
             workspace=sessions_dir,
         )
 
+    assert captured_env.get("BOB_SESSION_ID") == session.session_id
     assert captured_env.get("BOB_DISPATCH_KIND") == "gptodo-spawn"
 
 
@@ -637,7 +639,7 @@ def test_spawn_agent_foreground_sets_parent_session_id_from_cc_session_id(
         return _make_proc(returncode=0, stdout="done")
 
     with patch("gptodo.subagent.subprocess.run", side_effect=_fake_run):
-        spawn_agent(
+        session = spawn_agent(
             task_id="t-pid-cc",
             prompt="work",
             backend=backend,
@@ -645,6 +647,7 @@ def test_spawn_agent_foreground_sets_parent_session_id_from_cc_session_id(
             workspace=sessions_dir,
         )
 
+    assert captured_env.get("BOB_SESSION_ID") == session.session_id
     assert captured_env.get("BOB_PARENT_SESSION_ID") == "cc-parent-abc123"
 
 
@@ -663,7 +666,7 @@ def test_spawn_agent_foreground_sets_parent_session_id_from_bob_session_id(
         return _make_proc(returncode=0, stdout="done")
 
     with patch("gptodo.subagent.subprocess.run", side_effect=_fake_run):
-        spawn_agent(
+        session = spawn_agent(
             task_id="t-pid-bob",
             prompt="work",
             backend=backend,
@@ -671,6 +674,7 @@ def test_spawn_agent_foreground_sets_parent_session_id_from_bob_session_id(
             workspace=sessions_dir,
         )
 
+    assert captured_env.get("BOB_SESSION_ID") == session.session_id
     assert captured_env.get("BOB_PARENT_SESSION_ID") == "bob-parent-xyz789"
 
 
@@ -687,7 +691,7 @@ def test_spawn_agent_foreground_no_parent_session_id_when_env_absent(sessions_di
         return _make_proc(returncode=0, stdout="done")
 
     with patch("gptodo.subagent.subprocess.run", side_effect=_fake_run):
-        spawn_agent(
+        session = spawn_agent(
             task_id="t-nopid",
             prompt="work",
             backend="claude",
@@ -695,6 +699,7 @@ def test_spawn_agent_foreground_no_parent_session_id_when_env_absent(sessions_di
             workspace=sessions_dir,
         )
 
+    assert captured_env.get("BOB_SESSION_ID") == session.session_id
     assert "BOB_PARENT_SESSION_ID" not in captured_env
     assert captured_env.get("BOB_DISPATCH_KIND") == "gptodo-spawn"
 
