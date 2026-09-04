@@ -4024,20 +4024,18 @@ def test_static_search_js_present(workspace: Path, tmp_path: Path):
 
 
 def test_static_search_initdynamic_sets_api_flag(workspace: Path, tmp_path: Path):
-    """initDynamic's catch block must set _apiAvailable=false then await _loadStaticSearchIndex."""
+    """initDynamic's catch block must switch to static mode without loading data."""
     output = tmp_path / "site"
     generate(workspace, output)
     html = (output / "index.html").read_text()
+    body = _extract_js_function(html, "initDynamic")
 
-    # Verify the catch block inside initDynamic (identified by its comment) contains both
-    # assignments — not just that the strings appear somewhere in the file.
-    catch_block = re.compile(
-        r"catch\s*\(e\)\s*\{[^}]*No backend[^}]*_apiAvailable\s*=\s*false[^}]*await\s+_loadStaticSearchIndex\(\)",
+    assert re.search(
+        r"catch\s*\(e\)\s*\{[^}]*No backend[^}]*_apiAvailable\s*=\s*false",
+        body,
         re.DOTALL,
-    )
-    assert catch_block.search(
-        html
-    ), "initDynamic catch block must set _apiAvailable=false and await _loadStaticSearchIndex()"
+    ), "initDynamic catch block must set _apiAvailable=false"
+    assert "_loadStaticSearchIndex" not in body
 
 
 def test_search_button_always_present(workspace: Path, tmp_path: Path):
@@ -4046,20 +4044,6 @@ def test_search_button_always_present(workspace: Path, tmp_path: Path):
     generate(workspace, output)
     html = (output / "index.html").read_text()
     assert 'id="search-btn"' in html, "Search button must always be in the HTML"
-
-
-def test_static_search_initdynamic_awaits_load(workspace: Path, tmp_path: Path):
-    """_loadStaticSearchIndex must be awaited in BOTH failure paths of initDynamic."""
-    output = tmp_path / "site"
-    generate(workspace, output)
-    html = (output / "index.html").read_text()
-    # Both the !resp.ok and catch branches in initDynamic must await the loader —
-    # a single occurrence would mean one branch was missed.
-    count = html.count("await _loadStaticSearchIndex()")
-    assert count >= 2, (
-        f"initDynamic must await _loadStaticSearchIndex() in BOTH failure branches "
-        f"(!resp.ok and catch), found only {count} occurrence(s)"
-    )
 
 
 def test_static_search_haystack_includes_source(workspace: Path, tmp_path: Path):
@@ -4105,17 +4089,48 @@ def test_static_search_broken_url_guard(workspace: Path, tmp_path: Path):
 
 
 def test_static_search_failed_load_sentinel(workspace: Path, tmp_path: Path):
-    """runSearch must show a user-visible error when data.json load fails (_staticSearchIndex===false)."""
+    """runSearch must retry and show a user-visible message when data.json load fails (_staticSearchIndex===false)."""
     output = tmp_path / "site"
     generate(workspace, output)
     html = (output / "index.html").read_text()
     assert (
         "_staticSearchIndex = false" in html
     ), "_loadStaticSearchIndex must set false sentinel on failure"
+    # false is now handled in the combined null||false branch that auto-retries
     assert "_staticSearchIndex === false" in html, "runSearch must branch on false sentinel"
     assert (
-        "Search unavailable" in html
-    ), "user must see an error message when static index load failed"
+        "Retrying search index" in html
+    ), "user must see a retry message when static index load failed"
+
+
+def test_static_search_failed_load_no_infinite_retry(workspace: Path, tmp_path: Path):
+    """After a failed data.json load, the .then() callback must NOT call runSearch
+    unconditionally — doing so creates an infinite retry loop because _staticSearchIndex
+    stays false and _staticSearchIndexPromise is cleared, so each runSearch call
+    re-triggers _loadStaticSearchIndex immediately.  The guard must be Array.isArray."""
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    # Find the .then() callback attached to _loadStaticSearchIndex()
+    then_idx = html.index("_loadStaticSearchIndex().then(")
+    # There must be an Array.isArray guard before runSearch inside that callback
+    close_then_idx = html.index("});", then_idx)
+    callback_body = html[then_idx:close_then_idx]
+    assert "Array.isArray(_staticSearchIndex)" in callback_body, (
+        "The .then() callback after _loadStaticSearchIndex() must guard runSearch "
+        "with Array.isArray(_staticSearchIndex) to prevent infinite retry loops when "
+        "the fetch fails (sets _staticSearchIndex=false and clears the promise)."
+    )
+    # Also verify there is an else branch for the failure case (=== false) that
+    # shows a definitive error message so the user isn't stuck on "Retrying…" forever.
+    assert "_staticSearchIndex === false" in callback_body, (
+        "The .then() callback must handle the failure case (_staticSearchIndex === false) "
+        "with a definitive error message, not just silence after the retry fails."
+    )
+    assert "Search unavailable" in callback_body, (
+        "The .then() failure branch must display 'Search unavailable' so the user knows "
+        "the retry also failed (not 'Retrying…' indefinitely)."
+    )
 
 
 def test_static_search_selfheal_retrigger(workspace: Path, tmp_path: Path):
@@ -4137,12 +4152,7 @@ def test_static_search_selfheal_retrigger(workspace: Path, tmp_path: Path):
 
 
 def test_static_search_null_static_index_shows_loading(workspace: Path, tmp_path: Path):
-    """runSearch must show 'Loading' when _apiAvailable===false but _staticSearchIndex===null.
-
-    Race window: _apiAvailable is set to false synchronously before _loadStaticSearchIndex
-    resolves. A 250 ms debounce can fire runSearch into the _apiAvailable===false branch
-    while the index is still null, producing misleading "No results".
-    """
+    """runSearch must show 'Loading' while the lazy static index loads."""
     output = tmp_path / "site"
     generate(workspace, output)
     html = (output / "index.html").read_text()
@@ -4281,6 +4291,29 @@ def _extract_js_function(html: str, name: str) -> str:
             if depth == 0:
                 return html[start : i + 1]
     raise ValueError(f"Unclosed function {name!r} found in HTML")
+
+
+def test_static_search_initdynamic_does_not_load_index(workspace: Path, tmp_path: Path):
+    """initDynamic must NOT load the static index — data.json is deferred to search intent.
+
+    Both failure paths (``!resp.ok`` and ``catch``) still have to flip
+    ``_apiAvailable`` to false so runSearch takes the client-side branch, but
+    neither may pull data.json: it is multi-MB on real workspaces and would be
+    paid by every visitor who never searches.
+    """
+    output = tmp_path / "site"
+    generate(workspace, output)
+    html = (output / "index.html").read_text()
+    body = _extract_js_function(html, "initDynamic")
+
+    assert "_loadStaticSearchIndex" not in body, (
+        "initDynamic must not load the static search index at page load; "
+        "openSearch()/runSearch() load it on first user intent"
+    )
+    assert body.count("_apiAvailable = false") >= 2, (
+        "both initDynamic failure branches (!resp.ok and catch) must set "
+        "_apiAvailable = false so runSearch uses the client-side index"
+    )
 
 
 def test_static_safeurl_rejects_protocol_relative(workspace: Path, tmp_path: Path):
@@ -5085,3 +5118,92 @@ def test_tasks_index_not_overwritten_by_index_task(workspace: Path, tmp_path: Pa
         "tasks/index.html was overwritten by index.md detail page — "
         "scan_tasks must exclude index.md"
     )
+
+
+def test_static_index_not_fetched_until_user_searches(workspace: Path, tmp_path: Path):
+    """data.json must not be fetched during page load on a static deploy.
+
+    It is multi-MB on real workspaces (3.2 MB / 790 KiB gzipped for Bob's), so
+    fetching it eagerly blows the cold-load transfer budget for every visitor
+    who never searches. It must load on first search intent instead, and search
+    must still work once it lands.
+    """
+    import functools
+    import http.server
+    import socketserver
+    import threading
+
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import sync_playwright  # noqa: PLC0415
+
+    tasks_dir = workspace / "tasks"
+    tasks_dir.mkdir(exist_ok=True)
+    (tasks_dir / "zebra-lazy-index-fixture.md").write_text(
+        textwrap.dedent(
+            """\
+            ---
+            state: active
+            created: 2026-03-01
+            ---
+            # ZebraLazyIndexFixture
+
+            Searchable fixture for the lazy static-index test.
+            """
+        )
+    )
+
+    output = tmp_path / "site"
+    generate(workspace, output)
+    generate_json(workspace, output)
+
+    prefix = "/dashboard/"
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def translate_path(self, path: str) -> str:
+            clean = path.split("?", 1)[0].split("#", 1)[0]
+            if clean.startswith(prefix):
+                clean = clean[len(prefix) - 1 :]
+            return str(output) + clean
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    socketserver.TCPServer.allow_reuse_address = True
+    server = socketserver.TCPServer(
+        ("127.0.0.1", 0), functools.partial(Handler, directory=str(output))
+    )
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch()
+            except Exception as exc:  # no browser binaries installed
+                pytest.skip(f"chromium unavailable: {exc}")
+            page = browser.new_page()
+            requested: list[str] = []
+            page.on("request", lambda r: requested.append(r.url))
+
+            page.goto(f"http://127.0.0.1:{port}{prefix}index.html", wait_until="load")
+            # Give initDynamic()'s /api/status probe time to fail and settle.
+            page.wait_for_timeout(1500)
+
+            assert not [u for u in requested if u.endswith("data.json")], (
+                "data.json was fetched during page load; it must be deferred until "
+                f"the user searches (requests: {requested})"
+            )
+
+            # First search intent must pull the index in and then find the fixture.
+            page.evaluate("() => openSearch()")
+            page.fill("#global-search-input", "ZebraLazyIndexFixture")
+            page.wait_for_selector("#search-results-area a", state="attached", timeout=15000)
+
+            assert [
+                u for u in requested if u.endswith("data.json")
+            ], f"data.json was never fetched on search intent (requests: {requested})"
+            href = page.get_attribute("#search-results-area a", "href")
+            assert href and "zebra-lazy-index-fixture" in href, href
+            browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
