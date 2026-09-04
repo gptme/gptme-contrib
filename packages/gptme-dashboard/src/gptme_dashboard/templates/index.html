@@ -1950,7 +1950,15 @@ async function runSearch(q, typeFilter) {
           const input = document.getElementById('global-search-input');
           const liveQuery = input ? input.value.trim() : '';
           const liveFilter = document.getElementById('search-type-filter').value;
-          if (Array.isArray(_staticSearchIndex) && liveQuery.length >= 2) runSearch(liveQuery, liveFilter);
+          if (Array.isArray(_staticSearchIndex)) {
+            if (liveQuery.length >= 2) runSearch(liveQuery, liveFilter);
+          } else if (_staticSearchIndex === false) {
+            // Retry also failed — show a definitive failure message so the user
+            // knows search is unavailable (not just "still retrying").
+            document.getElementById('search-results-area').innerHTML =
+              '<div class="search-empty">Search unavailable — could not load index. Reopen search to retry.</div>';
+            document.getElementById('search-result-count').textContent = '';
+          }
         });
       }
       return;

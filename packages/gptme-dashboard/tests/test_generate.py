@@ -4121,6 +4121,16 @@ def test_static_search_failed_load_no_infinite_retry(workspace: Path, tmp_path: 
         "with Array.isArray(_staticSearchIndex) to prevent infinite retry loops when "
         "the fetch fails (sets _staticSearchIndex=false and clears the promise)."
     )
+    # Also verify there is an else branch for the failure case (=== false) that
+    # shows a definitive error message so the user isn't stuck on "Retrying…" forever.
+    assert "_staticSearchIndex === false" in callback_body, (
+        "The .then() callback must handle the failure case (_staticSearchIndex === false) "
+        "with a definitive error message, not just silence after the retry fails."
+    )
+    assert "Search unavailable" in callback_body, (
+        "The .then() failure branch must display 'Search unavailable' so the user knows "
+        "the retry also failed (not 'Retrying…' indefinitely)."
+    )
 
 
 def test_static_search_selfheal_retrigger(workspace: Path, tmp_path: Path):
