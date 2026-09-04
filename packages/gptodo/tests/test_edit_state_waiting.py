@@ -206,3 +206,119 @@ def test_edit_clearing_waiting_for_does_not_inject_waiting_since(
     assert (
         "waiting_since" not in tasks[0].metadata
     ), "clearing waiting_for must not trigger waiting_since injection"
+
+
+# ---------------------------------------------------------------------------
+# Cumulative waiting history: first_waiting_since + waiting_spell_count
+#
+# TASKS.md documents both fields, but until 2026-09-03 nothing wrote them live:
+# the only writer was a one-shot git-history backfill script with no caller, so
+# every value in the tree was frozen at whenever someone last ran it by hand.
+# task_metadata_hygiene_audit check 16 (erik_gate_repark) reads
+# waiting_spell_count >= 3, so a frozen counter under-reports exactly the tasks
+# that are being repeatedly re-parked.
+# ---------------------------------------------------------------------------
+
+
+def test_edit_state_waiting_initialises_cumulative_waiting_fields(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A first waiting entry stamps first_waiting_since and sets the spell count to 1."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(ACTIVE_TASK)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        ["edit", "my-task", "--set", "state", "waiting", "--set", "waiting_for", "some-blocker"],
+    )
+    assert result.exit_code == 0, f"edit failed: {result.output}"
+
+    task = load_tasks(tasks_dir)[0]
+    assert task.metadata["waiting_spell_count"] == 1
+    # Stamped in the same branch as waiting_since, so the two agree exactly.
+    assert task.metadata["first_waiting_since"] == task.metadata["waiting_since"]
+
+
+def test_two_waiting_entries_produce_spell_count_two(tmp_path: Path, monkeypatch) -> None:
+    """Re-parking a task after an un-park increments the spell count to 2.
+
+    first_waiting_since must NOT move: it is the cumulative blocker age that
+    survives re-parks (waiting_since is reset on every entry).
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(ACTIVE_TASK)
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    first = runner.invoke(
+        cli,
+        ["edit", "my-task", "--set", "state", "waiting", "--set", "waiting_for", "blocker-one"],
+    )
+    assert first.exit_code == 0, f"first park failed: {first.output}"
+    first_stamp = load_tasks(tasks_dir)[0].metadata["first_waiting_since"]
+
+    unpark = runner.invoke(cli, ["edit", "my-task", "--set", "state", "todo"])
+    assert unpark.exit_code == 0, f"un-park failed: {unpark.output}"
+    unparked = load_tasks(tasks_dir)[0]
+    assert unpark.exit_code == 0
+    # Un-parking does NOT clear waiting_since, which is why the spell counter
+    # keys off the prior state instead of treating a missing waiting_since as
+    # the "new spell" signal — that would miss every re-park of this shape.
+    assert "waiting_since" in unparked.metadata
+    assert unparked.metadata["waiting_spell_count"] == 1
+
+    second = runner.invoke(
+        cli,
+        ["edit", "my-task", "--set", "state", "waiting", "--set", "waiting_for", "blocker-two"],
+    )
+    assert second.exit_code == 0, f"re-park failed: {second.output}"
+
+    task = load_tasks(tasks_dir)[0]
+    assert task.metadata["waiting_spell_count"] == 2
+    assert task.metadata["first_waiting_since"] == first_stamp
+
+
+def test_re_setting_waiting_on_an_already_waiting_task_does_not_increment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`--set state waiting` on a task already waiting is not a new spell."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(ALREADY_WAITING_TASK)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "state", "waiting"])
+    assert result.exit_code == 0, f"edit failed: {result.output}"
+
+    task = load_tasks(tasks_dir)[0]
+    # waiting_since survived, so no spell was recorded.
+    assert "waiting_spell_count" not in task.metadata
+
+
+def test_waiting_spell_count_recovers_from_a_non_numeric_value(tmp_path: Path, monkeypatch) -> None:
+    """A hand-corrupted counter must not crash the edit; it restarts at 1."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(
+        "---\nstate: active\ncreated: 2026-06-16T00:00:00+00:00\n"
+        "waiting_spell_count: not-a-number\n---\n# Corrupted Counter\n"
+    )
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        ["edit", "my-task", "--set", "state", "waiting", "--set", "waiting_for", "some-blocker"],
+    )
+    assert result.exit_code == 0, f"edit failed: {result.output}"
+    assert load_tasks(tasks_dir)[0].metadata["waiting_spell_count"] == 1
+
+
+def test_cumulative_waiting_fields_are_known_frontmatter(tmp_path: Path) -> None:
+    """Both fields must be registered, or `gptodo lint` warns on what gptodo writes."""
+    from gptodo.utils import KNOWN_FRONTMATTER_FIELDS
+
+    assert "first_waiting_since" in KNOWN_FRONTMATTER_FIELDS
+    assert "waiting_spell_count" in KNOWN_FRONTMATTER_FIELDS
