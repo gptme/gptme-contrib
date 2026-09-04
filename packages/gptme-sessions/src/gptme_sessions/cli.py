@@ -38,6 +38,7 @@ from .replay import (
 from .record import (
     ANNOTATABLE_FIELDS,
     ATTEMPT_KINDS,
+    DISPATCH_KINDS,
     SessionRecord,
     normalize_run_type,
     trajectory_revision_for,
@@ -2807,6 +2808,22 @@ def repair_grades(ctx: click.Context, dry_run: bool) -> None:
 @click.option("--model", default="unknown", help="Model name")
 @click.option("--run-type", default="unknown", help="Run type (autonomous, etc.)")
 @click.option("--trigger", default=None, help="Session trigger: timer, dispatch, manual, spawn")
+@click.option(
+    "--parent-session-id",
+    default=None,
+    help="session_id of the session that spawned this one (default: $BOB_PARENT_SESSION_ID)",
+)
+@click.option(
+    "--dispatch-kind",
+    default=None,
+    type=click.Choice(sorted(DISPATCH_KINDS)),
+    help="How this session was spawned (default: $BOB_DISPATCH_KIND)",
+)
+@click.option(
+    "--dispatch-id",
+    default=None,
+    help="Run-id of the dispatcher (e.g. PM slot unit name; default: $PM_DISPATCH_ID)",
+)
 @click.option("--category", default=None, help="Work category (code, triage, ...)")
 @click.option(
     "--recommended-category",
@@ -2862,6 +2879,9 @@ def post_session_cmd(
     model: str,
     run_type: str,
     trigger: str | None,
+    parent_session_id: str | None,
+    dispatch_kind: str | None,
+    dispatch_id: str | None,
     category: str | None,
     recommended_category: str | None,
     selector_mode: str | None,
@@ -2887,6 +2907,9 @@ def post_session_cmd(
         model=model,
         run_type=run_type,
         trigger=trigger,
+        parent_session_id=parent_session_id,
+        dispatch_kind=dispatch_kind,
+        dispatch_id=dispatch_id,
         category=category,
         recommended_category=recommended_category,
         selector_mode=selector_mode,
