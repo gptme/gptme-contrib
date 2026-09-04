@@ -111,8 +111,12 @@ class _DummyTwilioWebSocket(_DummyWebSocket):
 
 
 class _PeerWebSocket:
-    def __init__(self, host: str | None) -> None:
+    def __init__(
+        self, host: str | None, incoming: list[dict[str, object]] | None = None
+    ) -> None:
         self.client = None if host is None else (host, 12345)
+        self.query_params: dict[str, str] = {}
+        self._incoming = [json.dumps(message) for message in incoming or []]
         self.accepted = False
         self.close_code: int | None = None
 
@@ -122,10 +126,18 @@ class _PeerWebSocket:
     async def close(self, code: int = 1000) -> None:
         self.close_code = code
 
+    def iter_text(self):
+        async def _gen():
+            for message in self._incoming:
+                yield message
+
+        return _gen()
+
 
 class _FakeRealtimeClient:
     def __init__(self) -> None:
         self.sent_audio: list[bytes] = []
+        self.sent_text: list[str] = []
         self.commit_count = 0
         self.disconnect_kwargs: dict[str, object] | None = None
         self.activate_session_count = 0
@@ -148,6 +160,9 @@ class _FakeRealtimeClient:
 
     async def inject_message(self, _text: str) -> None:
         return None
+
+    async def send_text_message(self, text: str) -> None:
+        self.sent_text.append(text)
 
 
 class _DummyToolBridge:
@@ -175,6 +190,114 @@ def test_local_websocket_rejects_non_loopback_peer(host: str | None) -> None:
     assert websocket.close_code == 1008
 
 
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"])
+def test_local_websocket_accepts_loopback_peer(
+    monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    server = VoiceServer()
+    websocket = _PeerWebSocket(host)
+    fake_client = _FakeRealtimeClient()
+
+    monkeypatch.setattr(
+        server,
+        "_build_session_instructions",
+        lambda **_kwargs: asyncio.sleep(0, result="You are Bob."),
+    )
+    monkeypatch.setattr(server, "_make_client", lambda *_args, **_kwargs: fake_client)
+    monkeypatch.setattr(
+        server, "_on_call_end", lambda *_args, **_kwargs: asyncio.sleep(0)
+    )
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
+
+    asyncio.run(server.handle_local_websocket(websocket))
+
+    assert websocket.accepted is True
+    assert websocket.close_code is None
+
+
+def test_local_text_turn_is_persisted_in_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = VoiceServer()
+    websocket = _PeerWebSocket(
+        "127.0.0.1",
+        incoming=[{"type": "text", "text": "  what do you see?  "}],
+    )
+    fake_client = _FakeRealtimeClient()
+    persisted: list[TranscriptTurn] = []
+
+    async def _fake_build_session_instructions(
+        *, caller_id: str, handoff_id: str | None
+    ) -> str:
+        return "You are Bob."
+
+    async def _fake_on_call_end(
+        _caller_id: str,
+        _source: str,
+        transcript: list[TranscriptTurn],
+        _metadata: dict,
+        **_kwargs,
+    ) -> None:
+        persisted.extend(transcript)
+
+    monkeypatch.setattr(
+        server, "_build_session_instructions", _fake_build_session_instructions
+    )
+    monkeypatch.setattr(server, "_make_client", lambda *_args, **_kwargs: fake_client)
+    monkeypatch.setattr(server, "_on_call_end", _fake_on_call_end)
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
+
+    asyncio.run(server.handle_local_websocket(websocket))
+
+    assert websocket.accepted is True
+    assert fake_client.sent_text == ["  what do you see?  "]
+    assert persisted == [TranscriptTurn(role="user", text="what do you see?")]
+
+
+def test_local_text_timeout_keeps_connection_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = VoiceServer()
+    websocket = _PeerWebSocket(
+        "127.0.0.1",
+        incoming=[
+            {"type": "text", "text": "too early"},
+            {"type": "text", "text": "ready now"},
+        ],
+    )
+    fake_client = _FakeRealtimeClient()
+    persisted: list[TranscriptTurn] = []
+
+    async def _send_text_message(text: str) -> None:
+        if text == "too early":
+            raise RuntimeError("session was not ready in time")
+        fake_client.sent_text.append(text)
+
+    async def _fake_on_call_end(
+        _caller_id: str,
+        _source: str,
+        transcript: list[TranscriptTurn],
+        _metadata: dict,
+        **_kwargs,
+    ) -> None:
+        persisted.extend(transcript)
+
+    fake_client.send_text_message = _send_text_message  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        server,
+        "_build_session_instructions",
+        lambda **_kwargs: asyncio.sleep(0, result="You are Bob."),
+    )
+    monkeypatch.setattr(server, "_make_client", lambda *_args, **_kwargs: fake_client)
+    monkeypatch.setattr(server, "_on_call_end", _fake_on_call_end)
+    monkeypatch.setattr("gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge)
+
+    asyncio.run(server.handle_local_websocket(websocket))
+
+    assert fake_client.sent_text == ["ready now"]
+    assert persisted == [TranscriptTurn(role="user", text="ready now")]
+
+
 def test_body_adapter_only_reaches_trusted_transports(monkeypatch) -> None:
     monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
     server = VoiceServer()
@@ -182,6 +305,7 @@ def test_body_adapter_only_reaches_trusted_transports(monkeypatch) -> None:
     remote = type("WebSocket", (), {"client": ("203.0.113.1", 443)})()
     loopback = type("WebSocket", (), {"client": ("127.0.0.1", 12345)})()
     ipv6 = type("WebSocket", (), {"client": ("::1", 12345)})()
+    mapped_ipv6 = type("WebSocket", (), {"client": ("::ffff:127.0.0.1", 12345)})()
     named = type(
         "WebSocket", (), {"client": type("Client", (), {"host": "127.0.0.1"})()}
     )()
@@ -194,6 +318,10 @@ def test_body_adapter_only_reaches_trusted_transports(monkeypatch) -> None:
     )
     assert (
         server._body_adapter_for_websocket(ipv6, transport="browser")
+        is server.body_adapter
+    )
+    assert (
+        server._body_adapter_for_websocket(mapped_ipv6, transport="local")
         is server.body_adapter
     )
     assert (

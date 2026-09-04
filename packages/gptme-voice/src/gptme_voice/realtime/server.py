@@ -9,6 +9,7 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -72,6 +73,20 @@ def _websocket_peer_host(websocket) -> str | None:
         if isinstance(first, str) and first:
             return first
     return None
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    """Whether a peer host is loopback, including IPv4-mapped IPv6."""
+    if host == "localhost":
+        return True
+    if host is None:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    mapped = getattr(address, "ipv4_mapped", None)
+    return address.is_loopback or (mapped is not None and mapped.is_loopback)
 
 
 def _websocket_has_vision(websocket) -> bool:
@@ -1093,7 +1108,7 @@ class VoiceServer:
             )
             return None
         host = _websocket_peer_host(websocket)
-        if host in {"127.0.0.1", "::1", "localhost"}:
+        if _is_loopback_host(host):
             return self.body_adapter
         logger.warning(
             "Body tools disabled for unauthenticated %s client %s",
@@ -2758,7 +2773,7 @@ class VoiceServer:
         or test client.
         """
         peer_host = _websocket_peer_host(websocket)
-        if peer_host not in {"127.0.0.1", "::1", "localhost"}:
+        if not _is_loopback_host(peer_host):
             logger.warning(
                 "Rejecting unauthenticated /local client %s",
                 peer_host or "unknown",
@@ -2843,7 +2858,17 @@ class VoiceServer:
                     # (including tool calls) without sending audio.
                     text = data.get("text", "")
                     if isinstance(text, str) and text.strip():
-                        await realtime_client.send_text_message(text)
+                        try:
+                            await realtime_client.send_text_message(text)
+                        except RuntimeError as exc:
+                            logger.warning("Text turn failed: %s", exc)
+                            continue
+                        _append_transcript_turn(
+                            transcript,
+                            "user",
+                            text,
+                            allow_continuation=False,
+                        )
 
         except WebSocketDisconnect:
             pass  # Normal path when _schedule_hangup closes the WebSocket
