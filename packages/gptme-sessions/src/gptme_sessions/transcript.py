@@ -954,8 +954,8 @@ def read_session_tree(path: Path) -> SessionTree:
     The parent transcript is returned as ``tree.parent``. Each ``Agent`` tool
     call whose ``tool_use.id`` matches a subagent ``.meta.json`` ``toolUseId``
     is expanded into a :class:`SubagentNode`, recursively by ``spawnDepth``.
-    Workflow agents (no ``toolUseId``) are attached as direct children of the
-    parent.
+    Workflow agents and flat agents without readable metadata (no
+    ``toolUseId``) are attached as direct children of the parent.
 
     A session without subagents returns a tree with an empty ``subagents``
     list whose ``flatten_records`` / ``flatten_messages`` are identical to the
@@ -976,18 +976,24 @@ def read_session_tree(path: Path) -> SessionTree:
                 continue
             child_stem = meta_path.name.removesuffix(".meta.json")
             child_path = meta_path.parent / f"{child_stem}.jsonl"
+            if not child_path.exists():
+                continue
             tool_use_id = meta.get("toolUseId", "")
             if tool_use_id:
                 agent_map[tool_use_id] = (meta, child_path)
-            elif child_path.exists():
+            else:
                 workflow_files.append(child_path)
-        # Catch workflow jsonl files whose .meta.json was absent.
+        # Catch flat and workflow JSONL files whose .meta.json was absent or
+        # unreadable. Without a tool-use join they are attached at the root,
+        # preserving their work instead of silently dropping it.
+        mapped = {c for _, c in agent_map.values()}
+        fallback_files = sorted(sub_dir.glob("agent-*.jsonl"))
         wf_dir = sub_dir / "workflows"
         if wf_dir.is_dir():
-            mapped = {c for _, c in agent_map.values()}
-            for child_path in sorted(wf_dir.glob("*/agent-*.jsonl")):
-                if child_path not in mapped and child_path not in workflow_files:
-                    workflow_files.append(child_path)
+            fallback_files += sorted(wf_dir.glob("*/agent-*.jsonl"))
+        for child_path in fallback_files:
+            if child_path not in mapped and child_path not in workflow_files:
+                workflow_files.append(child_path)
 
     tree = SessionTree(parent=parent, parent_records=parent_records)
     visited: set[str] = set()

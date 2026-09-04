@@ -194,3 +194,92 @@ def test_extract_from_path_counts_subagent_tool_calls(tmp_path: Path) -> None:
     # a1/a2's writes are included too.
     tool_calls = result.get("tool_calls", {})
     assert tool_calls.get("Write") == 3  # parent + a1 + a2
+
+
+def test_extract_from_path_deduplicates_echoed_parent_tool_call(tmp_path: Path) -> None:
+    session = tmp_path / "echo.jsonl"
+    spawn = _cc_assistant_with_agent("tool_agent_echo")
+    _write_jsonl(session, [spawn])
+
+    sub = tmp_path / "echo" / "subagents"
+    _write_jsonl(
+        sub / "agent-echo.jsonl",
+        [spawn, _cc_write_record("tool_write_child", "child.py")],
+    )
+    _write_jsonl(
+        sub / "agent-echo.meta.json",
+        [_meta("tool_agent_echo", "Explore", 1, "echo")],
+    )
+
+    result = extract_from_path(session)
+    assert result["tool_calls"]["Agent"] == 1
+    assert result["tool_calls"]["Write"] == 1
+    assert result["steps"] == 2
+
+
+def _cc_usage_record(input_tokens: int, output_tokens: int) -> dict:
+    """A complete durable CC assistant turn with token usage."""
+    return {
+        "type": "assistant",
+        "timestamp": "2026-03-01T10:00:02.000Z",
+        "message": {
+            "role": "assistant",
+            "model": "claude-opus-4-6",
+            "content": [],
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            },
+        },
+    }
+
+
+def test_extract_from_path_adds_subagent_usage_to_parent_result(tmp_path: Path) -> None:
+    """A parent's stream result must not replace a durable child's usage."""
+    session = tmp_path / "usage.jsonl"
+    _write_jsonl(
+        session,
+        [
+            _cc_usage_record(1, 1),
+            {
+                "type": "result",
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+            },
+            _cc_assistant_with_agent("tool_agent_usage"),
+        ],
+    )
+    sub = tmp_path / "usage" / "subagents"
+    _write_jsonl(sub / "agent-usage.jsonl", [_cc_usage_record(20, 10)])
+    _write_jsonl(
+        sub / "agent-usage.meta.json",
+        [_meta("tool_agent_usage", "Explore", 1, "usage")],
+    )
+
+    usage = extract_from_path(session)["usage"]
+    assert usage["input_tokens"] == 120
+    assert usage["output_tokens"] == 60
+
+
+def test_read_session_tree_skips_meta_for_missing_jsonl(tmp_path: Path) -> None:
+    session = tmp_path / "missing.jsonl"
+    _write_jsonl(session, [_cc_assistant_with_agent("tool_missing")])
+    sub = tmp_path / "missing" / "subagents"
+    _write_jsonl(
+        sub / "agent-missing.meta.json",
+        [_meta("tool_missing", "Explore", 1, "missing")],
+    )
+
+    tree = read_session_tree(session)
+    assert tree.total_subagents == 0
+
+
+def test_read_session_tree_includes_flat_jsonl_without_meta(tmp_path: Path) -> None:
+    session = tmp_path / "unmapped.jsonl"
+    _write_jsonl(session, [_cc_write_record("tool_parent", "parent.py")])
+    sub = tmp_path / "unmapped" / "subagents"
+    _write_jsonl(sub / "agent-unmapped.jsonl", [_cc_write_record("tool_child", "child.py")])
+
+    tree = read_session_tree(session)
+    assert tree.total_subagents == 1
+    assert tree.subagents[0].session_id == "agent-unmapped"
+    assert tree.subagents[0].tool_use_id is None
