@@ -697,6 +697,12 @@ class LaneDispatcher:
     slot_timeout_sec: int = 2400
     memory_max: str = "8G"
     cpu_quota: str = "80%"
+    #: Directory for per-slot log files. When set, slot stdout+stderr are
+    #: redirected here via ``StandardOutput=append:<dir>/<unit>.log`` instead
+    #: of streaming into the journal. Sequential file appends are orders of
+    #: magnitude cheaper than journald's mmap random-write pattern on DRAM-less
+    #: SSDs. Set to None to keep the journal-only behaviour (default).
+    slot_log_dir: Path | None = None
 
     def dispatch(
         self,
@@ -903,6 +909,18 @@ class LaneDispatcher:
             "--setenv=BOB_PM_BANDIT_SHADOW="
             + os.environ.get("BOB_PM_BANDIT_SHADOW", "0")
         )
+        # Route stdout+stderr to per-slot log files when slot_log_dir is set.
+        # Sequential file appends are much cheaper than journald's mmap
+        # random-write pattern on DRAM-less SSDs (~18 GB/day → target <3 GB).
+        if self.slot_log_dir is not None:
+            self.slot_log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = self.slot_log_dir / f"{unit_name}.log"
+            cmd.extend(
+                [
+                    f"--property=StandardOutput=append:{log_file}",
+                    f"--property=StandardError=append:{log_file}",
+                ]
+            )
         cmd.extend(["--", "bash", script_path])
 
         try:
