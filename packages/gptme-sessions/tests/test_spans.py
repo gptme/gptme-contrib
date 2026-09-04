@@ -917,3 +917,94 @@ def test_codex_malformed_lines_skipped(tmp_path: Path) -> None:
     p = tmp_path / "rollout-bad.jsonl"
     p.write_text('not json\n{}\n{"type": "event_msg"}\n')
     assert extract_spans_from_codex_jsonl(p) == []
+
+
+# ── subagent traversal (items 1a + 1b) ────────────────────────────────────────
+
+
+def _make_subagent_tree(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a parent JSONL with one subagent (CC layout).
+
+    Returns (parent_path, child_path).
+    """
+    parent_session_id = "parent-session-abc1"
+    child_session_id = "agent-child001"
+
+    # Parent: one Bash call
+    parent_records = [
+        _cc_assistant("Bash", "tid-p1", "ls /", "2026-09-01T10:00:00+00:00"),
+        _cc_result("tid-p1", "bin\nusr\n", "2026-09-01T10:00:02+00:00"),
+    ]
+    parent_path = _write_jsonl(tmp_path, parent_records, name=f"{parent_session_id}.jsonl")
+
+    # Subagents directory (CC convention: <stem>/subagents/)
+    subagents_dir = tmp_path / parent_session_id / "subagents"
+    subagents_dir.mkdir(parents=True)
+
+    # Child: one Read call
+    child_records = [
+        _cc_assistant("Read", "tid-c1", "/etc/hosts", "2026-09-01T10:00:05+00:00"),
+        _cc_result("tid-c1", "127.0.0.1 localhost\n", "2026-09-01T10:00:06+00:00"),
+    ]
+    child_path = _write_jsonl(subagents_dir, child_records, name=f"{child_session_id}.jsonl")
+
+    # Meta sidecar
+    meta = {"spawnDepth": 1, "agentType": "general-purpose", "toolUseId": "tid-agent-1"}
+    (subagents_dir / f"{child_session_id}.meta.json").write_text(json.dumps(meta))
+
+    return parent_path, child_path
+
+
+def test_subagent_spans_included_by_default(tmp_path: Path) -> None:
+    """extract_spans_from_cc_jsonl includes subagent spans with include_subagents=True."""
+    parent_path, _ = _make_subagent_tree(tmp_path)
+    spans = extract_spans_from_cc_jsonl(parent_path)
+    tool_names = [s.tool_name for s in spans]
+    assert "Bash" in tool_names, "parent span missing"
+    assert "Read" in tool_names, "child span missing"
+    assert len(spans) == 2
+
+
+def test_subagent_spans_excluded_when_disabled(tmp_path: Path) -> None:
+    """include_subagents=False returns only parent spans."""
+    parent_path, _ = _make_subagent_tree(tmp_path)
+    spans = extract_spans_from_cc_jsonl(parent_path, include_subagents=False)
+    assert len(spans) == 1
+    assert spans[0].tool_name == "Bash"
+
+
+def test_subagent_spans_have_depth_and_type_tags(tmp_path: Path) -> None:
+    """Subagent spans carry spawn_depth and agent_type from the .meta.json."""
+    parent_path, _ = _make_subagent_tree(tmp_path)
+    spans = extract_spans_from_cc_jsonl(parent_path)
+
+    parent_spans = [s for s in spans if s.spawn_depth == 0]
+    child_spans = [s for s in spans if s.spawn_depth == 1]
+
+    assert len(parent_spans) == 1
+    assert parent_spans[0].agent_type is None  # parent carries no agent_type
+
+    assert len(child_spans) == 1
+    assert child_spans[0].tool_name == "Read"
+    assert child_spans[0].agent_type == "general-purpose"
+
+
+def test_subagent_spans_attributed_to_parent_session(tmp_path: Path) -> None:
+    """Both parent and child spans carry the parent's session_id."""
+    parent_path, _ = _make_subagent_tree(tmp_path)
+    spans = extract_spans_from_cc_jsonl(parent_path)
+    parent_session_id = parent_path.stem
+    assert all(s.session_id == parent_session_id for s in spans)
+
+
+def test_no_subagents_directory_returns_only_parent(tmp_path: Path) -> None:
+    """Sessions without a subagents/ dir return only parent spans (no crash)."""
+    records = [
+        _cc_assistant("Bash", "tid1", "echo hello", "2026-04-21T10:00:00+00:00"),
+        _cc_result("tid1", "hello\n", "2026-04-21T10:00:01+00:00"),
+    ]
+    p = _write_jsonl(tmp_path, records)
+    spans = extract_spans_from_cc_jsonl(p)
+    assert len(spans) == 1
+    assert spans[0].spawn_depth == 0
+    assert spans[0].agent_type is None

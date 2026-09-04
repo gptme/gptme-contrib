@@ -774,6 +774,12 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     # command used `gh pr merge` without an explicit number). Keyed by tool_use_id.
     _pr_merge_num_by_tool_id: dict[str, int] = {}
     detail_by_value: dict[str, dict[str, object]] = {}
+    # Subagent transcripts can repeat parent context verbatim. Count each
+    # tool invocation/result once across the flattened session, keyed by the
+    # stable Claude tool-use id. Records without an id cannot be identified
+    # safely and retain the historical per-record behavior.
+    seen_tool_use_ids: set[str] = set()
+    seen_tool_result_ids: set[str] = set()
 
     for record in msgs:
         rec_type = record.get("type", "")
@@ -795,17 +801,22 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                 tool = item.get("name", "")
                 if not tool:
                     continue
-                tool_calls[tool] = tool_calls.get(tool, 0) + 1
-                step_has_tool = True
 
-                # Track id → name for commit detection filtering and timing
+                # Track id → name for commit detection filtering and timing.
+                # Skip an invocation already seen in parent/ancestor context.
                 tool_id = item.get("id", "")
                 if tool_id:
+                    if tool_id in seen_tool_use_ids:
+                        continue
+                    seen_tool_use_ids.add(tool_id)
                     tool_id_to_name[tool_id] = tool
                     # Record dispatch ids for this assistant turn so each tool
                     # can later be tagged with the final batch size of the turn.
                     if ts is not None:
                         dispatch_ids.append((tool_id, tool))
+
+                tool_calls[tool] = tool_calls.get(tool, 0) + 1
+                step_has_tool = True
 
                 if tool in _CC_WRITE_TOOLS:
                     inp = item.get("input", {})
@@ -951,6 +962,10 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     continue
 
                 tool_use_id = item.get("tool_use_id", "")
+                if tool_use_id:
+                    if tool_use_id in seen_tool_result_ids:
+                        continue
+                    seen_tool_result_ids.add(tool_use_id)
 
                 # Per-tool-call duration: match result back to dispatch.
                 # When an assistant message batches multiple tool calls, they all
@@ -1576,6 +1591,30 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
     }
     if stop_reason is not None:
         result["stop_reason"] = stop_reason
+    return result
+
+
+def _combine_cc_usage(parts: list[dict]) -> dict:
+    """Roll up usage extracted independently from parent and subagents."""
+    if not parts:
+        return {}
+
+    additive_fields = (
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_tokens",
+        "cache_read_tokens",
+        "total_tokens",
+    )
+    result = {
+        field: sum(_as_int(part.get(field)) or 0 for part in parts) for field in additive_fields
+    }
+    # Parent metadata describes the aggregate session. Fall back to a child
+    # only when the parent did not carry the field at all.
+    for field in ("model", "sys_prompt_tokens", "context_peak_tokens", "stop_reason"):
+        value = next((part.get(field) for part in parts if part.get(field) is not None), None)
+        if value is not None:
+            result[field] = value
     return result
 
 
@@ -2993,10 +3032,28 @@ def extract_from_path(jsonl_path: Path) -> dict:
                 f"{jsonl_path} is a directory and does not contain conversation.jsonl"
             )
     msgs = parse_trajectory(jsonl_path)
+    parent_msgs = list(msgs)
+    subagent_msgs: list[list[dict]] = []
+    # Include subagent records so their tool calls and file writes count toward
+    # the parent session (trajectory attribution, item 1). Keep each transcript
+    # separate for usage extraction: a stream-json ``result`` is cumulative for
+    # one transcript and must not replace assistant usage from its siblings.
+    # Best-effort: subagent resolution must never break signal extraction.
+    try:
+        from .transcript import subagent_record_files
+
+        for sub_file in subagent_record_files(jsonl_path):
+            child_msgs = parse_trajectory(sub_file)
+            subagent_msgs.append(child_msgs)
+            msgs.extend(child_msgs)
+    except Exception:
+        pass
     fmt = detect_format(msgs)
     if fmt == "claude_code":
         signals = extract_signals_cc(msgs)
-        usage = extract_usage_cc(msgs)
+        usage_parts = [extract_usage_cc(part) for part in [parent_msgs, *subagent_msgs]]
+        usage_parts = [part for part in usage_parts if part]
+        usage = _combine_cc_usage(usage_parts)
     elif fmt == "pi":
         signals = extract_signals_pi(msgs)
         usage = extract_usage_pi(msgs)

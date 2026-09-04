@@ -736,3 +736,270 @@ def read_transcript(path: Path) -> SessionTranscript:
         capabilities=capabilities,
         messages=norm_msgs,
     )
+
+
+# ---------------------------------------------------------------------------
+# Subagent tree resolution
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SubagentNode:
+    """A resolved subagent transcript with provenance.
+
+    Fields
+    ------
+    session_id : str
+        Child session id (the ``agent-<id>`` file stem).
+    agent_type : str | None
+        ``agentType`` from the child's ``.meta.json`` (e.g. ``"Explore"``,
+        ``"workflow-subagent"``), falling back to the parent tool's
+        ``subagent_type``.
+    description : str | None
+        Task description from ``.meta.json`` or the parent tool input.
+    spawn_depth : int
+        Nesting depth. ``1`` is a direct child of the parent session.
+    tool_use_id : str | None
+        The parent's ``tool_use.id`` that spawned this child (``None`` for
+        workflow agents, which carry no tool-use link).
+    trajectory_path : str
+        Absolute path to the child JSONL file.
+    transcript : SessionTranscript
+        Normalized transcript of the child session.
+    records : list[dict]
+        Raw harness JSONL records of the child (for signal extraction).
+    children : list[SubagentNode]
+        Nested subagents spawned by this child.
+    """
+
+    session_id: str
+    trajectory_path: str
+    transcript: SessionTranscript
+    records: list[dict] = field(default_factory=list)
+    children: list["SubagentNode"] = field(default_factory=list)
+    agent_type: str | None = None
+    description: str | None = None
+    spawn_depth: int = 1
+    tool_use_id: str | None = None
+
+
+@dataclass
+class SessionTree:
+    """A session with its subagents resolved into a tree.
+
+    ``parent`` is the root transcript. ``subagents`` holds the direct
+    subagents (spawn depth 1), each of which may itself have ``children``.
+    """
+
+    parent: SessionTranscript
+    parent_records: list[dict] = field(default_factory=list)
+    subagents: list[SubagentNode] = field(default_factory=list)
+
+    @property
+    def total_subagents(self) -> int:
+        """Total number of subagent nodes in the tree (all depths)."""
+
+        def count(nodes: list[SubagentNode]) -> int:
+            return sum(1 + count(n.children) for n in nodes)
+
+        return count(self.subagents)
+
+    def flatten_records(self) -> list[dict]:
+        """Raw JSONL records: parent first, then all descendants pre-order.
+
+        Suitable for feeding harness signal extractors so subagent tool calls,
+        tokens, file writes and commits count toward the parent session.
+        """
+        out = list(self.parent_records)
+
+        def walk(nodes: list[SubagentNode]) -> None:
+            for n in nodes:
+                out.extend(n.records)
+                walk(n.children)
+
+        walk(self.subagents)
+        return out
+
+    def flatten_messages(self) -> list[NormalizedMessage]:
+        """Normalized messages: parent first, then all descendants pre-order."""
+        out = list(self.parent.messages)
+
+        def walk(nodes: list[SubagentNode]) -> None:
+            for n in nodes:
+                out.extend(n.transcript.messages)
+                walk(n.children)
+
+        walk(self.subagents)
+        return out
+
+
+def _resolve_parent_jsonl(path: Path) -> Path:
+    """Resolve a session path (directory or JSONL file) to its parent JSONL."""
+    if path.is_dir():
+        jsonl = path / "conversation.jsonl"
+        if jsonl.exists():
+            return jsonl
+        raise FileNotFoundError(f"{path} is a directory and does not contain conversation.jsonl")
+    return path
+
+
+def _find_subagents_dir(parent_jsonl: Path) -> Path | None:
+    """Locate the ``subagents/`` directory for a session, or ``None``.
+
+    Claude Code stores subagents under ``<session-id>/subagents/`` next to the
+    ``<session-id>.jsonl`` parent; gptme stores them under the session
+    directory (which contains ``conversation.jsonl``) as ``subagents/``.
+    """
+    candidates = (
+        parent_jsonl.parent / parent_jsonl.stem / "subagents",  # claude-code
+        parent_jsonl.parent / "subagents",  # gptme session dir
+    )
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return None
+
+
+def subagent_record_files(path: Path) -> list[Path]:
+    """JSONL files of every subagent spawned by the session at ``path``.
+
+    Accepts a JSONL file or a gptme session directory. Covers both the flat
+    ``agent-*.jsonl`` agents (nested ones included) and workflow agents under
+    ``workflows/*/``. Returns ``[]`` when the session has no subagents.
+    """
+    parent_jsonl = _resolve_parent_jsonl(path)
+    sub_dir = _find_subagents_dir(parent_jsonl)
+    if sub_dir is None:
+        return []
+    files = sorted(sub_dir.glob("agent-*.jsonl"))
+    files += sorted(sub_dir.glob("workflows/*/agent-*.jsonl"))
+    return files
+
+
+def _agent_tool_use_ids(records: list[dict]) -> list[tuple[str, dict]]:
+    """Return ``(tool_use_id, block)`` for each ``Agent`` tool use in records."""
+    out: list[tuple[str, dict]] = []
+    for r in records:
+        if r.get("type") != "assistant":
+            continue
+        content = r.get("message", {}).get("content", [])
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and block.get("name") == "Agent"
+            ):
+                tool_id = block.get("id")
+                if tool_id is not None:
+                    out.append((tool_id, block))
+    return out
+
+
+def _make_subagent_node(
+    child_path: Path,
+    meta: dict,
+    tool_use_id: str | None,
+    parent_depth: int,
+    agent_map: dict[str, tuple[dict, Path]],
+    visited: set[str],
+) -> SubagentNode:
+    """Build a SubagentNode for ``child_path``, recursing into its children."""
+    child_records = parse_trajectory(child_path)
+    visited.add(str(child_path))
+    return SubagentNode(
+        session_id=child_path.stem,
+        agent_type=meta.get("agentType"),
+        description=meta.get("description"),
+        spawn_depth=int(meta.get("spawnDepth", parent_depth + 1) or parent_depth + 1),
+        tool_use_id=tool_use_id,
+        trajectory_path=str(child_path),
+        transcript=read_transcript(child_path),
+        records=child_records,
+        children=_build_subagent_nodes(child_records, agent_map, parent_depth + 1, visited),
+    )
+
+
+def _build_subagent_nodes(
+    records: list[dict],
+    agent_map: dict[str, tuple[dict, Path]],
+    parent_depth: int,
+    visited: set[str],
+) -> list[SubagentNode]:
+    """Resolve the subagents whose tool-use ids appear in ``records``.
+
+    ``visited`` guards against self-loops: a subagent's JSONL carries the
+    parent's ``Agent`` tool-use as context, so its own ``toolUseId`` re-matches
+    the node itself. Skipping already-visited children also breaks any
+    cross-referential cycle.
+    """
+    nodes: list[SubagentNode] = []
+    for tool_use_id, block in _agent_tool_use_ids(records):
+        entry = agent_map.get(tool_use_id)
+        if entry is None:
+            continue
+        meta, child_path = entry
+        if str(child_path) in visited:
+            continue
+        nodes.append(
+            _make_subagent_node(child_path, meta, tool_use_id, parent_depth, agent_map, visited)
+        )
+    return nodes
+
+
+def read_session_tree(path: Path) -> SessionTree:
+    """Read a session and resolve its subagent tree.
+
+    The parent transcript is returned as ``tree.parent``. Each ``Agent`` tool
+    call whose ``tool_use.id`` matches a subagent ``.meta.json`` ``toolUseId``
+    is expanded into a :class:`SubagentNode`, recursively by ``spawnDepth``.
+    Workflow agents and flat agents without readable metadata (no
+    ``toolUseId``) are attached as direct children of the parent.
+
+    A session without subagents returns a tree with an empty ``subagents``
+    list whose ``flatten_records`` / ``flatten_messages`` are identical to the
+    parent transcript alone.
+    """
+    parent_jsonl = _resolve_parent_jsonl(path)
+    parent_records = parse_trajectory(parent_jsonl)
+    parent = read_transcript(parent_jsonl)
+
+    agent_map: dict[str, tuple[dict, Path]] = {}
+    workflow_files: list[Path] = []
+    sub_dir = _find_subagents_dir(parent_jsonl)
+    if sub_dir is not None:
+        for meta_path in sorted(sub_dir.glob("agent-*.meta.json")):
+            try:
+                meta = json.loads(meta_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            child_stem = meta_path.name.removesuffix(".meta.json")
+            child_path = meta_path.parent / f"{child_stem}.jsonl"
+            if not child_path.exists():
+                continue
+            tool_use_id = meta.get("toolUseId", "")
+            if tool_use_id:
+                agent_map[tool_use_id] = (meta, child_path)
+            else:
+                workflow_files.append(child_path)
+        # Catch flat and workflow JSONL files whose .meta.json was absent or
+        # unreadable. Without a tool-use join they are attached at the root,
+        # preserving their work instead of silently dropping it.
+        mapped = {c for _, c in agent_map.values()}
+        fallback_files = sorted(sub_dir.glob("agent-*.jsonl"))
+        wf_dir = sub_dir / "workflows"
+        if wf_dir.is_dir():
+            fallback_files += sorted(wf_dir.glob("*/agent-*.jsonl"))
+        for child_path in fallback_files:
+            if child_path not in mapped and child_path not in workflow_files:
+                workflow_files.append(child_path)
+
+    tree = SessionTree(parent=parent, parent_records=parent_records)
+    visited: set[str] = set()
+    tree.subagents = _build_subagent_nodes(parent_records, agent_map, 0, visited)
+    for child_path in workflow_files:
+        if str(child_path) in visited:
+            continue
+        tree.subagents.append(_make_subagent_node(child_path, {}, None, 0, agent_map, visited))
+    return tree
