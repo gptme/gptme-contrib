@@ -42,11 +42,16 @@ from gptme_runloops.run_item import (
     PR_STATE_TYPES,
     THREAD_DELIVERABLE_TYPES,
     ArcInfo,
+    ItemPlan,
     RunItem,
     RunItemConfig,
     RunItemHooks,
+    RunItemOutcome,
+    _classify_backend_error_text,
     _handle_cc_rate_limit,
     _inspect_cc_failure,
+    _inspect_gptme_failure,
+    _inspect_grok_failure,
     _load_shadow_bandit,
     _record_shadow_bandit_outcome,
     _shadow_bandit_enabled,
@@ -2644,3 +2649,425 @@ def test_promote_item_state_number_zero_promotes_notifs(tmp_path) -> None:
     promote_item_state(config, "gptme/gptme", 0)
     names = {p.name for p in config.state_dir.iterdir()}
     assert names == {"notif-1.state"}
+
+
+# --- Non-CC backend infra failure detection (gptme/gptme-contrib#1601) ---
+
+
+class TestClassifyBackendErrorText:
+    """Unit tests for the generic backend error classifier."""
+
+    def test_quota_402_detected(self) -> None:
+        text = "API error (status 402 Payment Required): Grok Build usage balance exhausted"
+        assert _classify_backend_error_text(text, "grok-build") == "grok_build_quota"
+
+    def test_quota_balance_exhausted_detected(self) -> None:
+        text = "Error: usage balance exhausted, please top up your account"
+        assert _classify_backend_error_text(text, "gptme") == "gptme_quota"
+
+    def test_auth_401_detected(self) -> None:
+        text = "API error (status 401 Unauthorized): invalid api key"
+        assert _classify_backend_error_text(text, "grok-build") == "grok_build_auth"
+
+    def test_rate_limit_429_detected(self) -> None:
+        text = "API error (status 429 Too Many Requests)"
+        assert _classify_backend_error_text(text, "gptme") == "gptme_rate_limit"
+
+    def test_quota_takes_priority_over_auth(self) -> None:
+        # A 402 with "unauthorized" in the body → quota wins.
+        text = "status 402 Payment Required: unauthorized quota exceeded"
+        assert _classify_backend_error_text(text, "grok-build") == "grok_build_quota"
+
+    def test_unknown_error_returns_none(self) -> None:
+        text = "Traceback (most recent call last): ... RuntimeError: disk full"
+        assert _classify_backend_error_text(text, "grok-build") is None
+
+    def test_empty_text_returns_none(self) -> None:
+        assert _classify_backend_error_text("", "gptme") is None
+
+    def test_backend_slug_replaces_hyphens(self) -> None:
+        # Hyphens in backend names become underscores so the result is
+        # a valid field-fragment in JSON/JSONL.
+        assert (
+            _classify_backend_error_text("status 402", "my-backend")
+            == "my_backend_quota"
+        )
+
+
+class TestInspectGrokFailure:
+    """Integration-level tests for _inspect_grok_failure."""
+
+    def test_returns_quota_on_402_log(self, tmp_path) -> None:
+        session_id = "test-session-abc"
+        log = tmp_path / "grok-session.log"
+        log.write_text(
+            "Starting session...\n"
+            "API error (status 402 Payment Required): Grok Build usage balance exhausted\n"
+        )
+        ref = tmp_path / f"grok-build-session-log-ref-{session_id}.txt"
+        ref.write_text(str(log))
+
+        result = _inspect_grok_failure(_make_plan_stub(session_id), tmp_dir=tmp_path)
+        assert result == "grok_build_quota"
+
+    def test_returns_none_when_no_ref(self, tmp_path) -> None:
+        result = _inspect_grok_failure(
+            _make_plan_stub("no-such-session"), tmp_dir=tmp_path
+        )
+        assert result is None
+
+    def test_returns_none_when_ref_points_to_missing_log(self, tmp_path) -> None:
+        session_id = "test-session-xyz"
+        ref = tmp_path / f"grok-build-session-log-ref-{session_id}.txt"
+        ref.write_text("/nonexistent/path.log")
+        result = _inspect_grok_failure(_make_plan_stub(session_id), tmp_dir=tmp_path)
+        assert result is None
+
+    def test_returns_none_for_non_infra_error(self, tmp_path) -> None:
+        session_id = "test-session-def"
+        log = tmp_path / "grok-ok.log"
+        log.write_text("Session finished with error: assertion failed in test")
+        ref = tmp_path / f"grok-build-session-log-ref-{session_id}.txt"
+        ref.write_text(str(log))
+        result = _inspect_grok_failure(_make_plan_stub(session_id), tmp_dir=tmp_path)
+        assert result is None
+
+
+class TestInspectGptmeFailure:
+    """Integration-level tests for _inspect_gptme_failure."""
+
+    def test_returns_quota_on_balance_exhausted_trajectory(self, tmp_path) -> None:
+        session_id = "gptme-session-111"
+        traj = tmp_path / "gptme-session.jsonl"
+        traj.write_text(
+            '{"role": "system", "content": "..."}\n'
+            '{"role": "error", "content": "API error: usage balance exhausted"}\n'
+        )
+        ref = tmp_path / f"gptme-traj-{session_id}.path"
+        ref.write_text(str(traj))
+
+        result = _inspect_gptme_failure(_make_plan_stub(session_id), tmp_dir=tmp_path)
+        assert result == "gptme_quota"
+
+    def test_returns_none_when_no_ref(self, tmp_path) -> None:
+        result = _inspect_gptme_failure(
+            _make_plan_stub("no-gptme-session"), tmp_dir=tmp_path
+        )
+        assert result is None
+
+    def test_returns_none_for_clean_trajectory(self, tmp_path) -> None:
+        session_id = "gptme-session-222"
+        traj = tmp_path / "gptme-clean.jsonl"
+        traj.write_text('{"role": "assistant", "content": "Done."}\n')
+        ref = tmp_path / f"gptme-traj-{session_id}.path"
+        ref.write_text(str(traj))
+        result = _inspect_gptme_failure(_make_plan_stub(session_id), tmp_dir=tmp_path)
+        assert result is None
+
+
+def _make_plan_stub(session_id: str) -> ItemPlan:
+    """Minimal ItemPlan stub for infra-inspection tests."""
+
+    return ItemPlan(
+        index=1,
+        repo="gptme/gptme-contrib",
+        number="1601",
+        title="test",
+        types=("pr_update",),
+        skip_item=False,
+        lifecycle_decisions=[],
+        dry_run_intents=[],
+        instruction_kind=None,
+        prompt="test prompt",
+        timeout=900,
+        time_desc="~10 minutes",
+        backend="grok-build",
+        model="grok-3",
+        record_model="grok-3",
+        slug="gptme-gptme-contrib_1601_1",
+        session_id=session_id,
+        record_file="/tmp/test-record.json",
+        trajectory_path="",
+        claim_mode="acquire",
+        claim_key=None,
+        claim_agent=None,
+        ack_intent=False,
+        arc_id=None,
+        runner_argv=["/fake/run.sh"],
+        runner_env={},
+    )
+
+
+class TestGrokBuildInfraFailureRecordedInLedger:
+    """End-to-end: grok-build 402 death should record infra_failure in the ledger."""
+
+    def test_grok_build_quota_death_sets_infra_failure(self, tmp_path) -> None:
+        """A grok-build session that exits 1 with a 402 log → infra_failure=grok_build_quota."""
+        item = make_item(types=["notification"], number=0)
+        work_file = _write_work_file(tmp_path, item)
+        config = make_config(tmp_path)
+        session_ref: Path | None = None
+
+        def run_cmd(argv, **kwargs):
+            nonlocal session_ref
+            argv = [str(arg) for arg in argv]
+            if "/fake/run.sh" in argv:
+                env = kwargs.get("env", {})
+                session_id = env.get("GROK_BUILD_SESSION_ID", "test-grok-session")
+                log = tmp_path / "grok-error.log"
+                log.write_text(
+                    "Starting grok-build session\n"
+                    "API error (status 402 Payment Required): "
+                    "Grok Build usage balance exhausted\n"
+                )
+                # Ref must live in /tmp (the default tmp_dir in _inspect_grok_failure),
+                # matching how the real grok-build runner writes it.
+                ref = Path("/tmp") / f"grok-build-session-log-ref-{session_id}.txt"
+                ref.write_text(str(log))
+                session_ref = ref
+                return subprocess.CompletedProcess(argv, 1, "", "")
+            stdout = "abc123\n" if "rev-parse" in argv else ""
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+        try:
+            rc = run_work_file(
+                work_file,
+                config,
+                make_hooks(run_cmd=run_cmd),
+                backend="grok-build",
+            )
+        finally:
+            if session_ref is not None:
+                session_ref.unlink(missing_ok=True)
+
+        assert rc == 1
+        completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+        assert completed["infra_failure"] == "grok_build_quota"
+        assert completed["exit_code"] == 1
+        assert completed["outcome"] == "failed"
+
+    def test_gptme_auth_death_sets_infra_failure(self, tmp_path) -> None:
+        """A gptme session that exits 1 with a 401 trajectory → infra_failure=gptme_auth."""
+        item = make_item(types=["notification"], number=0)
+        work_file = _write_work_file(tmp_path, item)
+        config = make_config(tmp_path)
+        session_ref: Path | None = None
+
+        def run_cmd(argv, **kwargs):
+            nonlocal session_ref
+            argv = [str(arg) for arg in argv]
+            if "/fake/run.sh" in argv:
+                env = kwargs.get("env", {})
+                session_id = env.get("BOB_SESSION_ID", "test-gptme-session")
+                traj = tmp_path / "gptme-traj.jsonl"
+                traj.write_text(
+                    '{"role": "error", "content": "API error (status 401 Unauthorized): invalid api key"}\n'
+                )
+                # Ref must live in /tmp (the default tmp_dir in _inspect_gptme_failure).
+                ref = Path("/tmp") / f"gptme-traj-{session_id}.path"
+                ref.write_text(str(traj))
+                session_ref = ref
+                return subprocess.CompletedProcess(argv, 1, "", "")
+            stdout = "abc123\n" if "rev-parse" in argv else ""
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+        try:
+            rc = run_work_file(
+                work_file,
+                config,
+                make_hooks(run_cmd=run_cmd),
+                backend="gptme",
+            )
+        finally:
+            if session_ref is not None:
+                session_ref.unlink(missing_ok=True)
+
+        assert rc == 1
+        completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+        assert completed["infra_failure"] == "gptme_auth"
+
+
+# --- Effect=observed suppression for failed sessions (gptme/gptme-contrib#1601) ---
+
+
+class TestFailedSessionEffectSignal:
+    """A failed session (exit_code != 0) must not record effect=observed.
+
+    Root cause documented in gptme/gptme-contrib#1601: a 23s grok-build 402
+    death carried effect=observed in the ledger because the delivery check
+    found an earlier session's comment. This caused pm_dispatch_recovery to
+    treat it as "progressing" (retry budget 8, backoff 120s) instead of the
+    free infra class, producing 10 re-arms on an unchanged head.
+    """
+
+    def test_failed_session_with_delivery_check_does_not_report_observed(
+        self, tmp_path
+    ) -> None:
+        """exit_code=1 + delivery check claiming "handled" → effect must NOT be observed.
+
+        Uses a ``notification`` item (in THREAD_DELIVERABLE_TYPES but NOT in
+        PR_OBSERVE_TYPES) so the PR-state diff step is skipped and the test
+        does not need to intercept the real ``gh pr view`` call that
+        ``update_record_pr_state`` would otherwise make.
+        """
+        # notification is in THREAD_DELIVERABLE_TYPES → delivery check runs
+        # notification is NOT in PR_OBSERVE_TYPES → pr-state diff is skipped
+        item = make_item(types=["notification"], number=1597)
+        plan = _make_plan_for_effect_test(tmp_path, item)
+        record_file = Path(plan.record_file)
+        record_file.parent.mkdir(parents=True, exist_ok=True)
+        # Record with no before/after PR snapshot (session died in 23s).
+        record_file.write_text(json.dumps({"outcome": "failed"}))
+        outcome = _make_outcome(exit_code=1)
+        config = make_config(tmp_path)
+        hooks = _make_hooks_with_handled_delivery(tmp_path)
+
+        effect = run_post_session(plan, item, outcome, config, hooks)
+
+        # A failed session must not report effect=observed even when the
+        # delivery check returns "handled" — delivery may have found a
+        # comment from a previous dispatch.
+        assert (
+            effect != "observed"
+        ), f"effect={effect!r} — failed session incorrectly reported as observed"
+
+    def test_successful_session_with_delivery_check_can_be_observed(
+        self, tmp_path
+    ) -> None:
+        """exit_code=0 + verified delivery → effect=observed is still correct."""
+        item = make_item(types=["notification"], number=1597)
+        plan = _make_plan_for_effect_test(tmp_path, item)
+        record_file = Path(plan.record_file)
+        record_file.parent.mkdir(parents=True, exist_ok=True)
+        record_file.write_text(json.dumps({"outcome": "productive"}))
+        outcome = _make_outcome(exit_code=0)
+        config = make_config(tmp_path)
+        hooks = _make_hooks_with_handled_delivery(tmp_path)
+
+        effect = run_post_session(plan, item, outcome, config, hooks)
+
+        assert effect == "observed"
+
+    def test_failed_session_without_snapshot_is_unknown_not_observed(
+        self, tmp_path
+    ) -> None:
+        """exit_code=1 + no PR snapshot + no delivery check → effect must be unknown."""
+        item = make_item(types=["notification"], number=0)
+        plan = _make_plan_for_effect_test(tmp_path, item)
+        record_file = Path(plan.record_file)
+        record_file.parent.mkdir(parents=True, exist_ok=True)
+        record_file.write_text(json.dumps({"outcome": "failed"}))
+        outcome = _make_outcome(exit_code=1)
+        config = make_config(tmp_path)
+        hooks = make_hooks()
+
+        effect = run_post_session(plan, item, outcome, config, hooks)
+
+        assert effect == "unknown"
+        assert effect != "observed"
+
+    def test_failed_session_pr_snapshot_unchanged_is_none_not_observed(
+        self, tmp_path
+    ) -> None:
+        """exit_code=1 + PR head unchanged + delivery "handled" → effect=none, not observed.
+
+        Uses fetch_pr_snapshot hook to avoid a real ``gh pr view`` call so
+        the PR state diff step can run with predictable before/after values.
+        """
+        item = make_item(types=["pr_update"])
+        plan = _make_plan_for_effect_test(tmp_path, item)
+        record_file = Path(plan.record_file)
+        record_file.parent.mkdir(parents=True, exist_ok=True)
+        record_file.write_text(json.dumps({"outcome": "failed"}))
+        # before snapshot captured before the session started
+        before_snap = {"headRefOid": "abc123", "state": "OPEN", "mergeCommit": None}
+        outcome = _make_outcome(exit_code=1, pr_before_json=json.dumps(before_snap))
+        config = make_config(tmp_path)
+
+        # Provide a fake fetch so the after snapshot matches (head unchanged).
+        def fake_fetch(repo: str, number: int) -> dict[str, str]:
+            return {"headRefOid": "abc123", "state": "OPEN", "mergeCommit": ""}
+
+        hooks = _make_hooks_with_handled_delivery(tmp_path)
+        hooks = RunItemHooks(
+            runner=hooks.runner,
+            run_cmd=hooks.run_cmd,
+            delivery_check=hooks.delivery_check,
+            fetch_pr_snapshot=fake_fetch,
+        )
+
+        effect = run_post_session(plan, item, outcome, config, hooks)
+
+        assert (
+            effect == "none"
+        ), f"effect={effect!r} — failed session with unchanged head should be 'none'"
+        assert effect != "observed"
+
+
+def _make_plan_for_effect_test(tmp_path: Path, item: RunItem) -> ItemPlan:
+    """Build an ItemPlan for effect-signal tests."""
+    from gptme_runloops.run_item import derive_session_id, item_slug
+
+    slug = item_slug(item.repo, item.number_str, 1)
+    session_id = derive_session_id(slug, 0)
+    records_dir = tmp_path / "records"
+    records_dir.mkdir(parents=True, exist_ok=True)
+    return ItemPlan(
+        index=1,
+        repo=item.repo,
+        number=item.number_str,
+        title=item.title,
+        types=item.types,
+        skip_item=False,
+        lifecycle_decisions=[],
+        dry_run_intents=[],
+        instruction_kind=None,
+        prompt="test prompt",
+        timeout=900,
+        time_desc="~10 minutes",
+        backend="grok-build",
+        model="grok-3",
+        record_model="grok-3",
+        slug=slug,
+        session_id=session_id,
+        record_file=str(records_dir / f"{slug}.json"),
+        trajectory_path="",
+        claim_mode="acquire",
+        claim_key=None,
+        claim_agent=None,
+        ack_intent=False,
+        arc_id=None,
+        runner_argv=["/fake/run.sh"],
+        runner_env={},
+    )
+
+
+def _make_outcome(*, exit_code: int = 0, pr_before_json: str = "") -> RunItemOutcome:
+    """Build a minimal RunItemOutcome for effect-signal tests."""
+    return RunItemOutcome(
+        exit_code=exit_code,
+        duration_seconds=23,
+        started_epoch=0,
+        started_iso="2026-09-03T17:40:00+00:00",
+        trajectory_path="",
+        pr_before_json=pr_before_json,
+        latency_context_json="[]",
+        ack_result_json="",
+    )
+
+
+def _make_hooks_with_handled_delivery(tmp_path: Path) -> RunItemHooks:
+    """Build hooks where the delivery check always returns outcome=handled (exit 0)."""
+
+    def run_cmd(argv, **kwargs):
+        argv = [str(a) for a in argv]
+        # Delivery check → "handled" response
+        if any("delivery" in a or "check" in a for a in argv):
+            return subprocess.CompletedProcess(argv, 0, '{"outcome":"handled"}', "")
+        stdout = "abc123\n" if "rev-parse" in argv else ""
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    return make_hooks(
+        run_cmd=run_cmd,
+        delivery_check=["/fake/delivery-check.sh"],
+    )
