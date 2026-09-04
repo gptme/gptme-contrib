@@ -160,12 +160,7 @@ def commits_for_path(path: str, limit: int = 10) -> list[Attribution]:
     return result
 
 
-#: ``git blame`` reports this sentinel sha for lines that exist only in the
-#: working tree (not yet committed).
-_UNCOMMITTED_SHA = "0" * 40
-
-
-def _uncommitted_attribution(porcelain: str) -> Attribution:
+def _uncommitted_attribution(porcelain: str, sha: str) -> Attribution:
     """Build an Attribution for a working-tree line from ``git blame`` porcelain.
 
     ``git blame`` still emits ``author-time``/``author-tz`` for uncommitted
@@ -185,7 +180,7 @@ def _uncommitted_attribution(porcelain: str) -> Attribution:
         when = datetime.now(tz=timezone.utc)
 
     return Attribution(
-        sha=_UNCOMMITTED_SHA,
+        sha=sha,
         when=when,
         author=fields.get("author") or "Not Committed Yet",
         subject="(uncommitted change in working tree)",
@@ -202,8 +197,8 @@ def commit_for_line(path: str, line: int) -> list[Attribution]:
     """
     out = _run(["git", "blame", "-L", f"{line},{line}", "--porcelain", "--", path])
     sha = out.split("\n", 1)[0].split(" ", 1)[0]
-    if sha == _UNCOMMITTED_SHA:
-        return [_uncommitted_attribution(out)]
+    if sha and set(sha) == {"0"}:
+        return [_uncommitted_attribution(out, sha)]
     meta = _run(
         [
             "git",

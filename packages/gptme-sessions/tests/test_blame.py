@@ -406,10 +406,11 @@ def test_commit_for_line_duplicate_trailers(monkeypatch):
     assert atts[0].trailer_session_id == "sess-first"
 
 
-def test_commit_for_line_uncommitted(monkeypatch):
+@pytest.mark.parametrize("null_sha", ["0" * 40, "0" * 64])
+def test_commit_for_line_uncommitted(monkeypatch, null_sha):
     """A working-tree-only line returns an uncommitted Attribution, not a crash."""
     porcelain = (
-        "0000000000000000000000000000000000000000 84 84 1\n"
+        f"{null_sha} 84 84 1\n"
         "author Not Committed Yet\n"
         "author-mail <not.committed.yet>\n"
         "author-time 1788472197\n"
@@ -430,10 +431,10 @@ def test_commit_for_line_uncommitted(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _fake)
     atts = commit_for_line("SOUL.md", 84)
 
-    # `git show` must not be invoked for the all-zeros sentinel sha.
+    # `git show` must not be invoked for either Git object format's null sha.
     assert len(calls) == 1
     assert len(atts) == 1
-    assert atts[0].sha == "0" * 40
+    assert atts[0].sha == null_sha
     assert atts[0].author == "Not Committed Yet"
     assert atts[0].when == datetime(2026, 9, 3, 21, 49, 57, tzinfo=timezone.utc)
     assert atts[0].trailer_session_id is None
