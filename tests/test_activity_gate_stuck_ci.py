@@ -364,6 +364,71 @@ check_ci_failures "o/r" '{json.dumps([pr])}'
     assert not state_file.exists(), "green PR must clean up the state file"
 
 
+def test_ci_failure_detail_includes_state_hash_token() -> None:
+    """A terminal CI flip must change the grouped dispatch payload.
+
+    ``activity-gate.sh`` state-tracks CI by ``ci_hash`` and emits only when the
+    stored hash changes. But the downstream PM dispatcher dedupes grouped items
+    by ``types`` + ``detail`` atoms. When the detail was the constant string
+    ``CI failing``, a PR whose previous red check was already dispatched could
+    flip to a different red check-set on the same head, pass activity-gate's
+    ``ci_hash`` test, and still be swallowed as ``event_unchanged`` /
+    ``event_subsumed`` by PM. Carrying the same state hash in the detail gives
+    dispatch dedupe the same state boundary the gate already uses.
+    """
+    old_rollup = [{"status": "COMPLETED", "conclusion": "FAILURE", "name": "old"}]
+    new_rollup = [
+        {"status": "COMPLETED", "conclusion": "FAILURE", "name": "old"},
+        {"status": "COMPLETED", "conclusion": "FAILURE", "name": "new"},
+    ]
+    old_key = _ci_hash_key(old_rollup)
+    new_key = _ci_hash_key(new_rollup)
+    assert old_key != new_key
+
+    pr = {
+        "number": 1,
+        "title": "red pr",
+        "headRefOid": "d" * 40,
+        "statusCheckRollup": new_rollup,
+    }
+
+    expected_hash = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"jq -r '{_extract_hash_program()}' | {_sha256_cmd()} | cut -d' ' -f1",
+        ],
+        input=json.dumps(pr),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    old_hash = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"printf %s {json.dumps(old_key)!r} | {_sha256_cmd()} | cut -d' ' -f1",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    script = f"""
+set -uo pipefail
+STATE_DIR=$(mktemp -d)
+CI_STUCK_SECS=3600
+portable_hash() {{ {_sha256_cmd()} | cut -d' ' -f1; }}
+emit_item() {{ echo "EMIT type=$1 repo=$2 pr=$3 detail=$5"; }}
+source_only=1
+{_extract_function()}
+check_ci_failures "o/r" '{json.dumps([pr])}'
+"""
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert f"state_hash={expected_hash}" in proc.stdout, proc.stdout
+    assert f"state_hash={old_hash}" not in proc.stdout, proc.stdout
+
+
 def test_ci_hash_changes_on_new_head_commit() -> None:
     """A push must start a new stuck episode even for an identical rollup.
 
