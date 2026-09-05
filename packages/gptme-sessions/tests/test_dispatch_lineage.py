@@ -163,6 +163,7 @@ def test_post_session_records_dispatch_id_from_argument(tmp_path: Path):
 
 def test_post_session_reads_dispatch_id_from_env(tmp_path: Path, monkeypatch):
     """PM_DISPATCH_ID env var is the fallback when no explicit dispatch_id given."""
+    monkeypatch.delenv("BOB_DISPATCH_ID", raising=False)
     monkeypatch.setenv("PM_DISPATCH_ID", "bob-pm-activitywatch-aw-webui-slot-1")
     store = SessionStore(sessions_dir=tmp_path)
     result = post_session(
@@ -178,6 +179,7 @@ def test_post_session_reads_dispatch_id_from_env(tmp_path: Path, monkeypatch):
 
 def test_explicit_dispatch_id_beats_env(tmp_path: Path, monkeypatch):
     """Explicit argument takes priority over the PM_DISPATCH_ID env var."""
+    monkeypatch.delenv("BOB_DISPATCH_ID", raising=False)
     monkeypatch.setenv("PM_DISPATCH_ID", "env-value")
     store = SessionStore(sessions_dir=tmp_path)
     result = post_session(
@@ -193,6 +195,7 @@ def test_explicit_dispatch_id_beats_env(tmp_path: Path, monkeypatch):
 
 def test_no_dispatch_id_without_env_or_argument(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("PM_DISPATCH_ID", raising=False)
+    monkeypatch.delenv("BOB_DISPATCH_ID", raising=False)
     store = SessionStore(sessions_dir=tmp_path)
     result = post_session(
         store=store,
@@ -202,6 +205,74 @@ def test_no_dispatch_id_without_env_or_argument(tmp_path: Path, monkeypatch):
         duration_seconds=10,
     )
     assert result.record.dispatch_id is None
+
+
+def test_post_session_reads_dispatch_id_from_bob_env(tmp_path: Path, monkeypatch):
+    """BOB_DISPATCH_ID is the harness-neutral fallback for non-PM dispatchers."""
+    monkeypatch.delenv("PM_DISPATCH_ID", raising=False)
+    monkeypatch.setenv("BOB_DISPATCH_ID", "bob-autonomous-fanout-code-1234")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        session_id="fanout-child1",
+        dispatch_kind="fanout",
+        duration_seconds=10,
+    )
+    assert result.record.dispatch_id == "bob-autonomous-fanout-code-1234"
+    assert result.record.dispatch_kind == "fanout"
+
+
+def test_bob_dispatch_id_beats_pm_dispatch_id(tmp_path: Path, monkeypatch):
+    """A dispatcher's own BOB_DISPATCH_ID wins over an inherited PM_DISPATCH_ID.
+
+    Slot units export PM_DISPATCH_ID and children inherit the whole
+    environment, so a nested non-PM dispatcher would otherwise be attributed to
+    the outer PM slot run.
+    """
+    monkeypatch.setenv("PM_DISPATCH_ID", "bob-pm-gptme-gptme-slot-2")
+    monkeypatch.setenv("BOB_DISPATCH_ID", "bob-workers-run-99")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        session_id="worker-child1",
+        dispatch_kind="worker",
+        duration_seconds=10,
+    )
+    assert result.record.dispatch_id == "bob-workers-run-99"
+
+
+def test_explicit_dispatch_id_beats_bob_env(tmp_path: Path, monkeypatch):
+    """Explicit argument still outranks the harness-neutral env var."""
+    monkeypatch.setenv("BOB_DISPATCH_ID", "env-value")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        session_id="fanout-child2",
+        dispatch_id="explicit-value",
+        duration_seconds=10,
+    )
+    assert result.record.dispatch_id == "explicit-value"
+
+
+def test_blank_bob_dispatch_id_falls_back_to_pm(tmp_path: Path, monkeypatch):
+    """An exported-but-empty BOB_DISPATCH_ID must not blank out the PM value."""
+    monkeypatch.setenv("BOB_DISPATCH_ID", "")
+    monkeypatch.setenv("PM_DISPATCH_ID", "bob-pm-gptme-gptme-slot-5")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        session_id="pm-child5",
+        duration_seconds=10,
+    )
+    assert result.record.dispatch_id == "bob-pm-gptme-gptme-slot-5"
 
 
 def test_dispatch_id_roundtrips_through_store(tmp_path: Path):

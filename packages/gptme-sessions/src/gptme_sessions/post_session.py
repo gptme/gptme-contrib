@@ -342,9 +342,11 @@ def post_session(
         ``BOB_DISPATCH_KIND`` environment variable.
     dispatch_id:
         Run-id of the dispatcher when the dispatcher is not itself a recorded
-        session (e.g. project-monitoring slot unit name from ``PM_DISPATCH_ID``).
-        Complements ``parent_session_id``; use for dispatcher-run→child joins.
-        Defaults to the ``PM_DISPATCH_ID`` environment variable.
+        session (e.g. an autonomous-fanout run, a spawn-workers run, or a
+        project-monitoring slot unit name).  Complements ``parent_session_id``;
+        use for dispatcher-run→child joins.  Defaults to the harness-neutral
+        ``BOB_DISPATCH_ID`` environment variable, falling back to
+        ``PM_DISPATCH_ID`` for the project-monitoring path.
     run_type:
         Pipeline / trigger name (e.g. ``"autonomous"``, ``"monitoring"``).
         Kept for backward compatibility; prefer ``trigger`` going forward.
@@ -909,10 +911,18 @@ def post_session(
     resolved_dispatch_kind = dispatch_kind or os.environ.get("BOB_DISPATCH_KIND") or None
     if resolved_dispatch_kind is not None:
         record_kwargs["dispatch_kind"] = resolved_dispatch_kind
-    # dispatch_id: the run-id of a dispatcher that is not itself a session
-    # (e.g. PM slot unit name from PM_DISPATCH_ID).  Distinct from
-    # parent_session_id which links session→session.
-    resolved_dispatch_id = dispatch_id or os.environ.get("PM_DISPATCH_ID") or None
+    # dispatch_id: the run-id of a dispatcher that is not itself a session.
+    # Distinct from parent_session_id, which links session→session.
+    #
+    # BOB_DISPATCH_ID is the harness-neutral name every dispatcher can export
+    # (autonomous-fanout.sh, spawn-workers.sh, ...).  PM_DISPATCH_ID stays as a
+    # fallback because project-monitoring slot units already set it and its
+    # value is joined against the PM ledger; keeping both lets the PM path work
+    # unchanged while non-PM dispatchers stop being forced to borrow a
+    # PM-flavoured variable name to get their run-id recorded.
+    resolved_dispatch_id = (
+        dispatch_id or os.environ.get("BOB_DISPATCH_ID") or os.environ.get("PM_DISPATCH_ID") or None
+    )
     if resolved_dispatch_id is not None:
         record_kwargs["dispatch_id"] = resolved_dispatch_id
     if actual_category is not None:
