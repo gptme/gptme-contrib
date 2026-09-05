@@ -936,6 +936,48 @@ class TestSessionRecordJudgeFields:
         updated = SessionStore(sessions_dir=tmp_path).load_all()[0]
         assert updated.grades["alignment"] == 0.5
 
+    def test_write_alignment_grade_extra_fields(self, tmp_path: Path) -> None:
+        """write_alignment_grade persists extra_fields into legacy_fields in the same rewrite."""
+        from gptme_sessions.judge import write_alignment_grade
+
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(SessionRecord(session_id="abc123", outcome="productive"))
+
+        result = write_alignment_grade(
+            session_id="abc123",
+            verdict={"score": 0.8, "reason": "good", "model": "test-model"},
+            sessions_dir=tmp_path,
+            extra_fields={"llm_judge_cascade_context": {"category": "code", "score": 42}},
+        )
+
+        assert result is True
+        updated = SessionStore(sessions_dir=tmp_path).load_all()[0]
+        # Grade written
+        assert updated.grades["alignment"] == 0.8
+        # extra_fields merged into the same record
+        legacy = getattr(updated, "_legacy_fields", {}) or {}
+        ctx = legacy.get("llm_judge_cascade_context")
+        assert ctx == {"category": "code", "score": 42}
+
+    def test_write_alignment_grade_extra_fields_none_is_noop(self, tmp_path: Path) -> None:
+        """extra_fields=None leaves legacy_fields unchanged."""
+        from gptme_sessions.judge import write_alignment_grade
+
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(SessionRecord(session_id="abc123", outcome="productive"))
+
+        result = write_alignment_grade(
+            session_id="abc123",
+            verdict={"score": 0.7, "reason": "ok", "model": "test-model"},
+            sessions_dir=tmp_path,
+            extra_fields=None,
+        )
+
+        assert result is True
+        updated = SessionStore(sessions_dir=tmp_path).load_all()[0]
+        legacy = getattr(updated, "_legacy_fields", {}) or {}
+        assert "llm_judge_cascade_context" not in legacy
+
     def test_writeback_merges_trajectory_ref_for_codex(self, tmp_path: Path) -> None:
         """write_alignment_grade merges harness+trajectory_path from trajectory_ref.json
         when the stored record is missing them (codex path)."""

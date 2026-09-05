@@ -925,6 +925,7 @@ def write_alignment_grade(
     session_id: str,
     verdict: JudgeVerdict,
     sessions_dir: Path,
+    extra_fields: dict[str, Any] | None = None,
 ) -> bool:
     """Persist an alignment verdict onto an existing session record.
 
@@ -933,6 +934,11 @@ def write_alignment_grade(
     the record is already being loaded and rewritten, so the extra work is
     amortized and keeps per-tool-call span data flowing into the LOO /
     analytics pipelines that key off ``SessionRecord``.
+
+    ``extra_fields`` are persisted into the record's ``_legacy_fields`` dict
+    during the same locked rewrite, avoiding a second full-store pass.
+    Values are JSON-serialised so non-serialisable objects (e.g. datetimes)
+    are coerced to strings.
     """
     store = SessionStore(sessions_dir=sessions_dir)
     records = store.load_all()
@@ -993,6 +999,13 @@ def write_alignment_grade(
                 legacy_fields["alignment_score"] = normalized["alignment_score"]
             if normalized.get("pivot_verdict") is not None:
                 legacy_fields["pivot_verdict"] = normalized["pivot_verdict"]
+            # Caller-supplied extra fields: merged in the same rewrite to avoid
+            # a second full-store pass.  JSON-roundtrip coerces non-serialisable
+            # objects (datetimes, etc.) to strings — same policy as callers that
+            # previously used a separate _persist_judge_cascade_context pass.
+            if extra_fields:
+                for k, v in extra_fields.items():
+                    legacy_fields[k] = json.loads(json.dumps(v, default=str))
         _store_judge_meta(record, normalized.get("meta"))
         # Safe to run unconditionally: returns False when trajectory_path is
         # missing / unreadable or harness is unknown, and is idempotent when
