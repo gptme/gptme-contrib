@@ -27,15 +27,26 @@ SendMessage = Callable[[str], Awaitable[None]]
 EventCallback = Callable[[str], Awaitable[None] | None]
 
 
-def vision_tool_schema() -> dict[str, Any]:
-    """Realtime function schema for an on-demand camera look."""
+def vision_tool_schema(
+    source_description: str = "the connected visual source",
+) -> dict[str, Any]:
+    """Realtime function schema for an on-demand visual-source look.
+
+    Parameters
+    ----------
+    source_description:
+        Human-readable description of the visual source embedded in the
+        tool description, e.g. ``"the connected BobBrain camera"`` (default
+        for physical camera setups) or ``"the current desktop screen"``
+        (when backed by a ScreenFrameSource).
+    """
     return {
         "type": "function",
         "name": "look",
         "description": (
-            "Look through the connected BobBrain camera and answer a visual "
-            "question. Use this whenever the caller asks what you see, who is "
-            "there, or asks about something currently in front of the camera."
+            f"Look at {source_description} and answer a visual question. "
+            "Use this whenever the caller asks what you see, what is visible, "
+            "or asks about something in the current view."
         ),
         "parameters": {
             "type": "object",
@@ -119,11 +130,15 @@ class VisionSessionBridge:
         on_event: EventCallback | None = None,
         look_timeout_s: float = 8.0,
         describe: Callable[..., Awaitable[str]] = describe_image,
+        events_enabled: bool = True,
     ) -> None:
         self.send_message = send_message
         self.on_event = on_event
         self.look_timeout_s = look_timeout_s
         self.describe = describe
+        # Disable for non-camera sources (e.g. ScreenFrameSource) where
+        # person/motion detector events are meaningless or noisy.
+        self.events_enabled = events_enabled
         self._pending: dict[str, _PendingLook] = {}
 
     async def look(self, prompt: str = DEFAULT_PROMPT) -> dict[str, str]:
@@ -202,6 +217,9 @@ class VisionSessionBridge:
         event = data.get("event")
         if not isinstance(event, str) or event not in _ALLOWED_EVENTS:
             logger.warning("ignoring unknown vision event: %r", event)
+            return
+        if not self.events_enabled:
+            logger.debug("vision event suppressed (events_enabled=False): %r", event)
             return
         if self.on_event is None:
             return
