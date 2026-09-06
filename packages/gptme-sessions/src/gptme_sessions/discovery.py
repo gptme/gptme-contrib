@@ -448,9 +448,8 @@ def resolve_cc_session_model(
     :param tmp_dir: directory containing the ``cc-session-log-ref-*.txt``
         pointer files. Defaults to ``/tmp``.
     :param extra_dirs: archive roots laid out like ``~/.claude/projects``
-        (default ``GPTME_CC_EXTRA_PROJECTS_DIRS``); consulted for
-        ``<root>/<project_dir.name>/<session_id>.jsonl`` when the trajectory
-        has been rotated out of *project_dir*.
+        (default ``GPTME_CC_EXTRA_PROJECTS_DIRS``); consulted across project
+        slugs when the live trajectory is absent or cannot attribute a model.
     """
     if not session_id:
         return None
@@ -471,16 +470,16 @@ def resolve_cc_session_model(
                 return model
 
     if project_dir is not None:
-        trajectory = project_dir / f"{session_id}.jsonl"
-        if trajectory.is_file():
-            return extract_cc_model(trajectory)
-        archived = find_cc_session_file(
-            session_id,
-            cc_dir=project_dir.parent,
-            extra_dirs=extra_dirs,
-        )
-        if archived is not None:
-            return extract_cc_model(archived)
+        name = f"{session_id}.jsonl"
+        for root in _cc_roots(project_dir.parent, extra_dirs):
+            try:
+                project_dirs = sorted(path for path in root.iterdir() if path.is_dir())
+            except OSError:
+                continue
+            for candidate_dir in project_dirs:
+                candidate = candidate_dir / name
+                if candidate.is_file() and (model := extract_cc_model(candidate)):
+                    return model
 
     return None
 
@@ -602,8 +601,8 @@ def discover_cc_sessions(
                         continue
                     seen.add(key)
                     sessions_with_dates.append((session_date, jsonl_file))
-        except PermissionError:
-            logger.debug("Permission denied reading: %s", root)
+        except OSError as e:
+            logger.debug("Failed to read CC projects root %s: %s", root, e)
     return [path for _, path in sorted(sessions_with_dates)]
 
 

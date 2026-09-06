@@ -1760,9 +1760,29 @@ def test_discover_cc_sessions_out_of_range_live_copy_does_not_hide_archive(
     ) == [archived]
 
 
+def test_discover_cc_sessions_skips_misconfigured_extra_root(tmp_path: Path) -> None:
+    live = tmp_path / "projects"
+    live_file = _cc_session(live, "-home-u-repo", "dddd-live")
+    not_a_directory = tmp_path / "archive.jsonl"
+    not_a_directory.write_text("not a directory", encoding="utf-8")
+
+    assert discover_cc_sessions(
+        date(2026, 3, 5),
+        date(2026, 3, 5),
+        cc_dir=live,
+        min_size=0,
+        extra_dirs=[not_a_directory],
+    ) == [live_file]
+
+
 def test_resolve_cc_session_model_falls_back_to_archive_root(tmp_path: Path) -> None:
     live = tmp_path / "projects" / "-home-u-repo"
     live.mkdir(parents=True)
+    (live / "dddd.jsonl").write_text(
+        json.dumps({"sessionId": "dddd", "timestamp": "2026-03-05T10:00:00Z", "type": "user"})
+        + "\n",
+        encoding="utf-8",
+    )
     _cc_session(tmp_path / "archive", "-home-u-renamed-repo", "dddd")
     empty_tmp = tmp_path / "tmp"
     empty_tmp.mkdir()
