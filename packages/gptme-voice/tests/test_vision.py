@@ -15,6 +15,17 @@ def test_vision_tool_schema_is_an_on_demand_look() -> None:
     schema = vision_tool_schema()
     assert schema["name"] == "look"
     assert schema["parameters"]["properties"]["prompt"]["type"] == "string"
+    assert schema["description"] == (
+        "Look through the connected BobBrain camera and answer a visual question. "
+        "Use this whenever the caller asks what you see, who is there, or asks "
+        "about something currently in front of the connected BobBrain camera."
+    )
+
+
+def test_vision_tool_schema_describes_custom_source() -> None:
+    schema = vision_tool_schema("the current desktop screen")
+    assert "Look through the current desktop screen" in schema["description"]
+    assert "in front of the current desktop screen" in schema["description"]
 
 
 @pytest.mark.asyncio

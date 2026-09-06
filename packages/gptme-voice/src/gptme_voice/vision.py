@@ -28,25 +28,24 @@ EventCallback = Callable[[str], Awaitable[None] | None]
 
 
 def vision_tool_schema(
-    source_description: str = "the connected visual source",
+    source_description: str = "the connected BobBrain camera",
 ) -> dict[str, Any]:
     """Realtime function schema for an on-demand visual-source look.
 
     Parameters
     ----------
     source_description:
-        Human-readable description of the visual source embedded in the
-        tool description, e.g. ``"the connected BobBrain camera"`` (default
-        for physical camera setups) or ``"the current desktop screen"``
-        (when backed by a ScreenFrameSource).
+        Human-readable description of the visual source embedded in the tool
+        description. Pass ``"the current desktop screen"`` when backed by a
+        ScreenFrameSource.
     """
     return {
         "type": "function",
         "name": "look",
         "description": (
-            f"Look at {source_description} and answer a visual question. "
-            "Use this whenever the caller asks what you see, what is visible, "
-            "or asks about something in the current view."
+            f"Look through {source_description} and answer a visual question. "
+            "Use this whenever the caller asks what you see, who is there, or "
+            f"asks about something currently in front of {source_description}."
         ),
         "parameters": {
             "type": "object",
