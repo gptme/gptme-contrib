@@ -128,6 +128,7 @@ from gptme_runloops.worker_records import (
     read_record_effect_signal,
     read_record_pr_state_after,
     update_record_pr_state,
+    voice_postcall_effect_observed,
     write_fallback_session_record,
     write_post_session_record,
     write_worker_result_manifest,
@@ -2620,6 +2621,16 @@ def run_post_session(
         record_file,
         delivery_outcome=effect_delivery,
     )
+    # A pure voice_postcall item has no PR and no thread, so the signal above
+    # grades it ``unknown`` even when the generic notification-triage route
+    # completed the call (post-call.sh wrote a terminal trace row + journal).
+    # The native pm-run-item-slot path grades that ``observed`` explicitly;
+    # do the same here so the dispatch row carries one authoritative signal
+    # instead of leaving the actuation verifier to re-derive it from journal
+    # markers.
+    if effect != EFFECT_OBSERVED and "voice_postcall" in item.types:
+        if voice_postcall_effect_observed(item.detail, config.workspace):
+            effect = EFFECT_OBSERVED
     if effect == EFFECT_NONE:
         _log(
             f"WARN: PM dispatch produced NO observable effect on {plan.repo}#{plan.number} "

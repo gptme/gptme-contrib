@@ -72,11 +72,14 @@ Design rules (same as steps 1-2):
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import subprocess
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1214,6 +1217,123 @@ def _parse_thread_count(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return count if count >= 0 else None
+
+
+# --- Voice post-call effect detection ---
+#
+# The generic notification-triage route (``gptme_runloops.run_item``) completes
+# a voice post-call by running ``scripts/runs/voice/post-call.sh`` inside the
+# gptme session. That script writes a terminal row to the trace ledger
+# (``state/voice-calls/post-call-events.tsv``) plus a journal linking the call
+# record — durable external effects the native ``pm-run-item-slot`` path grades
+# ``effect=observed`` via its ``voice_postcall_effect_verified`` shim. But a
+# ``voice_postcall`` item has no PR and no thread, so :func:`derive_effect_signal`
+# has no signal to read and grades ``unknown``. This helper is the parity check
+# for that gap: when the generic route completed the call, the dispatch row
+# should carry ``effect=observed`` so the actuation verifier has one
+# authoritative signal instead of re-deriving completion from journal markers.
+
+#: ``record=`` token separator, mirrored from the bash
+#: ``voice_postcall_records_for_work_file`` (pm-run-item-slot.sh).
+VOICE_POSTCALL_RECORD_RE = re.compile(
+    r"(?:^|;\s*)record=(.*?)(?=;\s*[A-Za-z_][A-Za-z0-9_]*(?:=|:)|$)"
+)
+
+#: Terminal trace phases post-call.sh writes on a completed call. ``run_failed``
+#: is deliberately absent — a failed call is not an observed effect.
+VOICE_POSTCALL_TERMINAL_PHASES = frozenset({"run_completed", "stub_call_skip"})
+
+#: Env override for the trace ledger, mirroring the bash + prompt-templates param.
+VOICE_POSTCALL_TRACE_ENV = "GPTME_VOICE_POST_CALL_TRACE_FILE"
+
+#: Journal markers that link a completed call to its archive record.
+_VOICE_POSTCALL_JOURNAL_MARKERS = (
+    "**Archive**: `{record}`",
+    "**Call record**: `{record}`",
+    "**Source record**: `{record}`",
+)
+
+
+def voice_postcall_record_paths(detail: str) -> list[str]:
+    """Extract ``record=`` archive paths from a voice_postcall item's detail."""
+    return [
+        match.group(1).strip()
+        for match in VOICE_POSTCALL_RECORD_RE.finditer(detail or "")
+    ]
+
+
+def voice_postcall_journal_path(
+    workspace: str | Path, record_paths: Iterable[str], now: datetime
+) -> Path:
+    """Deterministic journal path post-call.sh writes for the given records."""
+    digest = hashlib.sha256()
+    for record in record_paths:
+        digest.update(record.encode())
+        digest.update(b"\0")
+    return (
+        Path(workspace)
+        / "journal"
+        / now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+        / f"autonomous-session-voice-postcall-{digest.hexdigest()[:8]}.md"
+    )
+
+
+def voice_postcall_effect_observed(
+    detail: str,
+    workspace: str | Path,
+    *,
+    now: datetime | None = None,
+    trace_file: str | Path | None = None,
+) -> bool:
+    """True when the generic route completed a voice post-call for ``detail``.
+
+    Mirrors ``voice_postcall_effect_verified`` in
+    ``scripts/runs/github/pm-run-item-slot.sh``: a terminal trace row naming
+    every record, plus a journal linking every record to its archive.
+    """
+    records = voice_postcall_record_paths(detail)
+    if not records:
+        return False
+
+    when = now or datetime.now(timezone.utc)
+    journal = voice_postcall_journal_path(workspace, records, when)
+
+    if trace_file is None:
+        trace_file = os.environ.get(
+            VOICE_POSTCALL_TRACE_ENV,
+            str(Path(workspace) / "state" / "voice-calls" / "post-call-events.tsv"),
+        )
+    trace_file = Path(trace_file)
+
+    trace_ok = False
+    try:
+        for raw in trace_file.read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines():
+            parts = raw.split("\t")
+            if len(parts) < 3 or parts[1] not in VOICE_POSTCALL_TERMINAL_PHASES:
+                continue
+            row_records = {part.strip() for part in parts[2].split(",") if part.strip()}
+            if all(record in row_records for record in records):
+                trace_ok = True
+                break
+    except OSError:
+        trace_ok = False
+
+    journal_ok = False
+    try:
+        text = journal.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    journal_ok = all(
+        any(
+            marker.format(record=record) in text
+            for marker in _VOICE_POSTCALL_JOURNAL_MARKERS
+        )
+        for record in records
+    )
+
+    return trace_ok and journal_ok
 
 
 def derive_effect_signal(
