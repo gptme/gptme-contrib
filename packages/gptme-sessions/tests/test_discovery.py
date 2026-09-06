@@ -1701,8 +1701,9 @@ def test_discover_cc_sessions_extra_dirs_param_and_env(
     archive = tmp_path / "archive"
     live_file = _cc_session(live, "-home-u-repo", "aaaa-live")
     archived_file = _cc_session(archive, "-home-u-repo", "bbbb-archived")
-    # same session id in both roots: the live copy wins, reported once
-    _cc_session(archive, "-home-u-repo", "aaaa-live", day="2026-03-05")
+    # Same session id in both roots, under different project slugs: the live
+    # copy wins and is reported once because session ids are globally unique.
+    _cc_session(archive, "-home-u-renamed-repo", "aaaa-live", day="2026-03-05")
 
     result = discover_cc_sessions(
         date(2026, 3, 5), date(2026, 3, 5), cc_dir=live, min_size=0, extra_dirs=[archive]
@@ -1735,6 +1736,11 @@ def test_find_cc_session_file_prefers_live_then_archive(tmp_path: Path) -> None:
     assert find_cc_session_file("cccc", cc_dir=live, extra_dirs=[archive]) == revived
     assert find_cc_session_file("", cc_dir=live, extra_dirs=[archive]) is None
     assert find_cc_session_file("zzzz", cc_dir=live, extra_dirs=[archive]) is None
+    assert find_cc_session_file("../cccc", cc_dir=live, extra_dirs=[archive]) is None
+    assert (
+        find_cc_session_file("cccc", cc_dir=live, extra_dirs=[archive], project="../archive")
+        is None
+    )
 
 
 def test_resolve_cc_session_model_falls_back_to_archive_root(tmp_path: Path) -> None:

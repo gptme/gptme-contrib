@@ -100,11 +100,13 @@ def find_cc_session_file(
     otherwise every project dir under each root is checked. Never picks by
     mtime — a session id names exactly one file.
     """
-    if not session_id:
+    if not session_id or Path(session_id).name != session_id:
+        return None
+    if project is not None and (not project or Path(project).name != project):
         return None
     name = f"{session_id}.jsonl"
     for root in _cc_roots(cc_dir, extra_dirs):
-        if project:
+        if project is not None:
             candidate = root / project / name
             if candidate.is_file():
                 return candidate
@@ -580,7 +582,7 @@ def discover_cc_sessions(
     Returns sorted list of session JSONL file paths.
     """
     sessions_with_dates: list[tuple[date, Path]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[str] = set()
     for root in _cc_roots(cc_dir, extra_dirs):
         if not root.exists():
             logger.debug("CC projects directory does not exist: %s", root)
@@ -590,7 +592,7 @@ def discover_cc_sessions(
                 if not project_dir.is_dir():
                     continue
                 for jsonl_file in sorted(project_dir.glob("*.jsonl")):
-                    key = (project_dir.name, jsonl_file.name)
+                    key = jsonl_file.name
                     if key in seen:
                         continue
                     # Skip stub sessions (metadata-only, no assistant response)
