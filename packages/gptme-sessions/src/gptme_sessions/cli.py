@@ -28,6 +28,7 @@ from .discovery import (
     session_date_from_path,
     session_datetime_from_path,
 )
+from . import attribution
 from .post_session import VALID_AB_GROUPS, VALID_CONTEXT_TIERS, post_session
 from .replay import (
     ToolResultsMode,
@@ -3671,6 +3672,95 @@ def blame(
         raise click.ClickException(str(exc)) from exc
 
     click.echo(render_json(result) if as_json else render_text(result))
+
+
+def _parse_iso_date(_ctx: click.Context, _param: click.Parameter, value: str | None) -> date | None:
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise click.BadParameter("expected YYYY-MM-DD") from exc
+
+
+@cli.command("cost-attribution")
+@click.option(
+    "--records",
+    "records_path",
+    type=click.Path(path_type=Path),  # type: ignore[type-var]
+    default=attribution.DEFAULT_RECORDS,
+    show_default=True,
+    help="session-records JSONL path.",
+)
+@click.option(
+    "--tenant-map",
+    "tenant_map_path",
+    type=click.Path(path_type=Path),  # type: ignore[type-var]
+    default=attribution.DEFAULT_TENANT_MAP,
+    show_default=True,
+    help="tenant/project attribution rules YAML path.",
+)
+@click.option("--since", callback=_parse_iso_date, help="Inclusive YYYY-MM-DD date window start.")
+@click.option("--until", callback=_parse_iso_date, help="Inclusive YYYY-MM-DD date window end.")
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["markdown", "jsonl"]),
+    default="markdown",
+    show_default=True,
+    help="Stdout format.",
+)
+@click.option(
+    "--output-jsonl",
+    type=click.Path(path_type=Path),  # type: ignore[type-var]
+    help="Write derived attribution records as JSONL.",
+)
+@click.option(
+    "--output-markdown",
+    type=click.Path(path_type=Path),  # type: ignore[type-var]
+    help="Write Markdown summary report.",
+)
+def cost_attribution(
+    records_path: Path,
+    tenant_map_path: Path,
+    since: date | None,
+    until: date | None,
+    output_format: str,
+    output_jsonl: Path | None,
+    output_markdown: Path | None,
+) -> None:
+    """Derive tenant/billing-aware cost attribution records.
+
+    This is the importable package CLI for the same coverage-aware attribution
+    primitive Bob uses in local cost-governance reports. Unknown tenant,
+    pricing, and billable-policy coverage remains explicit in the output.
+    """
+    if since and until and since > until:
+        raise click.UsageError("--since must be on or before --until")
+    try:
+        report = attribution.build_report(
+            records_path=records_path,
+            tenant_map_path=tenant_map_path,
+            since=since,
+            until=until,
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+    if report.malformed_rows:
+        click.echo(
+            f"warning: skipped {report.malformed_rows} malformed JSONL row(s)",
+            err=True,
+        )
+    if output_jsonl:
+        attribution.write_jsonl(output_jsonl, report.records)
+    if output_markdown:
+        attribution.write_markdown(output_markdown, report)
+
+    if output_format == "jsonl":
+        click.echo(attribution.render_jsonl(report.records), nl=False)
+    else:
+        click.echo(attribution.render_markdown(report), nl=False)
 
 
 @cli.command("stamp-attempt-kind")
