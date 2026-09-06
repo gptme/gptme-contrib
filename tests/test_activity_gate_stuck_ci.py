@@ -403,12 +403,14 @@ def test_ci_failure_detail_includes_state_hash_token() -> None:
         text=True,
         check=True,
     ).stdout.strip()
+    old_pr = {**pr, "statusCheckRollup": old_rollup}
     old_hash = subprocess.run(
         [
             "bash",
             "-c",
-            f"printf %s {json.dumps(old_key)!r} | {_sha256_cmd()} | cut -d' ' -f1",
+            f"jq -r '{_extract_hash_program()}' | {_sha256_cmd()} | cut -d' ' -f1",
         ],
+        input=json.dumps(old_pr),
         capture_output=True,
         text=True,
         check=True,
