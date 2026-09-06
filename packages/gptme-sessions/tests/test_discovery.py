@@ -1743,10 +1743,27 @@ def test_find_cc_session_file_prefers_live_then_archive(tmp_path: Path) -> None:
     )
 
 
+def test_discover_cc_sessions_out_of_range_live_copy_does_not_hide_archive(
+    tmp_path: Path,
+) -> None:
+    live = tmp_path / "projects"
+    archive = tmp_path / "archive"
+    _cc_session(live, "-home-u-repo", "cccc-resumed", day="2026-03-06")
+    archived = _cc_session(archive, "-home-u-repo", "cccc-resumed", day="2026-03-05")
+
+    assert discover_cc_sessions(
+        date(2026, 3, 5),
+        date(2026, 3, 5),
+        cc_dir=live,
+        min_size=0,
+        extra_dirs=[archive],
+    ) == [archived]
+
+
 def test_resolve_cc_session_model_falls_back_to_archive_root(tmp_path: Path) -> None:
     live = tmp_path / "projects" / "-home-u-repo"
     live.mkdir(parents=True)
-    _cc_session(tmp_path / "archive", "-home-u-repo", "dddd")
+    _cc_session(tmp_path / "archive", "-home-u-renamed-repo", "dddd")
     empty_tmp = tmp_path / "tmp"
     empty_tmp.mkdir()
     assert (

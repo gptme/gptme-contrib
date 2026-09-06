@@ -478,7 +478,6 @@ def resolve_cc_session_model(
             session_id,
             cc_dir=project_dir.parent,
             extra_dirs=extra_dirs,
-            project=project_dir.name,
         )
         if archived is not None:
             return extract_cc_model(archived)
@@ -599,11 +598,10 @@ def discover_cc_sessions(
                     if min_size > 0 and jsonl_file.stat().st_size < min_size:
                         continue
                     session_date = _quick_date_from_jsonl(jsonl_file)
-                    if session_date is None:
+                    if session_date is None or not start <= session_date <= end:
                         continue
                     seen.add(key)
-                    if start <= session_date <= end:
-                        sessions_with_dates.append((session_date, jsonl_file))
+                    sessions_with_dates.append((session_date, jsonl_file))
         except PermissionError:
             logger.debug("Permission denied reading: %s", root)
     return [path for _, path in sorted(sessions_with_dates)]
