@@ -47,6 +47,19 @@ from .signals import (
     grade_signals,
     is_productive,
 )
+from .attribution import (
+    CostAttributionReport,
+    LoadedRecords,
+    SourceSessionRecord,
+    TenantConfig,
+    TenantRule,
+    build_attribution_record,
+    build_report,
+    load_session_records,
+    load_tenant_config,
+    render_jsonl as render_cost_attribution_jsonl,
+    render_markdown as render_cost_attribution_markdown,
+)
 from .classification import (
     Category,
     ClassificationResult,
@@ -84,6 +97,17 @@ from .transcript import (
 )
 
 __all__ = [
+    "CostAttributionReport",
+    "LoadedRecords",
+    "SourceSessionRecord",
+    "TenantConfig",
+    "TenantRule",
+    "build_attribution_record",
+    "build_report",
+    "load_session_records",
+    "load_tenant_config",
+    "render_cost_attribution_jsonl",
+    "render_cost_attribution_markdown",
     "Category",
     "ClassificationResult",
     "DEFAULT_CATEGORIES",
