@@ -77,6 +77,36 @@ def test_env_overrides_win_over_toml(tmp_path, monkeypatch) -> None:
     assert config.self_merge_repos == "from/env"
 
 
+def test_gptme_canary_scales_default_timeout_only(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PM_GPTME_CANARY", "1")
+    config, _ = load_run_item_config(tmp_path)
+    assert config.default_timeout == 1800
+    assert config.default_time_desc == "~25 minutes"
+    assert config.assigned_issue_timeout == 1500
+    assert config.greptile_fix_timeout == 2700
+
+
+def test_gptme_canary_timeout_env_override(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PM_GPTME_CANARY", "1")
+    monkeypatch.setenv("PM_GPTME_CANARY_DEFAULT_TIMEOUT", "2100")
+    config, _ = load_run_item_config(tmp_path)
+    assert config.default_timeout == 2100
+    assert config.default_time_desc == "~35 minutes"
+
+
+def test_gptme_canary_timeout_disabled_keeps_default(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PM_GPTME_CANARY", "1")
+    monkeypatch.setenv("PM_GPTME_CANARY_DEFAULT_TIMEOUT", "0")
+    config, _ = load_run_item_config(tmp_path)
+    assert config.default_timeout == 900
+
+
+def test_cli_override_wins_over_gptme_canary_timeout(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PM_GPTME_CANARY", "1")
+    config, _ = load_run_item_config(tmp_path, default_timeout=900)
+    assert config.default_timeout == 900
+
+
 def test_cli_overrides_win_over_everything(tmp_path) -> None:
     config, _ = load_run_item_config(tmp_path, author="CliAuthor", agent_name=None)
     assert config.author == "CliAuthor"
