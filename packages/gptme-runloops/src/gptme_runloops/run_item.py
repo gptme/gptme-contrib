@@ -2629,7 +2629,14 @@ def run_post_session(
     # instead of leaving the actuation verifier to re-derive it from journal
     # markers.
     if effect != EFFECT_OBSERVED and "voice_postcall" in item.types:
-        if voice_postcall_effect_observed(item.detail, config.workspace):
+        session_start: datetime | None = None
+        try:
+            session_start = datetime.fromisoformat(outcome.started_iso)
+        except ValueError:
+            pass
+        if voice_postcall_effect_observed(
+            item.detail, config.workspace, now=session_start
+        ):
             effect = EFFECT_OBSERVED
     if effect == EFFECT_NONE:
         _log(

@@ -122,3 +122,34 @@ def test_grouped_records_require_all_present_in_one_trace_row(tmp_path):
     assert not voice_postcall_effect_observed(
         f"record={a}; record={b}", tmp_path, now=when, trace_file=trace
     )
+
+
+def test_midnight_crossing_uses_session_start_date(tmp_path):
+    """Journal written at 23:58 on day X must be found when run_post_session runs at 00:02 on day X+1.
+
+    Without passing ``now=session_start``, voice_postcall_effect_observed falls
+    back to the current time (day X+1) and looks in the wrong journal directory.
+    """
+    record = "/data/calls/one.wav"
+    call_time = datetime(2026, 9, 6, 23, 58, 0, tzinfo=timezone.utc)
+    next_day = datetime(2026, 9, 7, 0, 2, 0, tzinfo=timezone.utc)
+
+    # Journal written by post-call.sh during the session (at call_time's date).
+    journal = voice_postcall_journal_path(tmp_path, [record], call_time)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(f"**Archive**: `{record}`\n", encoding="utf-8")
+
+    trace = tmp_path / "post-call-events.tsv"
+    trace.write_text(
+        f"2026-09-06T23:59:00Z\trun_completed\t{record}\n",
+        encoding="utf-8",
+    )
+
+    # Passing the session start date finds the journal correctly.
+    assert voice_postcall_effect_observed(
+        f"record={record}", tmp_path, now=call_time, trace_file=trace
+    )
+    # Passing the next day's date misses the journal → False.
+    assert not voice_postcall_effect_observed(
+        f"record={record}", tmp_path, now=next_day, trace_file=trace
+    )
