@@ -2229,6 +2229,20 @@ def is_sensitive_path(path: str) -> bool:
         or name.endswith(SENSITIVE_FILE_SUFFIXES)
     ):
         return True
+    # The keyword scan below matches a sensitive word as one TOKEN of a
+    # compound filename (split on "_"/"-"/"."), by design — e.g. "authToken.py"
+    # and "docker-deployment.yaml" must still match. But a *test* filename is
+    # itself a compound of "<subject>_test"/"test_<subject>": "secrets_test.py"
+    # (a test file about secrets handling, not a file that holds a secret) is
+    # exactly the same shape and the scan cannot tell the two apart from the
+    # filename alone. is_test_file() already resolves this ambiguity by path
+    # component (segment), not substring — a test file's OWN name accidentally
+    # containing a sensitive word does not make the file sensitive. This only
+    # skips the keyword scan: the hard prefix/suffix/dotfile/private-key checks
+    # above (a real secret can still live at a test-looking path, e.g.
+    # "tests/fixtures/id_rsa") still apply unconditionally.
+    if is_test_file(path):
+        return False
     # Use the original (pre-lowercase) path to preserve camelCase boundaries for
     # detection; e.g. "authToken.py" → "auth_token" catches the "auth" rule.
     original_components = path.replace("\\", "/").split("/")
@@ -2594,6 +2608,430 @@ def gptme_core_route_to_erik_reasons(
         )
 
     return reasons
+
+
+# --- gptme/gptme-contrib: placement rule + segment-matched sensitive paths +
+# spec-doc waiver ---
+#
+# knowledge/strategic/2026-09-07-auto-merge-analysis.md §3 cluster 2 / §5
+# policy table, T2. Composes with the gptme/gptme diff-shape detectors
+# (gptme_core_route_to_erik_reasons, contrib#1626) — same idea (route on diff
+# SHAPE, not just path category), different repo, disjoint helper names so
+# both additions can land and be reverted independently.
+#
+# Erik's actual block reasons in contrib, verbatim: contrib#1088 "Bob
+# shouldn't have his configuration in gptme-contrib"; #1250 "state belongs in
+# brain, not contrib"; #1325/#1428 "better placed in docs (core)" / "the
+# `knowledge` top-level directory shouldn't exist" — a brand-new top-level
+# directory; #1219 "please don't re-implement prior art (gptme-rag)" —
+# gptme-wisdom-mcp added indexer.py/mcp_server.py, basenames that already
+# exist under packages/gptme-rag/src/. classify_category cannot see any of
+# this from path category alone (packages/**, scripts/** are already-allowed
+# categories) — it needs the diff SHAPE: is this an EXISTING package/dir, or
+# a new one / one colliding with a package that already implements this?
+_GPTME_CONTRIB_REPO = "gptme/gptme-contrib"
+
+# Bare word literals, not substrings — "erik" must not fire on a variable
+# named "erikson_score" (custom, not \b: \w treats "_" as a word char, so a
+# plain \b boundary would MISS "BOB_SPECIFIC_WEIGHT" — snake_case identifiers
+# are exactly where an agent-name literal shows up in code). Case-insensitive:
+# agent names show up both as bare identifiers (bob_config = ...) and
+# capitalized prose/log strings.
+_CONTRIB_AGENT_LITERAL_RE = re.compile(
+    r"(?<![A-Za-z0-9])(bob|alice|gordon|sven|erik)(?![A-Za-z0-9])", re.IGNORECASE
+)
+
+
+def _contrib_repo_root() -> Path:
+    """Repo root for the gptme-contrib checkout this script itself lives in.
+
+    self-merge-check.py is at <repo>/scripts/github/self-merge-check.py, so
+    two parents up is the repo root — whether that's a standalone
+    gptme-contrib checkout or, as in Bob's workspace, the `gptme-contrib`
+    subdirectory the brain-local wrapper loads this module from.
+    """
+    return Path(__file__).resolve().parents[2]
+
+
+@cache
+def _contrib_known_top_level_entries() -> frozenset[str]:
+    """Non-hidden top-level directory/file names already in the repo tree.
+
+    Cached for the process lifetime — the checked-out tree does not change
+    between PR evaluations in one run. Reflects whatever commit is checked
+    out locally (normally close to origin/master); a directory added by a PR
+    that has ALREADY merged since the last checkout update would read as
+    "new" for one stale cycle, which only makes the placement gate
+    conservative (routes to Erik), never lets a genuinely new top-level dir
+    through unrouted.
+    """
+    root = _contrib_repo_root()
+    try:
+        return frozenset(p.name for p in root.iterdir() if not p.name.startswith("."))
+    except OSError:
+        return frozenset()
+
+
+@cache
+def _contrib_known_package_names() -> frozenset[str]:
+    packages_dir = _contrib_repo_root() / "packages"
+    try:
+        return frozenset(p.name for p in packages_dir.iterdir() if p.is_dir())
+    except OSError:
+        return frozenset()
+
+
+# Basenames too generic/boilerplate to signal real API overlap — nearly every
+# package legitimately has an __init__.py or a cli.py entrypoint, so treating
+# those as collisions would route almost every new package to Erik and defeat
+# the point of the rule. Anything else repeated across packages/*/src is a
+# much stronger signal (gptme-wisdom-mcp's indexer.py/mcp_server.py exactly
+# duplicating gptme-rag's).
+_CONTRIB_COLLISION_BASENAME_DENYLIST = frozenset(
+    {
+        "__init__.py",
+        "__main__.py",
+        "conftest.py",
+        "py.typed",
+        "cli.py",
+        "config.py",
+        "types.py",
+        "utils.py",
+        "constants.py",
+        "models.py",
+        "exceptions.py",
+        "settings.py",
+    }
+)
+
+
+@cache
+def _contrib_existing_src_basenames() -> dict[str, frozenset[str]]:
+    """basename -> package names already using it, under packages/*/src/**.
+
+    Cached for the process lifetime, same staleness tradeoff as
+    _contrib_known_top_level_entries.
+    """
+    index: dict[str, set[str]] = {}
+    packages_dir = _contrib_repo_root() / "packages"
+    try:
+        package_dirs = [p for p in packages_dir.iterdir() if p.is_dir()]
+    except OSError:
+        return {}
+    for pkg_dir in package_dirs:
+        src_dir = pkg_dir / "src"
+        if not src_dir.is_dir():
+            continue
+        for f in src_dir.rglob("*.py"):
+            if f.name in _CONTRIB_COLLISION_BASENAME_DENYLIST:
+                continue
+            index.setdefault(f.name, set()).add(pkg_dir.name)
+    return {name: frozenset(pkgs) for name, pkgs in index.items()}
+
+
+def _contrib_normalize(path: str) -> str:
+    return path.replace("\\", "/").removeprefix("./")
+
+
+def _contrib_new_top_level_dirs(paths: list[str]) -> list[str]:
+    known = _contrib_known_top_level_entries()
+    new_dirs: set[str] = set()
+    for raw in paths:
+        normalized = _contrib_normalize(raw)
+        if "/" not in normalized:
+            continue  # a new top-level FILE, not a new top-level DIRECTORY
+        top = normalized.split("/", 1)[0]
+        if top.startswith("."):
+            continue
+        if top not in known:
+            new_dirs.add(top)
+    return sorted(new_dirs)
+
+
+def _contrib_new_packages(paths: list[str]) -> list[str]:
+    known = _contrib_known_package_names()
+    new_pkgs: set[str] = set()
+    for raw in paths:
+        normalized = _contrib_normalize(raw)
+        parts = normalized.split("/")
+        # len >= 3: packages/<name>/<something> — a file directly at
+        # packages/<name> with nothing nested (len == 2, e.g. a loose
+        # "packages/README.md") is not a package directory at all.
+        if len(parts) >= 3 and parts[0] == "packages" and parts[1] not in known:
+            new_pkgs.add(parts[1])
+    return sorted(new_pkgs)
+
+
+def _contrib_state_writes(paths: list[str]) -> list[str]:
+    return sorted(
+        {
+            _contrib_normalize(p)
+            for p in paths
+            if _contrib_normalize(p).startswith("state/")
+        }
+    )
+
+
+def _contrib_basename_collisions(paths: list[str]) -> dict[str, frozenset[str]]:
+    """basename -> OTHER packages already using it, for new files this PR adds.
+
+    Scoped to packages/<name>/src/**/*.py so a same-named test fixture or
+    script (packages/<name>/tests/indexer.py) does not trip this — those live
+    outside src/ and aren't the package's public API.
+    """
+    existing = _contrib_existing_src_basenames()
+    collisions: dict[str, set[str]] = {}
+    for raw in paths:
+        normalized = _contrib_normalize(raw)
+        parts = normalized.split("/")
+        if (
+            len(parts) < 4
+            or parts[0] != "packages"
+            or parts[2] != "src"
+            or not normalized.endswith(".py")
+        ):
+            continue
+        basename = parts[-1]
+        if basename in _CONTRIB_COLLISION_BASENAME_DENYLIST:
+            continue
+        pkg_name = parts[1]
+        other_pkgs = existing.get(basename, frozenset()) - {pkg_name}
+        if other_pkgs:
+            collisions.setdefault(basename, set()).update(other_pkgs)
+    return {name: frozenset(pkgs) for name, pkgs in collisions.items()}
+
+
+def _contrib_spec_doc_waived(doc_path: str, all_paths: list[str]) -> bool:
+    """Whether a spec-like doc's own hard stop is waived for this PR.
+
+    Mirror table (auto-merge-analysis §5): "Spec-like doc requires human
+    review | 1 (#1576, 73 identical refusals) | Yes when the doc lives inside
+    a package the same PR implements." contrib#1576 touched root README.md
+    (SPEC_LIKE_DOCS) purely to register two packages it also implemented
+    end-to-end in the same diff (gptme-body-protocol, gptme-voice) — Erik
+    merged it untouched. The waiver requires at least one OTHER changed file
+    in this PR to live under packages/ (real implementation work, not a
+    doc-only edit) — a doc-only PR touching README.md/ARCHITECTURE.md/etc.
+    with nothing else still routes to Erik.
+    """
+    return any(
+        _contrib_normalize(p).startswith("packages/") and p != doc_path
+        for p in all_paths
+    )
+
+
+def _contrib_placement_route_reasons(paths: list[str]) -> list[str]:
+    """Path-shape checks that route a gptme-contrib PR to Erik.
+
+    Each fired reason quotes, in one clause, the corpus cluster it encodes
+    (auto-merge-analysis §3 cluster 2 — "wrong home / re-implementing prior
+    art", the one placement class Erik actually blocks on in contrib).
+    Returns an empty list when none of the shapes are present.
+    """
+    reasons: list[str] = []
+
+    new_dirs = _contrib_new_top_level_dirs(paths)
+    if new_dirs:
+        reasons.append(
+            "New top-level directory ("
+            + ", ".join(new_dirs)
+            + "): Erik — \"the `knowledge` top-level directory shouldn't "
+            'exist" / "better placed in docs (core)" (auto-merge-analysis §3 '
+            "cluster 2, e.g. contrib#1325 cookbook/, #1428 knowledge/)"
+        )
+
+    new_pkgs = _contrib_new_packages(paths)
+    if new_pkgs:
+        reasons.append(
+            "New packages/<name>/ ("
+            + ", ".join(new_pkgs)
+            + "): a brand-new package is exactly the placement decision Erik "
+            "reserves for himself, same cluster as the top-level-dir case "
+            "(auto-merge-analysis §3 cluster 2)"
+        )
+
+    state_writes = _contrib_state_writes(paths)
+    if state_writes:
+        reasons.append(
+            "Writes under state/ ("
+            + ", ".join(state_writes)
+            + '): Erik — "state belongs in brain, not contrib" '
+            "(auto-merge-analysis §3 cluster 2, contrib#1250)"
+        )
+
+    collisions = _contrib_basename_collisions(paths)
+    if collisions:
+        detail = "; ".join(
+            f"{basename} also in {', '.join(sorted(pkgs))}"
+            for basename, pkgs in sorted(collisions.items())
+        )
+        reasons.append(
+            "New module basename collides with an existing package under "
+            "packages/*/src (" + detail + "): Erik — \"please don't "
+            're-implement prior art" (auto-merge-analysis §3 cluster 2, '
+            "contrib#1219 gptme-wisdom-mcp/indexer.py + mcp_server.py "
+            "duplicating gptme-rag's)"
+        )
+
+    return reasons
+
+
+def _contrib_iter_json_documents(text: str) -> Iterator[Any]:
+    """Yield successive JSON values from paginated compact API/jq output.
+
+    Same technique as pm_dispatch_recovery.py's helper of the same name and
+    contrib#1626's gptme-core diff-shape detector — kept as a distinct copy
+    here (rather than importing that one) so the two additions stay
+    independent and can land/revert separately.
+    """
+    decoder = json.JSONDecoder()
+    idx = 0
+    n = len(text)
+    while idx < n:
+        while idx < n and text[idx].isspace():
+            idx += 1
+        if idx >= n:
+            break
+        try:
+            val, end = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            break
+        yield val
+        idx = end
+
+
+def _fetch_contrib_pr_file_shapes(repo: str, number: int) -> list[dict[str, Any]]:
+    """Per-file status + patch text, for the agent-literal detector only.
+
+    Gated behind the cheaper path-only placement checks in evaluate_pr — only
+    reached once those (and the rest of contrib_classify_category) have
+    already left the PR otherwise eligible, so an ordinary internal-tooling
+    PR costs no extra API call.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{repo}/pulls/{number}/files",
+                "--paginate",
+                "--jq",
+                ".[] | {path: .filename, status: .status, patch: .patch}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if result.returncode != 0:
+        return []
+    return [
+        doc
+        for doc in _contrib_iter_json_documents(result.stdout)
+        if isinstance(doc, dict)
+    ]
+
+
+def _contrib_added_lines(patch: str | None) -> list[str]:
+    """Added (`+`-prefixed, non-hunk-header) lines of a unified diff patch."""
+    if not patch:
+        return []
+    return [
+        line[1:]
+        for line in patch.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    ]
+
+
+def contrib_agent_literal_reasons(file_shapes: list[dict[str, Any]]) -> list[str]:
+    """Agent-name literals added in non-test code route to Erik.
+
+    Erik — "Bob shouldn't have his configuration in gptme-contrib"
+    (auto-merge-analysis §3 cluster 2, contrib#1088). Test fixtures
+    legitimately reference agent names (e.g. testing attribution logic), so
+    is_test_file() paths are excluded — same segment-not-substring reasoning
+    as the sensitive-path keyword-scan fix in is_sensitive_path.
+    """
+    hits: dict[str, set[str]] = {}
+    for entry in file_shapes:
+        path = _contrib_normalize(str(entry.get("path", "")))
+        if is_test_file(path):
+            continue
+        for line in _contrib_added_lines(cast("str | None", entry.get("patch"))):
+            for match in _CONTRIB_AGENT_LITERAL_RE.finditer(line):
+                hits.setdefault(match.group(1).lower(), set()).add(path)
+    if not hits:
+        return []
+    detail = "; ".join(
+        f'"{name}" in {", ".join(sorted(files))}'
+        for name, files in sorted(hits.items())
+    )
+    return [
+        "Agent-name literal in non-test code ("
+        + detail
+        + "): Erik — \"Bob shouldn't have his configuration in "
+        'gptme-contrib" (auto-merge-analysis §3 cluster 2, contrib#1088)'
+    ]
+
+
+def contrib_classify_category(
+    paths: list[str], repo: str
+) -> tuple[str | None, list[str]]:
+    """gptme-contrib override: classify_category's hard stops plus placement.
+
+    Delegates the remaining "what category shape is this" labeling to the
+    canonical classify_category (test-only / internal-tooling / mixed-allowed
+    / ...) unchanged — only two things differ from it here, both documented
+    in auto-merge-analysis.md §5 T2: (1) the spec-like-doc hard stop is
+    waived when the doc is paired with real package work in the same PR, and
+    (2) the new placement-rule hard stop below, which classify_category has
+    no way to express (packages/**, scripts/** are already-allowed
+    categories; the placement rule blocks a SUBSET of an allowed category by
+    diff shape, not by path). The keyword-based sensitive-path fix
+    (segment-, not substring-, matched) lives in is_sensitive_path itself, so
+    it applies to every repo, not just this one.
+    """
+    if not paths:
+        return None, ["PR has no changed files"]
+
+    repo_path_allowlist = _get_repo_path_allowlist()
+    if any(
+        is_sensitive_path(p)
+        and not is_repo_allowlisted_path(p, repo, repo_path_allowlist)
+        for p in paths
+    ):
+        return None, ["Touches sensitive/security/infra paths"]
+
+    if any(is_bot_config(p) for p in paths):
+        return None, ["Bot/CI config changes require human review under current policy"]
+
+    placement_reasons = _contrib_placement_route_reasons(paths)
+    if placement_reasons:
+        return None, placement_reasons
+
+    waived_docs = {
+        p
+        for p in paths
+        if is_doc_file(p) and is_spec_like_doc(p) and _contrib_spec_doc_waived(p, paths)
+    }
+    unwaived_spec_docs = [
+        p
+        for p in paths
+        if is_doc_file(p) and is_spec_like_doc(p) and p not in waived_docs
+    ]
+    if unwaived_spec_docs:
+        return None, ["Touches spec-like documentation requiring human review"]
+
+    remaining = [p for p in paths if p not in waived_docs]
+    if not remaining:
+        return "docs-only", []
+    category, reasons = classify_category(remaining, repo=repo)
+    if category is None:
+        return None, reasons
+    if waived_docs:
+        category = f"{category}+spec-doc-waived"
+    return category, reasons
 
 
 def _check_workspace_repo(
@@ -2989,6 +3427,21 @@ def evaluate_pr(
                 result.reasons.extend(shape_reasons)
             else:
                 result.category = "gptme-core-diff-shape-eligible"
+    elif repo == _GPTME_CONTRIB_REPO:
+        # gptme/gptme-contrib: classify_category's category shape plus the
+        # placement rule + spec-doc waiver (see contrib_classify_category's
+        # docstring). The agent-literal check needs patch text, so it is
+        # fetched lazily and only once the cheaper path-only checks above
+        # have already left the PR eligible.
+        category, category_reasons = contrib_classify_category(files, repo=repo)
+        result.category = category
+        result.reasons.extend(category_reasons)
+        if category is not None:
+            file_shapes = _fetch_contrib_pr_file_shapes(repo, number)
+            agent_literal_reasons = contrib_agent_literal_reasons(file_shapes)
+            if agent_literal_reasons:
+                result.category = None
+                result.reasons.extend(agent_literal_reasons)
     else:
         category, category_reasons = classify_category(files, repo=repo)
         result.category = category
