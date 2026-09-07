@@ -78,7 +78,7 @@ def find_repo_root(start_path: Path) -> Path:
         if (current / ".git").exists():
             return current
         current = current.parent
-    return start_path.resolve()
+    raise RuntimeError(f"No git repository found above {start_path}")
 
 
 @dataclass
