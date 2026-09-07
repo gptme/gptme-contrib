@@ -491,23 +491,44 @@ def test_evaluate_pr_accepts_our_clean_review_without_greptile(evaluate: Any) ->
     result, _ = evaluate(greptile=NO_GREPTILE, comments=[_comment(_marker())])
     assert result.eligible is True
     assert result.reasons == []
-    assert any("satisfied by self-hosted AI review" in w for w in result.warnings)
+    assert any("AI review accepted" in w for w in result.warnings)
 
 
 def test_evaluate_pr_blocks_fallback_when_greptile_state_fetch_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unknown Greptile state must not become absence and admit our review."""
+    """Greptile API failure is advisory; a clean AI review can still accept the PR.
+
+    Previously a failed Greptile fetch blocked the AI fallback (fail-closed).
+    After the 2026-09-07 change Greptile is advisory, so its API failure produces
+    a warning and the AI reviewer's clean verdict makes the PR eligible.
+    """
     monkeypatch.setattr(smc, "fetch_pr", lambda repo, number: _pr_payload())
     monkeypatch.setattr(smc, "get_gh_user", lambda: AUTHOR)
     monkeypatch.setattr(smc, "merge_permission", lambda repo: True)
     monkeypatch.setattr(smc, "_fetch_greptile_review_data", lambda r, n: None)
     monkeypatch.setattr(smc, "greptile_summary_score", lambda r, n: 5)
+    monkeypatch.setattr(
+        smc,
+        "fetch_ai_review_status",
+        lambda *a, **k: {
+            "accepted": True,
+            "detail": "5/5 at current head, findings disposed",
+        },
+    )
+    monkeypatch.setattr(
+        smc,
+        "fetch_unresolved_human_threads",
+        lambda *a, **k: {"unresolved": 0, "authors": []},
+    )
     result = smc.evaluate_pr(
         "gptme/gptme-contrib", 1382, workspace_repos=["gptme/gptme-contrib"]
     )
-    assert result.eligible is False
-    assert any("Could not verify Greptile review state" in r for r in result.reasons)
+    assert result.eligible is True
+    assert any("Greptile review not found" in w for w in result.warnings)
+    assert not any(
+        "Could not verify Greptile review state" in r for r in result.reasons
+    )
 
 
 def test_evaluate_pr_blocks_on_degraded_review(evaluate: Any) -> None:
@@ -516,7 +537,7 @@ def test_evaluate_pr_blocks_on_degraded_review(evaluate: Any) -> None:
         greptile=NO_GREPTILE, comments=[_comment(_marker(consensus=consensus))]
     )
     assert result.eligible is False
-    assert any("Greptile review not found" in r for r in result.reasons)
+    assert any("Greptile review not found" in w for w in result.warnings)
     assert any("degraded" in r for r in result.reasons)
 
 
@@ -535,10 +556,11 @@ def test_evaluate_pr_blocks_on_abstain(evaluate: Any) -> None:
 
 
 def test_evaluate_pr_reason_unchanged_when_no_ai_review(evaluate: Any) -> None:
-    """No reviewer at all still reads exactly as it did before this change."""
+    """No reviewer at all: AI review required; Greptile absence is advisory."""
     result, _ = evaluate(greptile=NO_GREPTILE, comments=[_comment(None)])
     assert result.eligible is False
-    assert "Greptile review not found" in result.reasons
+    assert "AI review required" in result.reasons
+    assert any("Greptile review not found" in w for w in result.warnings)
 
 
 def test_greptile_path_is_untouched_and_pays_one_marker_fetch(evaluate: Any) -> None:
@@ -555,14 +577,22 @@ def test_greptile_path_is_untouched_and_pays_one_marker_fetch(evaluate: Any) -> 
     assert len(marker_fetches) == 1
 
 
-def test_greptile_unresolved_still_blocks_despite_clean_ai_review(
+def test_greptile_stale_with_unresolved_is_advisory_with_clean_ai_review(
     evaluate: Any,
 ) -> None:
-    """Our review is an alternative to a *missing* Greptile, never an override."""
+    """Stale Greptile (even with old unresolved threads) is advisory; clean AI review wins.
+
+    The evaluate fixture stubs greptile_summary_reviewed_commit → None, so the review
+    is treated as stale regardless of the has_review flag.  Branch 2 of the new
+    3-branch policy fires: the stale review becomes an advisory warning and the AI
+    reviewer's clean verdict is the gate.  Unresolved thread counts from stale reviews
+    are not surfaced (only a fresh Greptile head-match triggers that path).
+    """
     greptile = {"has_review": True, "unresolved": 2, "total": 3}
     result, _ = evaluate(greptile=greptile, comments=[_comment(_marker())])
-    assert result.eligible is False
-    assert any("2 unresolved review thread(s)" in r for r in result.reasons)
+    assert result.eligible is True
+    assert not result.reasons
+    assert any("Greptile review stale" in w for w in result.warnings)
 
 
 @pytest.mark.parametrize("score", [6, 7, 100])
