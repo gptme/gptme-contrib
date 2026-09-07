@@ -515,12 +515,26 @@ FORBIDDEN_RATIONALE_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 
+_STRAIGHT_QUOTE_SPAN_RE = re.compile(r"(?<!\w)([\"'`])(.*?)\1(?!\w)")
+_CURLY_DOUBLE_SPAN_RE = re.compile(r"“[^”]*”")
+_CURLY_SINGLE_SPAN_RE = re.compile(r"(?<!\w)‘[^’]*’(?!\w)")
+
+
 def _strip_quoted_spans(text: str) -> str:
     """Remove quoted phrases so reporting a forbidden phrase is not rejected."""
     # Handles the common quote forms the judge and journal use. This is not a
     # full natural-language parser; it deliberately protects benign mentions
     # like ``fixed the "priority #6" defect`` from the rationale detector.
-    return re.sub(r"(['\"`“‘]).*?(['\"`”’])", " ", text)
+    #
+    # The word-boundary guards matter: without them, the apostrophes in
+    # ordinary contractions ("don't", "it's", "Author's") pair up as fake
+    # quote delimiters and can strip a genuine forbidden phrase sitting
+    # between two unrelated contractions (e.g. "Author's take: this is low
+    # priority, don't ship it." would silently erase "low priority").
+    text = _STRAIGHT_QUOTE_SPAN_RE.sub(" ", text)
+    text = _CURLY_DOUBLE_SPAN_RE.sub(" ", text)
+    text = _CURLY_SINGLE_SPAN_RE.sub(" ", text)
+    return text
 
 
 def _has_negation_near(text: str, start: int, end: int) -> bool:
@@ -540,10 +554,6 @@ def _has_negation_near(text: str, start: int, end: int) -> bool:
             "without penalizing",
             "rather than penalizing",
             "instead of penalizing",
-            "fixed the",
-            "fixes the",
-            "reports that",
-            "documented that",
         )
     )
 

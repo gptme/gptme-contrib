@@ -465,6 +465,22 @@ class TestJudgeSession:
     def test_forbidden_rationale_detector_allows_benign_mentions(self, reason: str) -> None:
         assert _reason_violates_forbidden_rationale(reason) is False
 
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            # Two unrelated contractions must not pair up as fake quote
+            # delimiters and erase the forbidden phrase sitting between them.
+            "Author's take: this is low priority, don't ship it. Capping score at 0.3.",
+            # A generic phrase like "fixed the" elsewhere in the reason must
+            # not be treated as negating a genuine penalty rationale later
+            # in the same sentence.
+            "Score 0.3. The session fixed the auth bug, but this remains low "
+            "priority content work, capping below the top goal.",
+        ],
+    )
+    def test_forbidden_rationale_detector_catches_bypass_attempts(self, reason: str) -> None:
+        assert _reason_violates_forbidden_rationale(reason) is True
+
     def test_parse_judge_payload_marks_forbidden_rationale_non_ok(self) -> None:
         parsed = _parse_judge_payload(
             json.dumps(
