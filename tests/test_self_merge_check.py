@@ -2502,3 +2502,508 @@ def test_classify_category_legacy_lookalikes_are_not_test_only(path: str) -> Non
 )
 def test_genuine_test_paths_still_match(path: str) -> None:
     assert self_merge_check.is_test_file(path) is True
+
+
+# --- gptme/gptme core: diff-shape eligibility, not path category ---
+#
+# Erik (2026-09-07), on gptme#3620's gate message: "path alone doesn't feel
+# like a good eligibility gate, at least not for this PR". Corpus fixtures
+# below capture real file lists (`gh pr view --json title,body,files`, 3
+# calls total) for the PRs named in
+# tasks/gptme-core-self-merge-diff-shape-not-path-category.md; patch text is
+# synthesized to match each PR's documented shape (not re-fetched — the
+# detectors only need to see *some* added line of the relevant shape).
+
+
+def test_gptme_core_cache_fix_no_route_reasons() -> None:
+    """gptme#3620: cache fix in gptme/util/reduce.py + tests, clean review.
+
+    Modifies an existing core-internal module and adds tests only — no new
+    CLI/config/module/docs surface, no unlinked feat, nothing sensitive.
+    Must produce zero route-to-Erik reasons (diff-shape eligible).
+    """
+    file_shapes = [
+        {
+            "path": "gptme/util/reduce.py",
+            "status": "modified",
+            "patch": (
+                "@@ -10,6 +10,10 @@\n"
+                "+_CACHE: dict[str, Message] = {}\n"
+                "+\n"
+                "+def _cache_key(model: str, msgs: list[Message]) -> str:\n"
+                "+    return hashlib.sha256(...).hexdigest()\n"
+            ),
+        },
+        {
+            "path": "tests/conftest.py",
+            "status": "modified",
+            "patch": (
+                "@@ -1,3 +1,22 @@\n"
+                "+@pytest.fixture(autouse=True)\n"
+                "+def _clear_reduce_cache():\n"
+                "+    yield\n"
+            ),
+        },
+        {
+            "path": "tests/test_reduce.py",
+            "status": "added",
+            "patch": (
+                "@@ -0,0 +1,296 @@\n"
+                "+def test_proactive_summarize_cache_hit_skips_llm():\n"
+                "+    pass\n"
+            ),
+        },
+    ]
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "fix(reduce): cache proactive_summarize_log result by middle-message content hash",
+        "Phase 4.1 of the append-only request construction audit. "
+        "Phases 2+3 landed in #3616.",
+        file_shapes,
+    )
+    assert reasons == []
+
+
+def test_gptme_core_new_hook_module_and_config_routes() -> None:
+    """gptme#3695: new gptme/hooks/guardrails.py hook module + config surface.
+
+    A wholly new module two levels under gptme/, plus a new env-gated config
+    knob declared in gptme/config/ — must route to Erik on the new-module (and,
+    when the config field is present, config) reason.
+    """
+    file_shapes = [
+        {
+            "path": "gptme/hooks/__init__.py",
+            "status": "modified",
+            "patch": (
+                "@@ -1,3 +1,8 @@\n" "+register_hook(guardrails_hook, priority=200)\n"
+            ),
+        },
+        {
+            "path": "gptme/hooks/guardrails.py",
+            "status": "added",
+            "patch": (
+                "@@ -0,0 +1,677 @@\n" "+def guardrails_hook(...):\n" "+    pass\n"
+            ),
+        },
+        {
+            "path": "gptme/config/models.py",
+            "status": "modified",
+            "patch": (
+                "@@ -260,6 +260,9 @@ class HooksConfig:\n"
+                '+    guardrails_mode: str = field(default="shadow")\n'
+            ),
+        },
+        {
+            "path": "tests/test_guardrails_policy.py",
+            "status": "added",
+            "patch": ("@@ -0,0 +1,43 @@\n+def test_shell_policy(): pass\n"),
+        },
+    ]
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "feat(hooks): add guardrails policy hook",
+        "Resolves the three design questions from RFC #3598 ... Closes #3598",
+        file_shapes,
+    )
+    assert any("New module under gptme/" in r and "guardrails.py" in r for r in reasons)
+    assert any("New config schema key" in r and "models.py" in r for r in reasons)
+    # This PR *does* link an issue (#3598), so the unlinked-feat reason must
+    # not also fire — only the new-module/config reasons should.
+    assert not any("no #issue reference" in r for r in reasons)
+
+
+def test_gptme_core_new_top_level_module_routes() -> None:
+    """gptme#3706: new top-level gptme/error_hintkit.py module.
+
+    A bare new top-level module (added file, one path segment under gptme/)
+    must route to Erik on the new-module reason.
+    """
+    file_shapes = [
+        {
+            "path": "gptme/cli/main.py",
+            "status": "modified",
+            "patch": ("@@ -10,6 +10,7 @@\n+sys.excepthook = hintkit_excepthook\n"),
+        },
+        {
+            "path": "gptme/error_hintkit.py",
+            "status": "added",
+            "patch": ("@@ -0,0 +1,261 @@\n+HINTKIT_ENABLED = True\n"),
+        },
+        {
+            "path": "tests/test_error_hintkit.py",
+            "status": "added",
+            "patch": ("@@ -0,0 +1,250 @@\n+def test_hint(): pass\n"),
+        },
+        {
+            "path": "tests/test_cli_fatal_error_envelope.py",
+            "status": "added",
+            "patch": ("@@ -0,0 +1,89 @@\n+def test_envelope(): pass\n"),
+        },
+    ]
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "feat(cli): add Error-HintKit hints",
+        "Part of Error-HintKit M1 from Bob's local task "
+        "error-hintkit-m1-registry-and-cli-adapter.",
+        file_shapes,
+    )
+    assert any(
+        "New module under gptme/" in r and "error_hintkit.py" in r for r in reasons
+    )
+    # feat: title with genuinely no #issue reference anywhere — must ALSO fire.
+    assert any("no #issue reference" in r for r in reasons)
+
+
+def test_gptme_core_feat_title_without_issue_routes() -> None:
+    """A `feat:` PR touching only ordinary internal files but with no linked
+    issue anywhere in title or body must still route (auto-merge-analysis §3
+    cluster 5: unmotivated/low-value features are exactly what Erik closes)."""
+    file_shapes = [
+        {
+            "path": "gptme/tools/browser.py",
+            "status": "modified",
+            "patch": ("@@ -1,3 +1,9 @@\n+def new_helper():\n+    pass\n"),
+        },
+        {
+            "path": "tests/test_browser.py",
+            "status": "modified",
+            "patch": ("@@ -1,3 +1,7 @@\n+def test_new_helper(): pass\n"),
+        },
+    ]
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "feat: add a configurable retry delay to the browser tool",
+        "No design doc, just seemed useful.",
+        file_shapes,
+    )
+    assert len(reasons) == 1
+    assert "no #issue reference" in reasons[0]
+
+
+def test_gptme_core_new_click_option_routes() -> None:
+    file_shapes = [
+        {
+            "path": "gptme/cli/main.py",
+            "status": "modified",
+            "patch": (
+                "@@ -540,6 +540,11 @@\n"
+                '+@click.option("--no-verify", is_flag=True, help="Skip verification")\n'
+            ),
+        },
+    ]
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "fix(cli): add --no-verify escape hatch", "", file_shapes
+    )
+    assert any("New CLI surface" in r for r in reasons)
+
+
+def test_gptme_core_new_cli_subcommand_file_routes() -> None:
+    file_shapes = [
+        {
+            "path": "gptme/cli/cmd_replay.py",
+            "status": "added",
+            "patch": (
+                "@@ -0,0 +1,40 @@\n+@click.command()\n+def cmd_replay():\n+    pass\n"
+            ),
+        },
+    ]
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "fix(cli): add replay subcommand", "", file_shapes
+    )
+    assert any("New CLI surface" in r and "cmd_replay.py" in r for r in reasons)
+
+
+def test_gptme_core_new_docs_page_routes() -> None:
+    file_shapes = [
+        {
+            "path": "docs/replay.rst",
+            "status": "added",
+            "patch": ("@@ -0,0 +1,20 @@\n+Replay\n+======\n"),
+        },
+    ]
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "fix(docs): document replay", "", file_shapes
+    )
+    assert any("New docs page" in r and "replay.rst" in r for r in reasons)
+
+
+def test_gptme_core_llm_server_provider_paths_route() -> None:
+    file_shapes = [
+        {
+            "path": "gptme/llm/llm_anthropic.py",
+            "status": "modified",
+            "patch": ("@@ -1,3 +1,6 @@\n+def _retry(): pass\n"),
+        },
+    ]
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "fix(llm): retry on 529", "", file_shapes
+    )
+    assert any(
+        "gptme/llm/, gptme/server/, auth, or provider routing" in r for r in reasons
+    )
+
+
+def test_gptme_core_modified_existing_module_is_not_new() -> None:
+    """A modified (not added) file under gptme/ must not trip the new-module
+    detector — only genuinely new files count."""
+    file_shapes = [
+        {
+            "path": "gptme/tools/browser.py",
+            "status": "modified",
+            "patch": ("@@ -1,3 +1,5 @@\n+x = 1\n"),
+        },
+    ]
+    reasons = self_merge_check.gptme_core_route_to_erik_reasons(
+        "fix(tools): tighten browser timeout", "", file_shapes
+    )
+    assert reasons == []
+
+
+def _evaluate_gptme_core(
+    files: list[dict[str, Any]],
+    file_shapes: list[dict[str, Any]],
+    *,
+    title: str = "fix(reduce): cache result",
+    body: str = "",
+) -> Any:
+    pr_data = _make_clean_pr_data(
+        title=title,
+        body=body,
+        files=files,
+        url="https://github.com/gptme/gptme/pull/999",
+    )
+    with (
+        patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
+        patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
+        patch.object(
+            self_merge_check, "_fetch_greptile_review_data", return_value=None
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_greptile_status",
+            return_value={"has_review": False, "unresolved": 0, "total": 0},
+        ),
+        patch.object(self_merge_check, "greptile_summary_score", return_value=None),
+        patch.object(
+            self_merge_check,
+            "fetch_unresolved_human_threads",
+            return_value={"unresolved": 0, "total": 0, "authors": []},
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_ai_review_status",
+            return_value={"accepted": True, "detail": "AI review 5/5 at current head"},
+        ),
+        patch.object(
+            self_merge_check, "_fetch_pr_file_shapes", return_value=file_shapes
+        ),
+    ):
+        return self_merge_check.evaluate_pr(
+            "gptme/gptme",
+            999,
+            workspace_repos=["gptme/gptme"],
+        )
+
+
+def test_evaluate_pr_gptme_core_cache_fix_is_eligible() -> None:
+    """gptme#3620 end-to-end: CI green, AI review clean, no route-to-Erik
+    shape → eligible regardless of gptme/util/reduce.py's directory."""
+    files = [
+        {"path": "gptme/util/reduce.py"},
+        {"path": "tests/conftest.py"},
+        {"path": "tests/test_reduce.py"},
+    ]
+    file_shapes = [
+        {
+            "path": "gptme/util/reduce.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+x = 1\n",
+        },
+        {
+            "path": "tests/conftest.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+y = 1\n",
+        },
+        {
+            "path": "tests/test_reduce.py",
+            "status": "added",
+            "patch": "@@ -0,0 +1,2 @@\n+def test_x(): pass\n",
+        },
+    ]
+    result = _evaluate_gptme_core(
+        files,
+        file_shapes,
+        title="fix(reduce): cache proactive_summarize_log result by middle-message content hash",
+        body="Phase 4.1 of the append-only request construction audit. Phases 2+3 landed in #3616.",
+    )
+    assert result.eligible, result.reasons
+    assert result.category == "gptme-core-diff-shape-eligible"
+
+
+def test_evaluate_pr_gptme_core_new_hook_module_routes_to_erik() -> None:
+    """gptme#3695 end-to-end: new hook module + config surface → NOT eligible,
+    even with CI green and AI review clean."""
+    files = [
+        {"path": "gptme/hooks/__init__.py"},
+        {"path": "gptme/hooks/guardrails.py"},
+        {"path": "gptme/config/models.py"},
+        {"path": "tests/test_guardrails_policy.py"},
+    ]
+    file_shapes = [
+        {
+            "path": "gptme/hooks/__init__.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+register_hook(guardrails_hook)\n",
+        },
+        {
+            "path": "gptme/hooks/guardrails.py",
+            "status": "added",
+            "patch": "@@ -0,0 +1,2 @@\n+def guardrails_hook(): pass\n",
+        },
+        {
+            "path": "gptme/config/models.py",
+            "status": "modified",
+            "patch": '@@ -260,1 +260,2 @@\n+    guardrails_mode: str = field(default="shadow")\n',
+        },
+        {
+            "path": "tests/test_guardrails_policy.py",
+            "status": "added",
+            "patch": "@@ -0,0 +1,2 @@\n+def test_x(): pass\n",
+        },
+    ]
+    result = _evaluate_gptme_core(
+        files,
+        file_shapes,
+        title="feat(hooks): add guardrails policy hook",
+        body="Resolves the three design questions from RFC #3598 ... Closes #3598",
+    )
+    assert not result.eligible
+    assert any("New module under gptme/" in r for r in result.reasons)
+
+
+def test_evaluate_pr_gptme_core_new_top_level_module_routes_to_erik() -> None:
+    """gptme#3706 end-to-end: new top-level gptme/error_hintkit.py module."""
+    files = [
+        {"path": "gptme/cli/main.py"},
+        {"path": "gptme/error_hintkit.py"},
+        {"path": "tests/test_error_hintkit.py"},
+        {"path": "tests/test_cli_fatal_error_envelope.py"},
+    ]
+    file_shapes = [
+        {
+            "path": "gptme/cli/main.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+x = 1\n",
+        },
+        {
+            "path": "gptme/error_hintkit.py",
+            "status": "added",
+            "patch": "@@ -0,0 +1,2 @@\n+HINTKIT_ENABLED = True\n",
+        },
+        {
+            "path": "tests/test_error_hintkit.py",
+            "status": "added",
+            "patch": "@@ -0,0 +1,2 @@\n+def test_x(): pass\n",
+        },
+        {
+            "path": "tests/test_cli_fatal_error_envelope.py",
+            "status": "added",
+            "patch": "@@ -0,0 +1,2 @@\n+def test_y(): pass\n",
+        },
+    ]
+    result = _evaluate_gptme_core(
+        files,
+        file_shapes,
+        title="feat(cli): add Error-HintKit hints",
+        body="Part of Error-HintKit M1 from Bob's local task "
+        "error-hintkit-m1-registry-and-cli-adapter.",
+    )
+    assert not result.eligible
+    assert any("New module under gptme/" in r for r in result.reasons)
+    assert any("no #issue reference" in r for r in result.reasons)
+
+
+def test_evaluate_pr_gptme_core_feat_without_issue_routes_to_erik() -> None:
+    """A synthetic `feat:` PR with no linked issue must route, even when every
+    file it touches is otherwise an ordinary internal module."""
+    files = [
+        {"path": "gptme/tools/browser.py"},
+        {"path": "tests/test_browser.py"},
+    ]
+    file_shapes = [
+        {
+            "path": "gptme/tools/browser.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+def new_helper(): pass\n",
+        },
+        {
+            "path": "tests/test_browser.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+def test_x(): pass\n",
+        },
+    ]
+    result = _evaluate_gptme_core(
+        files,
+        file_shapes,
+        title="feat: add a configurable retry delay to the browser tool",
+        body="No design doc, just seemed useful.",
+    )
+    assert not result.eligible
+    assert any("no #issue reference" in r for r in result.reasons)
+    assert result.category is None
+
+
+def test_evaluate_pr_gptme_core_sensitive_path_still_blocks() -> None:
+    """The generic sensitive-path hard stop still applies to gptme/gptme —
+    dropping the category-allowlist requirement does not touch it."""
+    files = [{"path": "gptme/oauth/tokens.py"}]
+    file_shapes = [
+        {
+            "path": "gptme/oauth/tokens.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+x = 1\n",
+        }
+    ]
+    result = _evaluate_gptme_core(files, file_shapes, title="fix(oauth): rotate token")
+    assert not result.eligible
+    assert any("sensitive" in r.lower() for r in result.reasons)
+
+
+def test_evaluate_pr_other_repo_category_allowlist_unchanged() -> None:
+    """gptme/gptme-contrib must still use classify_category's path-category
+    allowlist — the diff-shape override is gptme/gptme-only."""
+    files = [{"path": "gptme/util/reduce.py"}]
+    pr_data = _make_clean_pr_data(files=files)
+    with (
+        patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
+        patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
+        patch.object(
+            self_merge_check, "_fetch_greptile_review_data", return_value=None
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_greptile_status",
+            return_value={"has_review": False, "unresolved": 0, "total": 0},
+        ),
+        patch.object(self_merge_check, "greptile_summary_score", return_value=None),
+        patch.object(
+            self_merge_check,
+            "fetch_unresolved_human_threads",
+            return_value={"unresolved": 0, "total": 0, "authors": []},
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_ai_review_status",
+            return_value={"accepted": True, "detail": "AI review 5/5 at current head"},
+        ),
+        patch.object(self_merge_check, "_fetch_pr_file_shapes") as mock_shapes,
+    ):
+        result = self_merge_check.evaluate_pr(
+            "gptme/gptme-contrib",
+            999,
+            workspace_repos=["gptme/gptme-contrib"],
+        )
+    # gptme/util/reduce.py is not in any allowed category for contrib (no
+    # SELF_MERGE_ALLOWED_PATHS entry for it) — the old behaviour must persist.
+    assert not result.eligible
+    assert any(
+        "Files not in any allowed self-merge category" in r for r in result.reasons
+    )
+    mock_shapes.assert_not_called()

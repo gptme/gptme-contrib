@@ -677,7 +677,7 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any]:
             "--repo",
             repo,
             "--json",
-            "number,title,url,author,statusCheckRollup,isDraft,state,reviewDecision,headRefOid,mergeStateStatus,isCrossRepository,baseRefName,labels",
+            "number,title,body,url,author,statusCheckRollup,isDraft,state,reviewDecision,headRefOid,mergeStateStatus,isCrossRepository,baseRefName,labels",
         ]
     )
     if not raw:
@@ -2369,6 +2369,233 @@ def classify_category(
     ]
 
 
+# --- gptme/gptme core: diff-shape eligibility, not path category ---
+#
+# Erik (2026-09-07), on gptme#3620's gate message: "The PR is self-merge
+# ineligible due to gptme/util/reduce.py being outside the bot's allowed
+# category — manual merge needed. <-- path alone doesn't feel like a good
+# eligibility gate, at least not for this PR". Erik's own merge history routes
+# on the *shape* of a diff, not on which directory it lands in (workspace
+# brain repo, knowledge/strategic/2026-09-07-auto-merge-analysis.md §3/§5).
+#
+# For gptme/gptme only, classify_category's "must fall into an allowed
+# category" requirement stops applying (see evaluate_pr). The sensitive-path/
+# bot-config/spec-like-doc hard stops that classify_category also enforces
+# still apply — those are the one thing Erik has said belongs to a human
+# every time (auto-merge-analysis §3 cluster 3). In their place, these
+# detectors flag the diff *shapes* Erik has repeatedly asked to see himself:
+# new public CLI surface, new config schema, a wholly new module, a new docs
+# page, an unmotivated `feat` with no linked issue, and anything touching
+# LLM/server/provider routing or auth. A PR triggering none of these — and
+# otherwise clean on CI, AI review, Greptile, and human threads — is eligible
+# regardless of which directory it touches. Every other repo's
+# classify_category call is untouched by this block.
+_GPTME_CORE_REPO = "gptme/gptme"
+
+# A newly *added* .py file at most one subdirectory below gptme/ — deep
+# enough to catch a new subpackage module (gptme/hooks/guardrails.py,
+# gptme#3695) as well as a bare top-level one (gptme/error_hintkit.py,
+# gptme#3706), shallow enough that it doesn't also match a test file three
+# levels down (gptme/hooks/tests/test_x.py — is_test_file already excludes
+# those, but the depth bound keeps this detector's own intent legible).
+_GPTME_CORE_NEW_MODULE_RE = re.compile(r"^gptme/(?:[^/]+/)?[^/]+\.py$")
+# A dataclass-style attribute declaration added inside gptme/config/ — how
+# gptme declares its config schema (gptme/config/models.py: `field_name: Type
+# = field(...)` at class scope, indented). Matched against the added line's
+# *own* indentation, so a top-level statement (import, function def) does not
+# false-positive.
+_GPTME_CORE_CONFIG_FIELD_RE = re.compile(r"^\s{4,}[A-Za-z_][A-Za-z0-9_]*\s*:\s*\S")
+_GPTME_CORE_ISSUE_REF_RE = re.compile(r"#\d+")
+# gptme/llm/ (model calls), gptme/server/ (HTTP surface + auth), gptme/oauth/
+# and gptme/credentials.py (auth), gptme/providers/ and gptme/cli/auth.py
+# (provider routing / auth). Generic auth/oauth keyword matching already
+# exists in is_sensitive_path and still applies everywhere; this list adds
+# the LLM/server/provider-routing surface that keyword isn't aimed at.
+_GPTME_CORE_SENSITIVE_SURFACE_PREFIXES = (
+    "gptme/llm/",
+    "gptme/server/",
+    "gptme/providers/",
+    "gptme/oauth/",
+    "gptme/credentials.py",
+    "gptme/cli/auth.py",
+)
+
+
+def _iter_json_documents(text: str) -> Iterator[Any]:
+    """Yield successive JSON values from paginated compact API/jq output.
+
+    `gh api --paginate --jq` concatenates one JSON value per page/item without
+    a guaranteed separator (usually newlines, but not contractually so), so
+    this walks the text with a raw decoder instead of splitting on lines.
+    """
+    decoder = json.JSONDecoder()
+    idx = 0
+    n = len(text)
+    while idx < n:
+        while idx < n and text[idx].isspace():
+            idx += 1
+        if idx >= n:
+            break
+        try:
+            val, end = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            break
+        yield val
+        idx = end
+
+
+def _fetch_pr_file_shapes(repo: str, number: int) -> list[dict[str, Any]]:
+    """Per-file status + patch text, for the gptme/gptme diff-shape detectors only.
+
+    Separate from `_fetch_pr_files` (which only needs `.filename`, used by
+    every other repo's category classification via classify_category): patch
+    text is the bulk of the file-list payload, so fetching it is gated to the
+    one repo that needs it, and only reached once classify_category's
+    replacement for gptme/gptme has ruled out the cheaper sensitive/bot-
+    config/spec-doc hard stops.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{repo}/pulls/{number}/files",
+                "--paginate",
+                "--jq",
+                ".[] | {path: .filename, status: .status, patch: .patch}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if result.returncode != 0:
+        return []
+    return [doc for doc in _iter_json_documents(result.stdout) if isinstance(doc, dict)]
+
+
+def _gptme_core_added_lines(patch: str | None) -> list[str]:
+    """Added (`+`-prefixed, non-hunk-header) lines of a unified diff patch."""
+    if not patch:
+        return []
+    return [
+        line[1:]
+        for line in patch.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    ]
+
+
+def gptme_core_route_to_erik_reasons(
+    title: str, body: str, file_shapes: list[dict[str, Any]]
+) -> list[str]:
+    """Diff-shape checks that route a gptme/gptme PR to Erik.
+
+    Each reason quotes, in one clause, the cluster of Erik's block reasons it
+    encodes (workspace brain repo,
+    knowledge/strategic/2026-09-07-auto-merge-analysis.md §3). Returns an
+    empty list when none of the shapes are present — evaluate_pr then treats
+    the PR as eligible on diff shape, regardless of which directory it
+    touches (subject to CI/AI-review/Greptile/human-thread checks elsewhere).
+    """
+    reasons: list[str] = []
+
+    new_click_surface: set[str] = set()
+    new_cli_files: set[str] = set()
+    new_config_keys: set[str] = set()
+    new_modules: set[str] = set()
+    new_docs_pages: set[str] = set()
+
+    for entry in file_shapes:
+        path = str(entry.get("path", "")).replace("\\", "/").removeprefix("./")
+        status = entry.get("status", "")
+        added_lines = _gptme_core_added_lines(cast("str | None", entry.get("patch")))
+
+        if status == "added" and path.startswith("gptme/cli/"):
+            new_cli_files.add(path)
+        if any(
+            "@click.option(" in line or "@click.command(" in line
+            for line in added_lines
+        ):
+            new_click_surface.add(path)
+        if path.startswith("gptme/config/") and any(
+            _GPTME_CORE_CONFIG_FIELD_RE.match(line) for line in added_lines
+        ):
+            new_config_keys.add(path)
+        if (
+            status == "added"
+            and not is_test_file(path)
+            and _GPTME_CORE_NEW_MODULE_RE.match(path)
+        ):
+            new_modules.add(path)
+        if status == "added" and path.startswith("docs/"):
+            new_docs_pages.add(path)
+
+    if new_click_surface or new_cli_files:
+        reasons.append(
+            "New CLI surface ("
+            + ", ".join(sorted(new_click_surface | new_cli_files))
+            + "): Erik — \"I don't like adding a whole set of --arguments to "
+            "the default gptme CLI\" / \"can't justify a whole 'nother CLI "
+            'flag" (auto-merge-analysis §3 cluster 4, e.g. gptme#3209, #3296)'
+        )
+    if new_config_keys:
+        reasons.append(
+            "New config schema key ("
+            + ", ".join(sorted(new_config_keys))
+            + "): core config surface is Erik's call, same cluster as new CLI "
+            "flags (auto-merge-analysis §3 cluster 4)"
+        )
+    if new_modules:
+        reasons.append(
+            "New module under gptme/ ("
+            + ", ".join(sorted(new_modules))
+            + "): Erik — public-surface proliferation and naming/placement is "
+            "his taste to set (auto-merge-analysis §3 cluster 4, e.g. #3529 "
+            "\"'harness' is kinda vague\")"
+        )
+    if new_docs_pages:
+        reasons.append(
+            "New docs page under docs/ ("
+            + ", ".join(sorted(new_docs_pages))
+            + "): Erik has flagged duplicate/misplaced doc pages before "
+            "(auto-merge-analysis §3 cluster 4, e.g. #3178)"
+        )
+
+    normalized_title = title.strip()
+    if re.match(r"(?i)^feat[:(]", normalized_title):
+        if not _GPTME_CORE_ISSUE_REF_RE.search(title) and not (
+            body and _GPTME_CORE_ISSUE_REF_RE.search(body)
+        ):
+            reasons.append(
+                "feat: title with no #issue reference in title or body: Erik — "
+                '"Idk if this is an actually useful feature" / "kinda low '
+                'value" (auto-merge-analysis §3 cluster 5, e.g. gptme#2836, '
+                "#2979)"
+            )
+
+    sensitive_surface = sorted(
+        {
+            str(entry.get("path", "")).replace("\\", "/").removeprefix("./")
+            for entry in file_shapes
+            if str(entry.get("path", ""))
+            .replace("\\", "/")
+            .removeprefix("./")
+            .startswith(_GPTME_CORE_SENSITIVE_SURFACE_PREFIXES)
+        }
+    )
+    if sensitive_surface:
+        reasons.append(
+            "Touches gptme/llm/, gptme/server/, auth, or provider routing ("
+            + ", ".join(sensitive_surface)
+            + '): Erik — "avoid making too much auth cloud-specific"; silent '
+            "auth/provider misrouting is exactly this class (auto-merge-"
+            "analysis §3 cluster 3, e.g. gptme#2820, #2901)"
+        )
+
+    return reasons
+
+
 def _check_workspace_repo(
     repo: str, workspace_repos: list[str] | None
 ) -> tuple[list[str], list[str]]:
@@ -2733,9 +2960,39 @@ def evaluate_pr(
             f"from: {authors}"
         )
 
-    category, category_reasons = classify_category(files, repo=repo)
-    result.category = category
-    result.reasons.extend(category_reasons)
+    if repo == _GPTME_CORE_REPO:
+        # gptme/gptme: diff shape, not path category (see the block above
+        # classify_category's definition). The sensitive/bot-config/spec-
+        # like-doc hard stops classify_category also enforces still apply
+        # here; only the "must fall into an allowed category" requirement is
+        # replaced, and only for this repo.
+        if any(is_sensitive_path(path) for path in files):
+            result.category = None
+            result.reasons.append("Touches sensitive/security/infra paths")
+        elif any(is_bot_config(path) for path in files):
+            result.category = None
+            result.reasons.append(
+                "Bot/CI config changes require human review under current policy"
+            )
+        elif any(is_doc_file(path) and is_spec_like_doc(path) for path in files):
+            result.category = None
+            result.reasons.append(
+                "Touches spec-like documentation requiring human review"
+            )
+        else:
+            file_shapes = _fetch_pr_file_shapes(repo, number)
+            shape_reasons = gptme_core_route_to_erik_reasons(
+                title, cast("str", pr.get("body") or ""), file_shapes
+            )
+            if shape_reasons:
+                result.category = None
+                result.reasons.extend(shape_reasons)
+            else:
+                result.category = "gptme-core-diff-shape-eligible"
+    else:
+        category, category_reasons = classify_category(files, repo=repo)
+        result.category = category
+        result.reasons.extend(category_reasons)
 
     review_decision = pr.get("reviewDecision")
     if review_decision == "CHANGES_REQUESTED":
