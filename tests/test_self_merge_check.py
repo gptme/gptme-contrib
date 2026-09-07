@@ -2587,15 +2587,13 @@ def test_gptme_core_new_hook_module_and_config_routes() -> None:
             "path": "gptme/hooks/__init__.py",
             "status": "modified",
             "patch": (
-                "@@ -1,3 +1,8 @@\n" "+register_hook(guardrails_hook, priority=200)\n"
+                "@@ -1,3 +1,8 @@\n+register_hook(guardrails_hook, priority=200)\n"
             ),
         },
         {
             "path": "gptme/hooks/guardrails.py",
             "status": "added",
-            "patch": (
-                "@@ -0,0 +1,677 @@\n" "+def guardrails_hook(...):\n" "+    pass\n"
-            ),
+            "patch": ("@@ -0,0 +1,677 @@\n+def guardrails_hook(...):\n+    pass\n"),
         },
         {
             "path": "gptme/config/models.py",
@@ -3023,6 +3021,7 @@ def test_evaluate_pr_other_repo_category_allowlist_unchanged() -> None:
         "Files not in any allowed self-merge category" in r for r in result.reasons
     )
     mock_shapes.assert_not_called()
+
 
 # --- gptme/gptme-contrib: placement rule + segment-matched sensitive paths +
 # spec-doc waiver ---
