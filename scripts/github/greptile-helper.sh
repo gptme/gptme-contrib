@@ -58,6 +58,30 @@ MAX_RE_TRIGGERS="${MAX_RE_TRIGGERS:-3}"  # Max re-review triggers per review cyc
 # cap fired, which Erik flagged as spam. Lower cap + stale-bypass fix below.
 # Restored to 8 on 2026-07-20 per Erik's request (gptme/gptme#3206 comment).
 MAX_TOTAL_TRIGGERS="${MAX_TOTAL_TRIGGERS:-8}"
+# A trigger comment that got no Greptile ack/reaction AND no Greptile comment or
+# review within this window is "unanswered" and does NOT consume a slot in
+# MAX_TOTAL_TRIGGERS. Without this, triggers fired into a Greptile dark window
+# (e.g. 2026-08-10..08-28) permanently burn the lifetime cap even though Greptile
+# never looked — gptme/gptme#3620 hit 8/8 lifetime triggers from 3 re-triggers that
+# landed in the dark window plus normal answered triggers, leaving a stale 4/5
+# score on an old head with no way to get a fresh review.
+# See tasks/greptile-post-recovery-retrigger-sweep.md.
+UNANSWERED_GRACE_SECONDS="${UNANSWERED_GRACE_SECONDS:-1800}"  # 30 min
+# When set to 1, `check`/`trigger`/`status` allow exactly ONE trigger past the
+# lifetime cap if scripts/monitoring/greptile-repo-darkness.py's persisted
+# availability state (GREPTILE_AVAILABILITY_FILE) shows this repo flipped
+# dark->responding AFTER our last trigger, and no such bonus trigger has been
+# posted yet (detected via a marker embedded in the trigger body). This is a
+# distinct mechanism from UNANSWERED_GRACE_SECONDS: it also unsticks a PR whose
+# triggers WERE acked (so they still count) but never got a real review.
+GREPTILE_POST_RECOVERY="${GREPTILE_POST_RECOVERY:-0}"
+# No default path: this script is shared (gptme-contrib), so it must not guess
+# a caller's directory layout. Callers that want --post-recovery must point
+# this at their own persisted availability state (Bob's is
+# state/greptile-availability.json, written by
+# scripts/monitoring/greptile-repo-darkness.py --record-state). Unset ->
+# GREPTILE_POST_RECOVERY has no effect even if =1.
+GREPTILE_AVAILABILITY_FILE="${GREPTILE_AVAILABILITY_FILE:-}"
 GITHUB_AUTHOR="${GITHUB_AUTHOR:-$(gh api user --jq .login 2>/dev/null || echo "")}"
 
 if [ -z "$REPO" ] || [ -z "$PR_NUMBER" ]; then
@@ -147,7 +171,8 @@ PY
 _REVIEW_CACHE_FILE="${TMPDIR:-/tmp}/greptile-review-cache-$$.json"
 _ISSUE_COMMENTS_CACHE_FILE="${TMPDIR:-/tmp}/greptile-issue-comments-$$.json"
 _ISSUE_COMMENTS_ERROR_FILE="${TMPDIR:-/tmp}/greptile-issue-comments-error-$$"
-trap 'rm -f "$_REVIEW_CACHE_FILE" "$_ISSUE_COMMENTS_CACHE_FILE" "$_ISSUE_COMMENTS_ERROR_FILE"' EXIT
+_ACTIVITY_CACHE_FILE="${TMPDIR:-/tmp}/greptile-activity-$$.json"
+trap 'rm -f "$_REVIEW_CACHE_FILE" "$_ISSUE_COMMENTS_CACHE_FILE" "$_ISSUE_COMMENTS_ERROR_FILE" "$_ACTIVITY_CACHE_FILE"' EXIT
 
 # Shared hash for per-PR state files (lock + trigger timestamp).
 # Used across trigger and _our_trigger_status to coordinate without the GitHub API.
@@ -176,14 +201,90 @@ _issue_comments_json() {
     cat "$_ISSUE_COMMENTS_CACHE_FILE"
 }
 
+_greptile_activity_times() {
+    # All Greptile-authored timestamps on this PR: issue-comment created_at
+    # (incl. reviews Greptile posts as a plain comment) plus formal PR-review
+    # submitted_at. Used by _trigger_answered to tell "Greptile responded to
+    # this trigger" from "Greptile was dark". Cached once per process.
+    trap - EXIT
+    if [ -f "$_ACTIVITY_CACHE_FILE" ]; then
+        cat "$_ACTIVITY_CACHE_FILE"
+        return
+    fi
+    {
+        _issue_comments_json | jq -c '[.[][] | select(.user.login | test("greptile"; "i")) | .created_at]'
+        gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate 2>/dev/null \
+            | jq -cs '[.[][] | select((.user.login // "") | test("greptile"; "i")) | .submitted_at]' 2>/dev/null
+    } | jq -cs 'add // [] | map(select(. != null))' > "$_ACTIVITY_CACHE_FILE" 2>/dev/null \
+        || echo '[]' > "$_ACTIVITY_CACHE_FILE"
+    cat "$_ACTIVITY_CACHE_FILE"
+}
+
+_trigger_answered() {
+    # Args: <comment_id> <created_at>. True (0) when Greptile answered this
+    # specific trigger: either it reacted to the comment, or SOME Greptile
+    # activity (comment or review) landed within UNANSWERED_GRACE_SECONDS
+    # after it. False (1) = unanswered — excluded from _total_trigger_count.
+    local comment_id="$1" created_at="$2"
+    # _greptile_activity_times writes/reads _ACTIVITY_CACHE_FILE as a side
+    # effect; call it once (in a subshell — it resets the EXIT trap on the
+    # assumption it always runs in one) to populate the cache, then hand
+    # python the FILE (not a pipe — a pipe's stdin would be shadowed by the
+    # heredoc below).
+    (_greptile_activity_times >/dev/null)
+    if python3 - "$_ACTIVITY_CACHE_FILE" "$created_at" "${UNANSWERED_GRACE_SECONDS:-1800}" 2>/dev/null <<'PY'
+import json, sys
+from datetime import datetime, timedelta
+
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+after = datetime.fromisoformat(sys.argv[2].replace("Z", "+00:00"))
+grace = timedelta(seconds=int(sys.argv[3]))
+for t in data:
+    try:
+        ts = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        continue
+    if after < ts <= after + grace:
+        sys.exit(0)
+sys.exit(1)
+PY
+    then
+        return 0
+    fi
+    # No in-window Greptile comment/review — fall back to a direct reaction
+    # check on the trigger comment itself (costs one extra API call, only
+    # reached when the cheap timeline check above found nothing).
+    local ack
+    ack=$(gh api -H "Accept: application/vnd.github+json" "repos/$REPO/issues/comments/$comment_id/reactions" \
+        --jq '[.[] | select(.user.login == "greptile-apps[bot]")] | length' 2>/dev/null) || ack=0
+    [ "${ack:-0}" -gt 0 ]
+}
+
 _total_trigger_count() {
-    # Count our actual `@greptileai review` trigger commands over the PR lifetime.
-    # This count backs the helper's spam ceiling, so another maintainer's manual
-    # trigger must not consume one of our slots.
-    local count
-    count=$(_issue_comments_json \
-        | jq -r '[.[][] | select(.user.login == "'"${GITHUB_AUTHOR}"'" and (.body | test("^@greptileai review( comment)?(\\s|$)")))] | length' 2>/dev/null) || count=0
-    printf '%s\n' "${count:-0}"
+    # Count our actual `@greptileai review` trigger commands over the PR lifetime
+    # that Greptile actually answered. This count backs the helper's spam
+    # ceiling, so another maintainer's manual trigger must not consume one of
+    # our slots, and neither should a trigger fired into a Greptile dark
+    # window that never got a response (see UNANSWERED_GRACE_SECONDS above).
+    # A trigger still inside its grace window (age < UNANSWERED_GRACE_SECONDS)
+    # is counted conservatively — it may yet be answered, so it is not (yet)
+    # known-unanswered.
+    local triggers count=0 id created_at age
+    triggers=$(_issue_comments_json \
+        | jq -c '[.[][] | select(.user.login == "'"${GITHUB_AUTHOR}"'" and (.body | test("^@greptileai review( comment)?(\\s|$)"))) | {id, created_at}]' 2>/dev/null) || triggers='[]'
+    while IFS=$'\t' read -r id created_at; do
+        [ -z "$id" ] && continue
+        age=$(_age_seconds "$created_at" 2>/dev/null) || age=0
+        if [ "${age:-0}" -lt "${UNANSWERED_GRACE_SECONDS:-1800}" ]; then
+            count=$((count + 1))
+            continue
+        fi
+        if _trigger_answered "$id" "$created_at"; then
+            count=$((count + 1))
+        fi
+    done < <(printf '%s' "$triggers" | jq -r '.[] | [.id, .created_at] | @tsv' 2>/dev/null)
+    printf '%s\n' "$count"
 }
 
 _any_trigger_count() {
@@ -499,6 +600,54 @@ _our_trigger_status() {
     fi
 }
 
+# --- Helper: post-recovery bonus trigger (see GREPTILE_POST_RECOVERY above) ---
+
+# Prints the ISO timestamp this repo's Greptile availability last flipped to
+# "responding" per GREPTILE_AVAILABILITY_FILE, or nothing if the file is
+# unset/missing/unparseable, the repo is absent from it, or it is still dark.
+# The file is written by scripts/monitoring/greptile-repo-darkness.py
+# --record-state as {"repos": {"<repo>": {"status": "dark"|"responding",
+# "since": "<iso8601>"}, ...}}.
+_repo_recovery_since() {
+    [ -n "$GREPTILE_AVAILABILITY_FILE" ] && [ -f "$GREPTILE_AVAILABILITY_FILE" ] || return 0
+    python3 - "$GREPTILE_AVAILABILITY_FILE" "$REPO" <<'PY' 2>/dev/null
+import json, sys
+
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+except (OSError, json.JSONDecodeError):
+    sys.exit(0)
+repo = (data.get("repos") or {}).get(sys.argv[2]) or {}
+if repo.get("status") == "responding" and repo.get("since"):
+    print(repo["since"])
+PY
+}
+
+# True (0) when we have already spent this PR's one post-recovery bonus
+# trigger (marked in the trigger body — see the marker embedded below).
+_post_recovery_bonus_used() {
+    _issue_comments_json | jq -e '
+        any(.[][]; .user.login == "'"${GITHUB_AUTHOR}"'" and ((.body // "") | test("greptile-helper post-recovery")))
+        ' >/dev/null 2>&1
+}
+
+# True (0) when GREPTILE_POST_RECOVERY=1, the repo's Greptile availability
+# flipped dark->responding AFTER our most recent trigger on this PR, and the
+# one-time bonus has not already been spent. Callers gate the lifetime-cap
+# backoff on this to allow exactly one extra trigger.
+_post_recovery_allows_trigger() {
+    [ "${GREPTILE_POST_RECOVERY:-0}" = "1" ] || return 1
+    local recovered_at last_trigger last_trigger_created
+    recovered_at=$(_repo_recovery_since) || recovered_at=""
+    [ -n "$recovered_at" ] || return 1
+    last_trigger=$(_our_last_trigger_json)
+    last_trigger_created=$(echo "$last_trigger" | _json_field "created_at") || last_trigger_created=""
+    [ -n "$last_trigger_created" ] || return 1
+    _timestamp_gt "$recovered_at" "$last_trigger_created" 2>/dev/null || return 1
+    ! _post_recovery_bonus_used
+}
+
 # --- Main commands ---
 case "${1:-}" in
 check)
@@ -507,8 +656,10 @@ check)
         # Already reviewed — check if re-review is needed (new commits since review)
         if _needs_re_review; then
             # Hard lifetime ceiling: if hit, skip just like "no new commits" (exit 2)
+            # — unless the post-recovery bonus applies (repo recovered from a
+            # dark window after our last trigger; see GREPTILE_POST_RECOVERY).
             _total_triggers=$(_total_trigger_count)
-            if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ]; then
+            if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ] && ! _post_recovery_allows_trigger; then
                 echo "  [greptile] BACKOFF: $REPO#$PR_NUMBER has $_total_triggers lifetime triggers (cap $MAX_TOTAL_TRIGGERS). Skipping." >&2
                 exit 2  # Ceiling hit — skip (same as "already reviewed, nothing to do")
             fi
@@ -560,9 +711,15 @@ trigger)
             # the PR is pathological (stuck loop, or mergeable-but-human-gated) — stop
             # triggering and escalate to a human instead of adding more spam.
             _total_triggers=$(_total_trigger_count)
+            _post_recovery_used=0
             if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ]; then
-                echo "  [greptile] BACKOFF: $REPO#$PR_NUMBER already has $_total_triggers lifetime triggers (cap $MAX_TOTAL_TRIGGERS). Not re-triggering — this PR is stuck or human-gated; escalate to merge/close/intervene."
-                exit 0
+                if _post_recovery_allows_trigger; then
+                    _post_recovery_used=1
+                    echo "  [greptile] Post-recovery bonus: $REPO#$PR_NUMBER is at cap ($_total_triggers/$MAX_TOTAL_TRIGGERS) but Greptile recovered after our last trigger — allowing one extra."
+                else
+                    echo "  [greptile] BACKOFF: $REPO#$PR_NUMBER already has $_total_triggers lifetime triggers (cap $MAX_TOTAL_TRIGGERS). Not re-triggering — this PR is stuck or human-gated; escalate to merge/close/intervene."
+                    exit 0
+                fi
             fi
             reviewed_at=$( _greptile_review_info | _json_field "reviewed_at") || reviewed_at=""
             # Check trigger status BEFORE the no-new-commit guard. If stale-acked (Greptile
@@ -598,6 +755,10 @@ trigger)
                 _trigger_body="$_trigger_body
 
 <!-- greptile-helper head-sha: $_head_sha -->"
+            fi
+            if [ "$_post_recovery_used" -eq 1 ]; then
+                _trigger_body="$_trigger_body
+<!-- greptile-helper post-recovery -->"
             fi
             # Use REST API instead of `gh pr comment` (GraphQL) — REST has a
             # separate 5000/hour quota that's rarely exhausted.
@@ -743,8 +904,10 @@ status)
     if _has_greptile_review; then
         if _needs_re_review; then
             # Hard lifetime ceiling: report "backoff" so callers/dashboards see the true state
+            # — unless the post-recovery bonus applies, in which case this is
+            # reported like any other stuck-but-actionable PR ("stale").
             _total_triggers=$(_total_trigger_count)
-            if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ]; then
+            if [ "${_total_triggers:-0}" -ge "$MAX_TOTAL_TRIGGERS" ] && ! _post_recovery_allows_trigger; then
                 echo "backoff"
             else
                 reviewed_at=$(_greptile_review_info | _json_field "reviewed_at") || reviewed_at=""

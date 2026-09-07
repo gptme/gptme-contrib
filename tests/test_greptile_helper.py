@@ -879,7 +879,14 @@ def test_trigger_fallback_invalid_grace_uses_default():
 
 
 def test_trigger_fallback_enforces_lifetime_cap():
-    """The initial-review path keeps the helper's trigger ceiling explicit."""
+    """The initial-review path keeps the helper's trigger ceiling explicit.
+
+    bot_reaction_count=1 makes every one of the 8 triggers "answered" (acked),
+    so they all consume a lifetime-cap slot despite no full review ever
+    landing. Without an ack/response, unanswered triggers no longer count
+    (see test_unanswered_triggers_excluded_from_lifetime_cap) — this test is
+    specifically about the cap still firing when Greptile DID respond.
+    """
     fixture = {
         "pr_number": 1385,
         "raw_comments": [
@@ -887,7 +894,7 @@ def test_trigger_fallback_enforces_lifetime_cap():
         ],
         "raw_commits": [],
         "raw_pr": {"created_at": _iso_ago(minutes=180)},
-        "bot_reaction_count": 0,
+        "bot_reaction_count": 1,
     }
     result, gh_log = _run_helper(
         "trigger",
@@ -986,6 +993,141 @@ def test_other_authors_triggers_do_not_consume_helper_lifetime_cap():
     )
     assert status.returncode == 0, f"stderr: {status.stderr}"
     assert status.stdout.strip() == "needs-re-review"
+
+
+def test_unanswered_triggers_excluded_from_lifetime_cap():
+    """8 of OUR triggers that Greptile never acked/answered must not hit the cap.
+
+    Regression for gptme/gptme#3620: 3 re-triggers landed in a Greptile dark
+    window (2026-08-10..08-28) and got no response, permanently contributing
+    to the lifetime cap under the old count-everything logic. All 8 triggers
+    here are old (well past UNANSWERED_GRACE_SECONDS), unacked
+    (bot_reaction_count=0), and no Greptile activity followed any of them —
+    so none count, and the PR must NOT report "backoff".
+    """
+    reviewed_at = _iso_ago(minutes=200)
+    fixture = {
+        "pr_number": 3620,
+        "raw_comments": [
+            _make_greptile_comment(4, reviewed_at=reviewed_at),
+            *[
+                _make_trigger_comment("test-user", _iso_ago(minutes=minutes))
+                for minutes in (150, 140, 130, 120, 110, 100, 90, 80)
+            ],
+        ],
+        "raw_commits": [_make_commit(_iso_ago(minutes=10))],
+        "raw_pr": {"created_at": _iso_ago(minutes=300)},
+        "bot_reaction_count": 0,
+    }
+    status = _run_helper(
+        "status",
+        fixture,
+        extra_env={"MAX_TOTAL_TRIGGERS": "8", "MAX_RE_TRIGGERS": "20"},
+    )
+    assert status.returncode == 0, f"stderr: {status.stderr}"
+    assert (
+        status.stdout.strip() != "backoff"
+    ), "unanswered (dark-window) triggers must not count toward the lifetime cap"
+    assert status.stdout.strip() == "needs-re-review"
+
+
+def _write_availability_file(
+    tmp_path: Path, repo: str, status: str, since: str
+) -> Path:
+    path = tmp_path / "greptile-availability.json"
+    path.write_text(json.dumps({"repos": {repo: {"status": status, "since": since}}}))
+    return path
+
+
+def test_post_recovery_bonus_allows_trigger_past_cap(tmp_path: Path):
+    """--post-recovery allows exactly one trigger past the lifetime cap.
+
+    8 triggers, all acked (bot_reaction_count=1) so all count and the PR sits
+    at the cap. GREPTILE_AVAILABILITY_FILE records the repo recovering AFTER
+    the last of those triggers, and GREPTILE_POST_RECOVERY=1 — the bonus
+    should fire once, embedding a "post-recovery" marker in the comment body.
+    """
+    reviewed_at = _iso_ago(minutes=300)
+    last_trigger_at = _iso_ago(minutes=130)
+    avail_file = _write_availability_file(
+        tmp_path, "gptme/gptme", "responding", since=_iso_ago(minutes=60)
+    )
+    fixture = {
+        "pr_number": 3620,
+        "raw_comments": [
+            _make_greptile_comment(4, reviewed_at=reviewed_at),
+            *[
+                _make_trigger_comment("test-user", _iso_ago(minutes=minutes))
+                for minutes in (200, 190, 180, 170, 160, 150, 140)
+            ],
+            _make_trigger_comment("test-user", last_trigger_at),
+        ],
+        "raw_commits": [_make_commit(_iso_ago(minutes=10))],
+        "raw_pr": {"created_at": _iso_ago(minutes=400)},
+        "bot_reaction_count": 1,
+    }
+    result, gh_log = _run_helper(
+        "trigger",
+        fixture,
+        capture_gh_log=True,
+        extra_env={
+            "MAX_TOTAL_TRIGGERS": "8",
+            "MAX_RE_TRIGGERS": "20",
+            "GREPTILE_POST_RECOVERY": "1",
+            "GREPTILE_AVAILABILITY_FILE": str(avail_file),
+        },
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "Post-recovery bonus" in result.stdout, f"stdout: {result.stdout!r}"
+    assert gh_log, "post-recovery bonus should have posted a trigger comment"
+    body = json.loads(gh_log)["body"]
+    assert "greptile-helper post-recovery" in body
+
+
+def test_post_recovery_bonus_used_only_once(tmp_path: Path):
+    """The post-recovery bonus is spent once per PR, even across a later recovery.
+
+    A post-recovery trigger was already posted (marker present) for an
+    earlier dark->responding flip. A SECOND, more recent recovery must not
+    grant a second bonus — "exactly one trigger per PR", not one per
+    recovery event.
+    """
+    reviewed_at = _iso_ago(minutes=300)
+    bonus_trigger = _make_trigger_comment(
+        "test-user", _iso_ago(minutes=40), head_sha="abcdef1234567890"
+    )
+    bonus_trigger["body"] += "\n<!-- greptile-helper post-recovery -->"
+    avail_file = _write_availability_file(
+        tmp_path, "gptme/gptme", "responding", since=_iso_ago(minutes=30)
+    )
+    fixture = {
+        "pr_number": 3620,
+        "raw_comments": [
+            _make_greptile_comment(4, reviewed_at=reviewed_at),
+            *[
+                _make_trigger_comment("test-user", _iso_ago(minutes=minutes))
+                for minutes in (200, 190, 180, 170, 160, 150, 140, 130)
+            ],
+            bonus_trigger,
+        ],
+        "raw_commits": [_make_commit(_iso_ago(minutes=10))],
+        "raw_pr": {"created_at": _iso_ago(minutes=400)},
+        "bot_reaction_count": 1,
+    }
+    result, gh_log = _run_helper(
+        "trigger",
+        fixture,
+        capture_gh_log=True,
+        extra_env={
+            "MAX_TOTAL_TRIGGERS": "8",
+            "MAX_RE_TRIGGERS": "20",
+            "GREPTILE_POST_RECOVERY": "1",
+            "GREPTILE_AVAILABILITY_FILE": str(avail_file),
+        },
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not gh_log, f"bonus already spent — must not trigger again: {gh_log!r}"
+    assert "BACKOFF" in result.stdout, f"stdout: {result.stdout!r}"
 
 
 def test_trigger_fallback_stale_acked_does_not_repost():
