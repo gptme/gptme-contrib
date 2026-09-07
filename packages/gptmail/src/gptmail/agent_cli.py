@@ -1348,10 +1348,10 @@ def watch(
     plain terminal.
 
     \b
-    Example — watch all agents for new messages to erik:
-        gptmail agent watch --to erik
-    Example — watch only alice and bob, exit on first reply:
-        gptmail agent watch --to erik --from alice,bob --once
+    Example — watch all agents for new messages to you (the default):
+        gptmail agent watch
+    Example — watch a subset of agents, exit on first reply:
+        gptmail agent watch --from peer1,peer2 --once
     """
     agents = _load_agents()
     recipient = (to_recipient or _self_name()).lower()
