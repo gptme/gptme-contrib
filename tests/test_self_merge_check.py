@@ -3235,6 +3235,32 @@ def test_is_sensitive_path_still_blocks_real_sensitive_paths(path: str) -> None:
     assert self_merge_check.is_sensitive_path(path) is True
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "tests/secrets.json",
+        "tests/fixtures/credentials.json",
+        "tests/fixtures/authToken.json",
+        "tests/deploy-config.yaml",
+    ],
+)
+def test_is_sensitive_path_test_dir_does_not_exempt_sensitive_basename(
+    path: str,
+) -> None:
+    """Living under a test directory does not exempt a file with a sensitive
+    basename from the keyword scan. Only files whose OWN NAME is test-shaped
+    (test_foo.py, foo_test.go, foo.spec.js) get the carve-out.
+
+    Regression for the P1 finding in contrib#1628: the early return in
+    is_sensitive_path was scoped to is_test_file(), which returns True for any
+    path under 'tests/', causing tests/secrets.json to bypass sensitive-path
+    detection entirely."""
+    assert (
+        self_merge_check.is_test_file(path) is True
+    ), "precondition: IS a test-dir member"
+    assert self_merge_check.is_sensitive_path(path) is True
+
+
 def test_contrib_agent_literal_in_non_test_code_routes() -> None:
     """contrib#1088-shaped case: an agent-name literal added to non-test
     code. Erik, verbatim: "Bob shouldn't have his configuration in

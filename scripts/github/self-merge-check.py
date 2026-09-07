@@ -2235,14 +2235,26 @@ def is_sensitive_path(path: str) -> bool:
     # itself a compound of "<subject>_test"/"test_<subject>": "secrets_test.py"
     # (a test file about secrets handling, not a file that holds a secret) is
     # exactly the same shape and the scan cannot tell the two apart from the
-    # filename alone. is_test_file() already resolves this ambiguity by path
-    # component (segment), not substring — a test file's OWN name accidentally
-    # containing a sensitive word does not make the file sensitive. This only
-    # skips the keyword scan: the hard prefix/suffix/dotfile/private-key checks
-    # above (a real secret can still live at a test-looking path, e.g.
-    # "tests/fixtures/id_rsa") still apply unconditionally.
+    # filename alone.
+    #
+    # The early return only applies when the BASENAME itself is test-shaped
+    # (test_foo.py, foo_test.go, foo.spec.js). A file like tests/secrets.json
+    # or tests/fixtures/aws_keys.json is a test-directory member but carries a
+    # sensitive basename — the keyword scan must still run for it. The hard
+    # prefix/suffix/dotfile/private-key checks above still apply unconditionally
+    # for all paths (a real secret at tests/fixtures/id_rsa is caught there).
     if is_test_file(path):
-        return False
+        _name = path.replace("\\", "/").split("/")[-1]
+        _basename_is_test = (
+            _name.startswith(TEST_FILENAME_PREFIXES)
+            or any(marker in _name for marker in TEST_FILENAME_MARKERS)
+            or (
+                not SPEC_DOCUMENT_PREFIX_RE.match(_name)
+                and bool(SPEC_TEST_FILE_RE.search(_name))
+            )
+        )
+        if _basename_is_test:
+            return False
     # Use the original (pre-lowercase) path to preserve camelCase boundaries for
     # detection; e.g. "authToken.py" → "auth_token" catches the "auth" rule.
     original_components = path.replace("\\", "/").split("/")
