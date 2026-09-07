@@ -418,9 +418,15 @@ _CACHE_PRICING_PROVIDER: dict[tuple[str, str], str] = {
     ("copilot-cli", "sonnet"): "anthropic",
     ("codex", "gpt-5.4"): "openai",
     ("codex", "gpt-5.5"): "openai",
+    ("codex", "gpt-5.6-sol"): "openai",
+    ("codex", "gpt-5.6-terra"): "openai",
+    ("codex", "gpt-5.6-luna"): "openai",
     ("copilot-cli", "gpt-5.4"): "openai",
     ("gptme", "gpt-5.4"): "openai",
     ("gptme", "gpt-5.5"): "openai",
+    ("gptme", "gpt-5.6-sol"): "openai",
+    ("gptme", "gpt-5.6-terra"): "openai",
+    ("gptme", "gpt-5.6-luna"): "openai",
     # kimi-k2.6: no cache pricing exposed on OpenRouter
 }
 
@@ -510,6 +516,9 @@ SUBSCRIPTION_BACKED_MODELS: set[tuple[str, str]] = {
     ("grok-build", "grok-build"),
     ("codex", "gpt-5.4"),
     ("codex", "gpt-5.5"),
+    ("codex", "gpt-5.6-sol"),
+    ("codex", "gpt-5.6-terra"),
+    ("codex", "gpt-5.6-luna"),
     # copilot-cli: both full model name (for pricing-table lookups from existing
     # session records, where model="claude-sonnet-4.6") and short alias (to match
     # HARNESS_TIERS canonical keys after the 2026-08-01 naming alignment). Once
@@ -522,6 +531,9 @@ SUBSCRIPTION_BACKED_MODELS: set[tuple[str, str]] = {
     ("copilot-cli", "gpt-5.4"),
     ("gptme", "gpt-5.4"),
     ("gptme", "gpt-5.5"),
+    ("gptme", "gpt-5.6-sol"),
+    ("gptme", "gpt-5.6-terra"),
+    ("gptme", "gpt-5.6-luna"),
 }
 
 # Tier ordering for scoring
