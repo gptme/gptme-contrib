@@ -6,9 +6,11 @@ autonomous AI agent can safely merge its own PRs without human review.
 
 Policy summary:
 - CI must be green (or skipped)
-- A machine review must be present and clean: EITHER a Greptile review with no
-  unresolved threads, OR a high-confidence review from the agent's own
-  self-hosted AI reviewer (see "Accepting our own review" below)
+- A machine review must be present and clean: own self-hosted AI reviewer with
+  consensus pass and zero open P1 findings (see "Accepting our own review" below).
+  Greptile review is fetched and shown but is advisory only — never a blocker.
+  (Erik decision 2026-09-07: Greptile pricing dispute + credit outages make it
+  unreliable as a hard gate; ErikBjare/bob#self-merge-gate-greptile-floor-while-credits-exhausted)
 - PR must be authored by the authenticated user
 - Changed files must fall into a low-risk category (tests, docs, lessons, skills,
   internal tooling, task metadata)
@@ -2643,96 +2645,51 @@ def evaluate_pr(
         repo, number, expected_author=current_user
     )
 
+    # --- Greptile review (advisory: fetched and reported, never a blocker) ---
+    # Erik decision 2026-09-07: Greptile is now advisory only — its score and
+    # findings are fetched and shown, but never a refusal reason. Reason:
+    # pricing dispute and credit outages make it unreliable as a hard gate.
+    # Required signals: own AI reviewer (consensus pass, zero open P1s) and
+    # the sensitive-paths human-merge rule.
     greptile = fetch_greptile_status(repo, number, review_data=shared_review_data)
-    if not greptile["has_review"]:
-        # The alternative review is safe only after a successful GraphQL fetch
-        # proves there is no Greptile review. An API failure is unknown, not
-        # absence: accepting our marker there would turn a fail-closed outage into
-        # a path around potentially unresolved Greptile feedback.
-        # `greptile["unknown"]` covers the second way the lookup can fail: the
-        # GraphQL fetch succeeds and reports no reviews, but the summary-comment
-        # fallback inside `fetch_greptile_status` errors out. That path also
-        # yields `has_review: False`, so gating on `shared_review_data` alone
-        # would let a transient comment-API failure open the AI fallback.
-        if shared_review_data is None or greptile.get("unknown"):
-            result.reasons.append(
-                "Could not verify Greptile review state; refusing AI-review fallback"
-            )
-        else:
-            ai_review = fetch_ai_review_status(
-                repo,
-                number,
-                head_sha=result.head_sha,
-                expected_author=current_user,
-                marker_result=shared_marker,
-                review_data=shared_review_data,
-            )
-            if ai_review["accepted"]:
-                result.warnings.append(
-                    f"Greptile review not found; satisfied by self-hosted "
-                    f"AI review ({ai_review['detail']})"
-                )
-            else:
-                reason = "Greptile review not found"
-                if ai_review["detail"]:
-                    reason += f"; {ai_review['detail']}"
-                result.reasons.append(reason)
-    elif greptile["unresolved"] > 0:
-        result.reasons.append(
-            f"Greptile has {greptile['unresolved']} unresolved review thread(s)"
+    if greptile.get("unknown"):
+        result.warnings.append(
+            "Greptile review state could not be determined (API failure) [advisory]"
         )
-
-    # Score floor (defense in depth): require the Greptile summary score >= floor
-    # (default 5/5, override via SELF_MERGE_MIN_GREPTILE_SCORE). Without this, resolving
-    # threads alone could let a low-score PR self-merge — the alice#61 (4/5) and #63 (3/5)
-    # incidents where buggy control-path code shipped. Reuses the shared greptile-merge-signal
-    # evaluator (upstreamed from Bob). Parse failure (score None) does NOT block — the
-    # thread/category gates still apply; this only catches a clear sub-floor score.
-    if greptile["has_review"]:
-        min_score = _parse_self_merge_min_greptile_score()
+    elif greptile["has_review"]:
         score = greptile_summary_score(repo, number)
-        if score is not None and score < min_score:
-            result.reasons.append(f"Greptile score {score}/5 below floor {min_score}/5")
-        elif score is not None and result.head_sha:
-            # Provenance gate (gptme/gptme#3656 class): Greptile edits its
-            # summary in place, so the "latest summary" score can belong to an
-            # older head. A clearing score only counts when the summary's
-            # "Last reviewed commit" footer names the current head. Fails open
-            # when provenance is absent (None) — older summary formats carry no
-            # footer, and the thread/category gates still apply.
-            reviewed = greptile_summary_reviewed_commit(repo, number)
-            if reviewed and not _sha_matches_head(reviewed, result.head_sha):
-                result.reasons.append(
-                    f"Greptile score {score}/5 is stale (summary reviewed "
-                    f"{reviewed[:12]}, head is {result.head_sha[:12]}) — "
-                    "re-review of head required"
-                )
+        score_str = f"{score}/5" if score is not None else "n/a"
+        greptile_note = f"Greptile reviewed (score {score_str})"
+        if greptile["unresolved"] > 0:
+            greptile_note += f"; {greptile['unresolved']} unresolved thread(s)"
+        result.warnings.append(f"{greptile_note} [advisory — not a gate]")
+    else:
+        result.warnings.append("Greptile review not found [advisory — not required]")
 
-    # An explicit abstention blocks in its own right. If the structured review
-    # state cannot be read, fail closed rather than silently removing the gate.
-    ai_abstention = ai_review_abstained(
+    # --- AI review (required: own reviewer + consensus gate are the signal) ---
+    # `fetch_ai_review_status` covers abstention (score: null → not accepted)
+    # and API failure (marker lookup failed → not accepted), so the old
+    # separate `ai_review_abstained` check is no longer needed here.
+    ai_review = fetch_ai_review_status(
         repo,
         number,
-        expected_author=current_user,
         head_sha=result.head_sha,
+        expected_author=current_user,
         marker_result=shared_marker,
+        review_data=shared_review_data,
     )
-    if ai_abstention is True:
-        result.reasons.append("AI review abstained — not reviewed")
-    elif ai_abstention is None and not greptile["has_review"]:
-        # Indeterminate blocks only when our own reviewer is the sole evidence.
-        #
-        # Failing closed unconditionally would let one flaky call on the
-        # issue-comments endpoint disqualify EVERY self-merge, including PRs
-        # Greptile reviewed cleanly with all threads resolved -- trading the
-        # deadlock this gate family just escaped for a wider one.
-        #
-        # When Greptile has reviewed, that is independent review evidence and
-        # this check is defence in depth, so its unavailability must not veto.
-        # When Greptile has NOT reviewed, the PR is leaning on our own reviewer,
-        # and an unreadable verdict is exactly the "nobody actually reviewed
-        # this" case (gptme-cloud#850) -- so it still fails closed there.
-        result.reasons.append("AI review status unavailable")
+    if not _ai_review_enabled():
+        result.warnings.append(
+            "AI review disabled (SELF_MERGE_ACCEPT_AI_REVIEW=0); "
+            "no machine review required"
+        )
+    elif ai_review["accepted"]:
+        result.warnings.append(f"AI review accepted ({ai_review['detail']})")
+    else:
+        reason = "AI review required"
+        if ai_review["detail"]:
+            reason += f": {ai_review['detail']}"
+        result.reasons.append(reason)
 
     human_threads = fetch_unresolved_human_threads(
         repo, number, review_data=shared_review_data
