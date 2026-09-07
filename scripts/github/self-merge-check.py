@@ -118,6 +118,12 @@ from functools import cache
 from pathlib import Path
 from typing import Any, Iterator, cast
 
+_CONTRIB_LIB_SRC = (
+    Path(__file__).resolve().parents[2] / "packages" / "gptme-contrib-lib" / "src"
+)
+sys.path.insert(0, str(_CONTRIB_LIB_SRC))
+from gptme_contrib_lib.ai_review_policy import blocking_shortfall  # type: ignore[import-not-found]  # noqa: E402,I001
+
 MAX_GRAPHQL_PAGE_SIZE = 100
 DEFAULT_MIN_GREPTILE_SCORE = 5
 
@@ -1196,6 +1202,7 @@ def _ai_review_disposition_shortfall(
     _, threads = review_data
     disposed: dict[str, int] = {"P0": 0, "P1": 0}
     disposed_fps: set[tuple[str, str]] = set()
+    policy_rows: list[dict[str, object]] = []
     for thread in threads:
         comments = thread.get("comments") or {}
         nodes = comments.get("nodes") or []
@@ -1229,18 +1236,21 @@ def _ai_review_disposition_shortfall(
         severity = m.group(1) if m else None
         if severity is not None and severity not in AI_REVIEW_BLOCKING_SEVERITIES:
             continue  # surviving P2s never block
-        label = (
-            f"{severity} finding" if severity else "finding with unreadable severity"
-        )
         fp = _ai_review_fp_from_body(body)
-        if not thread.get("isResolved"):
-            return f"{label} is not resolved"
         total = comments.get("totalCount")
         replied = isinstance(total, int) and total >= 2
-        if not replied:
-            if fp and fp in auto_resolved:
-                continue  # reviewer-retired because the fix stopped it reproducing
-            return f"{label} resolved without a reply (not disposed)"
+        policy_rows.append(
+            {
+                "fp": fp or "",
+                "severity": severity,
+                "isResolved": bool(thread.get("isResolved")),
+                "replied": replied,
+                "superseded": bool(fp and fp in auto_resolved),
+                "disposition": None,
+            }
+        )
+        if fp and fp in auto_resolved:
+            continue  # reviewer-retired because the fix stopped it reproducing
         # Counted only here — after the thread proved disposed — and only for a
         # severity we could actually read. Two exclusions, both fail-closed:
         #   * `auto_resolved` is the reviewer's own record that this finding
@@ -1261,6 +1271,10 @@ def _ai_review_disposition_shortfall(
                 # the re-raised P0 could not be anchored, i.e. when the recall
                 # guard is the only thing left checking.
                 disposed_fps.add((fp, severity))
+
+    shortfalls = blocking_shortfall(policy_rows)
+    if shortfalls:
+        return str(shortfalls[0]["reason"])
 
     def _blocking_findings(
         marker_findings: list[Any],
