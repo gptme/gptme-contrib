@@ -171,6 +171,12 @@ def load_run_item_config(
         if value is not None and key in valid_fields:
             kwargs[key] = value
 
+    # If default_timeout was overridden after the canary function set default_time_desc,
+    # recompute the description so they stay consistent.
+    if overrides.get("default_timeout") is not None and "default_time_desc" in kwargs:
+        t = int(kwargs["default_timeout"])
+        kwargs["default_time_desc"] = f"~{max(1, t // 60)} minutes"
+
     return RunItemConfig(workspace=workspace, **kwargs), raw
 
 

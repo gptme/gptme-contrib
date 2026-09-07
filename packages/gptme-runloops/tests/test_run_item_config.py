@@ -105,6 +105,7 @@ def test_cli_override_wins_over_gptme_canary_timeout(tmp_path, monkeypatch) -> N
     monkeypatch.setenv("PM_GPTME_CANARY", "1")
     config, _ = load_run_item_config(tmp_path, default_timeout=900)
     assert config.default_timeout == 900
+    assert config.default_time_desc == "~15 minutes"  # recomputed from final timeout
 
 
 def test_cli_overrides_win_over_everything(tmp_path) -> None:
