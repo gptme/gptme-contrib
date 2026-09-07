@@ -6,15 +6,12 @@ import importlib.util
 import sys
 from pathlib import Path
 
-_CONTRIB_LIB_SRC = (
-    Path(__file__).resolve().parents[1] / "packages" / "gptme-contrib-lib" / "src"
-)
+REPO_ROOT = Path(__file__).resolve().parents[3]
+_CONTRIB_LIB_SRC = REPO_ROOT / "packages" / "gptme-contrib-lib" / "src"
 sys.path.insert(0, str(_CONTRIB_LIB_SRC))
 from gptme_contrib_lib.ai_review_policy import blocking_shortfall  # type: ignore[import-not-found]  # noqa: E402,I001
 
-MODULE_PATH = (
-    Path(__file__).resolve().parents[1] / "scripts" / "github" / "self-merge-check.py"
-)
+MODULE_PATH = REPO_ROOT / "scripts" / "github" / "self-merge-check.py"
 spec = importlib.util.spec_from_file_location(
     "self_merge_check_shared_policy", MODULE_PATH
 )
