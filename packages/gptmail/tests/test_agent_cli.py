@@ -1092,3 +1092,222 @@ def test_ssh_control_path_different_targets_differ() -> None:
     p1 = agent_cli._ssh_control_path("alice@alice.lxc")
     p2 = agent_cli._ssh_control_path("bob@bob.lxc")
     assert p1 != p2
+
+
+# ---------------------------------------------------------------------------
+# watch command tests
+# ---------------------------------------------------------------------------
+
+
+def _make_row(filename: str, subject: str, sender: str = "bob", recipient: str = "erik") -> dict:
+    return {
+        "file": filename,
+        "subject": subject,
+        "from": sender,
+        "to": recipient,
+        "timestamp": "2026-09-07T12:00:00Z",
+    }
+
+
+def test_watch_detects_new_message_once(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """watch --once emits a formatted line when a new outbox message appears."""
+    calls: list[int] = [0]
+
+    def _fake_remote_rows(
+        agent_name: str,
+        agent_cfg: dict,
+        *,
+        recipient: str,
+        mailboxes: list,
+        all_mailboxes: bool,
+    ) -> list[dict]:
+        calls[0] += 1
+        if calls[0] == 1:
+            return []  # baseline: empty
+        # First poll: one new message
+        return [_make_row("20260907-120000-bob-Hello.md", "Hello from bob")]
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _fake_remote_rows)
+    monkeypatch.setattr(agent_cli.time, "sleep", lambda _: None)
+
+    result = CliRunner().invoke(agent, ["watch", "--to", "erik", "--once"])
+    assert result.exit_code == 0, result.output
+    assert "NEW reply from bob" in result.output
+    assert "Hello from bob" in result.output
+    assert "20260907-120000-bob-Hello.md" in result.output
+    assert "(0 -> 1)" in result.output
+
+
+def test_watch_emits_count_transition_for_multiple_new_messages(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """watch shows old→new count when multiple messages appear at once."""
+    calls: list[int] = [0]
+
+    def _fake_remote_rows(
+        agent_name: str,
+        agent_cfg: dict,
+        *,
+        recipient: str,
+        mailboxes: list,
+        all_mailboxes: bool,
+    ) -> list[dict]:
+        calls[0] += 1
+        if calls[0] == 1:
+            return [_make_row("20260907-110000-bob-Earlier.md", "Earlier")]
+        return [
+            _make_row("20260907-110000-bob-Earlier.md", "Earlier"),
+            _make_row("20260907-120000-bob-Later.md", "Later"),
+        ]
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _fake_remote_rows)
+    monkeypatch.setattr(agent_cli.time, "sleep", lambda _: None)
+
+    result = CliRunner().invoke(agent, ["watch", "--to", "erik", "--once"])
+    assert result.exit_code == 0, result.output
+    assert "Later" in result.output
+    assert "Earlier" not in result.output  # not new
+    assert "(1 -> 2)" in result.output
+
+
+def test_watch_baseline_failure_then_success_no_spurious_event(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If baseline fails, first successful poll establishes baseline (no event)."""
+    calls: list[int] = [0]
+    stop: list[bool] = [False]
+
+    def _fake_remote_rows(
+        agent_name: str,
+        agent_cfg: dict,
+        *,
+        recipient: str,
+        mailboxes: list,
+        all_mailboxes: bool,
+    ) -> list[dict] | None:
+        calls[0] += 1
+        if calls[0] == 1:
+            return None  # baseline probe fails
+        if calls[0] == 2:
+            stop[0] = True
+            return [_make_row("20260907-existing.md", "Existing")]
+        return []
+
+    def _fake_sleep(_: int) -> None:
+        if stop[0]:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _fake_remote_rows)
+    monkeypatch.setattr(agent_cli.time, "sleep", _fake_sleep)
+
+    result = CliRunner().invoke(agent, ["watch", "--to", "erik"])
+    assert result.exit_code == 0, result.output
+    # The existing message on first successful probe must NOT generate an event.
+    assert "NEW reply" not in result.output
+    assert "Watch stopped." in result.output
+
+
+def test_watch_skips_pull_only_agents(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Agents with delivery=pull-only are excluded from the watch set."""
+    # Add a pull-only agent to the registry.
+    config_path = workspace / "messages" / "agents.yaml"
+    registry = yaml.safe_load(config_path.read_text())
+    registry["gordon"] = {"delivery": "pull-only"}
+    config_path.write_text(yaml.dump(registry))
+
+    probed: list[str] = []
+
+    def _fake_remote_rows(
+        agent_name: str,
+        agent_cfg: dict,
+        *,
+        recipient: str,
+        mailboxes: list,
+        all_mailboxes: bool,
+    ) -> list[dict]:
+        probed.append(agent_name)
+        return []
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _fake_remote_rows)
+    monkeypatch.setattr(
+        agent_cli.time, "sleep", lambda _: (_ for _ in ()).throw(KeyboardInterrupt())
+    )
+
+    result = CliRunner().invoke(agent, ["watch", "--to", "erik"])
+    assert result.exit_code == 0, result.output
+    assert "gordon" not in probed
+    assert "bob" in probed
+
+
+def test_watch_from_filter_restricts_agents(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--from limits watch to the named agents only."""
+    # Add gordon to the registry alongside bob.
+    config_path = workspace / "messages" / "agents.yaml"
+    registry = yaml.safe_load(config_path.read_text())
+    registry["gordon"] = {"ssh": "gordon@gordon", "workspace": "/gordon"}
+    config_path.write_text(yaml.dump(registry))
+
+    probed: list[str] = []
+
+    def _fake_remote_rows(
+        agent_name: str,
+        agent_cfg: dict,
+        *,
+        recipient: str,
+        mailboxes: list,
+        all_mailboxes: bool,
+    ) -> list[dict]:
+        probed.append(agent_name)
+        return []
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _fake_remote_rows)
+    monkeypatch.setattr(
+        agent_cli.time, "sleep", lambda _: (_ for _ in ()).throw(KeyboardInterrupt())
+    )
+
+    result = CliRunner().invoke(agent, ["watch", "--to", "erik", "--from", "bob"])
+    assert result.exit_code == 0, result.output
+    assert "bob" in probed
+    assert "gordon" not in probed
+
+
+def test_watch_warns_unknown_from_agent(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--from with an unknown agent name emits a warning and continues with known ones."""
+    probed: list[str] = []
+
+    def _fake_remote_rows(
+        agent_name: str,
+        agent_cfg: dict,
+        *,
+        recipient: str,
+        mailboxes: list,
+        all_mailboxes: bool,
+    ) -> list[dict]:
+        probed.append(agent_name)
+        return []
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _fake_remote_rows)
+    monkeypatch.setattr(
+        agent_cli.time, "sleep", lambda _: (_ for _ in ()).throw(KeyboardInterrupt())
+    )
+
+    result = CliRunner().invoke(agent, ["watch", "--to", "erik", "--from", "bob,nobody"])
+    assert result.exit_code == 0, result.output
+    assert "unknown agent 'nobody'" in result.output
+    assert "bob" in probed
+
+
+def test_watch_no_ssh_agents_exits_nonzero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """watch exits non-zero when there are no SSH-reachable agents to watch."""
+    messages = tmp_path / "messages"
+    (messages / "inbox").mkdir(parents=True)
+    (messages / "outbox").mkdir(parents=True)
+    (messages / "agents.yaml").write_text(yaml.dump({"erik": {"delivery": "pull-only"}}))
+    monkeypatch.setenv("AGENT_NAME", "alice")
+    monkeypatch.setattr(agent_cli, "_repo_root", lambda: tmp_path)
+
+    result = CliRunner().invoke(agent, ["watch", "--to", "erik"])
+    assert result.exit_code != 0
+    assert "No SSH-reachable agents" in result.output

@@ -41,6 +41,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1299,6 +1300,156 @@ def status(mailbox: str, all_mailboxes: bool) -> None:
     click.echo(f"Pending:  {len(pend)}")
     if stale:
         click.echo(f"Stale:    {len(stale)} (unreplied, aged out of reply window)")
+
+
+@agent.command()
+@click.option(
+    "--to",
+    "to_recipient",
+    default=None,
+    help="Watch for messages addressed to this recipient (default: self).",
+)
+@click.option(
+    "--from",
+    "from_agents",
+    default=None,
+    help="Comma-separated list of agents to watch (default: all SSH-reachable agents).",
+)
+@click.option(
+    "--interval",
+    default=45,
+    show_default=True,
+    type=int,
+    help="Poll interval in seconds.",
+)
+@click.option("--once", is_flag=True, help="Exit after the first new message.")
+@click.option(
+    "--pull",
+    "do_pull",
+    is_flag=True,
+    help="Invoke 'gptmail agent pull' after each hit to fetch the message locally.",
+)
+@click.option("--mailbox", default="default", show_default=True, help="Mailbox to watch.")
+@click.option("--all-mailboxes", is_flag=True, help="Watch across all mailboxes.")
+def watch(
+    to_recipient: str | None,
+    from_agents: str | None,
+    interval: int,
+    once: bool,
+    do_pull: bool,
+    mailbox: str,
+    all_mailboxes: bool,
+) -> None:
+    """Watch agents' outboxes for new messages (streaming reply monitor).
+
+    Baselines each watched agent's outbox count of messages addressed to --to,
+    then polls via SSH every --interval seconds. Emits one line per new message
+    so it composes with Claude Code's Monitor tool, launchd/systemd units, or a
+    plain terminal.
+
+    \b
+    Example — watch all agents for new messages to you (the default):
+        gptmail agent watch
+    Example — watch a subset of agents, exit on first reply:
+        gptmail agent watch --from peer1,peer2 --once
+    """
+    agents = _load_agents()
+    recipient = (to_recipient or _self_name()).lower()
+
+    # Build the set of agents to watch.
+    if from_agents:
+        names = [a.strip().lower() for a in from_agents.split(",") if a.strip()]
+        unknown = [n for n in names if n not in agents]
+        for u in unknown:
+            click.echo(f"Warning: unknown agent '{u}' in --from, skipping.", err=True)
+        watch_agents = {n: agents[n] for n in names if n in agents}
+    else:
+        watch_agents = {k: v for k, v in agents.items() if k != recipient}
+
+    # Exclude pull-only or incompletely configured agents (no SSH).
+    skipped = [
+        name
+        for name, cfg in watch_agents.items()
+        if cfg.get("delivery") == "pull-only" or not all(cfg.get(k) for k in ("ssh", "workspace"))
+    ]
+    ssh_agents = {k: v for k, v in watch_agents.items() if k not in skipped}
+    if skipped:
+        click.echo(f"Note: skipping non-SSH agents: {', '.join(skipped)}", err=True)
+
+    if not ssh_agents:
+        click.echo("No SSH-reachable agents to watch.", err=True)
+        sys.exit(1)
+
+    mailboxes = _selected_mailboxes(mailbox, all_mailboxes)
+
+    click.echo(
+        f"Watching {len(ssh_agents)} agent(s) for messages to {recipient} "
+        f"(interval: {interval}s)...",
+        err=True,
+    )
+
+    # Baseline: None = not yet successfully probed; set[str] = known filenames.
+    baselines: dict[str, set[str] | None] = {}
+    for agent_name, agent_cfg in ssh_agents.items():
+        rows = _remote_pending_rows(
+            agent_name,
+            agent_cfg,
+            recipient=recipient,
+            mailboxes=mailboxes,
+            all_mailboxes=all_mailboxes,
+        )
+        if rows is None:
+            click.echo(f"Warning: {agent_name} unreachable at baseline; will retry.", err=True)
+            baselines[agent_name] = None
+        else:
+            baselines[agent_name] = {str(row.get("file", "")) for row in rows if row.get("file")}
+
+    try:
+        while True:
+            time.sleep(interval)
+            for agent_name, agent_cfg in ssh_agents.items():
+                rows = _remote_pending_rows(
+                    agent_name,
+                    agent_cfg,
+                    recipient=recipient,
+                    mailboxes=mailboxes,
+                    all_mailboxes=all_mailboxes,
+                )
+                if rows is None:
+                    continue  # unreachable — skip and retry next poll
+                current = {str(row.get("file", "")) for row in rows if row.get("file")}
+                known = baselines.get(agent_name)
+                if known is None:
+                    # First successful probe after a failed baseline: set baseline, no event.
+                    baselines[agent_name] = current
+                    continue
+                new_rows = [row for row in rows if str(row.get("file", "")) not in known]
+                if not new_rows:
+                    continue
+                now_str = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
+                old_count = len(known)
+                new_count = len(current)
+                for row in new_rows:
+                    subject = str(row.get("subject", "(no subject)"))
+                    filename = str(row.get("file", ""))
+                    click.echo(
+                        f"{now_str} NEW reply from {agent_name} "
+                        f"({old_count} -> {new_count}): {subject} ({filename})"
+                    )
+                baselines[agent_name] = current
+                if do_pull:
+                    try:
+                        subprocess.run(
+                            [sys.executable, "-m", "gptmail", "agent", "pull", "--as", recipient],
+                            check=False,
+                            timeout=60,
+                        )
+                    except (OSError, subprocess.TimeoutExpired) as e:
+                        click.echo(f"Warning: --pull failed: {e}", err=True)
+                if once:
+                    return
+    except KeyboardInterrupt:
+        click.echo("\nWatch stopped.", err=True)
 
 
 if __name__ == "__main__":
