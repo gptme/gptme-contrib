@@ -24,6 +24,7 @@ from gptme_sessions.discovery import (
     extract_cc_model,
     extract_project,
     extract_session_name,
+    find_cc_session_file,
     parse_gptme_config,
     resolve_cc_session_model,
     session_datetime_from_path,
@@ -1674,3 +1675,129 @@ def test_discover_pi_sessions_file_uri_session_dir_env(
     result = discover_pi_sessions(date(2026, 3, 5), date(2026, 3, 5))
 
     assert result == [session.resolve()]
+
+
+# --- archive roots (rotated-out sessions) ---
+
+
+def _cc_session(root: Path, project: str, sid: str, day: str = "2026-03-05") -> Path:
+    project_dir = root / project
+    project_dir.mkdir(parents=True, exist_ok=True)
+    path = project_dir / f"{sid}.jsonl"
+    path.write_text(
+        json.dumps({"sessionId": sid, "timestamp": f"{day}T10:00:00Z", "type": "user"})
+        + "\n"
+        + json.dumps(
+            {
+                "sessionId": sid,
+                "timestamp": f"{day}T10:00:01Z",
+                "type": "assistant",
+                "message": {"role": "assistant", "model": "claude-archived-1"},
+            }
+        )
+        + "\n"
+    )
+    return path
+
+
+def test_discover_cc_sessions_extra_dirs_param_and_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live = tmp_path / "projects"
+    archive = tmp_path / "archive"
+    live_file = _cc_session(live, "-home-u-repo", "aaaa-live")
+    archived_file = _cc_session(archive, "-home-u-repo", "bbbb-archived")
+    # Same session id in both roots, under different project slugs: the live
+    # copy wins and is reported once because session ids are globally unique.
+    _cc_session(archive, "-home-u-renamed-repo", "aaaa-live", day="2026-03-05")
+
+    result = discover_cc_sessions(
+        date(2026, 3, 5), date(2026, 3, 5), cc_dir=live, min_size=0, extra_dirs=[archive]
+    )
+    assert result == sorted([live_file, archived_file])
+
+    # env-driven default
+    monkeypatch.setenv("GPTME_CC_EXTRA_PROJECTS_DIRS", str(archive))
+    result_env = discover_cc_sessions(date(2026, 3, 5), date(2026, 3, 5), cc_dir=live, min_size=0)
+    assert result_env == result
+
+    # explicit empty list disables the env default
+    assert discover_cc_sessions(
+        date(2026, 3, 5), date(2026, 3, 5), cc_dir=live, min_size=0, extra_dirs=[]
+    ) == [live_file]
+
+
+def test_find_cc_session_file_prefers_live_then_archive(tmp_path: Path) -> None:
+    live = tmp_path / "projects"
+    archive = tmp_path / "archive"
+    (live / "-home-u-repo").mkdir(parents=True)
+    archived = _cc_session(archive, "-home-u-repo", "cccc")
+    assert find_cc_session_file("cccc", cc_dir=live, extra_dirs=[archive]) == archived
+    assert (
+        find_cc_session_file("cccc", cc_dir=live, extra_dirs=[archive], project="-home-u-repo")
+        == archived
+    )
+    assert find_cc_session_file("cccc", cc_dir=live, extra_dirs=[archive], project="-other") is None
+    revived = _cc_session(live, "-home-u-repo", "cccc")
+    assert find_cc_session_file("cccc", cc_dir=live, extra_dirs=[archive]) == revived
+    assert find_cc_session_file("", cc_dir=live, extra_dirs=[archive]) is None
+    assert find_cc_session_file("zzzz", cc_dir=live, extra_dirs=[archive]) is None
+    assert find_cc_session_file("../cccc", cc_dir=live, extra_dirs=[archive]) is None
+    assert (
+        find_cc_session_file("cccc", cc_dir=live, extra_dirs=[archive], project="../archive")
+        is None
+    )
+
+
+def test_discover_cc_sessions_out_of_range_live_copy_does_not_hide_archive(
+    tmp_path: Path,
+) -> None:
+    live = tmp_path / "projects"
+    archive = tmp_path / "archive"
+    _cc_session(live, "-home-u-repo", "cccc-resumed", day="2026-03-06")
+    archived = _cc_session(archive, "-home-u-repo", "cccc-resumed", day="2026-03-05")
+
+    assert discover_cc_sessions(
+        date(2026, 3, 5),
+        date(2026, 3, 5),
+        cc_dir=live,
+        min_size=0,
+        extra_dirs=[archive],
+    ) == [archived]
+
+
+def test_discover_cc_sessions_skips_misconfigured_extra_root(tmp_path: Path) -> None:
+    live = tmp_path / "projects"
+    live_file = _cc_session(live, "-home-u-repo", "dddd-live")
+    not_a_directory = tmp_path / "archive.jsonl"
+    not_a_directory.write_text("not a directory", encoding="utf-8")
+
+    assert discover_cc_sessions(
+        date(2026, 3, 5),
+        date(2026, 3, 5),
+        cc_dir=live,
+        min_size=0,
+        extra_dirs=[not_a_directory],
+    ) == [live_file]
+
+
+def test_resolve_cc_session_model_falls_back_to_archive_root(tmp_path: Path) -> None:
+    live = tmp_path / "projects" / "-home-u-repo"
+    live.mkdir(parents=True)
+    (live / "dddd.jsonl").write_text(
+        json.dumps({"sessionId": "dddd", "timestamp": "2026-03-05T10:00:00Z", "type": "user"})
+        + "\n",
+        encoding="utf-8",
+    )
+    _cc_session(tmp_path / "archive", "-home-u-renamed-repo", "dddd")
+    empty_tmp = tmp_path / "tmp"
+    empty_tmp.mkdir()
+    assert (
+        resolve_cc_session_model(
+            "dddd", project_dir=live, tmp_dir=empty_tmp, extra_dirs=[tmp_path / "archive"]
+        )
+        == "claude-archived-1"
+    )
+    assert (
+        resolve_cc_session_model("dddd", project_dir=live, tmp_dir=empty_tmp, extra_dirs=[]) is None
+    )
