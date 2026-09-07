@@ -8,9 +8,13 @@ Policy summary:
 - CI must be green (or skipped)
 - A machine review must be present and clean: own self-hosted AI reviewer with
   consensus pass and zero open P1 findings (see "Accepting our own review" below).
-  Greptile review is fetched and shown but is advisory only — never a blocker.
-  (Erik decision 2026-09-07: Greptile pricing dispute + credit outages make it
-  unreliable as a hard gate; ErikBjare/bob#self-merge-gate-greptile-floor-while-credits-exhausted)
+  Greptile review uses a 3-branch staleness policy (Erik decision 2026-09-07):
+    1. Fresh Greptile on current head → 5/5 floor applies (original gate).
+    2. Stale or dark Greptile AND fresh own-AI-review → AI reviewer verdict is the gate.
+    3. Neither fresh → PR is not eligible (fail-closed, not fail-open).
+  (Rationale: Greptile is a fine gate on public OSS repos when it responds and
+  covers the current head; pricing dispute + credit outages make it an unreliable
+  hard gate when stale. Reference: ErikBjare/bob#self-merge-gate-greptile-floor-while-credits-exhausted)
 - PR must be authored by the authenticated user
 - Changed files must fall into a low-risk category (tests, docs, lessons, skills,
   internal tooling, task metadata)
@@ -2645,26 +2649,54 @@ def evaluate_pr(
         repo, number, expected_author=current_user
     )
 
-    # --- Greptile review (advisory: fetched and reported, never a blocker) ---
-    # Erik decision 2026-09-07: Greptile is now advisory only — its score and
-    # findings are fetched and shown, but never a refusal reason. Reason:
-    # pricing dispute and credit outages make it unreliable as a hard gate.
-    # Required signals: own AI reviewer (consensus pass, zero open P1s) and
-    # the sensitive-paths human-merge rule.
+    # --- Greptile review: 3-branch staleness policy (Erik, 2026-09-07) ---
+    # 1. Fresh Greptile on current head → 5/5 floor applies (original gate).
+    # 2. Stale or dark Greptile AND fresh own-AI-review → AI reviewer verdict is the gate.
+    # 3. Neither fresh → AI review required reason blocks (fail-closed, not fail-open).
     greptile = fetch_greptile_status(repo, number, review_data=shared_review_data)
+    greptile_reviewed_sha: str | None = (
+        greptile_summary_reviewed_commit(repo, number)
+        if greptile.get("has_review")
+        else None
+    )
+    greptile_is_fresh: bool = (
+        bool(greptile.get("has_review"))
+        and greptile_reviewed_sha is not None
+        and _sha_matches_head(greptile_reviewed_sha, result.head_sha or "")
+    )
     if greptile.get("unknown"):
+        # API failure: treat as stale/dark; AI review is the gate
         result.warnings.append(
-            "Greptile review state could not be determined (API failure) [advisory]"
+            "Greptile review state could not be determined (API failure) — AI review is the gate"
         )
-    elif greptile["has_review"]:
+    elif greptile_is_fresh:
+        # Branch 1: Greptile covers the current head → its 5/5 floor applies
         score = greptile_summary_score(repo, number)
         score_str = f"{score}/5" if score is not None else "n/a"
-        greptile_note = f"Greptile reviewed (score {score_str})"
+        min_score = _parse_self_merge_min_greptile_score()
         if greptile["unresolved"] > 0:
-            greptile_note += f"; {greptile['unresolved']} unresolved thread(s)"
-        result.warnings.append(f"{greptile_note} [advisory — not a gate]")
+            result.reasons.append(
+                f"Greptile reviewed (score {score_str}); {greptile['unresolved']} unresolved thread(s)"
+            )
+        elif score is not None and score < min_score:
+            result.reasons.append(f"Greptile score {score}/5 below floor {min_score}/5")
+        else:
+            result.warnings.append(
+                f"Greptile reviewed (score {score_str}) at current head — floor satisfied"
+            )
     else:
-        result.warnings.append("Greptile review not found [advisory — not required]")
+        # Branch 2/3: Greptile stale or dark → AI review is the gate (see block below)
+        if greptile.get("has_review"):
+            reviewed_at = (greptile_reviewed_sha or "unknown")[:12]
+            head_at = (result.head_sha or "")[:12]
+            result.warnings.append(
+                f"Greptile review stale (reviewed at {reviewed_at}, head is {head_at})"
+                " — AI review is the gate"
+            )
+        else:
+            result.warnings.append(
+                "Greptile review not found (credit-exhausted or dark) — AI review is the gate"
+            )
 
     # --- AI review (required: own reviewer + consensus gate are the signal) ---
     # `fetch_ai_review_status` covers abstention (score: null → not accepted)

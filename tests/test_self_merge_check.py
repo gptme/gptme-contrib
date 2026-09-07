@@ -1142,10 +1142,10 @@ def test_greptile_summary_score_ignores_signal_disable_env() -> None:
     assert "GREPTILE_MERGE_SIGNAL_DISABLED" not in mock_run.call_args.kwargs["env"]
 
 
-def test_greptile_score_below_old_floor_is_now_advisory() -> None:
-    """Greptile is advisory (Erik decision 2026-09-07): a score of 4/5 must
-    appear as a warning, not a reason, and must not block an otherwise eligible PR.
-    AI review accepted → eligible; no "Greptile score ... below floor" in reasons."""
+def test_greptile_stale_score_gated_by_ai_review() -> None:
+    """Stale Greptile (score 4/5, reviewed at old head) must not block an otherwise
+    eligible PR. AI review accepted → eligible; Greptile floor bypassed because its
+    review does not cover the current head (branch 2 of the 3-branch staleness policy)."""
     pr_data = {
         "author": {"login": "TimeToBuildBob"},
         "title": "Test PR",
@@ -1175,6 +1175,12 @@ def test_greptile_score_below_old_floor_is_now_advisory() -> None:
             return_value={"has_review": True, "unresolved": 0, "total": 1},
         ),
         patch.object(self_merge_check, "greptile_summary_score", return_value=4),
+        # Stale: reviewed at a different (old) head → not fresh
+        patch.object(
+            self_merge_check,
+            "greptile_summary_reviewed_commit",
+            return_value="deadbeef1234",
+        ),
         patch.object(
             self_merge_check,
             "fetch_unresolved_human_threads",
@@ -1195,19 +1201,19 @@ def test_greptile_score_below_old_floor_is_now_advisory() -> None:
             workspace_repos=["gptme/gptme-contrib"],
         )
 
-    # Greptile 4/5 is now advisory — must not block
+    # Stale Greptile → AI review is the gate → AI review accepted → eligible
     assert result.eligible, f"Expected eligible but got reasons: {result.reasons}"
     assert not any("floor" in r for r in result.reasons), result.reasons
     assert not any("Greptile score" in r for r in result.reasons), result.reasons
-    # Greptile info should appear in warnings
+    # Greptile stale info should appear in warnings (not as a reason)
     assert any(
-        "Greptile reviewed" in w and "advisory" in w for w in result.warnings
+        "stale" in w and "AI review is the gate" in w for w in result.warnings
     ), result.warnings
 
 
-def test_greptile_score_below_old_floor_blocked_by_ai_review_not_greptile() -> None:
-    """When Greptile is 4/5 and AI review has not run, the block reason must be
-    'AI review required', not 'Greptile score below floor'."""
+def test_greptile_stale_score_blocked_by_ai_review_not_greptile() -> None:
+    """When Greptile is 4/5 (stale) and AI review has not run, the block reason must be
+    'AI review required', not 'Greptile score below floor' (branch 3: neither fresh)."""
     pr_data = {
         "author": {"login": "TimeToBuildBob"},
         "title": "Test PR",
@@ -1237,6 +1243,12 @@ def test_greptile_score_below_old_floor_blocked_by_ai_review_not_greptile() -> N
             return_value={"has_review": True, "unresolved": 0, "total": 1},
         ),
         patch.object(self_merge_check, "greptile_summary_score", return_value=4),
+        # Stale: reviewed at a different head → not fresh
+        patch.object(
+            self_merge_check,
+            "greptile_summary_reviewed_commit",
+            return_value="deadbeef1234",
+        ),
         patch.object(
             self_merge_check,
             "fetch_unresolved_human_threads",
@@ -1260,6 +1272,134 @@ def test_greptile_score_below_old_floor_blocked_by_ai_review_not_greptile() -> N
     assert not result.eligible
     assert any("AI review required" in r for r in result.reasons), result.reasons
     assert not any("floor" in r for r in result.reasons), result.reasons
+
+
+def test_greptile_fresh_score_below_floor_blocks() -> None:
+    """When Greptile reviews the current head (fresh) with score 4/5, the 5/5 floor
+    applies and the PR must be blocked (branch 1 of the 3-branch staleness policy)."""
+    pr_data = {
+        "author": {"login": "TimeToBuildBob"},
+        "title": "Test PR",
+        "url": "https://github.com/gptme/gptme-contrib/pull/999",
+        "number": 999,
+        "headRefOid": "abc1234",
+        "files": [{"path": "tests/test_example.py"}],
+        "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+        "isDraft": False,
+        "state": "OPEN",
+        "reviewDecision": None,
+        "labels": [],
+        "isCrossRepository": False,
+        "baseRefName": "master",
+        "mergeStateStatus": "CLEAN",
+    }
+
+    with (
+        patch.object(
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
+        ),
+        patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
+        patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
+        patch.object(
+            self_merge_check,
+            "fetch_greptile_status",
+            return_value={"has_review": True, "unresolved": 0, "total": 1},
+        ),
+        patch.object(self_merge_check, "greptile_summary_score", return_value=4),
+        # Fresh: reviewed at the current head
+        patch.object(
+            self_merge_check,
+            "greptile_summary_reviewed_commit",
+            return_value="abc1234",
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_unresolved_human_threads",
+            return_value={"unresolved": 0, "authors": []},
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_ai_review_status",
+            return_value={
+                "accepted": True,
+                "detail": "AI review 5/5 at current head abc1234, findings disposed",
+            },
+        ),
+    ):
+        result = self_merge_check.evaluate_pr(
+            "gptme/gptme-contrib",
+            999,
+            workspace_repos=["gptme/gptme-contrib"],
+        )
+
+    # Fresh Greptile 4/5 < floor 5/5 → blocked even if AI review accepted
+    assert (
+        not result.eligible
+    ), f"Expected blocked but got eligible. Warnings: {result.warnings}"
+    assert any(
+        "Greptile score" in r and "below floor" in r for r in result.reasons
+    ), result.reasons
+
+
+def test_greptile_fresh_score_at_floor_eligible() -> None:
+    """Fresh Greptile 5/5 satisfies the floor; PR is eligible (branch 1, floor met)."""
+    pr_data = {
+        "author": {"login": "TimeToBuildBob"},
+        "title": "Test PR",
+        "url": "https://github.com/gptme/gptme-contrib/pull/999",
+        "number": 999,
+        "headRefOid": "abc1234",
+        "files": [{"path": "tests/test_example.py"}],
+        "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+        "isDraft": False,
+        "state": "OPEN",
+        "reviewDecision": None,
+        "labels": [],
+        "isCrossRepository": False,
+        "baseRefName": "master",
+        "mergeStateStatus": "CLEAN",
+    }
+
+    with (
+        patch.object(
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
+        ),
+        patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
+        patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
+        patch.object(
+            self_merge_check,
+            "fetch_greptile_status",
+            return_value={"has_review": True, "unresolved": 0, "total": 1},
+        ),
+        patch.object(self_merge_check, "greptile_summary_score", return_value=5),
+        # Fresh: reviewed at the current head
+        patch.object(
+            self_merge_check,
+            "greptile_summary_reviewed_commit",
+            return_value="abc1234",
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_unresolved_human_threads",
+            return_value={"unresolved": 0, "authors": []},
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_ai_review_status",
+            return_value={
+                "accepted": True,
+                "detail": "AI review 5/5 at current head abc1234, findings disposed",
+            },
+        ),
+    ):
+        result = self_merge_check.evaluate_pr(
+            "gptme/gptme-contrib",
+            999,
+            workspace_repos=["gptme/gptme-contrib"],
+        )
+
+    assert result.eligible, f"Expected eligible but got reasons: {result.reasons}"
+    assert any("floor satisfied" in w for w in result.warnings), result.warnings
 
 
 def test_evaluate_pr_disqualified_when_workspace_repos_unknown() -> None:
@@ -1870,16 +2010,12 @@ def _evaluate_with_score_provenance(reviewed_commit, head_sha="abc123def456789a"
         )
 
 
-def test_evaluate_pr_blocks_stale_summary_score() -> None:
-    """Greptile is advisory (Erik decision 2026-09-07): a stale summary score
-    (reviewed at an older head) must never block the PR — Greptile is now advisory
-    and its provenance is no longer a gate.  When AI review is accepted the PR
-    should be eligible regardless of Greptile provenance.
-    """
+def test_evaluate_pr_stale_summary_score_falls_through_to_ai_review() -> None:
+    """Stale Greptile (reviewed at older head) must not block when AI review is
+    accepted — branch 2 of the 3-branch staleness policy: stale Greptile + fresh
+    own-AI-review → own reviewer's verdict is the gate."""
     outcome = _evaluate_with_score_provenance("deadbeef" * 5)
-    assert (
-        outcome.eligible
-    ), f"Stale Greptile score must not block; reasons: {outcome.reasons}"
+    assert outcome.eligible, f"Stale Greptile must not block when AI review accepted; reasons: {outcome.reasons}"
     assert not any("is stale" in r for r in outcome.reasons), outcome.reasons
     assert not any(
         "re-review of head required" in r for r in outcome.reasons
