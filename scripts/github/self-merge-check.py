@@ -58,7 +58,12 @@ falls back to requiring Greptile rather than approving:
   read as full consensus", so it does not satisfy this gate either. Get a
   qualifying review with a consensus re-review: `ai-review.py OWNER/REPO N --force`.
 - the reviewer did not abstain (a null score is "no verdict" — the submodule
-  pointer-bump case — and must never read as a pass)
+  pointer-bump case — and must never read as a pass). Abstention is never an
+  AI-review *pass*. A pointer-only gitlink bump may waive the AI-review
+  *requirement* when Greptile is 5/5 at the current head, the gitlink path is
+  already in SELF_MERGE_ALLOWED_PATHS, and the new SHA is backed by a merged
+  upstream PR (PR existence, not merge-base — squash-merge leaves the original
+  SHA unreachable). Branch-only pins stay blocked (gptme-cloud#850 / #898).
 - the marker comment was posted by the authenticated user. Anyone can write the
   marker string into a comment on our PR; only our own account posts a real one.
 
@@ -3181,6 +3186,194 @@ def _parse_self_merge_min_greptile_score() -> int:
     return DEFAULT_MIN_GREPTILE_SCORE
 
 
+_SUBPROJECT_COMMIT_RE = re.compile(r"^([+-])Subproject commit ([0-9a-f]{7,40})$")
+
+
+def parse_gitmodules(text: str) -> dict[str, str]:
+    """Map submodule path → url from a `.gitmodules` body."""
+    path_to_url: dict[str, str] = {}
+    current_path: str | None = None
+    current_url: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("[submodule"):
+            if current_path and current_url:
+                path_to_url[current_path] = current_url
+            current_path = None
+            current_url = None
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        value = value.strip()
+        if key == "path":
+            current_path = value
+        elif key == "url":
+            current_url = value
+    if current_path and current_url:
+        path_to_url[current_path] = current_url
+    return path_to_url
+
+
+def github_repo_from_remote_url(url: str) -> str | None:
+    """owner/repo from a GitHub clone URL, or None if it is not GitHub."""
+    stripped = url.strip()
+    prefixes = (
+        "git@github.com:",
+        "https://github.com/",
+        "http://github.com/",
+        "ssh://git@github.com/",
+        "git://github.com/",
+    )
+    rest = None
+    for prefix in prefixes:
+        if stripped.startswith(prefix):
+            rest = stripped[len(prefix) :]
+            break
+    if rest is None:
+        return None
+    rest = rest.removesuffix(".git").removesuffix("/")
+    parts = rest.split("/")
+    if len(parts) != 2 or not all(parts):
+        return None
+    return f"{parts[0]}/{parts[1]}"
+
+
+def parse_pointer_only_gitlink(
+    file_shapes: list[dict[str, Any]],
+) -> tuple[str, str] | None:
+    """Single 160000 pointer bump → (path, new_sha), else None.
+
+    GitHub's patch for a gitlink is two `Subproject commit` lines. Any other
+    added/removed line means this is not pointer-only.
+    """
+    if len(file_shapes) != 1:
+        return None
+    entry = file_shapes[0]
+    path = str(entry.get("path") or "").replace("\\", "/").removeprefix("./")
+    if not path:
+        return None
+    patch = entry.get("patch")
+    if not isinstance(patch, str) or not patch.strip():
+        return None
+    added: list[str] = []
+    removed: list[str] = []
+    for line in patch.splitlines():
+        if (
+            line.startswith("@@")
+            or line.startswith("diff ")
+            or line.startswith("index ")
+            or line.startswith("---")
+            or line.startswith("+++")
+            or line.startswith("old mode ")
+            or line.startswith("new mode ")
+        ):
+            continue
+        match = _SUBPROJECT_COMMIT_RE.match(line)
+        if match:
+            sha = match.group(2)
+            if match.group(1) == "+":
+                added.append(sha)
+            else:
+                removed.append(sha)
+            continue
+        if line.startswith(("+", "-")):
+            return None
+    if len(added) != 1 or len(removed) != 1 or added[0] == removed[0]:
+        return None
+    return path, added[0]
+
+
+def fetch_gitmodules_text(repo: str) -> str | None:
+    return run_gh_checked(
+        [
+            "api",
+            f"repos/{repo}/contents/.gitmodules",
+            "-H",
+            "Accept: application/vnd.github.raw",
+        ]
+    )
+
+
+def commit_has_merged_upstream_pr(upstream_repo: str, sha: str) -> bool | None:
+    """Whether *sha* is associated with a merged PR in *upstream_repo*.
+
+    Uses PR association, not `merge-base --is-ancestor`. Squash-merge leaves
+    the original SHA unreachable from master, which is the healthy case
+    (gptme-cloud#901 / gptme#3742). A branch-only pin with no PR returns
+    False (gptme-cloud#898's 9da4505).
+
+    ``None`` means the lookup failed — callers must fail closed.
+    """
+    raw = run_gh_checked(
+        [
+            "api",
+            f"repos/{upstream_repo}/commits/{sha}/pulls",
+            "--jq",
+            ".[] | {number, merged_at}",
+        ]
+    )
+    if raw is None:
+        return None
+    for doc in _iter_json_documents(raw):
+        if isinstance(doc, dict) and doc.get("merged_at"):
+            return True
+    return False
+
+
+def pointer_only_gitlink_ai_review_waiver(
+    *,
+    repo: str,
+    number: int,
+    files: list[str],
+    greptile_is_fresh: bool,
+    greptile_unresolved: int,
+    greptile_score: int | None,
+) -> str | None:
+    """Waive the AI-review *requirement* for a safe pointer-only gitlink bump.
+
+    Returns a warning string when every condition holds, else None. This does
+    not make an abstention count as an AI-review pass — `fetch_ai_review_status`
+    still refuses `score: null`. It only stops that refusal from being a
+    permanent self-merge block when Greptile + allowlist + merged-upstream-PR
+    already cover the bump (gptme-cloud#901 vs #898/#850).
+    """
+    if not greptile_is_fresh or greptile_unresolved > 0:
+        return None
+    min_score = _parse_self_merge_min_greptile_score()
+    if type(greptile_score) is not int or greptile_score < min_score:
+        return None
+    if len(files) != 1:
+        return None
+    path = files[0]
+    if not is_repo_allowlisted_path(path, repo):
+        return None
+
+    parsed = parse_pointer_only_gitlink(_fetch_pr_file_shapes(repo, number))
+    if parsed is None:
+        return None
+    gitlink_path, new_sha = parsed
+    if gitlink_path != path:
+        return None
+
+    gitmodules = fetch_gitmodules_text(repo)
+    if not gitmodules:
+        return None
+    url = parse_gitmodules(gitmodules).get(gitlink_path)
+    if not url:
+        return None
+    upstream = github_repo_from_remote_url(url)
+    if not upstream:
+        return None
+    if commit_has_merged_upstream_pr(upstream, new_sha) is not True:
+        return None
+    return (
+        f"AI review waived: pointer-only gitlink {gitlink_path} → {new_sha[:12]} "
+        f"backed by a merged {upstream} PR; Greptile {greptile_score}/5 at current head"
+    )
+
+
 def evaluate_pr(
     repo: str, number: int, *, workspace_repos: list[str] | None
 ) -> CheckResult:
@@ -3355,6 +3548,8 @@ def evaluate_pr(
         and greptile_reviewed_sha is not None
         and _sha_matches_head(greptile_reviewed_sha, result.head_sha or "")
     )
+    greptile_score: int | None = None
+    greptile_unresolved = int(greptile.get("unresolved") or 0)
     if greptile.get("unknown"):
         # API failure: treat as stale/dark; AI review is the gate
         result.warnings.append(
@@ -3362,15 +3557,17 @@ def evaluate_pr(
         )
     elif greptile_is_fresh:
         # Branch 1: Greptile covers the current head → its 5/5 floor applies
-        score = greptile_summary_score(repo, number)
-        score_str = f"{score}/5" if score is not None else "n/a"
+        greptile_score = greptile_summary_score(repo, number)
+        score_str = f"{greptile_score}/5" if greptile_score is not None else "n/a"
         min_score = _parse_self_merge_min_greptile_score()
-        if greptile["unresolved"] > 0:
+        if greptile_unresolved > 0:
             result.reasons.append(
-                f"Greptile reviewed (score {score_str}); {greptile['unresolved']} unresolved thread(s)"
+                f"Greptile reviewed (score {score_str}); {greptile_unresolved} unresolved thread(s)"
             )
-        elif score is not None and score < min_score:
-            result.reasons.append(f"Greptile score {score}/5 below floor {min_score}/5")
+        elif greptile_score is not None and greptile_score < min_score:
+            result.reasons.append(
+                f"Greptile score {greptile_score}/5 below floor {min_score}/5"
+            )
         else:
             result.warnings.append(
                 f"Greptile reviewed (score {score_str}) at current head — floor satisfied"
@@ -3393,6 +3590,9 @@ def evaluate_pr(
     # `fetch_ai_review_status` covers abstention (score: null → not accepted)
     # and API failure (marker lookup failed → not accepted), so the old
     # separate `ai_review_abstained` check is no longer needed here.
+    # Pointer-only gitlink bumps are the remaining deadlock: the reviewer
+    # abstains by design, which used to make "AI review required" unsatisfiable
+    # even with Greptile 5/5 + an allowlisted path + a merged upstream PR.
     ai_review = fetch_ai_review_status(
         repo,
         number,
@@ -3409,10 +3609,21 @@ def evaluate_pr(
     elif ai_review["accepted"]:
         result.warnings.append(f"AI review accepted ({ai_review['detail']})")
     else:
-        reason = "AI review required"
-        if ai_review["detail"]:
-            reason += f": {ai_review['detail']}"
-        result.reasons.append(reason)
+        waiver = pointer_only_gitlink_ai_review_waiver(
+            repo=repo,
+            number=number,
+            files=files,
+            greptile_is_fresh=greptile_is_fresh,
+            greptile_unresolved=greptile_unresolved,
+            greptile_score=greptile_score,
+        )
+        if waiver:
+            result.warnings.append(waiver)
+        else:
+            reason = "AI review required"
+            if ai_review["detail"]:
+                reason += f": {ai_review['detail']}"
+            result.reasons.append(reason)
 
     human_threads = fetch_unresolved_human_threads(
         repo, number, review_data=shared_review_data
