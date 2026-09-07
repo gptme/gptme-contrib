@@ -816,7 +816,7 @@ check_ci_failures() {
         # failure now re-emits `ci_failure`. That is the desired behaviour — new
         # commit, still red, is a fresh actionable signal, not a duplicate.
         ci_hash=$(echo "$pr_data" | jq -r '(.headRefOid // "") + ":" + ([.statusCheckRollup[] | .conclusion // .state // "pending"] | sort | join(","))' | portable_hash)
-        detail="CI failing"
+        detail="CI failing: state_hash=$ci_hash"
 
         if [ "$ci_state" = "inflight" ]; then
             # Checks still running is normal. Only actionable once the state has
@@ -826,7 +826,7 @@ check_ci_failures() {
                 mtime=$(stat -c %Y "$state_file" 2>/dev/null || stat -f %m "$state_file" 2>/dev/null) || continue
                 age=$(( now - mtime ))
                 [ "$age" -ge "$stuck_secs" ] || continue
-                detail="CI stuck: checks in flight ${age}s with no state change"
+                detail="CI stuck: checks in flight ${age}s with no state change; state_hash=$ci_hash"
                 # Re-stamp so a still-stuck PR re-emits at most once per
                 # stuck_secs rather than on every gate run.
                 touch "$state_file"

@@ -2451,6 +2451,7 @@ version = "0.1.0"
 source = { editable = "packages/gptme-sessions" }
 dependencies = [
     { name = "click" },
+    { name = "pyyaml" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
@@ -2461,6 +2462,7 @@ cost = [
 dev = [
     { name = "mypy" },
     { name = "pytest" },
+    { name = "types-pyyaml" },
 ]
 test = [
     { name = "pytest" },
@@ -2473,7 +2475,9 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=1.0" },
+    { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
 ]
 provides-extras = ["cost", "dev", "test"]
 

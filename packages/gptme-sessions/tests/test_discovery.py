@@ -1381,6 +1381,12 @@ class TestExtractSessionName:
         jsonl.touch()
         assert extract_session_name("codex", jsonl) == "session-"
 
+    def test_codex_rollout_uses_session_id(self, tmp_path: Path) -> None:
+        """codex: rollout-* files extract the trailing session id, not 'rollout-'."""
+        jsonl = tmp_path / "rollout-2026-09-06T22-04-16-01a078c0-2ff3-7080-a370-221c9c968dae.jsonl"
+        jsonl.touch()
+        assert extract_session_name("codex", jsonl) == "01a078c0"
+
     def test_copilot_uses_parent_dir(self, tmp_path: Path) -> None:
         """copilot: uses first 8 chars of parent dir name."""
         session_dir = tmp_path / "abcdefgh-1234-5678"

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from collections.abc import Sequence
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -883,6 +884,27 @@ def session_datetime_from_path(harness: str, path: Path) -> datetime | None:
         return _quick_datetime_from_jsonl(path)
 
 
+_CODEX_ROLLOUT_ID_RE = re.compile(
+    r"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-"
+    r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+)
+
+
+def _codex_session_name(stem: str) -> str | None:
+    """Return a stable name for a Codex rollout filename stem.
+
+    Codex names its sessions ``rollout-YYYY-MM-DDTHH-MM-SS-<session-id>.jsonl``.
+    The first-8-chars-of-stem rule yields the literal ``rollout-`` prefix for
+    every such file, which is not a useful name. Extract the trailing Codex
+    session id and return its first 8 chars (matching the claude-code
+    convention) instead. Unknown stem shapes fall back to the old rule.
+    """
+    m = _CODEX_ROLLOUT_ID_RE.match(stem)
+    if m:
+        return m.group(1)[:8]
+    return stem[:8] if stem else None
+
+
 def extract_session_name(harness: str, path: Path) -> str | None:
     """Extract a human-readable session name from a discovered session path.
 
@@ -910,7 +932,7 @@ def extract_session_name(harness: str, path: Path) -> str | None:
         # JSONL filename is a UUID like "abc12345-...-def67890.jsonl"
         return path.stem[:8]
     elif harness == "codex":
-        return path.stem[:8] if path.stem else None
+        return _codex_session_name(path.stem)
     elif harness == "copilot":
         return path.parent.name[:8]
     elif harness == "pi":

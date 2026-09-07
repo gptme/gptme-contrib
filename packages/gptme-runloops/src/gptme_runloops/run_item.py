@@ -1756,6 +1756,11 @@ def execute_plan(
         counted_failure = True
         if plan.backend == "claude-code":
             rate_limited, infra_failure = _inspect_cc_failure(plan, config)
+        elif plan.backend == "grok-build":
+            # Must inspect BEFORE resolve_backend_trajectory deletes the ref.
+            infra_failure = _inspect_grok_failure(plan)
+        elif plan.backend == "gptme":
+            infra_failure = _inspect_gptme_failure(plan)
 
     trajectory = plan.trajectory_path
     if not rate_limited:
@@ -1805,6 +1810,134 @@ CC_AUTH_FAILURE_MARKERS: tuple[str, ...] = (
 
 INFRA_FAILURE_CC_RATE_LIMIT = "cc_rate_limit"
 INFRA_FAILURE_CC_AUTH = "cc_auth"
+
+# --- Non-CC backend infra failure detection ---
+#
+# CC has a structured stream-json log with rate_limit_event / result entries;
+# other backends expose failure causes only in free-form text (their session log
+# or trajectory).  The patterns below catch the known quota/auth/rate-limit
+# shapes without being so broad they mislabel ordinary work errors.
+
+#: Substrings indicating a quota / payment failure (HTTP 402 or balance-exhausted).
+#: Observed 2026-09-03: "API error (status 402 Payment Required):
+#: Grok Build usage balance exhausted" in the grok-build session log.
+BACKEND_QUOTA_MARKERS: tuple[str, ...] = (
+    "status 402",
+    "Payment Required",
+    "usage balance exhausted",
+    "balance exhausted",
+    "quota exceeded",
+    "out of credits",
+    "insufficient_quota",
+)
+
+#: Substrings indicating an authentication failure (HTTP 401 / bad key).
+BACKEND_AUTH_MARKERS: tuple[str, ...] = (
+    "status 401",
+    "Unauthorized",
+    "invalid api key",
+    "invalid_api_key",
+    "authentication failed",
+    "unauthenticated",
+)
+
+#: Substrings indicating a rate-limit rejection (HTTP 429 / too many requests).
+BACKEND_RATE_LIMIT_MARKERS: tuple[str, ...] = (
+    "status 429",
+    "Too Many Requests",
+    "rate limit",
+    "rate_limit",
+    "RateLimitError",
+    "too many requests",
+)
+
+
+def _classify_backend_error_text(text: str, backend: str) -> str | None:
+    """Classify an infra error from free-form backend log / trajectory text.
+
+    Returns ``"<backend>_quota"``, ``"<backend>_auth"``, or
+    ``"<backend>_rate_limit"`` when a known infrastructure error is found;
+    ``None`` when the text carries no recognisable infra signal.
+
+    ``backend`` is the raw backend name (``"grok-build"``, ``"gptme"``);
+    hyphens are replaced with underscores in the returned key so the result
+    is valid as a JSONL field fragment.
+    """
+    lower = text.lower()
+    backend_slug = backend.replace("-", "_")
+    # Quota/payment takes priority (more specific than auth).
+    if any(m.lower() in lower for m in BACKEND_QUOTA_MARKERS):
+        return f"{backend_slug}_quota"
+    if any(m.lower() in lower for m in BACKEND_AUTH_MARKERS):
+        return f"{backend_slug}_auth"
+    if any(m.lower() in lower for m in BACKEND_RATE_LIMIT_MARKERS):
+        return f"{backend_slug}_rate_limit"
+    return None
+
+
+def _inspect_grok_failure(
+    plan: ItemPlan, *, tmp_dir: Path = Path("/tmp")
+) -> str | None:
+    """Read the grok-build session log and classify any infra failure.
+
+    Must be called **before** :func:`resolve_backend_trajectory`, which
+    deletes the ref file.  Returns an infra_failure key or ``None``.
+    """
+    if not plan.session_id:
+        return None
+    ref = tmp_dir / f"grok-build-session-log-ref-{plan.session_id}.txt"
+    if not ref.is_file():
+        return None
+    log_path_str = ref.read_text(encoding="utf-8", errors="replace").strip()
+    log_path = Path(log_path_str) if log_path_str else None
+    if log_path is None or not log_path.is_file():
+        return None
+    try:
+        # Read the last 4 KiB — quota/auth errors appear in the terminal
+        # error message, which is always at the end of the session log.
+        with log_path.open(encoding="utf-8", errors="replace") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 4096))
+            tail = fh.read(4096)
+    except OSError:
+        return None
+    result = _classify_backend_error_text(tail, "grok_build")
+    if result:
+        _log(f"ERROR: Grok Build infra failure detected: {result}")
+    return result
+
+
+def _inspect_gptme_failure(
+    plan: ItemPlan, *, tmp_dir: Path = Path("/tmp")
+) -> str | None:
+    """Read the gptme trajectory and classify any infra failure.
+
+    The gptme trajectory (pointed to by ``gptme-traj-{session_id}.path``)
+    is the only post-mortem artifact available without capturing the runner's
+    stderr.  Returns an infra_failure key or ``None``.
+    """
+    if not plan.session_id:
+        return None
+    ref = tmp_dir / f"gptme-traj-{plan.session_id}.path"
+    if not ref.is_file():
+        return None
+    traj_str = ref.read_text(encoding="utf-8", errors="replace").strip()
+    traj_path = Path(traj_str) if traj_str else None
+    if traj_path is None or not traj_path.is_file():
+        return None
+    try:
+        with traj_path.open(encoding="utf-8", errors="replace") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 4096))
+            tail = fh.read(4096)
+    except OSError:
+        return None
+    result = _classify_backend_error_text(tail, "gptme")
+    if result:
+        _log(f"ERROR: gptme infra failure detected: {result}")
+    return result
 
 
 def cc_stream_died_on_auth(text: str) -> bool:
@@ -2469,9 +2602,23 @@ def run_post_session(
     # bounded ineffective retry path. Mixed items (e.g. ci_failure+merge_ready)
     # keep the delivery signal — a reply there can be the legitimate
     # deliverable of the other type.
+    #
+    # A failed session (exit_code != 0) must NOT report effect=observed solely
+    # from a "handled" delivery outcome. The delivery check looks for any
+    # comment posted since session start — it can find a comment from a
+    # *previous* dispatch or a fallback reply that pre-dates the actual work.
+    # This produced the exact churn documented in gptme/gptme-contrib#1601: a
+    # 23s grok-build 402 death that exited 1 carried effect=observed in the
+    # ledger, which caused pm_dispatch_recovery to treat it as "progressing"
+    # and re-arm it 10 times on an unchanged head. Suppress the delivery signal
+    # when the session failed; the PR snapshot diff (head/state/threads) is
+    # sufficient and is not affected by this gate.
+    effect_delivery = (
+        (delivery_outcome if delivery_verified else "") if exit_code == 0 else ""
+    )
     effect = read_record_effect_signal(
         record_file,
-        delivery_outcome=delivery_outcome if delivery_verified else "",
+        delivery_outcome=effect_delivery,
     )
     if effect == EFFECT_NONE:
         _log(

@@ -52,15 +52,17 @@ class JudgeMetadata(TypedDict):
 
 
 class JudgeVerdict(TypedDict, total=False):
-    # ``None`` when the judge returned a payload without a usable score.
-    # Never silently substituted with a neutral default — see
-    # ``_coerce_score`` and ``JUDGE_STATUS_NO_SCORE``.
+    # ``None`` when the judge returned a payload without a usable score, or
+    # when an otherwise parseable payload violated the judge contract. Never
+    # silently substituted with a neutral default — see ``_coerce_score``,
+    # ``JUDGE_STATUS_NO_SCORE``, and ``JUDGE_STATUS_COMPLIANCE_FAILURE``.
     score: float | None
     judge_status: str
     reason: str
     model: str
     alignment_score: float | None
     pivot_verdict: str | None
+    raw_response: str
     meta: JudgeMetadata
 
 
@@ -187,6 +189,7 @@ that ship a durable, high-impact deliverable.
 
 ## Forbidden Constructions
 Do NOT invoke any of the following as a penalty rationale:
+- "priority #6", "goal #6", "lowest priority"
 - "low priority", "Tier 3", "Tier 5", "not a top goal"
 - "misaligned with top goals" or "misaligned with top-priority"
 - "not revenue-generating" or "not revenue work"
@@ -495,6 +498,82 @@ VALID_ALIGNMENT_VALUES = frozenset({"on_track", "partial", "pivot", "off_target"
 
 JUDGE_STATUS_OK = "ok"
 JUDGE_STATUS_NO_SCORE = "no_score"
+JUDGE_STATUS_COMPLIANCE_FAILURE = "compliance_failure"
+
+FORBIDDEN_RATIONALE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bpriority\s*#?\s*6\b", re.IGNORECASE),
+    re.compile(r"\bgoal\s*#?\s*6\b", re.IGNORECASE),
+    re.compile(r"\blowest\s+priority\b", re.IGNORECASE),
+    re.compile(r"\blow\s+priority\b", re.IGNORECASE),
+    re.compile(r"\btier\s+[35]\b", re.IGNORECASE),
+    re.compile(r"\bnot\s+(?:a\s+)?top(?:-priority)?\s+goal\b", re.IGNORECASE),
+    re.compile(r"\bmisaligned\s+with\s+top(?:-priority)?\s+goals?\b", re.IGNORECASE),
+    re.compile(r"\bnot\s+revenue(?:-generating|\s+work)\b", re.IGNORECASE),
+    re.compile(r"\bbelow\s+the\s+top\s+revenue-generating\s+goal\b", re.IGNORECASE),
+    re.compile(r"\bfallback\s+tier\b", re.IGNORECASE),
+    re.compile(r"\blower-tier\s+work\b", re.IGNORECASE),
+)
+
+
+_STRAIGHT_QUOTE_SPAN_RE = re.compile(r"(?<!\w)([\"'`])(.*?)\1(?!\w)")
+_CURLY_DOUBLE_SPAN_RE = re.compile(r"“[^”]*”")
+_CURLY_SINGLE_SPAN_RE = re.compile(r"(?<!\w)‘[^’]*’(?!\w)")
+
+
+def _strip_quoted_spans(text: str) -> str:
+    """Remove quoted phrases so reporting a forbidden phrase is not rejected."""
+    # Handles the common quote forms the judge and journal use. This is not a
+    # full natural-language parser; it deliberately protects benign mentions
+    # like ``fixed the "priority #6" defect`` from the rationale detector.
+    #
+    # The word-boundary guards matter: without them, the apostrophes in
+    # ordinary contractions ("don't", "it's", "Author's") pair up as fake
+    # quote delimiters and can strip a genuine forbidden phrase sitting
+    # between two unrelated contractions (e.g. "Author's take: this is low
+    # priority, don't ship it." would silently erase "low priority").
+    text = _STRAIGHT_QUOTE_SPAN_RE.sub(" ", text)
+    text = _CURLY_DOUBLE_SPAN_RE.sub(" ", text)
+    text = _CURLY_SINGLE_SPAN_RE.sub(" ", text)
+    return text
+
+
+def _has_negation_near(text: str, start: int, end: int) -> bool:
+    """Return True when a forbidden phrase is explicitly negated nearby."""
+    window = text[max(0, start - 80) : min(len(text), end + 80)].lower()
+    return any(
+        marker in window
+        for marker in (
+            "do not penalize",
+            "does not penalize",
+            "did not penalize",
+            "don't penalize",
+            "not penalized",
+            "not a penalty",
+            "not because",
+            "not for being",
+            "without penalizing",
+            "rather than penalizing",
+            "instead of penalizing",
+        )
+    )
+
+
+def _reason_violates_forbidden_rationale(reason: str) -> bool:
+    """Detect forbidden goal-order/category rationale in a judge reason.
+
+    The judge prompt may mention these phrases as a *contract*, but a returned
+    reason must not use them to justify a penalty or cap. We strip quoted spans
+    and accept explicit negations/reporting so sessions that fix this defect are
+    not rejected merely for naming it.
+    """
+    if not reason:
+        return False
+    candidate = _strip_quoted_spans(reason)
+    for pattern in FORBIDDEN_RATIONALE_PATTERNS:
+        match = pattern.search(candidate)
+        if match and not _has_negation_near(candidate, match.start(), match.end()):
+            return True
+    return False
 
 
 def _coerce_score(raw: Any) -> float | None:
@@ -548,7 +627,9 @@ def normalize_judge_verdict(payload: dict[str, Any]) -> JudgeVerdict:
     base_meta = _build_judge_meta(model=model)
     score = _coerce_score(payload.get("score"))
     status = str(payload.get("judge_status") or JUDGE_STATUS_OK)
-    if score is None:
+    if status == JUDGE_STATUS_COMPLIANCE_FAILURE:
+        score = None
+    elif score is None:
         status = JUDGE_STATUS_NO_SCORE
         logger.warning(
             "Judge verdict has no usable score (raw=%r, model=%s); "
@@ -569,6 +650,8 @@ def normalize_judge_verdict(payload: dict[str, Any]) -> JudgeVerdict:
             "judge_version": str(meta.get("judge_version", base_meta["judge_version"])),
         },
     }
+    if payload.get("raw_response") is not None:
+        verdict["raw_response"] = str(payload["raw_response"])
     return verdict
 
 
@@ -603,7 +686,16 @@ def _parse_judge_payload(text: str, model: str) -> dict | None:
         verdict = json.loads(match.group(0))
     score = _coerce_score(verdict.get("score"))
     reason = str(verdict.get("reason", ""))
-    if score is None:
+    compliance_failure = _reason_violates_forbidden_rationale(reason)
+    if compliance_failure:
+        logger.warning(
+            "LLM judge returned forbidden goal-order/category penalty rationale "
+            "(model=%s, reason=%r)",
+            model,
+            reason,
+        )
+        score = None
+    if score is None and not compliance_failure:
         logger.warning(
             "LLM judge returned a payload without a usable score (raw=%r, model=%s)",
             verdict.get("score"),
@@ -611,9 +703,12 @@ def _parse_judge_payload(text: str, model: str) -> dict | None:
         )
     result: dict[str, Any] = {
         "score": score,
-        "judge_status": JUDGE_STATUS_OK if score is not None else JUDGE_STATUS_NO_SCORE,
+        "judge_status": JUDGE_STATUS_COMPLIANCE_FAILURE
+        if compliance_failure
+        else (JUDGE_STATUS_OK if score is not None else JUDGE_STATUS_NO_SCORE),
         "reason": reason,
         "model": model,
+        "raw_response": text,
     }
     # Phase 3: pass through intent-contract fields when the judge returns them
     alignment_score = _coerce_alignment_score(verdict.get("alignment_score"))
@@ -925,6 +1020,7 @@ def write_alignment_grade(
     session_id: str,
     verdict: JudgeVerdict,
     sessions_dir: Path,
+    extra_fields: dict[str, Any] | None = None,
 ) -> bool:
     """Persist an alignment verdict onto an existing session record.
 
@@ -933,6 +1029,11 @@ def write_alignment_grade(
     the record is already being loaded and rewritten, so the extra work is
     amortized and keeps per-tool-call span data flowing into the LOO /
     analytics pipelines that key off ``SessionRecord``.
+
+    ``extra_fields`` are persisted into the record's ``_legacy_fields`` dict
+    during the same locked rewrite, avoiding a second full-store pass.
+    Values are JSON-serialised so non-serialisable objects (e.g. datetimes)
+    are coerced to strings.
     """
     store = SessionStore(sessions_dir=sessions_dir)
     records = store.load_all()
@@ -993,6 +1094,15 @@ def write_alignment_grade(
                 legacy_fields["alignment_score"] = normalized["alignment_score"]
             if normalized.get("pivot_verdict") is not None:
                 legacy_fields["pivot_verdict"] = normalized["pivot_verdict"]
+            if normalized.get("raw_response") is not None:
+                legacy_fields["llm_judge_raw_response"] = normalized["raw_response"]
+            # Caller-supplied extra fields: merged in the same rewrite to avoid
+            # a second full-store pass.  JSON-roundtrip coerces non-serialisable
+            # objects (datetimes, etc.) to strings — same policy as callers that
+            # previously used a separate _persist_judge_cascade_context pass.
+            if extra_fields:
+                for k, v in extra_fields.items():
+                    legacy_fields[k] = json.loads(json.dumps(v, default=str))
         _store_judge_meta(record, normalized.get("meta"))
         # Safe to run unconditionally: returns False when trajectory_path is
         # missing / unreadable or harness is unknown, and is idempotent when
@@ -1064,6 +1174,6 @@ def judge_and_writeback(
     if not updated:
         return {"status": "no_record", **normalized}
     if normalized.get("score") is None:
-        return {"status": JUDGE_STATUS_NO_SCORE, **normalized}
+        return {"status": normalized.get("judge_status", JUDGE_STATUS_NO_SCORE), **normalized}
 
     return {"status": "ok", **normalized}

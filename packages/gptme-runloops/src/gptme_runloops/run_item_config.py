@@ -84,9 +84,44 @@ _ENV_OVERRIDES = {
     "wait_merge_auto_enabled_repos": "PROJECT_MONITORING_AUTO_WAIT_AND_MERGE_REPOS",
 }
 
+# gptme PM canary slots already set PM_GPTME_CANARY=1. Their fast-lane default
+# of 900s kills 29% of gptme:grok-4.6 sessions (duration >= budget) vs 0.7%
+# of grok-build:grok-4.6 on the same budget. Timeouts zero PM_ITEM_SUCCESSES
+# and the model bandit records a failure — the 24-point grok-gptme vs
+# grok-cli gap. Scale only the default tier; extended 1500/2700 tiers stay.
+GPTME_CANARY_DEFAULT_TIMEOUT = 1800
+GPTME_CANARY_DEFAULT_TIME_DESC = "~25 minutes"
+
 
 def default_config_path(workspace: Path) -> Path:
     return workspace / "config" / "pm-run-item.toml"
+
+
+def apply_gptme_canary_default_timeout(
+    kwargs: dict[str, Any], environ: dict[str, str] | None = None
+) -> None:
+    """Raise the fast-lane default timeout for gptme canary slots.
+
+    ``PM_GPTME_CANARY=1`` is already forwarded onto those slots. An explicit
+    ``PM_GPTME_CANARY_DEFAULT_TIMEOUT`` overrides the 1800s default; ``0`` or a
+    non-integer leaves the config/TOML value unchanged.
+    """
+    env = os.environ if environ is None else environ
+    if env.get("PM_GPTME_CANARY") != "1":
+        return
+    raw = env.get("PM_GPTME_CANARY_DEFAULT_TIMEOUT", str(GPTME_CANARY_DEFAULT_TIMEOUT))
+    try:
+        timeout = int(raw)
+    except (TypeError, ValueError):
+        return
+    if timeout <= 0:
+        return
+    kwargs["default_timeout"] = timeout
+    kwargs["default_time_desc"] = (
+        GPTME_CANARY_DEFAULT_TIME_DESC
+        if timeout == GPTME_CANARY_DEFAULT_TIMEOUT
+        else f"~{max(1, timeout // 60)} minutes"
+    )
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
@@ -130,9 +165,17 @@ def load_run_item_config(
         if env_value:
             kwargs[field_name] = env_value
 
+    apply_gptme_canary_default_timeout(kwargs)
+
     for key, value in overrides.items():
         if value is not None and key in valid_fields:
             kwargs[key] = value
+
+    # If default_timeout was overridden after the canary function set default_time_desc,
+    # recompute the description so they stay consistent.
+    if overrides.get("default_timeout") is not None and "default_time_desc" in kwargs:
+        t = int(kwargs["default_timeout"])
+        kwargs["default_time_desc"] = f"~{max(1, t // 60)} minutes"
 
     return RunItemConfig(workspace=workspace, **kwargs), raw
 
