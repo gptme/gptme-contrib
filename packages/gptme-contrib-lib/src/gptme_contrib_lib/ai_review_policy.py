@@ -28,7 +28,12 @@ def blocking_shortfall(rows: Sequence[FindingRow]) -> list[Shortfall]:
     for row in rows:
         severity_value = row.get("severity")
         severity = str(severity_value) if severity_value is not None else None
-        if severity is not None and severity not in {"P0", "P1"}:
+        if (
+            severity is not None
+            and severity.startswith("P")
+            and severity[1:].isdigit()
+            and int(severity[1:]) >= 2
+        ):
             continue
         if row.get("disposition") or row.get("superseded"):
             continue

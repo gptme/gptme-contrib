@@ -65,6 +65,17 @@ def test_unreadable_severity_fails_closed_but_p2_does_not_block() -> None:
         "finding with unreadable severity is not resolved"
     )
     assert blocking_shortfall([_row(severity="P2")]) == []
+    assert blocking_shortfall([_row(severity="P3")]) == []
+
+
+def test_unknown_non_null_severity_fails_closed() -> None:
+    for severity in ("CRITICAL", "high", "P1 ", ""):
+        shortfalls = blocking_shortfall([_row(severity=severity)])
+        assert shortfalls
+        assert shortfalls[0]["reason"].endswith("finding is not resolved") or (
+            shortfalls[0]["reason"]
+            == "finding with unreadable severity is not resolved"
+        )
 
 
 def test_merge_gate_imports_the_shared_predicate() -> None:
