@@ -68,7 +68,7 @@ CLEAN_REVIEW_BODY = """## 🤖 AI code review
 <!-- bob-ai-review {"sha": "deadbeef1234", "score": 5, "engine": "llm", "history": []} -->
 """
 
-ABSTENTION_REASON = "AI review abstained — not reviewed"
+ABSTENTION_REASON = "AI reviewer abstained (no score)"
 
 
 REVIEWER = "TimeToBuildBob"
@@ -270,33 +270,38 @@ def test_evaluate_pr_blocks_on_abstention() -> None:
     """The regression: gptme-cloud#850 merged with exactly this comment."""
     result = _evaluate(ABSTENTION_BODY)
     assert not result.eligible
-    assert ABSTENTION_REASON in result.reasons
+    assert any(ABSTENTION_REASON in r for r in result.reasons)
 
 
 @pytest.mark.parametrize("body", [ORDINARY_REVIEW_BODY, CLEAN_REVIEW_BODY])
 def test_evaluate_pr_unchanged_by_an_ordinary_ai_review(body: str) -> None:
-    """A clean AI review must grant nothing and block nothing.
+    """An ordinary AI review (stale or low-score) still blocks via the AI review gate.
 
-    Pins the scope: this change adds a blocker, it does not turn our own
-    reviewer into a merge credential.
+    The AI review is now required, so a stale or non-accepted review leaves the PR
+    ineligible. The abstention blocker is a separate signal — this test pins that
+    ordinary reviews don't trigger the abstention path.
     """
     result = _evaluate(body)
     assert not any(ABSTENTION_REASON in r for r in result.reasons)
-    assert result.eligible
+    assert not result.eligible
+    assert any("stale" in r for r in result.reasons)
 
 
 def test_evaluate_pr_unchanged_when_there_is_no_ai_review() -> None:
+    """No AI review comment at all: AI review is required, PR is ineligible."""
     result = _evaluate()
     assert not any(ABSTENTION_REASON in r for r in result.reasons)
-    assert result.eligible
+    assert not result.eligible
+    assert any("AI review required" in r for r in result.reasons)
 
 
-def test_unverifiable_greptile_state_refuses_the_ai_fallback() -> None:
-    """A clean AI review must not rescue a PR whose Greptile state cannot be read.
+def test_unverifiable_greptile_state_is_advisory_not_a_blocker() -> None:
+    """Greptile API failure is advisory; the AI review result is what matters.
 
-    `_fetch_greptile_review_data` returning None means the lookup failed, not that
-    Greptile is absent. Treating it as absence would open the AI-review fallback
-    on any transient API error, so the gate fails closed instead.
+    After the 2026-09-07 change, `_fetch_greptile_review_data` returning None
+    (lookup failed) becomes an advisory warning — the old fail-closed behavior
+    ("could not verify Greptile state" in reasons) is removed.  The absence of
+    Greptile is reported via result.warnings; no "Could not verify…" reason appears.
     """
     pr_data: dict[str, object] = {
         "number": 999,
@@ -308,9 +313,6 @@ def test_unverifiable_greptile_state_refuses_the_ai_fallback() -> None:
         "isDraft": False,
         "state": "OPEN",
         "reviewDecision": None,
-        # Matches ABSTENTION_BODY's marker sha: the #850 regression is an
-        # abstention written for THIS head, and the gate now ignores abstentions
-        # left behind by an older one.
         "headRefOid": "c096e25e50f8",
         "mergeStateStatus": "CLEAN",
         "labels": [],
@@ -329,11 +331,13 @@ def test_unverifiable_greptile_state_refuses_the_ai_fallback() -> None:
         ),
         patch.object(self_merge_check, "greptile_summary_score", return_value=None),
         patch.object(
+            self_merge_check, "greptile_summary_reviewed_commit", return_value=None
+        ),
+        patch.object(
             self_merge_check,
             "fetch_unresolved_human_threads",
             return_value={"unresolved": 0, "authors": []},
         ),
-        # A clean AI review does not rescue a PR whose Greptile state is unknown.
         patch.object(self_merge_check, "run_gh", _gh_returning(CLEAN_REVIEW_BODY)),
         patch.object(
             self_merge_check, "run_gh_checked", _gh_returning(CLEAN_REVIEW_BODY)
@@ -342,8 +346,10 @@ def test_unverifiable_greptile_state_refuses_the_ai_fallback() -> None:
         result = self_merge_check.evaluate_pr(
             "gptme/gptme-cloud", 999, workspace_repos=["gptme/gptme-cloud"]
         )
-    assert not result.eligible
-    assert any("Could not verify Greptile review state" in r for r in result.reasons)
+    assert any("Greptile review not found" in w for w in result.warnings)
+    assert not any(
+        "Could not verify Greptile review state" in r for r in result.reasons
+    )
 
 
 def test_corrupt_newer_marker_does_not_fall_back_to_older_valid_one() -> None:

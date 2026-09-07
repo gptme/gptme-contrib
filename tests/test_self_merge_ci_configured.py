@@ -436,6 +436,20 @@ def _evaluate_with(
     # succeeded, PR carries no marker"; the stubbed Greptile review above is what
     # satisfies the review gate, leaving CI as the only thing under test.
     monkeypatch.setattr(smc, "_fetch_ai_review_marker_checked", lambda *a, **k: None)
+    monkeypatch.setattr(
+        smc,
+        "fetch_ai_review_status",
+        lambda *a, **k: {
+            "accepted": True,
+            "detail": "AI review 5/5 at current head abc1234, findings disposed",
+        },
+    )
+    monkeypatch.setattr(smc, "greptile_summary_reviewed_commit", lambda *a, **k: None)
+    monkeypatch.setattr(
+        smc,
+        "fetch_unresolved_human_threads",
+        lambda *a, **k: {"unresolved": 0, "total": 0, "authors": []},
+    )
     return smc.evaluate_pr("o/r", 1, workspace_repos=["o/r"])
 
 
