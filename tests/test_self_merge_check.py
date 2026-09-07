@@ -40,6 +40,18 @@ def _stub_external_merge_checks():
     with (
         patch.object(self_merge_check, "merge_permission", return_value=True),
         patch.object(self_merge_check, "ai_review_abstained", return_value=False),
+        # contrib_classify_category's agent-literal check makes its own live
+        # ``gh api .../files`` call once a gptme-contrib PR is otherwise
+        # eligible (see evaluate_pr). Default to "no added lines to scan" so
+        # ordinary evaluate_pr tests don't depend on GitHub access or on
+        # whatever PR #999 happens to contain; tests targeting the
+        # agent-literal check itself override this explicitly.
+        patch.object(
+            self_merge_check, "_fetch_contrib_pr_file_shapes", return_value=[]
+        ),
+        # Same for gptme/gptme's diff-shape fetch: only gptme-core tests
+        # that need real patch text override this.
+        patch.object(self_merge_check, "_fetch_pr_file_shapes", return_value=[]),
     ):
         yield
     self_merge_check.merge_permission.cache_clear()
@@ -2575,15 +2587,13 @@ def test_gptme_core_new_hook_module_and_config_routes() -> None:
             "path": "gptme/hooks/__init__.py",
             "status": "modified",
             "patch": (
-                "@@ -1,3 +1,8 @@\n" "+register_hook(guardrails_hook, priority=200)\n"
+                "@@ -1,3 +1,8 @@\n+register_hook(guardrails_hook, priority=200)\n"
             ),
         },
         {
             "path": "gptme/hooks/guardrails.py",
             "status": "added",
-            "patch": (
-                "@@ -0,0 +1,677 @@\n" "+def guardrails_hook(...):\n" "+    pass\n"
-            ),
+            "patch": ("@@ -0,0 +1,677 @@\n+def guardrails_hook(...):\n+    pass\n"),
         },
         {
             "path": "gptme/config/models.py",
@@ -2967,9 +2977,13 @@ def test_evaluate_pr_gptme_core_sensitive_path_still_blocks() -> None:
 
 
 def test_evaluate_pr_other_repo_category_allowlist_unchanged() -> None:
-    """gptme/gptme-contrib must still use classify_category's path-category
-    allowlist — the diff-shape override is gptme/gptme-only."""
-    files = [{"path": "gptme/util/reduce.py"}]
+    """gptme/gptme-contrib still uses classify_category for remaining files.
+
+    A top-level FILE (no slash) is not a new top-level directory, so the
+    contrib placement rule does not fire; the old path-category allowlist
+    is what disqualifies it. gptme-core's patch-text fetch must not run.
+    """
+    files = [{"path": "orphan_module.py"}]
     pr_data = _make_clean_pr_data(files=files)
     with (
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
@@ -3000,9 +3014,444 @@ def test_evaluate_pr_other_repo_category_allowlist_unchanged() -> None:
             999,
             workspace_repos=["gptme/gptme-contrib"],
         )
-    # gptme/util/reduce.py is not in any allowed category for contrib (no
-    # SELF_MERGE_ALLOWED_PATHS entry for it) — the old behaviour must persist.
+    # orphan_module.py is not in any allowed category for contrib — the
+    # path-category allowlist still applies to remaining (non-placement) files.
     assert not result.eligible
+    assert any(
+        "Files not in any allowed self-merge category" in r for r in result.reasons
+    )
+    mock_shapes.assert_not_called()
+
+
+# --- gptme/gptme-contrib: placement rule + segment-matched sensitive paths +
+# spec-doc waiver ---
+#
+# Erik (2026-09-07 corpus, auto-merge-analysis.md §3 cluster 2 / §5 T2).
+# Fixtures below are real file lists (`gh pr view --json files`, 9 calls
+# total across this task) for the corpus PRs named in
+# tasks/contrib-self-merge-placement-rule-and-segment-paths.md.
+
+
+def test_contrib_new_top_level_dir_cookbook_routes() -> None:
+    """contrib#1325 (CLOSED): a brand-new top-level cookbook/ directory.
+
+    Erik: "better placed in docs (core)" — a new top-level dir is exactly
+    the placement decision classify_category's path-category allowlist
+    cannot see (scripts/build-cookbook.py alone would be plain
+    internal-tooling)."""
+    files = [
+        "cookbook/.gitignore",
+        "cookbook/01-tool-use-basics.md",
+        "cookbook/README.md",
+        "scripts/build-cookbook.py",
+    ]
+    category, reasons = self_merge_check.contrib_classify_category(
+        files, "gptme/gptme-contrib"
+    )
+    assert category is None
+    assert any("New top-level directory" in r and "cookbook" in r for r in reasons)
+
+
+def test_contrib_new_top_level_dir_knowledge_routes() -> None:
+    """contrib#1428 (CLOSED): a brand-new top-level knowledge/ directory.
+
+    Erik, verbatim: "the `knowledge` top-level directory shouldn't exist"."""
+    files = [
+        "knowledge/decks/agentic-presentation-demo.json",
+        "scripts/generate-presentation-html.py",
+        "skills/agentic-presentation/SKILL.md",
+        "tests/test_generate_presentation_html.py",
+    ]
+    category, reasons = self_merge_check.contrib_classify_category(
+        files, "gptme/gptme-contrib"
+    )
+    assert category is None
+    assert any("New top-level directory" in r and "knowledge" in r for r in reasons)
+
+
+def test_contrib_basename_collision_wisdom_mcp_routes() -> None:
+    """contrib#1219 (MERGED): gptme-wisdom-mcp's indexer.py/mcp_server.py
+    duplicate basenames that already live under packages/gptme-rag/src/ (and
+    packages/gptme-wisdom/src/). Erik, verbatim: "please don't re-implement
+    prior art (gptme-rag)". classify_category alone would pass this PR —
+    packages/** is already-allowed internal-tooling; the collision is a diff
+    SHAPE, not a path category."""
+    files = [
+        "mypy.ini",
+        "packages/gptme-wisdom-mcp/Makefile",
+        "packages/gptme-wisdom-mcp/README.md",
+        "packages/gptme-wisdom-mcp/pyproject.toml",
+        "packages/gptme-wisdom-mcp/src/gptme_wisdom_mcp/__init__.py",
+        "packages/gptme-wisdom-mcp/src/gptme_wisdom_mcp/indexer.py",
+        "packages/gptme-wisdom-mcp/src/gptme_wisdom_mcp/mcp_server.py",
+        "packages/gptme-wisdom-mcp/src/gptme_wisdom_mcp/parsers.py",
+        "packages/gptme-wisdom-mcp/tests/test_indexer.py",
+        "uv.lock",
+    ]
+    category, reasons = self_merge_check.contrib_classify_category(
+        files, "gptme/gptme-contrib"
+    )
+    assert category is None
+    collision_reasons = [r for r in reasons if "basename collides" in r]
+    assert collision_reasons, reasons
+    assert "indexer.py" in collision_reasons[0]
+    assert "mcp_server.py" in collision_reasons[0]
+    assert "gptme-rag" in collision_reasons[0]
+
+
+def test_contrib_new_package_alone_routes() -> None:
+    """A brand-new packages/<name>/ that does NOT collide with any existing
+    basename must still route on the new-package reason alone (isolates the
+    new-package rule from the basename-collision rule above)."""
+    files = [
+        "packages/gptme-totally-novel-thing/pyproject.toml",
+        "packages/gptme-totally-novel-thing/src/gptme_totally_novel_thing/__init__.py",
+        "packages/gptme-totally-novel-thing/src/gptme_totally_novel_thing/unique_widget.py",
+    ]
+    category, reasons = self_merge_check.contrib_classify_category(
+        files, "gptme/gptme-contrib"
+    )
+    assert category is None
+    assert any(
+        "New packages/<name>/" in r and "gptme-totally-novel-thing" in r
+        for r in reasons
+    )
+
+
+def test_contrib_state_writes_route() -> None:
+    """Writes under state/ route to Erik. Erik, verbatim (contrib#1250):
+    "state belongs in brain, not contrib"."""
+    files = ["state/some-new-ledger.jsonl", "scripts/emit-ledger.py"]
+    category, reasons = self_merge_check.contrib_classify_category(
+        files, "gptme/gptme-contrib"
+    )
+    assert category is None
+    assert any("Writes under state/" in r for r in reasons)
+
+
+def test_contrib_loose_file_directly_under_packages_is_not_a_new_package() -> None:
+    """A file placed directly at packages/<file>, with no nested directory
+    (e.g. packages/README.md), must not be misread as a new package named
+    "README.md" — regression guard for the len(parts) >= 3 requirement."""
+    files = ["packages/README.md"]
+    new_pkgs = self_merge_check._contrib_new_packages(files)
+    assert new_pkgs == []
+
+
+def test_contrib_merged_untouched_runloops_fix_is_clean() -> None:
+    """contrib#1621 (merged by Erik untouched): an ordinary fix to an
+    existing package. No placement reason should fire — this is exactly the
+    class of PR the whole T2 policy exists to stop routing unnecessarily."""
+    files = [
+        "packages/gptme-runloops/src/gptme_runloops/run_item.py",
+        "packages/gptme-runloops/src/gptme_runloops/worker_records.py",
+        "packages/gptme-runloops/tests/test_worker_records_voice_postcall.py",
+    ]
+    category, reasons = self_merge_check.contrib_classify_category(
+        files, "gptme/gptme-contrib"
+    )
+    assert category == "internal-tooling", reasons
+    assert reasons == []
+
+
+def test_contrib_merged_untouched_voice_vision_fix_is_clean() -> None:
+    """contrib#1617 (merged by Erik untouched): same shape, different
+    package."""
+    files = [
+        "packages/gptme-voice/src/gptme_voice/vision.py",
+        "packages/gptme-voice/tests/test_vision.py",
+    ]
+    category, reasons = self_merge_check.contrib_classify_category(
+        files, "gptme/gptme-contrib"
+    )
+    assert category == "internal-tooling", reasons
+    assert reasons == []
+
+
+def test_contrib_spec_doc_waived_when_paired_with_package_impl() -> None:
+    """contrib#1576 (merged by Erik untouched, 73 identical refusals before
+    that): root README.md registers a package the SAME PR implements
+    end-to-end. Mirror table (auto-merge-analysis §5): 'Yes when the doc
+    lives inside a package the same PR implements.'"""
+    files = [
+        "README.md",
+        "packages/gptme-body-protocol/README.md",
+        "packages/gptme-body-protocol/src/gptme_body_protocol/__init__.py",
+        "packages/gptme-body-protocol/tests/test_protocol.py",
+    ]
+    category, reasons = self_merge_check.contrib_classify_category(
+        files, "gptme/gptme-contrib"
+    )
+    assert category is not None, reasons
+    assert category.endswith("+spec-doc-waived")
+    assert not any("spec-like" in r.lower() for r in reasons)
+
+
+def test_contrib_spec_doc_not_waived_when_doc_only() -> None:
+    """A doc-only PR touching a root SPEC_LIKE_DOCS file with nothing else in
+    the diff is NOT paired with package implementation work — must still
+    route to Erik, same as before this change."""
+    files = ["README.md"]
+    category, reasons = self_merge_check.contrib_classify_category(
+        files, "gptme/gptme-contrib"
+    )
+    assert category is None
+    assert any("spec-like" in r.lower() for r in reasons)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "secrets_test.py",
+        "tests/secrets_test.py",
+        "test_secrets.py",
+        "packages/foo/tests/test_secrets.py",
+        "tests/deploy_test.py",
+    ],
+)
+def test_is_sensitive_path_segment_not_substring_for_test_files(path: str) -> None:
+    """A test file's OWN name incidentally containing a sensitive word (e.g.
+    'secrets_test.py' — a test file ABOUT secrets handling, not a file that
+    HOLDS a secret) must not trip the keyword scan. Segment/path-shape
+    matching, not substring — task
+    tasks/contrib-self-merge-placement-rule-and-segment-paths.md item 2."""
+    assert self_merge_check.is_test_file(path) is True
+    assert self_merge_check.is_sensitive_path(path) is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "secrets/id_rsa",
+        "secrets/prod.env",
+        "scripts/deploy-prod.sh",
+        "packages/foo/authToken.py",
+    ],
+)
+def test_is_sensitive_path_still_blocks_real_sensitive_paths(path: str) -> None:
+    """The is_test_file() carve-out only applies to test files — a real
+    secret-bearing or sensitive path is unaffected."""
+    assert self_merge_check.is_sensitive_path(path) is True
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "tests/secrets.json",
+        "tests/fixtures/credentials.json",
+        "tests/fixtures/authToken.json",
+        "tests/deploy-config.yaml",
+    ],
+)
+def test_is_sensitive_path_test_dir_does_not_exempt_sensitive_basename(
+    path: str,
+) -> None:
+    """Living under a test directory does not exempt a file with a sensitive
+    basename from the keyword scan. Only files whose OWN NAME is test-shaped
+    (test_foo.py, foo_test.go, foo.spec.js) get the carve-out.
+
+    Regression for the P1 finding in contrib#1628: the early return in
+    is_sensitive_path was scoped to is_test_file(), which returns True for any
+    path under 'tests/', causing tests/secrets.json to bypass sensitive-path
+    detection entirely."""
+    assert (
+        self_merge_check.is_test_file(path) is True
+    ), "precondition: IS a test-dir member"
+    assert self_merge_check.is_sensitive_path(path) is True
+
+
+def test_contrib_agent_literal_in_non_test_code_routes() -> None:
+    """contrib#1088-shaped case: an agent-name literal added to non-test
+    code. Erik, verbatim: "Bob shouldn't have his configuration in
+    gptme-contrib"."""
+    file_shapes = [
+        {
+            "path": "packages/gptme-subscription/src/gptme_subscription/harness_models.py",
+            "status": "modified",
+            "patch": (
+                "@@ -10,6 +10,8 @@\n"
+                "+BOB_QUOTA_OVERRIDE_USD = 40.0  # Bob-specific quota bump\n"
+            ),
+        },
+    ]
+    reasons = self_merge_check.contrib_agent_literal_reasons(file_shapes)
+    assert any('"bob"' in r for r in reasons)
+
+
+def test_contrib_agent_literal_in_test_code_is_excluded() -> None:
+    """The same literal added to a test fixture (e.g. testing attribution
+    logic across agent names) must not route — only non-test code counts."""
+    file_shapes = [
+        {
+            "path": "packages/gptme-sessions/tests/test_attribution.py",
+            "status": "modified",
+            "patch": ("@@ -1,3 +1,5 @@\n+def test_bob_attribution():\n+    pass\n"),
+        },
+    ]
+    reasons = self_merge_check.contrib_agent_literal_reasons(file_shapes)
+    assert reasons == []
+
+
+def test_contrib_agent_literal_word_boundary_no_false_positive() -> None:
+    """ "erik" as a bound token must fire; a name that merely CONTAINS the
+    substring ("erikson") must not — word-boundary, not substring, matching."""
+    file_shapes = [
+        {
+            "path": "packages/gptme-example/src/gptme_example/scoring.py",
+            "status": "modified",
+            "patch": "@@ -1,3 +1,4 @@\n+ERIKSON_COEFFICIENT = 0.7\n",
+        },
+    ]
+    reasons = self_merge_check.contrib_agent_literal_reasons(file_shapes)
+    assert reasons == []
+
+
+def _evaluate_contrib(
+    files: list[dict[str, Any]],
+    file_shapes: list[dict[str, Any]],
+    *,
+    title: str = "fix(gptme-runloops): tighten worker record timeout",
+) -> Any:
+    pr_data = _make_clean_pr_data(
+        title=title,
+        files=files,
+        url="https://github.com/gptme/gptme-contrib/pull/999",
+    )
+    with (
+        patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
+        patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
+        patch.object(
+            self_merge_check, "_fetch_greptile_review_data", return_value=None
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_greptile_status",
+            return_value={"has_review": False, "unresolved": 0, "total": 0},
+        ),
+        patch.object(self_merge_check, "greptile_summary_score", return_value=None),
+        patch.object(
+            self_merge_check,
+            "fetch_unresolved_human_threads",
+            return_value={"unresolved": 0, "total": 0, "authors": []},
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_ai_review_status",
+            return_value={"accepted": True, "detail": "AI review 5/5 at current head"},
+        ),
+        patch.object(
+            self_merge_check, "_fetch_contrib_pr_file_shapes", return_value=file_shapes
+        ),
+    ):
+        return self_merge_check.evaluate_pr(
+            "gptme/gptme-contrib",
+            999,
+            workspace_repos=["gptme/gptme-contrib"],
+        )
+
+
+def test_evaluate_pr_contrib_new_top_level_dir_not_eligible() -> None:
+    """End-to-end: CI green, AI review clean, but a new top-level dir in the
+    diff → NOT eligible, and _fetch_contrib_pr_file_shapes must not even be
+    called (the cheaper path-only placement check already disqualified it)."""
+    files = [
+        {"path": "cookbook/01-tool-use-basics.md"},
+        {"path": "scripts/build-cookbook.py"},
+    ]
+    with patch.object(self_merge_check, "_fetch_contrib_pr_file_shapes") as mock_shapes:
+        mock_shapes.return_value = []
+        result = _evaluate_contrib(files, [], title="feat(cookbook): add cookbook")
+    assert not result.eligible
+    assert any("New top-level directory" in r for r in result.reasons)
+    mock_shapes.assert_not_called()
+
+
+def test_evaluate_pr_contrib_agent_literal_end_to_end_not_eligible() -> None:
+    """End-to-end: an ordinary-looking internal-tooling diff (so the
+    path-only placement checks pass) with an agent-name literal added in the
+    patch text → NOT eligible."""
+    files = [{"path": "packages/gptme-runloops/src/gptme_runloops/scoring_helper.py"}]
+    file_shapes = [
+        {
+            "path": "packages/gptme-runloops/src/gptme_runloops/scoring_helper.py",
+            "status": "modified",
+            "patch": "@@ -1,3 +1,4 @@\n+BOB_SPECIFIC_WEIGHT = 1.5\n",
+        }
+    ]
+    result = _evaluate_contrib(files, file_shapes)
+    assert not result.eligible
+    assert any("Agent-name literal" in r for r in result.reasons)
+
+
+def test_evaluate_pr_contrib_clean_internal_tooling_is_eligible() -> None:
+    """End-to-end: contrib#1621-shaped PR (merged by Erik untouched) — clean
+    on every gate, no placement reason, no agent literal → eligible."""
+    files = [
+        {"path": "packages/gptme-runloops/src/gptme_runloops/run_item.py"},
+        {"path": "packages/gptme-runloops/tests/test_worker_records_voice_postcall.py"},
+    ]
+    file_shapes = [
+        {
+            "path": "packages/gptme-runloops/src/gptme_runloops/run_item.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+TIMEOUT_S = 30\n",
+        },
+        {
+            "path": "packages/gptme-runloops/tests/test_worker_records_voice_postcall.py",
+            "status": "modified",
+            "patch": "@@ -1,1 +1,2 @@\n+def test_x(): pass\n",
+        },
+    ]
+    result = _evaluate_contrib(files, file_shapes)
+    assert result.eligible, result.reasons
+    assert result.category == "internal-tooling"
+
+
+def test_evaluate_pr_other_repo_contrib_placement_rule_not_applied() -> None:
+    """A third repo (not gptme/gptme, not gptme/gptme-contrib) must not go
+    through contrib_classify_category — a path shaped exactly like the contrib
+    new-top-level-dir trigger must not produce that contrib-specific reason
+    text (or fetch contrib-only patch data). gptme/gptme cannot be the control
+    here: after #1626 it has its own diff-shape override.
+    """
+    files = [{"path": "totally_new_top_level_dir/foo.py"}]
+    pr_data = _make_clean_pr_data(
+        files=files, url="https://github.com/gptme/gptme-cloud/pull/999"
+    )
+    with (
+        patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
+        patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
+        patch.object(
+            self_merge_check, "_fetch_greptile_review_data", return_value=None
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_greptile_status",
+            return_value={"has_review": False, "unresolved": 0, "total": 0},
+        ),
+        patch.object(self_merge_check, "greptile_summary_score", return_value=None),
+        patch.object(
+            self_merge_check,
+            "fetch_unresolved_human_threads",
+            return_value={"unresolved": 0, "total": 0, "authors": []},
+        ),
+        patch.object(
+            self_merge_check,
+            "fetch_ai_review_status",
+            return_value={"accepted": True, "detail": "AI review 5/5 at current head"},
+        ),
+        patch.object(self_merge_check, "_fetch_contrib_pr_file_shapes") as mock_shapes,
+    ):
+        result = self_merge_check.evaluate_pr(
+            "gptme/gptme-cloud",
+            999,
+            workspace_repos=["gptme/gptme-cloud"],
+        )
+    # "Files not in any allowed self-merge category" (plain classify_category)
+    # must fire instead of the contrib-specific "New top-level directory"
+    # reason — proves the repo-gated dispatch, not a coincidental verdict.
+    assert not result.eligible
+    assert not any("New top-level directory" in r for r in result.reasons)
     assert any(
         "Files not in any allowed self-merge category" in r for r in result.reasons
     )
