@@ -9,8 +9,20 @@ from gptme_voice.body import (
     NullAdapter,
     body_adapter_from_env,
     body_tool_schemas,
+    conservative_mobile_characteristics,
+    no_locomotion_characteristics,
 )
-from gptme_voice.body.mavsdk_adapter import body_to_ned, offset_latlon
+from gptme_voice.body.adapter import (
+    FALLBACK_MAX_ALTITUDE_M,
+    FALLBACK_MAX_RADIUS_M,
+    FALLBACK_MAX_SPEED_MPS,
+    FALLBACK_RESERVE_RTL_PERCENT,
+)
+from gptme_voice.body.mavsdk_adapter import (
+    body_to_ned,
+    characteristics_from_px4_params,
+    offset_latlon,
+)
 from gptme_voice.realtime.tool_bridge import GptmeToolBridge
 
 
@@ -48,6 +60,11 @@ class FakeAdapter:
             else None
         )
         return {"body": "fake", "in_air": self.in_air, "position": position}
+
+    def characteristics(self) -> dict[str, Any]:
+        if self.capabilities & {"move", "rotate", "altitude"}:
+            return conservative_mobile_characteristics(source="declared")
+        return no_locomotion_characteristics()
 
     async def takeoff(self, altitude_m: float) -> dict:
         self.calls.append(("takeoff", (altitude_m,)))
@@ -142,6 +159,8 @@ def test_bridge_status_and_stop(loop):
     status = _call(bridge, "body_status")
     assert status["status"] == "ok"
     assert status["telemetry"]["body"] == "fake"
+    assert status["characteristics"]["locomotion"] is True
+    assert status["characteristics"]["envelope"]["max_altitude_m"] > 0
     stop = _call(bridge, "body_stop")
     assert stop["status"] == "holding"
     assert ("stop", ()) in adapter.calls
@@ -311,6 +330,13 @@ def test_null_adapter_motion_reports_unsupported(loop):
     result = asyncio.get_event_loop().run_until_complete(null.stop())
     assert "error" in result
     assert null.telemetry()["mobile"] is False
+    characteristics = null.characteristics()
+    assert characteristics["locomotion"] is False
+    assert characteristics["envelope"] is None
+    assert characteristics["geofence"] is None
+    assert characteristics["endurance"] is None
+    assert characteristics["link_loss"]["action"] == "none"
+    assert characteristics["source"] == "declared"
 
 
 # --- env factory --------------------------------------------------------
@@ -542,7 +568,7 @@ def test_mavsdk_telemetry_failure_marks_disconnected(loop):
         flight_mode = staticmethod(waiting_stream)
         armed = staticmethod(waiting_stream)
 
-    async def run() -> tuple[bool, dict[str, Any], list[asyncio.Task]]:
+    async def run() -> tuple[bool, dict[str, Any], list[asyncio.Task], dict[str, Any]]:
         adapter = MavsdkAdapter("unused")
         adapter._system = type("System", (), {"telemetry": Telemetry()})()
         adapter._connected = True
@@ -550,9 +576,115 @@ def test_mavsdk_telemetry_failure_marks_disconnected(loop):
         adapter._start_telemetry_cache()
         await asyncio.sleep(0)
         await asyncio.sleep(0)
-        return adapter._connected, adapter._position, adapter._telemetry_tasks
+        return (
+            adapter._connected,
+            adapter._position,
+            adapter._telemetry_tasks,
+            adapter.characteristics(),
+        )
 
-    connected, position, tasks = loop.run_until_complete(run())
+    connected, position, tasks, characteristics = loop.run_until_complete(run())
     assert connected is False
     assert position == {}
     assert tasks == []
+    assert characteristics["source"] == "fallback"
+
+
+def _assert_finite_envelope(payload: dict[str, Any]) -> None:
+    envelope = payload["envelope"]
+    assert envelope is not None
+    for key in ("max_altitude_m", "max_radius_m", "max_horizontal_speed_mps"):
+        value = envelope[key]
+        assert isinstance(value, int | float) and not isinstance(value, bool)
+        assert value > 0
+        assert value != float("inf")
+    assert payload["link_loss"]["action"] != "none"
+
+
+def test_px4_params_populate_envelope():
+    payload = characteristics_from_px4_params(
+        {
+            "GF_MAX_HOR_DIST": 80.0,
+            "GF_MAX_VER_DIST": 25.0,
+            "MPC_XY_VEL_MAX": 8.0,
+            "NAV_DLL_ACT": 2,
+            "NAV_RCL_ACT": 1,
+            "COM_DL_LOSS_T": 12,
+            "BAT_LOW_THR": 0.2,
+        },
+        battery_remaining_percent=67.0,
+    )
+    _assert_finite_envelope(payload)
+    assert payload["source"] == "px4-params"
+    assert payload["locomotion"] is True
+    assert payload["envelope"]["max_radius_m"] == 80.0
+    assert payload["envelope"]["max_altitude_m"] == 25.0
+    assert payload["envelope"]["max_horizontal_speed_mps"] == 8.0
+    assert payload["geofence"]["enabled"] is True
+    assert payload["link_loss"]["action"] == "rtl"
+    assert payload["link_loss"]["timeout_s"] == 12.0
+    assert payload["link_loss"]["authority"] == "px4"
+    assert payload["endurance"]["reserve_rtl_percent"] == pytest.approx(20.0)
+    assert payload["endurance"]["battery_remaining_percent"] == 67.0
+    assert payload["endurance"]["remaining_s"] is None
+
+
+def test_px4_zero_geofence_is_not_unlimited():
+    payload = characteristics_from_px4_params(
+        {
+            "GF_MAX_HOR_DIST": 0,
+            "GF_MAX_VER_DIST": 0,
+            "MPC_XY_VEL_MAX": 12.0,
+            "NAV_DLL_ACT": 0,
+            "NAV_RCL_ACT": 0,
+        }
+    )
+    _assert_finite_envelope(payload)
+    assert payload["source"] == "mixed"
+    assert payload["envelope"]["max_radius_m"] == FALLBACK_MAX_RADIUS_M
+    assert payload["envelope"]["max_altitude_m"] == FALLBACK_MAX_ALTITUDE_M
+    assert payload["envelope"]["max_horizontal_speed_mps"] == 12.0
+    assert payload["geofence"]["enabled"] is False
+    assert payload["link_loss"]["action"] == "rtl"
+
+
+def test_px4_missing_params_use_conservative_fallback():
+    payload = characteristics_from_px4_params({})
+    _assert_finite_envelope(payload)
+    assert payload["source"] == "fallback"
+    assert payload["envelope"]["max_altitude_m"] == FALLBACK_MAX_ALTITUDE_M
+    assert payload["envelope"]["max_radius_m"] == FALLBACK_MAX_RADIUS_M
+    assert payload["envelope"]["max_horizontal_speed_mps"] == FALLBACK_MAX_SPEED_MPS
+    assert payload["endurance"]["reserve_rtl_percent"] == FALLBACK_RESERVE_RTL_PERCENT
+    assert payload["link_loss"]["action"] == "rtl"
+
+
+def test_mavsdk_characteristics_from_overrides_and_live_battery(loop):
+    from gptme_voice.body.mavsdk_adapter import MavsdkAdapter
+
+    adapter = MavsdkAdapter("unused")
+    adapter._param_overrides = {
+        "GF_MAX_HOR_DIST": 40.0,
+        "GF_MAX_VER_DIST": 15.0,
+        "MPC_XY_VEL_MAX": 6.0,
+        "NAV_DLL_ACT": 3,
+        "NAV_RCL_ACT": 2,
+        "COM_DL_LOSS_T": 8,
+        "BAT_LOW_THR": 0.3,
+    }
+    loop.run_until_complete(adapter._load_characteristics())
+    first = adapter.characteristics()
+    assert first["envelope"]["max_radius_m"] == 40.0
+    assert first["link_loss"]["action"] == "land"
+    assert first["endurance"]["battery_remaining_percent"] is None
+
+    adapter._battery = {"remaining_percent": 41.5}
+    assert adapter.characteristics()["endurance"]["battery_remaining_percent"] == 41.5
+
+
+def test_bridge_null_adapter_surfaces_no_locomotion_characteristics(loop):
+    bridge = GptmeToolBridge(body_adapter=NullAdapter())
+    status = _call(bridge, "body_status")
+    assert status["status"] == "ok"
+    assert status["characteristics"]["locomotion"] is False
+    assert status["characteristics"]["envelope"] is None

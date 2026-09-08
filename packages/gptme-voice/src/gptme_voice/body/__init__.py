@@ -11,9 +11,12 @@ from .adapter import (
     CAP_MOVE,
     CAP_ROTATE,
     BodyAdapter,
+    BodyCharacteristics,
     NullAdapter,
     body_adapter_from_env,
     body_tool_schemas,
+    conservative_mobile_characteristics,
+    no_locomotion_characteristics,
 )
 from .remote_adapter import RemoteAdapter
 
@@ -23,8 +26,11 @@ __all__ = [
     "CAP_MOVE",
     "CAP_ROTATE",
     "BodyAdapter",
+    "BodyCharacteristics",
     "NullAdapter",
     "RemoteAdapter",
     "body_adapter_from_env",
     "body_tool_schemas",
+    "conservative_mobile_characteristics",
+    "no_locomotion_characteristics",
 ]

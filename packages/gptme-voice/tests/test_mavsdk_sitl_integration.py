@@ -41,6 +41,14 @@ def test_full_flight_via_bridge():
                 break
             await asyncio.sleep(1)
         assert status["telemetry"]["position"], "no position fix from SITL"
+        characteristics = status["characteristics"]
+        assert characteristics["locomotion"] is True
+        envelope = characteristics["envelope"]
+        assert envelope["max_altitude_m"] > 0
+        assert envelope["max_radius_m"] > 0
+        assert envelope["max_horizontal_speed_mps"] > 0
+        assert characteristics["link_loss"]["action"] != "none"
+        assert characteristics["source"] in {"px4-params", "mixed", "fallback"}
 
         # takeoff
         result = await call("body_takeoff", {"altitude_m": 2.5})
