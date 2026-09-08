@@ -3070,23 +3070,20 @@ def test_contrib_new_top_level_dir_knowledge_routes() -> None:
 
 
 def test_contrib_basename_collision_wisdom_mcp_routes() -> None:
-    """contrib#1219 (MERGED): gptme-wisdom-mcp's indexer.py/mcp_server.py
+    """contrib#1219 (MERGED): a *new* package adding indexer.py/mcp_server.py
     duplicate basenames that already live under packages/gptme-rag/src/ (and
     packages/gptme-wisdom/src/). Erik, verbatim: "please don't re-implement
     prior art (gptme-rag)". classify_category alone would pass this PR —
     packages/** is already-allowed internal-tooling; the collision is a diff
-    SHAPE, not a path category."""
+    SHAPE, not a path category.
+
+    Paths must not exist on disk: after #1219 merged, the original
+    gptme-wisdom-mcp files are existing same-package modules and the
+    collision rule (skip-if-exists) no longer fires on them.
+    """
     files = [
-        "mypy.ini",
-        "packages/gptme-wisdom-mcp/Makefile",
-        "packages/gptme-wisdom-mcp/README.md",
-        "packages/gptme-wisdom-mcp/pyproject.toml",
-        "packages/gptme-wisdom-mcp/src/gptme_wisdom_mcp/__init__.py",
-        "packages/gptme-wisdom-mcp/src/gptme_wisdom_mcp/indexer.py",
-        "packages/gptme-wisdom-mcp/src/gptme_wisdom_mcp/mcp_server.py",
-        "packages/gptme-wisdom-mcp/src/gptme_wisdom_mcp/parsers.py",
-        "packages/gptme-wisdom-mcp/tests/test_indexer.py",
-        "uv.lock",
+        "packages/gptme-brand-new-mcp/src/gptme_brand_new_mcp/indexer.py",
+        "packages/gptme-brand-new-mcp/src/gptme_brand_new_mcp/mcp_server.py",
     ]
     category, reasons = self_merge_check.contrib_classify_category(
         files, "gptme/gptme-contrib"
@@ -3097,6 +3094,37 @@ def test_contrib_basename_collision_wisdom_mcp_routes() -> None:
     assert "indexer.py" in collision_reasons[0]
     assert "mcp_server.py" in collision_reasons[0]
     assert "gptme-rag" in collision_reasons[0]
+
+
+def test_contrib_basename_collision_skips_existing_same_package_file() -> None:
+    """contrib#1636: modifying gptme-voice's existing realtime/server.py
+    must not route as 'new module basename collides' just because
+    gptme-dashboard also has a server.py."""
+    files = [
+        "packages/gptme-voice/README.md",
+        "packages/gptme-voice/src/gptme_voice/realtime/__init__.py",
+        "packages/gptme-voice/src/gptme_voice/realtime/latency.py",
+        "packages/gptme-voice/src/gptme_voice/realtime/openai_client.py",
+        "packages/gptme-voice/src/gptme_voice/realtime/server.py",
+        "packages/gptme-voice/tests/test_latency.py",
+    ]
+    _category, reasons = self_merge_check.contrib_classify_category(
+        files, "gptme/gptme-contrib"
+    )
+    collision_reasons = [r for r in reasons if "basename collides" in r]
+    assert not collision_reasons, collision_reasons
+
+
+def test_contrib_basename_collision_new_file_in_existing_package_routes() -> None:
+    """A brand-new src file inside an already-allowed package still routes
+    when its basename exists in another package — the skip is existence,
+    not 'this package is allowed'."""
+    files = ["packages/gptme-voice/src/gptme_voice/indexer.py"]
+    category, reasons = self_merge_check.contrib_classify_category(
+        files, "gptme/gptme-contrib"
+    )
+    assert category is None
+    assert any("basename collides" in r and "indexer.py" in r for r in reasons)
 
 
 def test_contrib_new_package_alone_routes() -> None:
