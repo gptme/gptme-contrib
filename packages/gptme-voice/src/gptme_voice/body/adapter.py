@@ -8,14 +8,18 @@ final authority — a dropped brain link must always leave the body safe.
 
 Capabilities gate which voice tools get registered for a session:
 a tabletop puck (NullAdapter, no capabilities) exposes no motion tools at
-all, so the model cannot try to fly a desk ornament.
+all, so the model cannot try to fly a desk ornament. ``characteristics()``
+is the machine-readable envelope (limits, geofence, endurance reserve,
+link-loss) so the model can see *how far* as well as *whether*. PX4 0 on a
+limit param means disabled/unlimited and must never be advertised.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Protocol, runtime_checkable
+from dataclasses import asdict, dataclass
+from typing import Any, Literal, Protocol, runtime_checkable
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -25,6 +29,125 @@ CAP_MOVE = "move"  # horizontal translation (goto/move/return home)
 CAP_ROTATE = "rotate"  # yaw control
 CAP_ALTITUDE = "altitude"  # vertical control (takeoff/land/up-down)
 CAP_INTERACT = "interact"  # trigger the body's default local interaction
+
+# Conservative static envelope. PX4 geofence 0 means "disabled" (unlimited);
+# we never advertise unlimited. These match the tool-bridge session clamps.
+FALLBACK_MAX_ALTITUDE_M = 30.0
+FALLBACK_MAX_RADIUS_M = 50.0
+FALLBACK_MAX_SPEED_MPS = 5.0
+FALLBACK_LINK_LOSS_TIMEOUT_S = 10.0
+FALLBACK_RESERVE_RTL_PERCENT = 25.0
+
+LinkLossAction = Literal[
+    "none", "hold", "rtl", "land", "terminate", "disarm", "unknown"
+]
+
+
+@dataclass(frozen=True)
+class FlightEnvelope:
+    max_altitude_m: float
+    max_radius_m: float
+    max_horizontal_speed_mps: float
+
+
+@dataclass(frozen=True)
+class Geofence:
+    enabled: bool
+    max_radius_m: float
+    max_altitude_m: float
+
+
+@dataclass(frozen=True)
+class Endurance:
+    remaining_s: float | None
+    reserve_rtl_percent: float
+    battery_remaining_percent: float | None = None
+
+
+@dataclass(frozen=True)
+class LinkLossBehavior:
+    action: LinkLossAction
+    timeout_s: float | None
+    authority: str
+
+
+@dataclass(frozen=True)
+class BodyCharacteristics:
+    """Machine-readable body limits. Informs goal selection; does not replace
+    autopilot enforcement."""
+
+    locomotion: bool
+    envelope: FlightEnvelope | None
+    geofence: Geofence | None
+    endurance: Endurance | None
+    link_loss: LinkLossBehavior
+    source: str
+    notes: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def no_locomotion_characteristics(
+    *,
+    source: str = "declared",
+    notes: str | None = "No locomotion: no envelope, no geofence, no endurance.",
+    authority: str = "none",
+) -> dict[str, Any]:
+    return BodyCharacteristics(
+        locomotion=False,
+        envelope=None,
+        geofence=None,
+        endurance=None,
+        link_loss=LinkLossBehavior(action="none", timeout_s=None, authority=authority),
+        source=source,
+        notes=notes,
+    ).to_dict()
+
+
+def conservative_mobile_characteristics(
+    *,
+    source: str = "fallback",
+    notes: str | None = None,
+    authority: str = "px4",
+    link_loss_action: LinkLossAction = "rtl",
+    link_loss_timeout_s: float | None = FALLBACK_LINK_LOSS_TIMEOUT_S,
+    reserve_rtl_percent: float = FALLBACK_RESERVE_RTL_PERCENT,
+    battery_remaining_percent: float | None = None,
+    envelope: FlightEnvelope | None = None,
+    geofence: Geofence | None = None,
+) -> dict[str, Any]:
+    env = envelope or FlightEnvelope(
+        max_altitude_m=FALLBACK_MAX_ALTITUDE_M,
+        max_radius_m=FALLBACK_MAX_RADIUS_M,
+        max_horizontal_speed_mps=FALLBACK_MAX_SPEED_MPS,
+    )
+    fence = geofence or Geofence(
+        enabled=False,
+        max_radius_m=env.max_radius_m,
+        max_altitude_m=env.max_altitude_m,
+    )
+    return BodyCharacteristics(
+        locomotion=True,
+        envelope=env,
+        geofence=fence,
+        endurance=Endurance(
+            remaining_s=None,
+            reserve_rtl_percent=reserve_rtl_percent,
+            battery_remaining_percent=battery_remaining_percent,
+        ),
+        link_loss=LinkLossBehavior(
+            action=link_loss_action,
+            timeout_s=link_loss_timeout_s,
+            authority=authority,
+        ),
+        source=source,
+        notes=notes
+        or (
+            "Conservative static envelope; remaining flight time is unknown "
+            "without a fitted power model. Autopilot failsafes remain final."
+        ),
+    ).to_dict()
 
 
 @runtime_checkable
@@ -68,6 +191,8 @@ class BodyAdapter(Protocol):
 
     def telemetry(self) -> dict[str, Any]: ...
 
+    def characteristics(self) -> dict[str, Any]: ...
+
 
 class NullAdapter:
     """Body with no locomotion — the tabletop puck.
@@ -88,6 +213,11 @@ class NullAdapter:
 
     def telemetry(self) -> dict[str, Any]:
         return {"body": self.name, "mobile": False}
+
+    def characteristics(self) -> dict[str, Any]:
+        return no_locomotion_characteristics(
+            notes="Tabletop puck: no locomotion, no envelope, no geofence.",
+        )
 
     async def _unsupported(self) -> dict[str, Any]:
         return {"error": "This body has no locomotion."}
@@ -139,10 +269,11 @@ def body_tool_schemas(adapter: BodyAdapter | None) -> list[dict]:
             "type": "function",
             "name": "body_status",
             "description": (
-                "Read the physical body's current state: position, altitude, "
-                "battery, heading, flight mode. Use it before motion commands "
-                "and whenever the caller asks where the body is or how it is "
-                "doing."
+                "Read the physical body's current state and its machine-readable "
+                "limits: position, altitude, battery, heading, flight mode, plus "
+                "the flight envelope, geofence, endurance reserve, and declared "
+                "link-loss behavior. Use characteristics before planning motion. "
+                "Limits inform goal selection; the autopilot still enforces them."
             ),
             "parameters": {"type": "object", "properties": {}},
         }

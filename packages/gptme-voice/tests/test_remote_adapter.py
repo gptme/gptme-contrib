@@ -59,6 +59,11 @@ def test_remote_adapter_handshake_capabilities_and_goal_translation() -> None:
         try:
             await adapter.ensure_connected()
             assert adapter.capabilities == {"move", "rotate", "interact"}
+            characteristics = adapter.characteristics()
+            assert characteristics["locomotion"] is True
+            assert characteristics["envelope"]["max_altitude_m"] > 0
+            assert characteristics["source"] == "fallback"
+            assert characteristics["link_loss"]["authority"] == "body-node"
             assert await adapter.move(2.0, -0.5, 0.0) == {
                 "type": "command_result",
                 "command_id": "remote-0001",

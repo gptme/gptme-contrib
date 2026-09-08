@@ -1003,7 +1003,11 @@ class GptmeToolBridge:
         caps = adapter.capabilities
         try:
             if name == "body_status":
-                return {"status": "ok", "telemetry": adapter.telemetry()}
+                return {
+                    "status": "ok",
+                    "telemetry": adapter.telemetry(),
+                    "characteristics": adapter.characteristics(),
+                }
             if name == "body_stop" and "move" in caps:
                 return await _call(adapter.stop())
             if name == "body_return_home" and "move" in caps:

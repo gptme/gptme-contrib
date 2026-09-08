@@ -15,6 +15,11 @@ from gptme_body_protocol import (
     require_handshake_ok,
 )
 
+from .adapter import (
+    conservative_mobile_characteristics,
+    no_locomotion_characteristics,
+)
+
 # Body-node wire capabilities mapped to gptme-voice's model-facing capabilities.
 _WIRE_TO_ADAPTER_CAPABILITY = {
     "move": "move",
@@ -142,6 +147,25 @@ class RemoteAdapter:
 
     def telemetry(self) -> dict[str, Any]:
         return self._telemetry.copy()
+
+    def characteristics(self) -> dict[str, Any]:
+        # The body-node wire protocol does not yet export an envelope. Never
+        # advertise unlimited: a mobile remote body gets the conservative
+        # static descriptor; a non-mobile one declares no locomotion.
+        if self.capabilities & {"move", "rotate", "altitude"}:
+            return conservative_mobile_characteristics(
+                source="fallback",
+                authority="body-node",
+                notes=(
+                    "Remote body-node does not export characteristics yet; "
+                    "conservative static envelope. The body node owns local safety."
+                ),
+            )
+        return no_locomotion_characteristics(
+            source="declared",
+            authority="body-node",
+            notes="Remote body has no locomotion capabilities.",
+        )
 
     @staticmethod
     def _validated_telemetry(response: dict[str, Any]) -> dict[str, Any]:

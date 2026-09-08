@@ -16,11 +16,162 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from collections.abc import Mapping
 from typing import Any
+
+from .adapter import (
+    FALLBACK_LINK_LOSS_TIMEOUT_S,
+    FALLBACK_MAX_ALTITUDE_M,
+    FALLBACK_MAX_RADIUS_M,
+    FALLBACK_MAX_SPEED_MPS,
+    FALLBACK_RESERVE_RTL_PERCENT,
+    FlightEnvelope,
+    Geofence,
+    LinkLossAction,
+    conservative_mobile_characteristics,
+)
 
 logger = logging.getLogger(__name__)
 
 _EARTH_M_PER_DEG_LAT = 111_320.0
+
+# PX4 params that populate the characteristics descriptor. A geofence
+# distance of 0 means "disabled" (unlimited) — never advertise that.
+_PX4_PARAM_NAMES = (
+    "GF_MAX_HOR_DIST",
+    "GF_MAX_VER_DIST",
+    "MPC_XY_VEL_MAX",
+    "NAV_RCL_ACT",
+    "NAV_DLL_ACT",
+    "COM_RC_LOSS_T",
+    "COM_DL_LOSS_T",
+    "BAT_LOW_THR",
+)
+
+_PX4_FAILSAFE_ACTION: dict[int, LinkLossAction] = {
+    0: "none",
+    1: "hold",
+    2: "rtl",
+    3: "land",
+    4: "terminate",
+    5: "disarm",
+}
+
+
+def _finite_positive(value: object) -> float | None:
+    """Return a finite number > 0, else None.
+
+    PX4 uses 0 on several limit params to mean 'disabled' / unlimited.
+    Those must degrade to the conservative fallback, never pass through.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
+def _px4_failsafe_action(value: object) -> LinkLossAction | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    if float(value) != int(value):
+        return None
+    return _PX4_FAILSAFE_ACTION.get(int(value))
+
+
+def characteristics_from_px4_params(
+    params: Mapping[str, float | int],
+    *,
+    battery_remaining_percent: float | None = None,
+) -> dict[str, Any]:
+    """Build a characteristics dict from PX4 params.
+
+    Missing, non-finite, or non-positive limit params fall back to the
+    conservative static envelope. ``source`` is ``px4-params`` when every
+    limit we care about was present, else ``mixed`` or ``fallback``.
+    """
+    gaps: list[str] = []
+
+    radius_raw = _finite_positive(params.get("GF_MAX_HOR_DIST"))
+    altitude_raw = _finite_positive(params.get("GF_MAX_VER_DIST"))
+    if radius_raw is None:
+        gaps.append("GF_MAX_HOR_DIST")
+    if altitude_raw is None:
+        gaps.append("GF_MAX_VER_DIST")
+    radius = radius_raw if radius_raw is not None else FALLBACK_MAX_RADIUS_M
+    altitude = altitude_raw if altitude_raw is not None else FALLBACK_MAX_ALTITUDE_M
+    fence_enabled = radius_raw is not None or altitude_raw is not None
+
+    speed = _finite_positive(params.get("MPC_XY_VEL_MAX"))
+    if speed is None:
+        gaps.append("MPC_XY_VEL_MAX")
+        speed = FALLBACK_MAX_SPEED_MPS
+
+    # Brain-link loss is closer to datalink loss than RC loss. PX4 action 0
+    # means "disabled"; a flying body must not advertise "none".
+    dll = _px4_failsafe_action(params.get("NAV_DLL_ACT"))
+    rcl = _px4_failsafe_action(params.get("NAV_RCL_ACT"))
+    if dll is None:
+        gaps.append("NAV_DLL_ACT")
+    if rcl is None:
+        gaps.append("NAV_RCL_ACT")
+    action: LinkLossAction = "rtl"
+    for candidate in (dll, rcl):
+        if candidate is not None and candidate != "none":
+            action = candidate
+            break
+
+    timeout = _finite_positive(params.get("COM_DL_LOSS_T"))
+    if timeout is None:
+        timeout = _finite_positive(params.get("COM_RC_LOSS_T"))
+    if timeout is None:
+        gaps.append("COM_DL_LOSS_T")
+        timeout = FALLBACK_LINK_LOSS_TIMEOUT_S
+
+    reserve = _finite_positive(params.get("BAT_LOW_THR"))
+    if reserve is None:
+        gaps.append("BAT_LOW_THR")
+        reserve_percent = FALLBACK_RESERVE_RTL_PERCENT
+    else:
+        # BAT_LOW_THR is 0-1; the descriptor advertises percent.
+        reserve_percent = reserve * 100.0 if reserve <= 1.0 else reserve
+
+    if not gaps:
+        source = "px4-params"
+        notes = "Populated from live PX4 parameters. Autopilot failsafes remain final."
+    elif len(gaps) >= 5:
+        source = "fallback"
+        notes = (
+            "PX4 param read missed the envelope; using conservative static "
+            "limits. Autopilot failsafes remain final."
+        )
+    else:
+        source = "mixed"
+        notes = (
+            "Some PX4 params were missing or disabled (0 = unlimited); "
+            f"fell back for: {', '.join(gaps)}. Autopilot failsafes remain final."
+        )
+
+    return conservative_mobile_characteristics(
+        source=source,
+        notes=notes,
+        authority="px4",
+        link_loss_action=action,
+        link_loss_timeout_s=timeout,
+        reserve_rtl_percent=reserve_percent,
+        battery_remaining_percent=battery_remaining_percent,
+        envelope=FlightEnvelope(
+            max_altitude_m=altitude,
+            max_radius_m=radius,
+            max_horizontal_speed_mps=speed,
+        ),
+        geofence=Geofence(
+            enabled=fence_enabled,
+            max_radius_m=radius,
+            max_altitude_m=altitude,
+        ),
+    )
 
 
 def body_to_ned(
@@ -76,6 +227,9 @@ class MavsdkAdapter:
         self._in_air: bool | None = None
         self._flight_mode: str | None = None
         self._armed: bool | None = None
+        # Characteristics cache. Tests can set _param_overrides to skip MAVSDK I/O.
+        self._param_overrides: dict[str, float | int] | None = None
+        self._characteristics: dict[str, Any] = conservative_mobile_characteristics()
 
     async def ensure_connected(self) -> None:
         async with self._connection_lock:
@@ -110,6 +264,7 @@ class MavsdkAdapter:
                 self._system = system
                 self._start_telemetry_cache()
                 self._connected = True
+                await self._load_characteristics()
                 logger.info("MavsdkAdapter connected")
 
     def _start_telemetry_cache(self) -> None:
@@ -180,6 +335,7 @@ class MavsdkAdapter:
         self._in_air = None
         self._flight_mode = None
         self._armed = None
+        self._characteristics = conservative_mobile_characteristics()
         current = asyncio.current_task()
         for task in self._telemetry_tasks:
             if task is not current:
@@ -247,6 +403,91 @@ class MavsdkAdapter:
             "flight_mode": self._flight_mode,
             "armed": self._armed,
         }
+
+    def characteristics(self) -> dict[str, Any]:
+        payload = dict(self._characteristics)
+        endurance = payload.get("endurance")
+        if isinstance(endurance, dict):
+            endurance = dict(endurance)
+            remaining = self._battery.get("remaining_percent")
+            if remaining is not None:
+                endurance["battery_remaining_percent"] = remaining
+            payload["endurance"] = endurance
+        return payload
+
+    async def _load_characteristics(self) -> None:
+        if self._param_overrides is not None:
+            raw: dict[str, float | int] = dict(self._param_overrides)
+        else:
+            raw = await self._read_px4_params()
+        self._characteristics = characteristics_from_px4_params(
+            raw,
+            battery_remaining_percent=self._battery.get("remaining_percent"),
+        )
+
+    async def _read_px4_params(self) -> dict[str, float | int]:
+        system = self._system
+        if system is None:
+            return {}
+        collected = await self._read_all_px4_params(system)
+        if collected is not None:
+            return {
+                name: collected[name] for name in _PX4_PARAM_NAMES if name in collected
+            }
+        raw: dict[str, float | int] = {}
+        for name in _PX4_PARAM_NAMES:
+            value = await self._get_param(system, name)
+            if value is not None:
+                raw[name] = value
+        return raw
+
+    @staticmethod
+    async def _read_all_px4_params(system: Any) -> dict[str, float | int] | None:
+        getter = getattr(getattr(system, "param", None), "get_all_params", None)
+        if not callable(getter):
+            return None
+        try:
+            all_params = await asyncio.wait_for(getter(), timeout=5.0)
+        except Exception:
+            logger.debug(
+                "MAVSDK get_all_params failed; falling back to per-name reads",
+                exc_info=True,
+            )
+            return None
+        collected: dict[str, float | int] = {}
+        for group in (
+            getattr(all_params, "int_params", None),
+            getattr(all_params, "float_params", None),
+        ):
+            if not group:
+                continue
+            for param in group:
+                name = getattr(param, "name", None)
+                value = getattr(param, "value", None)
+                if (
+                    isinstance(name, str)
+                    and isinstance(value, int | float)
+                    and not isinstance(value, bool)
+                ):
+                    collected[name] = value
+        return collected
+
+    @staticmethod
+    async def _get_param(system: Any, name: str) -> float | int | None:
+        param = getattr(system, "param", None)
+        if param is None:
+            return None
+        for getter_name in ("get_param_float", "get_param_int"):
+            getter = getattr(param, getter_name, None)
+            if not callable(getter):
+                continue
+            try:
+                value = await asyncio.wait_for(getter(name), timeout=1.0)
+            except Exception:
+                continue
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                return value
+        return None
 
     async def takeoff(self, altitude_m: float) -> dict[str, Any]:
         async with self._command_lock:
