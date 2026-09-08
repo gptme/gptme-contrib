@@ -131,7 +131,12 @@ def _pr(head_sha: str = TEST_HEAD_SHA) -> dict:
 
 
 def _bob_ai_review_comment(
-    sha: str, score: int = 4, *, n_history: int | None = None
+    sha: str,
+    score: int = 4,
+    *,
+    n_history: int | None = None,
+    findings: list[dict] | None = None,
+    dispositions: dict | None = None,
 ) -> dict:
     """A comment carrying Bob's ai-review marker (no Greptile signature).
 
@@ -139,18 +144,20 @@ def _bob_ai_review_comment(
     current round, matching the live reviewer). Default ``None`` keeps the
     original compact marker so existing tests stay byte-identical.
     """
+    payload: dict = {"sha": sha, "score": score}
     if n_history:
-        history = [
+        payload["history"] = [
             {"sha": f"{sha[:6]}{i:02d}", "score": score, "findings": 1}
             for i in range(n_history)
         ]
-        marker = json.dumps(
-            {"sha": sha, "score": score, "history": history},
-            separators=(",", ":"),
-        )
-        body = f"<!-- bob-ai-review {marker} -->"
-    else:
+    if findings is not None:
+        payload["findings"] = findings
+    if dispositions is not None:
+        payload["dispositions"] = dispositions
+    if findings is None and dispositions is None and not n_history:
         body = f'<!-- bob-ai-review {{"sha": "{sha}", "score": {score}}} -->'
+    else:
+        body = f"<!-- bob-ai-review {json.dumps(payload, separators=(',', ':'))} -->"
     return {
         "id": 111,
         "user": {"login": BOT},
@@ -717,6 +724,180 @@ def test_dark_branch_high_dark_score_dirty_ai_emits_needs_fix() -> None:
         assert (
             improvement_items == []
         ), f"no improvement item expected when AI verdict is dirty; got: {improvement_items}"
+
+
+def test_fully_disposed_findings_are_clean() -> None:
+    """Score 4 with every listed finding disposed is clean before the round cap.
+
+    gptme/gptme#3755: Greptile 5/5, our reviewer 4/5 with one P2 already
+    rejected on its thread, history length 5 (cap not yet fired). Frozen
+    score stayed 4, so the gate re-emitted reviewer_needs_fix every hour.
+    """
+    import time
+
+    short_sha = TEST_HEAD_SHA[:10]
+    fp = "543152f97269"
+    fixture = {
+        "prs": [_pr()],
+        "comments": [
+            _bob_ai_review_comment(
+                short_sha,
+                score=4,
+                n_history=5,
+                findings=[{"fp": fp, "severity": "P2"}],
+                dispositions={fp: {"fp": fp, "reason": "rejected"}},
+            )
+        ],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        state_file = _state_file(state_dir)
+        old_ts = int(time.time()) - 7200
+        state_file.write_text(f":{old_ts}:{TEST_HEAD_SHA}:dirty")
+
+        result = _run_gate(tmp, fixture, state_dir=state_dir)
+        assert result.returncode in (0, 1), result.stderr
+
+        items = _greptile_items(result)
+        assert items == [], (
+            f"fully-disposed findings must not emit; got {items}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        fields = state_file.read_text().strip().split(":")
+        assert fields[3] == "clean", (
+            f"verdict field must be clean after full disposition; "
+            f"got: {state_file.read_text()!r}"
+        )
+
+
+def test_undisposed_findings_stay_dirty_before_round_cap() -> None:
+    """A listed finding without a disposition still dispatches at score 4."""
+    import time
+
+    short_sha = TEST_HEAD_SHA[:10]
+    fixture = {
+        "prs": [_pr()],
+        "comments": [
+            _bob_ai_review_comment(
+                short_sha,
+                score=4,
+                n_history=5,
+                findings=[{"fp": "543152f97269", "severity": "P2"}],
+            )
+        ],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        state_file = _state_file(state_dir)
+        old_ts = int(time.time()) - 7200
+        state_file.write_text(f":{old_ts}:{TEST_HEAD_SHA}:dirty")
+
+        result = _run_gate(tmp, fixture, state_dir=state_dir)
+        assert result.returncode in (0, 1), result.stderr
+
+        items = _greptile_items(result)
+        assert any(
+            i.get("type") in ("greptile_needs_fix", "reviewer_needs_fix") for i in items
+        ), (
+            f"undisposed score-4 finding before round cap must emit; got {items}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+
+def test_findings_without_fp_stay_dirty_before_round_cap() -> None:
+    """A listed finding missing ``fp`` is outstanding, not vacuously disposed.
+
+    The jq path used to count only findings that already had a fingerprint,
+    so ``findings: [{"severity": "P2"}]`` produced outstanding=0 and cleaned
+    a score-4 marker. Python's standing-findings check is fail-closed here.
+    """
+    import time
+
+    short_sha = TEST_HEAD_SHA[:10]
+    fixture = {
+        "prs": [_pr()],
+        "comments": [
+            _bob_ai_review_comment(
+                short_sha,
+                score=4,
+                n_history=5,
+                findings=[{"severity": "P2"}],
+                dispositions={},
+            )
+        ],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        state_file = _state_file(state_dir)
+        old_ts = int(time.time()) - 7200
+        state_file.write_text(f":{old_ts}:{TEST_HEAD_SHA}:dirty")
+
+        result = _run_gate(tmp, fixture, state_dir=state_dir)
+        assert result.returncode in (0, 1), result.stderr
+
+        items = _greptile_items(result)
+        assert any(
+            i.get("type") in ("greptile_needs_fix", "reviewer_needs_fix") for i in items
+        ), (
+            f"finding without fp must stay dirty; got {items}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+
+def test_null_disposition_stays_dirty_before_round_cap() -> None:
+    """A listed finding whose disposition value is JSON null is outstanding.
+
+    ``fp in dispositions`` would treat ``{"aaaa": null}`` as settled; jq's
+    ``($d[.fp] // null) == null`` already counted it outstanding. Require an
+    object disposition entry in both paths.
+    """
+    import time
+
+    short_sha = TEST_HEAD_SHA[:10]
+    fixture = {
+        "prs": [_pr()],
+        "comments": [
+            _bob_ai_review_comment(
+                short_sha,
+                score=4,
+                n_history=5,
+                findings=[{"fp": "aaaa", "severity": "P2"}],
+                dispositions={"aaaa": None},
+            )
+        ],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        state_file = _state_file(state_dir)
+        old_ts = int(time.time()) - 7200
+        state_file.write_text(f":{old_ts}:{TEST_HEAD_SHA}:dirty")
+
+        result = _run_gate(tmp, fixture, state_dir=state_dir)
+        assert result.returncode in (0, 1), result.stderr
+
+        items = _greptile_items(result)
+        assert any(
+            i.get("type") in ("greptile_needs_fix", "reviewer_needs_fix") for i in items
+        ), (
+            f"null disposition must stay dirty; got {items}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
 
 
 def test_round_capped_p2_score_4_is_clean() -> None:

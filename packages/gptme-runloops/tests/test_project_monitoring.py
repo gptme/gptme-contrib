@@ -556,6 +556,47 @@ def test_quoted_standing_marker_is_not_standing_findings(workspace):
         assert run._is_last_activity_by_self("gptme/gptme", 1549) is True
 
 
+def test_disposed_findings_are_not_standing(workspace):
+    """gptme#3755: rejected findings must not keep last-activity inbound."""
+    run = ProjectMonitoringRun(workspace, author=SELF)
+    marker = (
+        "## AI code review\n\nreview body...\n\n"
+        '<!-- bob-ai-review {"sha": "7bb89e6c544c", "score": 4, '
+        '"findings": [{"fp": "543152f97269", "severity": "P2"}], '
+        '"dispositions": {"543152f97269": {"fp": "543152f97269", '
+        '"reason": "rejected"}}} -->'
+    )
+    assert run._marker_has_standing_findings(marker, _HEAD_3638) is False
+    mixed = (
+        "## AI code review\n\nreview body...\n\n"
+        '<!-- bob-ai-review {"sha": "7bb89e6c544c", "score": 3, '
+        '"findings": [{"fp": "aaaa", "severity": "P1"}, '
+        '{"fp": "bbbb", "severity": "P2"}], '
+        '"dispositions": {"bbbb": {"fp": "bbbb", "reason": "rejected"}}} -->'
+    )
+    assert run._marker_has_standing_findings(mixed, _HEAD_3638) is True
+    no_fp = (
+        "## AI code review\n\nreview body...\n\n"
+        '<!-- bob-ai-review {"sha": "7bb89e6c544c", "score": 4, '
+        '"findings": [{"severity": "P2"}], '
+        '"dispositions": {}} -->'
+    )
+    assert run._marker_has_standing_findings(no_fp, _HEAD_3638) is True
+    malformed = (
+        "## AI code review\n\nreview body...\n\n"
+        '<!-- bob-ai-review {"sha": "7bb89e6c544c", "score": 4, '
+        '"findings": ["not-an-object"], "dispositions": {}} -->'
+    )
+    assert run._marker_has_standing_findings(malformed, _HEAD_3638) is True
+    null_disp = (
+        "## AI code review\n\nreview body...\n\n"
+        '<!-- bob-ai-review {"sha": "7bb89e6c544c", "score": 4, '
+        '"findings": [{"fp": "aaaa", "severity": "P2"}], '
+        '"dispositions": {"aaaa": null}} -->'
+    )
+    assert run._marker_has_standing_findings(null_disp, _HEAD_3638) is True
+
+
 def test_is_last_activity_by_self_stale_marker_findings(workspace):
     """Marker findings recorded against an OLDER head do not count: the push
     since the review is fresh activity and the sweep will re-review it."""

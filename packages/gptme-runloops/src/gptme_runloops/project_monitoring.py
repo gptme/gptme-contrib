@@ -468,7 +468,9 @@ class ProjectMonitoringRun(BaseRunLoop):
         standing P1 at head sat undispatched for ~2.5 days behind three
         self-authored comments). Non-empty findings[] whose marker sha matches
         the current head = the reviewer's latest verdict on this exact code
-        still needs a response, regardless of who commented last.
+        still needs a response, regardless of who commented last — unless
+        every listed finding has a disposition (rejected/fixed/accepted).
+        The frozen score does not move on disposition; the map does.
 
         A stale marker sha (agent pushed since the review) does not count:
         the push is fresh activity in its own right and the review sweep will
@@ -487,12 +489,31 @@ class ProjectMonitoringRun(BaseRunLoop):
             state = json.loads(payload)
         except (ValueError, TypeError):
             return False
-        if not state.get("findings"):
+        findings = state.get("findings")
+        if not findings:
             return False
         marker_sha = state.get("sha") or ""
         if head_sha and marker_sha and not head_sha.startswith(marker_sha):
             return False
-        return True
+        # Disposed findings are settled — the frozen score/findings[] stay as
+        # the historical record of that pass. gptme/gptme#3755: a rejected P2
+        # kept dispatching because this predicate ignored the dispositions map.
+        dispositions = state.get("dispositions")
+        if not isinstance(dispositions, dict):
+            dispositions = {}
+        for finding in findings:
+            if not isinstance(finding, dict):
+                return True
+            fp = finding.get("fp")
+            # Fail-closed: missing/non-string fp, or a null/non-object
+            # disposition entry, is still outstanding. jq uses
+            # `($d[.fp] // null) | type != "object"`; `fp in dispositions`
+            # would treat `"fp": null` as settled.
+            if not isinstance(fp, str) or not fp:
+                return True
+            if not isinstance(dispositions.get(fp), dict):
+                return True
+        return False
 
     def _last_activity_is_self_response(
         self,

@@ -485,6 +485,16 @@ has_actionable_update() {
           else (.sha // "") as $sha
             | if (((.findings // []) | length) > 0)
                  and ($sha != "") and ($head | startswith($sha))
+                 and (
+                   (.dispositions // {}) as $d
+                   | [.findings[] | select(
+                       type != "object"
+                       or (.fp | type) != "string"
+                       or .fp == ""
+                       or (($d[.fp] // null) | type) != "object"
+                     )]
+                     | length > 0
+                 )
               then "yes" else "no" end
           end
     ' 2>/dev/null)
@@ -1060,6 +1070,33 @@ ai_review_verdict() {
     score=$(printf '%s' "$marker" | jq -r '.score // empty' 2>/dev/null)
     if [ -n "$score" ] && [ "$score" != "null" ]; then
         if [ "$score" -ge 5 ] 2>/dev/null; then
+            echo "clean"
+            return 0
+        fi
+        # Fully disposed findings at this head are not outstanding work.
+        # The frozen `score` is the historical record of that pass and does
+        # not move when a finding is rejected on its thread (rerender updates
+        # the human header + dispositions map only). gptme/gptme#3755: score
+        # 4, one P2 already rejected, threads resolved, still dispatched every
+        # cooldown hour. Round cap (#3646) only fires after history length > 5,
+        # so an explicit disposition must be enough on its own.
+        # Old markers omit findings[]; do not treat that as "all disposed".
+        local outstanding
+        outstanding=$(printf '%s' "$marker" | jq -r '
+            (.findings // null) as $f
+            | if ($f | type) != "array" or ($f | length) == 0 then
+                empty
+              else
+                (.dispositions // {}) as $d
+                | [$f[] | select(
+                    type != "object"
+                    or (.fp | type) != "string"
+                    or .fp == ""
+                    or (($d[.fp] // null) | type) != "object"
+                  )] | length
+              end
+        ' 2>/dev/null)
+        if [ "$outstanding" = "0" ]; then
             echo "clean"
             return 0
         fi
