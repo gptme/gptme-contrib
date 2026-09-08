@@ -103,6 +103,78 @@ def _format_address_header(value: str) -> str:
     return formataddr((name, addr))
 
 
+# Envelope headers that survive BCC stripping. Gmail's IMAP copy of a blind
+# copy has Delivered-To set to the agent and no Bcc header.
+_ENVELOPE_RECIPIENT_HEADERS = (
+    "Delivered-To",
+    "X-Original-To",
+    "Envelope-To",
+    "X-Envelope-To",
+)
+
+# Headers preserved when importing a maildir message into markdown. Recipient
+# provenance must survive sync or get_unreplied_emails cannot see a BCC.
+_SYNC_HEADERS = (
+    "MIME-Version",
+    "From",
+    "To",
+    "Cc",
+    "Bcc",
+    *_ENVELOPE_RECIPIENT_HEADERS,
+    "Date",
+    "Subject",
+    "Message-ID",
+    "In-Reply-To",
+    "References",
+    "Content-Type",
+)
+
+
+def _header_values_ci(headers: dict[str, str], names: tuple[str, ...]) -> list[str]:
+    """Return header values matching ``names``, case-insensitively."""
+    lookup = {key.lower(): value for key, value in headers.items()}
+    return [
+        lookup[name.lower()] for name in names if name.lower() in lookup and lookup[name.lower()]
+    ]
+
+
+def _header_mentions_agent(values: list[str], own_emails: tuple[str, ...]) -> bool:
+    """True if any address in ``values`` is one of the agent's own addresses."""
+    if not values or not own_emails:
+        return False
+    addrs = {addr.lower() for _, addr in getaddresses(values) if addr}
+    if addrs:
+        return bool(addrs.intersection(own_emails))
+    blob = " ".join(values).lower()
+    return any(own in blob for own in own_emails)
+
+
+def inbound_recipient_role(headers: dict[str, str], own_emails: tuple[str, ...]) -> str | None:
+    """Classify how a message was addressed to the agent.
+
+    Inspects header fields only — a ``To:`` line in the body is not evidence.
+
+    Returns:
+        ``"to"``: agent is in To (normal auto-reply).
+        ``"cc"``: agent is in Cc and not To (private triage, no auto-reply).
+        ``"bcc"``: agent is in Bcc and not To/Cc (private auto-reply).
+        ``"envelope"``: transport stripped Bcc; Delivered-To / X-Original-To /
+            Envelope-To names the agent (private auto-reply).
+        ``None``: no inbound recipient provenance for the agent.
+    """
+    if not own_emails:
+        return "to"
+    if _header_mentions_agent(_header_values_ci(headers, ("To",)), own_emails):
+        return "to"
+    if _header_mentions_agent(_header_values_ci(headers, ("Cc",)), own_emails):
+        return "cc"
+    if _header_mentions_agent(_header_values_ci(headers, ("Bcc",)), own_emails):
+        return "bcc"
+    if _header_mentions_agent(_header_values_ci(headers, _ENVELOPE_RECIPIENT_HEADERS), own_emails):
+        return "envelope"
+    return None
+
+
 def fix_list_spacing(markdown_text: str) -> str:
     """
     Add blank lines before lists if missing.
@@ -361,6 +433,9 @@ class AgentEmail:
 
         Returns:
             List of UnrepliedEmail named tuples, sorted by date oldest-first.
+
+        Auto-reply candidates are To, Bcc, or envelope-delivered (stripped BCC)
+        messages. Cc is visible via ``list_messages`` but never auto-replied.
         """
         if folders is None:
             # Default to inbox only - caller can pass ["inbox", "archive"] if needed
@@ -378,40 +453,27 @@ class AgentEmail:
                 try:
                     content = email_file.read_text()
 
-                    # Extract message details
-                    message_id_match = re.search(r"Message-ID: (<[^>]+>)", content)
-                    subject_match = re.search(r"Subject: (.+)", content)
-                    from_match = re.search(r"From: (.+)", content)
-                    to_match = re.search(r"To: (.+)", content)
-
-                    if not (message_id_match and subject_match and from_match):
+                    # Parse the header block only. A "To:" line in a forwarded
+                    # body is not delivery evidence.
+                    headers, _body = self._markdown_to_email(content)
+                    message_id = (
+                        headers.get("Message-ID") or headers.get("Message-Id") or ""
+                    ).strip()
+                    subject = (headers.get("Subject") or "").strip()
+                    from_line = (headers.get("From") or "").strip()
+                    if not (message_id and subject and from_line):
                         continue
-
-                    message_id = message_id_match.group(1)
 
                     # Skip if we've already seen this message in another folder
                     if message_id in seen_message_ids:
                         continue
                     seen_message_ids.add(message_id)
 
-                    subject = subject_match.group(1)
-                    date_match = re.search(r"Date: (.+)", content)
-                    from_line = from_match.group(1)
-
-                    # Skip if not addressed to the agent's email
-                    # (only process emails sent TO the agent, not CC'd or other recipients)
-                    if to_match and self.own_emails:
-                        to_line = to_match.group(1)
-                        to_addrs = {addr.lower() for _, addr in getaddresses([to_line]) if addr}
-                        if to_addrs:
-                            is_addressed_to_agent = bool(to_addrs.intersection(self.own_emails))
-                        else:
-                            lower_to_line = to_line.lower()
-                            is_addressed_to_agent = any(
-                                own_email in lower_to_line for own_email in self.own_emails
-                            )
-                        if not is_addressed_to_agent:
-                            continue
+                    date_header = headers.get("Date", "")
+                    role = inbound_recipient_role(headers, self.own_emails)
+                    # Cc is for deliberate private triage, not the auto-reply loop.
+                    if role in (None, "cc"):
+                        continue
 
                     # Extract email from "Name <email>" format
                     sender = from_line
@@ -449,7 +511,7 @@ class AgentEmail:
                         continue
 
                     sort_date = self._parse_email_date(
-                        date_match.group(1) if date_match else "",
+                        date_header,
                         invalid_default=datetime.min.replace(tzinfo=timezone.utc),
                     )
                     unreplied_with_dates.append(
@@ -1782,19 +1844,10 @@ class AgentEmail:
                         )
                         continue
 
-                    # Convert to markdown format
+                    # Convert to markdown format. Keep envelope/Cc/Bcc so a
+                    # transport-stripped BCC remains attributable after import.
                     headers = []
-                    for key in [
-                        "MIME-Version",
-                        "From",
-                        "To",
-                        "Date",
-                        "Subject",
-                        "Message-ID",
-                        "In-Reply-To",
-                        "References",
-                        "Content-Type",
-                    ]:
+                    for key in _SYNC_HEADERS:
                         if key in email_msg:
                             headers.append(f"{key}: {email_msg[key]}")
 
