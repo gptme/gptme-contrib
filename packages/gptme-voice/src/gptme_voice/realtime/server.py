@@ -37,6 +37,7 @@ from ..body import body_adapter_from_env, body_tool_schemas
 from ..handoff import HandoffWriter
 from ..vision import VisionSessionBridge, vision_tool_schema
 from .audio import AudioConverter
+from .latency import latency_trace_from_env
 from .openai_client import (
     OpenAIRealtimeClient,
     SessionConfig,
@@ -2684,17 +2685,22 @@ class VoiceServer:
         **kwargs,
     ) -> OpenAIRealtimeClient:
         """Instantiate the realtime client for the configured provider."""
+        latency_trace = kwargs.pop("latency_trace", None)
+        if latency_trace is None:
+            latency_trace = latency_trace_from_env(_get_config_env)
         if self.provider == _PROVIDER_GROK:
             return XAIRealtimeClient(
                 api_key=self._api_key,
                 session_config=session_config,
                 hold_initial_response=hold_initial_response,
+                latency_trace=latency_trace,
                 **kwargs,
             )
         return OpenAIRealtimeClient(
             api_key=self._api_key,
             session_config=session_config,
             hold_initial_response=hold_initial_response,
+            latency_trace=latency_trace,
             **kwargs,
         )
 

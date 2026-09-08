@@ -17,6 +17,8 @@ from typing import Any, Callable, Literal
 import websockets  # type: ignore
 from gptme.config import get_config, get_project_config
 
+from .latency import VoiceLatencyTrace
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_INSTRUCTIONS = "You are a helpful assistant with access to tools via gptme."
@@ -270,6 +272,7 @@ class OpenAIRealtimeClient:
         on_function_call: Callable[[str, dict], Any] | None = None,
         on_speech_started: Callable[[], None] | None = None,
         hold_initial_response: bool = False,
+        latency_trace: VoiceLatencyTrace | None = None,
     ):
         self.api_key = api_key or _get_openai_api_key()
         if not self.api_key:
@@ -372,6 +375,7 @@ class OpenAIRealtimeClient:
         self.on_user_transcript = on_user_transcript
         self.on_function_call = on_function_call
         self.on_speech_started = on_speech_started
+        self.latency_trace = latency_trace
 
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._receive_task: asyncio.Task | None = None
@@ -810,6 +814,9 @@ class OpenAIRealtimeClient:
         silent calls on cold starts / fast reconnects where Twilio's first
         media frames race ahead of the provider's session handshake.
         """
+        if self.latency_trace is not None:
+            self.latency_trace.observe_send_audio()
+
         if self._session_ready is None or not self._session_ready.is_set():
             # Session not confirmed yet — buffer the chunk, bounded so a
             # never-arriving ready signal cannot leak memory.
@@ -918,6 +925,8 @@ class OpenAIRealtimeClient:
     async def _handle_event(self, event: dict) -> None:
         """Handle an event from OpenAI Realtime API."""
         event_type = event.get("type", "")
+        if self.latency_trace is not None:
+            self.latency_trace.observe_event(event_type)
         # Only transcript-carrying events reset the drain idle timer; VAD and
         # lifecycle events must not extend the teardown window unnecessarily.
         if self._event_notice is not None and event_type in _TRANSCRIPT_EVENT_TYPES:
