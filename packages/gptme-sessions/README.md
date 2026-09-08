@@ -46,6 +46,14 @@ stats = store.stats()
 print(f"Success rate: {stats['success_rate']:.0%}")
 ```
 
+Grok Build usage records retain `sys_prompt_tokens` (the first observed prompt,
+including cached input) and `context_peak_tokens` (the largest per-call prompt).
+These are stored alongside session input, output, cache-read, cache-creation,
+and total token counts, so analytics do not need to reparse the trajectory.
+The terminal `end.usage` provides cumulative totals, never context size. An
+incomplete stream uses its observed per-call totals; older streams with only
+an `end` record leave context metrics unknown.
+
 ### CLI
 
 ```bash

@@ -1,5 +1,6 @@
 """Tests for post_session context_tier plumbing and signal fallbacks."""
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -370,6 +371,56 @@ def test_post_session_populates_productivity_grade(tmp_path: Path):
 
     records = store.load_all()
     assert records[0].grades == {"productivity": 0.68}
+
+
+def test_post_session_grok_usage_survives_without_trajectory(tmp_path: Path):
+    """Real Grok usage must survive extraction, storage, and trajectory loss."""
+    trajectory = tmp_path / "grok.jsonl"
+    turns = [
+        {
+            "input_tokens": 100,
+            "output_tokens": 10,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        },
+        {
+            "input_tokens": 20,
+            "output_tokens": 30,
+            "cache_read_input_tokens": 100,
+            "cache_creation_input_tokens": 0,
+        },
+    ]
+    totals = {key: sum(turn[key] for turn in turns) for key in turns[0]}
+    records = [
+        {"type": "available_commands", "commands": []},
+        *({"type": "usage", "usage": turn} for turn in turns),
+        {
+            "type": "end",
+            "usage": {**totals, "total_tokens": 260},
+            "modelUsage": {"grok-build": totals},
+            "stopReason": "end_turn",
+        },
+    ]
+    trajectory.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    sessions_dir = tmp_path / "sessions"
+    post_session(
+        store=SessionStore(sessions_dir=sessions_dir),
+        harness="grok-build",
+        model="grok-build",
+        duration_seconds=60,
+        trajectory_path=trajectory,
+    )
+
+    trajectory.unlink()
+    record = SessionStore(sessions_dir=sessions_dir).load_all()[0]
+    assert record.sys_prompt_tokens == 100
+    assert record.context_peak_tokens == 120
+    assert record.input_tokens == 120
+    assert record.output_tokens == 40
+    assert record.cache_read_tokens == 100
+    assert record.cache_creation_tokens == 0
+    assert record.token_count == 260
+    assert record.stop_reason == "end_turn"
 
 
 def test_post_session_persists_usage_fields(tmp_path: Path):
