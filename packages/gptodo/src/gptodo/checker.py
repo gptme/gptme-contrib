@@ -90,11 +90,12 @@ class CheckerConfig:
 # a normal path, not a policy break), but it is excluded from `next`/`ready`
 # so the queue doesn't grow unboundedly.
 VALID_TRANSITIONS: dict[str, list[str]] = {
-    "backlog": ["todo", "someday", "cancelled", "expired"],
-    "todo": ["active", "backlog", "someday", "cancelled", "expired"],
-    "active": ["ready_for_review", "waiting", "someday", "done", "cancelled"],
+    "backlog": ["todo", "draft", "someday", "cancelled", "expired"],
+    "todo": ["active", "backlog", "draft", "someday", "cancelled", "expired"],
+    "active": ["ready_for_review", "waiting", "draft", "someday", "done", "cancelled"],
     "ready_for_review": ["active", "done", "cancelled"],  # Can go back to active if review fails
     "waiting": ["active", "someday", "cancelled"],
+    "draft": ["backlog", "todo", "cancelled"],  # Release the plan, or drop it
     "someday": [
         "backlog",
         "todo",

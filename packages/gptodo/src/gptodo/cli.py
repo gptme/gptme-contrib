@@ -178,6 +178,7 @@ BROWSE_DEFAULT_STATES = [
 BROWSE_FILTER_STATES = [
     "backlog",
     "someday",
+    "draft",
     "todo",
     "active",
     "waiting",
@@ -221,7 +222,7 @@ def cli(verbose, tasks_dir):
     - Link checking and task integrity verification
 
     Frontmatter fields (set via `gptodo edit TASK --set field value`):
-        state: backlog|todo|active|waiting|ready_for_review|done|cancelled|someday
+        state: backlog|todo|active|waiting|ready_for_review|done|cancelled|someday|draft
         priority: high|medium|low
         task_type: project|action
         assigned_to: bob|erik|alice|gordon (or any string)
@@ -544,6 +545,8 @@ def explain_readiness(task_id: str) -> None:
         check("state", False, f"terminal state ({state}) — work is complete or cancelled")
     elif state == "someday":
         check("state", False, "someday — explicitly deferred, not in ready pool")
+    elif state == "draft":
+        check("state", False, "draft — in-progress plan, not released to the ready pool")
     elif state == "waiting":
         waiting_for = str(task.metadata.get("waiting_for") or "").strip()
         detail = f"waiting_for={waiting_for!r}" if waiting_for else "state=waiting"
@@ -1064,13 +1067,14 @@ choice=$(printf 'date\\npriority\\nmodified\\nname' | fzf --no-sort --header 'So
     # Filter picker: sub-fzf to choose state filter
     Path(sd, "filter-picker.sh").write_text(
         f"""#!/bin/sh
-choice=$(printf 'open tasks (default)\\nall states\\nbacklog only\\nsomeday only\\ntodo only\\nactive only\\nwaiting only\\nready for review only' \\
+choice=$(printf 'open tasks (default)\\nall states\\nbacklog only\\nsomeday only\\ndraft only\\ntodo only\\nactive only\\nwaiting only\\nready for review only' \\
   | fzf --no-sort --header 'Filter by state:')
 case "$choice" in
   "open tasks"*) printf '' > "{sd}/state";;
   "all"*) printf 'all' > "{sd}/state";;
   "backlog"*) printf 'backlog' > "{sd}/state";;
   "someday"*) printf 'someday' > "{sd}/state";;
+  "draft"*) printf 'draft' > "{sd}/state";;
   "todo"*) printf 'todo' > "{sd}/state";;
   "active"*) printf 'active' > "{sd}/state";;
   "waiting"*) printf 'waiting' > "{sd}/state";;
@@ -1082,7 +1086,7 @@ esac
     # State change: sub-fzf to pick new state, then call gptodo edit
     Path(sd, "state-change.sh").write_text(
         """#!/bin/sh
-choice=$(printf 'backlog\\nsomeday\\ntodo\\nactive\\nwaiting\\nready_for_review\\ndone\\ncancelled' \\
+choice=$(printf 'backlog\\nsomeday\\ndraft\\ntodo\\nactive\\nwaiting\\nready_for_review\\ndone\\ncancelled' \\
   | fzf --no-sort --header 'Set state to:')
 [ -n "$choice" ] && gptodo edit "$1" --set state "$choice"
 """
@@ -1101,6 +1105,7 @@ action=$(printf '%s\\n' \\
   'Filter: all states' \\
   'Filter: backlog only' \\
   'Filter: someday only' \\
+  'Filter: draft only' \\
   'Filter: todo only' \\
   'Filter: active only' \\
   'Filter: waiting only' \\
@@ -1108,6 +1113,7 @@ action=$(printf '%s\\n' \\
   '───────────────────' \\
   'Change state -> backlog' \\
   'Change state -> someday' \\
+  'Change state -> draft' \\
   'Change state -> todo' \\
   'Change state -> active' \\
   'Change state -> waiting' \\
@@ -1131,12 +1137,14 @@ case "$action" in
   "Filter: all"*) printf 'all' > "{sd}/state";;
   "Filter: backlog"*) printf 'backlog' > "{sd}/state";;
   "Filter: someday"*) printf 'someday' > "{sd}/state";;
+  "Filter: draft"*) printf 'draft' > "{sd}/state";;
   "Filter: todo"*) printf 'todo' > "{sd}/state";;
   "Filter: active"*) printf 'active' > "{sd}/state";;
   "Filter: waiting"*) printf 'waiting' > "{sd}/state";;
   "Filter: ready for review"*) printf 'ready_for_review' > "{sd}/state";;
   "Change state"*"backlog") gptodo edit "$task" --set state backlog;;
   "Change state"*"someday") gptodo edit "$task" --set state someday;;
+  "Change state"*"draft") gptodo edit "$task" --set state draft;;
   "Change state"*"todo") gptodo edit "$task" --set state todo;;
   "Change state"*"active") gptodo edit "$task" --set state active;;
   "Change state"*"waiting") gptodo edit "$task" --set state waiting;;
@@ -3251,7 +3259,14 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
 
 
 # States that cannot be claimed (already terminal or deliberately deferred/blocked).
-_CLAIM_REFUSED_STATES = {"waiting", "ready_for_review", "someday", "done", "cancelled"}
+_CLAIM_REFUSED_STATES = {
+    "waiting",
+    "ready_for_review",
+    "draft",
+    "someday",
+    "done",
+    "cancelled",
+}
 # States that get auto-promoted to active on claim.
 _CLAIM_PROMOTABLE_STATES = {"backlog", "todo"}
 
@@ -3313,7 +3328,7 @@ def claim(task_id: str, agent_override: str | None):
 
     Sets ``state: active`` (for backlog/todo), records ``assigned_to`` and
     ``assigned_at``, and refuses to claim waiting / ready_for_review /
-    someday / terminal tasks.
+    draft / someday / terminal tasks.
 
     Agent name resolution: --agent flag, then GPTODO_AGENT_NAME env var,
     then [agent].name from gptme.toml (lowercased), else "agent".
@@ -3351,7 +3366,8 @@ def claim(task_id: str, agent_override: str | None):
     if current_state in _CLAIM_REFUSED_STATES:
         console.print(
             f"[red]Refusing to claim {task.id}: state is '{current_state}'. "
-            "Resolve the blocker (or revive from someday) before claiming.[/]"
+            "Release from draft, resolve the blocker, or revive from someday "
+            "before claiming.[/]"
         )
         sys.exit(1)
 
@@ -3520,14 +3536,24 @@ def _get_claimed_task_ids(repo_root: Path) -> set[str]:
 @click.option(
     "--state",
     type=click.Choice(
-        ["backlog", "todo", "active", "ready_for_review", "someday", "both", "actionable"]
+        [
+            "backlog",
+            "todo",
+            "active",
+            "ready_for_review",
+            "someday",
+            "draft",
+            "both",
+            "actionable",
+        ]
     ),
     default="both",
     help=(
         "Filter by task state. 'both' = backlog+todo+active (default). "
         "'actionable' = backlog+todo+active+ready_for_review (everything locally workable). "
         "'ready_for_review' = only tasks awaiting local review/verification. "
-        "'someday' = explicitly query deferred tasks."
+        "'someday' = explicitly query deferred tasks. "
+        "'draft' = explicitly query in-progress plans (not released)."
     ),
 )
 @click.option(
@@ -3621,6 +3647,8 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
         filtered_tasks = [task for task in all_tasks if task.state == "ready_for_review"]
     elif state == "someday":
         filtered_tasks = [task for task in all_tasks if task.state == "someday"]
+    elif state == "draft":
+        filtered_tasks = [task for task in all_tasks if task.state == "draft"]
     elif state == "actionable":
         filtered_tasks = [
             task
@@ -5754,6 +5782,7 @@ def list_all_locks(cleanup: bool, output_json: bool):
             "active",
             "ready_for_review",
             "waiting",
+            "draft",
             "someday",
             "done",
             "cancelled",
@@ -7138,6 +7167,7 @@ def transitions_cmd(output_json: bool):
         console.print("\n[dim]State flow: backlog → todo → active → ready_for_review → done[/]")
         console.print("[dim]Alternate: active → waiting → active → done[/]")
         console.print("[dim]Deferred:  any → someday → backlog/todo (revive when ready)[/]")
+        console.print("[dim]Draft:     backlog/todo/active → draft → backlog/todo (release)[/]")
 
 
 @cli.command("lint")

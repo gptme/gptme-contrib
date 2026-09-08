@@ -115,6 +115,7 @@ def test_expire_multiple_task_states(tmp_path: Path, monkeypatch) -> None:
     _write(tasks_dir, "old-review", "ready_for_review", _iso(200))
     _write(tasks_dir, "old-done", "done", _iso(200))
     _write(tasks_dir, "old-cancelled", "cancelled", _iso(200))
+    _write(tasks_dir, "old-draft", "draft", _iso(200))
 
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(cli, ["expire"])
@@ -129,6 +130,7 @@ def test_expire_multiple_task_states(tmp_path: Path, monkeypatch) -> None:
     assert by_name["old-review"].metadata["state"] == "ready_for_review"
     assert by_name["old-done"].metadata["state"] == "done"
     assert by_name["old-cancelled"].metadata["state"] == "cancelled"
+    assert by_name["old-draft"].metadata["state"] == "draft"
 
 
 # ---------- --state filter -----------------------------------------------------

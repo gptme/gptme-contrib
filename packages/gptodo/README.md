@@ -197,7 +197,7 @@ Task files should use frontmatter metadata:
 
 ```yaml
 ---
-state: active      # backlog, todo, active, ready_for_review, waiting, someday, done, cancelled, expired
+state: active      # draft, backlog, todo, active, ready_for_review, waiting, someday, done, cancelled, expired
 priority: high     # low, medium, high
 task_type: project # project (multi-step) or action (single-step)
 assigned_to: bob   # agent name
@@ -214,25 +214,27 @@ Task description...
 
 ## State Semantics
 
-The nine canonical states and what they *mean* — not just what they're
+The ten canonical states and what they *mean* — not just what they're
 called. The autonomous loop drifts when "active" gets used as an opaque
 "recently touched" tag; enforcing the semantics is the point of the
 `gptodo transitions` table and the `--force` gate on `gptodo edit --set state`.
 
 | State              | Meaning                                                                                                    | In `next`/`ready`? |
 | ------------------ | ---------------------------------------------------------------------------------------------------------- | ------------------ |
+| `draft`            | In-progress plan, filed so it isn't lost, but **not released** to the fleet. Use while a planning session is still writing the plan. | No                 |
 | `backlog`          | Queued, not yet triaged. Default for newly-created tasks.                                                  | Yes                |
 | `todo`             | Triaged and ready to start; unclaimed; nothing is blocking work.                                           | Yes                |
-| `active`           | A human or agent is working on it **right now**. Should be paired with `assigned_to` and `assigned_at`.    | No (already owned) |
+| `active`           | A human or agent is working on it **right now**. Should be paired with `assigned_to` and `assigned_at`.    | Yes (already owned; still listed) |
 | `waiting`          | Blocked on an external event (a date, a reply, an approval, a gate firing). Should carry `wait:` and/or `waiting_for:` explaining *what* it's waiting for. | No             |
-| `ready_for_review` | Work done, awaiting operator sign-off before `done`. Should reference a commit or PR in the body.          | No                 |
+| `ready_for_review` | Work done, awaiting operator sign-off before `done`. Should reference a commit or PR in the body.          | No (query `--state ready_for_review`) |
 | `someday`          | Parked idea; may or may not ever be picked up. Explicitly excluded from `next`/`ready` (GTD someday/maybe). | No                 |
 | `done`             | Terminal. Work merged / criterion met.                                                                     | No (terminal)      |
 | `cancelled`        | Terminal. Will not be picked up; rationale in body.                                                        | No (terminal)      |
 | `expired`          | Soft-terminal. Auto-applied by `gptodo expire` when a `backlog`/`todo`/`someday` task has sat quiet longer than the expire window (default 90d since `created`). Revive to `backlog`/`todo` without `--force`. | No |
 
 Legacy deprecated aliases (still accepted with a warning): `new` → `backlog`,
-`paused` → `backlog`.
+`paused` → `backlog`. **`paused` is not a hold** — it normalizes to `backlog`
+and is claimable. Do not file in-progress plans as `paused`; use `draft`.
 
 ### Common confusions to avoid
 
@@ -251,23 +253,35 @@ Legacy deprecated aliases (still accepted with a warning): `new` → `backlog`,
   transition it to `active` via `gptodo claim` (which also records
   `assigned_to`).
 - **`someday` is not the same as `backlog`.** `backlog` says "we'll get to
-  this"; `someday` says "maybe never, but keep it around". Only `someday`
-  is excluded from `gptodo next`/`ready`.
+  this"; `someday` says "maybe never, but keep it around".
+- **`draft` is not `someday` and not `paused`.** `draft` says "complete,
+  approved-or-approvable plan, deliberately not yet released." `someday` is
+  GTD maybe-never. `paused` is a deprecated alias that **normalizes to
+  `backlog`** — it is not a guard and eager agents will claim it. File
+  in-progress plans as `draft`. Both `draft` and `someday` are excluded
+  from `gptodo next`/`ready` and from `gptodo claim`.
 
 ### Legal transitions
 
 ```mermaid
 stateDiagram-v2
     [*] --> backlog
+    [*] --> draft
+    draft --> backlog : released
+    draft --> todo : released
+    draft --> cancelled
     backlog --> todo
+    backlog --> draft
     backlog --> someday
     backlog --> cancelled
     todo --> active
     todo --> backlog
+    todo --> draft
     todo --> someday
     todo --> cancelled
     active --> ready_for_review
     active --> waiting
+    active --> draft
     active --> someday
     active --> done
     active --> cancelled
