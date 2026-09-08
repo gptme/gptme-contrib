@@ -2809,8 +2809,16 @@ def _contrib_basename_collisions(paths: list[str]) -> dict[str, frozenset[str]]:
     Scoped to packages/<name>/src/**/*.py so a same-named test fixture or
     script (packages/<name>/tests/indexer.py) does not trip this — those live
     outside src/ and aren't the package's public API.
+
+    Files that already exist in this package are modifications, not new
+    modules, and are skipped. The Erik block is "please don't re-implement
+    prior art" — touching a file already in this package is maintenance.
+    Observed false positive: gptme-contrib#1636 adding 6 lines to
+    gptme-voice's existing realtime/server.py, which also exists in
+    gptme-dashboard.
     """
     existing = _contrib_existing_src_basenames()
+    root = _contrib_repo_root()
     collisions: dict[str, set[str]] = {}
     for raw in paths:
         normalized = _contrib_normalize(raw)
@@ -2824,6 +2832,9 @@ def _contrib_basename_collisions(paths: list[str]) -> dict[str, frozenset[str]]:
             continue
         basename = parts[-1]
         if basename in _CONTRIB_COLLISION_BASENAME_DENYLIST:
+            continue
+        # Existing same-package file = modification, not a new module.
+        if (root / normalized).is_file():
             continue
         pkg_name = parts[1]
         other_pkgs = existing.get(basename, frozenset()) - {pkg_name}
