@@ -149,10 +149,12 @@ check_repo() {
     # runs and still have a fallback.  headSha is needed so we can detect when
     # the most recent run lives on an older commit than the current
     # default-branch HEAD — a common case when path filters skip CI on
-    # journal-only / docs-only commits.
+    # journal-only / docs-only commits.  event is needed so Dependabot's
+    # `dynamic` runs can be dropped without hiding product CI.
     local run_json run_err_file run_err
+    local run_fields="conclusion,status,url,name,headSha,event"
     run_err_file=$(mktemp)
-    run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json conclusion,status,url,name,headSha 2>"$run_err_file" || echo "error")
+    run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json "$run_fields" 2>"$run_err_file" || echo "error")
     run_err=$(cat "$run_err_file"); rm -f "$run_err_file"
 
     if [ "$run_json" = "error" ]; then
@@ -165,7 +167,7 @@ check_repo() {
         if echo "$run_err" | grep -qiE "not found|no commit|does not exist|unknown ref|no ref|could not resolve|no such branch"; then
             rm -f "$_DB_CACHE_DIR/${repo//\//__}" 2>/dev/null || true
             default_branch=$(_default_branch "$repo")
-            run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json conclusion,status,url,name,headSha 2>/dev/null || echo "error")
+            run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json "$run_fields" 2>/dev/null || echo "error")
         fi
     fi
 
@@ -194,6 +196,23 @@ check_repo() {
     non_skipped_json=$(echo "$run_json" | jq '[.[] | select(.conclusion != "skipped")]')
     if [ "$(echo "$non_skipped_json" | jq 'length')" -gt 0 ]; then
         run_json="$non_skipped_json"
+    fi
+
+    # Filter out non-product CI that otherwise masks real build health.
+    # Dependabot version updates fire as event=dynamic on the default branch
+    # (gptme-cloud 2026-09-08: Dependabot red, Pre-commit green on the same
+    # SHA → compact context reported the repo Failing). operator-health.py
+    # already excludes event=dynamic from master-red escalation
+    # (MASTER_CI_NONBLOCKING_EVENTS). Do not drop workflow_dispatch here —
+    # nightly full-suite failures are still useful status. Only drop these
+    # rows when a product-CI run remains to report.
+    local product_json
+    product_json=$(echo "$run_json" | jq '[.[] | select(
+        ((.event // "") != "dynamic")
+        and ((.name // "") | test("[Dd]ependabot") | not)
+    )]')
+    if [ "$(echo "$product_json" | jq 'length')" -gt 0 ]; then
+        run_json="$product_json"
     fi
 
     local conclusion status in_progress=""
