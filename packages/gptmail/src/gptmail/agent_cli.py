@@ -1080,7 +1080,10 @@ def _fetch_from_agent(
                 )
             continue
         if dest.exists():
-            continue  # Already fetched — deduplicate by mailbox and filename.
+            # Skip-if-exists is load-bearing: local inbox copies carry
+            # read/replied stamps that the sender's outbox never has.
+            # Recopying would silently reset tracking (gptme/gptme-contrib#1476).
+            continue
         dest.parent.mkdir(parents=True, exist_ok=True)
         # The row's mailbox field tells us which remote outbox subfolder to look in.
         row_mailbox = _normalize_mailbox(str(row.get("mailbox") or fallback_mailbox))

@@ -3,6 +3,7 @@
 Covers the missing human-side delivery introduced in issue #1476:
 - ``pull`` fetches messages from SSH-reachable agents' outboxes into local inbox
 - ``pull`` deduplicates by filename (re-pull is idempotent)
+- ``pull`` skip-if-exists preserves local ``read``/``replied`` stamps on re-pull
 - ``pull --json`` emits machine-readable count + file list
 - ``pull --notify-cmd`` invokes the hook with NEW_COUNT + SUMMARY env vars
 - ``pull --dry-run`` shows what would be fetched without writing
@@ -205,6 +206,42 @@ def test_pull_deduplicates_on_repull(pull_workspace: Path) -> None:
 
     local_inbox = pull_workspace / "erik" / "messages" / "inbox"
     assert len(list(local_inbox.glob("*.md"))) == 1, "only one copy must exist"
+
+
+def test_pull_preserves_local_read_state_on_repull(pull_workspace: Path) -> None:
+    """Re-pull must not clobber local read/replied stamps (gptme/gptme-contrib#1476).
+
+    Read/replied state lives only in the local inbox copy; the sender's outbox
+    never carries it. Skip-if-exists is the required guard: a recopy would
+    silently reset tracking even if filenames are stable.
+    """
+    gordon_outbox = pull_workspace / "gordon" / "messages" / "outbox"
+    name = _write_outbox_msg(
+        gordon_outbox, sender="gordon", recipient="erik", subject="Decision request"
+    )
+
+    first = CliRunner().invoke(agent, ["pull"])
+    assert first.exit_code == 0, first.output
+
+    local = pull_workspace / "erik" / "messages" / "inbox" / name
+    assert local.exists()
+
+    marked = CliRunner().invoke(agent, ["read", name])
+    assert marked.exit_code == 0, marked.output
+    assert "read: true" in local.read_text()
+
+    # Remote outbox is still the unread original; rewrite it so a recopy
+    # would be observable (new body, no read stamp).
+    remote = gordon_outbox / name
+    remote.write_text(remote.read_text() + "\nUpdated upstream body.\n")
+
+    second = CliRunner().invoke(agent, ["pull"])
+    assert second.exit_code == 0, second.output
+    assert "No new messages." in second.output
+
+    text = local.read_text()
+    assert "read: true" in text
+    assert "Updated upstream body." not in text
 
 
 def test_pull_json_output(pull_workspace: Path) -> None:
