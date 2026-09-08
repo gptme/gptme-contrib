@@ -232,6 +232,34 @@ def test_disposed_standing_findings_are_silenced():
     assert not _actionable_pr(pr)
 
 
+def test_standing_findings_without_fp_stay_actionable():
+    """A finding missing ``fp`` is still inbound work, even with last-actor=self."""
+    marker = (
+        "## AI code review\n\n"
+        f'{MARKER} {{"sha": "7bb89e6c544c", "score": 4, '
+        f'"findings": [{{"severity": "P2"}}], '
+        f'"dispositions": {{}}}} -->'
+    )
+    pr = {
+        "number": 3755,
+        "headRefOid": HEAD,
+        "comments": [
+            {
+                "author": {"login": BOT},
+                "createdAt": "2026-09-08T14:12:16Z",
+                "body": marker,
+            },
+            {
+                "author": {"login": BOT},
+                "createdAt": "2026-09-08T14:40:00Z",
+                "body": "Looked into this; no code change.",
+            },
+        ],
+        "latestReviews": [],
+    }
+    assert _actionable_pr(pr)
+
+
 def test_quoted_standing_marker_reply_is_silenced():
     """A later self-reply that blockquotes the standing marker is not itself
     reviewer state. Without a complete-line marker comment, last-actor=self

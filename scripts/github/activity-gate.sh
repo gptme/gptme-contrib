@@ -487,7 +487,12 @@ has_actionable_update() {
                  and ($sha != "") and ($head | startswith($sha))
                  and (
                    (.dispositions // {}) as $d
-                   | [.findings[] | select(.fp != null and ($d[.fp] // null) == null)]
+                   | [.findings[] | select(
+                       type != "object"
+                       or (.fp | type) != "string"
+                       or .fp == ""
+                       or (($d[.fp] // null) == null)
+                     )]
                      | length > 0
                  )
               then "yes" else "no" end
@@ -1083,7 +1088,12 @@ ai_review_verdict() {
                 empty
               else
                 (.dispositions // {}) as $d
-                | [$f[] | select(.fp != null and ($d[.fp] // null) == null)] | length
+                | [$f[] | select(
+                    type != "object"
+                    or (.fp | type) != "string"
+                    or .fp == ""
+                    or (($d[.fp] // null) == null)
+                  )] | length
               end
         ' 2>/dev/null)
         if [ "$outstanding" = "0" ]; then

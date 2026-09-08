@@ -575,6 +575,19 @@ def test_disposed_findings_are_not_standing(workspace):
         '"dispositions": {"bbbb": {"fp": "bbbb", "reason": "rejected"}}} -->'
     )
     assert run._marker_has_standing_findings(mixed, _HEAD_3638) is True
+    no_fp = (
+        "## AI code review\n\nreview body...\n\n"
+        '<!-- bob-ai-review {"sha": "7bb89e6c544c", "score": 4, '
+        '"findings": [{"severity": "P2"}], '
+        '"dispositions": {}} -->'
+    )
+    assert run._marker_has_standing_findings(no_fp, _HEAD_3638) is True
+    malformed = (
+        "## AI code review\n\nreview body...\n\n"
+        '<!-- bob-ai-review {"sha": "7bb89e6c544c", "score": 4, '
+        '"findings": ["not-an-object"], "dispositions": {}} -->'
+    )
+    assert run._marker_has_standing_findings(malformed, _HEAD_3638) is True
 
 
 def test_is_last_activity_by_self_stale_marker_findings(workspace):
