@@ -136,7 +136,7 @@ def test_claim_waiting_task_refuses(workspace: Path) -> None:
     assert "assigned_at" not in meta
 
 
-@pytest.mark.parametrize("state", ["done", "cancelled", "ready_for_review", "someday"])
+@pytest.mark.parametrize("state", ["done", "cancelled", "ready_for_review", "someday", "draft"])
 def test_claim_terminal_or_deferred_refuses(workspace: Path, state: str) -> None:
     path = write_task(workspace, f"{state}-task", state=state, created="2026-04-26T00:00:00+00:00")
 

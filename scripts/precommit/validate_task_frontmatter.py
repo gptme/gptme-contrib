@@ -41,6 +41,7 @@ VALID_STATES = {
         "done",
         "cancelled",
         "someday",
+        "draft",
     ],
     "tweets": ["new", "queued", "approved", "posted"],
 }

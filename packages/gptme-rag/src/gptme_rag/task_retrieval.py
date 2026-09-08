@@ -43,8 +43,18 @@ TASK_TRAILING_RATIO: float = 0.55
 MAX_TASKS_PER_QUERY: int = 3
 
 TASK_OPEN_STATES: frozenset[str] = frozenset(
-    {"backlog", "todo", "active", "waiting", "ready_for_review", "someday", "new", "paused"}
+    {
+        "backlog",
+        "todo",
+        "active",
+        "waiting",
+        "ready_for_review",
+        "someday",
+        "new",
+        "paused",
+    }
 )
+# `draft` is a held in-progress plan, not open work. Do not add it here.
 TASK_CLOSED_STATES: frozenset[str] = frozenset({"done", "cancelled", "archived"})
 
 # ---------------------------------------------------------------------------

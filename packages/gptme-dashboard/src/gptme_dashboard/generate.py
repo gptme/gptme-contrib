@@ -53,9 +53,10 @@ _STATE_ORDER = {
     "ready_for_review": 2,
     "todo": 3,
     "backlog": 4,
-    "someday": 5,
-    "done": 6,
-    "cancelled": 7,
+    "draft": 5,
+    "someday": 6,
+    "done": 7,
+    "cancelled": 8,
 }
 
 

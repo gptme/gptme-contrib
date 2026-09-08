@@ -94,6 +94,19 @@ def test_explain_someday_task(tmp_path: Path, monkeypatch) -> None:
     assert "VERDICT: NOT READY" in out
 
 
+def test_explain_draft_task(tmp_path: Path, monkeypatch) -> None:
+    """A draft task should report NOT READY (in-progress plan, not released)."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(tasks_dir, "in-progress-plan", state="draft", created="2026-01-01T00:00:00")
+    monkeypatch.chdir(tmp_path)
+
+    out = run_explain(tmp_path, "in-progress-plan")
+
+    assert "draft" in out
+    assert "VERDICT: NOT READY" in out
+
+
 def test_explain_blocked_by_dependency(tmp_path: Path, monkeypatch) -> None:
     """A task with an incomplete dependency should report NOT READY with dep info."""
     tasks_dir = tmp_path / "tasks"

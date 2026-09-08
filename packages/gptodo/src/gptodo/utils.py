@@ -76,13 +76,14 @@ class DirectoryConfig:
 # Deprecated state aliases - these map to their canonical state
 # Used by normalize_state() to provide backward compatibility
 #
-# Note: `someday` is intentionally NOT in this list. It is a canonical state
-# that means "deferred indefinitely, not currently actionable" and is excluded
-# from `gptodo next` / `gptodo ready` selection. This preserves the GTD
-# someday/maybe distinction so plateau-pivot decisions stick.
+# Note: `someday` and `draft` are intentionally NOT in this list. Both are
+# canonical states excluded from `gptodo next` / `gptodo ready` selection.
+# `someday` is GTD someday/maybe (deferred indefinitely). `draft` is an
+# in-progress plan that has been filed but not released to the fleet.
+# `paused` is NOT a hold — it normalizes to `backlog` and is claimable.
 DEPRECATED_STATE_ALIASES: dict[str, str] = {
     "new": "backlog",  # new → backlog (untriaged work)
-    "paused": "backlog",  # paused → backlog (intentionally deferred)
+    "paused": "backlog",  # paused → backlog. NOT a guard — selectors will pick it up.
 }
 
 
@@ -123,6 +124,7 @@ def get_canonical_states() -> list[str]:
         "active",
         "ready_for_review",
         "waiting",
+        "draft",
         "someday",
         "done",
         "cancelled",
@@ -404,16 +406,19 @@ CONFIGS = {
         # - active: being actively worked on
         # - ready_for_review: work done, awaiting review/verification (Issue #255)
         # - waiting: blocked on external response
+        # - draft: in-progress plan, filed but not released; NOT eligible for `next`/`ready`
         # - someday: deferred indefinitely, NOT eligible for `next`/`ready` (GTD someday/maybe)
         # - done: completed
         # - cancelled: won't do
-        # Also accepts deprecated aliases: new, paused (with warnings)
+        # Also accepts deprecated aliases: new, paused (with warnings).
+        # `paused` is NOT a hold — it normalizes to backlog and is claimable.
         states=[
             "backlog",
             "todo",
             "active",
             "ready_for_review",  # Issue #255: review state before done
             "waiting",
+            "draft",  # in-progress plan; excluded from next/ready/claim
             "someday",
             "done",
             "cancelled",
@@ -455,6 +460,7 @@ STATE_STYLES = {
     "active": ("blue", "active"),
     "ready_for_review": ("bright_yellow", "review"),  # Issue #255
     "waiting": ("magenta", "waiting"),
+    "draft": ("bright_magenta", "draft"),  # in-progress plan; excluded from next/ready
     "someday": ("dim", "someday"),  # canonical: GTD someday/maybe (excluded from next/ready)
     "done": ("green", "done"),
     "cancelled": ("red", "cancelled"),
@@ -486,6 +492,7 @@ STATE_EMOJIS = {
     "active": "🏃",
     "ready_for_review": "👀",  # Issue #255: review state
     "waiting": "⏳",
+    "draft": "📝",  # in-progress plan; excluded from next/ready
     "someday": "💭",  # canonical: GTD someday/maybe
     "done": "✅",
     "cancelled": "❌",
