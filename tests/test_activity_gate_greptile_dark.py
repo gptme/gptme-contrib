@@ -856,6 +856,50 @@ def test_findings_without_fp_stay_dirty_before_round_cap() -> None:
         )
 
 
+def test_null_disposition_stays_dirty_before_round_cap() -> None:
+    """A listed finding whose disposition value is JSON null is outstanding.
+
+    ``fp in dispositions`` would treat ``{"aaaa": null}`` as settled; jq's
+    ``($d[.fp] // null) == null`` already counted it outstanding. Require an
+    object disposition entry in both paths.
+    """
+    import time
+
+    short_sha = TEST_HEAD_SHA[:10]
+    fixture = {
+        "prs": [_pr()],
+        "comments": [
+            _bob_ai_review_comment(
+                short_sha,
+                score=4,
+                n_history=5,
+                findings=[{"fp": "aaaa", "severity": "P2"}],
+                dispositions={"aaaa": None},
+            )
+        ],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        state_file = _state_file(state_dir)
+        old_ts = int(time.time()) - 7200
+        state_file.write_text(f":{old_ts}:{TEST_HEAD_SHA}:dirty")
+
+        result = _run_gate(tmp, fixture, state_dir=state_dir)
+        assert result.returncode in (0, 1), result.stderr
+
+        items = _greptile_items(result)
+        assert any(
+            i.get("type") in ("greptile_needs_fix", "reviewer_needs_fix") for i in items
+        ), (
+            f"null disposition must stay dirty; got {items}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+
 def test_round_capped_p2_score_4_is_clean() -> None:
     """Score 4 with history length > 5 (round cap already applied) is clean.
 

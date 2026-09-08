@@ -491,7 +491,7 @@ has_actionable_update() {
                        type != "object"
                        or (.fp | type) != "string"
                        or .fp == ""
-                       or (($d[.fp] // null) == null)
+                       or (($d[.fp] // null) | type) != "object"
                      )]
                      | length > 0
                  )
@@ -1092,7 +1092,7 @@ ai_review_verdict() {
                     type != "object"
                     or (.fp | type) != "string"
                     or .fp == ""
-                    or (($d[.fp] // null) == null)
+                    or (($d[.fp] // null) | type) != "object"
                   )] | length
               end
         ' 2>/dev/null)

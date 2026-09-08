@@ -588,6 +588,13 @@ def test_disposed_findings_are_not_standing(workspace):
         '"findings": ["not-an-object"], "dispositions": {}} -->'
     )
     assert run._marker_has_standing_findings(malformed, _HEAD_3638) is True
+    null_disp = (
+        "## AI code review\n\nreview body...\n\n"
+        '<!-- bob-ai-review {"sha": "7bb89e6c544c", "score": 4, '
+        '"findings": [{"fp": "aaaa", "severity": "P2"}], '
+        '"dispositions": {"aaaa": null}} -->'
+    )
+    assert run._marker_has_standing_findings(null_disp, _HEAD_3638) is True
 
 
 def test_is_last_activity_by_self_stale_marker_findings(workspace):

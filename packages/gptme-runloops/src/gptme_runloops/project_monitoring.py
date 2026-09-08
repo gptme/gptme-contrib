@@ -505,7 +505,13 @@ class ProjectMonitoringRun(BaseRunLoop):
             if not isinstance(finding, dict):
                 return True
             fp = finding.get("fp")
-            if not fp or fp not in dispositions:
+            # Fail-closed: missing/non-string fp, or a null/non-object
+            # disposition entry, is still outstanding. jq uses
+            # `($d[.fp] // null) | type != "object"`; `fp in dispositions`
+            # would treat `"fp": null` as settled.
+            if not isinstance(fp, str) or not fp:
+                return True
+            if not isinstance(dispositions.get(fp), dict):
                 return True
         return False
 

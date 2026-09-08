@@ -260,6 +260,34 @@ def test_standing_findings_without_fp_stay_actionable():
     assert _actionable_pr(pr)
 
 
+def test_standing_findings_with_null_disposition_stay_actionable():
+    """A null disposition entry is not a settlement — last-actor=self still inbound."""
+    marker = (
+        "## AI code review\n\n"
+        f'{MARKER} {{"sha": "7bb89e6c544c", "score": 4, '
+        f'"findings": [{{"fp": "aaaa", "severity": "P2"}}], '
+        f'"dispositions": {{"aaaa": null}}}} -->'
+    )
+    pr = {
+        "number": 3755,
+        "headRefOid": HEAD,
+        "comments": [
+            {
+                "author": {"login": BOT},
+                "createdAt": "2026-09-08T14:12:16Z",
+                "body": marker,
+            },
+            {
+                "author": {"login": BOT},
+                "createdAt": "2026-09-08T14:40:00Z",
+                "body": "Looked into this; no code change.",
+            },
+        ],
+        "latestReviews": [],
+    }
+    assert _actionable_pr(pr)
+
+
 def test_quoted_standing_marker_reply_is_silenced():
     """A later self-reply that blockquotes the standing marker is not itself
     reviewer state. Without a complete-line marker comment, last-actor=self
