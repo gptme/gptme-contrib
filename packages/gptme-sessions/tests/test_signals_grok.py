@@ -296,6 +296,72 @@ def test_extract_usage_grok_reads_from_end_record():
     assert usage["output_tokens"] == 114
     assert usage["model"] == "grok-4.5-build"
     assert usage["stop_reason"] == "end_turn"
+    assert "sys_prompt_tokens" not in usage
+    assert "context_peak_tokens" not in usage
+
+
+def test_extract_usage_grok_context_from_turns_totals_from_end():
+    msgs = [
+        _available_commands(),
+        {"type": "usage", "usage": {"input_tokens": 100, "output_tokens": 10}},
+        {
+            "type": "usage",
+            "usage": {
+                "input_tokens": 20,
+                "output_tokens": 1000,
+                "cache_read_input_tokens": 100,
+                "cache_creation_input_tokens": 30,
+            },
+        },
+        # A smaller turn after compaction must not replace the peak.
+        {"type": "usage", "usage": {"input_tokens": 50, "output_tokens": 10}},
+        {
+            **_end_record(input_tokens=4000, output_tokens=1020),
+            "usage": {
+                "input_tokens": 4000,
+                "output_tokens": 1020,
+                "cache_read_input_tokens": 5000,
+                "cache_creation_input_tokens": 300,
+            },
+        },
+    ]
+    usage = extract_usage_grok(msgs)
+    assert usage["sys_prompt_tokens"] == 100
+    assert usage["context_peak_tokens"] == 150
+    assert usage["input_tokens"] == 4000
+    assert usage["output_tokens"] == 1020
+    assert usage["cache_read_tokens"] == 5000
+    assert usage["cache_creation_tokens"] == 300
+    assert usage["total_tokens"] == 10320
+    assert usage["stop_reason"] == "end_turn"
+
+
+def test_extract_usage_grok_incomplete_stream_keeps_observed_usage():
+    msgs = [
+        _available_commands(),
+        {"type": "usage", "usage": None},
+        {"type": "usage", "usage": {}},
+        {
+            "type": "usage",
+            "usage": {"input_tokens": 100, "output_tokens": 10},
+        },
+        {
+            "type": "usage",
+            "usage": {
+                "input_tokens": 20,
+                "output_tokens": 30,
+                "cache_read_input_tokens": 100,
+            },
+        },
+    ]
+    usage = extract_usage_grok(msgs)
+    assert usage["sys_prompt_tokens"] == 100
+    assert usage["context_peak_tokens"] == 120
+    assert usage["input_tokens"] == 120
+    assert usage["output_tokens"] == 40
+    assert usage["cache_read_tokens"] == 100
+    assert usage["total_tokens"] == 260
+    assert "stop_reason" not in usage
 
 
 def test_extract_usage_grok_stop_reason_without_usage():
@@ -335,7 +401,8 @@ def test_extract_usage_grok_cache_read_tokens_included():
         },
     ]
     usage = extract_usage_grok(msgs)
-    assert usage["cache_read_input_tokens"] == 29184
+    assert usage["cache_read_tokens"] == 29184
+    assert usage["total_tokens"] == 30234
 
 
 def test_background_task_commit_via_task_output():

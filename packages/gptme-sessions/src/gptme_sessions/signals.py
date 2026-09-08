@@ -2989,25 +2989,52 @@ def extract_signals_grok(msgs: list[dict]) -> dict:
 def extract_usage_grok(msgs: list[dict]) -> dict:
     """Extract token usage from Grok Build streaming-json trajectories.
 
-    Reads from the final 'end' record which has cumulative session totals.
+    Per-turn ``usage`` records provide first/peak context, including caches.
+    The final ``end`` record provides cumulative totals, never context size;
+    incomplete streams retain the totals observed in their usage records.
     Model name comes from the modelUsage dict (keyed by model id).
     Terminal ``stopReason`` (e.g. ``end_turn``) is copied onto ``stop_reason``
     so post_session / sync can persist the harness-native stop signal.
     """
+    token_fields = {
+        "input_tokens": "input_tokens",
+        "output_tokens": "output_tokens",
+        "cache_read_input_tokens": "cache_read_tokens",
+        "cache_creation_input_tokens": "cache_creation_tokens",
+    }
+    totals = dict.fromkeys(token_fields.values(), 0)
+    observed = set()
+    result: dict = {}
+    for record in msgs:
+        if record.get("type") != "usage":
+            continue
+        usage_data = record.get("usage")
+        if not isinstance(usage_data, dict):
+            continue
+        turn_context = 0
+        for source, field in token_fields.items():
+            value = _as_int(usage_data.get(source))
+            if value is not None and value >= 0:
+                observed.add(field)
+                totals[field] += value
+                if field != "output_tokens":
+                    turn_context += value
+        if turn_context > 0:
+            result.setdefault("sys_prompt_tokens", turn_context)
+            result["context_peak_tokens"] = max(result.get("context_peak_tokens", 0), turn_context)
+
     for record in reversed(msgs):
         if record.get("type") != "end":
             continue
         usage_data = record.get("usage") or {}
-        result: dict = {}
-        input_tokens = usage_data.get("input_tokens")
-        output_tokens = usage_data.get("output_tokens")
-        cache_read = usage_data.get("cache_read_input_tokens")
-        if isinstance(input_tokens, int) and input_tokens > 0:
-            result["input_tokens"] = input_tokens
-        if isinstance(output_tokens, int) and output_tokens > 0:
-            result["output_tokens"] = output_tokens
-        if isinstance(cache_read, int) and cache_read > 0:
-            result["cache_read_input_tokens"] = cache_read
+        for source, field in token_fields.items():
+            value = _as_int(usage_data.get(source))
+            if value is not None and value >= 0:
+                observed.add(field)
+                totals[field] = value
+        total_tokens = _as_int(usage_data.get("total_tokens"))
+        if total_tokens is not None and total_tokens > 0:
+            result["total_tokens"] = total_tokens
         model_usage = record.get("modelUsage") or {}
         if model_usage:
             model_name = next(iter(model_usage), None)
@@ -3016,9 +3043,11 @@ def extract_usage_grok(msgs: list[dict]) -> dict:
         raw_stop = record.get("stopReason")
         if isinstance(raw_stop, str) and raw_stop:
             result["stop_reason"] = raw_stop
-        if result:
-            return result
-    return {}
+        break
+    result.update({field: value for field, value in totals.items() if field in observed})
+    if observed:
+        result.setdefault("total_tokens", sum(totals.values()))
+    return result
 
 
 def extract_from_path(jsonl_path: Path) -> dict:
