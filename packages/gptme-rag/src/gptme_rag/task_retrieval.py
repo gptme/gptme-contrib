@@ -49,12 +49,12 @@ TASK_OPEN_STATES: frozenset[str] = frozenset(
         "active",
         "waiting",
         "ready_for_review",
-        "draft",
         "someday",
         "new",
         "paused",
     }
 )
+# `draft` is a held in-progress plan, not open work. Do not add it here.
 TASK_CLOSED_STATES: frozenset[str] = frozenset({"done", "cancelled", "archived"})
 
 # ---------------------------------------------------------------------------
