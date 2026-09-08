@@ -120,6 +120,18 @@ Keys are loaded from gptme config (`~/.config/gptme/config.toml` or
 
 No need to export them as shell env vars if they're already configured in gptme.
 
+### Voice latency tracing
+
+Set `GPTME_VOICE_LATENCY_SINK` to a file path or `-` (stdout). Each utterance
+emits one JSONL `utterance_trace` with:
+
+- `asr_ms` — VAD speech_stopped → user transcript completed
+- `tts_first_audio_ms` — `response.created` → first audio chunk
+- `round_trip_ms` — speech_stopped → first audio chunk
+
+`send_audio` is counted (`input_audio_chunks`) but is not the round-trip clock;
+Twilio streams PCM continuously.
+
 ## Architecture
 
 - **openai_client.py** - WebSocket client for OpenAI Realtime API with VAD, audio streaming, and event handling
@@ -129,6 +141,7 @@ No need to export them as shell env vars if they're already configured in gptme.
 - **vision.py** - Correlated camera-frame requests, edge-event handling, and host-side VLM inference
 - **audio.py** - Audio format conversion (PCM ↔ μ-law for Twilio)
 - **client.py** - Local client with mic/speaker I/O and feedback loop prevention
+- **latency.py** - Per-utterance ASR / TTS-first-audio / round-trip tracing
 
 ## Limitations
 
