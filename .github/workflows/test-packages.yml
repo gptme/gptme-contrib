@@ -135,7 +135,19 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
+          # Retry apt-get update to handle transient repository errors
+          for i in {1..3}; do
+            if sudo apt-get update -o Acquire::http::Timeout=30; then
+              break
+            fi
+            if [ $i -lt 3 ]; then
+              echo "apt-get update failed, retrying in 5s..."
+              sleep 5
+            else
+              # Continue anyway - system deps may not be critical if already installed
+              echo "apt-get update failed after 3 attempts, continuing..."
+            fi
+          done
           sudo apt-get install -y portaudio19-dev libportaudio2
 
       - name: Install dependencies
