@@ -3047,6 +3047,22 @@ def test_prepend_activity_digest_includes_guidance_and_content() -> None:
 def test_prepend_activity_digest_tells_model_to_skip_subagent() -> None:
     result = _prepend_activity_digest("## Recent sessions\n", "instructions")
     assert "subagent" in result.lower()
+    # Regression: 2026-09-09 standup "what have you been doing in the last hour?"
+    # spawned a subagent because the guidance only named "today / last 12 hours".
+    assert "last hour" in result.lower()
+    assert "24 hours" in result.lower()
+
+
+def test_server_disables_handoff_without_explicit_secret(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Handoff must fail closed — never HMAC with a hardcoded default secret."""
+    monkeypatch.setenv("GPTME_VOICE_HANDOFF_DIR", str(tmp_path))
+    monkeypatch.delenv("GPTME_VOICE_HANDOFF_SECRET", raising=False)
+
+    server = VoiceServer()
+
+    assert server._handoff_writer is None
 
 
 # ── ASR partial deduplication ──────────────────────────────────────────────
