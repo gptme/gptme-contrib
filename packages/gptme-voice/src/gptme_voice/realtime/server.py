@@ -2527,19 +2527,29 @@ class VoiceServer:
                     rag_for_ws = self._rag_for_websocket(
                         websocket,
                         transport="twilio",
-                        caller_id=from_number,
+                        caller_id=granted_from,
                     )
 
                     # Try to claim a pre-warmed session (no handoff/standup for inbound fresh calls)
                     prewarm_eligible = (
                         from_number and not handoff_id and not standup_brief
                     )
-                    # A spoofed start event must not steal a body-capable prewarm.
+                    # A spoofed start event must not steal a body- or rag-capable
+                    # prewarm: the prewarmed session's tool schema was built from
+                    # from_number at the signed /incoming webhook, so if this
+                    # start event's grant doesn't check out, claiming it would
+                    # hand the caller a session that already advertised
+                    # body_* / workspace_search tools with no authorized adapter
+                    # or rag instance behind them (tool_bridge below is wired
+                    # using granted_from, which is None here).
                     if (
                         prewarm_eligible
-                        and self.body_adapter is not None
                         and self._twilio_body_caller_allowed(from_number)
                         and granted_from is None
+                        and (
+                            self.body_adapter is not None
+                            or (self._rag is not None and self._rag.enabled)
+                        )
                     ):
                         prewarm_eligible = False
                     prewarm_client = (

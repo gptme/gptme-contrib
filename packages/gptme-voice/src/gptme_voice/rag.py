@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -31,6 +32,17 @@ _MAX_RESULTS = 5
 _MAX_SNIPPET = 400
 _MAX_FILES = 80
 _MAX_FILE_BYTES = 200_000
+
+# asyncio.wait_for cannot cancel a running asyncio.to_thread worker — the
+# underlying OS thread has no cancellation point and keeps running the
+# search to completion even after search() has returned a "timeout" result.
+# Route search work through a small dedicated pool (rather than the default
+# executor, which is process-wide and shared by every unrelated
+# asyncio.to_thread caller) so a pile-up of slow/timed-out searches can only
+# ever starve future workspace_search calls, never the rest of the process.
+_SEARCH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="voice-rag-search"
+)
 
 # Recency phrasing from the 2026-09-09 standup and typical follow-ups.
 _RECENCY_RE = re.compile(
@@ -347,8 +359,11 @@ class VoiceRag:
 
         started = time.perf_counter()
         try:
+            loop = asyncio.get_running_loop()
             payload = await asyncio.wait_for(
-                asyncio.to_thread(self._search_sync, query.strip(), n_results),
+                loop.run_in_executor(
+                    _SEARCH_EXECUTOR, self._search_sync, query.strip(), n_results
+                ),
                 timeout=self.timeout_seconds,
             )
         except asyncio.TimeoutError:

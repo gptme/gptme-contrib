@@ -1061,6 +1061,163 @@ def test_twilio_spoof_cannot_steal_body_capable_prewarm(
     assert claimed == []
 
 
+def test_twilio_websocket_does_not_grant_rag_tools_from_spoofed_from_number(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raw /twilio start events can invent customParameters.from_number.
+
+    workspace_search must require the call-scoped grant minted by signed
+    /incoming — not the client-supplied from_number — same as body tools.
+    """
+    monkeypatch.setenv("GPTME_VOICE_RAG", "1")
+    monkeypatch.delenv("GPTME_VOICE_BODY_URL", raising=False)
+    import gptme_voice.realtime.server as server_mod
+
+    real_get = server_mod._get_config_env
+
+    def fake_get(name: str) -> str | None:
+        if name == "TWILIO_CALLER_ALLOWLIST":
+            return "+15551212"
+        return real_get(name)
+
+    monkeypatch.setattr(server_mod, "_get_config_env", fake_get)
+
+    captured: dict[str, object] = {}
+
+    class _CapturingBridge(_DummyToolBridge):
+        def __init__(self, *args, **kwargs) -> None:
+            captured["rag"] = kwargs.get("rag")
+
+    async def _exercise(*, grant: bool) -> None:
+        captured.clear()
+        server = VoiceServer(workspace=str(tmp_path))
+        custom: dict[str, str] = {"from_number": "+15551212"}
+        if grant:
+            custom["body_grant"] = server._mint_twilio_body_grant("+15551212", "CA123")
+        websocket = _DummyTwilioWebSocket(
+            [
+                {"event": "connected"},
+                {
+                    "event": "start",
+                    "start": {
+                        "streamSid": "MZ123",
+                        "callSid": "CA123",
+                        "customParameters": custom,
+                    },
+                },
+                {"event": "stop"},
+            ]
+        )
+        fake_client = _FakeRealtimeClient()
+
+        async def _fake_build_session_bootstrap(
+            *,
+            caller_id: str,
+            from_number: str = "",
+            handoff_id: str | None = None,
+            standup_brief: str | None = None,
+        ) -> SessionBootstrap:
+            return SessionBootstrap("You are Bob.")
+
+        def _fake_make_client(_session_cfg, **_kwargs):
+            return fake_client
+
+        async def _fake_on_call_end(*_args, **_kwargs) -> None:
+            return None
+
+        monkeypatch.setattr(
+            server, "_build_session_bootstrap", _fake_build_session_bootstrap
+        )
+        monkeypatch.setattr(server, "_make_client", _fake_make_client)
+        monkeypatch.setattr(server, "_on_call_end", _fake_on_call_end)
+        monkeypatch.setattr(
+            "gptme_voice.realtime.server.GptmeToolBridge", _CapturingBridge
+        )
+        await server.handle_twilio_websocket(websocket)
+
+    asyncio.run(_exercise(grant=False))
+    assert captured.get("rag") is None
+
+    asyncio.run(_exercise(grant=True))
+    assert captured.get("rag") is not None
+
+
+def test_twilio_spoof_cannot_steal_rag_capable_prewarm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spoofed start event must not claim a prewarm that already advertised
+    workspace_search to the model — the claiming tool_bridge would compute
+    rag_for_ws from granted_from (None here), so the tool would be advertised
+    with nothing behind it."""
+    monkeypatch.setenv("GPTME_VOICE_RAG", "1")
+    monkeypatch.delenv("GPTME_VOICE_BODY_URL", raising=False)
+    import gptme_voice.realtime.server as server_mod
+
+    real_get = server_mod._get_config_env
+
+    def fake_get(name: str) -> str | None:
+        if name == "TWILIO_CALLER_ALLOWLIST":
+            return "+15551212"
+        return real_get(name)
+
+    monkeypatch.setattr(server_mod, "_get_config_env", fake_get)
+
+    claimed: list[str] = []
+
+    async def _exercise() -> None:
+        server = VoiceServer(workspace=str(tmp_path))
+        assert server.body_adapter is None
+        assert server._rag is not None and server._rag.enabled
+        websocket = _DummyTwilioWebSocket(
+            [
+                {"event": "connected"},
+                {
+                    "event": "start",
+                    "start": {
+                        "streamSid": "MZ123",
+                        "callSid": "CA123",
+                        "customParameters": {"from_number": "+15551212"},
+                    },
+                },
+                {"event": "stop"},
+            ]
+        )
+        fake_client = _FakeRealtimeClient()
+
+        def _fake_claim(from_number: str):
+            claimed.append(from_number)
+            return fake_client
+
+        async def _fake_on_call_end(*_args, **_kwargs) -> None:
+            return None
+
+        async def _fake_build_session_bootstrap(
+            *,
+            caller_id: str,
+            from_number: str = "",
+            handoff_id: str | None = None,
+            standup_brief: str | None = None,
+        ) -> SessionBootstrap:
+            return SessionBootstrap("You are Bob.")
+
+        def _fake_make_client(_session_cfg, **_kwargs):
+            return fake_client
+
+        monkeypatch.setattr(server, "_claim_prewarm", _fake_claim)
+        monkeypatch.setattr(server, "_on_call_end", _fake_on_call_end)
+        monkeypatch.setattr(
+            server, "_build_session_bootstrap", _fake_build_session_bootstrap
+        )
+        monkeypatch.setattr(server, "_make_client", _fake_make_client)
+        monkeypatch.setattr(
+            "gptme_voice.realtime.server.GptmeToolBridge", _DummyToolBridge
+        )
+        await server.handle_twilio_websocket(websocket)
+
+    asyncio.run(_exercise())
+    assert claimed == []
+
+
 def test_untrusted_sessions_do_not_advertise_body_tools(monkeypatch) -> None:
     monkeypatch.setenv("GPTME_VOICE_BODY_URL", "null")
     server = VoiceServer()

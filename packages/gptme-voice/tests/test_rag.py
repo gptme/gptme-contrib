@@ -7,6 +7,7 @@ the 8s voice budget, without going through the subagent.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from datetime import datetime, timezone
@@ -172,6 +173,35 @@ async def test_timeout_is_enforced() -> None:
     result = await rag.search(CALL_QUERY)
     assert result["status"] == "timeout"
     assert "exceeded" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_timeout_fires_promptly_even_when_search_executor_is_saturated() -> None:
+    """asyncio.wait_for cannot cancel a running executor worker (finding: the
+    orphaned search thread keeps executing after the caller times out), so
+    search() runs on a small dedicated pool instead of the default
+    process-wide executor. That bound must not delay the caller's own
+    timeout: with more concurrent searches than pool workers, each search()
+    still returns 'timeout' within its own budget rather than being
+    serialized behind slots freed by the (still-running) earlier workers.
+    """
+
+    def _slow(query: str, n_results: int) -> list[dict]:
+        time.sleep(0.5)
+        return []
+
+    rags = [
+        VoiceRag(workspace=None, enabled=True, timeout_seconds=0.05, search_impl=_slow)
+        for _ in range(8)  # more than the search executor's 4 workers
+    ]
+    started = time.perf_counter()
+    results = await asyncio.gather(*(r.search(CALL_QUERY) for r in rags))
+    elapsed = time.perf_counter() - started
+    assert all(r["status"] == "timeout" for r in results)
+    assert elapsed < 0.5, (
+        f"timeouts took {elapsed:.2f}s — appear serialized behind the "
+        "still-running orphaned workers instead of firing independently"
+    )
 
 
 @pytest.mark.asyncio
