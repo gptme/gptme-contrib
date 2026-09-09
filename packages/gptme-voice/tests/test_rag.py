@@ -231,3 +231,79 @@ def test_session_config_omits_workspace_search_when_disabled(
     cfg = server._build_session_config("You are Bob.", include_body_tools=False)
     assert all(tool["name"] != TOOL_NAME for tool in cfg.extra_tools)
     assert "WORKSPACE SEARCH" not in cfg.instructions
+
+
+def test_session_config_omits_workspace_search_when_rag_tools_excluded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """include_rag_tools=False suppresses the tool even when GPTME_VOICE_RAG=1."""
+    monkeypatch.setenv("GPTME_VOICE_RAG", "1")
+    monkeypatch.delenv("GPTME_VOICE_BODY_URL", raising=False)
+    from gptme_voice.realtime.server import VoiceServer
+
+    server = VoiceServer(workspace=str(tmp_path))
+    cfg = server._build_session_config(
+        "You are Bob.", include_body_tools=False, include_rag_tools=False
+    )
+    assert all(tool["name"] != TOOL_NAME for tool in cfg.extra_tools)
+    assert "WORKSPACE SEARCH" not in cfg.instructions
+
+
+def test_rag_for_websocket_loopback_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Loopback WebSocket clients get RAG access."""
+    monkeypatch.setenv("GPTME_VOICE_RAG", "1")
+    monkeypatch.delenv("GPTME_VOICE_BODY_URL", raising=False)
+    monkeypatch.delenv("TWILIO_CALLER_ALLOWLIST", raising=False)
+    from unittest.mock import MagicMock
+
+    from gptme_voice.realtime.server import VoiceServer
+
+    server = VoiceServer(workspace=str(tmp_path))
+    ws = MagicMock()
+    ws.client.host = "127.0.0.1"
+    result = server._rag_for_websocket(ws, transport="local")
+    assert result is not None
+    assert result.enabled
+
+
+def test_rag_for_websocket_non_loopback_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-loopback WebSocket clients are denied RAG access."""
+    monkeypatch.setenv("GPTME_VOICE_RAG", "1")
+    monkeypatch.delenv("GPTME_VOICE_BODY_URL", raising=False)
+    monkeypatch.delenv("TWILIO_CALLER_ALLOWLIST", raising=False)
+    from unittest.mock import MagicMock
+
+    from gptme_voice.realtime.server import VoiceServer
+
+    server = VoiceServer(workspace=str(tmp_path))
+    ws = MagicMock()
+    ws.client.host = "203.0.113.42"  # external IP
+    result = server._rag_for_websocket(ws, transport="browser")
+    assert result is None
+
+
+def test_rag_for_websocket_twilio_allowlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Twilio callers on TWILIO_CALLER_ALLOWLIST get RAG; others are denied."""
+    monkeypatch.setenv("GPTME_VOICE_RAG", "1")
+    monkeypatch.delenv("GPTME_VOICE_BODY_URL", raising=False)
+    monkeypatch.setenv("TWILIO_CALLER_ALLOWLIST", "+46765784797")
+    from unittest.mock import MagicMock
+
+    from gptme_voice.realtime.server import VoiceServer
+
+    server = VoiceServer(workspace=str(tmp_path))
+    ws = MagicMock()
+
+    allowed = server._rag_for_websocket(
+        ws, transport="twilio", caller_id="+46765784797"
+    )
+    assert allowed is not None
+
+    denied = server._rag_for_websocket(ws, transport="twilio", caller_id="+10000000000")
+    assert denied is None

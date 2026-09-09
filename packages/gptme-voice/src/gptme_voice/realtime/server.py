@@ -1124,6 +1124,34 @@ class VoiceServer:
         )
         return None
 
+    def _rag_for_websocket(
+        self, websocket, *, transport: str, caller_id: str | None = None
+    ) -> "VoiceRag | None":
+        """Expose workspace_search only on loopback or allowlisted Twilio callers.
+
+        Mirrors _body_adapter_for_websocket: external callers must not be able
+        to read journal content via a recap query on the Twilio number.
+        """
+        if self._rag is None or not self._rag.enabled:
+            return None
+        if transport == "twilio":
+            if self._twilio_body_caller_allowed(caller_id):
+                return self._rag
+            logger.warning(
+                "workspace_search disabled for Twilio caller %s (not on TWILIO_CALLER_ALLOWLIST)",
+                caller_id or "unknown",
+            )
+            return None
+        host = _websocket_peer_host(websocket)
+        if _is_loopback_host(host):
+            return self._rag
+        logger.warning(
+            "workspace_search disabled for unauthenticated %s client %s",
+            transport,
+            host or "unknown",
+        )
+        return None
+
     def _recent_call_path(self, caller_id: str) -> Path:
         digest = hashlib.sha256(caller_id.encode("utf-8")).hexdigest()[:16]
         return self._recent_state_dir() / f"{digest}.json"
@@ -1688,6 +1716,7 @@ class VoiceServer:
                     else ""
                 ),
                 include_body_tools=self._twilio_body_caller_allowed(from_number),
+                include_rag_tools=self._twilio_body_caller_allowed(from_number),
             )
             client = self._make_client(session_cfg, hold_initial_response=True)
             await client.connect()
@@ -2495,6 +2524,11 @@ class VoiceServer:
                         transport="twilio",
                         caller_id=granted_from,
                     )
+                    rag_for_ws = self._rag_for_websocket(
+                        websocket,
+                        transport="twilio",
+                        caller_id=from_number,
+                    )
 
                     # Try to claim a pre-warmed session (no handoff/standup for inbound fresh calls)
                     prewarm_eligible = (
@@ -2538,6 +2572,7 @@ class VoiceServer:
                             instructions=instructions,
                             initial_response_instructions=initial_response_instructions,
                             include_body_tools=body_adapter is not None,
+                            include_rag_tools=rag_for_ws is not None,
                         )
                         realtime_client = self._make_client(
                             session_cfg,
@@ -2568,7 +2603,7 @@ class VoiceServer:
                         on_handoff=self._make_handoff_callback([caller_id], transcript),
                         transcript_provider=lambda: transcript,
                         body_adapter=body_adapter,
-                        rag=self._rag,
+                        rag=rag_for_ws,
                     )
                     realtime_client.on_function_call = tool_bridge.handle_function_call
 
@@ -2659,6 +2694,7 @@ class VoiceServer:
         *,
         include_body_tools: bool = True,
         include_vision_tools: bool = False,
+        include_rag_tools: bool = True,
     ) -> SessionConfig:
         """Build a SessionConfig with optional runtime overrides."""
         kwargs: dict = dict(
@@ -2681,7 +2717,7 @@ class VoiceServer:
             extra_tools.extend(body_tool_schemas(self.body_adapter))
         if include_vision_tools:
             extra_tools.append(vision_tool_schema())
-        if self._rag.enabled:
+        if include_rag_tools and self._rag.enabled:
             extra_tools.append(rag_tool_schema())
             kwargs["instructions"] = rag_instruction_preamble() + kwargs["instructions"]
         if extra_tools:
@@ -2814,12 +2850,14 @@ class VoiceServer:
             body_adapter = self._body_adapter_for_websocket(
                 websocket, transport="local"
             )
+            rag_for_ws = self._rag_for_websocket(websocket, transport="local")
             if _websocket_has_vision(websocket):
                 vision_bridge = VisionSessionBridge(websocket.send_text)
             session_cfg = self._build_session_config(
                 instructions=instructions,
                 include_body_tools=body_adapter is not None,
                 include_vision_tools=vision_bridge is not None,
+                include_rag_tools=rag_for_ws is not None,
             )
             on_ai_transcript, on_user_transcript, _local_hangup = (
                 self._make_transcript_callbacks(
@@ -2847,7 +2885,7 @@ class VoiceServer:
                 transcript_provider=lambda: transcript,
                 body_adapter=body_adapter,
                 vision_bridge=vision_bridge,
-                rag=self._rag,
+                rag=rag_for_ws,
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
 
@@ -2939,9 +2977,11 @@ class VoiceServer:
             body_adapter = self._body_adapter_for_websocket(
                 websocket, transport="browser"
             )
+            rag_for_ws = self._rag_for_websocket(websocket, transport="browser")
             session_cfg = self._build_session_config(
                 instructions=instructions,
                 include_body_tools=body_adapter is not None,
+                include_rag_tools=rag_for_ws is not None,
             )
             on_ai_transcript, on_user_transcript, _browser_hangup = (
                 self._make_transcript_callbacks(
@@ -2968,7 +3008,7 @@ class VoiceServer:
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,
                 body_adapter=body_adapter,
-                rag=self._rag,
+                rag=rag_for_ws,
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
 
