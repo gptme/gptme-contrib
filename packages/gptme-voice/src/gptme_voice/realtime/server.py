@@ -35,6 +35,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from ..body import body_adapter_from_env, body_tool_schemas
 from ..handoff import HandoffWriter
+from ..rag import VoiceRag, rag_instruction_preamble, rag_tool_schema
 from ..vision import VisionSessionBridge, vision_tool_schema
 from .audio import AudioConverter
 from .latency import latency_trace_from_env
@@ -787,6 +788,10 @@ class VoiceServer:
         else:
             self._api_key = openai_api_key or _get_openai_api_key()
         self.workspace = workspace or _detect_agent_repo()
+        # Shared across calls so the recency corpus stays warm. Opt-in via
+        # GPTME_VOICE_RAG=1 — off by default so generic installs do not
+        # advertise a tool they cannot serve.
+        self._rag = VoiceRag.from_env(self.workspace)
         self._agent_name = (
             _get_config_env("GPTME_VOICE_AGENT_NAME")
             or _get_config_env("AGENT_NAME")
@@ -2563,6 +2568,7 @@ class VoiceServer:
                         on_handoff=self._make_handoff_callback([caller_id], transcript),
                         transcript_provider=lambda: transcript,
                         body_adapter=body_adapter,
+                        rag=self._rag,
                     )
                     realtime_client.on_function_call = tool_bridge.handle_function_call
 
@@ -2675,6 +2681,9 @@ class VoiceServer:
             extra_tools.extend(body_tool_schemas(self.body_adapter))
         if include_vision_tools:
             extra_tools.append(vision_tool_schema())
+        if self._rag.enabled:
+            extra_tools.append(rag_tool_schema())
+            kwargs["instructions"] = rag_instruction_preamble() + kwargs["instructions"]
         if extra_tools:
             kwargs["extra_tools"] = extra_tools
         return SessionConfig(**kwargs)
@@ -2838,6 +2847,7 @@ class VoiceServer:
                 transcript_provider=lambda: transcript,
                 body_adapter=body_adapter,
                 vision_bridge=vision_bridge,
+                rag=self._rag,
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
 
@@ -2958,6 +2968,7 @@ class VoiceServer:
                 on_handoff=self._make_handoff_callback([caller_id], transcript),
                 transcript_provider=lambda: transcript,
                 body_adapter=body_adapter,
+                rag=self._rag,
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
 
