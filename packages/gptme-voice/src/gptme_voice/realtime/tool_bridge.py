@@ -67,7 +67,7 @@ _KILLED_RETURNCODE = 137  # 128 + SIGKILL (timeout kill-after or OOM kill)
 # (giving gptme a clean SIGTERM), before this outer Python-level ``timeout``
 # sends its own SIGTERM to the whole subprocess tree.  Without the buffer the
 # Python layer fires at 30 s while the shell layer expects 60 s, causing every
-# fast-mode lookup to be killed prematurely (observed: 2026-09-09 call, Erik).
+# fast-mode lookup to be killed prematurely (observed: 2026-09-09 standup call).
 _FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS = (
     int(os.environ.get("GPTME_VOICE_SUBAGENT_TIMEOUT_FAST_SECONDS", 60)) + 10
 )
