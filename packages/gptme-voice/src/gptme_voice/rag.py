@@ -45,7 +45,7 @@ _RECENCY_RE = re.compile(
 )
 _STOP_RE = re.compile(
     r"\b(what|have|has|you|been|doing|working|on|in|the|a|an|of|for|"
-    r"please|like|just|specifically|bob)\b",
+    r"please|like|just|specifically)\b",
     re.IGNORECASE,
 )
 
