@@ -291,6 +291,139 @@ _GH_ISSUE_CREATE_CMD_RE = re.compile(r"\bgh\s+issue\s+create\b")
 _CI_FAILURE_LOG_CMD_RE = re.compile(r"gh\s+run\s+view\b.*--log-failed")
 
 
+# Reasoning-effort field names, per harness.  Kept together so the
+# cross-harness telemetry contract is visible in one place:
+#   Claude Code: top-level ``effort`` on ``type=assistant`` records (sibling of
+#                ``message``), thinking tokens under
+#                ``message.usage.output_tokens_details.thinking_tokens``.
+#   Codex:       ``turn_context.payload.effort`` (also mirrored under
+#                ``collaboration_mode.settings.reasoning_effort``) and, on older
+#                rollouts, ``reasoning_effort`` inside the developer message's
+#                ``internal_chat_message_metadata_passthrough`` which may be a
+#                dict *or* a JSON-encoded string.  Reasoning tokens under
+#                ``total_token_usage.reasoning_output_tokens``.
+#   gptme:       ``metadata.reasoning_effort`` on assistant messages and
+#                ``metadata.usage.reasoning_tokens`` (gptme/gptme PR in flight;
+#                both optional).
+_REASONING_EFFORT_RE = re.compile(r'\\?"reasoning_effort\\?"\s*:\s*\\?"([A-Za-z_-]+)')
+
+
+def _dominant_value(values: list[str]) -> str | None:
+    """Most common entry of ``values``; ties resolve to the first seen."""
+    if not values:
+        return None
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    best = max(counts.values())
+    for value in values:
+        if counts[value] == best:
+            return value
+    return None  # pragma: no cover - unreachable
+
+
+def _find_nested_key(obj: object, key: str, *, depth: int = 6) -> object:
+    """Depth-first lookup of ``key`` in nested dicts/lists (bounded depth)."""
+    if depth < 0:
+        return None
+    if isinstance(obj, dict):
+        if key in obj:
+            return obj[key]
+        for value in obj.values():
+            found = _find_nested_key(value, key, depth=depth - 1)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for value in obj:
+            found = _find_nested_key(value, key, depth=depth - 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _normalize_effort(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
+def _cc_reasoning_telemetry(msgs: list[dict]) -> tuple[str | None, int | None]:
+    """Return ``(reasoning_effort, thinking_tokens)`` for a Claude Code trajectory.
+
+    ``reasoning_effort`` is the dominant top-level ``effort`` across assistant
+    records (ties → first seen).  ``thinking_tokens`` sums
+    ``message.usage.output_tokens_details.thinking_tokens`` and is ``None``
+    when no assistant record carried the detail block.
+    """
+    efforts: list[str] = []
+    thinking_total = 0
+    thinking_seen = False
+    for record in msgs:
+        if record.get("type") != "assistant":
+            continue
+        effort = _normalize_effort(record.get("effort"))
+        if effort is not None:
+            efforts.append(effort)
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        usage = message.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        details = usage.get("output_tokens_details")
+        if not isinstance(details, dict):
+            continue
+        thinking = _as_int(details.get("thinking_tokens"))
+        if thinking is not None:
+            thinking_total += thinking
+            thinking_seen = True
+    return _dominant_value(efforts), (thinking_total if thinking_seen else None)
+
+
+def _codex_reasoning_effort(msgs: list[dict]) -> str | None:
+    """Dominant reasoning effort across a Codex rollout (ties → first seen).
+
+    Reads ``turn_context.payload.effort`` first (present since mid-2026),
+    falling back to ``collaboration_mode.settings.reasoning_effort`` and to
+    ``reasoning_effort`` inside a developer message's
+    ``internal_chat_message_metadata_passthrough`` (dict or JSON string).
+    """
+    efforts: list[str] = []
+    for record in msgs:
+        rec_type = record.get("type", "")
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if rec_type == "turn_context":
+            effort = _normalize_effort(payload.get("effort"))
+            if effort is None:
+                effort = _normalize_effort(_find_nested_key(payload, "reasoning_effort"))
+            if effort is not None:
+                efforts.append(effort)
+        elif rec_type == "response_item":
+            passthrough = payload.get("internal_chat_message_metadata_passthrough")
+            if passthrough is None:
+                continue
+            effort = None
+            if isinstance(passthrough, str):
+                try:
+                    parsed = json.loads(passthrough)
+                except (ValueError, TypeError):
+                    parsed = None
+                if parsed is not None:
+                    effort = _normalize_effort(_find_nested_key(parsed, "reasoning_effort"))
+                if effort is None:
+                    match = _REASONING_EFFORT_RE.search(passthrough)
+                    if match:
+                        effort = _normalize_effort(match.group(1))
+            else:
+                effort = _normalize_effort(_find_nested_key(passthrough, "reasoning_effort"))
+            if effort is not None:
+                efforts.append(effort)
+    return _dominant_value(efforts)
+
+
 def parse_trajectory(jsonl_path: Path) -> list[dict]:
     """Parse a JSONL trajectory file into a list of records."""
     msgs = []
@@ -485,11 +618,18 @@ def extract_signals(msgs: list[dict]) -> dict:
 
     # Track recent (tool, path) pairs for retry detection
     recent_sigs: list[str] = []
+    reasoning_efforts: list[str] = []
 
     for msg in msgs:
         role = msg.get("role", "")
         content = msg.get("content", "") or ""
         ts_str = msg.get("timestamp", "")
+        if role == "assistant":
+            _meta = msg.get("metadata")
+            if isinstance(_meta, dict):
+                _effort = _normalize_effort(_meta.get("reasoning_effort"))
+                if _effort is not None:
+                    reasoning_efforts.append(_effort)
 
         # Parse timestamps for duration
         if ts_str:
@@ -590,6 +730,7 @@ def extract_signals(msgs: list[dict]) -> dict:
         "deliverables": deliverables,
         "deliverable_details": deliverable_details,
         "summarizer_fired": summarizer_fired,
+        "reasoning_effort": _dominant_value(reasoning_efforts),
     }
 
 
@@ -1198,6 +1339,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
         tool_time_total[name] = round(sum(durs), 1)
         tool_time_max[name] = round(max(durs), 1)
     total_tool_time_s = round(sum(tool_time_total.values()), 1)
+    cc_reasoning_effort, cc_thinking_tokens = _cc_reasoning_telemetry(msgs)
 
     return {
         "tool_calls": tool_calls,
@@ -1222,6 +1364,8 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
         "ci_fixed": ci_fixed,
         "deliverables": deliverables,
         "deliverable_details": deliverable_details,
+        "reasoning_effort": cc_reasoning_effort,
+        "thinking_tokens": cc_thinking_tokens or 0,
     }
 
 
@@ -1317,6 +1461,9 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
     model: str | None = None
     sys_prompt_tokens: int | None = None
     context_peak_tokens: int | None = None
+    reasoning_efforts: list[str] = []
+    reasoning_tokens = 0
+    reasoning_seen = False
 
     # --- Byte-level metrics (model-independent; ErikBjare/bob#738) ---
     sys_prompt_bytes: int | None = None
@@ -1397,6 +1544,14 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
         if not isinstance(reported_cost, bool) and isinstance(reported_cost, (int, float)):
             cost += float(reported_cost)
             cost_found = True
+        # Reasoning telemetry (gptme/gptme in-flight PR; both fields optional).
+        _effort = _normalize_effort(metadata.get("reasoning_effort"))
+        if _effort is not None:
+            reasoning_efforts.append(_effort)
+        _reasoning = _as_int(usage.get("reasoning_tokens"))
+        if _reasoning is not None:
+            reasoning_tokens += _reasoning
+            reasoning_seen = True
 
     total_tokens = input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens
     has_byte_metrics = any(
@@ -1421,6 +1576,11 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
     }
     if cost_found:
         result["cost"] = cost
+    _dominant_effort = _dominant_value(reasoning_efforts)
+    if _dominant_effort is not None:
+        result["reasoning_effort"] = _dominant_effort
+    if reasoning_seen:
+        result["reasoning_tokens"] = reasoning_tokens
     return result
 
 
@@ -1600,6 +1760,11 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
     }
     if stop_reason is not None:
         result["stop_reason"] = stop_reason
+    cc_effort, cc_thinking = _cc_reasoning_telemetry(msgs)
+    if cc_effort is not None:
+        result["reasoning_effort"] = cc_effort
+    if cc_thinking is not None:
+        result["reasoning_tokens"] = cc_thinking
     return result
 
 
@@ -1618,9 +1783,21 @@ def _combine_cc_usage(parts: list[dict]) -> dict:
     result = {
         field: sum(_as_int(part.get(field)) or 0 for part in parts) for field in additive_fields
     }
+    # Reasoning tokens are additive too, but only when some part observed them —
+    # ``None`` must stay distinguishable from "thought zero tokens".
+    if any(part.get("reasoning_tokens") is not None for part in parts):
+        result["reasoning_tokens"] = sum(
+            _as_int(part.get("reasoning_tokens")) or 0 for part in parts
+        )
     # Parent metadata describes the aggregate session. Fall back to a child
     # only when the parent did not carry the field at all.
-    for field in ("model", "sys_prompt_tokens", "context_peak_tokens", "stop_reason"):
+    for field in (
+        "model",
+        "sys_prompt_tokens",
+        "context_peak_tokens",
+        "stop_reason",
+        "reasoning_effort",
+    ):
         value = next((part.get(field) for part in parts if part.get(field) is not None), None)
         if value is not None:
             result[field] = value
@@ -1895,6 +2072,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
         "retry_count": len(retry_candidates),
         "deliverables": deliverables,
         "deliverable_details": deliverable_details,
+        "reasoning_effort": _codex_reasoning_effort(msgs),
     }
 
 
@@ -2092,6 +2270,7 @@ def extract_usage_codex(msgs: list[dict]) -> dict:
         and rate_limit_secondary is None
         and final_total is None
         and context_peak_tokens is None
+        and _codex_reasoning_effort(msgs) is None
     ):
         return {}
     result: dict = {}
@@ -2121,6 +2300,13 @@ def extract_usage_codex(msgs: list[dict]) -> dict:
         result["context_peak_tokens"] = context_peak_tokens
     if context_window is not None:
         result["context_window"] = context_window
+    codex_effort = _codex_reasoning_effort(msgs)
+    if codex_effort is not None:
+        result["reasoning_effort"] = codex_effort
+    if final_total is not None:
+        reasoning_tokens = _as_int(final_total.get("reasoning_output_tokens"))
+        if reasoning_tokens is not None:
+            result["reasoning_tokens"] = reasoning_tokens
     return result
 
 

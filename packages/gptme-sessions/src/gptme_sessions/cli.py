@@ -29,7 +29,13 @@ from .discovery import (
     session_datetime_from_path,
 )
 from . import attribution
-from .post_session import VALID_AB_GROUPS, VALID_CONTEXT_TIERS, post_session
+from .post_session import (
+    VALID_AB_GROUPS,
+    VALID_CONTEXT_TIERS,
+    VALID_REASONING_PROFILES,
+    check_reasoning_effort,
+    post_session,
+)
 from .replay import (
     ToolResultsMode,
     render_replay,
@@ -78,6 +84,8 @@ _USAGE_FIELD_MAP: dict[str, str] = {
     "first_turn_bytes": "first_turn_bytes",
     "context_peak_bytes": "context_peak_bytes",
     "session_total_bytes": "session_total_bytes",
+    "reasoning_effort": "reasoning_effort",
+    "reasoning_tokens": "reasoning_tokens",
 }
 
 # Fields whose absence should trigger ``sync --signals`` re-extraction.
@@ -234,7 +242,7 @@ def _refresh_pi_extract_result(record: SessionRecord, result: dict) -> bool:
     if not isinstance(usage, dict):
         return changed
 
-    latest_fields = {"model", "provider", "stop_reason"}
+    latest_fields = {"model", "provider", "stop_reason", "reasoning_effort"}
     for usage_key, record_key in _USAGE_FIELD_MAP.items():
         if record_key in record.annotated_fields:
             continue
@@ -2872,6 +2880,21 @@ def repair_grades(ctx: click.Context, dry_run: bool) -> None:
     help="A/B experiment group (control or treatment)",
 )
 @click.option("--tier-version", default=None, help="Context tier config version for this session")
+@click.option(
+    "--reasoning-profile",
+    default=None,
+    type=click.Choice(sorted(VALID_REASONING_PROFILES)),
+    help="Semantic reasoning profile requested for this session (routine, default, deep)",
+)
+@click.option(
+    "--reasoning-effort",
+    default=None,
+    help=(
+        "Backend-native reasoning effort the harness ran with (e.g. low, medium, high, "
+        "xhigh, max, ultra). Free-form, stored lowercase; unknown values warn but are "
+        "accepted. Omit to fill from the trajectory."
+    ),
+)
 @click.option("--json", "as_json", is_flag=True, help="Output result as JSON")
 @click.pass_context
 def post_session_cmd(
@@ -2897,11 +2920,18 @@ def post_session_cmd(
     context_tier: str | None,
     ab_group: str | None,
     tier_version: str | None,
+    reasoning_profile: str | None,
+    reasoning_effort: str | None,
     as_json: bool,
 ) -> None:
     """Record a completed session: extract signals, determine outcome, append record."""
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     deliverables = list(deliverables_raw) if deliverables_raw else None
+    if reasoning_effort is not None:
+        reasoning_effort = reasoning_effort.strip().lower() or None
+        _effort_warning = check_reasoning_effort(harness, reasoning_effort)
+        if _effort_warning:
+            click.echo(f"warning: {_effort_warning}", err=True)
     ps = post_session(
         store=store,
         harness=harness,
@@ -2925,6 +2955,8 @@ def post_session_cmd(
         context_tier=context_tier,
         ab_group=ab_group,
         tier_version=tier_version,
+        reasoning_profile=reasoning_profile,
+        reasoning_effort=reasoning_effort,
     )
     if as_json:
         click.echo(
@@ -2938,6 +2970,9 @@ def post_session_cmd(
                     "stop_reason": ps.stop_reason,
                     "cost_usd": ps.cost_usd,
                     "token_count": ps.token_count,
+                    "reasoning_effort": ps.reasoning_effort,
+                    "reasoning_profile": ps.reasoning_profile,
+                    "reasoning_tokens": ps.reasoning_tokens,
                 }
             )
         )
