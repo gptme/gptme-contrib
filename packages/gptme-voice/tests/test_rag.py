@@ -455,20 +455,26 @@ async def test_recency_bucket_sort_not_applied_for_today_query(
         "# Morning\n\nDeep-dive on the RAG pipeline — six hours of work.\n",
         mtime=now - 6 * 3600,
     )
-    # Recent file (written 10 min ago)
-    _write_journal(
-        tmp_path,
-        f"journal/{today}/recent-session.md",
-        "# Recent\n\nQuick CI fix.\n",
-        mtime=now - 600,
-    )
+    # Three recent files written in the last hour — more than n_results below.
+    # If the recency-bucket sort incorrectly fires for a 'today' query, it would
+    # re-rank these three ahead of the morning file, pushing it off the top-3 page.
+    for i, offset in enumerate([600, 900, 1200]):
+        _write_journal(
+            tmp_path,
+            f"journal/{today}/recent-session-{i}.md",
+            f"# Recent {i}\n\nQuick CI fix {i}.\n",
+            mtime=now - offset,
+        )
 
     rag = VoiceRag(workspace=str(tmp_path), enabled=True, search_impl=None)
-    result = await rag.search("what did you work on today", n_results=2)
+    # n_results=3: fewer than the 4 total files, so if the morning file is incorrectly
+    # sorted to position 4 by the recency-bucket sort, it will be absent from results.
+    result = await rag.search("what did you work on today", n_results=3)
 
     assert result["status"] == "ok"
     sources = [item["source"] for item in result["results"]]
-    # Both files must be in the results — the morning one must not be displaced.
+    # The morning file must appear in the top-3 — plain newest-first keeps it there;
+    # an erroneous recency-bucket sort on a 'today' query would drop it to position 4.
     assert any(
         "morning-session.md" in s for s in sources
     ), f"morning-session.md missing from 'today' query results; got {sources}"

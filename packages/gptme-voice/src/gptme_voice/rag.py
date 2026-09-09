@@ -280,7 +280,11 @@ class VoiceRag:
             if not content.strip():
                 continue
             rel = self._relpath(path)
-            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            try:
+                mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            except OSError as exc:
+                logger.debug("skip unreadable (stat) %s: %s", path, exc)
+                continue
             docs.append(
                 Document(
                     content=content,
