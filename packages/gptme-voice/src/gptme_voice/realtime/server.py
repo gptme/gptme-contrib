@@ -478,8 +478,10 @@ def _prepend_activity_digest(digest_text: str, instructions: str) -> str:
     guidance = (
         "ACTIVITY DIGEST (pre-computed — do not read aloud):\n"
         "- A compact summary of recent work is loaded below. "
-        "Use it to answer 'what did you do today / in the last 12 hours?' "
-        "without spawning a subagent.\n"
+        "Use it to answer questions like 'what did you do today?', "
+        "'what happened in the last hour?', or 'what have you been working on?' "
+        "without spawning a subagent. The digest covers the most recent sessions "
+        "within the last 24 hours — 'last hour' questions are answerable from it.\n"
         "- Treat this as of the 'Generated at' timestamp shown in the digest; "
         "sessions that started after that point are not included.\n"
         "- For questions about specific task status or anything genuinely absent "
@@ -841,26 +843,25 @@ class VoiceServer:
                 self.body_adapter.name,
                 sorted(self.body_adapter.capabilities) or "none",
             )
+        self._handoff_writer: HandoffWriter | None = None
         if handoff_dir_env:
             if not handoff_secret_env:
                 logger.warning(
                     "GPTME_VOICE_HANDOFF_SECRET not set while GPTME_VOICE_HANDOFF_DIR is "
-                    "configured — using insecure fallback. Set GPTME_VOICE_HANDOFF_SECRET "
-                    "to a strong random value in production."
+                    "configured — handoff disabled. Set GPTME_VOICE_HANDOFF_SECRET "
+                    "to a strong random value; never fall back to a known default."
                 )
-            handoff_secret = (handoff_secret_env or "dev-only-secret").encode("utf-8")
-            self._handoff_writer: HandoffWriter | None = HandoffWriter(
-                Path(handoff_dir_env),
-                from_agent=handoff_agent_name,
-                secret=handoff_secret,
-            )
-            logger.info(
-                "Handoff enabled: from_agent=%s, dir=%s",
-                handoff_agent_name,
-                handoff_dir_env,
-            )
-        else:
-            self._handoff_writer = None
+            else:
+                self._handoff_writer = HandoffWriter(
+                    Path(handoff_dir_env),
+                    from_agent=handoff_agent_name,
+                    secret=handoff_secret_env.encode("utf-8"),
+                )
+                logger.info(
+                    "Handoff enabled: from_agent=%s, dir=%s",
+                    handoff_agent_name,
+                    handoff_dir_env,
+                )
 
         # Active connections: call_sid -> (twilio_ws, realtime_client)
         self._connections: dict[str, tuple] = {}
