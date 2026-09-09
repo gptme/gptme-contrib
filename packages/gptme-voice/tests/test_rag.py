@@ -22,7 +22,7 @@ from gptme_voice.rag import (
     topic_terms,
 )
 
-CALL_QUERY = "what has Bob been doing in the last hour"
+CALL_QUERY = "what have you been doing in the last hour"
 
 
 def _write_journal(root: Path, rel: str, body: str, mtime: float | None = None) -> Path:
@@ -107,6 +107,35 @@ async def test_call_query_shape_returns_recent_answer_under_budget(
     assert "autonomous-session-recent.md" in sources
     assert "ABOUT.md" not in sources
     assert "rewrote about.md" not in snippets
+
+
+def test_collect_recent_files_spans_full_recency_window(tmp_path: Path) -> None:
+    """collect_recent_files must include files from all days inside the window.
+
+    With recency_hours=48 the window covers three calendar days.  A file written
+    two calendar days ago (but within 48h) must be returned; the previously
+    hardcoded two-directory list silently dropped it.
+    """
+    from datetime import timedelta
+
+    now = time.time()
+    today = datetime.fromtimestamp(now, tz=timezone.utc).date()
+    two_days_ago = (today - timedelta(days=2)).isoformat()
+
+    # File written 47h ago — inside a 48h window but in a directory two days
+    # before today, i.e. not covered by the old hardcoded [today, yesterday].
+    _write_journal(
+        tmp_path,
+        f"journal/{two_days_ago}/old-session.md",
+        "# Old Session\n\nDid some work 47 hours ago.\n",
+        mtime=now - 47 * 3600,
+    )
+
+    rag = VoiceRag(workspace=str(tmp_path), enabled=True, recency_hours=48)
+    found = rag.collect_recent_files(now=now)
+    assert any(
+        "old-session.md" in str(p) for p in found
+    ), f"expected old-session.md in results for recency_hours=48, got: {found}"
 
 
 @pytest.mark.asyncio

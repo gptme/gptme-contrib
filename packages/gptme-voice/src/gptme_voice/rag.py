@@ -178,9 +178,12 @@ class VoiceRag:
         clock = now if now is not None else time.time()
         cutoff = clock - self.recency_hours * 3600
         today = datetime.fromtimestamp(clock, tz=timezone.utc).date()
+        # Span enough calendar days to cover the full recency window.
+        # recency_hours=24 needs at most 2 dirs (today + yesterday);
+        # recency_hours=48 needs 3, etc.  Add 1 extra as a safety margin.
+        n_days = int(self.recency_hours // 24) + 2
         day_dirs = [
-            journal / today.isoformat(),
-            journal / (today - timedelta(days=1)).isoformat(),
+            journal / (today - timedelta(days=d)).isoformat() for d in range(n_days)
         ]
 
         found: list[tuple[float, Path]] = []
