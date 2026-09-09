@@ -369,6 +369,16 @@ def test_execute_fast_mode_uses_subprocess_timeout_wrapper() -> None:
     asyncio.run(_exercise())
 
 
+def test_unset_env_timeout_fallbacks_keep_smart_at_previous_budget() -> None:
+    """Unset-env fallbacks: fast 60+10, smart 120+10 (do not shrink smart)."""
+    import os
+
+    if os.environ.get("GPTME_VOICE_SUBAGENT_TIMEOUT_FAST_SECONDS") is None:
+        assert _FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS == 70
+    if os.environ.get("GPTME_VOICE_SUBAGENT_TIMEOUT_SMART_SECONDS") is None:
+        assert _SMART_MODE_SUBPROCESS_TIMEOUT_SECONDS == 130
+
+
 def test_execute_smart_mode_uses_subprocess_timeout_wrapper() -> None:
     async def _exercise() -> None:
         captured: dict[str, object] = {}
