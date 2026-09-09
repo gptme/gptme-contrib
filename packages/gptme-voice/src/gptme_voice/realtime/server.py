@@ -478,8 +478,10 @@ def _prepend_activity_digest(digest_text: str, instructions: str) -> str:
     guidance = (
         "ACTIVITY DIGEST (pre-computed — do not read aloud):\n"
         "- A compact summary of recent work is loaded below. "
-        "Use it to answer 'what did you do today / in the last 12 hours?' "
-        "without spawning a subagent.\n"
+        "Use it to answer questions like 'what did you do today?', "
+        "'what happened in the last hour?', or 'what have you been working on?' "
+        "without spawning a subagent. The digest covers the most recent sessions "
+        "within the last 24 hours — 'last hour' questions are answerable from it.\n"
         "- Treat this as of the 'Generated at' timestamp shown in the digest; "
         "sessions that started after that point are not included.\n"
         "- For questions about specific task status or anything genuinely absent "
