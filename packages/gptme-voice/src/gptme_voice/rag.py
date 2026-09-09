@@ -198,8 +198,10 @@ class VoiceRag:
                     continue
                 if stat.st_size > _MAX_FILE_BYTES:
                     continue
-                # Today's directory is always in-window; yesterday needs mtime.
-                if day_dir.name != today.isoformat() and stat.st_mtime < cutoff:
+                # Apply the mtime cutoff to all directories including today's.
+                # A journal file written hours ago in today's dir is stale for
+                # sub-24h windows (e.g. GPTME_VOICE_RAG_RECENCY_HOURS=1).
+                if stat.st_mtime < cutoff:
                     continue
                 seen.add(resolved)
                 found.append((stat.st_mtime, path))
@@ -354,6 +356,16 @@ class VoiceRag:
                     f"workspace_search exceeded {self.timeout_seconds:.0f}s. "
                     "Try a narrower query."
                 ),
+            }
+        except Exception as exc:  # noqa: BLE001
+            # Any unhandled exception from _search_sync must NOT propagate out of
+            # search() into the realtime client's _receive_loop, which has no
+            # general handler and would terminate the WebSocket on a single bad call.
+            logger.error("workspace_search error: %s", exc, exc_info=True)
+            return {
+                "status": "error",
+                "query": query,
+                "error": str(exc),
             }
         payload["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
         return payload

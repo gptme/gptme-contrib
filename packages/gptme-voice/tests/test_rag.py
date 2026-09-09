@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -72,9 +72,9 @@ async def test_call_query_shape_returns_recent_answer_under_budget(
     """Exact standup query: recent snippet in, stale snippet out, <8s."""
     now = time.time()
     today = datetime.fromtimestamp(now, tz=timezone.utc).date().isoformat()
-    old_day = (
-        datetime.fromtimestamp(now, tz=timezone.utc).date() - timedelta(days=40)
-    ).isoformat()
+    # Stale file lives in TODAY's directory but with an old mtime so the
+    # mtime cutoff filter is actually exercised (the old test used a 40-day-old
+    # directory which collect_recent_files never visits, giving false confidence).
     _write_journal(
         tmp_path,
         f"journal/{today}/autonomous-session-recent.md",
@@ -83,7 +83,7 @@ async def test_call_query_shape_returns_recent_answer_under_budget(
     )
     _write_journal(
         tmp_path,
-        f"journal/{old_day}/autonomous-session-stale.md",
+        f"journal/{today}/autonomous-session-stale.md",
         "# Ancient work\n\nRewrote ABOUT.md in June.\n",
         mtime=now - 40 * 86400,
     )
