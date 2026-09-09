@@ -139,6 +139,77 @@ def test_collect_recent_files_spans_full_recency_window(tmp_path: Path) -> None:
     ), f"expected old-session.md in results for recency_hours=48, got: {found}"
 
 
+def test_collect_recent_files_spans_timezone_ahead_of_utc(tmp_path: Path) -> None:
+    """A recent file in a local-date directory ahead of the server's UTC date.
+
+    Journal dirs are named by the writer's local calendar date.  When the writer
+    is ahead of the server's UTC clock (e.g. UTC+1) and writes shortly after
+    local midnight, the file lands in a directory dated one day AHEAD of the
+    UTC date.  collect_recent_files must scan those dirs and return the file.
+    """
+    from datetime import timedelta
+
+    now = time.time()
+    today = datetime.fromtimestamp(now, tz=timezone.utc).date()
+    local_tomorrow = (today + timedelta(days=1)).isoformat()
+
+    # Written 10 min ago (recent, inside the default 24h window) but sitting in
+    # a directory dated one day ahead of the server's UTC date.
+    _write_journal(
+        tmp_path,
+        f"journal/{local_tomorrow}/local-midnight-session.md",
+        "# Local midnight\n\nShipped the heartbeat widget just now.\n",
+        mtime=now - 600,
+    )
+
+    rag = VoiceRag(workspace=str(tmp_path), enabled=True)
+    found = rag.collect_recent_files(now=now)
+    assert any(
+        "local-midnight-session.md" in str(p) for p in found
+    ), f"expected local-midnight-session.md (in a dir ahead of UTC) in results, got: {found}"
+
+
+@pytest.mark.asyncio
+async def test_backend_is_recency_when_lexical_has_no_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Topic query with no lexical matches must not mislabel the backend.
+
+    When the query has real topic terms but lexical search returns no hits, the
+    results fall back to the recency-ordered corpus — the backend field must say
+    'recency', not claim a lexical ranking that never happened.
+    """
+    now = time.time()
+    today = datetime.fromtimestamp(now, tz=timezone.utc).date()
+    _write_journal(
+        tmp_path,
+        f"journal/{today}/a-session.md",
+        "# Work\n\nShipped the heartbeat widget an hour ago.\n",
+        mtime=now - 3600,
+    )
+
+    rag = VoiceRag(
+        workspace=str(tmp_path),
+        enabled=True,
+        search_impl=None,
+    )
+
+    # Force lexical to return no matches.  With relevance_floor=0.0 the real
+    # TfidfIndex returns documents even for an unmatched term, so this empty
+    # return is monkeypatched to exercise the no-match fallback branch.
+    monkeypatch.setattr(rag, "_search_lexical", lambda *a, **k: [])
+
+    # 'quasar' is a real topic term (survives stop-word stripping); with lexical
+    # forced empty the recency order is returned and must be labelled 'recency'.
+    result = await rag.search("quasar in the last hour", n_results=3)
+    assert result["status"] == "ok"
+    assert result["backend"] == "recency", (
+        f"backend should be 'recency' when lexical has no matches, got "
+        f"{result['backend']!r}"
+    )
+    assert any("a-session.md" in item["source"] for item in result["results"])
+
+
 @pytest.mark.asyncio
 async def test_injected_backend_records_call_query_and_latency() -> None:
     seen: list[str] = []

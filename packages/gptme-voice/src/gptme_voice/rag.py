@@ -194,8 +194,15 @@ class VoiceRag:
         # recency_hours=24 needs at most 2 dirs (today + yesterday);
         # recency_hours=48 needs 3, etc.  Add 1 extra as a safety margin.
         n_days = int(self.recency_hours // 24) + 2
+        # Also scan a couple of days AHEAD of the UTC date.  Journal directories
+        # are conventionally named by the machine's local calendar date; when the
+        # writer's timezone is ahead of the server's UTC clock, a file written
+        # shortly after local midnight lands in a directory dated one (rarely two)
+        # days greater than today's UTC date.  The per-file mtime cutoff below is
+        # authoritative, so scanning these extra dirs cannot return stale files —
+        # it only prevents silently missing a genuinely recent entry near midnight.
         day_dirs = [
-            journal / (today - timedelta(days=d)).isoformat() for d in range(n_days)
+            journal / (today + timedelta(days=d)).isoformat() for d in range(-n_days, 3)
         ]
 
         found: list[tuple[float, Path]] = []
@@ -315,10 +322,12 @@ class VoiceRag:
         ranked = list(docs)
         if terms:
             try:
-                ranked = (
-                    self._search_lexical(terms, docs, n_results=len(docs)) or ranked
-                )
-                backend = "lexical"
+                lexical = self._search_lexical(terms, docs, n_results=len(docs))
+                if lexical:
+                    ranked = lexical
+                    backend = "lexical"
+                # else: lexical returned no matches — keep the recency order and
+                # the "recency" backend label rather than mislabeling the fallback.
             except Exception as exc:  # noqa: BLE001 - lexical is optional
                 logger.info("lexical search unavailable (%s); using recency order", exc)
                 backend = "recency"
