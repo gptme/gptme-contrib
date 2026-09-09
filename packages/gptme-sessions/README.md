@@ -105,6 +105,14 @@ gptme-sessions judge --update-store  # write scores back to the store
 gptme-sessions post-session --harness gptme --model opus \
   --trajectory ~/.local/share/gptme/logs/2026-03-07-foo/conversation.jsonl
 
+# Reasoning telemetry: --reasoning-profile is the semantic intent
+# (routine|default|deep); --reasoning-effort is the backend-native level the
+# harness ran with (low/medium/high/xhigh/max/ultra/...; free-form, unknown
+# values warn but never fail). Omit --reasoning-effort to fill it from the
+# trajectory (Claude Code `effort`, Codex `reasoning_effort`, gptme metadata).
+gptme-sessions post-session --harness claude-code --model claude-fable-5-1 \
+  --reasoning-profile deep --reasoning-effort high --trajectory ~/.claude/projects/x/id.jsonl
+
 # Append a record manually (deprecated: prefer post-session or sync)
 gptme-sessions append --harness claude-code --model opus --outcome productive
 

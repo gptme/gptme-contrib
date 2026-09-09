@@ -56,6 +56,36 @@ DISPATCH_KINDS: frozenset[str] = frozenset(
     ]
 )
 
+# Semantic reasoning profile requested by the caller (the routing contract in
+# knowledge/technical-designs/reasoning-profile-routing-contract.md).  This is
+# the *intent* — "how hard should the model think for this kind of work" —
+# independent of which backend-native knob the harness turned to honor it.
+REASONING_PROFILES: frozenset[str] = frozenset({"routine", "default", "deep"})
+
+# Backend-native reasoning effort strings we have observed per harness.  These
+# are *documentation and warning* sets, never a hard validation gate: a grade
+# must never be lost because a harness introduced a new effort level.  Unknown
+# values are stored lowercase as-is.
+KNOWN_REASONING_EFFORTS: dict[str, frozenset[str]] = {
+    "claude-code": frozenset({"low", "medium", "high", "max"}),
+    "codex": frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "ultra"}),
+    "gptme": frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}),
+    "pi": frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}),
+}
+
+
+def normalize_reasoning_effort(value: object) -> str | None:
+    """Return ``value`` as a lowercase, stripped effort string, or ``None``.
+
+    Non-string and empty values map to ``None`` so a corrupt JSONL row cannot
+    persist an int or a bare space as an effort level.
+    """
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
 # Scalar fields the ``annotate`` CLI can explicitly override. Persisting this
 # provenance lets later source extraction distinguish operator decisions from
 # values it owns and may refresh.
@@ -480,6 +510,17 @@ class SessionRecord:
     # an override that happens to equal the source value at annotation time.
     annotated_fields: list[str] = field(default_factory=list)
 
+    # Reasoning telemetry (cross-harness).  ``reasoning_effort`` is the
+    # backend-native knob as the harness reports it (Claude Code ``effort``,
+    # Codex ``reasoning_effort``, gptme ``metadata.reasoning_effort``), stored
+    # lowercase.  ``reasoning_profile`` is the semantic profile the caller
+    # requested (see ``REASONING_PROFILES``).  ``reasoning_tokens`` is the
+    # summed thinking/reasoning output tokens when the trajectory exposes them.
+    # All ``None`` on records written before these fields existed.
+    reasoning_effort: str | None = None
+    reasoning_profile: str | None = None
+    reasoning_tokens: int | None = None
+
     # Preserve fields written by older schema versions so load→mutate→rewrite
     # round-trips don't silently drop data (e.g. ``inferred_category``,
     # ``recommended_confidence``, ``notes``).
@@ -541,6 +582,14 @@ class SessionRecord:
         # Discard unrecognized dispatch_kind values for the same reason.
         if self.dispatch_kind is not None and self.dispatch_kind not in DISPATCH_KINDS:
             self.dispatch_kind = None
+        # Reasoning telemetry: effort is free-form but always lowercase; profile
+        # is a closed semantic set so typos never reach the selector.
+        self.reasoning_effort = normalize_reasoning_effort(self.reasoning_effort)
+        if self.reasoning_profile is not None:
+            _profile = normalize_reasoning_effort(self.reasoning_profile)
+            self.reasoning_profile = _profile if _profile in REASONING_PROFILES else None
+        if isinstance(self.reasoning_tokens, bool) or not isinstance(self.reasoning_tokens, int):
+            self.reasoning_tokens = None
         # A session cannot be its own parent.  A spawner that leaks its own id
         # into the child environment would otherwise create a self-loop that
         # silently breaks every lineage walk.

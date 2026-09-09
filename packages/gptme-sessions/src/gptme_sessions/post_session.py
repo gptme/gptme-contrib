@@ -38,7 +38,13 @@ from .deliverables import (
 from .discovery import extract_project, extract_session_name
 from .failure_capture import capture_session_failure
 from .lesson_events import load_lesson_events
-from .record import SessionRecord, trajectory_revision_for
+from .record import (
+    KNOWN_REASONING_EFFORTS,
+    REASONING_PROFILES,
+    SessionRecord,
+    normalize_reasoning_effort,
+    trajectory_revision_for,
+)
 from .signals import extract_from_path
 from .smell import compute_smell_score
 from .store import SessionStore
@@ -233,6 +239,29 @@ VALID_CONTEXT_TIERS: frozenset[str] = frozenset({"standard", "extended", "large"
 #: can use a single source of truth for ``click.Choice``.
 VALID_AB_GROUPS: frozenset[str] = frozenset({"treatment", "control"})
 
+#: Valid values for the ``reasoning_profile`` parameter (semantic intent:
+#: routine / default / deep).  Re-exported from ``record`` for ``click.Choice``.
+VALID_REASONING_PROFILES: frozenset[str] = REASONING_PROFILES
+
+
+def check_reasoning_effort(harness: str, effort: str | None) -> str | None:
+    """Return a warning when ``effort`` is not a documented value for ``harness``.
+
+    Never raises: ``reasoning_effort`` is free-form by design so that a new
+    backend level (or a typo) can never cost us the whole session record —
+    that silent-drop failure is exactly what left ``weekly-review`` with zero
+    records when ``--reasoning-profile`` was rejected by click.
+    """
+    if effort is None:
+        return None
+    known = KNOWN_REASONING_EFFORTS.get(harness)
+    if known is None or effort in known:
+        return None
+    return (
+        f"reasoning_effort {effort!r} is not a documented level for harness {harness!r} "
+        f"(known: {', '.join(sorted(known))}); storing as-is"
+    )
+
 
 @dataclass
 class PostSessionResult:
@@ -261,6 +290,10 @@ class PostSessionResult:
         stop_reason:           Harness-native final assistant stop reason.
         cost_usd:              Harness-reported USD-equivalent cost. For subscription
                                providers this may be nominal rather than billed spend.
+        reasoning_effort:      Backend-native reasoning effort (lowercase), from the
+                               caller or the trajectory.
+        reasoning_profile:     Semantic reasoning profile requested by the caller.
+        reasoning_tokens:      Summed thinking/reasoning output tokens, when exposed.
     """
 
     record: SessionRecord
@@ -282,6 +315,9 @@ class PostSessionResult:
     provider: str | None = None
     stop_reason: str | None = None
     cost_usd: float | None = None
+    reasoning_effort: str | None = None
+    reasoning_profile: str | None = None
+    reasoning_tokens: int | None = None
 
 
 def post_session(
@@ -314,6 +350,8 @@ def post_session(
     failure_reason: str | None = None,
     error: str | None = None,
     commit_trailers: Mapping[str, Sequence[str]] | None = None,
+    reasoning_profile: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> PostSessionResult:
     """Record a completed agent session and extract trajectory signals.
 
@@ -332,6 +370,16 @@ def post_session(
         A/B group assignment for this session (e.g. ``"treatment"`` or ``"control"``).
     tier_version:
         Version of the context tier configuration used for this session.
+    reasoning_profile:
+        Semantic reasoning profile the caller requested for this session —
+        one of ``"routine"``, ``"default"``, ``"deep"`` (see
+        ``VALID_REASONING_PROFILES``).  Invalid values raise ``ValueError``.
+    reasoning_effort:
+        Backend-native reasoning effort the harness actually ran with
+        (``"low"``/``"high"``/``"xhigh"``/``"ultra"``/...).  Stored lowercase.
+        Unknown values are accepted with a warning — never rejected.  When
+        omitted, filled from the trajectory (Claude Code ``effort``, Codex
+        ``reasoning_effort``, gptme ``metadata.reasoning_effort``).
     parent_session_id:
         ``session_id`` of the session that spawned this one.  Defaults to the
         ``BOB_PARENT_SESSION_ID`` environment variable so spawners only have to
@@ -455,6 +503,16 @@ def post_session(
         raise ValueError(
             f"Invalid ab_group {ab_group!r}. Expected one of {sorted(VALID_AB_GROUPS)}"
         )
+    if reasoning_profile is not None and reasoning_profile not in VALID_REASONING_PROFILES:
+        raise ValueError(
+            f"Invalid reasoning_profile {reasoning_profile!r}. "
+            f"Expected one of {sorted(VALID_REASONING_PROFILES)}"
+        )
+    reasoning_effort = normalize_reasoning_effort(reasoning_effort)
+    _effort_warning = check_reasoning_effort(harness, reasoning_effort)
+    if _effort_warning:
+        logger.warning(_effort_warning)
+    reasoning_tokens: int | None = None
 
     grade: float | None = None
     signals: dict[str, Any] | None = None
@@ -509,6 +567,13 @@ def post_session(
                     stop_reason = _stop_reason
                 if not isinstance(_cost, bool) and isinstance(_cost, (int, float)):
                     cost_usd = float(_cost)
+                # Reasoning telemetry: caller-supplied effort wins; otherwise
+                # take what the harness recorded in the trajectory.
+                if reasoning_effort is None:
+                    reasoning_effort = normalize_reasoning_effort(usage.get("reasoning_effort"))
+                _reasoning_tokens = usage.get("reasoning_tokens")
+                if not isinstance(_reasoning_tokens, bool) and isinstance(_reasoning_tokens, int):
+                    reasoning_tokens = _reasoning_tokens
                 _in = usage.get("input_tokens")
                 _out = usage.get("output_tokens")
                 _cc = usage.get("cache_creation_tokens")
@@ -893,6 +958,14 @@ def post_session(
         record_kwargs["stop_reason"] = stop_reason
     if cost_usd is not None:
         record_kwargs["cost_usd"] = cost_usd
+    if reasoning_effort is None and signals:
+        reasoning_effort = normalize_reasoning_effort(signals.get("reasoning_effort"))
+    if reasoning_effort is not None:
+        record_kwargs["reasoning_effort"] = reasoning_effort
+    if reasoning_profile is not None:
+        record_kwargs["reasoning_profile"] = reasoning_profile
+    if reasoning_tokens is not None:
+        record_kwargs["reasoning_tokens"] = reasoning_tokens
     if outcome_flip_reason is not None:
         record_kwargs["outcome_flip_reason"] = outcome_flip_reason
     if context_tier is not None:
@@ -1061,6 +1134,9 @@ def post_session(
         provider=provider,
         stop_reason=stop_reason,
         cost_usd=cost_usd,
+        reasoning_effort=reasoning_effort,
+        reasoning_profile=reasoning_profile,
+        reasoning_tokens=reasoning_tokens,
         token_count=token_count,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
