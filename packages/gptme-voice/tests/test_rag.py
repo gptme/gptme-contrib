@@ -17,6 +17,7 @@ import pytest
 from gptme_voice.rag import (
     TOOL_NAME,
     VoiceRag,
+    is_last_hour_query,
     is_recency_query,
     rag_instruction_preamble,
     rag_tool_schema,
@@ -408,3 +409,107 @@ def test_rag_for_websocket_twilio_allowlist(
 
     denied = server._rag_for_websocket(ws, transport="twilio", caller_id="+10000000000")
     assert denied is None
+
+
+def test_is_last_hour_query_matches_only_sub_hour_phrases() -> None:
+    """is_last_hour_query must not fire on broader recency phrases.
+
+    Queries about "today", "this morning", "recently" use the 24h recency
+    window and must NOT trigger the last-hour bucket sort — that would push
+    morning or afternoon work out of the top results when more than n_results
+    files were written in the most recent hour.
+    """
+    # Sub-hour — should match
+    assert is_last_hour_query("what have you been doing in the last hour")
+    assert is_last_hour_query("what happened in the past hour")
+    assert is_last_hour_query("recap this hour")
+
+    # Broader recency — must NOT match
+    assert not is_last_hour_query("what did you work on today")
+    assert not is_last_hour_query("what have you been doing this morning")
+    assert not is_last_hour_query("what did you do this afternoon")
+    assert not is_last_hour_query("what have you been working on recently")
+    assert not is_last_hour_query("what did you do lately")
+
+    # Pure topic — must not match
+    assert not is_last_hour_query("training run status")
+
+
+@pytest.mark.asyncio
+async def test_recency_bucket_sort_not_applied_for_today_query(
+    tmp_path: Path,
+) -> None:
+    """'What did you work on today?' must not bias results toward the last hour.
+
+    If n_results or more files were written in the last hour, the recency-bucket
+    sort would push morning work off the top-N page.  For a 'today' query the
+    plain newest-first order should be returned without any sub-hour re-sorting.
+    """
+    now = time.time()
+    today = datetime.fromtimestamp(now, tz=timezone.utc).date()
+
+    # Morning file (written 6h ago — within the 24h window, outside the 1h window)
+    _write_journal(
+        tmp_path,
+        f"journal/{today}/morning-session.md",
+        "# Morning\n\nDeep-dive on the RAG pipeline — six hours of work.\n",
+        mtime=now - 6 * 3600,
+    )
+    # Recent file (written 10 min ago)
+    _write_journal(
+        tmp_path,
+        f"journal/{today}/recent-session.md",
+        "# Recent\n\nQuick CI fix.\n",
+        mtime=now - 600,
+    )
+
+    rag = VoiceRag(workspace=str(tmp_path), enabled=True, search_impl=None)
+    result = await rag.search("what did you work on today", n_results=2)
+
+    assert result["status"] == "ok"
+    sources = [item["source"] for item in result["results"]]
+    # Both files must be in the results — the morning one must not be displaced.
+    assert any(
+        "morning-session.md" in s for s in sources
+    ), f"morning-session.md missing from 'today' query results; got {sources}"
+
+
+def test_voice_rag_disabled_when_gptme_rag_not_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VoiceRag must set enabled=False at init when gptme-rag cannot be imported.
+
+    An operator who sets GPTME_VOICE_RAG=1 on a server without gptme-rag
+    installed should see workspace_search omitted from the session tool schema,
+    not a non-functional tool that returns 'could not be read' on every call.
+    """
+    import builtins
+    import sys
+
+    real_import = builtins.__import__
+
+    def _no_gptme_rag(name: str, *args: object, **kwargs: object) -> object:
+        if name.startswith("gptme_rag"):
+            raise ImportError(f"No module named '{name}' (test stub)")
+        return real_import(name, *args, **kwargs)
+
+    # Remove any cached gptme_rag modules so the import check actually fires.
+    for key in list(sys.modules.keys()):
+        if key.startswith("gptme_rag"):
+            del sys.modules[key]
+
+    monkeypatch.setattr(builtins, "__import__", _no_gptme_rag)
+
+    rag = VoiceRag(workspace=None, enabled=True)
+    assert not rag.enabled, (
+        "VoiceRag.enabled must be False when gptme-rag is not installed and "
+        "no search_impl override is provided"
+    )
+
+    # An explicit search_impl override bypasses the import check — the caller
+    # has provided the search implementation themselves.
+    rag_with_impl = VoiceRag(workspace=None, enabled=True, search_impl=lambda q, n: [])
+    assert rag_with_impl.enabled, (
+        "VoiceRag with an explicit search_impl must remain enabled even when "
+        "gptme-rag is not installed"
+    )

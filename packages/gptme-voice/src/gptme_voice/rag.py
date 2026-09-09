@@ -55,6 +55,13 @@ _RECENCY_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+# Sub-hour phrases only — the recency-bucket sort should only apply when the
+# query explicitly asks about the last hour, not for broader spans like "today"
+# or "this morning" (which have a 24h recency window).
+_LAST_HOUR_RE = re.compile(
+    r"\b(last hour|past hour|this hour|the last hour)\b",
+    re.IGNORECASE,
+)
 _STOP_RE = re.compile(
     r"\b(what|have|has|you|been|doing|working|on|in|the|a|an|of|for|"
     r"please|like|just|specifically)\b",
@@ -149,6 +156,16 @@ def is_recency_query(query: str) -> bool:
     return bool(_RECENCY_RE.search(query))
 
 
+def is_last_hour_query(query: str) -> bool:
+    """True only when the query explicitly asks about the last hour (sub-hour window).
+
+    Use this to gate the _recency_bucket sort.  Broader recency phrases ("today",
+    "this morning") do NOT match — those queries should not have their results
+    biased toward the most recent hour, as that would omit earlier work from the day.
+    """
+    return bool(_LAST_HOUR_RE.search(query))
+
+
 class VoiceRag:
     """Recency-scoped gptme-rag search used by the live voice tool surface."""
 
@@ -163,6 +180,19 @@ class VoiceRag:
     ):
         self.workspace = Path(workspace).expanduser() if workspace else None
         self.enabled = _env_flag("GPTME_VOICE_RAG") if enabled is None else enabled
+        # Fail closed at construction time: if gptme-rag is not installed and
+        # no override search_impl is supplied, advertising workspace_search would
+        # be misleading — every call returns "could not be read" and the model
+        # may not fall back to the subagent correctly.
+        if self.enabled and search_impl is None:
+            try:
+                import gptme_rag  # noqa: F401
+            except ImportError:
+                logger.warning(
+                    "GPTME_VOICE_RAG is set but gptme-rag is not installed; "
+                    "disabling workspace_search tool"
+                )
+                self.enabled = False
         self.timeout_seconds = (
             _env_float("GPTME_VOICE_RAG_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
             if timeout_seconds is None
@@ -332,8 +362,12 @@ class VoiceRag:
                 logger.info("lexical search unavailable (%s); using recency order", exc)
                 backend = "recency"
 
-        # Recency queries keep last-hour files at the front even after lexical rank.
-        if is_recency_query(query):
+        # Explicit last-hour queries keep last-hour files at the front even after
+        # lexical rank.  Broader recency spans ("today", "this morning") already
+        # get the right result from recency order alone — sorting everything
+        # written in the last hour to the front would push morning work out of the
+        # top-N for a user asking about their whole day.
+        if is_last_hour_query(query):
             hour_cutoff = time.time() - 3600
 
             def _recency_bucket(doc: Any) -> int:
