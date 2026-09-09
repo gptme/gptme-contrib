@@ -7,6 +7,7 @@ Voice interface for gptme agents using OpenAI or xAI Grok Realtime APIs.
 - **Real-time voice conversations** with low-latency audio streaming
 - **Agent personality loading** from gptme.toml project config (ABOUT.md, etc.)
 - **Subagent tool** dispatches tasks to gptme for workspace interaction (read files, check tasks, run commands)
+- **workspace_search** (opt-in `GPTME_VOICE_RAG=1`) — fast gptme-rag lookup over recent journals for recap / "last hour" questions, without a subagent
 - **Auto-detection** of agent repo when installed in gptme-contrib
 - **Feedback loop prevention** by muting mic during playback
 - **Twilio integration** for phone call support via Media Streams
@@ -120,6 +121,14 @@ Keys are loaded from gptme config (`~/.config/gptme/config.toml` or
 
 No need to export them as shell env vars if they're already configured in gptme.
 
+### Workspace search (gptme-rag)
+
+Set `GPTME_VOICE_RAG=1` to advertise a `workspace_search` tool. Recap questions
+such as "what have you been doing in the last hour?" search recent `journal/`
+files through gptme-rag (lexical first) and return in a few seconds instead of
+dispatching a subagent. Optional: `GPTME_VOICE_RAG_TIMEOUT_SECONDS` (default 8)
+and `GPTME_VOICE_RAG_RECENCY_HOURS` (default 24).
+
 ### Voice latency tracing
 
 Set `GPTME_VOICE_LATENCY_SINK` to a file path or `-` (stdout). Each utterance
@@ -137,7 +146,8 @@ Twilio streams PCM continuously.
 - **openai_client.py** - WebSocket client for OpenAI Realtime API with VAD, audio streaming, and event handling
 - **xai_client.py** - xAI Grok Voice Agent adapter (OpenAI-compatible WebSocket protocol)
 - **server.py** - Starlette WebSocket server bridging clients to OpenAI or xAI
-- **tool_bridge.py** - Async subagent dispatcher plus body/vision tool routing
+- **tool_bridge.py** - Async subagent dispatcher plus body/vision/RAG tool routing
+- **rag.py** - Recency-scoped gptme-rag search for live recap queries
 - **vision.py** - Correlated camera-frame requests, edge-event handling, and host-side VLM inference
 - **audio.py** - Audio format conversion (PCM ↔ μ-law for Twilio)
 - **client.py** - Local client with mic/speaker I/O and feedback loop prevention

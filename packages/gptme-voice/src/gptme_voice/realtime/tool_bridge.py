@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Sequence, TypeVar
 
 if TYPE_CHECKING:
     from ..body import BodyAdapter
+    from ..rag import VoiceRag
     from ..vision import VisionSessionBridge
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,7 @@ class GptmeToolBridge:
         transcript_provider: Callable[[], Sequence[object]] | None = None,
         body_adapter: "BodyAdapter | None" = None,
         vision_bridge: "VisionSessionBridge | None" = None,
+        rag: "VoiceRag | None" = None,
     ):
         self.gptme_path = os.environ.get("GPTME_VOICE_SUBAGENT_PATH") or gptme_path
         self.timeout = timeout
@@ -157,6 +159,7 @@ class GptmeToolBridge:
         self.transcript_provider = transcript_provider
         self.body_adapter = body_adapter
         self.vision_bridge = vision_bridge
+        self.rag = rag
         self.body_max_altitude_m = self._parse_env_float(
             "GPTME_VOICE_BODY_MAX_ALT_M", default=30.0, minimum=1.0
         )
@@ -970,6 +973,19 @@ class GptmeToolBridge:
             if not isinstance(prompt, str):
                 return {"error": "Invalid arguments for look: prompt must be text."}
             return await self.vision_bridge.look(prompt)
+
+        if name == "workspace_search":
+            if self.rag is None or not self.rag.enabled:
+                return {"error": "workspace_search is not enabled on this server."}
+            query = arguments.get("query") or ""
+            if not isinstance(query, str) or not query.strip():
+                return {"error": "No query provided"}
+            n_results = arguments.get("n_results", 5)
+            try:
+                n_results_int = int(n_results)
+            except (TypeError, ValueError):
+                n_results_int = 5
+            return await self.rag.search(query.strip(), n_results=n_results_int)
 
         if name.startswith("body_"):
             return await self._handle_body_call(name, arguments)
