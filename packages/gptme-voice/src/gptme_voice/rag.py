@@ -93,7 +93,7 @@ def rag_tool_schema() -> dict[str, Any]:
                 "query": {
                     "type": "string",
                     "description": (
-                        "Natural-language lookup, e.g. 'what has Bob been "
+                        "Natural-language lookup, e.g. 'what have you been "
                         "doing in the last hour'."
                     ),
                 },
@@ -125,7 +125,7 @@ def rag_instruction_preamble() -> str:
 def topic_terms(query: str) -> str:
     """Strip recency/stop phrasing so lexical search has real terms left.
 
-    'what has Bob been doing in the last hour' → '' (pure recency).
+    'what have you been doing in the last hour' → '' (pure recency).
     'training run in the last hour' → 'training run'.
     """
     stripped = _RECENCY_RE.sub(" ", query)
