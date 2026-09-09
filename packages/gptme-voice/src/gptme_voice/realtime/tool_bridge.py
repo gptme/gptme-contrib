@@ -61,8 +61,20 @@ _KILLED_RETURNCODE = 137  # 128 + SIGKILL (timeout kill-after or OOM kill)
 # (``self.timeout``, default 300 s) should rarely fire when these are set
 # correctly — it only catches pathological hangs where ``timeout(1)`` itself
 # fails to terminate the child.
-_FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS = 30
-_SMART_MODE_SUBPROCESS_TIMEOUT_SECONDS = 120
+#
+# These are read from the same env vars used by voice-subagent.sh, plus a 10 s
+# buffer.  The buffer keeps this outer Python ``timeout`` behind the shell
+# wrapper's inner ``timeout`` so gptme gets a clean SIGTERM first.
+# Fast fallback is 60 s (was a hardcoded 30 s that killed lookups before the
+# shell's 60 s budget).  Smart fallback stays 120 s — the previous hardcoded
+# Python default — so unset-env deployments do not shrink the smart budget.
+# Production systemd sets both env vars (currently 60/60); those values win.
+_FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS = (
+    int(os.environ.get("GPTME_VOICE_SUBAGENT_TIMEOUT_FAST_SECONDS", 60)) + 10
+)
+_SMART_MODE_SUBPROCESS_TIMEOUT_SECONDS = (
+    int(os.environ.get("GPTME_VOICE_SUBAGENT_TIMEOUT_SMART_SECONDS", 120)) + 10
+)
 # ``timeout(1)`` is a GNU coreutils binary available on Linux but not macOS.
 # When it is missing we fall back to Python-level asyncio timeout handling.
 _TIMEOUT_BINARY_AVAILABLE = shutil.which("timeout") is not None

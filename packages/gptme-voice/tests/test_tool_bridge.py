@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 from gptme_voice.realtime.tool_bridge import (
+    _FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS,
+    _SMART_MODE_SUBPROCESS_TIMEOUT_SECONDS,
     _TIMEOUT_BINARY_AVAILABLE,
     GptmeToolBridge,
 )
@@ -165,7 +167,7 @@ def test_execute_uses_legacy_env_override_for_smart_model() -> None:
             "timeout",
             "--signal=TERM",
             "--kill-after=5s",
-            "120s",
+            f"{_SMART_MODE_SUBPROCESS_TIMEOUT_SECONDS}s",
         )
         assert args[4:11] == (
             "gptme",
@@ -203,7 +205,7 @@ def test_execute_uses_fast_model_override_without_touching_smart() -> None:
             "timeout",
             "--signal=TERM",
             "--kill-after=5s",
-            "30s",
+            f"{_FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS}s",
         )
         assert "--model" in args
         model_index = args.index("--model") + 1
@@ -234,7 +236,7 @@ def test_execute_uses_smart_model_override_without_touching_fast() -> None:
             "timeout",
             "--signal=TERM",
             "--kill-after=5s",
-            "120s",
+            f"{_SMART_MODE_SUBPROCESS_TIMEOUT_SECONDS}s",
         )
         assert args[4:11] == (
             "gptme",
@@ -271,7 +273,7 @@ def test_execute_uses_env_override_for_gptme_path() -> None:
             "timeout",
             "--signal=TERM",
             "--kill-after=5s",
-            "120s",
+            f"{_SMART_MODE_SUBPROCESS_TIMEOUT_SECONDS}s",
             "/fake/bin/gptme",
         )
 
@@ -299,7 +301,7 @@ def test_execute_fast_mode_keeps_context_files() -> None:
             "timeout",
             "--signal=TERM",
             "--kill-after=5s",
-            "30s",
+            f"{_FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS}s",
         )
         assert "--context" in args
         assert "files" in args
@@ -329,7 +331,7 @@ def test_execute_smart_mode_keeps_context_loading() -> None:
             "timeout",
             "--signal=TERM",
             "--kill-after=5s",
-            "120s",
+            f"{_SMART_MODE_SUBPROCESS_TIMEOUT_SECONDS}s",
             "gptme",
             "--non-interactive",
             "--context",
@@ -359,12 +361,22 @@ def test_execute_fast_mode_uses_subprocess_timeout_wrapper() -> None:
                 "timeout",
                 "--signal=TERM",
                 "--kill-after=5s",
-                "30s",
+                f"{_FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS}s",
             )
         else:
             assert args[0] == bridge.gptme_path
 
     asyncio.run(_exercise())
+
+
+def test_unset_env_timeout_fallbacks_keep_smart_at_previous_budget() -> None:
+    """Unset-env fallbacks: fast 60+10, smart 120+10 (do not shrink smart)."""
+    import os
+
+    if os.environ.get("GPTME_VOICE_SUBAGENT_TIMEOUT_FAST_SECONDS") is None:
+        assert _FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS == 70
+    if os.environ.get("GPTME_VOICE_SUBAGENT_TIMEOUT_SMART_SECONDS") is None:
+        assert _SMART_MODE_SUBPROCESS_TIMEOUT_SECONDS == 130
 
 
 def test_execute_smart_mode_uses_subprocess_timeout_wrapper() -> None:
@@ -387,7 +399,7 @@ def test_execute_smart_mode_uses_subprocess_timeout_wrapper() -> None:
                 "timeout",
                 "--signal=TERM",
                 "--kill-after=5s",
-                "120s",
+                f"{_SMART_MODE_SUBPROCESS_TIMEOUT_SECONDS}s",
             )
         else:
             assert args[0] == bridge.gptme_path
