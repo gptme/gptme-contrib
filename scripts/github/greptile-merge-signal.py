@@ -33,7 +33,7 @@ BOT_ALLOWLIST_ENV = "GREPTILE_MERGE_SIGNAL_BOT_ALLOWLIST"
 MIN_SCORE_ENV = "GREPTILE_MERGE_SIGNAL_MIN_SCORE"
 
 SAFE_TO_MERGE_RE = re.compile(r"\bsafe to merge\b", re.IGNORECASE)
-SUMMARY_MARKER_RE = re.compile(r"greptile summary", re.IGNORECASE)
+SUMMARY_MARKER_RE = re.compile(r"greptile[ _-]+summary", re.IGNORECASE)
 SCORE_PATTERNS = (
     re.compile(r"confidence\s+score[^0-9]*(?P<score>[0-5])\s*/\s*5", re.IGNORECASE),
     re.compile(r"\bscore[^0-9]*(?P<score>[0-5])\s*/\s*5", re.IGNORECASE),
