@@ -36,13 +36,13 @@ FOOTER = (
 )
 
 
-def _summary(sha: str | None) -> dict:
+def _summary(sha: str | None, login: str = "greptile-apps[bot]") -> dict:
     body = "<h3>Greptile Summary</h3>\n\nSafe to merge.\n\nConfidence Score: 5/5</h3>\n"
     if sha is not None:
         body += "\n" + FOOTER.format(sha=sha)
     return {
         "id": 1,
-        "user": {"login": "greptile-apps[bot]"},
+        "user": {"login": login},
         "body": body,
         "created_at": "2026-08-28T00:18:09Z",
         "updated_at": "2026-08-29T14:10:08Z",
@@ -53,12 +53,27 @@ def test_extract_reviewed_commit_from_footer() -> None:
     assert gms._extract_reviewed_commit(_summary(HEAD)["body"]) == HEAD
 
 
-def test_current_underscore_summary_marker_is_detected() -> None:
-    summary = _summary(HEAD)
+def _underscore_summary(sha: str | None, login: str = "greptile-apps[bot]") -> dict:
+    summary = _summary(sha, login=login)
     summary["body"] = summary["body"].replace(
         "<h3>Greptile Summary</h3>", "<!-- greptile_summary -->"
     )
+    return summary
+
+
+def test_current_underscore_summary_marker_is_detected() -> None:
+    summary = _underscore_summary(HEAD)
     assert gms._latest_allowlisted_summary([summary], {"greptile-apps[bot]"}) == summary
+
+
+def test_legacy_space_summary_marker_remains_detected() -> None:
+    summary = _summary(HEAD)
+    assert gms._latest_allowlisted_summary([summary], {"greptile-apps[bot]"}) == summary
+
+
+def test_underscore_summary_marker_from_non_allowlisted_author_is_ignored() -> None:
+    summary = _underscore_summary(HEAD, login="random-user")
+    assert gms._latest_allowlisted_summary([summary], {"greptile-apps[bot]"}) is None
 
 
 def test_extract_reviewed_commit_absent() -> None:
