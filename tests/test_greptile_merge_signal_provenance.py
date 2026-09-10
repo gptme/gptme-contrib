@@ -107,3 +107,63 @@ def test_signal_without_head_sha_unchanged() -> None:
         mp.setattr(gms, "_load_comments", lambda repo, pr: [_summary(OLD)])
         result = gms.evaluate_summary_signal("gptme/gptme", 3656)
     assert result.eligible is True
+
+
+# ---------------------------------------------------------------------------
+# Underscore-marker regression tests (issue #1649)
+# Current Greptile comments open with ``<!-- greptile_summary -->`` instead
+# of the old visible ``Greptile Summary`` heading.  The marker regex must
+# match both forms; a non-allowlisted author carrying the new marker must
+# still be rejected.
+# ---------------------------------------------------------------------------
+
+
+def _underscore_summary(
+    sha: str | None = None, login: str = "greptile-apps[bot]"
+) -> dict:
+    """Build a comment that uses the current ``<!-- greptile_summary -->`` marker."""
+    body = (
+        "<!-- greptile_summary -->\n\n" "Safe to merge.\n\n" "Confidence Score: 5/5\n"
+    )
+    if sha is not None:
+        body += "\n" + FOOTER.format(sha=sha)
+    return {
+        "id": 2,
+        "user": {"login": login},
+        "body": body,
+        "created_at": "2026-09-10T11:00:00Z",
+        "updated_at": "2026-09-10T11:00:00Z",
+    }
+
+
+def test_underscore_marker_is_detected() -> None:
+    """``<!-- greptile_summary -->`` must trigger summary_found=True and be eligible."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(gms, "_load_comments", lambda repo, pr: [_underscore_summary(HEAD)])
+        result = gms.evaluate_summary_signal("gptme/gptme", 3807, head_sha=HEAD)
+    assert result.summary_found is True
+    assert result.eligible is True
+    assert result.reason == "positive_summary_comment"
+
+
+def test_underscore_marker_non_allowlisted_ignored() -> None:
+    """Same marker from a non-allowlisted author must not satisfy the signal."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            gms,
+            "_load_comments",
+            lambda repo, pr: [_underscore_summary(HEAD, login="random-user")],
+        )
+        result = gms.evaluate_summary_signal("gptme/gptme", 3807, head_sha=HEAD)
+    assert result.summary_found is False
+    assert result.eligible is False
+    assert result.reason == "no_allowlisted_summary_comment"
+
+
+def test_legacy_space_marker_still_detected() -> None:
+    """The old visible ``Greptile Summary`` heading must remain detected."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(gms, "_load_comments", lambda repo, pr: [_summary(HEAD)])
+        result = gms.evaluate_summary_signal("gptme/gptme", 3807, head_sha=HEAD)
+    assert result.summary_found is True
+    assert result.eligible is True
