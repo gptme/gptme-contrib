@@ -53,6 +53,14 @@ def test_extract_reviewed_commit_from_footer() -> None:
     assert gms._extract_reviewed_commit(_summary(HEAD)["body"]) == HEAD
 
 
+def test_current_underscore_summary_marker_is_detected() -> None:
+    summary = _summary(HEAD)
+    summary["body"] = summary["body"].replace(
+        "<h3>Greptile Summary</h3>", "<!-- greptile_summary -->"
+    )
+    assert gms._latest_allowlisted_summary([summary], {"greptile-apps[bot]"}) == summary
+
+
 def test_extract_reviewed_commit_absent() -> None:
     assert gms._extract_reviewed_commit(_summary(None)["body"]) is None
 
