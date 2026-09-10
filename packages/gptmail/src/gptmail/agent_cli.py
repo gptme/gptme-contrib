@@ -616,6 +616,13 @@ def _outbox_rows_for_recipient(
     return rows
 
 
+# Prepended to every remote command that needs `uv` (or other user-installed
+# tools). `ssh host cmd` runs a non-interactive shell whose ~/.bashrc returns
+# early, leaving only the system PATH, so `uv run gptmail ...` fails with
+# exit 127 on a stock install.
+REMOTE_PATH_PREFIX = 'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"'
+
+
 def _remote_pending_rows(
     agent_name: str,
     agent: dict[str, str],
@@ -644,6 +651,10 @@ def _remote_pending_rows(
         cmd.extend(["--mailbox", mailboxes[0]])
     remote_cmd = " && ".join(
         [
+            # Non-interactive SSH shells skip ~/.bashrc, so user-local tool
+            # dirs (where `uv` normally lives) are not on PATH. Prepend them
+            # explicitly instead of relying on the remote login environment.
+            REMOTE_PATH_PREFIX,
             f"cd {shlex.quote(agent['workspace'])}",
             f"AGENT_NAME={shlex.quote(agent_name)} {shlex.join(cmd)}",
         ]

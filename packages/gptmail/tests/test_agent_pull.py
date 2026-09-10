@@ -821,3 +821,86 @@ def test_pull_json_failed_agents_populated_on_ssh_failure(
         "gordon" not in payload["agents_polled"]
     ), f"SSH-unreachable agent should not appear in agents_polled: {payload}"
     assert payload["new_count"] == 0
+
+
+def test_remote_pending_rows_prepends_user_tool_dirs_to_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-interactive SSH shells lack ~/.local/bin, where `uv` lives.
+
+    Regression for pull/watch failing with exit 127 ("uv: command not found")
+    on every agent: the remote command must export a PATH that includes the
+    user-local tool dirs before invoking `uv run gptmail ...`.
+    """
+    captured: dict[str, list[str]] = {}
+
+    def _stub_run(cmd, *args, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _stub_run)
+    rows = agent_cli._remote_pending_rows(
+        "gordon",
+        {"ssh": "gordon@example", "workspace": "/home/gordon/gordon"},
+        recipient="erik",
+        mailboxes=["default"],
+        all_mailboxes=False,
+    )
+    assert rows == []
+    remote_cmd = captured["cmd"][-1]
+    assert remote_cmd.startswith(agent_cli.REMOTE_PATH_PREFIX + " && ")
+    assert "$HOME/.local/bin" in agent_cli.REMOTE_PATH_PREFIX
+    assert "cd /home/gordon/gordon && AGENT_NAME=gordon uv run gptmail agent pending" in remote_cmd
+
+
+def test_remote_command_resolves_uv_from_user_local_bin_in_noninteractive_shell(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exercise the real failure mode: ``uv`` only exists under ``~/.local/bin``.
+
+    Runs the exact remote command string through a non-interactive ``sh -c``
+    (the same class of shell ``ssh host cmd`` spawns) with a scrubbed PATH and
+    a fake HOME containing ``.local/bin/uv``. Without the PATH prefix this
+    exits 127 ("uv: command not found") — precisely the bug being fixed.
+    """
+    real_run = subprocess.run
+    captured: dict[str, list[str]] = {}
+
+    def _stub_run(cmd, *args, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _stub_run)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    agent_cli._remote_pending_rows(
+        "gordon",
+        {"ssh": "gordon@example", "workspace": str(workspace)},
+        recipient="erik",
+        mailboxes=["default"],
+        all_mailboxes=False,
+    )
+    remote_cmd = captured["cmd"][-1]
+
+    fake_home = tmp_path / "home"
+    fake_uv = fake_home / ".local" / "bin" / "uv"
+    fake_uv.parent.mkdir(parents=True)
+    fake_uv.write_text('#!/bin/sh\necho "uv-invoked:$*"\n')
+    fake_uv.chmod(0o755)
+    env = {"HOME": str(fake_home), "PATH": "/usr/bin:/bin"}
+
+    result = real_run(
+        ["sh", "-c", remote_cmd], env=env, capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, f"remote command failed: {result.stderr}"
+    assert result.stdout.strip() == (
+        "uv-invoked:run gptmail agent pending --for erik --json --local-only --mailbox default"
+    )
+
+    # Sanity: the same command without the prefix is exactly the reported bug (exit 127).
+    without_prefix = remote_cmd.removeprefix(agent_cli.REMOTE_PATH_PREFIX + " && ")
+    assert without_prefix != remote_cmd
+    broken = real_run(
+        ["sh", "-c", without_prefix], env=env, capture_output=True, text=True, check=False
+    )
+    assert broken.returncode == 127
