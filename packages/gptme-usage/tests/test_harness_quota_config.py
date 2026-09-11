@@ -228,6 +228,57 @@ def test_config_model_routes_drive_pricing_key() -> None:
     )
 
 
+def test_pricing_key_for_model_ignores_openrouter_provider_pin() -> None:
+    """An OpenRouter ``@provider[,provider...]`` pin is routing, not a model change.
+
+    2026-09-10: the deepseek-v4-flash route was re-pinned from
+    ``...-0731@deepseek`` to ``...-0731@together,fireworks,inceptron`` after
+    OpenRouter dropped the official endpoint. Sessions recorded under the old
+    pin (or with no pin at all) must still resolve to the same pricing key as
+    the currently configured route, or cost analysis silently drops them.
+    """
+    cfg = HarnessQuotaConfig(
+        model_routes={
+            "deepseek-v4-flash": (
+                "openrouter/deepseek/deepseek-v4-flash-0731@together,fireworks,inceptron"
+            )
+        }
+    )
+    # The exact current route still matches directly.
+    assert pricing_key_for_model(
+        "gptme",
+        "openrouter/deepseek/deepseek-v4-flash-0731@together,fireworks,inceptron",
+        config=cfg,
+    ) == ("gptme", "deepseek-v4-flash")
+    # The old pin normalizes to the same short name via the pin-insensitive fallback.
+    assert pricing_key_for_model(
+        "gptme",
+        "openrouter/deepseek/deepseek-v4-flash-0731@deepseek",
+        config=cfg,
+    ) == ("gptme", "deepseek-v4-flash")
+    # An unpinned record also normalizes to the same short name.
+    assert pricing_key_for_model(
+        "gptme",
+        "openrouter/deepseek/deepseek-v4-flash-0731",
+        config=cfg,
+    ) == ("gptme", "deepseek-v4-flash")
+
+
+def test_pricing_key_for_model_exact_match_wins_over_pin_fallback() -> None:
+    """When multiple routes share a base model, an exact match is preferred.
+
+    The pin-insensitive fallback only runs when no route matches exactly
+    (Python's ``for``/``else``), so a route that is currently pinned still
+    wins outright over stripping pins on every candidate.
+    """
+    cfg = HarnessQuotaConfig(
+        model_routes={"deepseek-v4-pro": "openrouter/deepseek/deepseek-v4-pro@deepseek"}
+    )
+    assert pricing_key_for_model(
+        "gptme", "openrouter/deepseek/deepseek-v4-pro@deepseek", config=cfg
+    ) == ("gptme", "deepseek-v4-pro")
+
+
 def test_config_aware_model_source_helpers() -> None:
     """openrouter_models / local_models / gptme_openrouter_context read config."""
     cfg = HarnessQuotaConfig(
