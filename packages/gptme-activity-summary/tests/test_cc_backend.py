@@ -214,6 +214,26 @@ def test_call_claude_code_quota_marker_in_stderr(mock_run, mock_sleep, mock_gptm
 @patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
+def test_call_claude_code_fable_limit_uses_backend_fallback(mock_run, mock_sleep, mock_gptme):
+    """The current Fable-limit wording must route to gptme without retries."""
+    mock_run.return_value = _make_completed_process(
+        returncode=1,
+        stdout=(
+            "You've reached your Fable limit. Switch to another model, or manage "
+            "usage credits at claude.ai/settings/usage, to continue."
+        ),
+    )
+    mock_gptme.return_value = '{"narrative": "fallback summary"}'
+
+    assert call_claude_code("test prompt", max_retries=3) == ('{"narrative": "fallback summary"}')
+    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+    assert mock_run.call_count == 1
+    assert mock_sleep.call_count == 0
+
+
+@patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
+@patch("gptme_activity_summary.cc_backend.time.sleep")
+@patch("subprocess.run")
 def test_call_claude_code_quota_is_called_process_error_subtype(mock_run, mock_sleep, mock_gptme):
     """ClaudeQuotaExhaustedError must be catchable as CalledProcessError."""
     from gptme_activity_summary.cc_backend import ClaudeQuotaExhaustedError
