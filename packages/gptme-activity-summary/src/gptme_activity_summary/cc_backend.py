@@ -30,6 +30,7 @@ _RETRY_DELAY_S = 5
 # slot is futile. Keep prefixes narrow so transient errors use the normal retry path.
 _PERMANENT_SUBSCRIPTION_FAILURE_MARKERS = (
     "you've hit your weekly limit",
+    "you've reached your fable limit",
     "your organization has disabled claude subscription access",
 )
 
