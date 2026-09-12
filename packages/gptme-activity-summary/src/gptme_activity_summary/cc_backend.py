@@ -9,15 +9,15 @@ import json
 import logging
 import re
 import shlex
-import shutil
 import subprocess
-import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from gptme_activity_summary.gptme_backend import call_gptme
+from gptme_activity_summary.traces import create_trace_dir
 
 logger = logging.getLogger(__name__)
 
@@ -81,19 +81,20 @@ def _try_with_credential_file(
     base_env: dict,
     timeout: int,
 ) -> subprocess.CompletedProcess:
-    """Run ``claude -p`` with a specific credential file via a temporary CLAUDE_CONFIG_DIR.
+    """Run ``claude -p`` with a specific credential file via an isolated CLAUDE_CONFIG_DIR.
 
-    Creates a temporary directory containing only a ``.credentials.json`` symlink
+    Creates a durable directory initially containing only a ``.credentials.json`` symlink
     pointing at *cred_path*, sets ``CLAUDE_CONFIG_DIR`` to that directory, and
     runs *cmd* (which is expected to be ``["claude", "-p", "-", ...]``).  The
-    temporary directory is removed after the call regardless of outcome.
+    credential symlink is removed after the call; session artifacts are retained.
 
     This avoids mutating the shared live symlink (``~/.claude/.credentials.json``),
     making it safe to call from concurrent sessions.
     """
-    tmpdir = Path(tempfile.mkdtemp(prefix="gptme-cc-slot-"))
+    tmpdir = create_trace_dir("claude-slot-")
+    logger.warning("Claude fallback slot traces retained in %s", tmpdir)
+    cred_link = tmpdir / ".credentials.json"
     try:
-        cred_link = tmpdir / ".credentials.json"
         cred_link.symlink_to(cred_path.resolve())
         slot_env = dict(base_env)
         slot_env["CLAUDE_CONFIG_DIR"] = str(tmpdir)
@@ -106,7 +107,7 @@ def _try_with_credential_file(
             env=slot_env,
         )
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        cred_link.unlink(missing_ok=True)
 
 
 def call_claude_code(
@@ -127,8 +128,8 @@ def call_claude_code(
         prompt: The prompt to send to Claude Code
         timeout: Maximum time to wait for response (seconds)
         max_retries: Maximum number of retry attempts per failure type
-        diagnostic_dir: Directory for Claude debug logs. Defaults to a stable
-            temporary directory so scheduled failures retain diagnostics.
+        diagnostic_dir: Directory for Claude debug logs. Defaults to
+            ~/.local/state/gptme-activity-summary so failures retain diagnostics.
         narrative_key: Expected top-level JSON key for the narrative field in
             the response (e.g. ``"narrative"`` or ``"month_narrative"``). When
             set, the gptme fallback accepts this exact key or any other key in
@@ -147,13 +148,7 @@ def call_claude_code(
     import os
 
     env = os.environ.copy()
-    # Allow nesting: unset all CC env vars. Historically we also passed
-    # --no-session-persistence unconditionally, but for non-nested callers that
-    # prevents CC from writing a full trajectory to ~/.claude/projects/. Only
-    # pass the flag when actually nested (CLAUDECODE set in parent env) as a
-    # belt-and-suspenders safeguard against the empty-output bug
-    # (gptme/gptme-contrib#585). See: ErikBjare/bob#681.
-    nested = bool(env.get("CLAUDECODE"))
+    # Clear parent identity and give each attempt its own persisted session.
     env.pop("CLAUDECODE", None)
     env.pop("CLAUDE_CODE_ENTRYPOINT", None)
     env.pop("CC_SESSION_ID", None)
@@ -168,7 +163,7 @@ def call_claude_code(
 
     # Fallback credential paths for permanent subscription failures. When the
     # active slot is unavailable, call_claude_code tries each path in order via
-    # a temp CLAUDE_CONFIG_DIR. Extract here (before the subprocess env is locked)
+    # an isolated CLAUDE_CONFIG_DIR. Extract here (before the subprocess env is locked)
     # and strip from the env so the subprocess never sees it (prevents recursion).
     # Format: colon-separated absolute paths to credential files.
     # Example: /home/bob/.claude/.credentials.json.alice:/home/bob/.claude/.credentials.json.erik
@@ -193,8 +188,6 @@ def call_claude_code(
         cmd = prefix + ["claude", "-p", "-"]
     else:
         cmd = ["claude", "-p", "-"]
-    if nested:
-        cmd.append("--no-session-persistence")
 
     if diagnostic_dir is None:
         try:
@@ -207,7 +200,7 @@ def call_claude_code(
 
     while attempt <= max_retries or plain_retry_pending:
         debug_file: Path | None = None
-        attempt_cmd = list(cmd)
+        attempt_cmd = [*cmd, "--session-id", str(uuid.uuid4())]
         # Keep the healthy path compatible with Claude versions that predate
         # --debug-file. Enable tracing only after an actual failure triggered a
         # retry, and make diagnostics best-effort so they cannot block Claude.
@@ -222,15 +215,6 @@ def call_claude_code(
                 )
                 diagnostic_dir = None
             else:
-                # Prune files older than 7 days on first retry to cap disk growth
-                if attempt == 2:
-                    cutoff = time.time() - 7 * 86400
-                    for old_log in diagnostic_dir.glob("claude-*.log"):
-                        try:
-                            if old_log.stat().st_mtime < cutoff:
-                                old_log.unlink(missing_ok=True)
-                        except OSError:
-                            pass
                 debug_file = diagnostic_dir / f"claude-{invocation_id}-attempt-{attempt}.log"
                 attempt_cmd.extend(["--debug-file", str(debug_file)])
         result = subprocess.run(
@@ -278,7 +262,11 @@ def call_claude_code(
                     for fb_attempt in range(1, max_retries + 1):
                         try:
                             fb_result = _try_with_credential_file(
-                                cmd, prompt, fb_cred, env, timeout
+                                [*cmd, "--session-id", str(uuid.uuid4())],
+                                prompt,
+                                fb_cred,
+                                env,
+                                timeout,
                             )
                         except (OSError, subprocess.TimeoutExpired) as exc:
                             logger.warning("Fallback slot %s failed to run: %s", fb_cred.name, exc)

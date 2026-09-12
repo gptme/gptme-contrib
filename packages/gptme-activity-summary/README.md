@@ -69,3 +69,23 @@ gptme-activity-summary smart --date yesterday
 ## License
 
 MIT
+
+## Backend trace retention
+
+The gptme fallback keeps each invocation under
+`$XDG_STATE_HOME/gptme-activity-summary/gptme-*` (default:
+`~/.local/state/gptme-activity-summary/`). The private directory contains the
+native conversation plus `stdout.log` and `stderr.log`, including captured
+partial output on timeout. Its path is logged before launching the child.
+Allocation failure returns an empty result without launching an unlogged child;
+a diagnostic write failure is logged and does not discard the model response.
+
+Claude calls clear inherited parent session identity and use a fresh
+`--session-id` for every attempt, including retries and configured alternate
+credential slots. Ordinary calls retain Claude's native project trajectories.
+Alternate slots use private `claude-slot-*` state directories; only the temporary
+credential symlink is removed after exit. Existing retry debug logs are retained.
+
+These backends do not automatically prune traces. They may contain journal
+content and provider diagnostics; keep their private permissions when archiving.
+Archive native files without following any conversation `workspace` symlink.
