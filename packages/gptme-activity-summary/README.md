@@ -80,7 +80,8 @@ partial output on timeout. Its path is logged before launching the child.
 Allocation failure returns an empty result without launching an unlogged child;
 a diagnostic write failure is logged and does not discard the model response.
 
-Claude calls clear inherited parent session identity and use a fresh
+Claude requires a CLI with `--session-id` support (verified on 2.1.269).
+Calls clear inherited parent session identity and use a fresh
 `--session-id` for every attempt, including retries and configured alternate
 credential slots. Ordinary calls retain Claude's native project trajectories.
 Alternate slots use private `claude-slot-*` state directories; only the temporary

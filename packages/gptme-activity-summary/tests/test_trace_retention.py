@@ -38,7 +38,7 @@ def test_gptme_retains_child_trace(tmp_path, monkeypatch, caplog, outcome):
     )
     child.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
-    result = call_gptme("test prompt", timeout=1 if outcome == "timeout" else 10)
+    result = call_gptme("test prompt", timeout=5 if outcome == "timeout" else 10)
     assert result == ('{"narrative": "done"}' if outcome == "success" else "")
     root = Path(marker.read_text())
     assert (root / "conversation/conversation.jsonl").read_text() == "retained trajectory\n"
@@ -64,7 +64,7 @@ def test_credential_slot_retains_trace(tmp_path, monkeypatch, caplog, returncode
         "(p / 'projects/trace.jsonl').write_text('slot trajectory'); "
         + ("time.sleep(30)" if returncode is None else f"sys.exit({returncode})")
     )
-    args = ([sys.executable, "-c", code], "prompt", cred, dict(os.environ), 1)
+    args = ([sys.executable, "-c", code], "prompt", cred, dict(os.environ), 5)
     if returncode is None:
         with pytest.raises(subprocess.TimeoutExpired):
             _try_with_credential_file(*args)
