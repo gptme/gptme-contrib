@@ -375,6 +375,10 @@ class SessionRecord:
     # Complements ``parent_session_id``; use for dispatcher-run→child joins when
     # the dispatcher has no session_id of its own.
     dispatch_id: str | None = None
+    # Launcher-captured reason for dispatch, separate from spawn mechanism.
+    # Callers define kind/id and may include parent_session_id, task, pr, or
+    # dispatcher-specific metadata. None means the cause was not recorded.
+    dispatch_cause: dict[str, Any] | None = None
 
     # Work classification
     category: str | None = None  # inferred from commits/files (what actually happened)
@@ -582,6 +586,8 @@ class SessionRecord:
         # Discard unrecognized dispatch_kind values for the same reason.
         if self.dispatch_kind is not None and self.dispatch_kind not in DISPATCH_KINDS:
             self.dispatch_kind = None
+        if self.dispatch_cause is not None and not isinstance(self.dispatch_cause, dict):
+            self.dispatch_cause = None
         # Reasoning telemetry: effort is free-form but always lowercase; profile
         # is a closed semantic set so typos never reach the selector.
         self.reasoning_effort = normalize_reasoning_effort(self.reasoning_effort)

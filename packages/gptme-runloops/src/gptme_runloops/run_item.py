@@ -1405,14 +1405,11 @@ def plan_item(
         runner_argv += ["--model", model]
     runner_argv.append(prompt)
 
-    runner_env: dict[str, str] = {}
+    # Every backend shares the recorded id with launch receipts and nested
+    # dispatchers; retain backend-specific aliases for trajectory discovery.
+    runner_env: dict[str, str] = {"BOB_SESSION_ID": session_id}
     if backend == "claude-code":
         runner_env["CC_SESSION_ID"] = session_id
-    elif backend == "gptme":
-        # run.sh uses this id for its trajectory sentinel. Without it the
-        # sentinel is keyed by the runner PID and run-item cannot recover the
-        # trajectory for post_session grading/token extraction.
-        runner_env["BOB_SESSION_ID"] = session_id
     elif backend == "grok-build":
         runner_env["GROK_BUILD_SESSION_ID"] = session_id
 
