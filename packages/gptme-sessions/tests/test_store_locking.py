@@ -208,8 +208,11 @@ def test_rotate_fsyncs_archive_creation_and_active_replace(tmp_path: Path, monke
 
     store.rotate(keep_days=30)
 
-    # The archive name, active replacement, and removal of the temp name are
-    # three namespace mutations. A repeated sync is cheap and explicit.
+    # Opening the archive in append mode creates its name. The first sync
+    # persists that name, the successful replace installs the active name
+    # and removes the temp name, and lock cleanup performs the final sync.
+    # These are three directory-sync calls, even though replace covers two
+    # namespace mutations with one barrier.
     assert calls == [tmp_path, tmp_path, tmp_path]
 
 

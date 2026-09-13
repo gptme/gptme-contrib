@@ -672,6 +672,17 @@ class TestAppendFullLedgerEntry:
 
         assert calls == [tmp_path]
 
+    def test_existing_lock_skips_directory_fsync(self, tmp_path, monkeypatch):
+        ledger = tmp_path / "ledger.jsonl"
+        ledger.write_text('{"dispatch_id": "existing"}\n')
+        ledger.with_name(ledger.name + ".lock").touch()
+        calls: list[Path] = []
+        monkeypatch.setattr("gptme_runloops.pm_dispatch._fsync_directory", calls.append)
+
+        append_full_ledger_entry(ledger, phase="completed", failures=0, exit_code=0)
+
+        assert calls == []
+
     def test_append_reports_fsync_failure(self, tmp_path, monkeypatch):
         ledger = tmp_path / "ledger.jsonl"
 

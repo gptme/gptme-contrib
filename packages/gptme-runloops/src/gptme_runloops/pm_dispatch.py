@@ -436,10 +436,12 @@ def _fsync_directory(path: Path) -> None:
 def _ledger_lock(path: Path):
     """Serialize appenders on a permanent sidecar inode."""
     lock_path = path.with_name(path.name + ".lock")
+    lock_created = not lock_path.exists()
     with lock_path.open("a", encoding="utf-8") as lock_fh:
         if _fcntl is not None:
             _fcntl.flock(lock_fh, _fcntl.LOCK_EX)
-        _fsync_directory(path.parent)
+        if lock_created:
+            _fsync_directory(path.parent)
         try:
             yield
         finally:
