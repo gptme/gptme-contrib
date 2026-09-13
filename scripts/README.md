@@ -30,6 +30,7 @@ for details.
 
 | Script | Description |
 |--------|-------------|
+| [agent-guild-preflight.py](./agent-guild-preflight.py) | Optional observations for one selected public endpoint ([usage and limits](../docs/agent-guild-preflight.md)) |
 | [agent-msg.py](./agent-msg.py) | Send messages between agents |
 | [agent-write-loss-scan.py](./agent-write-loss-scan.py) | Detect silently-reverted writes in agent sessions (see below) |
 | [check-claude-usage.sh](./check-claude-usage.sh) / [check-codex-usage.sh](./check-codex-usage.sh) / [check-openrouter-usage.sh](./check-openrouter-usage.sh) | Provider usage/quota checks |
