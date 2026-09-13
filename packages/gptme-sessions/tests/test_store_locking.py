@@ -178,6 +178,7 @@ def _directory_fsync_calls(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     return calls
 
 
+@pytest.mark.skipif(not hasattr(os, "O_DIRECTORY"), reason="directory fsync unavailable")
 def test_first_append_fsyncs_store_directory(tmp_path: Path, monkeypatch):
     calls = _directory_fsync_calls(monkeypatch)
 
@@ -186,6 +187,7 @@ def test_first_append_fsyncs_store_directory(tmp_path: Path, monkeypatch):
     assert calls == [tmp_path]
 
 
+@pytest.mark.skipif(not hasattr(os, "O_DIRECTORY"), reason="directory fsync unavailable")
 def test_rewrite_fsyncs_store_directory_after_replace(tmp_path: Path, monkeypatch):
     store = SessionStore(sessions_dir=tmp_path)
     store.append(SessionRecord(session_id="before", model="test"))
@@ -196,6 +198,7 @@ def test_rewrite_fsyncs_store_directory_after_replace(tmp_path: Path, monkeypatc
     assert calls == [tmp_path]
 
 
+@pytest.mark.skipif(not hasattr(os, "O_DIRECTORY"), reason="directory fsync unavailable")
 def test_rotate_fsyncs_archive_creation_and_active_replace(tmp_path: Path, monkeypatch):
     store = SessionStore(sessions_dir=tmp_path)
     store.append(
@@ -210,6 +213,7 @@ def test_rotate_fsyncs_archive_creation_and_active_replace(tmp_path: Path, monke
     assert calls == [tmp_path, tmp_path, tmp_path]
 
 
+@pytest.mark.skipif(not hasattr(os, "O_DIRECTORY"), reason="directory fsync unavailable")
 def test_directory_fsync_failure_is_reported(tmp_path: Path, monkeypatch):
     store = SessionStore(sessions_dir=tmp_path)
     store.append(SessionRecord(session_id="before", model="test"))

@@ -644,6 +644,9 @@ class TestAppendFullLedgerEntry:
             for row in range(rows_per_worker)
         }
 
+    @pytest.mark.skipif(
+        not hasattr(os, "O_DIRECTORY"), reason="directory fsync unavailable"
+    )
     def test_append_fsyncs_file_and_new_directory(self, tmp_path, monkeypatch):
         ledger = tmp_path / "nested" / "ledger.jsonl"
         fsynced_fds: list[int] = []
@@ -655,7 +658,19 @@ class TestAppendFullLedgerEntry:
 
         append_full_ledger_entry(ledger, phase="completed", failures=0, exit_code=0)
 
-        assert len(fsynced_fds) == 2
+        assert len(fsynced_fds) == 3  # lock directory, ledger file, ledger directory
+
+    def test_existing_ledger_with_new_lock_fsyncs_directory(
+        self, tmp_path, monkeypatch
+    ):
+        ledger = tmp_path / "ledger.jsonl"
+        ledger.write_text('{"dispatch_id": "existing"}\n')
+        calls: list[Path] = []
+        monkeypatch.setattr("gptme_runloops.pm_dispatch._fsync_directory", calls.append)
+
+        append_full_ledger_entry(ledger, phase="completed", failures=0, exit_code=0)
+
+        assert calls == [tmp_path]
 
     def test_append_reports_fsync_failure(self, tmp_path, monkeypatch):
         ledger = tmp_path / "ledger.jsonl"

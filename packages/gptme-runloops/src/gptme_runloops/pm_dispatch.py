@@ -439,6 +439,7 @@ def _ledger_lock(path: Path):
     with lock_path.open("a", encoding="utf-8") as lock_fh:
         if _fcntl is not None:
             _fcntl.flock(lock_fh, _fcntl.LOCK_EX)
+        _fsync_directory(path.parent)
         try:
             yield
         finally:
