@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import json
 import logging
+import multiprocessing
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -574,6 +576,13 @@ class TestBuildFullLedgerEntry:
         assert all("#None" not in ref for ref in entry["item_refs"])
 
 
+def _append_full_ledger_worker(path: str, worker_id: int, rows: int) -> None:
+    for row in range(rows):
+        append_full_ledger_entry(
+            path, phase="planned", dispatch_id=f"{worker_id}-{row}"
+        )
+
+
 class TestAppendFullLedgerEntry:
     def test_appends_jsonl_line(self, tmp_path):
         ledger = tmp_path / "ledger.jsonl"
@@ -604,6 +613,86 @@ class TestAppendFullLedgerEntry:
         assert len(lines) == 3
         ids = [json.loads(line)["dispatch_id"] for line in lines]
         assert ids == ["d0", "d1", "d2"]
+
+    def test_concurrent_appends_conserve_every_record(self, tmp_path):
+        ledger = tmp_path / "ledger.jsonl"
+        workers = 6
+        rows_per_worker = 40
+        ctx = multiprocessing.get_context(
+            "fork" if "fork" in multiprocessing.get_all_start_methods() else "spawn"
+        )
+        processes = [
+            ctx.Process(
+                target=_append_full_ledger_worker,
+                args=(str(ledger), worker_id, rows_per_worker),
+            )
+            for worker_id in range(workers)
+        ]
+
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=20)
+
+        assert all(not process.is_alive() for process in processes)
+        assert all(process.exitcode == 0 for process in processes)
+        rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+        assert len(rows) == workers * rows_per_worker
+        assert {row["dispatch_id"] for row in rows} == {
+            f"{worker_id}-{row}"
+            for worker_id in range(workers)
+            for row in range(rows_per_worker)
+        }
+
+    @pytest.mark.skipif(
+        not hasattr(os, "O_DIRECTORY"), reason="directory fsync unavailable"
+    )
+    def test_append_fsyncs_file_and_new_directory(self, tmp_path, monkeypatch):
+        ledger = tmp_path / "nested" / "ledger.jsonl"
+        fsynced_fds: list[int] = []
+
+        def tracking_fsync(fd):
+            fsynced_fds.append(fd)
+
+        monkeypatch.setattr(os, "fsync", tracking_fsync)
+
+        append_full_ledger_entry(ledger, phase="completed", failures=0, exit_code=0)
+
+        assert len(fsynced_fds) == 3  # lock directory, ledger file, ledger directory
+
+    def test_existing_ledger_with_new_lock_fsyncs_directory(
+        self, tmp_path, monkeypatch
+    ):
+        ledger = tmp_path / "ledger.jsonl"
+        ledger.write_text('{"dispatch_id": "existing"}\n')
+        calls: list[Path] = []
+        monkeypatch.setattr("gptme_runloops.pm_dispatch._fsync_directory", calls.append)
+
+        append_full_ledger_entry(ledger, phase="completed", failures=0, exit_code=0)
+
+        assert calls == [tmp_path]
+
+    def test_existing_lock_skips_directory_fsync(self, tmp_path, monkeypatch):
+        ledger = tmp_path / "ledger.jsonl"
+        ledger.write_text('{"dispatch_id": "existing"}\n')
+        ledger.with_name(ledger.name + ".lock").touch()
+        calls: list[Path] = []
+        monkeypatch.setattr("gptme_runloops.pm_dispatch._fsync_directory", calls.append)
+
+        append_full_ledger_entry(ledger, phase="completed", failures=0, exit_code=0)
+
+        assert calls == []
+
+    def test_append_reports_fsync_failure(self, tmp_path, monkeypatch):
+        ledger = tmp_path / "ledger.jsonl"
+
+        def fail_fsync(_fd):
+            raise OSError("injected fsync failure")
+
+        monkeypatch.setattr(os, "fsync", fail_fsync)
+
+        with pytest.raises(OSError, match="injected fsync failure"):
+            append_full_ledger_entry(ledger, phase="completed", failures=0, exit_code=0)
 
 
 # --- SlotManager ---

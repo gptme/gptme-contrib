@@ -19,10 +19,16 @@ import os
 import re
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, cast
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    _fcntl = None  # type: ignore[assignment]
 
 # Slow-lane item types — items that need deep investigation (PR reviews,
 # CI diagnostics, merge conflicts, Greptile issues). Fast lane is anything
@@ -415,20 +421,58 @@ def build_full_ledger_entry(
     }
 
 
+def _fsync_directory(path: Path) -> None:
+    """Persist a newly-created ledger name before acknowledging it."""
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _ledger_lock(path: Path):
+    """Serialize appenders on a permanent sidecar inode."""
+    lock_path = path.with_name(path.name + ".lock")
+    lock_created = not lock_path.exists()
+    with lock_path.open("a", encoding="utf-8") as lock_fh:
+        if _fcntl is not None:
+            _fcntl.flock(lock_fh, _fcntl.LOCK_EX)
+        if lock_created:
+            _fsync_directory(path.parent)
+        try:
+            yield
+        finally:
+            if _fcntl is not None:
+                _fcntl.flock(lock_fh, _fcntl.LOCK_UN)
+
+
+def _append_ledger_json(path: Path, entry: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _ledger_lock(path):
+        created = not path.exists()
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        if created:
+            _fsync_directory(path.parent)
+
+
 def append_full_ledger_entry(
     ledger_path: str | Path,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Build a full ledger entry and append it to *ledger_path* (JSONL).
+    """Build, serialize, and durably append one JSONL ledger entry.
 
-    Returns the entry dict that was written. ``kwargs`` are forwarded to
+    Success means the row reached ``fsync`` and, when creating the ledger, its
+    parent directory did too. ``kwargs`` are forwarded to
     :func:`build_full_ledger_entry`.
     """
     entry = build_full_ledger_entry(**kwargs)
-    path = Path(ledger_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    _append_ledger_json(Path(ledger_path), entry)
     return entry
 
 
@@ -642,10 +686,8 @@ class DispatchLedger:
         self.path = path
 
     def append(self, entry: LedgerEntry) -> None:
-        """Append a single ledger entry to the JSONL file."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "a") as f:
-            f.write(json.dumps(entry.to_dict(), default=str) + "\n")
+        """Serialize and durably append a single ledger entry."""
+        _append_ledger_json(self.path, entry.to_dict())
 
     def read(self) -> list[LedgerEntry]:
         """Read all entries from the ledger file."""
