@@ -167,6 +167,16 @@ def test_trajectory_has_assistant_cc_nested_format(tmp_path: Path):
     assert _trajectory_has_assistant(traj) is True
 
 
+def test_trajectory_has_assistant_grok_string_message(tmp_path: Path):
+    """Grok assistant records may carry their content directly in message."""
+    traj = tmp_path / "grok.jsonl"
+    traj.write_text(
+        json.dumps({"type": "assistant", "message": "Hello from Grok"}) + "\n",
+        encoding="utf-8",
+    )
+    assert _trajectory_has_assistant(traj) is True
+
+
 def test_trajectory_has_assistant_cc_tool_use_only(tmp_path: Path):
     """CC assistant turns with only tool_use blocks must be detected (Greptile P1)."""
     traj = tmp_path / "conversation.jsonl"

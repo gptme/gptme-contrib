@@ -42,12 +42,8 @@ def _record_is_assistant(rec: dict) -> bool:
     # Flat format: {"role": "assistant", "content": "..."}
     if rec.get("role") in _ASSISTANT_ROLES:
         return True
-    # CC nested format: {"type": "assistant", "message": {"role": "assistant", ...}}
-    if rec.get("type") == "assistant":
-        msg = rec.get("message") or {}
-        if msg.get("role") in _ASSISTANT_ROLES or rec.get("type") == "assistant":
-            return True
-    return False
+    # Both CC and Grok use type=assistant; only CC nests the role in message.
+    return rec.get("type") == "assistant"
 
 
 def _record_content_text(rec: dict) -> str:
@@ -76,6 +72,8 @@ def _record_has_any_content(rec: dict) -> bool:
     if rec.get("content") or rec.get("text"):
         return True
     msg = rec.get("message") or {}
+    if isinstance(msg, str):
+        return bool(msg)
     msg_content = msg.get("content")
     if isinstance(msg_content, list):
         return bool(msg_content)
