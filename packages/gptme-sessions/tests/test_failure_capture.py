@@ -108,6 +108,39 @@ def test_post_session_no_failure_fields_on_success(tmp_path: Path):
     assert result.record.error is None
 
 
+def test_post_session_records_grok_string_error(tmp_path: Path):
+    """A native Grok error must not crash recording and trigger PM's fallback."""
+    traj = tmp_path / "grok.jsonl"
+    error = "API error (status 402 Payment Required): Grok Build usage balance exhausted"
+    traj.write_text(
+        json.dumps({"type": "available_commands", "tools": []})
+        + "\n"
+        + json.dumps({"type": "error", "message": f"Internal error: {error}"})
+        + f"\nError: Internal error: {error}\n",
+        encoding="utf-8",
+    )
+    store = SessionStore(sessions_dir=tmp_path / "sessions")
+    result = post_session(
+        store=store,
+        harness="grok-build",
+        model="grok-4.6",
+        session_id="grok-quota-attempt",
+        run_type="monitoring",
+        category="pm-react",
+        exit_code=1,
+        duration_seconds=6,
+        trajectory_path=traj,
+    )
+    records = store.load_all()
+    assert len(records) == 1
+    assert records[0].session_id == "grok-quota-attempt"
+    assert records[0].outcome == "failed"
+    assert records[0].failure_reason == FAILURE_REASON_PRE_RESPONSE
+    assert records[0].error is not None
+    assert error in records[0].error
+    assert result.record.error == records[0].error
+
+
 def test_classify_not_pre_response_when_has_assistant_turn():
     """Zero input_tokens must not override a confirmed assistant turn (Greptile P1)."""
     result = classify_failure_reason(

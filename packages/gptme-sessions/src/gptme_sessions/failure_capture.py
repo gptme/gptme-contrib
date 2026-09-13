@@ -51,13 +51,15 @@ def _record_is_assistant(rec: dict) -> bool:
 
 
 def _record_content_text(rec: dict) -> str:
-    """Extract flattened text string from flat or CC nested record."""
+    """Extract text from flat records, Grok messages, or CC nested records."""
     # Flat format
     content = rec.get("content") or rec.get("text") or ""
     if content:
         return str(content)
-    # CC nested: message.content is a list of typed blocks — extract text blocks only
     msg = rec.get("message") or {}
+    if isinstance(msg, str):
+        return msg
+    # CC nested: message.content is a list of typed blocks — extract text blocks only
     msg_content = msg.get("content") or ""
     if isinstance(msg_content, list):
         parts = [block.get("text") or "" for block in msg_content if isinstance(block, dict)]
