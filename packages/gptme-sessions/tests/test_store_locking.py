@@ -152,8 +152,78 @@ def test_concurrent_append_and_rewrite_no_torn_writes(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# 3. Temp file is per-pid and cleaned up on failure
+# 3. Durability barriers and temp-file failure handling
 # ---------------------------------------------------------------------------
+
+
+def _directory_fsync_calls(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    calls: list[Path] = []
+    original_open = os.open
+    original_fsync = os.fsync
+    directory_fds: dict[int, Path] = {}
+
+    def tracking_open(path, flags, *args, **kwargs):
+        fd = original_open(path, flags, *args, **kwargs)
+        if flags & getattr(os, "O_DIRECTORY", 0):
+            directory_fds[fd] = Path(path)
+        return fd
+
+    def tracking_fsync(fd):
+        if fd in directory_fds:
+            calls.append(directory_fds[fd])
+        return original_fsync(fd)
+
+    monkeypatch.setattr(os, "open", tracking_open)
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+    return calls
+
+
+def test_first_append_fsyncs_store_directory(tmp_path: Path, monkeypatch):
+    calls = _directory_fsync_calls(monkeypatch)
+
+    SessionStore(sessions_dir=tmp_path).append(SessionRecord(session_id="created", model="test"))
+
+    assert calls == [tmp_path]
+
+
+def test_rewrite_fsyncs_store_directory_after_replace(tmp_path: Path, monkeypatch):
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(session_id="before", model="test"))
+    calls = _directory_fsync_calls(monkeypatch)
+
+    store.rewrite([SessionRecord(session_id="before", model="updated")])
+
+    assert calls == [tmp_path]
+
+
+def test_rotate_fsyncs_archive_creation_and_active_replace(tmp_path: Path, monkeypatch):
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(
+        SessionRecord(session_id="old", model="test", timestamp="2020-01-01T00:00:00+00:00")
+    )
+    calls = _directory_fsync_calls(monkeypatch)
+
+    store.rotate(keep_days=30)
+
+    # The archive name, active replacement, and removal of the temp name are
+    # three namespace mutations. A repeated sync is cheap and explicit.
+    assert calls == [tmp_path, tmp_path, tmp_path]
+
+
+def test_directory_fsync_failure_is_reported(tmp_path: Path, monkeypatch):
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(session_id="before", model="test"))
+    original_fsync = os.fsync
+
+    def fail_directory_fsync(fd):
+        if Path(f"/proc/self/fd/{fd}").resolve() == tmp_path:
+            raise OSError("injected directory fsync failure")
+        return original_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fail_directory_fsync)
+
+    with pytest.raises(OSError, match="directory fsync failure"):
+        store.rewrite([SessionRecord(session_id="before", model="updated")])
 
 
 def test_rewrite_temp_file_is_per_pid(tmp_path: Path, monkeypatch):

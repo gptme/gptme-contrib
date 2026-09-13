@@ -26,6 +26,17 @@ except ImportError:  # pragma: no cover - non-POSIX platforms
 logger = logging.getLogger(__name__)
 
 
+def _fsync_directory(path: Path) -> None:
+    """Persist directory-entry changes before acknowledging a mutation."""
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _default_sessions_dir() -> Path:
     """Return the default sessions directory (XDG-compliant).
 
@@ -163,13 +174,16 @@ class SessionStore:
         return True
 
     def append(self, record: SessionRecord) -> Path:
-        """Append a session record to the JSONL store.  Self-heals corrupt tails."""
+        """Append and durably acknowledge one record after file and namespace sync."""
         with self.lock():
             self._repair_tail()
+            created = not self.path.exists()
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(record.to_json() + "\n")
                 f.flush()
                 os.fsync(f.fileno())
+            if created:
+                _fsync_directory(self.sessions_dir)
         return self.path
 
     def archive_paths(self) -> list[Path]:
@@ -288,8 +302,11 @@ class SessionStore:
                     f.flush()
                     os.fsync(f.fileno())
                 tmp_path.replace(self.path)
+                _fsync_directory(self.sessions_dir)
             except BaseException:
-                tmp_path.unlink(missing_ok=True)
+                if tmp_path.exists():
+                    tmp_path.unlink()
+                    _fsync_directory(self.sessions_dir)
                 raise
         return self.path
 
@@ -363,6 +380,8 @@ class SessionStore:
                         archived += 1
                     af.flush()
                     os.fsync(af.fileno())
+                if not existing:
+                    _fsync_directory(self.sessions_dir)
 
             tmp_path = self.path.with_name(
                 f"{self.path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
@@ -373,8 +392,11 @@ class SessionStore:
                     f.flush()
                     os.fsync(f.fileno())
                 tmp_path.replace(self.path)
+                _fsync_directory(self.sessions_dir)
             except BaseException:
-                tmp_path.unlink(missing_ok=True)
+                if tmp_path.exists():
+                    tmp_path.unlink()
+                    _fsync_directory(self.sessions_dir)
                 raise
 
         logger.info(
