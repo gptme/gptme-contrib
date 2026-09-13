@@ -272,11 +272,31 @@ def test_pricing_key_for_model_exact_match_wins_over_pin_fallback() -> None:
     wins outright over stripping pins on every candidate.
     """
     cfg = HarnessQuotaConfig(
-        model_routes={"deepseek-v4-pro": "openrouter/deepseek/deepseek-v4-pro@deepseek"}
+        model_routes={
+            "deepseek-v4-pro": "openrouter/deepseek/deepseek-v4-pro@deepseek",
+            "deepseek-v4-pro-together": (
+                "openrouter/deepseek/deepseek-v4-pro@together"
+            ),
+        }
     )
     assert pricing_key_for_model(
         "gptme", "openrouter/deepseek/deepseek-v4-pro@deepseek", config=cfg
     ) == ("gptme", "deepseek-v4-pro")
+
+
+def test_pricing_key_for_model_ambiguous_pin_fallback_stays_unnormalized() -> None:
+    """If two short names share a stripped route base, do not pick by dict order."""
+    cfg = HarnessQuotaConfig(
+        model_routes={
+            "foo-a": "openrouter/acme/foo@together",
+            "foo-b": "openrouter/acme/foo@fireworks",
+        }
+    )
+    recorded = "openrouter/acme/foo@inceptron"
+    assert pricing_key_for_model("gptme", recorded, config=cfg) == (
+        "gptme",
+        recorded,
+    )
 
 
 def test_config_aware_model_source_helpers() -> None:

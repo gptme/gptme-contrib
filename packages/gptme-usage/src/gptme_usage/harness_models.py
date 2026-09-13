@@ -357,10 +357,17 @@ def pricing_key_for_model(
             # session recorded under the old pin must keep pricing to the
             # same short name, or cost analysis silently drops them.
             stripped = _strip_provider_pin(model)
-            for short_name, provider_model in routes.items():
-                if stripped == _strip_provider_pin(provider_model):
-                    normalized_model = short_name
-                    break
+            matches = [
+                short_name
+                for short_name, provider_model in routes.items()
+                if stripped == _strip_provider_pin(provider_model)
+            ]
+            unique = set(matches)
+            # Two short names sharing a stripped base is a config collision.
+            # Do not pick by dict order — leave the model unnormalized so
+            # cost analysis drops the row instead of assigning the wrong key.
+            if len(unique) == 1:
+                normalized_model = next(iter(unique))
     return harness, normalized_model
 
 
