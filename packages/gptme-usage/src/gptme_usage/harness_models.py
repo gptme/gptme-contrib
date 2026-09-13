@@ -349,7 +349,32 @@ def pricing_key_for_model(
             if model == provider_model:
                 normalized_model = short_name
                 break
+        else:
+            # The ``@provider`` suffix is an OpenRouter routing pin, not a
+            # different model: when a route is re-pinned (2026-09-10:
+            # ``deepseek-v4-flash-0731@deepseek`` -> ``@together,fireworks,
+            # inceptron`` after OpenRouter dropped the official endpoint) every
+            # session recorded under the old pin must keep pricing to the
+            # same short name, or cost analysis silently drops them.
+            stripped = _strip_provider_pin(model)
+            matches = [
+                short_name
+                for short_name, provider_model in routes.items()
+                if stripped == _strip_provider_pin(provider_model)
+            ]
+            unique = set(matches)
+            # Two short names sharing a stripped base is a config collision.
+            # Do not pick by dict order — leave the model unnormalized so
+            # cost analysis drops the row instead of assigning the wrong key.
+            if len(unique) == 1:
+                normalized_model = next(iter(unique))
     return harness, normalized_model
+
+
+def _strip_provider_pin(model: str) -> str:
+    """Drop an OpenRouter ``@provider[,provider...]`` pin from a model id."""
+    base, _, _ = model.partition("@")
+    return base
 
 
 class HarnessCostRow(TypedDict):
