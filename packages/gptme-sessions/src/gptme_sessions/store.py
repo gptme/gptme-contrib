@@ -366,6 +366,7 @@ class SessionStore:
                 archive_path = (
                     self.sessions_dir / f"{self.path.name[: -len('.jsonl')]}-archive-{month}.jsonl"
                 )
+                archive_created = not archive_path.exists()
                 existing = self._archive_line_hashes(archive_path)
                 # Append first, fsync, and only then drop from the active file.
                 # Do not add this batch's hashes to ``existing``: duplicate
@@ -380,7 +381,7 @@ class SessionStore:
                         archived += 1
                     af.flush()
                     os.fsync(af.fileno())
-                if not existing:
+                if archive_created:
                     _fsync_directory(self.sessions_dir)
 
             tmp_path = self.path.with_name(

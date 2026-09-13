@@ -168,12 +168,20 @@ def _directory_fsync_calls(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
             directory_fds[fd] = Path(path)
         return fd
 
+    def tracking_close(fd):
+        try:
+            return os_close(fd)
+        finally:
+            directory_fds.pop(fd, None)
+
     def tracking_fsync(fd):
         if fd in directory_fds:
             calls.append(directory_fds[fd])
         return original_fsync(fd)
 
+    os_close = os.close
     monkeypatch.setattr(os, "open", tracking_open)
+    monkeypatch.setattr(os, "close", tracking_close)
     monkeypatch.setattr(os, "fsync", tracking_fsync)
     return calls
 
@@ -209,11 +217,9 @@ def test_rotate_fsyncs_archive_creation_and_active_replace(tmp_path: Path, monke
     store.rotate(keep_days=30)
 
     # Opening the archive in append mode creates its name. The first sync
-    # persists that name, the successful replace installs the active name
-    # and removes the temp name, and lock cleanup performs the final sync.
-    # These are three directory-sync calls, even though replace covers two
-    # namespace mutations with one barrier.
-    assert calls == [tmp_path, tmp_path, tmp_path]
+    # persists that name; the second covers both installing the active name
+    # and removing the temp name during replace.
+    assert calls == [tmp_path, tmp_path]
 
 
 @pytest.mark.skipif(not hasattr(os, "O_DIRECTORY"), reason="directory fsync unavailable")
