@@ -491,7 +491,10 @@ def test_plan_runner_argv_and_env(tmp_path) -> None:
     ]
     assert flags[7:9] == ["--timeout", "900"]
     assert flags[9:11] == ["--model", "claude-sonnet-4-6"]
-    assert plan.runner_env == {"CC_SESSION_ID": plan.session_id}
+    assert plan.runner_env == {
+        "BOB_SESSION_ID": plan.session_id,
+        "CC_SESSION_ID": plan.session_id,
+    }
     assert plan.trajectory_path.endswith(f"/{plan.session_id}.jsonl")
 
 
@@ -505,8 +508,19 @@ def test_plan_grok_build_env(tmp_path) -> None:
     plan, _, _ = _plan_for(
         tmp_path, make_item(), FakeLifecycleIO(), backend="grok-build"
     )
-    assert plan.runner_env == {"GROK_BUILD_SESSION_ID": plan.session_id}
+    assert plan.runner_env == {
+        "BOB_SESSION_ID": plan.session_id,
+        "GROK_BUILD_SESSION_ID": plan.session_id,
+    }
     assert plan.trajectory_path == ""  # CC prediction only
+
+
+@pytest.mark.parametrize(
+    "backend", ["claude-code", "gptme", "grok-build", "codex", "pi"]
+)
+def test_plan_shares_record_id_with_every_backend(tmp_path, backend) -> None:
+    plan, _, _ = _plan_for(tmp_path, make_item(), FakeLifecycleIO(), backend=backend)
+    assert plan.runner_env["BOB_SESSION_ID"] == plan.session_id
 
 
 # --- Dry-run ExecutionPlan ---

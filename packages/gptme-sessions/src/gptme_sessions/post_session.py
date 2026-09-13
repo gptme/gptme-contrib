@@ -333,6 +333,7 @@ def post_session(
     parent_session_id: str | None = None,
     dispatch_kind: str | None = None,
     dispatch_id: str | None = None,
+    dispatch_cause: dict[str, Any] | None = None,
     category: str | None = None,
     recommended_category: str | None = None,
     selector_mode: str | None = None,
@@ -395,6 +396,12 @@ def post_session(
         use for dispatcher-run→child joins.  Defaults to the harness-neutral
         ``BOB_DISPATCH_ID`` environment variable, falling back to
         ``PM_DISPATCH_ID`` for the project-monitoring path.
+    dispatch_cause:
+        Launcher-captured cause object, with caller-defined ``kind``/``id``
+        and optional ``parent_session_id``, ``task``, ``pr``, or other metadata.
+        When omitted, read JSON from ``BOB_DISPATCH_CAUSE``. Malformed JSON and
+        non-object values are ignored. An explicit object, including an empty
+        one, takes precedence. This does not change the lineage fields above.
     run_type:
         Pipeline / trigger name (e.g. ``"autonomous"``, ``"monitoring"``).
         Kept for backward compatibility; prefer ``trigger`` going forward.
@@ -998,6 +1005,16 @@ def post_session(
     )
     if resolved_dispatch_id is not None:
         record_kwargs["dispatch_id"] = resolved_dispatch_id
+    resolved_dispatch_cause = dispatch_cause
+    if resolved_dispatch_cause is None:
+        raw_dispatch_cause = os.environ.get("BOB_DISPATCH_CAUSE")
+        if raw_dispatch_cause:
+            try:
+                resolved_dispatch_cause = json.loads(raw_dispatch_cause)
+            except json.JSONDecodeError:
+                pass
+    if isinstance(resolved_dispatch_cause, dict):
+        record_kwargs["dispatch_cause"] = resolved_dispatch_cause
     if actual_category is not None:
         record_kwargs["category"] = actual_category
     if recommended_category is not None:
