@@ -17,10 +17,10 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
-from pathlib import Path
 
 from json_repair import repair_json
+
+from .traces import create_trace_dir, save_output
 
 logger = logging.getLogger(__name__)
 
@@ -110,11 +110,10 @@ def call_gptme(prompt: str, timeout: int = 120) -> str:
     ):
         env.pop(key, None)
 
-    # Create the private log dir inside the try so a full/unwritable temp
-    # filesystem returns "" instead of raising (never-raise contract).
-    isolated_logs = None
+    # Keep allocation inside the never-raise boundary, but retain all traces.
     try:
-        isolated_logs = Path(tempfile.mkdtemp(prefix="gptme-activity-summary-"))
+        isolated_logs = create_trace_dir("gptme-")
+        logger.warning("gptme fallback traces retained in %s", isolated_logs)
         env["GPTME_LOGS_HOME"] = str(isolated_logs)
         result = subprocess.run(
             cmd,
@@ -124,15 +123,17 @@ def call_gptme(prompt: str, timeout: int = 120) -> str:
             timeout=timeout,
             env=env,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        save_output(isolated_logs, result.stdout, result.stderr)
+    except subprocess.TimeoutExpired as exc:
+        save_output(isolated_logs, exc.stdout, exc.stderr)
+        logger.warning("gptme fallback timed out; traces in %s", isolated_logs)
+        return ""
+    except OSError as exc:
         logger.warning("gptme fallback failed to run: %s", exc)
         return ""
     except Exception as exc:  # noqa: BLE001 - best-effort adapter must not raise
         logger.warning("gptme fallback errored unexpectedly: %s", exc)
         return ""
-    finally:
-        if isolated_logs is not None:
-            shutil.rmtree(isolated_logs, ignore_errors=True)
 
     if result.returncode != 0:
         logger.warning(

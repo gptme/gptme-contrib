@@ -476,7 +476,7 @@ def test_call_gptme_returns_empty_when_disabled(monkeypatch):
     assert call_gptme("ignored prompt") == ""
 
 
-def test_call_gptme_isolates_parent_session_logs(monkeypatch):
+def test_call_gptme_isolates_parent_session_logs(monkeypatch, tmp_path):
     """Nested gptme must not inherit the parent session's GPTME_LOGS_HOME/NAME.
 
     Incident 2026-08-30: a parent autonomous session exported
@@ -494,6 +494,7 @@ def test_call_gptme_isolates_parent_session_logs(monkeypatch):
     monkeypatch.setenv("GPTME_WORKSPACE", "/home/bob/bob")
     monkeypatch.setenv("GPTME_SUBPROCESS", "1")
 
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     captured: dict = {}
 
     def fake_run(*args, **kwargs):
@@ -516,11 +517,11 @@ def test_call_gptme_isolates_parent_session_logs(monkeypatch):
     logs_home = env.get("GPTME_LOGS_HOME")
     assert logs_home, "must set a private GPTME_LOGS_HOME"
     assert logs_home != "/tmp/gptme-logs-parent-session"
-    assert "gptme-activity-summary-" in logs_home
-    # Isolated dir is cleaned up after the call.
+    assert "gptme-activity-summary" in logs_home
+    # Isolated dir survives the call.
     from pathlib import Path
 
-    assert not Path(logs_home).exists()
+    assert Path(logs_home).is_dir()
 
 
 def test_call_gptme_returns_empty_when_tempdir_fails(monkeypatch):
@@ -540,7 +541,7 @@ def test_call_gptme_returns_empty_when_tempdir_fails(monkeypatch):
             return_value="/usr/bin/gptme",
         ),
         patch(
-            "gptme_activity_summary.gptme_backend.tempfile.mkdtemp",
+            "gptme_activity_summary.traces.tempfile.mkdtemp",
             side_effect=OSError("No space left on device"),
         ),
         patch("gptme_activity_summary.gptme_backend.subprocess.run") as run_mock,

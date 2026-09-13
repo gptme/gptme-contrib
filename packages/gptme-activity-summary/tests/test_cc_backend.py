@@ -251,8 +251,6 @@ def test_call_claude_code_quota_is_called_process_error_subtype(mock_run, mock_s
 
 @patch.dict(
     "os.environ",
-    # Explicitly clear CLAUDECODE so nested detection doesn't append
-    # --no-session-persistence and complicate the cmd assertion.
     {"GPTME_CC_CMD_PREFIX": "/opt/bin/slot-wrap --slot alice --", "CLAUDECODE": ""},
     clear=False,
 )
@@ -275,7 +273,8 @@ def test_call_claude_code_cmd_prefix_empty_env_unchanged(mock_run):
     mock_run.return_value = _make_completed_process(stdout='{"ok": true}')
     call_claude_code("test prompt")
     cmd = mock_run.call_args[0][0]
-    assert cmd == ["claude", "-p", "-"]
+    assert cmd[:3] == ["claude", "-p", "-"]
+    assert cmd[3] == "--session-id"
 
 
 @patch.dict("os.environ", {"GPTME_CC_CMD_PREFIX": "wrapper '"}, clear=True)
@@ -457,21 +456,19 @@ def test_call_claude_code_unsets_all_cc_env_vars(mock_run):
 
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
-def test_call_claude_code_no_session_persistence_when_nested(mock_run, mock_sleep):
-    """--no-session-persistence is passed only when CLAUDECODE is set (nested)."""
+def test_call_claude_code_preserves_session_when_nested(mock_run, mock_sleep):
+    """Nested calls still write trajectories with a fresh session identity."""
     import os
 
     mock_run.return_value = _make_completed_process(stdout="test output")
 
-    # Nested case: CLAUDECODE set → flag present as belt-and-suspenders safeguard
+    # Nested case: clearing parent identity must not disable persistence.
     os.environ["CLAUDECODE"] = "1"
     try:
         call_claude_code("test prompt")
         cmd = mock_run.call_args[0][0]
-        assert "--no-session-persistence" in cmd, (
-            "Must pass --no-session-persistence when nested (CLAUDECODE set) "
-            "to prevent empty-output bug (gptme/gptme-contrib#585)"
-        )
+        assert "--no-session-persistence" not in cmd
+        assert "--session-id" in cmd
     finally:
         os.environ.pop("CLAUDECODE", None)
 
