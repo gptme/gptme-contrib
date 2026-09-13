@@ -214,12 +214,21 @@ def test_directory_fsync_failure_is_reported(tmp_path: Path, monkeypatch):
     store = SessionStore(sessions_dir=tmp_path)
     store.append(SessionRecord(session_id="before", model="test"))
     original_fsync = os.fsync
+    original_open = os.open
+    directory_fds: set[int] = set()
+
+    def tracking_open(path, flags, *args, **kwargs):
+        fd = original_open(path, flags, *args, **kwargs)
+        if flags & getattr(os, "O_DIRECTORY", 0):
+            directory_fds.add(fd)
+        return fd
 
     def fail_directory_fsync(fd):
-        if Path(f"/proc/self/fd/{fd}").resolve() == tmp_path:
+        if fd in directory_fds:
             raise OSError("injected directory fsync failure")
         return original_fsync(fd)
 
+    monkeypatch.setattr(os, "open", tracking_open)
     monkeypatch.setattr(os, "fsync", fail_directory_fsync)
 
     with pytest.raises(OSError, match="directory fsync failure"):
