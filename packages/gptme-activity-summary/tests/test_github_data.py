@@ -14,6 +14,7 @@ from gptme_activity_summary.github_data import (
     GitHubActivity,
     RepoActivity,
     UserEvent,
+    _canonical_repo,
     _render_event_line,
     _run_command,
     _search_total_count,
@@ -181,6 +182,55 @@ def test_search_total_count_handles_failure():
         assert _search_total_count("q") is None
     with patch("gptme_activity_summary.github_data._run_command", return_value="oops"):
         assert _search_total_count("q") is None
+
+
+def test_canonical_repo_follows_rename():
+    with patch(
+        "gptme_activity_summary.github_data._run_command", return_value="new/name"
+    ) as mock_run:
+        assert _canonical_repo("old/name") == "new/name"
+    cmd = mock_run.call_args[0][0]
+    assert cmd[:2] == ["gh", "api"]
+    assert cmd[2] == "repos/old/name"
+    assert "--jq" in cmd
+    assert ".full_name" in cmd
+
+
+def test_canonical_repo_keeps_input_on_failure():
+    with patch("gptme_activity_summary.github_data._run_command", return_value=None):
+        assert _canonical_repo("old/name") == "old/name"
+    with patch("gptme_activity_summary.github_data._run_command", return_value="[]"):
+        assert _canonical_repo("old/name") == "old/name"
+
+
+def test_fetch_activity_searches_canonical_repo_name():
+    """Stale nwo must be resolved before search, or counts come back as zero."""
+    seen_queries: list[str] = []
+
+    def mock_run(cmd, timeout=30):
+        if cmd[:3] == ["gh", "auth", "status"]:
+            return "ok"
+        if cmd[:2] == ["gh", "api"] and len(cmd) > 2 and str(cmd[2]).startswith("repos/"):
+            nwo = str(cmd[2]).removeprefix("repos/")
+            return {"old/name": "new/name"}.get(nwo, nwo)
+        query = _search_query(cmd)
+        if query is not None:
+            seen_queries.append(query)
+            return "4" if "is:pr" in query else "1"
+        if cmd[1] == "pr" and "list" in cmd:
+            assert cmd[cmd.index("--repo") + 1] == "new/name"
+            return _items(4)
+        if cmd[1] == "issue":
+            return _items(1)
+        return "[]"
+
+    with patch("gptme_activity_summary.github_data._run_command", side_effect=mock_run):
+        activity = fetch_activity(date(2026, 8, 1), date(2026, 8, 31), repos=["old/name"])
+
+    assert activity.repos[0].repo == "new/name"
+    assert activity.total_prs_merged == 4
+    assert any(q.startswith("repo:new/name ") and "is:pr" in q for q in seen_queries)
+    assert not any("repo:old/name" in q for q in seen_queries)
 
 
 def test_repo_activity_count_prefers_exact_total():

@@ -15,9 +15,7 @@ from datetime import date, datetime, timezone
 logger = logging.getLogger(__name__)
 
 DEFAULT_REPOS = [
-    # Renamed from ErikBjare/gptme-bob; `gh ... --search` does not follow repo
-    # redirects, so the old name silently returned zero PRs/issues.
-    "ErikBjare/bob",
+    "ErikBjare/gptme-bob",
     "gptme/gptme",
     "gptme/gptme-contrib",
 ]
@@ -159,6 +157,22 @@ def _run_command(cmd: list[str], timeout: int = 30) -> str | None:
 def _gh_available() -> bool:
     """Check if the `gh` CLI is available and authenticated."""
     return _run_command(["gh", "auth", "status"]) is not None
+
+
+def _canonical_repo(repo: str) -> str:
+    """Return the current owner/name, following GitHub repo renames.
+
+    ``gh search`` and ``gh api search/...`` do not follow redirects, so a
+    stale nwo silently returns zero results. The repos API does follow them.
+    """
+    output = _run_command(["gh", "api", f"repos/{repo}", "--jq", ".full_name"])
+    if not output:
+        return repo
+    name = output.strip()
+    parts = name.split("/")
+    if len(parts) == 2 and all(parts) and " " not in name:
+        return name
+    return repo
 
 
 def _search_total_count(query: str, kind: str = "issues") -> int | None:
@@ -697,10 +711,12 @@ def fetch_activity(
         GitHubActivity with data from all repos.
     """
     if repos is None:
-        repos = DEFAULT_REPOS
+        repos = list(DEFAULT_REPOS)
 
     activity = GitHubActivity(start_date=start, end_date=end)
     has_gh = _gh_available()
+    if has_gh:
+        repos = [_canonical_repo(repo) for repo in repos]
 
     for repo in repos:
         repo_activity = RepoActivity(repo=repo)
