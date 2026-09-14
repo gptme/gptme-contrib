@@ -47,6 +47,12 @@ from .openai_client import (
     _load_project_instructions,
 )
 from .sounds import DISPATCH_CUE_MULAW, PCM_CUES, SAMPLE_RATE, TIMEOUT_CUE_MULAW
+from .standup_callback import (
+    CALLBACK_GREETING,
+    CALLBACK_GUIDANCE,
+    load_callback_brief,
+    load_callback_candidate,
+)
 from .tool_bridge import GptmeToolBridge
 from .twilio_integration import (
     _get_config_env,
@@ -2377,7 +2383,18 @@ class VoiceServer:
         # Fire-and-forget: pre-warm the provider connection so it is ready before
         # Twilio's media-stream WebSocket sends its "start" event.  This eliminates
         # most of the ~1-3s dead air between call answer and first greeting audio.
-        if from_number:
+        # A possible standup callback must retain recent-call evidence until
+        # the authenticated stream chooses callback vs resume. A generic
+        # prewarm would consume that evidence before the decision below.
+        callback_candidate = False
+        if signature_validated and self._twilio_body_caller_allowed(from_number):
+            identity = _lookup_caller_identity(from_number, self.workspace)
+            callback_candidate = bool(
+                identity
+                and identity.is_operator
+                and load_callback_candidate(self.workspace) is not None
+            )
+        if from_number and not callback_candidate:
             self._register_prewarm_task(from_number)
 
         # Forward caller number to WebSocket handler via TwiML custom parameters.
@@ -2530,9 +2547,27 @@ class VoiceServer:
                         caller_id=granted_from,
                     )
 
+                    # Only the signed, CallSid-bound grant may unlock the local
+                    # standup plan. Number-only prewarms never contain this data.
+                    callback_brief = None
+                    if granted_from and not handoff_id and not standup_brief:
+                        identity = _lookup_caller_identity(granted_from, self.workspace)
+                        if identity and identity.is_operator:
+                            recent = self._load_recent_call(granted_from)
+                            callback_brief = await load_callback_brief(
+                                self.workspace,
+                                granted_from,
+                                account_sid=_get_config_env("TWILIO_ACCOUNT_SID"),
+                                auth_token=_get_config_env("TWILIO_AUTH_TOKEN"),
+                                last_call_ended_at=recent.ended_at if recent else None,
+                            )
+
                     # Try to claim a pre-warmed session (no handoff/standup for inbound fresh calls)
                     prewarm_eligible = (
-                        from_number and not handoff_id and not standup_brief
+                        from_number
+                        and not handoff_id
+                        and not standup_brief
+                        and not callback_brief
                     )
                     # A spoofed start event must not steal a body- or rag-capable
                     # prewarm: the prewarmed session's tool schema was built from
@@ -2565,13 +2600,29 @@ class VoiceServer:
                         realtime_client.on_user_transcript = on_user_transcript
                         realtime_client.on_speech_started = on_speech_started
                     else:
-                        # Cold path: build session from scratch
-                        bootstrap = await self._build_session_bootstrap(
-                            caller_id=caller_id,
-                            from_number=from_number,
-                            handoff_id=handoff_id,
-                            standup_brief=standup_brief,
-                        )
+                        # Cold path: build session from scratch. Callback guidance
+                        # offers the brief instead of using the outbound opener.
+                        if callback_brief:
+                            bootstrap = SessionBootstrap(
+                                instructions=(
+                                    CALLBACK_GUIDANCE
+                                    + "\n\n"
+                                    + callback_brief
+                                    + "\n\n"
+                                    + _build_caller_instructions(
+                                        self._instructions, from_number, self.workspace
+                                    )
+                                ),
+                                should_greet_first=True,
+                                initial_response_instructions=CALLBACK_GREETING,
+                            )
+                        else:
+                            bootstrap = await self._build_session_bootstrap(
+                                caller_id=caller_id,
+                                from_number=from_number,
+                                handoff_id=handoff_id,
+                                standup_brief=standup_brief,
+                            )
                         instructions = bootstrap.instructions
                         initial_response_instructions = (
                             bootstrap.initial_response_instructions
