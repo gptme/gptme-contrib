@@ -1,17 +1,26 @@
 """Tests for github_data module."""
 
 import json
+import os
+import shutil
+import subprocess
 from datetime import date, datetime, timezone
 from unittest.mock import patch
 
+import pytest
+
 from gptme_activity_summary.github_data import (
+    LIST_LIMIT,
     GitHubActivity,
     RepoActivity,
     UserEvent,
     _render_event_line,
     _run_command,
+    _search_total_count,
+    fetch_activity,
     fetch_user_activity,
     format_activity_for_prompt,
+    get_commit_count,
     get_cross_repo_prs,
     get_merged_prs,
     get_user_commits,
@@ -142,6 +151,163 @@ def test_github_activity_properties():
     assert activity.total_commits == 5
     assert activity.total_prs_merged == 3
     assert activity.total_issues_closed == 1
+
+
+# --- Exact counts (not capped by list limits) ---
+
+
+def _items(n: int) -> str:
+    return json.dumps([{"number": i, "title": f"T{i}", "url": ""} for i in range(n)])
+
+
+def _search_query(cmd: list[str]) -> str | None:
+    """Extract the q= value from a `gh api search/...` command, else None."""
+    if "api" not in cmd or not any(c.startswith("search/") for c in cmd):
+        return None
+    return next(c[2:] for c in cmd if c.startswith("q="))
+
+
+def test_search_total_count_parses_and_requests_one_item():
+    with patch("gptme_activity_summary.github_data._run_command", return_value="472") as mock_run:
+        assert _search_total_count("author:x is:pr is:merged") == 472
+    cmd = mock_run.call_args[0][0]
+    assert "search/issues" in cmd
+    assert "per_page=1" in cmd
+    assert "q=author:x is:pr is:merged" in cmd
+
+
+def test_search_total_count_handles_failure():
+    with patch("gptme_activity_summary.github_data._run_command", return_value=None):
+        assert _search_total_count("q") is None
+    with patch("gptme_activity_summary.github_data._run_command", return_value="oops"):
+        assert _search_total_count("q") is None
+
+
+def test_repo_activity_count_prefers_exact_total():
+    repo = RepoActivity(repo="o/r", merged_prs=json.loads(_items(100)), merged_prs_total=208)
+    assert repo.merged_prs_count == 208
+    assert RepoActivity(repo="o/r", merged_prs=json.loads(_items(3))).merged_prs_count == 3
+
+
+def test_fetch_activity_reports_true_count_beyond_list_limit():
+    """A month with >200 merged PRs must not be reported as 100-per-repo."""
+    totals = {"a/one": 208, "b/two": 211, "c/three": 33}
+    issue_totals = {"a/one": 37, "b/two": 5, "c/three": 144}
+
+    def mock_run(cmd, timeout=30):
+        if cmd[:3] == ["gh", "auth", "status"]:
+            return "ok"
+        query = _search_query(cmd)
+        if query is not None:
+            repo = query.split()[0].removeprefix("repo:")
+            return str(totals[repo] if "is:pr" in query else issue_totals[repo])
+        if "--repo" not in cmd:  # cross-repo `gh search prs`
+            return "[]"
+        repo = cmd[cmd.index("--repo") + 1]
+        if "reviews" in " ".join(cmd):  # get_reviews_received
+            return "[]"
+        if cmd[1] == "pr" and "list" in cmd:
+            return _items(min(totals[repo], LIST_LIMIT))
+        if cmd[1] == "issue":
+            return _items(min(issue_totals[repo], LIST_LIMIT))
+        return "[]"
+
+    with patch("gptme_activity_summary.github_data._run_command", side_effect=mock_run):
+        activity = fetch_activity(date(2026, 8, 1), date(2026, 8, 31), repos=list(totals))
+
+    # Detail lists stay truncated (100 + 100 + 33); the old count was len() of these.
+    assert [len(r.merged_prs) for r in activity.repos] == [100, 100, 33]
+    assert activity.total_prs_merged == 452
+    assert activity.total_issues_closed == 186
+
+    text = format_activity_for_prompt(activity)
+    assert "**PRs merged**: 452" in text
+    assert "- PRs merged: 208 (showing 100)" in text
+    assert "- Issues closed: 144 (showing 100)" in text
+
+
+def test_fetch_activity_falls_back_to_list_length_when_count_fails():
+    def mock_run(cmd, timeout=30):
+        if cmd[:3] == ["gh", "auth", "status"]:
+            return "ok"
+        if _search_query(cmd) is not None:
+            return None
+        return _items(7) if cmd[1] == "pr" else _items(2)
+
+    with patch("gptme_activity_summary.github_data._run_command", side_effect=mock_run):
+        activity = fetch_activity(date(2026, 8, 1), date(2026, 8, 31), repos=["o/r"])
+    assert activity.total_prs_merged == 7
+    assert activity.total_issues_closed == 2
+
+
+def test_fetch_user_activity_uses_exact_totals():
+    def mock_run(cmd, timeout=30):
+        cmd_str = " ".join(cmd)
+        if "auth status" in cmd_str:
+            return "ok"
+        query = _search_query(cmd)
+        if query is not None:
+            if "search/commits" in cmd:
+                return "16457"
+            return "556" if "is:pr" in query else "12"
+        if "search prs" in cmd_str:
+            return json.dumps(
+                [
+                    {"repository": {"nameWithOwner": "u/r"}, "number": i, "title": "", "url": ""}
+                    for i in range(LIST_LIMIT)
+                ]
+            )
+        if "search issues" in cmd_str:
+            return "[]"
+        return None
+
+    with patch("gptme_activity_summary.github_data._run_command", side_effect=mock_run):
+        activity = fetch_user_activity(date(2026, 8, 1), date(2026, 8, 31), "someone")
+    assert activity.total_prs_merged == 556
+    assert activity.total_issues_closed == 12
+    assert activity.total_commits == 16457
+
+
+def test_get_user_commits_uses_exact_total():
+    with patch("gptme_activity_summary.github_data._run_command", return_value="16457"):
+        assert get_user_commits(date(2026, 8, 1), date(2026, 8, 31), "someone") == 16457
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_get_commit_count_excludes_adjacent_days(tmp_path, monkeypatch):
+    """Commits just outside [start, end] must not leak in via time-of-day bounds."""
+    monkeypatch.setenv("TZ", "UTC")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    for stamp in (
+        "2025-01-01T23:59:58+0000",  # day before start
+        "2025-01-02T00:00:01+0000",
+        "2025-01-03T23:59:00+0000",
+        "2025-01-04T00:00:01+0000",  # day after end
+    ):
+        env = {"GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(tmp_path),
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                stamp,
+            ],
+            check=True,
+            env={**os.environ, **env},
+        )
+    assert get_commit_count(date(2025, 1, 2), date(2025, 1, 3), str(tmp_path)) == 2
 
 
 def test_get_cross_repo_prs_excludes_defaults():

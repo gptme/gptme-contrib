@@ -10,25 +10,50 @@ import logging
 import subprocess
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_REPOS = [
-    "ErikBjare/gptme-bob",
+    # Renamed from ErikBjare/gptme-bob; `gh ... --search` does not follow repo
+    # redirects, so the old name silently returned zero PRs/issues.
+    "ErikBjare/bob",
     "gptme/gptme",
     "gptme/gptme-contrib",
 ]
 
+# Page size used for the detail lists (titles/links fed to the LLM prompt).
+# Counts never derive from these lists when an exact search count is available.
+LIST_LIMIT = 100
+
 
 @dataclass
 class RepoActivity:
-    """Activity for a single repository."""
+    """Activity for a single repository.
+
+    ``merged_prs`` / ``closed_issues`` are detail lists and may be truncated to
+    ``LIST_LIMIT``. ``merged_prs_total`` / ``closed_issues_total`` hold the exact
+    counts from the GitHub search API when available.
+    """
 
     repo: str
     commits: int = 0
     merged_prs: list[dict[str, str]] = field(default_factory=list)
     closed_issues: list[dict[str, str]] = field(default_factory=list)
+    merged_prs_total: int | None = None
+    closed_issues_total: int | None = None
+
+    @property
+    def merged_prs_count(self) -> int:
+        if self.merged_prs_total is not None:
+            return self.merged_prs_total
+        return len(self.merged_prs)
+
+    @property
+    def closed_issues_count(self) -> int:
+        if self.closed_issues_total is not None:
+            return self.closed_issues_total
+        return len(self.closed_issues)
 
 
 @dataclass
@@ -89,6 +114,10 @@ class GitHubActivity:
     reviews_received: list[PRReview] = field(default_factory=list)
     cross_repo_prs: list[CrossRepoPR] = field(default_factory=list)
     events: list[UserEvent] = field(default_factory=list)
+    # Exact activity-wide totals (human mode: author-scoped search counts).
+    # When set, they take precedence over summing per-repo counts.
+    prs_merged_total: int | None = None
+    issues_closed_total: int | None = None
 
     @property
     def total_commits(self) -> int:
@@ -96,11 +125,15 @@ class GitHubActivity:
 
     @property
     def total_prs_merged(self) -> int:
-        return sum(len(r.merged_prs) for r in self.repos)
+        if self.prs_merged_total is not None:
+            return self.prs_merged_total
+        return sum(r.merged_prs_count for r in self.repos)
 
     @property
     def total_issues_closed(self) -> int:
-        return sum(len(r.closed_issues) for r in self.repos)
+        if self.issues_closed_total is not None:
+            return self.issues_closed_total
+        return sum(r.closed_issues_count for r in self.repos)
 
 
 def _run_command(cmd: list[str], timeout: int = 30) -> str | None:
@@ -128,6 +161,70 @@ def _gh_available() -> bool:
     return _run_command(["gh", "auth", "status"]) is not None
 
 
+def _search_total_count(query: str, kind: str = "issues") -> int | None:
+    """Return the exact number of GitHub search results for ``query``.
+
+    The search API's ``total_count`` is exact even when the result set is far
+    larger than what can be listed (``gh ... --limit`` pages, 1000-item search
+    cap), so counts must come from here rather than ``len()`` of a list.
+
+    Costs one search request (authenticated budget: 30/min); callers make at
+    most a handful per summary. Returns None on any failure so callers can fall
+    back to the (possibly truncated) list length.
+
+    Args:
+        query: GitHub search query, e.g. ``repo:o/r is:pr is:merged merged:A..B``.
+        kind: Search endpoint: ``issues`` (issues and PRs) or ``commits``.
+    """
+    output = _run_command(
+        [
+            "gh",
+            "api",
+            "-X",
+            "GET",
+            f"search/{kind}",
+            "-f",
+            f"q={query}",
+            "-f",
+            "per_page=1",
+            "--jq",
+            ".total_count",
+        ]
+    )
+    if output is None:
+        return None
+    try:
+        return int(output.strip())
+    except ValueError:
+        return None
+
+
+def _date_range(start: date, end: date) -> str:
+    return f"{start.isoformat()}..{end.isoformat()}"
+
+
+def count_merged_prs(start: date, end: date, repo: str) -> int | None:
+    """Exact count of PRs merged in ``repo`` within the date range (any author)."""
+    return _search_total_count(f"repo:{repo} is:pr is:merged merged:{_date_range(start, end)}")
+
+
+def count_closed_issues(start: date, end: date, repo: str) -> int | None:
+    """Exact count of issues (not PRs) closed in ``repo`` within the date range."""
+    return _search_total_count(f"repo:{repo} is:issue is:closed closed:{_date_range(start, end)}")
+
+
+def count_user_merged_prs(start: date, end: date, author: str) -> int | None:
+    """Exact count of PRs authored by ``author`` and merged within the date range."""
+    return _search_total_count(f"author:{author} is:pr is:merged merged:{_date_range(start, end)}")
+
+
+def count_user_closed_issues(start: date, end: date, author: str) -> int | None:
+    """Exact count of issues authored by ``author`` and closed within the date range."""
+    return _search_total_count(
+        f"author:{author} is:issue is:closed closed:{_date_range(start, end)}"
+    )
+
+
 def get_merged_prs(start: date, end: date, repo: str) -> list[dict[str, str]]:
     """Get merged PRs for a repo in a date range."""
     # gh search uses ISO dates; merged:YYYY-MM-DD..YYYY-MM-DD
@@ -145,7 +242,7 @@ def get_merged_prs(start: date, end: date, repo: str) -> list[dict[str, str]]:
             "--json",
             "number,title,url,mergedAt",
             "--limit",
-            "100",
+            str(LIST_LIMIT),
         ]
     )
     if not output:
@@ -180,7 +277,7 @@ def get_closed_issues(start: date, end: date, repo: str) -> list[dict[str, str]]
             "--json",
             "number,title,url,closedAt",
             "--limit",
-            "100",
+            str(LIST_LIMIT),
         ]
     )
     if not output:
@@ -200,23 +297,31 @@ def get_closed_issues(start: date, end: date, repo: str) -> list[dict[str, str]]
 
 
 def get_commit_count(start: date, end: date, repo_path: str | None = None) -> int:
-    """Get commit count from git log for a date range."""
+    """Get commit count reachable from HEAD for a date range (inclusive days).
+
+    Bounds carry an explicit time of day: a bare ``--after=YYYY-MM-DD`` is
+    resolved by git with the *current* time of day, which previously leaked
+    part of the day before ``start`` and the day after ``end`` into the count.
+    """
     cmd = ["git"]
     if repo_path:
         cmd.extend(["-C", repo_path])
-    # --after is exclusive, so subtract 1 day; --before is exclusive, so add 1 day
     cmd.extend(
         [
-            "log",
-            f"--after={start - timedelta(days=1)}",
-            f"--before={end + timedelta(days=1)}",
-            "--oneline",
+            "rev-list",
+            "--count",
+            f"--since={start.isoformat()} 00:00:00",
+            f"--until={end.isoformat()} 23:59:59",
+            "HEAD",
         ]
     )
     output = _run_command(cmd)
     if not output:
         return 0
-    return len(output.strip().splitlines())
+    try:
+        return int(output.strip())
+    except ValueError:
+        return 0
 
 
 def get_reviews_received(start: date, end: date, repos: list[str]) -> list[PRReview]:
@@ -419,7 +524,16 @@ def get_user_commits(
     end: date,
     author: str,
 ) -> int:
-    """Get approximate commit count for a user via GitHub search."""
+    """Get commit count for a user via GitHub search.
+
+    Uses the search API's exact ``total_count``; falls back to listing (capped
+    at ``LIST_LIMIT``) only if the count request fails.
+    """
+    total = _search_total_count(
+        f"author:{author} author-date:{_date_range(start, end)}", kind="commits"
+    )
+    if total is not None:
+        return total
     output = _run_command(
         [
             "gh",
@@ -432,7 +546,7 @@ def get_user_commits(
             "--json",
             "sha",
             "--limit",
-            "100",
+            str(LIST_LIMIT),
         ]
     )
     if not output:
@@ -594,6 +708,24 @@ def fetch_activity(
         if has_gh:
             repo_activity.merged_prs = get_merged_prs(start, end, repo)
             repo_activity.closed_issues = get_closed_issues(start, end, repo)
+            repo_activity.merged_prs_total = count_merged_prs(start, end, repo)
+            repo_activity.closed_issues_total = count_closed_issues(start, end, repo)
+            if (
+                repo_activity.merged_prs_total is None
+                and len(repo_activity.merged_prs) >= LIST_LIMIT
+            ):
+                logger.warning(
+                    "Exact merged-PR count unavailable for %s; count capped at %d", repo, LIST_LIMIT
+                )
+            if (
+                repo_activity.closed_issues_total is None
+                and len(repo_activity.closed_issues) >= LIST_LIMIT
+            ):
+                logger.warning(
+                    "Exact closed-issue count unavailable for %s; count capped at %d",
+                    repo,
+                    LIST_LIMIT,
+                )
 
         activity.repos.append(repo_activity)
 
@@ -665,6 +797,11 @@ def fetch_user_activity(
             repo_issues[repo] = []
         repo_issues[repo].append(issue)
 
+    # Exact totals: the lists above are capped and scoped by creation date, so
+    # the headline "PRs merged" / "Issues closed" counts come from search counts.
+    activity.prs_merged_total = count_user_merged_prs(start, end, username)
+    activity.issues_closed_total = count_user_closed_issues(start, end, username)
+
     # Get commit count
     commit_count = get_user_commits(start, end, username)
 
@@ -719,15 +856,29 @@ def format_activity_for_prompt(activity: GitHubActivity) -> str:
     lines.append("")
 
     for repo in activity.repos:
-        if not repo.merged_prs and not repo.closed_issues and repo.commits == 0:
+        if (
+            not repo.merged_prs
+            and not repo.closed_issues
+            and repo.commits == 0
+            and not repo.merged_prs_count
+            and not repo.closed_issues_count
+        ):
             continue
         lines.append(f"### {repo.repo}")
         if repo.commits:
             lines.append(f"- Commits: {repo.commits}")
+        if repo.merged_prs_total is not None and repo.merged_prs_total > len(repo.merged_prs):
+            lines.append(f"- PRs merged: {repo.merged_prs_total} (showing {len(repo.merged_prs)})")
         if repo.merged_prs:
             lines.append("- Merged PRs:")
             for pr in repo.merged_prs:
                 lines.append(f"  - #{pr['number']}: {pr['title']}")
+        if repo.closed_issues_total is not None and repo.closed_issues_total > len(
+            repo.closed_issues
+        ):
+            lines.append(
+                f"- Issues closed: {repo.closed_issues_total} (showing {len(repo.closed_issues)})"
+            )
         if repo.closed_issues:
             lines.append("- Closed Issues:")
             for issue in repo.closed_issues:
