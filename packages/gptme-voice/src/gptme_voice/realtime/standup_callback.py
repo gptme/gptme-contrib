@@ -37,23 +37,11 @@ def _timestamp(value: object) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-async def load_callback_brief(
-    workspace: str | None,
-    caller: str,
-    *,
-    account_sid: str | None,
-    auth_token: str | None,
-    now: datetime | None = None,
-) -> str | None:
-    """Caller must already be authenticated and authorized as the operator.
-
-    Local artifacts nominate a call; Twilio confirms its recipient and terminal
-    outcome. Missing/ambiguous evidence leaves the normal inbound path intact.
-    The API lookup is bounded and only runs for a fresh local candidate.
-    """
-    if not workspace or not account_sid or not auth_token:
-        return None
-    if not re.fullmatch(r"AC[0-9a-fA-F]{32}", account_sid):
+def load_callback_candidate(
+    workspace: str | None, *, now: datetime | None = None
+) -> tuple[str, str, float] | None:
+    """Read fresh local evidence: outbound SID, prepared plan, placement time."""
+    if not workspace:
         return None
     current = now or datetime.now(timezone.utc)
     state = Path(workspace) / "state"
@@ -98,6 +86,35 @@ async def load_callback_brief(
         if len(payload) > 16000:
             return None
     except (OSError, ValueError):
+        return None
+
+    return sid, payload, placed.timestamp()
+
+
+async def load_callback_brief(
+    workspace: str | None,
+    caller: str,
+    *,
+    account_sid: str | None,
+    auth_token: str | None,
+    last_call_ended_at: float | None = None,
+    now: datetime | None = None,
+) -> str | None:
+    """Caller must already be authenticated and authorized as the operator.
+
+    Local artifacts nominate a call; Twilio confirms its recipient and terminal
+    outcome. An intervening conversation takes precedence over the missed call.
+    The API lookup is bounded and only runs for a fresh local candidate.
+    """
+    if not account_sid or not auth_token:
+        return None
+    if not re.fullmatch(r"AC[0-9a-fA-F]{32}", account_sid):
+        return None
+    candidate = load_callback_candidate(workspace, now=now)
+    if candidate is None:
+        return None
+    sid, payload, placed_at = candidate
+    if last_call_ended_at is not None and last_call_ended_at >= placed_at:
         return None
 
     try:

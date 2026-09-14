@@ -74,10 +74,19 @@ def callback_case(tmp_path, monkeypatch):
     monkeypatch.setattr(server_mod, "GptmeToolBridge", _DummyToolBridge)
     monkeypatch.setattr(server, "_on_call_end", lambda *a, **kw: asyncio.sleep(0))
 
-    def run(*, grant=True, grant_from=PHONE, grant_sid="CAinbound", from_number=PHONE):
+    def run(
+        *,
+        grant=True,
+        grant_from=PHONE,
+        grant_sid="CAinbound",
+        from_number=PHONE,
+        token=None,
+    ):
         custom = {"from_number": from_number}
         if grant:
-            custom["body_grant"] = server._mint_twilio_body_grant(grant_from, grant_sid)
+            custom["body_grant"] = token or server._mint_twilio_body_grant(
+                grant_from, grant_sid
+            )
         ws = _DummyTwilioWebSocket(
             [
                 {
@@ -250,3 +259,77 @@ def test_api_failure_falls_back_to_normal_inbound(callback_case, monkeypatch, fa
     # The fixture wraps AsyncClient; patch the real class's method.
     monkeypatch.setattr(httpx._client.AsyncClient, "get", get)
     assert MARKER not in run().instructions
+
+
+def test_intervening_call_resumes_instead_of_reoffering_missed_standup(callback_case):
+    run, server, _, requests, _, _, _ = callback_case
+    server._save_recent_call(
+        server_mod.RecentCallRecord(
+            caller_id=PHONE,
+            source="twilio",
+            ended_at=datetime.now(timezone.utc).timestamp(),
+            transcript=[
+                server_mod.TranscriptTurn(
+                    role="user", text="We already covered the standup."
+                )
+            ],
+            metadata={"call_sid": "CAprevious"},
+        )
+    )
+    cfg = run()
+    assert MARKER not in cfg.instructions
+    assert "We already covered the standup." in cfg.instructions
+    assert not cfg.initial_response_instructions
+    assert not requests
+
+
+@pytest.mark.parametrize("candidate", [True, False])
+def test_signed_webhook_preserves_callback_evidence_before_stream(
+    callback_case, monkeypatch, candidate
+):
+    from xml.etree import ElementTree
+
+    from twilio.request_validator import RequestValidator
+
+    run, server, _, _, state, _, _ = callback_case
+    if not candidate:
+        (state / "standup-brief.json").unlink()
+    prewarms = []
+    monkeypatch.setattr(server, "_register_prewarm_task", prewarms.append)
+    params = {"From": PHONE, "CallSid": "CAinbound"}
+    signature = RequestValidator("test-token").compute_signature(
+        "https://voice.example/incoming", params
+    )
+
+    class Request:
+        headers = {"host": "voice.example", "X-Twilio-Signature": signature}
+
+        async def form(self):
+            return params
+
+    response = asyncio.run(server.handle_incoming_call(Request()))
+    assert response.status_code == 200
+    assert prewarms == ([] if candidate else [PHONE])
+    xml = ElementTree.fromstring(response.body)
+    token = next(
+        node.attrib["value"]
+        for node in xml.iter("Parameter")
+        if node.attrib["name"] == "body_grant"
+    )
+    assert (MARKER in run(token=token).instructions) is candidate
+
+
+def test_callback_crossing_utc_midnight_is_not_same_day(callback_case):
+    from gptme_voice.realtime.standup_callback import load_callback_candidate
+
+    _, _, _, _, state, stamp, brief = callback_case
+    stamp.update(date="2026-09-14", placed_at="2026-09-14T23:59:00+00:00")
+    brief["generated_at"] = "2026-09-14T23:50:00+00:00"
+    (state / "standup-brief.json").write_text(json.dumps(brief))
+    (state / "voice-calls/last-standup-call-sid.txt").write_text(json.dumps(stamp))
+    assert (
+        load_callback_candidate(
+            str(state.parent), now=datetime(2026, 9, 15, 0, 1, tzinfo=timezone.utc)
+        )
+        is None
+    )

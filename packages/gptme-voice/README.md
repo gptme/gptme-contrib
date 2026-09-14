@@ -91,6 +91,10 @@ behavior intact. API errors also fail closed; no brief is generated on demand.
 The callback gets a short offer to deliver the standup. Questions covered by the
 plan are answered from context, dated to its actual generation time. Callback
 sessions bypass generic number-keyed prewarms, which never receive the plan.
+While a trusted caller has fresh local callback evidence, `/incoming` skips
+prewarming so it cannot consume recent-call state before the routing decision.
+An intervening call after the standup takes precedence and resumes normally;
+this also preserves conversation continuity after a callback disconnect.
 The timing rule identifies a plausible callback; it does not establish the
 caller's intent, so the greeting leaves room for another topic.
 
