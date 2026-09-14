@@ -47,6 +47,7 @@ from .openai_client import (
     _load_project_instructions,
 )
 from .sounds import DISPATCH_CUE_MULAW, PCM_CUES, SAMPLE_RATE, TIMEOUT_CUE_MULAW
+from .standup_callback import CALLBACK_GREETING, CALLBACK_GUIDANCE, load_callback_brief
 from .tool_bridge import GptmeToolBridge
 from .twilio_integration import (
     _get_config_env,
@@ -2530,9 +2531,25 @@ class VoiceServer:
                         caller_id=granted_from,
                     )
 
+                    # Only the signed, CallSid-bound grant may unlock the local
+                    # standup plan. Number-only prewarms never contain this data.
+                    callback_brief = None
+                    if granted_from and not handoff_id and not standup_brief:
+                        identity = _lookup_caller_identity(granted_from, self.workspace)
+                        if identity and identity.is_operator:
+                            callback_brief = await load_callback_brief(
+                                self.workspace,
+                                granted_from,
+                                account_sid=_get_config_env("TWILIO_ACCOUNT_SID"),
+                                auth_token=_get_config_env("TWILIO_AUTH_TOKEN"),
+                            )
+
                     # Try to claim a pre-warmed session (no handoff/standup for inbound fresh calls)
                     prewarm_eligible = (
-                        from_number and not handoff_id and not standup_brief
+                        from_number
+                        and not handoff_id
+                        and not standup_brief
+                        and not callback_brief
                     )
                     # A spoofed start event must not steal a body- or rag-capable
                     # prewarm: the prewarmed session's tool schema was built from
@@ -2565,13 +2582,29 @@ class VoiceServer:
                         realtime_client.on_user_transcript = on_user_transcript
                         realtime_client.on_speech_started = on_speech_started
                     else:
-                        # Cold path: build session from scratch
-                        bootstrap = await self._build_session_bootstrap(
-                            caller_id=caller_id,
-                            from_number=from_number,
-                            handoff_id=handoff_id,
-                            standup_brief=standup_brief,
-                        )
+                        # Cold path: build session from scratch. Callback guidance
+                        # offers the brief instead of using the outbound opener.
+                        if callback_brief:
+                            bootstrap = SessionBootstrap(
+                                instructions=(
+                                    CALLBACK_GUIDANCE
+                                    + "\n\n"
+                                    + callback_brief
+                                    + "\n\n"
+                                    + _build_caller_instructions(
+                                        self._instructions, from_number, self.workspace
+                                    )
+                                ),
+                                should_greet_first=True,
+                                initial_response_instructions=CALLBACK_GREETING,
+                            )
+                        else:
+                            bootstrap = await self._build_session_bootstrap(
+                                caller_id=caller_id,
+                                from_number=from_number,
+                                handoff_id=handoff_id,
+                                standup_brief=standup_brief,
+                            )
                         instructions = bootstrap.instructions
                         initial_response_instructions = (
                             bootstrap.initial_response_instructions

@@ -71,6 +71,29 @@ Speak into your microphone. The agent responds with its configured personality a
    `https://<your-ngrok-url>/incoming` (HTTP POST)
 3. Call the Twilio number — Twilio connects the call to the voice server.
 
+### Missed standup callbacks
+
+A trusted operator calling back within 30 minutes of a missed scheduled standup
+can receive the existing prepared plan before greeting. The workspace must have
+`state/standup-brief.json` (`generated_at`, nonempty `text`, optional structured
+plan fields) and `state/voice-calls/last-standup-call-sid.txt` (`sid`, `date`,
+`placed_at`). Timestamps must include a timezone. Both artifacts must belong to
+today in UTC; the brief must predate the call and be no more than four hours old.
+
+This path requires a signed `/incoming` webhook, an exact
+`TWILIO_CALLER_ALLOWLIST` match, and `Call role: operator` in the caller's people
+file. The WebSocket must present the webhook's grant bound to both number and
+CallSid. A bounded two-second Twilio lookup must confirm the stamped outbound
+call went to this caller and ended `no-answer`, `busy`, `failed`, or `canceled`.
+Answered, unresolved, stale, missing, or malformed evidence leaves normal inbound
+behavior intact. API errors also fail closed; no brief is generated on demand.
+
+The callback gets a short offer to deliver the standup. Questions covered by the
+plan are answered from context, dated to its actual generation time. Callback
+sessions bypass generic number-keyed prewarms, which never receive the plan.
+The timing rule identifies a plausible callback; it does not establish the
+caller's intent, so the greeting leaves room for another topic.
+
 ### Place outbound phone calls via Twilio
 
 Set these values in your environment or gptme config:
