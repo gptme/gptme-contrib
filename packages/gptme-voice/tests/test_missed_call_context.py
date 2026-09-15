@@ -146,6 +146,7 @@ def test_candidate_none_when_file_absent(tmp_path):
         "not_dict",
         "missing_context",
         "context_not_dict",
+        "missing_generated_at",
     ],
 )
 def test_invalid_note_returns_none(workspace, mutation):
@@ -190,6 +191,8 @@ def test_invalid_note_returns_none(workspace, mutation):
         del note["context"]
     elif mutation == "context_not_dict":
         note["context"] = "a string"
+    elif mutation == "missing_generated_at":
+        del ctx["generated_at"]
     (voice / "missed-call-context.json").write_text(json.dumps(note))
     assert load_callback_candidate(str(ws)) is None
 

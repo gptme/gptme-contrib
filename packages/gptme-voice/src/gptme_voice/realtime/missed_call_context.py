@@ -72,8 +72,9 @@ def write_missed_call_context(
     records the SID, caller, and prepared context so an inbound callback can
     resume without re-generating it.
 
-    ``context`` should include at minimum a ``text`` field with the prepared
-    summary, and a timezone-aware ``generated_at`` timestamp. Additional
+    ``context`` must include a ``text`` field with the prepared summary and a
+    timezone-aware ``generated_at`` timestamp. The inbound loader rejects notes
+    without ``generated_at`` rather than skipping freshness checks. Additional
     structured fields (goals, bullets, etc.) are included as-is.
 
     ``context_file`` is optional; it names the workspace-relative path that
@@ -137,15 +138,13 @@ def _load_from_note(
         context = note.get("context")
         if not isinstance(context, dict):
             return None
-        generated_at_val = context.get("generated_at")
-        if generated_at_val is not None:
-            generated = _timestamp(generated_at_val)
-            if not (
-                generated.date() == current.date()
-                and timedelta(0) <= current - generated <= MAX_CONTEXT_AGE
-                and generated <= placed
-            ):
-                return None
+        generated = _timestamp(context.get("generated_at"))
+        if not (
+            generated.date() == current.date()
+            and timedelta(0) <= current - generated <= MAX_CONTEXT_AGE
+            and generated <= placed
+        ):
+            return None
         if not isinstance(context.get("text"), str) or not context["text"].strip():
             return None
         payload = json.dumps(context, ensure_ascii=False)
