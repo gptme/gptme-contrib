@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -281,6 +282,152 @@ def test_candidate_loads_referenced_context_file(tmp_path):
     data = json.loads(payload)
     assert data["text"] == MARKER
     assert data["conversation_goals"] == ["ship it"]
+    assert data["context_file"] == "state/prepared-context.json"
+
+
+def test_candidate_loads_plain_text_context_file(tmp_path):
+    """General notes files are not standup-brief JSON; inbound still reads them."""
+    now = datetime.now(timezone.utc)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "agenda.md").write_text(f"# Agenda\n\n{MARKER}\n")
+    _write_file_link_note(tmp_path, now, context_file="state/agenda.md")
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    sid, payload, _ = result
+    assert sid == CALL_SID
+    data = json.loads(payload)
+    assert MARKER in data["text"]
+    assert data["context_file"] == "state/agenda.md"
+
+
+def test_candidate_loads_generic_json_context_file(tmp_path):
+    now = datetime.now(timezone.utc)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "prep.json").write_text(
+        json.dumps({"agenda": MARKER, "goals": ["ship"]})
+    )
+    _write_file_link_note(tmp_path, now, context_file="state/prep.json")
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    _, payload, _ = result
+    data = json.loads(payload)
+    assert data["agenda"] == MARKER
+    assert data["goals"] == ["ship"]
+    assert MARKER in data["text"]
+    assert data["context_file"] == "state/prep.json"
+
+
+def test_candidate_loads_text_json_without_generated_at(tmp_path):
+    now = datetime.now(timezone.utc)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "prep.json").write_text(
+        json.dumps({"text": MARKER, "goals": ["ship"]})
+    )
+    _write_file_link_note(tmp_path, now, context_file="state/prep.json")
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    _, payload, _ = result
+    data = json.loads(payload)
+    assert data["text"] == MARKER
+    assert data["goals"] == ["ship"]
+    assert data["context_file"] == "state/prep.json"
+
+
+def test_candidate_loads_generic_json_with_generated_at_but_no_text(tmp_path):
+    """A generated_at key alone is not standup-brief shape; load as generic."""
+    now = datetime.now(timezone.utc)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "prep.json").write_text(
+        json.dumps(
+            {
+                "generated_at": (now - timedelta(days=2)).isoformat(),
+                "agenda": MARKER,
+            }
+        )
+    )
+    note = _write_file_link_note(tmp_path, now, context_file="state/prep.json")
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    _, payload, _ = result
+    data = json.loads(payload)
+    assert data["agenda"] == MARKER
+    assert MARKER in data["text"]
+    assert data["generated_at"] == note["placed_at"]
+    assert data["context_file"] == "state/prep.json"
+
+
+def test_candidate_loads_generic_json_with_unparseable_generated_at(tmp_path):
+    now = datetime.now(timezone.utc)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "prep.json").write_text(
+        json.dumps({"generated_at": "yesterday", "agenda": MARKER})
+    )
+    _write_file_link_note(tmp_path, now, context_file="state/prep.json")
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    _, payload, _ = result
+    data = json.loads(payload)
+    assert data["agenda"] == MARKER
+    assert MARKER in data["text"]
+
+
+def test_candidate_loads_long_lived_text_file(tmp_path):
+    """A notes file older than MAX_CONTEXT_AGE still restores on a fresh missed call."""
+    now = datetime.now(timezone.utc)
+    (tmp_path / "state").mkdir()
+    notes = tmp_path / "state" / "agenda.md"
+    notes.write_text(MARKER)
+    old = (now - timedelta(days=2)).timestamp()
+    os.utime(notes, (old, old))
+    _write_file_link_note(tmp_path, now, context_file="state/agenda.md")
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    _, payload, _ = result
+    data = json.loads(payload)
+    assert data["text"] == MARKER
+
+
+def test_candidate_falls_back_to_inline_when_text_file_empty(tmp_path):
+    now = datetime.now(timezone.utc)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "agenda.md").write_text("   \n")
+    _write_file_link_note(
+        tmp_path,
+        now,
+        context_file="state/agenda.md",
+        inline={
+            "generated_at": (now - timedelta(minutes=20)).isoformat(),
+            "text": MARKER,
+        },
+    )
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    _, payload, _ = result
+    assert MARKER in payload
+
+
+def test_candidate_falls_back_to_inline_when_json_text_is_non_string(tmp_path):
+    """A non-string JSON `text` field is not overwritten with a dump of the file."""
+    now = datetime.now(timezone.utc)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "prep.json").write_text(
+        json.dumps({"text": 123, "goals": ["ship"]})
+    )
+    _write_file_link_note(
+        tmp_path,
+        now,
+        context_file="state/prep.json",
+        inline={
+            "generated_at": (now - timedelta(minutes=20)).isoformat(),
+            "text": MARKER,
+        },
+    )
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    _, payload, _ = result
+    data = json.loads(payload)
+    assert data["text"] == MARKER
+    assert data.get("goals") != ["ship"]
 
 
 def test_candidate_prefers_live_file_over_inline_snapshot(tmp_path):
@@ -308,6 +455,34 @@ def test_candidate_prefers_live_file_over_inline_snapshot(tmp_path):
     _, payload, _ = result
     assert MARKER in payload
     assert "stale snapshot" not in payload
+
+
+def test_candidate_stale_standup_brief_falls_back_to_inline(tmp_path):
+    """Standup-shaped JSON still honors freshness; stale live file → inline."""
+    now = datetime.now(timezone.utc)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "standup-brief.json").write_text(
+        json.dumps(
+            {
+                "generated_at": (now - timedelta(hours=5)).isoformat(),
+                "text": "stale live brief",
+            }
+        )
+    )
+    _write_file_link_note(
+        tmp_path,
+        now,
+        context_file="state/standup-brief.json",
+        inline={
+            "generated_at": (now - timedelta(minutes=20)).isoformat(),
+            "text": MARKER,
+        },
+    )
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    _, payload, _ = result
+    assert MARKER in payload
+    assert "stale live brief" not in payload
 
 
 def test_candidate_falls_back_to_inline_when_file_is_stale(tmp_path):
@@ -682,6 +857,7 @@ def test_write_file_link_then_load_round_trip(tmp_path):
     data = json.loads(payload)
     assert data["text"] == MARKER
     assert data["goals"] == ["ship it"]
+    assert data["context_file"] == "state/prepared-context.json"
 
 
 def test_utc_midnight_crossing_is_not_same_day(tmp_path):

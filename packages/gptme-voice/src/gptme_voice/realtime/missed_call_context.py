@@ -11,8 +11,14 @@ path writes a note with ``type="standup"`` and ``context_file`` pointing at
 ``state/standup-brief.json``; the inbound path loads the referenced file via
 the same generic reader, unaware of the type.
 
+A standup-brief-shaped JSON file (``generated_at`` + ``text``) keeps the
+existing freshness checks. Other JSON and text files are loaded as-is, using
+the missed call's ``placed_at`` so a long-lived notes file still restores on
+callback. The injected payload includes ``context_file`` so the session can
+see the link.
+
 An optional inlined ``context`` snapshot is a fallback for notes that already
-carry one, or when the referenced file is missing or stale.
+carry one, or when the referenced file is missing, stale, or unreadable.
 
 Legacy backward compat: if no ``missed-call-context.json`` exists, the loader
 falls back to reading ``last-standup-call-sid.txt`` + ``standup-brief.json``
@@ -113,7 +119,8 @@ def write_missed_call_context(
     The inbound loader still requires Twilio to confirm the outbound leg ended
     unanswered. The note records the SID, caller, and a workspace-relative
     ``context_file`` so the callback session can read the prepared context
-    from disk — the same file the original call would have used.
+    from disk — the same file the original call would have used. The linked
+    file may be standup-brief JSON or any other workspace text/JSON file.
 
     ``context`` is an optional snapshot of that file (``text`` plus a
     timezone-aware ``generated_at``). The inbound loader prefers the live
@@ -205,8 +212,8 @@ def _serialize_context(
     return payload
 
 
-def _read_capped_json(path: Path) -> object | None:
-    """Load JSON from *path* without following a symlink, bounded by size.
+def _read_capped_bytes(path: Path) -> bytes | None:
+    """Read *path* without following a symlink, bounded by size.
 
     Opens with ``O_NOFOLLOW`` so a file swapped for a symlink after the
     workspace containment check cannot leak an arbitrary local file into
@@ -224,9 +231,113 @@ def _read_capped_json(path: Path) -> object | None:
             os.close(fd)
         if len(data) > _MAX_PAYLOAD_BYTES:
             return None
-        return json.loads(data.decode("utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError):
+        return data
+    except OSError:
         return None
+
+
+def _with_context_file(payload: str, context_file: str) -> str:
+    """Attach the source path to a schema payload unless it already has one."""
+    try:
+        data = json.loads(payload)
+    except ValueError:
+        return payload
+    if not isinstance(data, dict) or data.get("context_file"):
+        return payload
+    data["context_file"] = context_file
+    encoded = json.dumps(data, ensure_ascii=False)
+    if len(encoded.encode()) > _MAX_PAYLOAD_BYTES:
+        return payload
+    return encoded
+
+
+def _generic_context_from_file(
+    parsed: object | None,
+    raw: bytes,
+    placed: datetime,
+    context_file: str,
+) -> dict | None:
+    """Wrap a non-schema linked file so the callback can inject its contents."""
+    if isinstance(parsed, dict):
+        context = dict(parsed)
+        text = context.get("text")
+        if not (isinstance(text, str) and text.strip()):
+            # Only synthesize `text` when the key is absent. A present but
+            # unusable value (non-string or blank) must not be overwritten
+            # with a dump of the whole object — fall back to the inlined
+            # snapshot instead.
+            if "text" in context:
+                return None
+            context["text"] = json.dumps(parsed, ensure_ascii=False)
+        context["generated_at"] = placed.isoformat()
+        context["context_file"] = context_file
+        return context
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if not text.strip():
+        return None
+    return {
+        "generated_at": placed.isoformat(),
+        "text": text,
+        "context_file": context_file,
+    }
+
+
+def _is_standup_brief(parsed: object) -> bool:
+    """True when *parsed* is standup-brief-shaped: generated_at + non-empty text.
+
+    Presence of ``generated_at`` alone is not enough — generic notes JSON may
+    carry that key. Freshness checks apply only to this shape; other JSON
+    takes the generic wrap path (``generated_at`` rewritten from ``placed``).
+    A stale brief still rejects so inbound falls back to the inlined snapshot.
+    """
+    if not isinstance(parsed, dict):
+        return False
+    text = parsed.get("text")
+    if not (isinstance(text, str) and text.strip()):
+        return False
+    try:
+        _timestamp(parsed.get("generated_at"))
+    except ValueError:
+        return False
+    return True
+
+
+def _payload_from_linked_file(
+    path: Path,
+    *,
+    current: datetime,
+    placed: datetime,
+    context_file: str,
+) -> str | None:
+    """Load a linked context file as the callback payload.
+
+    Standup-brief JSON (``generated_at`` + non-empty ``text``) keeps the
+    existing freshness checks. Other JSON and text files are wrapped with
+    ``generated_at`` taken from the missed call so a long-lived notes file
+    still restores.
+    """
+    raw = _read_capped_bytes(path)
+    if raw is None:
+        return None
+    parsed: object | None
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        parsed = None
+
+    if _is_standup_brief(parsed):
+        payload = _serialize_context(parsed, current, placed)
+        if payload is None:
+            return None
+        return _with_context_file(payload, context_file)
+
+    wrapped = _generic_context_from_file(parsed, raw, placed, context_file)
+    if wrapped is None:
+        return None
+    return _serialize_context(wrapped, current, placed)
 
 
 def _load_context_payload(
@@ -240,7 +351,9 @@ def _load_context_payload(
     if isinstance(context_file, str):
         path = _resolve_workspace_file(workspace, context_file)
         if path is not None:
-            payload = _serialize_context(_read_capped_json(path), current, placed)
+            payload = _payload_from_linked_file(
+                path, current=current, placed=placed, context_file=context_file
+            )
             if payload is not None:
                 return payload
     return _serialize_context(note.get("context"), current, placed)

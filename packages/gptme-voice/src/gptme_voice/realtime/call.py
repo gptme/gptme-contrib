@@ -43,7 +43,7 @@ from .twilio_integration import (
     "--context-file",
     default=None,
     help=(
-        "Workspace-relative path to a prepared context JSON file. "
+        "Workspace-relative path to a prepared context file (JSON or text). "
         "Written into the missed-call context note so a trusted callback "
         "can read it if this call goes unanswered."
     ),
