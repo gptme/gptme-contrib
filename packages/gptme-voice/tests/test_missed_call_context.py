@@ -368,6 +368,30 @@ def test_candidate_falls_back_to_inline_when_text_file_empty(tmp_path):
     assert MARKER in payload
 
 
+def test_candidate_falls_back_to_inline_when_json_text_is_non_string(tmp_path):
+    """A non-string JSON `text` field is not overwritten with a dump of the file."""
+    now = datetime.now(timezone.utc)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "prep.json").write_text(
+        json.dumps({"text": 123, "goals": ["ship"]})
+    )
+    _write_file_link_note(
+        tmp_path,
+        now,
+        context_file="state/prep.json",
+        inline={
+            "generated_at": (now - timedelta(minutes=20)).isoformat(),
+            "text": MARKER,
+        },
+    )
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    _, payload, _ = result
+    data = json.loads(payload)
+    assert data["text"] == MARKER
+    assert data.get("goals") != ["ship"]
+
+
 def test_candidate_prefers_live_file_over_inline_snapshot(tmp_path):
     now = datetime.now(timezone.utc)
     (tmp_path / "state").mkdir()

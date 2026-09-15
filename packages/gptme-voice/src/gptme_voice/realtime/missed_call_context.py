@@ -262,6 +262,12 @@ def _generic_context_from_file(
         context = dict(parsed)
         text = context.get("text")
         if not (isinstance(text, str) and text.strip()):
+            # Only synthesize `text` when the key is absent. A present but
+            # unusable value (non-string or blank) must not be overwritten
+            # with a dump of the whole object — fall back to the inlined
+            # snapshot instead.
+            if "text" in context:
+                return None
             context["text"] = json.dumps(parsed, ensure_ascii=False)
         context["generated_at"] = placed.isoformat()
         context["context_file"] = context_file
