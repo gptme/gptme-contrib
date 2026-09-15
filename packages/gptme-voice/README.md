@@ -102,8 +102,10 @@ The `context` object is injected verbatim into the callback session. The `type`
 field is for the writer's reference; the inbound reader treats all types the same.
 The optional `context_file` names the source artifact for audit purposes.
 
-The outbound call path calls `write_missed_call_context()` from
-`gptme_voice.realtime.missed_call_context` when a call ends unanswered.
+The outbound call path (`create_outbound_call`) writes the note via
+`write_missed_call_context()` when callers pass `workspace` plus a prepared
+`missed_call_context`. The inbound loader still requires Twilio to confirm
+the outbound leg ended unanswered.
 
 **Trust requirements** — the callback path requires a signed `/incoming`
 webhook, an exact `TWILIO_CALLER_ALLOWLIST` match, and `Call role: operator` in

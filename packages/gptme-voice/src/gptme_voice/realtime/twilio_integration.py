@@ -2,11 +2,14 @@
 Twilio helpers for gptme-voice.
 """
 
+import logging
 from dataclasses import dataclass, field
 from html import escape as _html_escape
 from urllib.parse import urlsplit, urlunsplit
 
 from gptme.config import get_config
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_STREAM_PATH = "/twilio"
 _PUBLIC_BASE_URL_ENV_NAMES = (
@@ -154,8 +157,18 @@ def create_outbound_call(
     settings: OutboundCallSettings,
     *,
     client_cls=None,
+    workspace: str | None = None,
+    missed_call_context: dict | None = None,
+    call_type: str = "general",
+    context_file: str | None = None,
 ) -> str:
-    """Place an outbound call that streams audio into the voice server."""
+    """Place an outbound call that streams audio into the voice server.
+
+    When ``workspace`` and ``missed_call_context`` are provided, persist a
+    missed-call context note after the call is placed so an inbound callback
+    can resume the prepared context. The inbound loader still requires Twilio
+    to confirm the outbound leg ended unanswered.
+    """
     if client_cls is None:
         try:
             from twilio.rest import Client as client_cls
@@ -171,4 +184,20 @@ def create_outbound_call(
         from_=settings.from_number,
         twiml=build_connect_stream_twiml(settings.stream_url, custom_params),
     )
+    if workspace is not None and missed_call_context is not None:
+        try:
+            from .missed_call_context import write_missed_call_context
+
+            write_missed_call_context(
+                workspace,
+                type=call_type,
+                sid=call.sid,
+                caller=to_number,
+                context=missed_call_context,
+                context_file=context_file,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist missed-call context for %s", call.sid, exc_info=True
+            )
     return call.sid

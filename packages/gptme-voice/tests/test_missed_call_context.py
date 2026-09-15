@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 from gptme_voice.realtime.missed_call_context import (
+    _MAX_PAYLOAD_BYTES,
     load_callback_brief,
     load_callback_candidate,
     write_missed_call_context,
@@ -178,7 +179,7 @@ def test_invalid_note_returns_none(workspace, mutation):
     elif mutation == "bad_sid":
         note["sid"] = "../../Calls"
     elif mutation == "oversized":
-        ctx["text"] = "x" * (_MAX_PAYLOAD_BYTES_THRESHOLD + 1)
+        ctx["text"] = "x" * (_MAX_PAYLOAD_BYTES + 1)
     elif mutation == "malformed":
         (voice / "missed-call-context.json").write_text("{")
         assert load_callback_candidate(str(ws)) is None
@@ -197,7 +198,10 @@ def test_invalid_note_returns_none(workspace, mutation):
     assert load_callback_candidate(str(ws)) is None
 
 
-_MAX_PAYLOAD_BYTES_THRESHOLD = 16000
+def test_candidate_rejects_caller_mismatch(workspace):
+    ws, _, _, _ = workspace
+    assert load_callback_candidate(str(ws), caller=PHONE) is not None
+    assert load_callback_candidate(str(ws), caller="+19999999") is None
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +365,17 @@ def test_wrong_recipient_returns_none(twilio_case):
         )
     )
     assert result is None
+
+
+def test_load_callback_brief_skips_twilio_on_caller_mismatch(twilio_case):
+    ws, account_sid, auth_token, _, requests = twilio_case
+    result = asyncio.run(
+        load_callback_brief(
+            str(ws), "+19999999", account_sid=account_sid, auth_token=auth_token
+        )
+    )
+    assert result is None
+    assert not requests
 
 
 def test_intervening_call_blocks_brief(twilio_case):

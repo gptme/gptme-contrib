@@ -101,25 +101,31 @@ def write_missed_call_context(
 
 
 def load_callback_candidate(
-    workspace: str | None, *, now: datetime | None = None
+    workspace: str | None, *, now: datetime | None = None, caller: str | None = None
 ) -> tuple[str, str, float] | None:
     """Return (sid, payload_json, placed_at_timestamp) for a fresh local candidate.
 
     Tries the generic ``missed-call-context.json`` first, then falls back to the
     legacy standup-specific files for backward compatibility.
+
+    When ``caller`` is provided, a new-format note must name that same caller
+    or it is ignored (avoids a Twilio lookup for a different number). Legacy
+    stamps have no caller field; Twilio remains the authority there.
     """
     if not workspace:
         return None
     current = now or datetime.now(timezone.utc)
     state = Path(workspace) / "state"
-    result = _load_from_note(state / "voice-calls" / _CONTEXT_NOTE_FILE, current)
+    result = _load_from_note(
+        state / "voice-calls" / _CONTEXT_NOTE_FILE, current, caller=caller
+    )
     if result is not None:
         return result
     return _load_legacy(state, current)
 
 
 def _load_from_note(
-    note_path: Path, current: datetime
+    note_path: Path, current: datetime, *, caller: str | None = None
 ) -> tuple[str, str, float] | None:
     try:
         note = json.loads(note_path.read_text())
@@ -127,6 +133,8 @@ def _load_from_note(
             return None
         sid = note.get("sid")
         if not isinstance(sid, str) or not re.fullmatch(r"CA[0-9a-fA-F]{32}", sid):
+            return None
+        if caller is not None and note.get("caller") != caller:
             return None
         placed = _timestamp(note.get("placed_at"))
         if not (
@@ -218,7 +226,7 @@ async def load_callback_brief(
         return None
     if not re.fullmatch(r"AC[0-9a-fA-F]{32}", account_sid):
         return None
-    candidate = load_callback_candidate(workspace, now=now)
+    candidate = load_callback_candidate(workspace, now=now, caller=caller)
     if candidate is None:
         return None
     sid, payload, placed_at = candidate
