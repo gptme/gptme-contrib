@@ -418,6 +418,73 @@ def test_post_session_does_not_estimate_cost_without_tokens(tmp_path: Path):
     assert result.record.cost_usd is None
 
 
+def test_post_session_does_not_estimate_cost_for_zero_tokens(tmp_path: Path):
+    """Explicit zero token counts are not evidence of usage — leave cost empty."""
+    store = SessionStore(sessions_dir=tmp_path)
+    trajectory = tmp_path / "trajectory.jsonl"
+    trajectory.touch()
+    usage = {
+        "model": "claude-sonnet-4-6",
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+    }
+
+    with (
+        patch.object(
+            _post_session_mod,
+            "extract_from_path",
+            return_value={"productive": True, "usage": usage},
+        ),
+        patch.object(
+            _post_session_mod,
+            "estimate_record_cost",
+            return_value=0.99,
+        ) as estimate,
+    ):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="claude-sonnet-4-6",
+            trajectory_path=trajectory,
+        )
+
+    estimate.assert_not_called()
+    assert result.cost_usd is None
+    assert result.record.cost_usd is None
+
+
+def test_post_session_estimates_cost_from_token_count_only(tmp_path: Path):
+    """Claude Code / grok-build often have total_tokens and no i/o breakdown."""
+    store = SessionStore(sessions_dir=tmp_path)
+    trajectory = tmp_path / "trajectory.jsonl"
+    trajectory.touch()
+    usage = {"model": "claude-sonnet-4-6", "total_tokens": 1500}
+
+    with (
+        patch.object(
+            _post_session_mod,
+            "extract_from_path",
+            return_value={"productive": True, "usage": usage},
+        ),
+        patch.object(
+            _post_session_mod,
+            "estimate_record_cost",
+            return_value=0.0105,
+        ) as estimate,
+    ):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="claude-sonnet-4-6",
+            trajectory_path=trajectory,
+        )
+
+    estimate.assert_called_once()
+    assert result.cost_usd == pytest.approx(0.0105)
+    assert result.record.cost_usd == pytest.approx(0.0105)
+
+
 def test_post_session_populates_productivity_grade(tmp_path: Path):
     """post_session mirrors the scalar trajectory grade into grades.productivity."""
     store = SessionStore(sessions_dir=tmp_path)

@@ -1120,10 +1120,10 @@ def post_session(
     # Harness-reported cost (including a real 0.0) is already on the record.
     # Claude Code / grok-build trajectories commonly have tokens and no cost;
     # fill a gptme-usage estimate so cost_usd is not permanently null. Skip
-    # when there are no tokens — inventing a number from model identity alone
-    # is worse than leaving the field empty.
+    # when every token field is missing or zero — inventing a number from
+    # model identity alone is worse than leaving the field empty.
     if cost_usd is None and any(
-        value is not None
+        value not in (None, 0)
         for value in (record.token_count, record.input_tokens, record.output_tokens)
     ):
         try:
