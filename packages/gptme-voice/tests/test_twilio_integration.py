@@ -1,3 +1,6 @@
+import json
+from datetime import datetime, timezone
+
 from click.testing import CliRunner
 from gptme_voice.realtime.call import main as call_main
 from gptme_voice.realtime.twilio_integration import (
@@ -108,6 +111,45 @@ def test_create_outbound_call_uses_twilio_client():
             outbound_identity_params("+46701234567"),
         ),
     }
+
+
+def test_create_outbound_call_writes_missed_call_context(tmp_path):
+    class FakeCalls:
+        def create(self, **kwargs):
+            class Response:
+                sid = "CA" + "c" * 32
+
+            return Response()
+
+    class FakeClient:
+        def __init__(self, account_sid, auth_token):
+            self.calls = FakeCalls()
+
+    settings = OutboundCallSettings(
+        account_sid="AC123",
+        auth_token="secret",
+        from_number="+15551234567",
+        stream_url="wss://voice.example/twilio",
+    )
+    generated_at = datetime.now(timezone.utc).isoformat()
+    sid = create_outbound_call(
+        "+46701234567",
+        settings,
+        client_cls=FakeClient,
+        workspace=str(tmp_path),
+        missed_call_context={"text": "standup brief", "generated_at": generated_at},
+        call_type="standup",
+        context_file="state/standup-brief.json",
+    )
+
+    note_path = tmp_path / "state" / "voice-calls" / "missed-call-context.json"
+    note = json.loads(note_path.read_text())
+    assert sid == "CA" + "c" * 32
+    assert note["type"] == "standup"
+    assert note["sid"] == sid
+    assert note["caller"] == "+46701234567"
+    assert note["context_file"] == "state/standup-brief.json"
+    assert note["context"]["text"] == "standup brief"
 
 
 def test_outbound_identity_params_preserve_dialed_remote_party():

@@ -71,32 +71,58 @@ Speak into your microphone. The agent responds with its configured personality a
    `https://<your-ngrok-url>/incoming` (HTTP POST)
 3. Call the Twilio number — Twilio connects the call to the voice server.
 
-### Missed standup callbacks
+### Missed-call context persistence
 
-A trusted operator calling back within 30 minutes of a missed scheduled standup
-can receive the existing prepared plan before greeting. The workspace must have
-`state/standup-brief.json` (`generated_at`, nonempty `text`, optional structured
-plan fields) and `state/voice-calls/last-standup-call-sid.txt` (`sid`, `date`,
-`placed_at`). Timestamps must include a timezone. Both artifacts must belong to
-today in UTC; the brief must predate the call and be no more than four hours old.
+When a trusted operator calls back within 30 minutes of an unanswered outbound
+call, the inbound session receives the context that was prepared for the original
+call — as if the call took place but the operator was silent. The original call
+must also have been placed on the same UTC calendar day: a call placed at 23:50
+UTC that is returned at 00:10 UTC the next day will not restore context.
 
-This path requires a signed `/incoming` webhook, an exact
-`TWILIO_CALLER_ALLOWLIST` match, and `Call role: operator` in the caller's people
-file. The WebSocket must present the webhook's grant bound to both number and
-CallSid. A bounded two-second Twilio lookup must confirm the stamped outbound
-call went to this caller and ended `no-answer`, `busy`, `failed`, or `canceled`.
-Answered, unresolved, stale, missing, or malformed evidence leaves normal inbound
-behavior intact. API errors also fail closed; no brief is generated on demand.
+**Context note format** — the outbound call path writes
+`state/voice-calls/missed-call-context.json`:
 
-The callback gets a short offer to deliver the standup. Questions covered by the
-plan are answered from context, dated to its actual generation time. Callback
-sessions bypass generic number-keyed prewarms, which never receive the plan.
-While a trusted caller has fresh local callback evidence, `/incoming` skips
-prewarming so it cannot consume recent-call state before the routing decision.
-An intervening call after the standup takes precedence and resumes normally;
-this also preserves conversation continuity after a callback disconnect.
-The timing rule identifies a plausible callback; it does not establish the
-caller's intent, so the greeting leaves room for another topic.
+```json
+{
+  "type": "standup",
+  "sid": "CA...",
+  "date": "2026-09-15",
+  "placed_at": "2026-09-15T10:00:00+00:00",
+  "caller": "+15551212",
+  "context_file": "state/standup-brief.json",
+  "context": {
+    "generated_at": "2026-09-15T09:30:00+00:00",
+    "text": "The prepared summary...",
+    "conversation_goals": ["..."]
+  }
+}
+```
+
+The `context` object is injected verbatim into the callback session. The `type`
+field is for the writer's reference; the inbound reader treats all types the same.
+The optional `context_file` names the source artifact for audit purposes.
+
+The outbound call path (`create_outbound_call`) writes the note via
+`write_missed_call_context()` when callers pass `workspace` plus a prepared
+`missed_call_context`. The inbound loader still requires Twilio to confirm
+the outbound leg ended unanswered.
+
+**Trust requirements** — the callback path requires a signed `/incoming`
+webhook, an exact `TWILIO_CALLER_ALLOWLIST` match, and `Call role: operator` in
+the caller's people file. The WebSocket must present the webhook's grant bound
+to both number and CallSid. A bounded two-second Twilio lookup must confirm the
+stamped outbound call went to this caller and ended `no-answer`, `busy`,
+`failed`, or `canceled`. Answered, unresolved, stale, missing, or malformed
+evidence leaves normal inbound behavior intact. API errors fail closed.
+
+Callback sessions bypass generic number-keyed prewarms. While a trusted caller
+has fresh local callback evidence, `/incoming` skips prewarming so it cannot
+consume recent-call state before the routing decision. An intervening call
+takes precedence and resumes normally.
+
+**Legacy standup files** — if no `missed-call-context.json` exists, the loader
+falls back to reading `state/voice-calls/last-standup-call-sid.txt` +
+`state/standup-brief.json` so existing deployments continue to work.
 
 ### Place outbound phone calls via Twilio
 
