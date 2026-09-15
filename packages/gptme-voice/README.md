@@ -75,7 +75,9 @@ Speak into your microphone. The agent responds with its configured personality a
 
 When a trusted operator calls back within 30 minutes of an unanswered outbound
 call, the inbound session receives the context that was prepared for the original
-call — as if the call took place but the operator was silent.
+call — as if the call took place but the operator was silent. The original call
+must also have been placed on the same UTC calendar day: a call placed at 23:50
+UTC that is returned at 00:10 UTC the next day will not restore context.
 
 **Context note format** — the outbound call path writes
 `state/voice-calls/missed-call-context.json`:

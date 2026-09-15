@@ -224,6 +224,29 @@ def test_candidate_falls_back_to_legacy_standup_files(tmp_path):
     assert MARKER in payload
 
 
+def test_legacy_multibyte_payload_respects_byte_cap(tmp_path):
+    """Legacy path must measure UTF-8 bytes, matching the new-format path."""
+    now = datetime.now(timezone.utc)
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    stamp = {
+        "sid": CALL_SID,
+        "date": now.date().isoformat(),
+        "placed_at": (now - timedelta(minutes=5)).isoformat(),
+    }
+    # "é" is 2 UTF-8 bytes. 9000 of them stay under 16000 characters but
+    # exceed 16000 bytes once JSON-encoded with ensure_ascii=False.
+    brief = {
+        "text": "é" * 9000,
+        "generated_at": (now - timedelta(minutes=30)).isoformat(),
+    }
+    (voice / "last-standup-call-sid.txt").write_text(json.dumps(stamp))
+    (tmp_path / "state" / "standup-brief.json").write_text(
+        json.dumps(brief, ensure_ascii=False)
+    )
+    assert load_callback_candidate(str(tmp_path)) is None
+
+
 def test_new_format_takes_priority_over_legacy(tmp_path):
     now = datetime.now(timezone.utc)
     voice = tmp_path / "state" / "voice-calls"

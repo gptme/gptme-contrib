@@ -193,7 +193,7 @@ def _load_legacy(state: Path, current: datetime) -> tuple[str, str, float] | Non
             if key in brief
         }
         payload = json.dumps(plan, ensure_ascii=False)
-        if len(payload) > _MAX_PAYLOAD_BYTES:
+        if len(payload.encode()) > _MAX_PAYLOAD_BYTES:
             return None
     except (OSError, ValueError):
         return None
