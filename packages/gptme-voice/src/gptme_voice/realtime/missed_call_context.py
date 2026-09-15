@@ -22,6 +22,7 @@ so existing deployments continue to work without changes.
 import asyncio
 import json
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -204,6 +205,30 @@ def _serialize_context(
     return payload
 
 
+def _read_capped_json(path: Path) -> object | None:
+    """Load JSON from *path* without following a symlink, bounded by size.
+
+    Opens with ``O_NOFOLLOW`` so a file swapped for a symlink after the
+    workspace containment check cannot leak an arbitrary local file into
+    the callback session.
+    """
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            size = os.fstat(fd).st_size
+            if size > _MAX_PAYLOAD_BYTES:
+                return None
+            data = os.read(fd, size)
+        finally:
+            os.close(fd)
+        if len(data) > _MAX_PAYLOAD_BYTES:
+            return None
+        return json.loads(data.decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+
+
 def _load_context_payload(
     note: dict,
     *,
@@ -215,14 +240,7 @@ def _load_context_payload(
     if isinstance(context_file, str):
         path = _resolve_workspace_file(workspace, context_file)
         if path is not None:
-            try:
-                if path.stat().st_size > _MAX_PAYLOAD_BYTES:
-                    loaded = None
-                else:
-                    loaded = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                loaded = None
-            payload = _serialize_context(loaded, current, placed)
+            payload = _serialize_context(_read_capped_json(path), current, placed)
             if payload is not None:
                 return payload
     return _serialize_context(note.get("context"), current, placed)

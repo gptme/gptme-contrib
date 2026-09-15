@@ -370,8 +370,8 @@ def test_candidate_rejects_context_file_path_traversal(tmp_path):
 
 
 def test_candidate_skips_oversized_context_file_before_read(tmp_path, monkeypatch):
-    """Cap is enforced on file size so a huge linked file is never buffered."""
-    from pathlib import Path
+    """Cap is enforced on the opened fd so a huge linked file is never parsed."""
+    import os
 
     now = datetime.now(timezone.utc)
     (tmp_path / "state").mkdir()
@@ -379,20 +379,20 @@ def test_candidate_skips_oversized_context_file_before_read(tmp_path, monkeypatc
     huge.write_bytes(b"x" * (_MAX_PAYLOAD_BYTES + 1))
     _write_file_link_note(tmp_path, now, context_file="state/prepared-context.json")
 
-    real_read_text = Path.read_text
+    real_read = os.read
 
-    def guarded(self, *args, **kwargs):
-        if self.resolve() == huge.resolve():
-            raise AssertionError("read_text must not run for oversized context files")
-        return real_read_text(self, *args, **kwargs)
+    def guarded(fd, n, *args, **kwargs):
+        # fstat already rejected oversized files; a read of the payload
+        # would mean the size cap did not hold the fd.
+        if n > _MAX_PAYLOAD_BYTES:
+            raise AssertionError("os.read must not buffer more than the payload cap")
+        return real_read(fd, n, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", guarded)
+    monkeypatch.setattr(os, "read", guarded)
     assert load_callback_candidate(str(tmp_path), now=now) is None
 
 
-def test_candidate_falls_back_to_inline_when_file_is_oversized(tmp_path, monkeypatch):
-    from pathlib import Path
-
+def test_candidate_falls_back_to_inline_when_file_is_oversized(tmp_path):
     now = datetime.now(timezone.utc)
     (tmp_path / "state").mkdir()
     huge = tmp_path / "state" / "prepared-context.json"
@@ -406,19 +406,33 @@ def test_candidate_falls_back_to_inline_when_file_is_oversized(tmp_path, monkeyp
             "text": MARKER,
         },
     )
-
-    real_read_text = Path.read_text
-
-    def guarded(self, *args, **kwargs):
-        if self.resolve() == huge.resolve():
-            raise AssertionError("read_text must not run for oversized context files")
-        return real_read_text(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "read_text", guarded)
     result = load_callback_candidate(str(tmp_path), now=now)
     assert result is not None
     _, payload, _ = result
     assert MARKER in payload
+
+
+def test_candidate_does_not_follow_symlink_at_read(tmp_path, monkeypatch):
+    """O_NOFOLLOW must refuse a symlink even if the resolver is raced."""
+    now = datetime.now(timezone.utc)
+    (tmp_path / "state").mkdir()
+    secret = tmp_path.parent / "secret.json"
+    secret.write_text(
+        json.dumps(
+            {
+                "generated_at": (now - timedelta(minutes=20)).isoformat(),
+                "text": MARKER,
+            }
+        )
+    )
+    link = tmp_path / "state" / "prepared-context.json"
+    link.symlink_to(secret)
+    _write_file_link_note(tmp_path, now, context_file="state/prepared-context.json")
+    monkeypatch.setattr(
+        "gptme_voice.realtime.missed_call_context._resolve_workspace_file",
+        lambda workspace, relative: link,
+    )
+    assert load_callback_candidate(str(tmp_path), now=now) is None
 
 
 # ---------------------------------------------------------------------------
