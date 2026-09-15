@@ -318,8 +318,10 @@ def get_commit_count(start: date, end: date, repo_path: str | None = None) -> in
     part of the day before ``start`` and the day after ``end`` into the count.
 
     git's ``--since`` / ``--until`` compare with ``>=`` / ``<=`` (inclusive of
-    the exact timestamp). ``00:00:00`` on ``start`` and ``23:59:59`` on ``end``
-    therefore cover the full days at integer-second resolution.
+    the exact timestamp). Bounds are UTC (``Z`` suffix) so the window does not
+    follow the process timezone; ``00:00:00Z`` on ``start`` through
+    ``23:59:59Z`` on ``end`` cover the full UTC days at integer-second
+    resolution.
     """
     cmd = ["git"]
     if repo_path:
@@ -328,8 +330,8 @@ def get_commit_count(start: date, end: date, repo_path: str | None = None) -> in
         [
             "rev-list",
             "--count",
-            f"--since={start.isoformat()} 00:00:00",
-            f"--until={end.isoformat()} 23:59:59",
+            f"--since={start.isoformat()}T00:00:00Z",
+            f"--until={end.isoformat()}T23:59:59Z",
             "HEAD",
         ]
     )

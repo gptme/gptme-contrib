@@ -417,9 +417,13 @@ def test_get_user_commits_uses_exact_total():
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
-def test_get_commit_count_excludes_adjacent_days(tmp_path, monkeypatch):
-    """Commits just outside [start, end] must not leak in via time-of-day bounds."""
-    monkeypatch.setenv("TZ", "UTC")
+@pytest.mark.parametrize("tz", ["UTC", "America/Los_Angeles", "Europe/Stockholm"])
+def test_get_commit_count_excludes_adjacent_days(tmp_path, monkeypatch, tz):
+    """Commits just outside [start, end] must not leak in via time-of-day bounds.
+
+    Bounds are UTC; the process timezone must not change which commits count.
+    """
+    monkeypatch.setenv("TZ", tz)
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     for stamp in (
         "2025-01-01T23:59:59+0000",  # last second of the day before
