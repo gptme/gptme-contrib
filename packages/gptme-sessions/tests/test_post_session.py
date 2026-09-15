@@ -345,6 +345,79 @@ def test_post_session_preserves_zero_vs_missing_cost(
     assert SessionStore(sessions_dir=tmp_path).load_all()[0].cost_usd == expected_cost
 
 
+def test_post_session_estimates_cost_when_harness_omits_it(tmp_path: Path):
+    """Token-bearing sessions without usage.cost get a gptme-usage estimate.
+
+    Real miss: 24h session-records on 2026-09-15 had 111/112 token fills and
+    0 cost_usd. Claude Code / grok-build extract tokens but not USD; the
+    estimator already prices those models. A reported 0.0 stays authoritative
+    (see test_post_session_preserves_zero_vs_missing_cost).
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    trajectory = tmp_path / "trajectory.jsonl"
+    trajectory.touch()
+    usage = {
+        "model": "claude-sonnet-4-6",
+        "input_tokens": 1000,
+        "output_tokens": 500,
+        "total_tokens": 1500,
+    }
+
+    with (
+        patch.object(
+            _post_session_mod,
+            "extract_from_path",
+            return_value={"productive": True, "usage": usage},
+        ),
+        patch.object(
+            _post_session_mod,
+            "estimate_record_cost",
+            return_value=0.0105,
+        ) as estimate,
+    ):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="claude-sonnet-4-6",
+            trajectory_path=trajectory,
+        )
+
+    estimate.assert_called_once()
+    assert result.cost_usd == pytest.approx(0.0105)
+    assert result.record.cost_usd == pytest.approx(0.0105)
+    assert SessionStore(sessions_dir=tmp_path).load_all()[0].cost_usd == pytest.approx(0.0105)
+
+
+def test_post_session_does_not_estimate_cost_without_tokens(tmp_path: Path):
+    """No token evidence → leave cost_usd empty rather than invent a number."""
+    store = SessionStore(sessions_dir=tmp_path)
+    trajectory = tmp_path / "trajectory.jsonl"
+    trajectory.touch()
+
+    with (
+        patch.object(
+            _post_session_mod,
+            "extract_from_path",
+            return_value={"productive": True, "usage": {"model": "claude-sonnet-4-6"}},
+        ),
+        patch.object(
+            _post_session_mod,
+            "estimate_record_cost",
+            return_value=0.99,
+        ) as estimate,
+    ):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="claude-sonnet-4-6",
+            trajectory_path=trajectory,
+        )
+
+    estimate.assert_not_called()
+    assert result.cost_usd is None
+    assert result.record.cost_usd is None
+
+
 def test_post_session_populates_productivity_grade(tmp_path: Path):
     """post_session mirrors the scalar trajectory grade into grades.productivity."""
     store = SessionStore(sessions_dir=tmp_path)

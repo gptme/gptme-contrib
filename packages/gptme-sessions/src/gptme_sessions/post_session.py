@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .cost import estimate_record_cost
 from .deliverables import (
     build_deliverable_detail,
     classify_commit_ownership,
@@ -288,8 +289,10 @@ class PostSessionResult:
         session_total_bytes:   Total bytes of all message content.
         provider:              Raw inference provider reported by the trajectory.
         stop_reason:           Harness-native final assistant stop reason.
-        cost_usd:              Harness-reported USD-equivalent cost. For subscription
-                               providers this may be nominal rather than billed spend.
+        cost_usd:              Harness-reported USD-equivalent cost, else a
+                               token-based estimate from gptme-usage when tokens
+                               exist. For subscription providers this may be
+                               nominal rather than billed spend.
         reasoning_effort:      Backend-native reasoning effort (lowercase), from the
                                caller or the trajectory.
         reasoning_profile:     Semantic reasoning profile requested by the caller.
@@ -1114,6 +1117,23 @@ def post_session(
         record_kwargs["lesson_events"] = lesson_events
 
     record = SessionRecord(**record_kwargs)
+    # Harness-reported cost (including a real 0.0) is already on the record.
+    # Claude Code / grok-build trajectories commonly have tokens and no cost;
+    # fill a gptme-usage estimate so cost_usd is not permanently null. Skip
+    # when there are no tokens — inventing a number from model identity alone
+    # is worse than leaving the field empty.
+    if cost_usd is None and any(
+        value is not None
+        for value in (record.token_count, record.input_tokens, record.output_tokens)
+    ):
+        try:
+            estimated = estimate_record_cost(record)
+        except Exception:
+            logger.warning("cost estimate failed (non-fatal)", exc_info=True)
+            estimated = None
+        if estimated is not None:
+            record.cost_usd = estimated
+            cost_usd = estimated
     if grade is not None:
         record.set_productivity_grade(grade)
         # NOTE: Weighted multi-dim combine (productivity × alignment × harm)
