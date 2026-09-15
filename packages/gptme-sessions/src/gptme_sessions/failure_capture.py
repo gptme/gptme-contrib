@@ -42,22 +42,20 @@ def _record_is_assistant(rec: dict) -> bool:
     # Flat format: {"role": "assistant", "content": "..."}
     if rec.get("role") in _ASSISTANT_ROLES:
         return True
-    # CC nested format: {"type": "assistant", "message": {"role": "assistant", ...}}
-    if rec.get("type") == "assistant":
-        msg = rec.get("message") or {}
-        if msg.get("role") in _ASSISTANT_ROLES or rec.get("type") == "assistant":
-            return True
-    return False
+    # Both CC and Grok use type=assistant; only CC nests the role in message.
+    return rec.get("type") == "assistant"
 
 
 def _record_content_text(rec: dict) -> str:
-    """Extract flattened text string from flat or CC nested record."""
+    """Extract text from flat records, Grok messages, or CC nested records."""
     # Flat format
     content = rec.get("content") or rec.get("text") or ""
     if content:
         return str(content)
-    # CC nested: message.content is a list of typed blocks — extract text blocks only
     msg = rec.get("message") or {}
+    if isinstance(msg, str):
+        return msg
+    # CC nested: message.content is a list of typed blocks — extract text blocks only
     msg_content = msg.get("content") or ""
     if isinstance(msg_content, list):
         parts = [block.get("text") or "" for block in msg_content if isinstance(block, dict)]
@@ -74,6 +72,8 @@ def _record_has_any_content(rec: dict) -> bool:
     if rec.get("content") or rec.get("text"):
         return True
     msg = rec.get("message") or {}
+    if isinstance(msg, str):
+        return bool(msg)
     msg_content = msg.get("content")
     if isinstance(msg_content, list):
         return bool(msg_content)
