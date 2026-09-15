@@ -316,6 +316,10 @@ def get_commit_count(start: date, end: date, repo_path: str | None = None) -> in
     Bounds carry an explicit time of day: a bare ``--after=YYYY-MM-DD`` is
     resolved by git with the *current* time of day, which previously leaked
     part of the day before ``start`` and the day after ``end`` into the count.
+
+    git's ``--since`` / ``--until`` compare with ``>=`` / ``<=`` (inclusive of
+    the exact timestamp). ``00:00:00`` on ``start`` and ``23:59:59`` on ``end``
+    therefore cover the full days at integer-second resolution.
     """
     cmd = ["git"]
     if repo_path:
@@ -715,6 +719,7 @@ def fetch_activity(
 
     activity = GitHubActivity(start_date=start, end_date=end)
     has_gh = _gh_available()
+    requested_repos = list(repos)
     if has_gh:
         repos = [_canonical_repo(repo) for repo in repos]
 
@@ -756,7 +761,12 @@ def fetch_activity(
     # Fetch reviews received and cross-repo PRs
     if has_gh:
         activity.reviews_received = get_reviews_received(start, end, repos)
-        activity.cross_repo_prs = get_cross_repo_prs(start, end)
+        # Exclude both the requested nwo and the resolved nwo. Search does not
+        # follow redirects, so DEFAULT_REPOS may still hold a stale name while
+        # GitHub returns the current one — without this, a renamed default repo
+        # is listed as "cross-repo".
+        exclude_repos = list(dict.fromkeys([*requested_repos, *repos]))
+        activity.cross_repo_prs = get_cross_repo_prs(start, end, exclude_repos=exclude_repos)
 
     return activity
 

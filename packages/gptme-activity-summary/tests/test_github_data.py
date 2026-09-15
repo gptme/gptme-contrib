@@ -233,6 +233,45 @@ def test_fetch_activity_searches_canonical_repo_name():
     assert not any("repo:old/name" in q for q in seen_queries)
 
 
+def test_fetch_activity_excludes_canonical_repo_from_cross_repo_prs():
+    """A renamed default repo must not reappear as a cross-repo PR."""
+
+    def mock_run(cmd, timeout=30):
+        if cmd[:3] == ["gh", "auth", "status"]:
+            return "ok"
+        if cmd[:2] == ["gh", "api"] and len(cmd) > 2 and str(cmd[2]).startswith("repos/"):
+            nwo = str(cmd[2]).removeprefix("repos/")
+            return {"old/name": "new/name"}.get(nwo, nwo)
+        query = _search_query(cmd)
+        if query is not None:
+            return "1"
+        if cmd[1] == "search" and "prs" in cmd:
+            return json.dumps(
+                [
+                    {
+                        "repository": {"nameWithOwner": "new/name"},
+                        "number": 1,
+                        "title": "in canonical repo",
+                        "state": "MERGED",
+                        "url": "",
+                    },
+                    {
+                        "repository": {"nameWithOwner": "other/repo"},
+                        "number": 2,
+                        "title": "actually cross-repo",
+                        "state": "MERGED",
+                        "url": "",
+                    },
+                ]
+            )
+        return "[]"
+
+    with patch("gptme_activity_summary.github_data._run_command", side_effect=mock_run):
+        activity = fetch_activity(date(2026, 8, 1), date(2026, 8, 31), repos=["old/name"])
+
+    assert [pr.repo for pr in activity.cross_repo_prs] == ["other/repo"]
+
+
 def test_repo_activity_count_prefers_exact_total():
     repo = RepoActivity(repo="o/r", merged_prs=json.loads(_items(100)), merged_prs_total=208)
     assert repo.merged_prs_count == 208
@@ -329,10 +368,12 @@ def test_get_commit_count_excludes_adjacent_days(tmp_path, monkeypatch):
     monkeypatch.setenv("TZ", "UTC")
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     for stamp in (
-        "2025-01-01T23:59:58+0000",  # day before start
+        "2025-01-01T23:59:59+0000",  # last second of the day before
+        "2025-01-02T00:00:00+0000",  # exact start (inclusive)
         "2025-01-02T00:00:01+0000",
         "2025-01-03T23:59:00+0000",
-        "2025-01-04T00:00:01+0000",  # day after end
+        "2025-01-03T23:59:59+0000",  # exact end (inclusive)
+        "2025-01-04T00:00:00+0000",  # first second of the day after
     ):
         env = {"GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
         subprocess.run(
@@ -357,7 +398,7 @@ def test_get_commit_count_excludes_adjacent_days(tmp_path, monkeypatch):
             check=True,
             env={**os.environ, **env},
         )
-    assert get_commit_count(date(2025, 1, 2), date(2025, 1, 3), str(tmp_path)) == 2
+    assert get_commit_count(date(2025, 1, 2), date(2025, 1, 3), str(tmp_path)) == 4
 
 
 def test_get_cross_repo_prs_excludes_defaults():
