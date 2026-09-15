@@ -95,9 +95,14 @@ UTC that is returned at 00:10 UTC the next day will not restore context.
 
 The inbound reader treats all `type` values the same. It **reads the
 referenced `context_file`** (workspace-relative; path traversal is rejected)
-and injects that JSON into the callback session. An optional inlined
-`context` snapshot is a fallback when the file is missing or stale
-(for example a replacement brief generated after the missed call).
+and injects that content into the callback session, including the file path
+so the session can see the link. A standup-brief-shaped JSON file
+(`generated_at` + `text`) keeps the existing freshness checks. Other JSON
+and text files are loaded as-is — `generated_at` is taken from the missed
+call so a long-lived notes file still restores on callback. An optional
+inlined `context` snapshot is a fallback when the file is missing, stale,
+or unreadable (for example a replacement brief generated after the missed
+call).
 
 The outbound call path (`create_outbound_call` / `gptme-voice-call
 --context-file`) writes the note when callers pass `workspace` plus a

@@ -147,6 +147,30 @@ def test_trusted_callback_reads_referenced_context_file(callback_case):
     assert len(requests) == 1
 
 
+def test_trusted_callback_reads_plain_text_context_file(callback_case):
+    """A general notes file (not standup-brief JSON) is injected on callback."""
+    run, _, _, requests, state, _, _ = callback_case
+    (state / "standup-brief.json").unlink()
+    (state / "voice-calls/last-standup-call-sid.txt").unlink()
+    now = datetime.now(timezone.utc)
+    (state / "agenda.md").write_text(f"# Follow-up\n\n{MARKER}\n")
+    note = {
+        "type": "general",
+        "sid": CALL_SID,
+        "date": now.date().isoformat(),
+        "placed_at": (now - timedelta(minutes=2)).isoformat(),
+        "caller": PHONE,
+        "context_file": "state/agenda.md",
+    }
+    (state / "voice-calls/missed-call-context.json").write_text(json.dumps(note))
+    cfg = run()
+    assert MARKER in cfg.instructions
+    assert "state/agenda.md" in cfg.instructions
+    assert "callback" in cfg.initial_response_instructions.lower()
+    assert "standup call" not in cfg.instructions.lower()
+    assert len(requests) == 1
+
+
 @pytest.mark.parametrize(
     "status", ["completed", "in-progress", "queued", "ringing", None, "unknown"]
 )
