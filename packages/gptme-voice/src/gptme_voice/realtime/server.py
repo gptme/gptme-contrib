@@ -39,6 +39,12 @@ from ..rag import VoiceRag, rag_instruction_preamble, rag_tool_schema
 from ..vision import VisionSessionBridge, vision_tool_schema
 from .audio import AudioConverter
 from .latency import latency_trace_from_env
+from .missed_call_context import (
+    CALLBACK_GREETING,
+    CALLBACK_GUIDANCE,
+    load_callback_brief,
+    load_callback_candidate,
+)
 from .openai_client import (
     OpenAIRealtimeClient,
     SessionConfig,
@@ -47,12 +53,6 @@ from .openai_client import (
     _load_project_instructions,
 )
 from .sounds import DISPATCH_CUE_MULAW, PCM_CUES, SAMPLE_RATE, TIMEOUT_CUE_MULAW
-from .standup_callback import (
-    CALLBACK_GREETING,
-    CALLBACK_GUIDANCE,
-    load_callback_brief,
-    load_callback_candidate,
-)
 from .tool_bridge import GptmeToolBridge
 from .twilio_integration import (
     _get_config_env,

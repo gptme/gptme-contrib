@@ -113,7 +113,7 @@ def test_trusted_callback_receives_prepared_plan_before_greeting(callback_case):
     assert MARKER in cfg.instructions
     assert "Decide release timing" in cfg.instructions
     assert "callback" in cfg.initial_response_instructions.lower()
-    assert "what did you call about" in cfg.instructions.lower()
+    assert "attempted to reach" in cfg.instructions.lower()
     assert len(requests) == 1
 
 
