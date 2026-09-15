@@ -459,7 +459,11 @@ def get_user_prs(
     end: date,
     author: str,
 ) -> list[CrossRepoPR]:
-    """Get all PRs authored by a user in a date range (across all repos)."""
+    """Get PRs authored by ``author`` and merged in the date range.
+
+    Scoped by merge date (not creation) so the detail lists match
+    ``count_user_merged_prs`` / the prompt's "PRs merged" headline.
+    """
     output = _run_command(
         [
             "gh",
@@ -467,12 +471,13 @@ def get_user_prs(
             "prs",
             "--author",
             author,
-            "--created",
+            "--merged",
+            "--merged-at",
             f"{start.isoformat()}..{end.isoformat()}",
             "--json",
             "repository,number,title,state,url",
             "--limit",
-            "100",
+            str(LIST_LIMIT),
         ]
     )
     if not output:
@@ -503,7 +508,11 @@ def get_user_issues(
     end: date,
     author: str,
 ) -> list[dict[str, str]]:
-    """Get issues created by a user in a date range."""
+    """Get issues authored by ``author`` and closed in the date range.
+
+    Scoped by close date (not creation) so the detail lists match
+    ``count_user_closed_issues`` / the prompt's "Issues closed" headline.
+    """
     output = _run_command(
         [
             "gh",
@@ -511,12 +520,14 @@ def get_user_issues(
             "issues",
             "--author",
             author,
-            "--created",
+            "--state",
+            "closed",
+            "--closed",
             f"{start.isoformat()}..{end.isoformat()}",
             "--json",
             "repository,number,title,state,url",
             "--limit",
-            "100",
+            str(LIST_LIMIT),
         ]
     )
     if not output:
@@ -796,35 +807,36 @@ def fetch_user_activity(
         logger.warning("gh CLI not available, skipping GitHub data")
         return activity
 
-    # Get all PRs by this user
+    # Detail lists use the same merge/close date window as the headline counts.
+    # Both are still capped at LIST_LIMIT; exact totals come from search counts.
     prs = get_user_prs(start, end, username)
 
-    # Group PRs by repo
     repo_prs: dict[str, list[dict[str, str]]] = {}
     for pr in prs:
+        if pr.state and pr.state not in ("merged", "closed"):
+            continue
         repo = pr.repo
         if repo not in repo_prs:
             repo_prs[repo] = []
-        pr_dict = {
-            "number": str(pr.number),
-            "title": pr.title,
-            "url": pr.url,
-        }
-        repo_prs[repo].append(pr_dict)
+        repo_prs[repo].append(
+            {
+                "number": str(pr.number),
+                "title": pr.title,
+                "url": pr.url,
+            }
+        )
 
-    # Get issues by this user
     issues = get_user_issues(start, end, username)
 
-    # Group issues by repo
     repo_issues: dict[str, list[dict[str, str]]] = {}
     for issue in issues:
+        if issue.get("state") and issue.get("state") != "closed":
+            continue
         repo = issue.get("repo", "")
         if repo not in repo_issues:
             repo_issues[repo] = []
         repo_issues[repo].append(issue)
 
-    # Exact totals: the lists above are capped and scoped by creation date, so
-    # the headline "PRs merged" / "Issues closed" counts come from search counts.
     activity.prs_merged_total = count_user_merged_prs(start, end, username)
     activity.issues_closed_total = count_user_closed_issues(start, end, username)
 

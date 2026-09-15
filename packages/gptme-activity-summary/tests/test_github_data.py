@@ -357,6 +357,60 @@ def test_fetch_user_activity_uses_exact_totals():
     assert activity.total_commits == 16457
 
 
+def test_fetch_user_activity_drops_open_items_from_merged_lists():
+    """Per-repo 'Merged PRs' / 'Closed Issues' lists must not include open items."""
+
+    def mock_run(cmd, timeout=30):
+        cmd_str = " ".join(cmd)
+        if "auth status" in cmd_str:
+            return "ok"
+        if cmd[:3] == ["gh", "search", "prs"]:
+            return json.dumps(
+                [
+                    {
+                        "repository": {"nameWithOwner": "u/r"},
+                        "number": 1,
+                        "title": "merged",
+                        "state": "MERGED",
+                        "url": "",
+                    },
+                    {
+                        "repository": {"nameWithOwner": "u/r"},
+                        "number": 2,
+                        "title": "still open",
+                        "state": "OPEN",
+                        "url": "",
+                    },
+                ]
+            )
+        if cmd[:3] == ["gh", "search", "issues"]:
+            return json.dumps(
+                [
+                    {
+                        "repository": {"nameWithOwner": "u/r"},
+                        "number": 10,
+                        "title": "closed",
+                        "state": "CLOSED",
+                        "url": "",
+                    },
+                    {
+                        "repository": {"nameWithOwner": "u/r"},
+                        "number": 11,
+                        "title": "still open",
+                        "state": "OPEN",
+                        "url": "",
+                    },
+                ]
+            )
+        return None
+
+    with patch("gptme_activity_summary.github_data._run_command", side_effect=mock_run):
+        activity = fetch_user_activity(date(2026, 8, 1), date(2026, 8, 31), "someone")
+
+    assert [pr["number"] for pr in activity.repos[0].merged_prs] == ["1"]
+    assert [issue["number"] for issue in activity.repos[0].closed_issues] == ["10"]
+
+
 def test_get_user_commits_uses_exact_total():
     with patch("gptme_activity_summary.github_data._run_command", return_value="16457"):
         assert get_user_commits(date(2026, 8, 1), date(2026, 8, 31), "someone") == 16457
@@ -439,6 +493,25 @@ def test_get_user_prs():
     assert prs[0].title == "Add feature"
 
 
+def test_get_user_prs_searches_by_merged_at():
+    """Human-mode PR lists must use merge date, not creation date."""
+    captured: list[list[str]] = []
+
+    def mock_run(cmd, timeout=30):
+        captured.append(cmd)
+        return "[]"
+
+    with patch("gptme_activity_summary.github_data._run_command", side_effect=mock_run):
+        get_user_prs(date(2026, 8, 1), date(2026, 8, 31), "someone")
+
+    assert captured
+    cmd = captured[0]
+    assert "--merged-at" in cmd
+    assert cmd[cmd.index("--merged-at") + 1] == "2026-08-01..2026-08-31"
+    assert "--merged" in cmd
+    assert "--created" not in cmd
+
+
 def test_get_user_prs_handles_none():
     """Test get_user_prs returns empty list when command fails."""
     with patch("gptme_activity_summary.github_data._run_command", return_value=None):
@@ -454,6 +527,26 @@ def test_get_user_issues():
     assert len(issues) == 1
     assert issues[0]["repo"] == "user/repo"
     assert issues[0]["number"] == "10"
+
+
+def test_get_user_issues_searches_by_closed_date():
+    """Human-mode issue lists must use close date, not creation date."""
+    captured: list[list[str]] = []
+
+    def mock_run(cmd, timeout=30):
+        captured.append(cmd)
+        return "[]"
+
+    with patch("gptme_activity_summary.github_data._run_command", side_effect=mock_run):
+        get_user_issues(date(2026, 8, 1), date(2026, 8, 31), "someone")
+
+    assert captured
+    cmd = captured[0]
+    assert "--closed" in cmd
+    assert cmd[cmd.index("--closed") + 1] == "2026-08-01..2026-08-31"
+    assert "--state" in cmd
+    assert cmd[cmd.index("--state") + 1] == "closed"
+    assert "--created" not in cmd
 
 
 def test_get_user_issues_handles_none():
