@@ -89,23 +89,28 @@ UTC that is returned at 00:10 UTC the next day will not restore context.
   "date": "2026-09-15",
   "placed_at": "2026-09-15T10:00:00+00:00",
   "caller": "+15551212",
-  "context_file": "state/standup-brief.json",
-  "context": {
-    "generated_at": "2026-09-15T09:30:00+00:00",
-    "text": "The prepared summary...",
-    "conversation_goals": ["..."]
-  }
+  "context_file": "state/standup-brief.json"
 }
 ```
 
-The `context` object is injected verbatim into the callback session. The `type`
-field is for the writer's reference; the inbound reader treats all types the same.
-The optional `context_file` names the source artifact for audit purposes.
+The inbound reader treats all `type` values the same. It **reads the
+referenced `context_file`** (workspace-relative; path traversal is rejected)
+and injects that JSON into the callback session. An optional inlined
+`context` snapshot is a fallback when the file is missing or stale
+(for example a replacement brief generated after the missed call).
 
-The outbound call path (`create_outbound_call`) writes the note via
-`write_missed_call_context()` when callers pass `workspace` plus a prepared
-`missed_call_context`. The inbound loader still requires Twilio to confirm
-the outbound leg ended unanswered.
+The outbound call path (`create_outbound_call` / `gptme-voice-call
+--context-file`) writes the note when callers pass `workspace` plus a
+`context_file` and/or a prepared `missed_call_context` snapshot. The
+inbound loader still requires Twilio to confirm the outbound leg ended
+unanswered.
+
+```bash
+gptme-voice-call +46701234567 \
+  --workspace /path/to/agent-repo \
+  --context-file state/standup-brief.json \
+  --call-type standup
+```
 
 **Trust requirements** — the callback path requires a signed `/incoming`
 webhook, an exact `TWILIO_CALLER_ALLOWLIST` match, and `Call role: operator` in
@@ -140,6 +145,10 @@ Then place a call:
 ```bash
 gptme-voice-call +46701234567
 ```
+
+Pass `--context-file` (and optionally `--workspace` / `--call-type`) to drop a
+missed-call context note so a trusted callback can pick up that file if the
+call goes unanswered.
 
 Use `--dry-run` to print the generated TwiML without dialing.
 

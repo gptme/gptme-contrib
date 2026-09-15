@@ -1,13 +1,18 @@
 """General missed-call context persistence for inbound callback sessions.
 
-When an outbound call goes unanswered, the caller writes a lightweight context
-note (``write_missed_call_context``). When the same party calls back within
-``CALLBACK_WINDOW``, the inbound path loads that note and injects its content
-into the session — as if the call took place but the other end was silent.
+When an outbound call is placed, the caller writes a lightweight context note
+(``write_missed_call_context``) with a path to the prepared context file. When
+the same party calls back within ``CALLBACK_WINDOW``, the inbound path reads
+that file and injects its content into the session — as if the call took place
+but the other end was silent.
 
 The standup case is an instance of this general pattern. The outbound standup
-path writes a note with ``type="standup"`` and the prepared brief as context;
-the inbound path loads it via the same generic reader, unaware of the type.
+path writes a note with ``type="standup"`` and ``context_file`` pointing at
+``state/standup-brief.json``; the inbound path loads the referenced file via
+the same generic reader, unaware of the type.
+
+An optional inlined ``context`` snapshot is a fallback for notes that already
+carry one, or when the referenced file is missing or stale.
 
 Legacy backward compat: if no ``missed-call-context.json`` exists, the loader
 falls back to reading ``last-standup-call-sid.txt`` + ``standup-brief.json``
@@ -17,6 +22,7 @@ so existing deployments continue to work without changes.
 import asyncio
 import json
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -56,34 +62,76 @@ def _timestamp(value: object) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _as_utc(now: datetime | None) -> datetime:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current.astimezone(timezone.utc)
+
+
+def _resolve_workspace_file(workspace: Path, relative: str) -> Path | None:
+    """Return an existing file inside *workspace*, or None if the path escapes."""
+    stored = _workspace_relative_path(workspace, relative)
+    if stored is None:
+        return None
+    candidate = (workspace.resolve() / stored).resolve()
+    if not candidate.is_file():
+        return None
+    return candidate
+
+
+def _workspace_relative_path(workspace: Path, context_file: str) -> str | None:
+    """Normalize *context_file* to a posix path inside *workspace*.
+
+    Rejects absolute paths and ``..`` traversal that would land outside the
+    workspace. The file does not have to exist yet (write path).
+    """
+    if not context_file or not context_file.strip():
+        return None
+    raw = Path(context_file.strip())
+    root = workspace.resolve()
+    candidate = raw.resolve() if raw.is_absolute() else (root / raw).resolve()
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        return None
+    return relative.as_posix()
+
+
 def write_missed_call_context(
     workspace: str | None,
     *,
     type: str = "general",
     sid: str,
     caller: str,
-    context: dict,
+    context: dict | None = None,
     context_file: str | None = None,
     now: datetime | None = None,
 ) -> None:
-    """Write a missed-call context note after an unanswered outbound call.
+    """Write a missed-call context note when an outbound call is placed.
 
-    Called by the outbound call path when the call ends unanswered. The note
-    records the SID, caller, and prepared context so an inbound callback can
-    resume without re-generating it.
+    The inbound loader still requires Twilio to confirm the outbound leg ended
+    unanswered. The note records the SID, caller, and a workspace-relative
+    ``context_file`` so the callback session can read the prepared context
+    from disk — the same file the original call would have used.
 
-    ``context`` must include a ``text`` field with the prepared summary and a
-    timezone-aware ``generated_at`` timestamp. The inbound loader rejects notes
-    without ``generated_at`` rather than skipping freshness checks. Additional
-    structured fields (goals, bullets, etc.) are included as-is.
+    ``context`` is an optional snapshot of that file (``text`` plus a
+    timezone-aware ``generated_at``). The inbound loader prefers the live
+    file and falls back to this snapshot if the file is missing or stale.
 
-    ``context_file`` is optional; it names the workspace-relative path that
-    was used to build the context, for audit purposes.
+    Additional structured fields (goals, bullets, etc.) in a snapshot are
+    included as-is.
+
+    Raises ``ValueError`` if ``context_file`` is supplied but cannot be
+    normalized to a path inside the workspace.
     """
     if not workspace:
         return
-    current = now or datetime.now(timezone.utc)
-    voice_dir = Path(workspace) / "state" / "voice-calls"
+    if context is None and not context_file:
+        return
+    current = _as_utc(now)
+    root = Path(workspace)
+    voice_dir = root / "state" / "voice-calls"
     voice_dir.mkdir(parents=True, exist_ok=True)
     note: dict = {
         "type": type,
@@ -91,10 +139,16 @@ def write_missed_call_context(
         "date": current.date().isoformat(),
         "placed_at": current.isoformat(),
         "caller": caller,
-        "context": context,
     }
     if context_file is not None:
-        note["context_file"] = context_file
+        relative = _workspace_relative_path(root, context_file)
+        if relative is None:
+            raise ValueError(f"context_file outside workspace: {context_file!r}")
+        note["context_file"] = relative
+    if context is not None:
+        note["context"] = context
+    if "context_file" not in note and "context" not in note:
+        return
     (voice_dir / _CONTEXT_NOTE_FILE).write_text(
         json.dumps(note, ensure_ascii=False), encoding="utf-8"
     )
@@ -114,18 +168,90 @@ def load_callback_candidate(
     """
     if not workspace:
         return None
-    current = now or datetime.now(timezone.utc)
-    state = Path(workspace) / "state"
+    current = _as_utc(now)
+    root = Path(workspace)
+    state = root / "state"
     result = _load_from_note(
-        state / "voice-calls" / _CONTEXT_NOTE_FILE, current, caller=caller
+        state / "voice-calls" / _CONTEXT_NOTE_FILE,
+        current,
+        workspace=root,
+        caller=caller,
     )
     if result is not None:
         return result
     return _load_legacy(state, current)
 
 
+def _serialize_context(
+    context: object, current: datetime, placed: datetime
+) -> str | None:
+    if not isinstance(context, dict):
+        return None
+    try:
+        generated = _timestamp(context.get("generated_at"))
+    except ValueError:
+        return None
+    if not (
+        generated.date() == current.date()
+        and timedelta(0) <= current - generated <= MAX_CONTEXT_AGE
+        and generated <= placed
+    ):
+        return None
+    if not isinstance(context.get("text"), str) or not context["text"].strip():
+        return None
+    payload = json.dumps(context, ensure_ascii=False)
+    if len(payload.encode()) > _MAX_PAYLOAD_BYTES:
+        return None
+    return payload
+
+
+def _read_capped_json(path: Path) -> object | None:
+    """Load JSON from *path* without following a symlink, bounded by size.
+
+    Opens with ``O_NOFOLLOW`` so a file swapped for a symlink after the
+    workspace containment check cannot leak an arbitrary local file into
+    the callback session.
+    """
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            size = os.fstat(fd).st_size
+            if size > _MAX_PAYLOAD_BYTES:
+                return None
+            data = os.read(fd, size)
+        finally:
+            os.close(fd)
+        if len(data) > _MAX_PAYLOAD_BYTES:
+            return None
+        return json.loads(data.decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+
+
+def _load_context_payload(
+    note: dict,
+    *,
+    workspace: Path,
+    current: datetime,
+    placed: datetime,
+) -> str | None:
+    context_file = note.get("context_file")
+    if isinstance(context_file, str):
+        path = _resolve_workspace_file(workspace, context_file)
+        if path is not None:
+            payload = _serialize_context(_read_capped_json(path), current, placed)
+            if payload is not None:
+                return payload
+    return _serialize_context(note.get("context"), current, placed)
+
+
 def _load_from_note(
-    note_path: Path, current: datetime, *, caller: str | None = None
+    note_path: Path,
+    current: datetime,
+    *,
+    workspace: Path,
+    caller: str | None = None,
 ) -> tuple[str, str, float] | None:
     try:
         note = json.loads(note_path.read_text())
@@ -143,20 +269,10 @@ def _load_from_note(
             and timedelta(0) <= current - placed <= CALLBACK_WINDOW
         ):
             return None
-        context = note.get("context")
-        if not isinstance(context, dict):
-            return None
-        generated = _timestamp(context.get("generated_at"))
-        if not (
-            generated.date() == current.date()
-            and timedelta(0) <= current - generated <= MAX_CONTEXT_AGE
-            and generated <= placed
-        ):
-            return None
-        if not isinstance(context.get("text"), str) or not context["text"].strip():
-            return None
-        payload = json.dumps(context, ensure_ascii=False)
-        if len(payload.encode()) > _MAX_PAYLOAD_BYTES:
+        payload = _load_context_payload(
+            note, workspace=workspace, current=current, placed=placed
+        )
+        if payload is None:
             return None
     except (OSError, ValueError):
         return None

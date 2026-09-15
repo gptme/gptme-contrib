@@ -117,6 +117,36 @@ def test_trusted_callback_receives_prepared_plan_before_greeting(callback_case):
     assert len(requests) == 1
 
 
+def test_trusted_callback_reads_referenced_context_file(callback_case):
+    """General missed-call notes load the linked file, not standup-specific stamps."""
+    run, _, _, requests, state, _, _ = callback_case
+    (state / "standup-brief.json").unlink()
+    (state / "voice-calls/last-standup-call-sid.txt").unlink()
+    now = datetime.now(timezone.utc)
+    brief = {
+        "text": MARKER,
+        "generated_at": (now - timedelta(minutes=30)).isoformat(),
+        "conversation_goals": ["Decide release timing"],
+    }
+    (state / "prepared-context.json").write_text(json.dumps(brief))
+    note = {
+        "type": "general",
+        "sid": CALL_SID,
+        "date": now.date().isoformat(),
+        "placed_at": (now - timedelta(minutes=2)).isoformat(),
+        "caller": PHONE,
+        "context_file": "state/prepared-context.json",
+    }
+    (state / "voice-calls/missed-call-context.json").write_text(json.dumps(note))
+    cfg = run()
+    assert MARKER in cfg.instructions
+    assert "Decide release timing" in cfg.instructions
+    assert "callback" in cfg.initial_response_instructions.lower()
+    assert "attempted to reach" in cfg.instructions.lower()
+    assert "standup call" not in cfg.instructions.lower()
+    assert len(requests) == 1
+
+
 @pytest.mark.parametrize(
     "status", ["completed", "in-progress", "queued", "ringing", None, "unknown"]
 )

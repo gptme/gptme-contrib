@@ -164,10 +164,12 @@ def create_outbound_call(
 ) -> str:
     """Place an outbound call that streams audio into the voice server.
 
-    When ``workspace`` and ``missed_call_context`` are provided, persist a
-    missed-call context note after the call is placed so an inbound callback
-    can resume the prepared context. The inbound loader still requires Twilio
-    to confirm the outbound leg ended unanswered.
+    When ``workspace`` is provided with ``context_file`` and/or
+    ``missed_call_context``, persist a missed-call context note after the
+    call is placed so an inbound callback can read the prepared context.
+    The note stores a workspace-relative ``context_file`` link; the inbound
+    loader reads that file (falling back to an inlined snapshot if given).
+    Twilio still has to confirm the outbound leg ended unanswered.
     """
     if client_cls is None:
         try:
@@ -184,7 +186,9 @@ def create_outbound_call(
         from_=settings.from_number,
         twiml=build_connect_stream_twiml(settings.stream_url, custom_params),
     )
-    if workspace is not None and missed_call_context is not None:
+    if workspace is not None and (
+        missed_call_context is not None or context_file is not None
+    ):
         try:
             from .missed_call_context import write_missed_call_context
 
