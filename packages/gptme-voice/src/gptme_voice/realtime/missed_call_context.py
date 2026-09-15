@@ -285,6 +285,26 @@ def _generic_context_from_file(
     }
 
 
+def _is_standup_brief(parsed: object) -> bool:
+    """True when *parsed* is standup-brief-shaped: generated_at + non-empty text.
+
+    Presence of ``generated_at`` alone is not enough — generic notes JSON may
+    carry that key. Freshness checks apply only to this shape; other JSON
+    takes the generic wrap path (``generated_at`` rewritten from ``placed``).
+    A stale brief still rejects so inbound falls back to the inlined snapshot.
+    """
+    if not isinstance(parsed, dict):
+        return False
+    text = parsed.get("text")
+    if not (isinstance(text, str) and text.strip()):
+        return False
+    try:
+        _timestamp(parsed.get("generated_at"))
+    except ValueError:
+        return False
+    return True
+
+
 def _payload_from_linked_file(
     path: Path,
     *,
@@ -294,9 +314,10 @@ def _payload_from_linked_file(
 ) -> str | None:
     """Load a linked context file as the callback payload.
 
-    Standup-brief JSON (``generated_at`` present) keeps the existing freshness
-    checks. Other JSON and text files are wrapped with ``generated_at`` taken
-    from the missed call so a long-lived notes file still restores.
+    Standup-brief JSON (``generated_at`` + non-empty ``text``) keeps the
+    existing freshness checks. Other JSON and text files are wrapped with
+    ``generated_at`` taken from the missed call so a long-lived notes file
+    still restores.
     """
     raw = _read_capped_bytes(path)
     if raw is None:
@@ -307,7 +328,7 @@ def _payload_from_linked_file(
     except (ValueError, UnicodeDecodeError):
         parsed = None
 
-    if isinstance(parsed, dict) and parsed.get("generated_at"):
+    if _is_standup_brief(parsed):
         payload = _serialize_context(parsed, current, placed)
         if payload is None:
             return None
