@@ -120,6 +120,9 @@ def write_missed_call_context(
 
     Additional structured fields (goals, bullets, etc.) in a snapshot are
     included as-is.
+
+    Raises ``ValueError`` if ``context_file`` is supplied but cannot be
+    normalized to a path inside the workspace.
     """
     if not workspace:
         return
@@ -138,8 +141,9 @@ def write_missed_call_context(
     }
     if context_file is not None:
         relative = _workspace_relative_path(root, context_file)
-        if relative is not None:
-            note["context_file"] = relative
+        if relative is None:
+            raise ValueError(f"context_file outside workspace: {context_file!r}")
+        note["context_file"] = relative
     if context is not None:
         note["context"] = context
     if "context_file" not in note and "context" not in note:
@@ -212,7 +216,10 @@ def _load_context_payload(
         path = _resolve_workspace_file(workspace, context_file)
         if path is not None:
             try:
-                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if path.stat().st_size > _MAX_PAYLOAD_BYTES:
+                    loaded = None
+                else:
+                    loaded = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 loaded = None
             payload = _serialize_context(loaded, current, placed)

@@ -119,12 +119,27 @@ def test_write_context_file_only_omits_inline_snapshot(tmp_path):
 
 
 def test_write_rejects_context_file_outside_workspace(tmp_path):
-    write_missed_call_context(
-        str(tmp_path),
-        sid=CALL_SID,
-        caller=PHONE,
-        context_file="../outside.json",
-    )
+    with pytest.raises(ValueError, match="context_file outside workspace"):
+        write_missed_call_context(
+            str(tmp_path),
+            sid=CALL_SID,
+            caller=PHONE,
+            context_file="../outside.json",
+        )
+    note_path = tmp_path / "state" / "voice-calls" / "missed-call-context.json"
+    assert not note_path.exists()
+
+
+def test_write_rejects_outside_context_file_even_with_snapshot(tmp_path):
+    now = datetime.now(timezone.utc)
+    with pytest.raises(ValueError, match="context_file outside workspace"):
+        write_missed_call_context(
+            str(tmp_path),
+            sid=CALL_SID,
+            caller=PHONE,
+            context={"generated_at": now.isoformat(), "text": MARKER},
+            context_file="../outside.json",
+        )
     note_path = tmp_path / "state" / "voice-calls" / "missed-call-context.json"
     assert not note_path.exists()
 
@@ -352,6 +367,58 @@ def test_candidate_rejects_context_file_path_traversal(tmp_path):
     )
     _write_file_link_note(tmp_path, now, context_file="../secret.json")
     assert load_callback_candidate(str(tmp_path), now=now) is None
+
+
+def test_candidate_skips_oversized_context_file_before_read(tmp_path, monkeypatch):
+    """Cap is enforced on file size so a huge linked file is never buffered."""
+    from pathlib import Path
+
+    now = datetime.now(timezone.utc)
+    (tmp_path / "state").mkdir()
+    huge = tmp_path / "state" / "prepared-context.json"
+    huge.write_bytes(b"x" * (_MAX_PAYLOAD_BYTES + 1))
+    _write_file_link_note(tmp_path, now, context_file="state/prepared-context.json")
+
+    real_read_text = Path.read_text
+
+    def guarded(self, *args, **kwargs):
+        if self.resolve() == huge.resolve():
+            raise AssertionError("read_text must not run for oversized context files")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded)
+    assert load_callback_candidate(str(tmp_path), now=now) is None
+
+
+def test_candidate_falls_back_to_inline_when_file_is_oversized(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    now = datetime.now(timezone.utc)
+    (tmp_path / "state").mkdir()
+    huge = tmp_path / "state" / "prepared-context.json"
+    huge.write_bytes(b"x" * (_MAX_PAYLOAD_BYTES + 1))
+    _write_file_link_note(
+        tmp_path,
+        now,
+        context_file="state/prepared-context.json",
+        inline={
+            "generated_at": (now - timedelta(minutes=20)).isoformat(),
+            "text": MARKER,
+        },
+    )
+
+    real_read_text = Path.read_text
+
+    def guarded(self, *args, **kwargs):
+        if self.resolve() == huge.resolve():
+            raise AssertionError("read_text must not run for oversized context files")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded)
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    _, payload, _ = result
+    assert MARKER in payload
 
 
 # ---------------------------------------------------------------------------

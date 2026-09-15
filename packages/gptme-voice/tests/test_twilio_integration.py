@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 
 from click.testing import CliRunner
@@ -187,6 +188,41 @@ def test_create_outbound_call_writes_note_from_context_file_only(tmp_path):
     assert note["caller"] == "+46701234567"
     assert note["context_file"] == "state/prepared-context.json"
     assert "context" not in note
+
+
+def test_create_outbound_call_warns_when_context_file_outside_workspace(
+    tmp_path, caplog
+):
+    class FakeCalls:
+        def create(self, **kwargs):
+            class Response:
+                sid = "CA" + "c" * 32
+
+            return Response()
+
+    class FakeClient:
+        def __init__(self, account_sid, auth_token):
+            self.calls = FakeCalls()
+
+    settings = OutboundCallSettings(
+        account_sid="AC123",
+        auth_token="secret",
+        from_number="+15551234567",
+        stream_url="wss://voice.example/twilio",
+    )
+    with caplog.at_level(logging.WARNING):
+        sid = create_outbound_call(
+            "+46701234567",
+            settings,
+            client_cls=FakeClient,
+            workspace=str(tmp_path),
+            context_file="../outside.json",
+        )
+
+    assert sid == "CA" + "c" * 32
+    note_path = tmp_path / "state" / "voice-calls" / "missed-call-context.json"
+    assert not note_path.exists()
+    assert "Failed to persist missed-call context" in caplog.text
 
 
 def test_call_cli_passes_context_file_to_outbound_call(monkeypatch, tmp_path):
