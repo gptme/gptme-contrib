@@ -104,6 +104,31 @@ def test_write_none_workspace_is_noop():
     )
 
 
+def test_write_context_file_only_omits_inline_snapshot(tmp_path):
+    write_missed_call_context(
+        str(tmp_path),
+        sid=CALL_SID,
+        caller=PHONE,
+        context_file="state/prepared-context.json",
+    )
+    note = json.loads(
+        (tmp_path / "state" / "voice-calls" / "missed-call-context.json").read_text()
+    )
+    assert note["context_file"] == "state/prepared-context.json"
+    assert "context" not in note
+
+
+def test_write_rejects_context_file_outside_workspace(tmp_path):
+    write_missed_call_context(
+        str(tmp_path),
+        sid=CALL_SID,
+        caller=PHONE,
+        context_file="../outside.json",
+    )
+    note_path = tmp_path / "state" / "voice-calls" / "missed-call-context.json"
+    assert not note_path.exists()
+
+
 # ---------------------------------------------------------------------------
 # load_callback_candidate — new format
 # ---------------------------------------------------------------------------
@@ -202,6 +227,131 @@ def test_candidate_rejects_caller_mismatch(workspace):
     ws, _, _, _ = workspace
     assert load_callback_candidate(str(ws), caller=PHONE) is not None
     assert load_callback_candidate(str(ws), caller="+19999999") is None
+
+
+def _write_file_link_note(tmp_path, now, *, context_file, inline=None, extra=None):
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True, exist_ok=True)
+    note = {
+        "type": "general",
+        "sid": CALL_SID,
+        "date": now.date().isoformat(),
+        "placed_at": (now - timedelta(minutes=5)).isoformat(),
+        "caller": PHONE,
+        "context_file": context_file,
+    }
+    if inline is not None:
+        note["context"] = inline
+    if extra:
+        note.update(extra)
+    (voice / "missed-call-context.json").write_text(json.dumps(note))
+    return note
+
+
+def test_candidate_loads_referenced_context_file(tmp_path):
+    """Inbound reads the linked file; no inlined snapshot is required."""
+    now = datetime.now(timezone.utc)
+    brief = {
+        "generated_at": (now - timedelta(minutes=20)).isoformat(),
+        "text": MARKER,
+        "conversation_goals": ["ship it"],
+    }
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "prepared-context.json").write_text(json.dumps(brief))
+    _write_file_link_note(tmp_path, now, context_file="state/prepared-context.json")
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    sid, payload, _ = result
+    assert sid == CALL_SID
+    data = json.loads(payload)
+    assert data["text"] == MARKER
+    assert data["conversation_goals"] == ["ship it"]
+
+
+def test_candidate_prefers_live_file_over_inline_snapshot(tmp_path):
+    now = datetime.now(timezone.utc)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "prepared-context.json").write_text(
+        json.dumps(
+            {
+                "generated_at": (now - timedelta(minutes=20)).isoformat(),
+                "text": MARKER,
+            }
+        )
+    )
+    _write_file_link_note(
+        tmp_path,
+        now,
+        context_file="state/prepared-context.json",
+        inline={
+            "generated_at": (now - timedelta(minutes=25)).isoformat(),
+            "text": "stale snapshot",
+        },
+    )
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    _, payload, _ = result
+    assert MARKER in payload
+    assert "stale snapshot" not in payload
+
+
+def test_candidate_falls_back_to_inline_when_file_is_stale(tmp_path):
+    now = datetime.now(timezone.utc)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "prepared-context.json").write_text(
+        json.dumps(
+            {
+                "generated_at": now.isoformat(),
+                "text": "replacement brief",
+            }
+        )
+    )
+    _write_file_link_note(
+        tmp_path,
+        now,
+        context_file="state/prepared-context.json",
+        inline={
+            "generated_at": (now - timedelta(minutes=20)).isoformat(),
+            "text": MARKER,
+        },
+    )
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    _, payload, _ = result
+    assert MARKER in payload
+    assert "replacement brief" not in payload
+
+
+def test_candidate_falls_back_to_inline_when_file_missing(tmp_path):
+    now = datetime.now(timezone.utc)
+    _write_file_link_note(
+        tmp_path,
+        now,
+        context_file="state/prepared-context.json",
+        inline={
+            "generated_at": (now - timedelta(minutes=20)).isoformat(),
+            "text": MARKER,
+        },
+    )
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    _, payload, _ = result
+    assert MARKER in payload
+
+
+def test_candidate_rejects_context_file_path_traversal(tmp_path):
+    now = datetime.now(timezone.utc)
+    secret = tmp_path.parent / "secret.json"
+    secret.write_text(
+        json.dumps(
+            {
+                "generated_at": (now - timedelta(minutes=20)).isoformat(),
+                "text": MARKER,
+            }
+        )
+    )
+    _write_file_link_note(tmp_path, now, context_file="../secret.json")
+    assert load_callback_candidate(str(tmp_path), now=now) is None
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +566,32 @@ def test_write_then_load_round_trip(tmp_path):
         caller=PHONE,
         context=context,
         context_file="state/standup-brief.json",
+        now=now - timedelta(minutes=5),
+    )
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    sid, payload, _ = result
+    assert sid == CALL_SID
+    data = json.loads(payload)
+    assert data["text"] == MARKER
+    assert data["goals"] == ["ship it"]
+
+
+def test_write_file_link_then_load_round_trip(tmp_path):
+    now = datetime.now(timezone.utc)
+    brief = {
+        "generated_at": (now - timedelta(minutes=20)).isoformat(),
+        "text": MARKER,
+        "goals": ["ship it"],
+    }
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "prepared-context.json").write_text(json.dumps(brief))
+    write_missed_call_context(
+        str(tmp_path),
+        type="general",
+        sid=CALL_SID,
+        caller=PHONE,
+        context_file="state/prepared-context.json",
         now=now - timedelta(minutes=5),
     )
     result = load_callback_candidate(str(tmp_path), now=now)

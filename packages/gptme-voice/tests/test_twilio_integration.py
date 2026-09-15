@@ -152,6 +152,83 @@ def test_create_outbound_call_writes_missed_call_context(tmp_path):
     assert note["context"]["text"] == "standup brief"
 
 
+def test_create_outbound_call_writes_note_from_context_file_only(tmp_path):
+    class FakeCalls:
+        def create(self, **kwargs):
+            class Response:
+                sid = "CA" + "c" * 32
+
+            return Response()
+
+    class FakeClient:
+        def __init__(self, account_sid, auth_token):
+            self.calls = FakeCalls()
+
+    settings = OutboundCallSettings(
+        account_sid="AC123",
+        auth_token="secret",
+        from_number="+15551234567",
+        stream_url="wss://voice.example/twilio",
+    )
+    sid = create_outbound_call(
+        "+46701234567",
+        settings,
+        client_cls=FakeClient,
+        workspace=str(tmp_path),
+        call_type="general",
+        context_file="state/prepared-context.json",
+    )
+
+    note_path = tmp_path / "state" / "voice-calls" / "missed-call-context.json"
+    note = json.loads(note_path.read_text())
+    assert sid == "CA" + "c" * 32
+    assert note["type"] == "general"
+    assert note["sid"] == sid
+    assert note["caller"] == "+46701234567"
+    assert note["context_file"] == "state/prepared-context.json"
+    assert "context" not in note
+
+
+def test_call_cli_passes_context_file_to_outbound_call(monkeypatch, tmp_path):
+    captured = {}
+
+    monkeypatch.setattr(
+        "gptme_voice.realtime.call.resolve_outbound_call_settings",
+        lambda **_: OutboundCallSettings(
+            account_sid="AC123",
+            auth_token="secret",
+            from_number="+15551234567",
+            stream_url="wss://voice.example/twilio",
+        ),
+    )
+
+    def fake_create(to_number, settings, **kwargs):
+        captured["to_number"] = to_number
+        captured.update(kwargs)
+        return "CA" + "c" * 32
+
+    monkeypatch.setattr("gptme_voice.realtime.call.create_outbound_call", fake_create)
+
+    result = CliRunner().invoke(
+        call_main,
+        [
+            "+46701234567",
+            "--workspace",
+            str(tmp_path),
+            "--context-file",
+            "state/prepared-context.json",
+            "--call-type",
+            "general",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["to_number"] == "+46701234567"
+    assert captured["workspace"] == str(tmp_path)
+    assert captured["context_file"] == "state/prepared-context.json"
+    assert captured["call_type"] == "general"
+
+
 def test_outbound_identity_params_preserve_dialed_remote_party():
     params = outbound_identity_params("+46701234567", {"handoff_id": "abc"})
 
