@@ -28,7 +28,7 @@ def _cc_assistant(
     ts: str,
     *,
     tool_name: str | None = None,
-    tool_id: str = "tool-1",
+    tool_id: str | None = "tool-1",
     tool_input: dict | None = None,
     text: str | None = None,
     usage: dict | None = None,
@@ -38,14 +38,14 @@ def _cc_assistant(
     if text is not None:
         content.append({"type": "text", "text": text})
     if tool_name is not None:
-        content.append(
-            {
-                "type": "tool_use",
-                "id": tool_id,
-                "name": tool_name,
-                "input": tool_input or {},
-            }
-        )
+        item: dict = {
+            "type": "tool_use",
+            "name": tool_name,
+            "input": tool_input or {},
+        }
+        if tool_id is not None:
+            item["id"] = tool_id
+        content.append(item)
     record: dict = {
         "type": "assistant",
         "timestamp": ts,
@@ -365,6 +365,46 @@ def test_concurrency_and_parent_kept_working(tmp_path: Path) -> None:
     assert summary["subagent_seconds_total"] >= 8
     assert summary["session_kind"] == "interactive"
     assert summary["parent_idle_max_seconds"] >= 0
+
+
+def test_kept_working_uses_launch_ts_when_agent_call_has_no_id() -> None:
+    """Parent work between launch and child's first record still counts.
+
+    Real Claude Code Agent tool_use blocks sometimes omit id, and child
+    metadata can be missing — both used to start the kept-working window
+    at the child's first record and drop the in-between parent turn.
+    """
+    parent = [
+        _cc_user("2026-03-01T10:00:00.000Z", "go"),
+        _cc_assistant(
+            "2026-03-01T10:00:01.000Z",
+            tool_name="Agent",
+            tool_id=None,
+            tool_input={"subagent_type": "Explore", "prompt": "a"},
+        ),
+        _cc_assistant(
+            "2026-03-01T10:00:02.000Z",
+            tool_name="Read",
+            tool_id="r1",
+            tool_input={"file_path": "x.md"},
+        ),
+    ]
+    child = [
+        _cc_assistant(
+            "2026-03-01T10:00:03.000Z",
+            tool_name="Grep",
+            tool_id="g1",
+            tool_input={"pattern": "x"},
+        ),
+        _cc_assistant("2026-03-01T10:00:05.000Z", text="done"),
+    ]
+    summary = summarize_subagents(
+        parent,
+        [ChildSpec(records=child, spawn_depth=1, session_id="agent-orphan")],
+        harness="claude-code",
+    )
+    assert summary["spawns_total"] == 1
+    assert summary["spawns_parent_kept_working"] == 1
 
 
 def test_summarize_subagents_direct_without_tree() -> None:

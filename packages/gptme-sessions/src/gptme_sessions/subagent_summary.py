@@ -744,12 +744,49 @@ def summarize_subagents(
     # Parent-side launch timestamps (from the Agent tool call) are the correct
     # kept-working window start: a non-spawn parent turn between the launch and
     # the child's first emitted record would otherwise be excluded.
+    # Keyed match covers metadata toolUseId. Greedy fallback covers Agent
+    # calls with no id and children whose metadata is missing — both used
+    # to silently start the window at the child's first record.
+    launches: list[tuple[float, str | None]] = []
     spawn_ts_by_id: dict[str, float] = {}
     for call in parent.agent_calls:
         call_ts = call.get("ts")
-        call_id = call.get("id")
-        if call_ts is not None and call_id:
-            spawn_ts_by_id[str(call_id)] = float(call_ts)
+        if call_ts is None:
+            continue
+        ts = float(call_ts)
+        raw_id = call.get("id")
+        cid = str(raw_id) if raw_id else None
+        launches.append((ts, cid))
+        if cid:
+            spawn_ts_by_id[cid] = ts
+    claimed_launches: set[int] = set()
+
+    def _launch_ts_for(child: ChildSpec, first_ts: float | None) -> float | None:
+        agent_id = child.session_id.removeprefix("agent-")
+        for key in (child.tool_use_id, agent_id, child.session_id):
+            if not key:
+                continue
+            ts = spawn_ts_by_id.get(str(key))
+            if ts is None:
+                continue
+            for i, (lts, lid) in enumerate(launches):
+                if i not in claimed_launches and lid == str(key) and lts == ts:
+                    claimed_launches.add(i)
+                    break
+            return ts
+        best_i: int | None = None
+        best_ts: float | None = None
+        for i, (lts, _lid) in enumerate(launches):
+            if i in claimed_launches:
+                continue
+            if first_ts is None or lts <= first_ts:
+                if best_ts is None or lts >= best_ts:
+                    best_ts = lts
+                    best_i = i
+        if best_i is not None and best_ts is not None:
+            claimed_launches.add(best_i)
+            return best_ts
+        return first_ts
 
     kept = 0
     for child in children:
@@ -757,11 +794,7 @@ def summarize_subagents(
             continue
         scanned = scan_records(child.records, harness)
         agent_id = child.session_id.removeprefix("agent-")
-        t_spawn: float | None = scanned.first_ts
-        for key in (child.tool_use_id, agent_id, child.session_id):
-            if key and str(key) in spawn_ts_by_id:
-                t_spawn = spawn_ts_by_id[str(key)]
-                break
+        t_spawn = _launch_ts_for(child, scanned.first_ts)
         t_done = (
             notif_by_id.get(agent_id)
             or (notif_by_id.get(str(child.tool_use_id)) if child.tool_use_id else None)
