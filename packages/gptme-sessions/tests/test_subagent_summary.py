@@ -606,3 +606,95 @@ def test_summarize_subagents_gptme_child_not_readonly() -> None:
     assert summary["subagents_total"] == 1
     assert summary["subagents_acting"] == 1
     assert summary["subagents_readonly"] == 0
+
+
+def test_scan_generic_child_tool_calls_are_seen() -> None:
+    # Unknown-harness children (generic scan) must still expose tool calls,
+    # commands, write paths, and tool output bytes — otherwise classify_agent
+    # marks a file-writing child ``readonly`` and result_bytes is dropped.
+    from gptme_sessions.subagent_summary import _scan_generic
+
+    records = [
+        {"role": "user", "content": "go", "timestamp": "2026-03-01T10:00:00Z"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "save",
+                    "input": {"path": "/home/bob/repo/out.py", "content": "print(1)"},
+                },
+                {
+                    "type": "tool_use",
+                    "name": "shell",
+                    "input": {"command": "pytest -q"},
+                },
+                {"type": "tool_result", "content": "x" * 30},
+            ],
+            "timestamp": "2026-03-01T10:00:01Z",
+        },
+    ]
+    scan = _scan_generic(records)
+    assert scan.write_paths == ["/home/bob/repo/out.py"]
+    assert scan.bash_cmds == ["pytest -q"]
+    assert scan.result_bytes == 30
+    assert scan.tools == {"save": 1, "shell": 1}
+
+
+def test_summarize_subagents_generic_child_not_readonly() -> None:
+    parent = [
+        {"role": "user", "content": "spawn", "timestamp": "2026-03-01T10:00:00Z"},
+        {
+            "role": "assistant",
+            "content": [{"type": "code", "lang": "bash", "content": "gptme child prompt"}],
+            "timestamp": "2026-03-01T10:00:01Z",
+        },
+    ]
+    child = [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "save",
+                    "input": {"path": "/home/bob/repo/file.py", "content": "print('hi')"},
+                }
+            ],
+            "timestamp": "2026-03-01T10:00:02Z",
+        }
+    ]
+    summary = summarize_subagents(
+        parent,
+        [ChildSpec(records=child, spawn_depth=1, session_id="agent-x")],
+        harness=None,
+    )
+    assert summary["subagents_acting"] == 1
+    assert summary["subagents_readonly"] == 0
+
+
+def test_child_token_failure_does_not_drop_summary(monkeypatch) -> None:
+    # One child's usage extraction raising must not abort the whole
+    # summarize_subagents call (it is wrapped best-effort per child).
+    import gptme_sessions.subagent_summary as mod
+
+    parent = [
+        {"role": "user", "content": "spawn", "timestamp": "2026-03-01T10:00:00Z"},
+    ]
+    child = [
+        {
+            "role": "assistant",
+            "content": "hi",
+            "timestamp": "2026-03-01T10:00:01Z",
+        }
+    ]
+
+    def boom(records, harness):
+        raise ValueError("malformed usage")
+
+    monkeypatch.setattr(mod, "_child_tokens", boom)
+    summary = mod.summarize_subagents(
+        parent,
+        [ChildSpec(records=child, spawn_depth=1, session_id="agent-x")],
+        harness=None,
+    )
+    assert summary["subagents_total"] == 1

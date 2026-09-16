@@ -604,6 +604,29 @@ def _scan_generic(records: list[dict[str, Any]]) -> TranscriptScan:
             role = record.get("role")
             if role == "user":
                 scan.first_prompt = _text_of(record.get("content"))[:400]
+        content = record.get("content")
+        if not isinstance(content, list):
+            continue
+        # Tool-call extraction even for unknown harnesses: without it a child
+        # that writes files or runs commands is classified as ``readonly``
+        # (labels come from tools/bash_cmds/write_paths), and its tool output
+        # bytes are dropped from the summary.
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype in ("tool_use", "function_call"):
+                name = str(block.get("name") or "tool")
+                scan.tools[name] = scan.tools.get(name, 0) + 1
+                args = block.get("input") or block.get("arguments") or {}
+                if isinstance(args, dict):
+                    if args.get("command"):
+                        scan.bash_cmds.append(str(args["command"]))
+                    path = args.get("path") or args.get("file_path")
+                    if path:
+                        scan.write_paths.append(str(path))
+            elif btype == "tool_result":
+                scan.result_bytes += _blob_len(block.get("content"))
     return scan
 
 
@@ -714,7 +737,14 @@ def summarize_subagents(
             scanned.tools, scanned.bash_cmds, scanned.write_paths, sticky_cwd=sticky
         )
         labels[label] += 1
-        tokens_total += _child_tokens(child.records, harness)
+        try:
+            tokens_total += _child_tokens(child.records, harness)
+        except Exception:
+            # Best-effort per child: one malformed child's usage extraction
+            # must not abort the whole summary (the caller wraps the entire
+            # summarize_subagents call, so an unguarded raise would replace
+            # every computed field with empty_summary).
+            pass
         if scanned.first_ts is not None and scanned.last_ts is not None:
             intervals.append((scanned.first_ts, scanned.last_ts))
             seconds_total += int(round(scanned.last_ts - scanned.first_ts))
