@@ -1664,6 +1664,14 @@ has_maintainer_waiting_comment() {
         *"waiting only on a maintainer merge click"*) return 0 ;;
         *"ready to merge when convenient"*) return 0 ;;
         *"blocked by missing mergepullrequest permission"*) return 0 ;;
+        # Canonical PM human-merge handoff marker (pm_dispatch_recovery.py
+        # HUMAN_MERGE_COMMENT_MARKER). A path-policy head that PM itself
+        # classified `human_merge_required` is terminal: the ball is with the
+        # maintainer. Without this the marker is invisible to the suppression
+        # set, so author notifications keep re-emitting on every Codecov/
+        # Greptile re-unread and dispatch sessions that can only re-confirm the
+        # existing handoff (same churn class as aw-server-rust#660).
+        *"bob-pm-human-merge-required"*) return 0 ;;
     esac
     # "ready (to|for) merge @<maintainer>" — the @-mention indicates the ball
     # is explicitly in the maintainer's court. Bare "ready to merge" is too
@@ -1705,6 +1713,7 @@ latest_comment_is_bot_waiting() {
                 or contains("waiting only on a maintainer merge click")
                 or contains("ready to merge when convenient")
                 or contains("blocked by missing mergepullrequest permission")
+                or contains("bob-pm-human-merge-required")
                 or test("ready (to|for) merge @[a-z0-9_-]+")
             ));
         def is_human:
