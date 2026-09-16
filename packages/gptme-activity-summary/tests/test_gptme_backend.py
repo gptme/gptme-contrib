@@ -471,8 +471,9 @@ def test_default_model_is_deepseek_flash():
     Official @deepseek for 0731 404s since 2026-09-10; the live pin is the
     no-train allowlist from the 09-09 subprovider probe.
     """
-    assert "deepseek" in _DEFAULT_MODEL and "flash" in _DEFAULT_MODEL
-    assert "@deepseek" not in _DEFAULT_MODEL
+    assert _DEFAULT_MODEL == (
+        "openrouter/deepseek/deepseek-v4-flash-0731@together,fireworks,inceptron"
+    )
     assert "@together,fireworks,inceptron" in _DEFAULT_MODEL
 
 
