@@ -843,3 +843,27 @@ def test_relative_fileop_outside_scratch_is_acting():
 
     assert cmd_mutation("mv foo.py bar.py") == ("acting", "mv foo.py bar.py")
     assert cmd_mutation("cd /tmp && rm -f junk.tmp")[0] == "scratch"
+
+
+def test_scan_cc_first_prompt_keeps_text_in_mixed_record() -> None:
+    from gptme_sessions.subagent_summary import _scan_cc
+
+    records = [
+        # A user record can mix tool_result blocks with ordinary prompt text —
+        # only the tool_result blocks are tool output, the text is the prompt.
+        {
+            "type": "user",
+            "timestamp": "2026-03-01T10:00:00Z",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "content": [{"type": "text", "text": "queued tool output"}],
+                    },
+                    {"type": "text", "text": "BOB_SESSION_SENTINEL=abc autonomous work"},
+                ]
+            },
+        },
+    ]
+    scan = _scan_cc(records)
+    assert scan.first_prompt == "BOB_SESSION_SENTINEL=abc autonomous work"

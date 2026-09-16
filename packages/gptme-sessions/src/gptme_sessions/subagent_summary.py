@@ -459,12 +459,22 @@ def _scan_cc(records: list[dict[str, Any]]) -> TranscriptScan:
                         scan.sendmessages += 1
         else:
             # A resumed/queued transcript can open with a tool_result payload;
-            # that is tool output, not the user's prompt — skip it.
-            first_is_tool_result = isinstance(content, list) and any(
-                isinstance(item, dict) and item.get("type") == "tool_result" for item in content
-            )
-            if not scan.first_prompt and not first_is_tool_result:
-                scan.first_prompt = _text_of(content)[:400]
+            # that is tool output, not the user's prompt — skip the tool_result
+            # blocks but keep any prompt text in the same (mixed) record.
+            if not scan.first_prompt:
+                if isinstance(content, list):
+                    prompt_parts: list[str] = []
+                    for item in content:
+                        if isinstance(item, dict):
+                            if item.get("type") == "text":
+                                prompt_parts.append(item.get("text") or "")
+                        elif isinstance(item, str):
+                            prompt_parts.append(item)
+                    prompt_text = "\n".join(prompt_parts)
+                else:
+                    prompt_text = _text_of(content)
+                if prompt_text.strip():
+                    scan.first_prompt = prompt_text[:400]
             if isinstance(content, list):
                 for item in content:
                     if isinstance(item, dict) and item.get("type") == "tool_result":
