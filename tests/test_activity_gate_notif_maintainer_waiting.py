@@ -414,6 +414,33 @@ def test_human_merge_marker_suppresses_author_notification() -> None:
         assert _emitted_notifications(result.stdout) == [], result.stdout
 
 
+def test_human_merge_marker_stale_head_does_not_suppress() -> None:
+    """A marker for an older head must NOT suppress on the updated head.
+
+    The marker is head-scoped: after new commits are pushed, the handoff for
+    the previous head no longer describes what the maintainer would merge, so
+    the updated head must get a fresh assessment (notification emitted).
+    Regression guard for the head-prefix check in the suppression logic.
+    """
+    stale = PM_HUMAN_MERGE_BODY.replace(
+        "a65ead926a4080f6a17de9af384a6a87774f5761", "0" * 40
+    )
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            waiting_body=stale,
+            head_sha="9e98494f5df9a2df0461cd42842363a63dd66e66",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        emitted = _emitted_notifications(result.stdout)
+        assert len(emitted) == 1, result.stdout
+        assert emitted[0]["detail"] == "author"
+
+
 def test_human_merge_marker_reopens_on_human_comment() -> None:
     """A maintainer comment after the human-merge handoff must still emit.
 
