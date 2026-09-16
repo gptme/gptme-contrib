@@ -48,6 +48,12 @@ from .signals import (
     grade_signals,
     is_productive,
 )
+from .subagent_summary import (
+    classify_agent,
+    empty_summary,
+    summarize_session_tree,
+    summarize_subagents,
+)
 from .attribution import (
     CostAttributionReport,
     LoadedRecords,
@@ -160,6 +166,10 @@ __all__ = [
     "read_session_tree",
     "read_transcript",
     "subagent_record_files",
+    "classify_agent",
+    "empty_summary",
+    "summarize_session_tree",
+    "summarize_subagents",
     "SpanAggregates",
     "ToolSpan",
     "extract_spans_from_cc_jsonl",
