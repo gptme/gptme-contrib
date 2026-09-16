@@ -494,8 +494,11 @@ def _scan_codex(records: list[dict[str, Any]]) -> TranscriptScan:
         if rec_type != "response_item" or not isinstance(payload, dict):
             continue
         ptype = payload.get("type")
-        if ptype == "message" and payload.get("role") == "user" and not scan.first_prompt:
-            scan.first_prompt = _text_of(payload.get("content"))[:400]
+        if ptype == "message":
+            if payload.get("role") == "assistant" and ts is not None:
+                scan.turn_ts.append(ts)
+            if payload.get("role") == "user" and not scan.first_prompt:
+                scan.first_prompt = _text_of(payload.get("content"))[:400]
         if ptype == "function_call":
             name = str(payload.get("name") or "")
             scan.tools[name] = scan.tools.get(name, 0) + 1
@@ -560,6 +563,8 @@ def _scan_gptme(records: list[dict[str, Any]]) -> TranscriptScan:
         prev = _bump_active(scan, ts, prev)
         role = record.get("role")
         content = record.get("content")
+        if role == "assistant" and ts is not None:
+            scan.turn_ts.append(ts)
         if role == "user" and not scan.first_prompt:
             scan.first_prompt = _text_of(content)[:400]
         if not isinstance(content, list):

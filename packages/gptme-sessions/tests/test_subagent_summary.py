@@ -782,3 +782,28 @@ def test_scan_cc_first_prompt_skips_tool_result_payload() -> None:
     ]
     scan = _scan_cc(records)
     assert scan.first_prompt == "the real prompt"
+
+
+def test_kept_working_populated_for_codex_and_gptme_parents() -> None:
+    # Non-Claude harnesses must also get turn_ts, else kept-working is always 0.
+    from gptme_sessions.subagent_summary import _scan_codex, _scan_gptme
+
+    codex_records = [
+        {
+            "type": "response_item",
+            "timestamp": "2026-03-01T10:00:00Z",
+            "payload": {"type": "message", "role": "user", "content": "go"},
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-03-01T10:00:10Z",
+            "payload": {"type": "message", "role": "assistant", "content": "done"},
+        },
+    ]
+    assert len(_scan_codex(codex_records).turn_ts) == 1
+
+    gptme_records = [
+        {"role": "user", "content": "go", "timestamp": "2026-03-01T10:00:00Z"},
+        {"role": "assistant", "content": "done", "timestamp": "2026-03-01T10:00:10Z"},
+    ]
+    assert len(_scan_gptme(gptme_records).turn_ts) == 1
