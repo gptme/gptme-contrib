@@ -1989,7 +1989,10 @@ def notification_priority:
   elif .reason == "author" then 4
   else 5 end;
 [.[] | select(.reason == "review_requested" or .reason == "mention" or .reason == "assign" or .reason == "author" or .reason == "comment")]
-| sort_by([notification_priority, -(.updated_at | fromdateiso8601)])
+# Mentions first (contrib#1572), then oldest unanswered within each reason.
+# Newest-first starved MENTION-SLO: a 16-mention flood vs this cap kept
+# emitting 08:50 threads while 07:11 @-asks never left the inbox.
+| sort_by([notification_priority, (.updated_at | fromdateiso8601)])
 | .[]' \
         2>/dev/null) || return 0
     [ -z "$notifs" ] && return 0
@@ -1997,7 +2000,9 @@ def notification_priority:
     # Cap emitted notifications per run to avoid flooding the dispatcher when
     # a filter change (e.g. adding new reasons) unlocks a large backlog.
     # The cap only gates emit-eligible items: those skipped by the cap get
-    # neither emitted nor persisted, so they retry next run.
+    # neither emitted nor persisted, so they retry next run. Combined with
+    # oldest-first above, the next cycle drains the remaining oldest asks
+    # instead of re-selecting whatever arrived last.
     local max_notif_per_run=5
 
     # Established-state detection: seed-on-first-sight (record without emitting)

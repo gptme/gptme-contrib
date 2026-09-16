@@ -1180,10 +1180,15 @@ class DispatchResult:
 HUMAN_PRIORITY_CHANGES_REQUESTED = "human_changes_requested"
 # The most recent comment/review actor on the PR is a human (non-bot, non-self).
 HUMAN_PRIORITY_ACTIVITY = "human_activity"
+# GitHub notification reason token from activity-gate.sh. Direct @-mentions
+# share human-activity rank so a mention flood cannot lose the slot cap to
+# never-dispatched bot PR churn (MENTION-SLO; 2026-09-16).
+HUMAN_PRIORITY_MENTION = "mention"
 
 _HUMAN_PRIORITY_RANKS = {
     HUMAN_PRIORITY_CHANGES_REQUESTED: 0,
     HUMAN_PRIORITY_ACTIVITY: 1,
+    HUMAN_PRIORITY_MENTION: 1,
 }
 DEFAULT_PRIORITY_RANK = 2
 
@@ -1199,13 +1204,17 @@ def item_priority_rank(detail: str | None) -> int:
     Tokens are ``"; "``-joined in the detail field (same convention as
     :func:`is_direct_mention`), so exact-token matching avoids false positives
     on free text. Returns the best (lowest) rank present:
-    0 = human CHANGES_REQUESTED, 1 = human activity, 2 = default (bot/none).
+    0 = human CHANGES_REQUESTED, 1 = human activity or direct @mention,
+    2 = default (bot/none). ``source: direct_mention_handoff`` is treated as
+    rank 1 even without a bare ``mention`` token.
     """
     rank = DEFAULT_PRIORITY_RANK
     for tok in (detail or "").split(";"):
         tok_rank = _HUMAN_PRIORITY_RANKS.get(tok.strip())
         if tok_rank is not None and tok_rank < rank:
             rank = tok_rank
+    if rank > 1 and is_direct_mention(detail or ""):
+        rank = 1
     return rank
 
 
@@ -1335,8 +1344,10 @@ def order_lane_lru(
     The sort is stable, so ties — including a fresh cooldown dir after
     reboot — preserve the original gate order, i.e. with no human-priority
     items this degrades gracefully to pure LRU / the previous behavior.
-    Freshness is preserved: a brand-new mention has no marker and therefore
-    sorts first anyway.
+    Direct ``mention`` tokens share human-activity rank, so unanswered
+    @-asks beat never-dispatched bot churn. Among never-dispatched mentions
+    the stable sort keeps activity-gate's oldest-first order, which is what
+    stops a mention flood from starving the oldest MENTION-SLO item.
     """
     if cooldown_dir is None:
         cooldown_dir = Path(
