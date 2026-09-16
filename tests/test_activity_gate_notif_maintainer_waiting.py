@@ -37,6 +37,14 @@ notif_number = int(os.environ.get("TEST_NOTIF_NUMBER", "660"))
 notif_reason = os.environ.get("TEST_NOTIF_REASON", "author")
 subject_type = os.environ.get("TEST_SUBJECT_TYPE", "PullRequest")
 waiting_comment = os.environ.get("TEST_WAITING_COMMENT", "1")
+# Optional override for the bot waiting-comment body (e.g. the PM human-merge
+# marker body) — without it the fake gh only ever serves the canonical phrase.
+waiting_body = os.environ.get("TEST_WAITING_BODY")
+# Current PR head sha served for `repos/<repo>/pulls/<n>` lookups (used by the
+# head-scoped PM human-merge marker check).
+head_sha = os.environ.get(
+    "TEST_HEAD_SHA", "a65ead926a4080f6a17de9af384a6a87774f5761"
+)
 # Human activity after the bot's waiting comment reopens the handoff.
 human_after_waiting = os.environ.get("TEST_HUMAN_AFTER_WAITING", "0")
 bot_after_waiting = os.environ.get("TEST_BOT_AFTER_WAITING", "0")
@@ -104,7 +112,8 @@ if argv[0] == "api":
         if waiting_comment == "1":
             comments = [{
                 "user": {"login": "TimeToBuildBob", "type": "User"},
-                "body": "CI-green and mergeable — waiting only on a maintainer click.",
+                "body": waiting_body
+                or "CI-green and mergeable — waiting only on a maintainer click.",
                 "created_at": "2026-08-26T16:00:00Z",
             }]
             comments.extend(
@@ -150,6 +159,10 @@ if argv[0] == "api":
             page = comments[:100]
             print(apply_jq(page, jq_expr) if jq_expr else json.dumps(page))
         sys.exit(0)
+    if "/pulls/" in endpoint and endpoint.endswith(str(notif_number)):
+        pr = {"head": {"sha": head_sha}}
+        print(apply_jq(pr, jq_expr))
+        sys.exit(0)
     if endpoint.endswith("/reviews?per_page=100"):
         reviews = []
         if human_review_after_waiting == "1":
@@ -181,6 +194,7 @@ def _run_gate(
     bot_reaffirm_waiting: str = "0",
     comment_count: int = 1,
     waiting_body: str | None = None,
+    head_sha: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
     fake_gh.write_text(FAKE_GH)
@@ -195,6 +209,8 @@ def _run_gate(
     env["TEST_WAITING_COMMENT"] = waiting
     if waiting_body is not None:
         env["TEST_WAITING_BODY"] = waiting_body
+    if head_sha is not None:
+        env["TEST_HEAD_SHA"] = head_sha
     env["TEST_HUMAN_AFTER_WAITING"] = human_after_waiting
     env["TEST_BOT_AFTER_WAITING"] = bot_after_waiting
     env["TEST_HUMAN_REVIEW_AFTER_WAITING"] = human_review_after_waiting
