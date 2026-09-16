@@ -133,6 +133,15 @@ def test_cmd_mutation_scratch_vs_repo_redirects() -> None:
     assert label == "scratch"
 
 
+def test_cmd_mutation_home_dir_is_user_agnostic() -> None:
+    label, _ = cmd_mutation("echo hi > /home/alice/repo/out.md")
+    assert label == "acting"
+    label, _ = cmd_mutation("echo hi > /home/alice/.cache/out.md")
+    assert label == "scratch"
+    label, _ = cmd_mutation("python3 scripts/memory/agent-remember.py save x")
+    assert label == "acting"
+
+
 def test_cmd_mutation_get_api_is_not_acting() -> None:
     label, _ = cmd_mutation("gh api -X GET -f q=foo repos/x")
     assert label is None

@@ -42,7 +42,7 @@ _STRONG_RE = re.compile(
           | api\b(?![^|;\n]*-X\s*GET)(?=[^|;\n]*(?:-X\s*(?:POST|PUT|PATCH|DELETE)|--method\s*(?:POST|PUT|PATCH|DELETE)|\s-[fF]\s|--input\b)))
   | gptodo\s+(edit|add|set|new|create|archive|generate-queue)
   | (?:\S*/)?coordination\s+work-(claim|complete) | (?:\S*/)?claim-github-issue\.py | (?:\S*/)?vent\.py
-  | (?:\S*/)?schedule-recheck\.sh | (?:\S*/)?bob-remember\.py | gptme-util\s+memory\s+(save|supersede)
+  | (?:\S*/)?schedule-recheck\.sh | (?:\S*/)?[\w-]*remember\.py | gptme-util\s+memory\s+(save|supersede)
   | (?:pip|uv)\s+(install|add|remove|sync|tool\s+install) | npm\s+(install|run|ci)\b | pnpm\s | yarn\s
   | systemctl\s+(--user\s+)?(start|stop|restart|enable|disable|reload|kill|reset-failed)
   | pkill\b | kill\s+-?\d | crontab\s
@@ -61,28 +61,39 @@ _FILEOPS_RE = re.compile(
 )
 _DOWNLOAD_RE = re.compile(r"\bcurl\s[^|;]*\s(?:-o|--output)\s+(\S+)|\bwget\s[^|;]*\s-O\s+(\S+)")
 _QUOTED_RE = re.compile(r"'[^'\n]*'|\"[^\"\n]*\"")
+# User-agnostic home dir — contrib must not hardcode an agent username.
+_HOME_DIR = r"(?:~|/home/[^/]+)"
 _CD_SCRATCH_RE = re.compile(
-    r"\bcd\s+(?:/tmp(?:/(?!worktrees/)|\b)|\$SCRATCH|\"?\$D\b|~/\.cache/"
-    r"|/dev/shm/|/home/bob/\.claude/projects/\S+/tool-results)"
+    r"\bcd\s+(?:/tmp(?:/(?!worktrees/)|\b)|\$SCRATCH|\"?\$D\b|"
+    + _HOME_DIR
+    + r"/\.cache/|/dev/shm/|"
+    + _HOME_DIR
+    + r"/\.claude/projects/\S+/tool-results)"
 )
 _ABS_REPO_PATH_RE = re.compile(
-    r"(?<![\w./-])(/home/bob/(?!\.cache|\.claude/projects/\S+/tool-results)"
-    r"|\$REPO_ROOT|~/(?!\.cache)|/tmp/worktrees/)"
+    r"(?<![\w./-])("
+    + _HOME_DIR
+    + r"/(?!\.cache|\.claude/projects/\S+/tool-results)"
+    + r"|\$REPO_ROOT|/tmp/worktrees/)"
 )
 _PRELUDE_RE = re.compile(
-    r"REPO_ROOT=\$\(git rev-parse --show-toplevel\)|cd\s+(?:\$REPO_ROOT|/home/bob/\S+|~/\S+)\s*(?:&&|;)?"
+    r"REPO_ROOT=\$\(git rev-parse --show-toplevel\)|cd\s+(?:\$REPO_ROOT|"
+    + _HOME_DIR
+    + r"/\S+)\s*(?:&&|;)?"
 )
 _REDIRECT_RE = re.compile(
     r"(?<![0-9&<>=!])>{1,2}(?!=)\s*(?!&|/dev/null|/dev/stderr)"
     r"((?:[~$/.]|\w+[/.])[^\s;|&)>\]'\"]*)"
 )
 _SCRATCH_PATH_RE = re.compile(
-    r"^(/tmp/(?!worktrees/)|/dev/shm/|/run/user/|~/\.cache/|/home/bob/\.cache/"
-    r"|\$SCRATCH|\$\{?TMP|\$OUT\b|\$T\b|\$D\b)"
+    r"^(/tmp/(?!worktrees/)|/dev/shm/|/run/user/|"
+    + _HOME_DIR
+    + r"/\.cache/"
+    + r"|\$SCRATCH|\$\{?TMP|\$OUT\b|\$T\b|\$D\b)"
 )
 _NONSCRATCH_PATH_RE = re.compile(
-    r"(?<![\w./-])(/tmp/worktrees/|/home/bob/(?!\.cache)|\$REPO_ROOT|\$REPO\b|"
-    r"~/(?!\.cache)|\./|journal/|tasks/|knowledge/|lessons/|state/|scripts/"
+    r"(?<![\w./-])(/tmp/worktrees/|" + _HOME_DIR + r"/(?!\.cache)|\$REPO_ROOT|\$REPO\b|"
+    r"\./|journal/|tasks/|knowledge/|lessons/|state/|scripts/"
     r"|packages/|gptme-contrib/)"
 )
 _QUOTED_TARGET_RE = re.compile(r"(?<![0-9&<>=!])>{1,2}\s*[\"']([^\"'\n]+)[\"']")
@@ -110,7 +121,7 @@ _NOTIF_TAGS = {
 _KIND_RULES: tuple[tuple[str, str], ...] = (
     ("project monitoring session", "pm"),
     ("pm-react", "pm"),
-    ("BOB_SESSION_SENTINEL", "autonomous"),
+    ("SESSION_SENTINEL", "autonomous"),
     ("autonomous work session", "autonomous"),
     ("focused task in a worktree", "worker"),
     ("strategic idea generator", "oneshot"),
