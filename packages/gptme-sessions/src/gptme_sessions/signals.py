@@ -3281,10 +3281,17 @@ def extract_from_path(jsonl_path: Path) -> dict:
                         meta = loaded
                 except (OSError, json.JSONDecodeError):
                     meta = {}
+            # Guard each child's depth independently: a nonnumeric spawnDepth in
+            # one metadata file must not abort the loop-wide best-effort block
+            # and silently drop every later child.
+            try:
+                depth = int(meta.get("spawnDepth") or 1)
+            except (TypeError, ValueError):
+                depth = 1
             child_specs.append(
                 ChildSpec(
                     records=child_msgs,
-                    spawn_depth=int(meta.get("spawnDepth") or 1),
+                    spawn_depth=depth,
                     session_id=sub_file.stem,
                     tool_use_id=meta.get("toolUseId"),
                     agent_type=meta.get("agentType"),

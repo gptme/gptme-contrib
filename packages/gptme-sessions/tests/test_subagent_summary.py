@@ -429,3 +429,66 @@ def test_read_session_tree_summary_matches_extract(tmp_path: Path) -> None:
     via_tree = summarize_session_tree(tree)
     assert via_extract["subagents_total"] == via_tree["subagents_total"] == 1
     assert via_extract["subagents_readonly"] == 1
+
+
+def test_max_concurrency_single_record_is_one() -> None:
+    # A child with only one timestamp (start == end) must count as 1, not 0.
+    assert max_concurrency([(100.0, 100.0)]) == 1
+    assert max_concurrency([(100.0, 100.0), (100.0, 100.0)]) == 2
+
+
+def test_scan_gptme_child_writes_are_seen() -> None:
+    from gptme_sessions.subagent_summary import _scan_gptme
+
+    records = [
+        {"role": "user", "content": "do the thing", "timestamp": "2026-03-01T10:00:00Z"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "code", "lang": "save", "content": "/home/bob/repo/out.md\ncontent here"},
+                {
+                    "type": "code",
+                    "lang": "bash",
+                    "content": "curl https://example.com > /dev/null",
+                },
+            ],
+            "timestamp": "2026-03-01T10:00:01Z",
+        },
+        {
+            "role": "system",
+            "content": [{"type": "console", "content": "ok" * 20}],
+            "timestamp": "2026-03-01T10:00:02Z",
+        },
+    ]
+    scan = _scan_gptme(records)
+    assert scan.write_paths == ["/home/bob/repo/out.md"]
+    assert scan.result_bytes == 40
+    assert any("curl" in cmd for cmd in scan.bash_cmds)
+
+
+def test_summarize_subagents_gptme_child_not_readonly() -> None:
+    parent = [
+        {"role": "user", "content": "spawn", "timestamp": "2026-03-01T10:00:00Z"},
+        {
+            "role": "assistant",
+            "content": [{"type": "code", "lang": "bash", "content": "gptme child prompt"}],
+            "timestamp": "2026-03-01T10:00:01Z",
+        },
+    ]
+    child = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "code", "lang": "save", "content": "/home/bob/repo/file.py\nprint('hi')"}
+            ],
+            "timestamp": "2026-03-01T10:00:02Z",
+        }
+    ]
+    summary = summarize_subagents(
+        parent,
+        [ChildSpec(records=child, spawn_depth=1, session_id="agent-x")],
+        harness="gptme",
+    )
+    assert summary["subagents_total"] == 1
+    assert summary["subagents_acting"] == 1
+    assert summary["subagents_readonly"] == 0

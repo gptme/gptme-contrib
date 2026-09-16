@@ -230,7 +230,9 @@ def max_concurrency(intervals: list[tuple[float, float]]) -> int:
     for start, end in intervals:
         events.append((start, 1))
         events.append((max(end, start), -1))
-    events.sort(key=lambda item: (item[0], item[1]))
+    # Starts before ends at equal timestamps: a zero-width interval (single
+    # record) must count as concurrent with itself (max >= 1), not 0.
+    events.sort(key=lambda item: (item[0], -item[1]))
     current = best = 0
     for _, delta in events:
         current += delta
@@ -518,6 +520,69 @@ def _scan_codex(records: list[dict[str, Any]]) -> TranscriptScan:
     return scan
 
 
+_GPTME_SHELL_LANGS = {"bash", "sh", "shell", "shell-expanded", "ipython"}
+_GPTME_WRITE_LANGS = {
+    "save",
+    "append",
+    "patch",
+    "insert",
+    "replace",
+    "touch",
+    "mkdir",
+    "move",
+    "rename",
+    "delete",
+    "rm",
+}
+
+
+def _scan_gptme(records: list[dict[str, Any]]) -> TranscriptScan:
+    """Scan a gptme-format transcript (role + content blocks).
+
+    gptme children write via ``save``/``patch``-style code blocks and mutate via
+    shell code blocks, so both feed the classifier — a plain timestamp-only
+    scan would classify every writing gptme child as ``readonly``.
+    """
+    scan = TranscriptScan()
+    prev: float | None = None
+    for record in records:
+        ts = _record_ts(record)
+        prev = _bump_active(scan, ts, prev)
+        role = record.get("role")
+        content = record.get("content")
+        if role == "user" and not scan.first_prompt:
+            scan.first_prompt = _text_of(content)[:400]
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            text = str(block.get("content") or block.get("text") or "")
+            if btype == "code":
+                lang = str(block.get("lang") or "").lower()
+                if lang in _GPTME_WRITE_LANGS:
+                    first_line = text.splitlines()[0] if text else "?"
+                    scan.write_paths.append(first_line)
+                    scan.tools[lang] = scan.tools.get(lang, 0) + 1
+                elif lang in _GPTME_SHELL_LANGS:
+                    scan.bash_cmds.append(text)
+                    scan.tools[lang] = scan.tools.get(lang, 0) + 1
+            elif btype == "console":
+                scan.result_bytes += len(text)
+            elif btype in ("tool_use", "function_call"):
+                name = str(block.get("name") or "tool")
+                scan.tools[name] = scan.tools.get(name, 0) + 1
+                args = block.get("input") or block.get("arguments") or {}
+                if isinstance(args, dict):
+                    if args.get("command"):
+                        scan.bash_cmds.append(str(args["command"]))
+                    path = args.get("path") or args.get("file_path")
+                    if path:
+                        scan.write_paths.append(str(path))
+    return scan
+
+
 def _scan_generic(records: list[dict[str, Any]]) -> TranscriptScan:
     scan = TranscriptScan()
     prev: float | None = None
@@ -537,7 +602,9 @@ def scan_records(records: list[dict[str, Any]], harness: str | None) -> Transcri
         return _scan_codex(records)
     if harness in ("claude-code", "claude_code"):
         return _scan_cc(records)
-    if harness in ("gptme", "grok", "grok-build", "pi", "copilot"):
+    if harness == "gptme":
+        return _scan_gptme(records)
+    if harness in ("grok", "grok-build", "pi", "copilot"):
         return _scan_generic(records)
     if any(record.get("type") == "session_meta" for record in records):
         return _scan_codex(records)
@@ -663,13 +730,27 @@ def summarize_subagents(
             if key and key not in notif_by_id and notif.get("ts"):
                 notif_by_id[str(key)] = float(notif["ts"])
 
+    # Parent-side launch timestamps (from the Agent tool call) are the correct
+    # kept-working window start: a non-spawn parent turn between the launch and
+    # the child's first emitted record would otherwise be excluded.
+    spawn_ts_by_id: dict[str, float] = {}
+    for call in parent.agent_calls:
+        call_ts = call.get("ts")
+        call_id = call.get("id")
+        if call_ts is not None and call_id:
+            spawn_ts_by_id[str(call_id)] = float(call_ts)
+
     kept = 0
     for child in children:
         if child.spawn_depth > 1:
             continue
         scanned = scan_records(child.records, harness)
-        t_spawn = scanned.first_ts
         agent_id = child.session_id.removeprefix("agent-")
+        t_spawn: float | None = scanned.first_ts
+        for key in (child.tool_use_id, agent_id, child.session_id):
+            if key and str(key) in spawn_ts_by_id:
+                t_spawn = spawn_ts_by_id[str(key)]
+                break
         t_done = (
             notif_by_id.get(agent_id)
             or (notif_by_id.get(str(child.tool_use_id)) if child.tool_use_id else None)
