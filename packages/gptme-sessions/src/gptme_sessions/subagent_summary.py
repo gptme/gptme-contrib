@@ -856,11 +856,15 @@ def summarize_subagents(
     for i, child in top_children:
         agent_id = child.session_id.removeprefix("agent-")
         t_spawn = spawn_ts_by_child[i]
+        # The child's last emitted record is its actual completion time; the
+        # task-notification is delivered to the parent later, so preferring
+        # notif_by_id here would extend the kept-working window past the
+        # child's finish and over-count parent turns as kept-working.
         t_done = (
-            notif_by_id.get(agent_id)
-            or (notif_by_id.get(str(child.tool_use_id)) if child.tool_use_id else None)
-            or child_done_ts.get(agent_id)
+            child_done_ts.get(agent_id)
             or scan_bounds[i][1]
+            or notif_by_id.get(agent_id)
+            or (notif_by_id.get(str(child.tool_use_id)) if child.tool_use_id else None)
         )
         if t_spawn is None or t_done is None:
             continue
