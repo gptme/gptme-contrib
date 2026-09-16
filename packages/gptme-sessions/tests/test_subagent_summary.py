@@ -807,3 +807,21 @@ def test_kept_working_populated_for_codex_and_gptme_parents() -> None:
         {"role": "assistant", "content": "done", "timestamp": "2026-03-01T10:00:10Z"},
     ]
     assert len(_scan_gptme(gptme_records).turn_ts) == 1
+
+
+def test_collect_notifications_nonnumeric_duration_ms():
+    """A malformed third-party duration_ms must not abort the whole scan."""
+    from gptme_sessions.subagent_summary import _collect_notifications
+
+    text = (
+        "<task-notification><summary>Agent t: done</summary>"
+        "<task-id>a1</task-id><duration_ms>N/A</duration_ms>"
+        "<result>ok</result></task-notification>"
+        "<task-notification><summary>Agent t: done2</summary>"
+        "<task-id>a2</task-id><duration_ms>1200</duration_ms>"
+        "<result>ok2</result></task-notification>"
+    )
+    seen: set[tuple[str, int, int]] = set()
+    dest: list[dict] = []
+    _collect_notifications(text, 1.0, seen, dest)
+    assert [d["task_id"] for d in dest] == ["a1", "a2"]

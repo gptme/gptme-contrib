@@ -332,9 +332,15 @@ def _collect_notifications(
         body = match.group(1)
         if not _notif_tag(body, "summary").startswith("Agent"):
             continue
+        try:
+            dur_ms = int(_notif_tag(body, "duration_ms") or 0)
+        except ValueError:
+            # duration_ms is a third-party (Claude Code) schema field that may
+            # carry arbitrary strings; a malformed value must not abort the scan.
+            dur_ms = 0
         key = (
             _notif_tag(body, "task-id"),
-            int(_notif_tag(body, "duration_ms") or 0),
+            dur_ms,
             len(_notif_tag(body, "result")),
         )
         if key in seen:
