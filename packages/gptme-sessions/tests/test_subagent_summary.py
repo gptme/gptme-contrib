@@ -407,6 +407,71 @@ def test_kept_working_uses_launch_ts_when_agent_call_has_no_id() -> None:
     assert summary["spawns_parent_kept_working"] == 1
 
 
+def test_idless_launch_assignment_is_order_independent() -> None:
+    """Ambiguous (id-less) launches are assigned in chronological order.
+
+    With one eligible launch and two id-less children, the children list's
+    filename order used to decide which child claimed the launch, shifting
+    that child's kept-working window and changing the kept count. Matching in
+    ascending first-record order makes the result independent of list order.
+    """
+    parent = [
+        _cc_user("2026-03-01T10:00:00.000Z", "go"),
+        _cc_assistant(
+            "2026-03-01T10:00:01.000Z",
+            tool_name="Agent",
+            tool_id=None,
+            tool_input={"subagent_type": "Explore", "prompt": "a"},
+        ),
+        # non-spawn parent work between the launch and the children's records
+        _cc_assistant(
+            "2026-03-01T10:00:03.000Z",
+            tool_name="Read",
+            tool_id="r1",
+            tool_input={"file_path": "x.md"},
+        ),
+        _cc_assistant(
+            "2026-03-01T10:00:08.000Z",
+            tool_name="Read",
+            tool_id="r2",
+            tool_input={"file_path": "y.md"},
+        ),
+        # a second id-less launch neither child may use (starts after them)
+        _cc_assistant(
+            "2026-03-01T10:00:10.000Z",
+            tool_name="Agent",
+            tool_id=None,
+            tool_input={"subagent_type": "Explore", "prompt": "b"},
+        ),
+    ]
+    early = [
+        _cc_assistant(
+            "2026-03-01T10:00:05.000Z",
+            tool_name="Grep",
+            tool_id="g1",
+            tool_input={"pattern": "x"},
+        ),
+        _cc_assistant("2026-03-01T10:00:07.000Z", text="done early"),
+    ]
+    late = [
+        _cc_assistant(
+            "2026-03-01T10:00:06.000Z",
+            tool_name="Grep",
+            tool_id="g2",
+            tool_input={"pattern": "y"},
+        ),
+        _cc_assistant("2026-03-01T10:00:20.000Z", text="done late"),
+    ]
+    c_early = ChildSpec(records=early, spawn_depth=1, session_id="agent-early")
+    c_late = ChildSpec(records=late, spawn_depth=1, session_id="agent-late")
+
+    forward = summarize_subagents(parent, [c_early, c_late], harness="claude-code")
+    reverse = summarize_subagents(parent, [c_late, c_early], harness="claude-code")
+
+    assert forward["spawns_parent_kept_working"] == reverse["spawns_parent_kept_working"]
+    assert forward["spawns_parent_kept_working"] == 2
+
+
 def test_summarize_subagents_direct_without_tree() -> None:
     parent = [
         _cc_user("2026-03-01T10:00:00.000Z", "BOB_SESSION_SENTINEL=deadbeef"),

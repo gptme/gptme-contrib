@@ -758,48 +758,79 @@ def summarize_subagents(
         cid = str(raw_id) if raw_id else None
         launches.append((ts, cid))
         if cid:
-            spawn_ts_by_id[cid] = ts
-    claimed_launches: set[int] = set()
+            spawn_ts_by_id.setdefault(cid, ts)
 
-    def _launch_ts_for(child: ChildSpec, first_ts: float | None) -> float | None:
+    # Resolve launch timestamps in two deterministic passes instead of the
+    # children list's (filename) order. Filename order does not represent
+    # launch order, and the claimed-launch bookkeeping makes a single greedy
+    # pass order-dependent: when both the Agent calls and the children lack
+    # ids, whichever child is listed first claims the eligible launch and the
+    # rest fall back to their own first record — assigning the wrong window
+    # start and mis-counting spawns_parent_kept_working.
+    top_children = [(i, c) for i, c in enumerate(children) if c.spawn_depth <= 1]
+    scan_bounds: dict[int, tuple[float | None, float | None]] = {}
+    for i, child in top_children:
+        scanned = scan_records(child.records, harness)
+        scan_bounds[i] = (scanned.first_ts, scanned.last_ts)
+
+    spawn_ts_by_child: dict[int, float | None] = {}
+    claimed_launches: set[int] = set()
+    unmatched: list[tuple[int, ChildSpec]] = []
+    # Pass 1: a child whose metadata carries an id claims that launch.
+    for i, child in top_children:
         agent_id = child.session_id.removeprefix("agent-")
+        matched_ts: float | None = None
         for key in (child.tool_use_id, agent_id, child.session_id):
             if not key:
                 continue
-            ts = spawn_ts_by_id.get(str(key))
-            if ts is None:
+            id_ts = spawn_ts_by_id.get(str(key))
+            if id_ts is None:
                 continue
-            for i, (lts, lid) in enumerate(launches):
-                if i not in claimed_launches and lid == str(key) and lts == ts:
-                    claimed_launches.add(i)
+            for j, (lts, lid) in enumerate(launches):
+                if j not in claimed_launches and lid == str(key) and lts == id_ts:
+                    claimed_launches.add(j)
                     break
-            return ts
-        best_i: int | None = None
+            matched_ts = id_ts
+            break
+        if matched_ts is None:
+            unmatched.append((i, child))
+        else:
+            spawn_ts_by_child[i] = matched_ts
+    # Pass 2: remaining children take the latest unclaimed launch at or before
+    # their first record, in ascending first-record order (a stable,
+    # order-independent chronological assignment).
+    for i, _child in sorted(
+        unmatched,
+        key=lambda item: (
+            scan_bounds[item[0]][0] is None,
+            scan_bounds[item[0]][0] or 0.0,
+        ),
+    ):
+        first_ts = scan_bounds[i][0]
+        best_j: int | None = None
         best_ts: float | None = None
-        for i, (lts, _lid) in enumerate(launches):
-            if i in claimed_launches:
+        for j, (lts, _lid) in enumerate(launches):
+            if j in claimed_launches:
                 continue
             if first_ts is None or lts <= first_ts:
                 if best_ts is None or lts >= best_ts:
                     best_ts = lts
-                    best_i = i
-        if best_i is not None and best_ts is not None:
-            claimed_launches.add(best_i)
-            return best_ts
-        return first_ts
+                    best_j = j
+        if best_j is not None and best_ts is not None:
+            claimed_launches.add(best_j)
+            spawn_ts_by_child[i] = best_ts
+        else:
+            spawn_ts_by_child[i] = first_ts
 
     kept = 0
-    for child in children:
-        if child.spawn_depth > 1:
-            continue
-        scanned = scan_records(child.records, harness)
+    for i, child in top_children:
         agent_id = child.session_id.removeprefix("agent-")
-        t_spawn = _launch_ts_for(child, scanned.first_ts)
+        t_spawn = spawn_ts_by_child[i]
         t_done = (
             notif_by_id.get(agent_id)
             or (notif_by_id.get(str(child.tool_use_id)) if child.tool_use_id else None)
             or child_done_ts.get(agent_id)
-            or scanned.last_ts
+            or scan_bounds[i][1]
         )
         if t_spawn is None or t_done is None:
             continue
