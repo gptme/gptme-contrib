@@ -1665,6 +1665,34 @@ has_maintainer_waiting_comment() {
         *"ready to merge when convenient"*) return 0 ;;
         *"blocked by missing mergepullrequest permission"*) return 0 ;;
     esac
+    # Canonical PM human-merge handoff marker (pm_dispatch_recovery.py
+    # HUMAN_MERGE_COMMENT_MARKER). A path-policy head that PM itself
+    # classified `human_merge_required` is terminal: the ball is with the
+    # maintainer. Without this the marker is invisible to the suppression
+    # set, so author notifications keep re-emitting on every Codecov/
+    # Greptile re-unread and dispatch sessions that can only re-confirm the
+    # existing handoff (same churn class as aw-server-rust#660).
+    #
+    # The marker is head-scoped (`head=<sha>`), so only treat it as a valid
+    # handoff while it still refers to the PR's current head. A stale marker
+    # for an older head must not suppress the updated head — new commits mean
+    # the handoff no longer describes what the maintainer would be merging.
+    # Matching mirrors pm_dispatch_recovery._sha_matches_head (prefix, min 7).
+    if printf '%s' "$lower" | grep -q 'bob-pm-human-merge-required'; then
+        local marker_sha head_sha
+        marker_sha=$(printf '%s' "$lower" \
+            | grep -oE 'bob-pm-human-merge-required head=[0-9a-f]+' \
+            | tail -1 | cut -d= -f2)
+        head_sha=$(gh api "repos/$repo/pulls/$number" --jq '.head.sha' 2>/dev/null) \
+            || return 1
+        if [ -n "$marker_sha" ] && [ "${#marker_sha}" -ge 7 ] \
+                && [ "${#head_sha}" -ge 7 ] \
+                && case "$head_sha" in "$marker_sha"*) true ;; *) false ;; esac; then
+            return 0
+        fi
+        # Stale or unresolvable marker: not a valid handoff for this head.
+        return 1
+    fi
     # "ready (to|for) merge @<maintainer>" — the @-mention indicates the ball
     # is explicitly in the maintainer's court. Bare "ready to merge" is too
     # broad (Bob says it about his own PRs in unrelated contexts), so we
@@ -1695,7 +1723,13 @@ latest_comment_is_bot_waiting() {
         -H "X-GitHub-Api-Version: 2022-11-28" \
         "repos/$repo/pulls/$number/reviews?per_page=100" 2>/dev/null) || return 1
 
-    jq -en --arg bot "$bot" \
+    # The PM human-merge marker is head-scoped: a marker whose head sha no
+    # longer prefixes the PR's current head is a stale handoff and must not
+    # suppress the updated head (Greptile P1, gptme/gptme-contrib#1669).
+    local head_sha
+    head_sha=$(gh api "repos/$repo/pulls/$number" --jq '.head.sha' 2>/dev/null) || return 1
+
+    jq -en --arg bot "$bot" --arg head "$head_sha" \
         --argjson comments "$comments_json" \
         --argjson reviews "$reviews_json" '
         def is_waiting_handoff:
@@ -1706,6 +1740,9 @@ latest_comment_is_bot_waiting() {
                 or contains("ready to merge when convenient")
                 or contains("blocked by missing mergepullrequest permission")
                 or test("ready (to|for) merge @[a-z0-9_-]+")
+                or (test("bob-pm-human-merge-required head=[0-9a-f]{7,}")
+                    and ((capture("head=(?<h>[0-9a-f]+)").h // "") as $mh
+                         | ($mh | length >= 7) and ($head | startswith($mh))))
             ));
         def is_human:
             (.user.type // "") == "User"

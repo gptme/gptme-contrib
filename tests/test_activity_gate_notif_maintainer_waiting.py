@@ -37,6 +37,14 @@ notif_number = int(os.environ.get("TEST_NOTIF_NUMBER", "660"))
 notif_reason = os.environ.get("TEST_NOTIF_REASON", "author")
 subject_type = os.environ.get("TEST_SUBJECT_TYPE", "PullRequest")
 waiting_comment = os.environ.get("TEST_WAITING_COMMENT", "1")
+# Optional override for the bot waiting-comment body (e.g. the PM human-merge
+# marker body) — without it the fake gh only ever serves the canonical phrase.
+waiting_body = os.environ.get("TEST_WAITING_BODY")
+# Current PR head sha served for `repos/<repo>/pulls/<n>` lookups (used by the
+# head-scoped PM human-merge marker check).
+head_sha = os.environ.get(
+    "TEST_HEAD_SHA", "a65ead926a4080f6a17de9af384a6a87774f5761"
+)
 # Human activity after the bot's waiting comment reopens the handoff.
 human_after_waiting = os.environ.get("TEST_HUMAN_AFTER_WAITING", "0")
 bot_after_waiting = os.environ.get("TEST_BOT_AFTER_WAITING", "0")
@@ -104,7 +112,8 @@ if argv[0] == "api":
         if waiting_comment == "1":
             comments = [{
                 "user": {"login": "TimeToBuildBob", "type": "User"},
-                "body": "CI-green and mergeable — waiting only on a maintainer click.",
+                "body": waiting_body
+                or "CI-green and mergeable — waiting only on a maintainer click.",
                 "created_at": "2026-08-26T16:00:00Z",
             }]
             comments.extend(
@@ -150,6 +159,10 @@ if argv[0] == "api":
             page = comments[:100]
             print(apply_jq(page, jq_expr) if jq_expr else json.dumps(page))
         sys.exit(0)
+    if "/pulls/" in endpoint and endpoint.endswith(str(notif_number)):
+        pr = {"head": {"sha": head_sha}}
+        print(apply_jq(pr, jq_expr))
+        sys.exit(0)
     if endpoint.endswith("/reviews?per_page=100"):
         reviews = []
         if human_review_after_waiting == "1":
@@ -180,6 +193,8 @@ def _run_gate(
     human_review_after_waiting: str = "0",
     bot_reaffirm_waiting: str = "0",
     comment_count: int = 1,
+    waiting_body: str | None = None,
+    head_sha: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
     fake_gh.write_text(FAKE_GH)
@@ -192,6 +207,10 @@ def _run_gate(
     env["TEST_NOTIF_REASON"] = reason
     env["TEST_SUBJECT_TYPE"] = subject_type
     env["TEST_WAITING_COMMENT"] = waiting
+    if waiting_body is not None:
+        env["TEST_WAITING_BODY"] = waiting_body
+    if head_sha is not None:
+        env["TEST_HEAD_SHA"] = head_sha
     env["TEST_HUMAN_AFTER_WAITING"] = human_after_waiting
     env["TEST_BOT_AFTER_WAITING"] = bot_after_waiting
     env["TEST_HUMAN_REVIEW_AFTER_WAITING"] = human_review_after_waiting
@@ -362,6 +381,54 @@ def test_author_pr_emits_when_bot_reaffirms_after_human_comment() -> None:
             waiting="1",
             human_after_waiting="1",
             bot_reaffirm_waiting="1",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        emitted = _emitted_notifications(result.stdout)
+        assert len(emitted) == 1, result.stdout
+        assert emitted[0]["detail"] == "author"
+
+
+PM_HUMAN_MERGE_BODY = (
+    "Automated merge handoff for `a65ead926a40`:\n\n"
+    "This head is ready for maintainer review and **manual merge**. Project\n"
+    "monitoring marked it `human_merge_required`.\n\n"
+    "<!-- bob-pm-human-merge-required head=a65ead926a4080f6a17de9af384a6a87774f5761 -->"
+)
+
+
+def test_human_merge_marker_suppresses_author_notification() -> None:
+    """PM's canonical human-merge handoff marker must count as a waiting handoff.
+
+    ``bob-pm-human-merge-required`` is the head-scoped marker PM posts for a
+    path-policy head whose sole remaining gate is a maintainer merge. It was not
+    in the suppression phrase set, so author notifications kept emitting on every
+    Codecov/Greptile re-unread and dispatched sessions that could only re-confirm
+    the handoff that already existed (gptme/gptme-cloud#973).
+    """
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(tmp, state_dir, waiting_body=PM_HUMAN_MERGE_BODY)
+        assert result.returncode in (0, 1), result.stderr
+        assert _emitted_notifications(result.stdout) == [], result.stdout
+
+
+def test_human_merge_marker_reopens_on_human_comment() -> None:
+    """A maintainer comment after the human-merge handoff must still emit.
+
+    Guards against over-suppression: recognising the PM marker must not turn the
+    handoff into a permanent silence when a human actually replies.
+    """
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            waiting_body=PM_HUMAN_MERGE_BODY,
+            human_after_waiting="1",
         )
         assert result.returncode in (0, 1), result.stderr
         emitted = _emitted_notifications(result.stdout)
