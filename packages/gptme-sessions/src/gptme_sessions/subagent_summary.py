@@ -65,7 +65,7 @@ _QUOTED_RE = re.compile(r"'[^'\n]*'|\"[^\"\n]*\"")
 # User-agnostic home dir — contrib must not hardcode an agent username.
 _HOME_DIR = r"(?:~|/home/[^/]+)"
 _CD_SCRATCH_RE = re.compile(
-    r"\bcd\s+(?:/tmp(?:/(?!worktrees/)|\b)|\$SCRATCH|\"?\$D\b|"
+    r"\bcd\s+(?:/tmp(?:/(?!(?:worktrees)/)\S*|(?=\s|$))|\$SCRATCH|\"?\$D\b|"
     + _HOME_DIR
     + r"/\.cache/|/dev/shm/|"
     + _HOME_DIR
@@ -183,7 +183,10 @@ def cmd_mutation(cmd: str, cwd_scratch: bool = False) -> tuple[str | None, str |
         )
     else:
         repo_hit = _ABS_REPO_PATH_RE.search(body)
-    if fm and repo_hit:
+    if fm and (repo_hit or not in_scratch):
+        # Same bias as the redirect path below: outside known scratch space a
+        # relative-path fileop (rm foo, mv a b) is counted as acting rather
+        # than scratch — a repo-root cwd is the common case.
         return "acting", cmd[max(0, fm.start() - 20) : fm.end() + 60]
     for t in targets:
         if _SCRATCH_PATH_RE.match(t):

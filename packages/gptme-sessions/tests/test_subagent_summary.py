@@ -825,3 +825,21 @@ def test_collect_notifications_nonnumeric_duration_ms():
     dest: list[dict] = []
     _collect_notifications(text, 1.0, seen, dest)
     assert [d["task_id"] for d in dest] == ["a1", "a2"]
+
+
+def test_cd_scratch_regex_excludes_worktrees():
+    """cd into /tmp/worktrees/* must NOT set scratch (matches _SCRATCH_PATH_RE)."""
+    from gptme_sessions.subagent_summary import _CD_SCRATCH_RE
+
+    assert not _CD_SCRATCH_RE.search("cd /tmp/worktrees/feature && echo hi > out.md")
+    assert _CD_SCRATCH_RE.search("cd /tmp && ls")
+    assert _CD_SCRATCH_RE.search("cd /tmp/foo")
+
+
+def test_relative_fileop_outside_scratch_is_acting():
+    """Bash fileops with relative paths outside scratch classify as acting,
+    consistent with the redirect path's bias."""
+    from gptme_sessions.subagent_summary import cmd_mutation
+
+    assert cmd_mutation("mv foo.py bar.py") == ("acting", "mv foo.py bar.py")
+    assert cmd_mutation("cd /tmp && rm -f junk.tmp")[0] == "scratch"
