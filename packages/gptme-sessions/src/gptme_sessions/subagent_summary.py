@@ -34,7 +34,8 @@ _STRONG_RE = re.compile(
     + _SEG
     + r"""(?:
     git\s+(?:-C\s+\S+\s+)?(commit|push|merge|rebase|cherry-pick|reset|stash|am|apply|
-        worktree\s+(add|remove|prune)|checkout\s+-b|switch\s+-c|branch\s+-[dD]|tag\s|rm\s|mv\s|add\s)(?![\w-])
+        worktree\s+(add|remove|prune)|checkout\s+-b|switch\s+-c|branch\s+-[dD]|tag\s|rm\s|mv\s)(?![\w-])
+  | git\s+(?:-C\s+\S+\s+)?add\s
   | git-safe-commit\b | git-safe-push-master\b
   | gh\s+(pr\s+(create|merge|close|edit|comment|review|ready|checkout)
           | issue\s+(create|close|edit|comment|reopen|transfer)
@@ -448,7 +449,12 @@ def _scan_cc(records: list[dict[str, Any]]) -> TranscriptScan:
                     elif name == "SendMessage":
                         scan.sendmessages += 1
         else:
-            if not scan.first_prompt:
+            # A resumed/queued transcript can open with a tool_result payload;
+            # that is tool output, not the user's prompt — skip it.
+            first_is_tool_result = isinstance(content, list) and any(
+                isinstance(item, dict) and item.get("type") == "tool_result" for item in content
+            )
+            if not scan.first_prompt and not first_is_tool_result:
                 scan.first_prompt = _text_of(content)[:400]
             if isinstance(content, list):
                 for item in content:

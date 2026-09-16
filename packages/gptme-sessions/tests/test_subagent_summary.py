@@ -746,3 +746,39 @@ def test_child_token_failure_does_not_drop_summary(monkeypatch) -> None:
         harness=None,
     )
     assert summary["subagents_total"] == 1
+
+
+def test_cmd_mutation_git_add_with_options_is_acting() -> None:
+    # `git add -A` / `-p` must count as acting (negative lookahead must not
+    # reject the leading `-` of an option).
+    for cmd in ("git add -A", "git add -p foo.py", "git add ."):
+        label, _ = cmd_mutation(cmd)
+        assert label == "acting", cmd
+
+
+def test_scan_cc_first_prompt_skips_tool_result_payload() -> None:
+    from gptme_sessions.subagent_summary import _scan_cc
+
+    records = [
+        # Resumed transcript opens with a tool_result payload (queued/resume
+        # attachment) — that is tool output, not the user's prompt.
+        {
+            "type": "user",
+            "timestamp": "2026-03-01T10:00:00Z",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "content": [{"type": "text", "text": "queued tool output"}],
+                    }
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-03-01T10:00:05Z",
+            "message": {"content": "the real prompt"},
+        },
+    ]
+    scan = _scan_cc(records)
+    assert scan.first_prompt == "the real prompt"
