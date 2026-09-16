@@ -30,7 +30,10 @@ logger = logging.getLogger(__name__)
 # explicitly opt in by setting _ENABLE_ENV=1.
 _ENABLE_ENV = "GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK"  # set to "1" to enable
 _MODEL_ENV = "GPTME_ACTIVITY_SUMMARY_GPTME_MODEL"  # override the default model
-_DEFAULT_MODEL = "openrouter/deepseek/deepseek-v4-flash-0731@deepseek"
+# OpenRouter removed the official @deepseek endpoint for 0731 on 2026-09-10
+# (404 "No endpoints found"). Pin to the no-train allowlist used by
+# harness-quota [model_routes] (together, fireworks, inceptron).
+_DEFAULT_MODEL = "openrouter/deepseek/deepseek-v4-flash-0731@together,fireworks,inceptron"
 
 # gptme emits one JSON object per line on stdout in --output-format json. The
 # JSON answer appears in the first assistant message after the user prompt; the

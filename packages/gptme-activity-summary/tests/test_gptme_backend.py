@@ -466,8 +466,14 @@ def test_is_enabled_off_by_default(monkeypatch):
 
 
 def test_default_model_is_deepseek_flash():
-    """The default fallback model is the cheap privacy-gated deepseek opt-in."""
+    """The default fallback model is the cheap privacy-gated deepseek opt-in.
+
+    Official @deepseek for 0731 404s since 2026-09-10; the live pin is the
+    no-train allowlist from the 09-09 subprovider probe.
+    """
     assert "deepseek" in _DEFAULT_MODEL and "flash" in _DEFAULT_MODEL
+    assert "@deepseek" not in _DEFAULT_MODEL
+    assert "@together,fireworks,inceptron" in _DEFAULT_MODEL
 
 
 def test_call_gptme_returns_empty_when_disabled(monkeypatch):
