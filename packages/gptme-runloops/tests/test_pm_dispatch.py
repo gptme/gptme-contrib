@@ -19,6 +19,7 @@ from gptme_runloops.pm_dispatch import (
     DISPATCH_COOLDOWN_DIR_ENV,
     HUMAN_PRIORITY_ACTIVITY,
     HUMAN_PRIORITY_CHANGES_REQUESTED,
+    HUMAN_PRIORITY_MENTION,
     MIN_BANDIT_OBSERVATIONS,
     PM_DISPATCH_EXCLUDE_REPOS_ENV,
     SLOW_LANE_TYPES,
@@ -2059,8 +2060,15 @@ class TestItemPriorityRank:
     def test_detail_is_human_priority(self):
         assert detail_is_human_priority(f"x; {HUMAN_PRIORITY_ACTIVITY}")
         assert detail_is_human_priority(f"{HUMAN_PRIORITY_CHANGES_REQUESTED}")
+        assert detail_is_human_priority(HUMAN_PRIORITY_MENTION)
+        assert detail_is_human_priority("source: direct_mention_handoff")
         assert not detail_is_human_priority("updated: 2026-07-11T13:26:04Z")
+        assert not detail_is_human_priority("team_mention")
         assert not detail_is_human_priority(None)
+
+    def test_mention_token_shares_human_activity_rank(self):
+        assert item_priority_rank(HUMAN_PRIORITY_MENTION) == 1
+        assert item_priority_rank("source: direct_mention_handoff") == 1
 
 
 class TestOrderLaneLruHumanPriority:
@@ -2089,6 +2097,19 @@ class TestOrderLaneLruHumanPriority:
             self._item(2, "updated: X"),  # never dispatched (epoch 0)
             self._item(3, "updated: X"),  # never dispatched (epoch 0)
             self._item(1, "updated: X; human_changes_requested"),
+        ]
+
+        ordered = order_lane_lru(items, cooldown_dir=cooldown)
+
+        assert [i["number"] for i in ordered] == [1, 2, 3]
+
+    def test_mention_beats_never_dispatched_bot_backlog(self, tmp_path):
+        cooldown = tmp_path / "cooldown"
+        cooldown.mkdir()
+        items = [
+            self._item(2, "updated: X"),
+            self._item(3, "updated: X"),
+            self._item(1, HUMAN_PRIORITY_MENTION),
         ]
 
         ordered = order_lane_lru(items, cooldown_dir=cooldown)
@@ -2153,6 +2174,11 @@ class TestHumanPriorityOverflow:
 
     def test_human_item_allowed_at_cap(self):
         assert human_priority_allows_overflow(self.HUMAN, running_slots=5, slot_cap=5)
+
+    def test_mention_allowed_at_cap(self):
+        assert human_priority_allows_overflow(
+            HUMAN_PRIORITY_MENTION, running_slots=5, slot_cap=5
+        )
 
     def test_overflow_is_bounded_to_allowance(self):
         # A previously granted overflow slot counts in running_slots, so the

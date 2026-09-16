@@ -16,8 +16,10 @@ FAKE_GH = r"""#!/usr/bin/env python3
 from __future__ import annotations
 
 import json
+import os
 import subprocess as sp
 import sys
+from pathlib import Path
 
 argv = sys.argv[1:]
 
@@ -71,6 +73,11 @@ if argv[0] in {"pr", "issue", "run"} and len(argv) > 1 and argv[1] == "list":
 if argv[0] == "api":
     endpoint, jq_expr = parse_endpoint_and_jq(argv)
     if endpoint == "notifications":
+        custom = os.environ.get("FAKE_NOTIFICATIONS_JSON")
+        if custom:
+            notifications = json.loads(Path(custom).read_text())
+            print(apply_jq(notifications, jq_expr))
+            sys.exit(0)
         notifications = [
             {
                 "id": "author-1",
@@ -148,13 +155,19 @@ sys.exit(0)
 """
 
 
-def _run_gate(tmp: Path, state_dir: Path) -> subprocess.CompletedProcess[str]:
+def _run_gate(
+    tmp: Path,
+    state_dir: Path,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
     fake_gh.write_text(FAKE_GH)
     fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
 
     env = os.environ.copy()
     env["PATH"] = f"{tmp}:{env['PATH']}"
+    if extra_env:
+        env.update(extra_env)
     (state_dir / "notif-seed.state").write_text("2026-08-01T00:00:00Z")
 
     return subprocess.run(
@@ -199,8 +212,57 @@ def test_mentions_emit_before_author_churn_when_notification_cap_applies() -> No
         assert len(emitted) == 5, result.stdout
         assert [item["detail"] for item in emitted[:2]] == ["mention", "mention"]
         assert [item["title"] for item in emitted[:2]] == [
-            "newer mention",
             "buried mention",
+            "newer mention",
         ]
         assert (state_dir / "notif-mention-buried.state").exists()
-        assert not (state_dir / "notif-author-4.state").exists()
+        # Oldest-first within author: author-4 (19:47) emits; newest author-1 waits.
+        assert (state_dir / "notif-author-4.state").exists()
+        assert not (state_dir / "notif-author-1.state").exists()
+
+
+def _mention(notif_id: str, updated_at: str, number: int) -> dict:
+    return {
+        "id": notif_id,
+        "reason": "mention",
+        "updated_at": updated_at,
+        "subject": {
+            "title": notif_id,
+            "url": f"https://api.github.com/repos/org/repo/issues/{number}",
+            "type": "Issue",
+        },
+        "repository": {"full_name": "org/repo"},
+    }
+
+
+def test_oldest_mentions_win_when_mention_set_exceeds_cap() -> None:
+    """A mention flood must drain oldest unanswered first, not the newest five."""
+    mentions = [
+        _mention("mention-07-11-a", "2026-09-16T07:11:00Z", 688),
+        _mention("mention-07-11-b", "2026-09-16T07:11:10Z", 689),
+        _mention("mention-07-11-c", "2026-09-16T07:11:20Z", 690),
+        _mention("mention-07-11-d", "2026-09-16T07:11:30Z", 982),
+        _mention("mention-08-50-e", "2026-09-16T08:50:00Z", 694),
+        _mention("mention-08-50-f", "2026-09-16T08:50:10Z", 274),
+    ]
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        payload = tmp / "notifications.json"
+        payload.write_text(json.dumps(mentions))
+        result = _run_gate(
+            tmp, state_dir, extra_env={"FAKE_NOTIFICATIONS_JSON": str(payload)}
+        )
+
+        assert result.returncode in (0, 1), result.stderr
+        emitted = _emitted_notifications(result.stdout)
+        assert [item["title"] for item in emitted] == [
+            "mention-07-11-a",
+            "mention-07-11-b",
+            "mention-07-11-c",
+            "mention-07-11-d",
+            "mention-08-50-e",
+        ], result.stdout
+        assert (state_dir / "notif-mention-07-11-a.state").exists()
+        assert not (state_dir / "notif-mention-08-50-f.state").exists()
