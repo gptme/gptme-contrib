@@ -319,14 +319,6 @@ def _text_of(content: Any) -> str:
     return ""
 
 
-def _blob_len(value: Any) -> int:
-    if value is None:
-        return 0
-    if isinstance(value, str):
-        return len(value)
-    return len(json.dumps(value))
-
-
 def _notif_tag(body: str, key: str) -> str:
     match = _NOTIF_TAGS[key].search(body)
     return (match.group(1) if match else "").strip()
@@ -461,7 +453,8 @@ def _scan_cc(records: list[dict[str, Any]]) -> TranscriptScan:
             if isinstance(content, list):
                 for item in content:
                     if isinstance(item, dict) and item.get("type") == "tool_result":
-                        scan.result_bytes += _blob_len(item.get("content"))
+                        # Count extracted text, not json.dumps of content-block lists.
+                        scan.result_bytes += len(_text_of(item.get("content")))
             text = _text_of(content)
             if "<task-notification>" in text:
                 _collect_notifications(text, ts, seen_notif, scan.notifs)
@@ -626,7 +619,7 @@ def _scan_generic(records: list[dict[str, Any]]) -> TranscriptScan:
                     if path:
                         scan.write_paths.append(str(path))
             elif btype == "tool_result":
-                scan.result_bytes += _blob_len(block.get("content"))
+                scan.result_bytes += len(_text_of(block.get("content")))
     return scan
 
 

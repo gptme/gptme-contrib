@@ -641,6 +641,54 @@ def test_scan_generic_child_tool_calls_are_seen() -> None:
     assert scan.tools == {"save": 1, "shell": 1}
 
 
+def test_scan_cc_tool_result_counts_text_not_json_dump() -> None:
+    # Real Claude Code tool_result content is a list of blocks, not a string.
+    # Counting json.dumps of that list inflates subagent_tool_output_bytes.
+    from gptme_sessions.subagent_summary import _scan_cc
+
+    text = "hello world"
+    records = [
+        {
+            "type": "user",
+            "timestamp": "2026-03-01T10:00:01.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": [{"type": "text", "text": text}],
+                    }
+                ],
+            },
+        }
+    ]
+    scan = _scan_cc(records)
+    assert scan.result_bytes == len(text)
+    dumped = json.dumps([{"type": "text", "text": text}])
+    assert len(dumped) > len(text)
+
+
+def test_scan_generic_tool_result_counts_text_not_json_dump() -> None:
+    from gptme_sessions.subagent_summary import _scan_generic
+
+    text = "hello world"
+    records = [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "content": [{"type": "text", "text": text}],
+                }
+            ],
+            "timestamp": "2026-03-01T10:00:01Z",
+        }
+    ]
+    scan = _scan_generic(records)
+    assert scan.result_bytes == len(text)
+
+
 def test_summarize_subagents_generic_child_not_readonly() -> None:
     parent = [
         {"role": "user", "content": "spawn", "timestamp": "2026-03-01T10:00:00Z"},
