@@ -3337,8 +3337,10 @@ def extract_from_path(jsonl_path: Path) -> dict:
         timings = extract_timings_gptme(msgs)
         if timings:
             result["timings"] = timings
-    # Subagent structure (count/depth/concurrency/classifier) uses the same
-    # child transcripts already loaded above — do not re-parse the tree.
+    # Subagent structure (count/depth/concurrency/classifier) reuses
+    # child_specs already built from the transcripts loaded above so the
+    # usage roll-up and this summary cannot diverge. A second tree walk
+    # here could resolve a different child set than the usage numbers.
     try:
         from .subagent_summary import empty_summary, summarize_subagents
 
