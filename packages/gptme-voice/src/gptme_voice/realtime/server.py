@@ -44,6 +44,7 @@ from .missed_call_context import (
     CALLBACK_GUIDANCE,
     load_callback_brief,
     load_callback_candidate,
+    load_callback_history_index,
 )
 from .openai_client import (
     OpenAIRealtimeClient,
@@ -1641,6 +1642,14 @@ class VoiceServer:
         )
         if activity_digest and not standup_brief:
             instructions = _prepend_activity_digest(activity_digest, instructions)
+
+        # Inject the compact call history index for operator inbound calls.
+        # CALLBACK_WINDOW no longer gates this — the index covers all recent
+        # calls so the agent can reference them on demand without a time cap.
+        if caller_is_operator and not standup_brief:
+            history_index = load_callback_history_index(self.workspace)
+            if history_index:
+                instructions = history_index + "\n\n" + instructions
 
         # standup_brief takes priority over recent-call resume: an explicit outbound
         # standup should always deliver the brief, not silently resume a prior session.

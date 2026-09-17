@@ -9,6 +9,7 @@ from .missed_call_context import (
     CALLBACK_GUIDANCE,
     load_callback_brief,
     load_callback_candidate,
+    load_callback_history_index,
     write_missed_call_context,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "CALLBACK_GUIDANCE",
     "load_callback_brief",
     "load_callback_candidate",
+    "load_callback_history_index",
     "write_missed_call_context",
 ]

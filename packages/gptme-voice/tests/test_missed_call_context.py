@@ -11,6 +11,7 @@ from gptme_voice.realtime.missed_call_context import (
     _MAX_PAYLOAD_BYTES,
     load_callback_brief,
     load_callback_candidate,
+    load_callback_history_index,
     write_missed_call_context,
 )
 
@@ -947,3 +948,220 @@ def test_callback_beyond_4h_window_rejected(tmp_path):
     }
     (voice / "missed-call-context.json").write_text(json.dumps(note))
     assert load_callback_candidate(str(tmp_path), now=now, caller=PHONE) is None
+
+
+# ---------------------------------------------------------------------------
+# JSONL callback-history.jsonl — write and read
+# ---------------------------------------------------------------------------
+
+
+def test_write_appends_to_jsonl(tmp_path):
+    """write_missed_call_context appends one line per call to callback-history.jsonl."""
+    now = datetime.now(timezone.utc)
+    for i in range(3):
+        write_missed_call_context(
+            str(tmp_path),
+            sid="CA" + str(i) * 32,
+            caller=PHONE,
+            context={"generated_at": now.isoformat(), "text": f"call {i}"},
+        )
+    history_path = tmp_path / "state" / "voice-calls" / "callback-history.jsonl"
+    assert history_path.exists()
+    lines = [ln for ln in history_path.read_text().splitlines() if ln.strip()]
+    assert len(lines) == 3
+    last = json.loads(lines[-1])
+    assert last["context"]["text"] == "call 2"
+
+
+def test_candidate_reads_from_jsonl(tmp_path):
+    """load_callback_candidate finds the most recent JSONL entry."""
+    now = datetime.now(timezone.utc)
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    entry = {
+        "type": "general",
+        "sid": CALL_SID,
+        "date": now.date().isoformat(),
+        "placed_at": (now - timedelta(minutes=5)).isoformat(),
+        "caller": PHONE,
+        "context": {
+            "generated_at": (now - timedelta(minutes=30)).isoformat(),
+            "text": MARKER,
+        },
+    }
+    history_path = voice / "callback-history.jsonl"
+    history_path.write_text(json.dumps(entry) + "\n")
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    sid, payload, _ = result
+    assert sid == CALL_SID
+    assert MARKER in payload
+
+
+def test_candidate_uses_latest_jsonl_entry_over_earlier(tmp_path):
+    """Most recent valid JSONL entry wins, not the first."""
+    now = datetime.now(timezone.utc)
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    old_sid = "CA" + "0" * 32
+    new_sid = "CA" + "1" * 32
+    old_entry = {
+        "sid": old_sid,
+        "date": now.date().isoformat(),
+        "placed_at": (now - timedelta(hours=3)).isoformat(),
+        "caller": PHONE,
+        "context": {
+            "generated_at": (now - timedelta(hours=3, minutes=5)).isoformat(),
+            "text": "old call",
+        },
+    }
+    new_entry = {
+        "sid": new_sid,
+        "date": now.date().isoformat(),
+        "placed_at": (now - timedelta(minutes=10)).isoformat(),
+        "caller": PHONE,
+        "context": {
+            "generated_at": (now - timedelta(minutes=20)).isoformat(),
+            "text": "new call",
+        },
+    }
+    history_path = voice / "callback-history.jsonl"
+    history_path.write_text(json.dumps(old_entry) + "\n" + json.dumps(new_entry) + "\n")
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    assert result[0] == new_sid
+
+
+def test_candidate_jsonl_takes_priority_over_single_file(tmp_path):
+    """JSONL entry is preferred over missed-call-context.json when both exist."""
+    now = datetime.now(timezone.utc)
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    jsonl_sid = "CA" + "a" * 32
+    json_sid = "CA" + "b" * 32
+    jsonl_entry = {
+        "sid": jsonl_sid,
+        "date": now.date().isoformat(),
+        "placed_at": (now - timedelta(minutes=5)).isoformat(),
+        "caller": PHONE,
+        "context": {
+            "generated_at": (now - timedelta(minutes=15)).isoformat(),
+            "text": "from jsonl",
+        },
+    }
+    single_note = {
+        "sid": json_sid,
+        "date": now.date().isoformat(),
+        "placed_at": (now - timedelta(minutes=5)).isoformat(),
+        "caller": PHONE,
+        "context": {
+            "generated_at": (now - timedelta(minutes=15)).isoformat(),
+            "text": "from single file",
+        },
+    }
+    (voice / "callback-history.jsonl").write_text(json.dumps(jsonl_entry) + "\n")
+    (voice / "missed-call-context.json").write_text(json.dumps(single_note))
+    result = load_callback_candidate(str(tmp_path), now=now)
+    assert result is not None
+    assert result[0] == jsonl_sid
+
+
+# ---------------------------------------------------------------------------
+# load_callback_history_index
+# ---------------------------------------------------------------------------
+
+
+def test_history_index_none_for_empty_workspace(tmp_path):
+    assert load_callback_history_index(str(tmp_path)) is None
+
+
+def test_history_index_none_when_no_file(tmp_path):
+    (tmp_path / "state" / "voice-calls").mkdir(parents=True)
+    assert load_callback_history_index(str(tmp_path)) is None
+
+
+def test_history_index_none_for_none_workspace():
+    assert load_callback_history_index(None) is None
+
+
+def test_history_index_returns_formatted_string(tmp_path):
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    now = datetime(2026, 9, 17, 12, 0, 0, tzinfo=timezone.utc)
+    entry = {
+        "sid": CALL_SID,
+        "date": now.date().isoformat(),
+        "placed_at": (now - timedelta(hours=1)).isoformat(),
+        "caller": PHONE,
+        "context_file": "state/standup-brief.json",
+    }
+    (voice / "callback-history.jsonl").write_text(json.dumps(entry) + "\n")
+    index = load_callback_history_index(str(tmp_path))
+    assert index is not None
+    assert PHONE in index
+    assert "state/standup-brief.json" in index
+    assert "2026-09-17" in index
+
+
+def test_history_index_shows_last_n_entries(tmp_path):
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    now = datetime(2026, 9, 17, 12, 0, 0, tzinfo=timezone.utc)
+    # Write 7 entries in chronological order (oldest first, newest last) — this
+    # matches the append-only JSONL where new calls are written at the end.
+    lines = []
+    for i in range(6, -1, -1):  # i=6 oldest (7h ago), i=0 newest (1h ago)
+        entry = {
+            "sid": "CA" + str(i) * 32,
+            "date": now.date().isoformat(),
+            "placed_at": (now - timedelta(hours=i + 1)).isoformat(),
+            "caller": PHONE,
+            "context_file": f"state/brief-{i}.json",
+        }
+        lines.append(json.dumps(entry))
+    (voice / "callback-history.jsonl").write_text("\n".join(lines) + "\n")
+    index = load_callback_history_index(str(tmp_path), n=5)
+    assert index is not None
+    # Should include the 5 most recent (i=0..4 = placed 1..5h ago), not oldest (i=5,6)
+    assert "brief-0.json" in index
+    assert "brief-4.json" in index
+    assert "brief-5.json" not in index
+    assert "brief-6.json" not in index
+
+
+def test_history_index_includes_transcript_and_session_files(tmp_path):
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    now = datetime(2026, 9, 17, 12, 0, 0, tzinfo=timezone.utc)
+    entry = {
+        "sid": CALL_SID,
+        "date": now.date().isoformat(),
+        "placed_at": now.isoformat(),
+        "caller": PHONE,
+        "context_file": "state/standup-brief.json",
+        "transcript_file": "state/voice-calls/transcript-CA.md",
+        "session_file": "journal/2026-09-17/standup-session.md",
+    }
+    (voice / "callback-history.jsonl").write_text(json.dumps(entry) + "\n")
+    index = load_callback_history_index(str(tmp_path))
+    assert index is not None
+    assert "transcript:" in index
+    assert "session:" in index
+    assert "transcript-CA.md" in index
+
+
+def test_write_then_index(tmp_path):
+    """Round-trip: write_missed_call_context then load_callback_history_index."""
+    now = datetime.now(timezone.utc)
+    write_missed_call_context(
+        str(tmp_path),
+        sid=CALL_SID,
+        caller=PHONE,
+        context={"generated_at": now.isoformat(), "text": MARKER},
+        context_file="state/standup-brief.json",
+        now=now,
+    )
+    index = load_callback_history_index(str(tmp_path))
+    assert index is not None
+    assert PHONE in index
+    assert "state/standup-brief.json" in index

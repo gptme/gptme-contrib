@@ -1,10 +1,17 @@
 """General missed-call context persistence for inbound callback sessions.
 
 When an outbound call is placed, the caller writes a lightweight context note
-(``write_missed_call_context``) with a path to the prepared context file. When
-the same party calls back within ``CALLBACK_WINDOW``, the inbound path reads
-that file and injects its content into the session — as if the call took place
-but the other end was silent.
+(``write_missed_call_context``) with a path to the prepared context file. The
+note is appended to ``state/voice-calls/callback-history.jsonl`` — one JSON
+line per call — so the full outbound history is preserved.
+
+When the same party calls back within ``CALLBACK_WINDOW``, the inbound path
+reads the most recent matching entry and injects its content into the session —
+as if the call took place but the other end was silent.
+
+``load_callback_history_index`` returns a compact index of the last N calls
+(pointers, not payloads) for injection into every inbound session. The agent
+can read referenced context files on demand via the read_file tool.
 
 The standup case is an instance of this general pattern. The outbound standup
 path writes a note with ``type="standup"`` and ``context_file`` pointing at
@@ -20,9 +27,10 @@ see the link.
 An optional inlined ``context`` snapshot is a fallback for notes that already
 carry one, or when the referenced file is missing, stale, or unreadable.
 
-Legacy backward compat: if no ``missed-call-context.json`` exists, the loader
-falls back to reading ``last-standup-call-sid.txt`` + ``standup-brief.json``
-so existing deployments continue to work without changes.
+Legacy backward compat: if no ``callback-history.jsonl`` entry exists, the
+loader falls back to ``missed-call-context.json`` then to the legacy standup
+files (``last-standup-call-sid.txt`` + ``standup-brief.json``) so existing
+deployments continue to work without changes.
 """
 
 import asyncio
@@ -39,9 +47,14 @@ logger = logging.getLogger(__name__)
 CALLBACK_WINDOW = timedelta(hours=4)
 MAX_CONTEXT_AGE = timedelta(hours=4)
 _MAX_PAYLOAD_BYTES = 16000
+_HISTORY_FILE = "callback-history.jsonl"
 _CONTEXT_NOTE_FILE = "missed-call-context.json"
 _LEGACY_STAMP_FILE = "last-standup-call-sid.txt"
 _LEGACY_BRIEF_FILE = "standup-brief.json"
+_HISTORY_INDEX_GUIDANCE = (
+    "Use the read_file tool to fetch any referenced context file on demand "
+    "if the caller's opening references it."
+)
 
 CALLBACK_GUIDANCE = (
     "MISSED CALL CALLBACK:\n"
@@ -156,6 +169,12 @@ def write_missed_call_context(
         note["context"] = context
     if "context_file" not in note and "context" not in note:
         return
+    # Append to JSONL history (one line per call).
+    history_path = voice_dir / _HISTORY_FILE
+    with history_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(note, ensure_ascii=False) + "\n")
+    # Also write the single-file format for backward compatibility with
+    # deployments still reading missed-call-context.json directly.
     (voice_dir / _CONTEXT_NOTE_FILE).write_text(
         json.dumps(note, ensure_ascii=False), encoding="utf-8"
     )
@@ -166,8 +185,9 @@ def load_callback_candidate(
 ) -> tuple[str, str, float] | None:
     """Return (sid, payload_json, placed_at_timestamp) for a fresh local candidate.
 
-    Tries the generic ``missed-call-context.json`` first, then falls back to the
-    legacy standup-specific files for backward compatibility.
+    Tries the JSONL history first (most recent entry within CALLBACK_WINDOW),
+    then falls back to ``missed-call-context.json``, then to the legacy
+    standup-specific files for backward compatibility.
 
     When ``caller`` is provided, a new-format note must name that same caller
     or it is ignored (avoids a Twilio lookup for a different number). Legacy
@@ -178,8 +198,18 @@ def load_callback_candidate(
     current = _as_utc(now)
     root = Path(workspace)
     state = root / "state"
+    voice_dir = state / "voice-calls"
+
+    # Try JSONL history first — most recent entry that fits the window.
+    result = _load_from_history(
+        voice_dir / _HISTORY_FILE, current, workspace=root, caller=caller
+    )
+    if result is not None:
+        return result
+
+    # Fall back to the single-entry JSON note.
     result = _load_from_note(
-        state / "voice-calls" / _CONTEXT_NOTE_FILE,
+        voice_dir / _CONTEXT_NOTE_FILE,
         current,
         workspace=root,
         caller=caller,
@@ -359,15 +389,15 @@ def _load_context_payload(
     return _serialize_context(note.get("context"), current, placed)
 
 
-def _load_from_note(
-    note_path: Path,
+def _validate_note(
+    note: object,
     current: datetime,
     *,
     workspace: Path,
     caller: str | None = None,
 ) -> tuple[str, str, float] | None:
+    """Validate a parsed note dict and return (sid, payload, placed_at) or None."""
     try:
-        note = json.loads(note_path.read_text())
         if not isinstance(note, dict):
             return None
         sid = note.get("sid")
@@ -390,6 +420,47 @@ def _load_from_note(
     except (OSError, ValueError):
         return None
     return sid, payload, placed.timestamp()
+
+
+def _load_from_note(
+    note_path: Path,
+    current: datetime,
+    *,
+    workspace: Path,
+    caller: str | None = None,
+) -> tuple[str, str, float] | None:
+    try:
+        note = json.loads(note_path.read_text())
+    except (OSError, ValueError):
+        return None
+    return _validate_note(note, current, workspace=workspace, caller=caller)
+
+
+def _load_from_history(
+    history_path: Path,
+    current: datetime,
+    *,
+    workspace: Path,
+    caller: str | None = None,
+) -> tuple[str, str, float] | None:
+    """Load the most recent eligible entry from the JSONL history file."""
+    try:
+        lines = history_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    # Iterate in reverse to find the most recent matching entry.
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            note = json.loads(line)
+        except ValueError:
+            continue
+        result = _validate_note(note, current, workspace=workspace, caller=caller)
+        if result is not None:
+            return result
+    return None
 
 
 def _load_legacy(state: Path, current: datetime) -> tuple[str, str, float] | None:
@@ -434,6 +505,59 @@ def _load_legacy(state: Path, current: datetime) -> tuple[str, str, float] | Non
     except (OSError, ValueError):
         return None
     return sid, payload, placed.timestamp()
+
+
+def load_callback_history_index(
+    workspace: str | None,
+    *,
+    n: int = 5,
+) -> str | None:
+    """Return a compact index of the last *n* outbound calls, or None if empty.
+
+    Each entry lists the call time, caller, and a pointer to the context file.
+    The agent can read any referenced file on demand via the read_file tool.
+    CALLBACK_WINDOW does not gate this — the index covers all recent calls.
+    """
+    if not workspace:
+        return None
+    history_path = Path(workspace) / "state" / "voice-calls" / _HISTORY_FILE
+    try:
+        lines = history_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    entries: list[dict] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            entries.append(obj)
+    if not entries:
+        return None
+    recent = entries[-n:]
+    lines_out: list[str] = [f"OUTBOUND CALL HISTORY (last {len(recent)}):"]
+    for entry in reversed(recent):
+        placed_raw = entry.get("placed_at", "")
+        try:
+            placed = _timestamp(placed_raw)
+            placed_str = placed.strftime("%Y-%m-%d %H:%MZ")
+        except ValueError:
+            placed_str = placed_raw[:16] if placed_raw else "unknown"
+        caller = entry.get("caller", "unknown")
+        parts = [f"- {placed_str} — {caller}"]
+        if "context_file" in entry:
+            parts.append(f"brief: {entry['context_file']}")
+        if "transcript_file" in entry:
+            parts.append(f"transcript: {entry['transcript_file']}")
+        if "session_file" in entry:
+            parts.append(f"session: {entry['session_file']}")
+        lines_out.append(" | ".join(parts))
+    lines_out.append(_HISTORY_INDEX_GUIDANCE)
+    return "\n".join(lines_out)
 
 
 async def load_callback_brief(
