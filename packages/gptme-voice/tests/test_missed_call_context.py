@@ -1207,6 +1207,80 @@ def test_append_repairs_torn_tail(tmp_path):
     assert json.loads(lines[1])["sid"] == CALL_SID
 
 
+def test_append_does_not_wipe_history_on_oversized_torn_tail(tmp_path):
+    """A torn tail larger than the read window must not nuke earlier history.
+
+    Regression for: when no newline is found inside the bounded tail-repair
+    window but the file extends further back than the window, the repair
+    logic used to truncate the file to byte 0 — destroying every prior
+    record instead of just the torn one.
+    """
+    from gptme_voice.realtime.missed_call_context import (
+        _HISTORY_TAIL_BYTES,
+        _append_history_line,
+    )
+
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    history = voice / "callback-history.jsonl"
+    now = datetime.now(timezone.utc)
+    first = {
+        "type": "general",
+        "sid": "CAfirstrecordmarker00000000000000",
+        "date": now.date().isoformat(),
+        "placed_at": now.isoformat(),
+        "caller": PHONE,
+    }
+    _append_history_line(history, first)
+    before = history.read_text()
+    assert before.strip()
+    # Simulate a torn write larger than the tail-repair window: no newline
+    # anywhere in the last _HISTORY_TAIL_BYTES of the file.
+    with history.open("a", encoding="utf-8") as fh:
+        fh.write('"' + "x" * (_HISTORY_TAIL_BYTES + 1024))
+    second = {**first, "sid": "CAsecondrecordmarker0000000000000"}
+    _append_history_line(history, second)
+    # The legitimate first record must still be present — the ambiguous
+    # torn tail must not have wiped it.
+    assert history.read_text().startswith(before)
+
+
+def test_append_drops_oversized_inline_context(tmp_path):
+    """An oversized inline context is dropped rather than written as-is.
+
+    Keeps every JSONL line comfortably under the tail-repair window so an
+    unbounded caller-supplied context dict can never itself trigger the
+    oversized-torn-tail scenario above.
+    """
+    from gptme_voice.realtime.missed_call_context import (
+        _MAX_PAYLOAD_BYTES,
+        _append_history_line,
+    )
+
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    history = voice / "callback-history.jsonl"
+    now = datetime.now(timezone.utc)
+    oversized = {
+        "type": "general",
+        "sid": CALL_SID,
+        "date": now.date().isoformat(),
+        "placed_at": now.isoformat(),
+        "caller": PHONE,
+        "context": {
+            "generated_at": now.isoformat(),
+            "text": "x" * (_MAX_PAYLOAD_BYTES * 2),
+        },
+    }
+    _append_history_line(history, oversized)
+    lines = [ln for ln in history.read_text().splitlines() if ln.strip()]
+    assert len(lines) == 1
+    assert len(lines[0].encode("utf-8")) <= _MAX_PAYLOAD_BYTES
+    record = json.loads(lines[0])
+    assert "context" not in record
+    assert record["sid"] == CALL_SID
+
+
 def test_index_reads_only_tail_of_large_history(tmp_path):
     """A very large history file still yields the last-n index entries."""
     voice = tmp_path / "state" / "voice-calls"

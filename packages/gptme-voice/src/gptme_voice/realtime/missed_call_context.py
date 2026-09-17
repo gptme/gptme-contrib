@@ -34,7 +34,6 @@ deployments continue to work without changes.
 """
 
 import asyncio
-import fcntl
 import json
 import logging
 import os
@@ -43,6 +42,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - POSIX-only; this server never runs on Windows
+    fcntl = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 CALLBACK_WINDOW = timedelta(hours=4)
@@ -222,8 +226,17 @@ def _append_history_line(history_path: Path, note: dict) -> None:
     """
     history_path.parent.mkdir(parents=True, exist_ok=True)
     encoded = json.dumps(note, ensure_ascii=False) + "\n"
+    if len(encoded.encode("utf-8")) > _MAX_PAYLOAD_BYTES and "context" in note:
+        # Keep every line well under the tail-repair window: an inlined
+        # `context` snapshot is the only unbounded field (file-backed
+        # snapshots are already capped by _read_capped_bytes). Drop it
+        # rather than write an oversized line — the loader already falls
+        # back to context_file when context is absent.
+        note = {k: v for k, v in note.items() if k != "context"}
+        encoded = json.dumps(note, ensure_ascii=False) + "\n"
     with history_path.open("a+b") as fh:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        if fcntl is not None:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
         try:
             size = fh.seek(0, os.SEEK_END)
             if size:
@@ -232,20 +245,29 @@ def _append_history_line(history_path: Path, note: dict) -> None:
                 fh.seek(tail_start)
                 tail = fh.read()
                 last_nl = tail.rfind(b"\n")
-                candidate = tail[last_nl + 1 :] if last_nl >= 0 else tail
-                if candidate.strip():
-                    try:
-                        json.loads(candidate.decode("utf-8"))
-                    except (ValueError, UnicodeDecodeError):
-                        # Torn tail: truncate back to the last complete line.
-                        good = tail_start + last_nl + 1 if last_nl >= 0 else 0
-                        fh.truncate(good)
-                        fh.seek(good)
+                if last_nl < 0 and tail_start > 0:
+                    # No newline anywhere in the tail window, but the file
+                    # extends further back than we read: we cannot tell
+                    # whether this is a torn record or just one larger than
+                    # our window, so don't guess — skip repair rather than
+                    # truncating data we never inspected.
+                    pass
+                else:
+                    candidate = tail[last_nl + 1 :] if last_nl >= 0 else tail
+                    if candidate.strip():
+                        try:
+                            json.loads(candidate.decode("utf-8"))
+                        except (ValueError, UnicodeDecodeError):
+                            # Torn tail: truncate back to the last complete line.
+                            good = tail_start + last_nl + 1 if last_nl >= 0 else 0
+                            fh.truncate(good)
+                            fh.seek(good)
             fh.write(encoded.encode("utf-8"))
             fh.flush()
             os.fsync(fh.fileno())
         finally:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 def _read_tail_lines(path: Path, max_bytes: int = _HISTORY_TAIL_BYTES) -> list[str]:
