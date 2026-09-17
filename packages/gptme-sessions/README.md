@@ -163,6 +163,7 @@ gptme-sessions blame scripts/watchdog.py --line 42
 gptme-sessions blame scripts/watchdog.py --limit 5 --json
 
 # GitHub refs (PR or issue) — no local git history needed
+# (requires the gh CLI installed and authenticated)
 gptme-sessions blame gptme/gptme-contrib#1252
 
 # Point at a specific records store (default: auto-detected from git root)

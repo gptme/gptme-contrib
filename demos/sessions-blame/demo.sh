@@ -24,15 +24,16 @@ COMMIT_DATE="2026-06-01T10:15:00+00:00"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 cd "$TMP"
-git init -q
+# Explicit -b main (a global init.defaultBranch would otherwise race with the
+# branch creation) and no inherited commit signing.
+git init -q -b main
 git config user.email "demo@example.com"
 git config user.name "Demo Agent"
-git checkout -q -b main
 printf 'def hello():\n    return "world"\n' > hello.py
 git add hello.py
 # Pin the author/committer date so the commit lands inside the sample window.
 GIT_AUTHOR_DATE="$COMMIT_DATE" GIT_COMMITTER_DATE="$COMMIT_DATE" \
-  git -c core.hooksPath=/dev/null commit -q -m "feat: add hello function"
+  git -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -q -m "feat: add hello function"
 
 echo "== commit =="
 git log -1 --format="%h  %aI  %s"
