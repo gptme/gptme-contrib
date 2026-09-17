@@ -712,7 +712,10 @@ def _coerce_delegation(raw: Any) -> DelegationVerdict | None:
     verdict = str(raw.get("verdict", "")).strip()
     if verdict not in VALID_DELEGATION_VERDICTS:
         return None
-    return {"verdict": verdict, "reason": str(raw.get("reason", ""))}
+    reason_raw = str(raw.get("reason", "")).strip()
+    if not reason_raw:
+        return None
+    return {"verdict": verdict, "reason": reason_raw}
 
 
 def normalize_judge_verdict(payload: dict[str, Any]) -> JudgeVerdict:
@@ -998,20 +1001,28 @@ def judge_session(
     # str.format() only parses {placeholder} in the template itself — values
     # passed as keyword arguments are substituted verbatim without re-parsing.
     # No escaping of {/} in user content is needed or correct.
+    subagent_ctx = format_subagent_context(subagent_summary)
     prompt = JUDGE_PROMPT_TEMPLATE.format(
         goals=goals,
         category=category or "unknown",
         routing_context=format_routing_context(cascade_context),
         intent_context=format_intent_context(intent),
-        subagent_context=format_subagent_context(subagent_summary),
+        subagent_context=subagent_ctx,
         journal=truncated,
     )
 
     if _is_anthropic_direct_model(model):
-        return _judge_via_anthropic_direct(
+        result = _judge_via_anthropic_direct(
             prompt, model=model, api_key=api_key, temperature=temperature
         )
-    return _judge_via_gptme(prompt, model=model)
+    else:
+        result = _judge_via_gptme(prompt, model=model)
+
+    # Omission contract: if no subagent context was injected, any delegation
+    # the model fabricates violates the contract — strip it unconditionally.
+    if result is not None and not subagent_ctx:
+        result.pop("delegation", None)
+    return result
 
 
 def judge_session_with_fallback(

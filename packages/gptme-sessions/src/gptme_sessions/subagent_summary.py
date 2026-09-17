@@ -152,7 +152,9 @@ EMPTY_SUMMARY: dict[str, Any] = {
 
 def empty_summary() -> dict[str, Any]:
     """Zeroed summary dict (always the same keys)."""
-    return dict(EMPTY_SUMMARY)
+    s = dict(EMPTY_SUMMARY)
+    s["subagent_children"] = []  # fresh list — EMPTY_SUMMARY's list must not be mutated
+    return s
 
 
 def cmd_mutation(cmd: str, cwd_scratch: bool = False) -> tuple[str | None, str | None]:
@@ -925,9 +927,18 @@ def summarize_subagents(
         )
         if parent_turns >= 1:
             kept += 1
-        child_rows[i]["result_used"] = parent_turns >= 1
+        # result_used: notification received in the parent's trajectory is the
+        # strongest available signal that the child's result was delivered and
+        # available for consumption.  "Parent was busy while child ran"
+        # (parent_turns >= 1) is kept-working, not result consumption.
+        notif_ts_for_child = notif_by_id.get(agent_id) or (
+            notif_by_id.get(str(child.tool_use_id)) if child.tool_use_id else None
+        )
+        child_rows[i]["result_used"] = notif_ts_for_child is not None
     summary["spawns_parent_kept_working"] = kept
-    summary["subagent_children"] = child_rows
+    # Only expose top-level (depth <= 1) children in the breakdown — nested
+    # descendants would inflate the row count and corrupt the delegation signal.
+    summary["subagent_children"] = [child_rows[i] for i, _ in top_children]
 
     idle_max = 0.0
     if intervals and len(parent.turn_ts) > 1:
