@@ -874,7 +874,21 @@ def test_write_file_link_then_load_round_trip(tmp_path):
     data = json.loads(payload)
     assert data["text"] == MARKER
     assert data["goals"] == ["ship it"]
-    assert data["context_file"] == "state/prepared-context.json"
+    # The history row points at an immutable per-call snapshot, not the
+    # mutable source file — a later call rewriting prepared-context.json
+    # must not repoint this row's context.
+    snapshot = data["context_file"]
+    assert snapshot.startswith("state/voice-calls/context-")
+    # The original file is replaced after the outbound call; the row still
+    # resolves to the content from that call.
+    (tmp_path / "state" / "prepared-context.json").write_text(
+        json.dumps({"generated_at": now.isoformat(), "text": "REPLACED"})
+    )
+    result2 = load_callback_candidate(str(tmp_path), now=now)
+    assert result2 is not None
+    data2 = json.loads(result2[1])
+    assert data2["text"] == MARKER
+    assert data2["context_file"] == snapshot
 
 
 def test_utc_midnight_crossing_is_not_same_day(tmp_path):
@@ -1165,3 +1179,51 @@ def test_write_then_index(tmp_path):
     assert index is not None
     assert PHONE in index
     assert "state/standup-brief.json" in index
+
+
+def test_append_repairs_torn_tail(tmp_path):
+    """An interrupted append leaves a partial line; the next write truncates it."""
+    from gptme_voice.realtime.missed_call_context import _append_history_line
+
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    history = voice / "callback-history.jsonl"
+    now = datetime.now(timezone.utc)
+    good = {
+        "type": "general",
+        "sid": CALL_SID,
+        "date": now.date().isoformat(),
+        "placed_at": now.isoformat(),
+        "caller": PHONE,
+        "context": {"generated_at": now.isoformat(), "text": MARKER},
+    }
+    _append_history_line(history, good)
+    with history.open("a", encoding="utf-8") as fh:
+        fh.write('{"type": "general", "sid": "CAxx')  # torn tail
+    _append_history_line(history, good)
+    lines = [ln for ln in history.read_text().splitlines() if ln.strip()]
+    assert len(lines) == 2
+    assert json.loads(lines[0])["sid"] == CALL_SID
+    assert json.loads(lines[1])["sid"] == CALL_SID
+
+
+def test_index_reads_only_tail_of_large_history(tmp_path):
+    """A very large history file still yields the last-n index entries."""
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    history = voice / "callback-history.jsonl"
+    now = datetime.now(timezone.utc)
+    filler = {
+        "type": "general",
+        "sid": CALL_SID,
+        "date": now.date().isoformat(),
+        "placed_at": now.isoformat(),
+        "caller": PHONE,
+        "context": {"generated_at": now.isoformat(), "text": "x" * 200},
+    }
+    with history.open("w", encoding="utf-8") as fh:
+        for _ in range(2000):
+            fh.write(json.dumps(filler, ensure_ascii=False) + "\n")
+    index = load_callback_history_index(str(tmp_path), n=5)
+    assert index is not None
+    assert "CALL HISTORY (last 5)" in index

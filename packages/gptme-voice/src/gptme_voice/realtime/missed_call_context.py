@@ -34,6 +34,7 @@ deployments continue to work without changes.
 """
 
 import asyncio
+import fcntl
 import json
 import logging
 import os
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 CALLBACK_WINDOW = timedelta(hours=4)
 MAX_CONTEXT_AGE = timedelta(hours=4)
 _MAX_PAYLOAD_BYTES = 16000
+_HISTORY_TAIL_BYTES = 65536
 _HISTORY_FILE = "callback-history.jsonl"
 _CONTEXT_NOTE_FILE = "missed-call-context.json"
 _LEGACY_STAMP_FILE = "last-standup-call-sid.txt"
@@ -164,20 +166,115 @@ def write_missed_call_context(
         relative = _workspace_relative_path(root, context_file)
         if relative is None:
             raise ValueError(f"context_file outside workspace: {context_file!r}")
-        note["context_file"] = relative
+        # Snapshot the referenced file into an immutable per-call copy.
+        # History rows must keep pointing at the content from *that* call —
+        # mutable files like state/standup-brief.json get replaced by later
+        # calls, which would silently repoint older history rows.
+        note["context_file"] = _snapshot_context_file(voice_dir, relative, current)
     if context is not None:
         note["context"] = context
     if "context_file" not in note and "context" not in note:
         return
-    # Append to JSONL history (one line per call).
-    history_path = voice_dir / _HISTORY_FILE
-    with history_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(note, ensure_ascii=False) + "\n")
+    # Append to JSONL history (one line per call), durably.
+    _append_history_line(voice_dir / _HISTORY_FILE, note)
     # Also write the single-file format for backward compatibility with
     # deployments still reading missed-call-context.json directly.
     (voice_dir / _CONTEXT_NOTE_FILE).write_text(
         json.dumps(note, ensure_ascii=False), encoding="utf-8"
     )
+
+
+def _snapshot_context_file(voice_dir: Path, relative: str, current: datetime) -> str:
+    """Copy the referenced context file to an immutable per-call snapshot.
+
+    Returns the workspace-relative path of the snapshot when the source file
+    exists and is small enough to matter; otherwise returns *relative*
+    unchanged (the loader falls back to the inlined snapshot or skips).
+    """
+    source = voice_dir.parent.parent / relative  # voice_dir = <ws>/state/voice-calls
+    try:
+        raw = _read_capped_bytes(source)
+    except OSError:
+        return relative
+    if raw is None:
+        return relative
+    suffix = source.suffix or ".json"
+    snapshot_name = f"context-{current.strftime('%Y%m%dT%H%M%S')}{suffix}"
+    snapshot_path = voice_dir / snapshot_name
+    try:
+        fd = os.open(snapshot_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, raw)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        return relative
+    return f"state/voice-calls/{snapshot_name}"
+
+
+def _append_history_line(history_path: Path, note: dict) -> None:
+    """Durably append one JSON line, locking and repairing a torn tail.
+
+    If a previous append was interrupted mid-line, the partial JSON is
+    truncated so it cannot corrupt the next record (the loaders would
+    otherwise skip the joined malformed line and lose both calls).
+    """
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(note, ensure_ascii=False) + "\n"
+    with history_path.open("a+b") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            size = fh.seek(0, os.SEEK_END)
+            if size:
+                # Read the trailing bytes and check the last complete line.
+                tail_start = max(0, size - _HISTORY_TAIL_BYTES)
+                fh.seek(tail_start)
+                tail = fh.read()
+                last_nl = tail.rfind(b"\n")
+                candidate = tail[last_nl + 1 :] if last_nl >= 0 else tail
+                if candidate.strip():
+                    try:
+                        json.loads(candidate.decode("utf-8"))
+                    except (ValueError, UnicodeDecodeError):
+                        # Torn tail: truncate back to the last complete line.
+                        good = tail_start + last_nl + 1 if last_nl >= 0 else 0
+                        fh.truncate(good)
+                        fh.seek(good)
+            fh.write(encoded.encode("utf-8"))
+            fh.flush()
+            os.fsync(fh.fileno())
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def _read_tail_lines(path: Path, max_bytes: int = _HISTORY_TAIL_BYTES) -> list[str]:
+    """Read only the last *max_bytes* of *path* as decoded lines.
+
+    Bounds the synchronous inbound-bootstrap scan (P2): the history file
+    grows unboundedly, but only the tail is ever relevant. A partial first
+    line (file larger than the window) is dropped.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+    if size == 0:
+        return []
+    start = max(0, size - max_bytes)
+    try:
+        with path.open("rb") as fh:
+            fh.seek(start)
+            data = fh.read()
+    except OSError:
+        return []
+    if start > 0:
+        first_nl = data.find(b"\n")
+        if first_nl >= 0:
+            data = data[first_nl + 1 :]
+        else:
+            return []
+    return data.decode("utf-8", errors="replace").splitlines()
 
 
 def load_callback_candidate(
@@ -444,10 +541,7 @@ def _load_from_history(
     caller: str | None = None,
 ) -> tuple[str, str, float] | None:
     """Load the most recent eligible entry from the JSONL history file."""
-    try:
-        lines = history_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return None
+    lines = _read_tail_lines(history_path)
     # Iterate in reverse to find the most recent matching entry.
     for line in reversed(lines):
         line = line.strip()
@@ -539,7 +633,7 @@ def load_callback_history_index(
     if not entries:
         return None
     recent = entries[-n:]
-    lines_out: list[str] = [f"OUTBOUND CALL HISTORY (last {len(recent)}):"]
+    lines_out: list[str] = [f"CALL HISTORY (last {len(recent)}):"]
     for entry in reversed(recent):
         placed_raw = entry.get("placed_at", "")
         try:

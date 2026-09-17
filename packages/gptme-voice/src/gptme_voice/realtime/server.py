@@ -2612,16 +2612,26 @@ class VoiceServer:
                         # Cold path: build session from scratch. Callback guidance
                         # offers the brief instead of using the outbound opener.
                         if callback_brief:
+                            # Callback sessions get the call history index too —
+                            # without this, only non-callback operator calls see it.
+                            callback_history = load_callback_history_index(
+                                self.workspace
+                            )
+                            callback_parts = [
+                                CALLBACK_GUIDANCE,
+                                "\n\n",
+                                callback_brief,
+                                "\n\n",
+                            ]
+                            if callback_history:
+                                callback_parts.append(callback_history + "\n\n")
+                            callback_parts.append(
+                                _build_caller_instructions(
+                                    self._instructions, from_number, self.workspace
+                                )
+                            )
                             bootstrap = SessionBootstrap(
-                                instructions=(
-                                    CALLBACK_GUIDANCE
-                                    + "\n\n"
-                                    + callback_brief
-                                    + "\n\n"
-                                    + _build_caller_instructions(
-                                        self._instructions, from_number, self.workspace
-                                    )
-                                ),
+                                instructions="".join(callback_parts),
                                 should_greet_first=True,
                                 initial_response_instructions=CALLBACK_GREETING,
                             )
