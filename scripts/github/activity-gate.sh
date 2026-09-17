@@ -2011,6 +2011,17 @@ check_merge_ready() {
     done
 }
 
+# Returns exit 0 (true) when the issue/PR for a mention notification is already
+# closed/merged. GitHub's issues API covers both issues and PRs (merged PRs
+# have .state == "closed"). Fails open (return 1) on API error so we never
+# accidentally suppress a live mention.
+mention_subject_is_closed() {
+    local repo="$1" number="$2"
+    local state
+    state=$(gh api "repos/${repo}/issues/${number}" --jq '.state' 2>/dev/null) || return 1
+    [ "$state" = "closed" ]
+}
+
 # Check for actionable unread notifications (review requests, mentions, assigns, author, comments)
 # State-tracked by notification ID to avoid re-triggering for the same unread notification.
 # Returns individual notification items in jsonl mode, count in markdown mode.
@@ -2113,6 +2124,18 @@ def notification_priority:
                         && latest_comment_is_bot_waiting "$repo" "$number"; then
                     printf '%s' "$notif_updated" > "$state_file"
                     printf '%s#%s' "$repo" "$number" > "$map_file"
+                    continue
+                fi
+                # Drop-only staleness filter for reason=mention: if the subject
+                # issue/PR is already closed/merged, PM has nothing actionable —
+                # a dispatch produces a NOOP session and may prompt a spurious
+                # comment on a closed thread. Persist the updated_at so the item
+                # is not retried until the thread is updated again.
+                if [ "$_notif_reason" = "mention" ] \
+                        && [ "$number" -gt 0 ] 2>/dev/null \
+                        && mention_subject_is_closed "$repo" "$number"; then
+                    printf '%s' "$notif_updated" > "$state_file"
+                    [ "$number" -gt 0 ] 2>/dev/null && printf '%s#%s' "$repo" "$number" > "$map_file"
                     continue
                 fi
                 _notif_emitted=$((_notif_emitted + 1))
