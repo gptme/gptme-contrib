@@ -102,6 +102,7 @@ ANNOTATABLE_FIELDS: frozenset[str] = frozenset(
         "trigger",
         "token_count",
         "recommended_category",
+        "subagent_summary",
     ]
 )
 
@@ -524,6 +525,18 @@ class SessionRecord:
     reasoning_effort: str | None = None
     reasoning_profile: str | None = None
     reasoning_tokens: int | None = None
+
+    # Per-session subagent practice summary (phase 1.2 of the subagent-fields
+    # program, gptme-sessions#1668). Dict shape mirrors
+    # ``subagent_summary.EMPTY_SUMMARY`` (subagents_total, subagents_depth_max,
+    # subagents_max_concurrent, subagents_readonly/scratch/acting,
+    # subagent_tokens_total, subagent_seconds_total,
+    # subagent_tool_output_bytes, subagent_report_bytes, subagent_resumes,
+    # spawns_parent_kept_working, spawns_total, parent_idle_max_seconds,
+    # active_seconds, session_kind) so downstream consumers can read it
+    # without importing gptme_sessions.subagent_summary. ``None`` means not
+    # yet populated (pre-dates this field or trajectory absent).
+    subagent_summary: dict[str, Any] | None = None
 
     # Preserve fields written by older schema versions so load→mutate→rewrite
     # round-trips don't silently drop data (e.g. ``inferred_category``,

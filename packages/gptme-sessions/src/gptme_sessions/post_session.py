@@ -547,6 +547,7 @@ def post_session(
     ttft_ms_p50: float | None = None
     gen_ms_total: float | None = None
     tool_ms_total: float | None = None
+    subagent_summary: dict[str, Any] | None = None
     trajectory_revision: str | None = None
 
     # --- Extract signals from trajectory ---
@@ -567,6 +568,14 @@ def post_session(
                 ttft_ms_p50 = _traj_timings.get("ttft_ms_p50")
                 gen_ms_total = _traj_timings.get("gen_ms_total")
                 tool_ms_total = _traj_timings.get("tool_ms_total")
+            # Subagent practice summary (count/depth/concurrency/classifier +
+            # spared-context signals). Always present on a successful extract
+            # (empty_summary() on the no-children/error path), so a plain dict
+            # check is enough — no "truthy" guard that would drop an
+            # all-zeros-but-real summary.
+            _subagent_summary = result.get("subagent_summary")
+            if isinstance(_subagent_summary, dict):
+                subagent_summary = _subagent_summary
             if usage:
                 _provider = usage.get("provider")
                 _stop_reason = usage.get("stop_reason")
@@ -1090,6 +1099,8 @@ def post_session(
         record_kwargs["gen_ms_total"] = gen_ms_total
     if tool_ms_total is not None:
         record_kwargs["tool_ms_total"] = tool_ms_total
+    if subagent_summary is not None:
+        record_kwargs["subagent_summary"] = subagent_summary
 
     if exit_code != 0:
         if failure_reason is None or error is None:

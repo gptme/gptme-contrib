@@ -184,3 +184,34 @@ def test_post_session_timings_absent_for_old_sessions(tmp_path: Path):
     assert rec.ttft_ms_avg is None
     assert rec.gen_ms_total is None
     assert rec.tool_ms_total is None
+
+
+def test_post_session_subagent_summary_populated_even_without_children(tmp_path: Path):
+    """subagent_summary lifts into SessionRecord — empty_summary() for a childless
+    session, not None, since extract_from_path always attaches the key."""
+    import json
+
+    traj = tmp_path / "conversation.jsonl"
+    msgs = [
+        {"role": "user", "content": "hi", "timestamp": "2026-01-01T00:00:01+00:00"},
+        {
+            "role": "assistant",
+            "content": "hello",
+            "timestamp": "2026-01-01T00:00:02+00:00",
+            "metadata": {"model": "claude-sonnet-4-6"},
+        },
+    ]
+    traj.write_text("\n".join(json.dumps(m) for m in msgs))
+
+    store = SessionStore(sessions_dir=tmp_path / "sessions")
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="sonnet",
+        duration_seconds=5,
+        trajectory_path=traj,
+    )
+    rec = result.record
+    assert rec.subagent_summary is not None
+    assert rec.subagent_summary["subagents_total"] == 0
+    assert rec.subagent_summary["session_kind"] in ("autonomous", "unknown")

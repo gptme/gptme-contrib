@@ -181,6 +181,17 @@ def _apply_extract_result_to_record(record: SessionRecord, result: dict) -> bool
         record, "deliverable_details", result.get("deliverable_details", [])
     )
     changed |= _assign_extracted_if_missing(record, "category", result.get("inferred_category"))
+    _subagent_summary = result.get("subagent_summary")
+    if isinstance(_subagent_summary, dict):
+        # A re-extraction of the same trajectory is authoritative: replace a
+        # stale summary (e.g. a resumed Pi session whose subagent counters
+        # grew) instead of backfill-missing. Only an explicit operator
+        # annotation freezes it.
+        if "subagent_summary" not in record.annotated_fields and (
+            record.subagent_summary != _subagent_summary
+        ):
+            record.subagent_summary = _subagent_summary
+            changed = True
 
     usage = result.get("usage")
     if isinstance(usage, dict):
@@ -311,6 +322,9 @@ def _apply_extract_result_to_kwargs(record_kwargs: dict, result: dict) -> None:
     record_kwargs["deliverable_details"] = result.get("deliverable_details", [])
     if result.get("inferred_category"):
         record_kwargs["category"] = result["inferred_category"]
+    _subagent_summary = result.get("subagent_summary")
+    if isinstance(_subagent_summary, dict):
+        record_kwargs["subagent_summary"] = _subagent_summary
 
     usage = result.get("usage")
     if not isinstance(usage, dict):
@@ -701,6 +715,7 @@ _RICHNESS_FIELDS: tuple[str, ...] = (
     "context_peak_tokens",
     "harm_category",
     "span_aggregates",
+    "subagent_summary",
 )
 
 # Values that count as "empty" for richness/merge purposes.
@@ -1383,6 +1398,16 @@ def append(
     default=None,
     help="Override recommended category (from Thompson sampling / CASCADE)",
 )
+@click.option(
+    "--subagent-summary",
+    default=None,
+    help=(
+        "Override subagent summary fields as a JSON object merged into the "
+        "extracted summary (e.g. '{\"subagents_total\": 3}' corrects just "
+        "that counter). Annotated summaries are frozen against re-extraction "
+        "on sync/regrade."
+    ),
+)
 @click.option("--add-deliverable", multiple=True, help="Add deliverable(s) to existing list")
 @click.option(
     "--json", "as_json", is_flag=True, help="Output updated record as JSON after applying changes"
@@ -1402,6 +1427,7 @@ def annotate(
     trigger: str | None,
     token_count: int | None,
     recommended_category: str | None,
+    subagent_summary: str | None,
     add_deliverable: tuple[str, ...],
     as_json: bool,
 ) -> None:
@@ -1434,6 +1460,7 @@ def annotate(
         and trigger is None
         and token_count is None
         and recommended_category is None
+        and subagent_summary is None
         and not add_deliverable
     )
     if nothing_supplied:
@@ -1501,6 +1528,28 @@ def annotate(
             set_annotated("token_count", token_count)
         if recommended_category is not None:
             set_annotated("recommended_category", recommended_category)
+        if subagent_summary is not None:
+
+            def _reject_constant(name: str) -> None:
+                raise ValueError(f"non-finite JSON constant {name!r} is not allowed")
+
+            try:
+                parsed_summary = json.loads(subagent_summary, parse_constant=_reject_constant)
+            except ValueError as e:
+                raise click.BadParameter(
+                    f"--subagent-summary must be a valid JSON object: {e}",
+                    param_hint="--subagent-summary",
+                ) from e
+            if not isinstance(parsed_summary, dict):
+                raise click.BadParameter(
+                    "--subagent-summary must be a JSON object (e.g. '{\"subagents_total\": 3}')",
+                    param_hint="--subagent-summary",
+                )
+            # Merge into the extracted summary so a partial correction does
+            # not silently drop the other extracted counters.
+            merged_summary: dict[str, Any] = dict(record.subagent_summary or {})
+            merged_summary.update(parsed_summary)
+            set_annotated("subagent_summary", merged_summary)
         if add_deliverable:
             existing = list(record.deliverables or [])
             for d in add_deliverable:
