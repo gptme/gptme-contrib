@@ -341,6 +341,34 @@ class TestJudgeSession:
         assert "Explore" in block and "used" in block
         assert "general-purpose" in block and "unused" in block
 
+    def test_format_subagent_context_unknown_result_used(self) -> None:
+        """A child with result_used=None renders as 'unknown', and the rubric
+        text in the prompt clarifies that 'unknown' is neutral evidence, not waste."""
+        block = format_subagent_context(
+            {
+                "subagents_total": 1,
+                "subagents_readonly": 1,
+                "subagents_scratch": 0,
+                "subagents_acting": 0,
+                "subagent_tokens_total": 100,
+                "spawns_parent_kept_working": 1,
+                "subagent_children": [
+                    {
+                        "agent_type": "Explore",
+                        "label": "nested",
+                        "duration_s": 5,
+                        "tokens": 100,
+                        "result_used": None,
+                    }
+                ],
+            }
+        )
+        assert "unknown" in block
+        # The prompt rubric must explicitly address "unknown" so the judge does not
+        # treat it as evidence of waste.
+        assert "unknown" in JUDGE_PROMPT_TEMPLATE
+        assert "neutral evidence" in JUDGE_PROMPT_TEMPLATE
+
     def test_prompt_template_uses_canonical_alignment_verdict_vocabulary(self) -> None:
         """The prompt vocabulary must match the values accepted by the parser."""
         prompt = JUDGE_PROMPT_TEMPLATE.format(

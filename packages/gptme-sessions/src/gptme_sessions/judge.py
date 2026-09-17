@@ -260,7 +260,8 @@ strategic-value score based on subagent use.
 **Delegation verdict** (`delegation.verdict`):
 - ``"good"``: Read-only/exploration work was offloaded to subagents while the
   parent kept working or synthesizing, and the subagents' results were
-  actually used (`result_used: true`).
+  actually used (`result_used: true`). Do not pick ``"good"`` for children
+  with `result_used: unknown` — that means no usage data was recorded.
 - ``"neutral"``: No subagents were used, or subagent use was incidental and
   neither clearly helped nor hurt. **Default to this** — not delegating is
   the correct default for short, simple, or single-file tasks. A session with
@@ -268,6 +269,9 @@ strategic-value score based on subagent use.
 - ``"wasteful"``: Subagents were spawned but their results were not used
   (`result_used: false`), duplicated work the parent already did, or the
   overhead (tokens/duration) was disproportionate to what was returned.
+  Do **not** treat `result_used: unknown` as evidence of waste — it means
+  no data was recorded (nested children or missing timestamps), not that
+  results were discarded; treat it as neutral evidence.
 - ``"missed"``: The session did a long serial exploration (many sequential
   read-only tool calls) that a read-only subagent should clearly have done
   in parallel, and no subagent was used.
