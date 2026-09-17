@@ -100,10 +100,17 @@ def outbound_identity_params(
     would archive the Call SID as ``caller_id`` and lose the dialed party.
     ``from_number`` stays the key the WebSocket handler already uses for resume
     and identity lookup; ``remote_party`` is the explicit durable identity.
+
+    ``direction`` marks the leg as ``outbound`` so the call-end handler can tell
+    an answered outbound call apart from an inbound one — both arrive on the same
+    Twilio Media Stream path with ``source="twilio"``. It is a *label* only, never
+    authorization: like every custom parameter it is replayable by anyone who can
+    reach ``/twilio``.
     """
     params = dict(extra or {})
     params["from_number"] = to_number
     params["remote_party"] = to_number
+    params["direction"] = "outbound"
     return params
 
 

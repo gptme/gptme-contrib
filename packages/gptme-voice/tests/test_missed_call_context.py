@@ -1408,12 +1408,18 @@ def test_record_inbound_call_appends_to_history(tmp_path):
     assert entry["placed_at"].startswith(now.date().isoformat())
 
 
-def test_record_inbound_call_noop_for_empty_workspace(tmp_path):
-    from gptme_voice.realtime.missed_call_context import record_inbound_call
+def test_record_inbound_call_noop_for_empty_workspace(tmp_path, monkeypatch):
+    from gptme_voice.realtime import missed_call_context as mcc
 
-    record_inbound_call(None, caller=PHONE)
-    record_inbound_call("", caller=PHONE)
-    # Neither call should create any files.
+    appended: list[tuple] = []
+    monkeypatch.setattr(mcc, "_append_history_line", lambda *a, **k: appended.append(a))
+
+    mcc.record_inbound_call(None, caller=PHONE)
+    mcc.record_inbound_call("", caller=PHONE)
+
+    # A falsy workspace must return before reaching the append helper — no
+    # history write anywhere, not just no write under an unrelated tmp_path.
+    assert appended == []
 
 
 def test_record_inbound_call_noop_for_empty_caller(tmp_path):
