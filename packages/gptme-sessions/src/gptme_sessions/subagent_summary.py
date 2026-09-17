@@ -399,6 +399,7 @@ def _scan_cc(records: list[dict[str, Any]]) -> TranscriptScan:
     prev: float | None = None
     seen_msg: set[str] = set()
     seen_notif: set[tuple[str, int, int]] = set()
+    seen_tool_result_ids: set[str] = set()
     for record in records:
         rec_type = record.get("type")
         ts = _record_ts(record)
@@ -478,6 +479,11 @@ def _scan_cc(records: list[dict[str, Any]]) -> TranscriptScan:
             if isinstance(content, list):
                 for item in content:
                     if isinstance(item, dict) and item.get("type") == "tool_result":
+                        tid = item.get("tool_use_id") or ""
+                        if tid and tid in seen_tool_result_ids:
+                            continue
+                        if tid:
+                            seen_tool_result_ids.add(tid)
                         # Count extracted text, not json.dumps of content-block lists.
                         scan.result_bytes += len(_text_of(item.get("content")))
             text = _text_of(content)

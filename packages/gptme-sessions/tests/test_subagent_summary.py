@@ -669,6 +669,36 @@ def test_scan_cc_tool_result_counts_text_not_json_dump() -> None:
     assert len(dumped) > len(text)
 
 
+def test_scan_cc_tool_result_deduplicates_by_tool_use_id() -> None:
+    # Resumed CC transcripts replay history — same tool_use_id appears twice.
+    # result_bytes must count each tool_use_id only once.
+    from gptme_sessions.subagent_summary import _scan_cc
+
+    text = "output text"
+    tool_result_block = {
+        "type": "tool_result",
+        "tool_use_id": "tool-abc",
+        "content": [{"type": "text", "text": text}],
+    }
+    records = [
+        {
+            "type": "user",
+            "timestamp": "2026-03-01T10:00:01.000Z",
+            "message": {"role": "user", "content": [tool_result_block]},
+        },
+        # Same tool_use_id replayed in resumed transcript — must NOT double-count.
+        {
+            "type": "user",
+            "timestamp": "2026-03-01T10:00:02.000Z",
+            "message": {"role": "user", "content": [tool_result_block]},
+        },
+    ]
+    scan = _scan_cc(records)
+    assert scan.result_bytes == len(
+        text
+    ), f"Expected {len(text)}, got {scan.result_bytes} — duplicate tool_use_id double-counted"
+
+
 def test_scan_generic_tool_result_counts_text_not_json_dump() -> None:
     from gptme_sessions.subagent_summary import _scan_generic
 
