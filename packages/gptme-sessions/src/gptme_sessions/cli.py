@@ -183,7 +183,15 @@ def _apply_extract_result_to_record(record: SessionRecord, result: dict) -> bool
     changed |= _assign_extracted_if_missing(record, "category", result.get("inferred_category"))
     _subagent_summary = result.get("subagent_summary")
     if isinstance(_subagent_summary, dict):
-        changed |= _assign_extracted_if_missing(record, "subagent_summary", _subagent_summary)
+        # A re-extraction of the same trajectory is authoritative: replace a
+        # stale summary (e.g. a resumed Pi session whose subagent counters
+        # grew) instead of backfill-missing. Only an explicit operator
+        # annotation freezes it.
+        if "subagent_summary" not in record.annotated_fields and (
+            record.subagent_summary != _subagent_summary
+        ):
+            record.subagent_summary = _subagent_summary
+            changed = True
 
     usage = result.get("usage")
     if isinstance(usage, dict):

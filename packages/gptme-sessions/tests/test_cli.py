@@ -2400,14 +2400,28 @@ class TestSubagentSummaryPropagation:
             "subagents_depth_max": 1,
         }
 
-    def test_backfill_preserves_existing_subagent_summary(self) -> None:
+    def test_refresh_replaces_stale_subagent_summary(self) -> None:
         from gptme_sessions.cli import _apply_extract_result_to_record
 
-        existing = {"subagents_total": 9, "subagents_depth_max": 3}
-        record = SessionRecord(session_id="s1", harness="gptme", subagent_summary=existing)
+        stale = {"subagents_total": 9, "subagents_depth_max": 3}
+        record = SessionRecord(session_id="s1", harness="gptme", subagent_summary=stale)
+        changed = _apply_extract_result_to_record(record, self._extract_result())
+
+        assert changed is True
+        assert record.subagent_summary == {
+            "subagents_total": 2,
+            "subagents_depth_max": 1,
+        }
+
+    def test_refresh_preserves_annotated_subagent_summary(self) -> None:
+        from gptme_sessions.cli import _apply_extract_result_to_record
+
+        annotated = {"subagents_total": 9, "subagents_depth_max": 3}
+        record = SessionRecord(session_id="s1", harness="gptme", subagent_summary=annotated)
+        record.annotated_fields.append("subagent_summary")
         _apply_extract_result_to_record(record, self._extract_result())
 
-        assert record.subagent_summary == existing
+        assert record.subagent_summary == annotated
 
     def test_kwargs_populates_subagent_summary(self) -> None:
         from gptme_sessions.cli import _apply_extract_result_to_kwargs
