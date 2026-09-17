@@ -891,6 +891,42 @@ def test_write_file_link_then_load_round_trip(tmp_path):
     assert data2["context_file"] == snapshot
 
 
+def test_snapshot_names_do_not_collide_within_same_second(tmp_path):
+    """Two calls in the same second referencing the same source file each
+    get their own immutable snapshot instead of the second silently falling
+    back to the mutable source path on an O_EXCL collision."""
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "prepared-context.json").write_text(
+        json.dumps(
+            {"generated_at": datetime.now(timezone.utc).isoformat(), "text": MARKER}
+        )
+    )
+    same_instant = datetime.now(timezone.utc)
+    write_missed_call_context(
+        str(tmp_path),
+        sid=CALL_SID,
+        caller=PHONE,
+        context_file="state/prepared-context.json",
+        now=same_instant,
+    )
+    first = json.loads(
+        (tmp_path / "state" / "voice-calls" / "missed-call-context.json").read_text()
+    )["context_file"]
+    write_missed_call_context(
+        str(tmp_path),
+        sid="CA" + "d" * 32,
+        caller=PHONE,
+        context_file="state/prepared-context.json",
+        now=same_instant,
+    )
+    second = json.loads(
+        (tmp_path / "state" / "voice-calls" / "missed-call-context.json").read_text()
+    )["context_file"]
+    assert first != second
+    assert first.startswith("state/voice-calls/context-")
+    assert second.startswith("state/voice-calls/context-")
+
+
 def test_utc_midnight_crossing_is_not_same_day(tmp_path):
     voice = tmp_path / "state" / "voice-calls"
     voice.mkdir(parents=True)

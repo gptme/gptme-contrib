@@ -52,7 +52,11 @@ logger = logging.getLogger(__name__)
 CALLBACK_WINDOW = timedelta(hours=4)
 MAX_CONTEXT_AGE = timedelta(hours=4)
 _MAX_PAYLOAD_BYTES = 16000
-_HISTORY_TAIL_BYTES = 65536
+# Sized so the last-n index (n defaults to 5) can't be starved of recent
+# entries by the read window: each JSONL line is capped near
+# _MAX_PAYLOAD_BYTES (16000), so 8x that comfortably covers 5 max-size
+# entries plus overhead with room to spare.
+_HISTORY_TAIL_BYTES = 8 * _MAX_PAYLOAD_BYTES
 _HISTORY_FILE = "callback-history.jsonl"
 _CONTEXT_NOTE_FILE = "missed-call-context.json"
 _LEGACY_STAMP_FILE = "last-standup-call-sid.txt"
@@ -203,18 +207,27 @@ def _snapshot_context_file(voice_dir: Path, relative: str, current: datetime) ->
     if raw is None:
         return relative
     suffix = source.suffix or ".json"
-    snapshot_name = f"context-{current.strftime('%Y%m%dT%H%M%S')}{suffix}"
-    snapshot_path = voice_dir / snapshot_name
-    try:
-        fd = os.open(snapshot_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    stamp = current.strftime("%Y%m%dT%H%M%S%f")
+    # Two outbound calls referencing the same source file at the identical
+    # microsecond (concurrent calls, or a frozen/mocked clock in tests) would
+    # collide on O_EXCL below. Retry with a distinguishing counter instead of
+    # silently falling back to the mutable path on the second call.
+    for attempt in range(10):
+        snapshot_name = f"context-{stamp}{f'-{attempt}' if attempt else ''}{suffix}"
+        snapshot_path = voice_dir / snapshot_name
+        try:
+            fd = os.open(snapshot_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        except OSError:
+            return relative
         try:
             os.write(fd, raw)
             os.fsync(fd)
         finally:
             os.close(fd)
-    except OSError:
-        return relative
-    return f"state/voice-calls/{snapshot_name}"
+        return f"state/voice-calls/{snapshot_name}"
+    return relative
 
 
 def _append_history_line(history_path: Path, note: dict) -> None:
