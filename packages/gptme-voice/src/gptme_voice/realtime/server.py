@@ -2293,6 +2293,15 @@ class VoiceServer:
             self._pending_call_groups[caller_id] = call_group_id
         record.call_group_id = call_group_id
         record_path = self._save_call_record(record)
+        if self.workspace and source in ("twilio", "browser", "local"):
+            from .missed_call_context import record_inbound_call
+
+            record_inbound_call(
+                self.workspace,
+                caller=caller_id,
+                sid=cleaned_metadata.get("call_sid"),
+                session_file=str(record_path),
+            )
         pending_record_paths.append(record_path)
         deduped_record_paths = self._dedupe_record_paths(pending_record_paths)
         record.archive_record_paths = [str(path) for path in deduped_record_paths]

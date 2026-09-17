@@ -636,14 +636,52 @@ def _load_legacy(state: Path, current: datetime) -> tuple[str, str, float] | Non
     return sid, payload, placed.timestamp()
 
 
+def record_inbound_call(
+    workspace: str | None,
+    *,
+    caller: str,
+    sid: str | None = None,
+    session_file: str | None = None,
+    now: datetime | None = None,
+) -> None:
+    """Append a compact session record for a completed inbound call.
+
+    Mirrors ``write_missed_call_context`` for the inbound direction so
+    ``load_callback_history_index`` covers both call directions.
+
+    *session_file* should be the workspace-relative path of the archived
+    call-record JSON written by the server at call-end.
+    """
+    if not workspace:
+        return
+    if not caller:
+        return
+    current = _as_utc(now)
+    voice_dir = Path(workspace) / "state" / "voice-calls"
+    note: dict = {
+        "direction": "inbound",
+        "date": current.date().isoformat(),
+        "placed_at": current.isoformat(),
+        "caller": caller,
+    }
+    if sid:
+        note["sid"] = sid
+    if session_file is not None:
+        root = Path(workspace)
+        relative = _workspace_relative_path(root, session_file)
+        if relative is not None:
+            note["session_file"] = relative
+    _append_history_line(voice_dir / _HISTORY_FILE, note)
+
+
 def load_callback_history_index(
     workspace: str | None,
     *,
     n: int = 5,
 ) -> str | None:
-    """Return a compact index of the last *n* outbound calls, or None if empty.
+    """Return a compact index of the last *n* calls (both directions), or None.
 
-    Each entry lists the call time, caller, and a pointer to the context file.
+    Each entry lists the call time, caller, direction, and file pointers.
     The agent can read any referenced file on demand via the read_file tool.
     CALLBACK_WINDOW does not gate this — the index covers all recent calls.
     """
@@ -674,7 +712,9 @@ def load_callback_history_index(
         except ValueError:
             placed_str = placed_raw[:16] if placed_raw else "unknown"
         caller = _sanitize_index_field(entry.get("caller", "unknown"))
-        parts = [f"- {placed_str} — {caller}"]
+        direction = entry.get("direction", "outbound")
+        direction_tag = f" ({direction})" if direction != "outbound" else ""
+        parts = [f"- {placed_str} — {caller}{direction_tag}"]
         for key, label in (
             ("context_file", "brief"),
             ("transcript_file", "transcript"),

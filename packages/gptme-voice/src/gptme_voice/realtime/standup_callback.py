@@ -10,6 +10,7 @@ from .missed_call_context import (
     load_callback_brief,
     load_callback_candidate,
     load_callback_history_index,
+    record_inbound_call,
     write_missed_call_context,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "load_callback_brief",
     "load_callback_candidate",
     "load_callback_history_index",
+    "record_inbound_call",
     "write_missed_call_context",
 ]
