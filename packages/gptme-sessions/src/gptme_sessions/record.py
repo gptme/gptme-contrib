@@ -102,6 +102,7 @@ ANNOTATABLE_FIELDS: frozenset[str] = frozenset(
         "trigger",
         "token_count",
         "recommended_category",
+        "subagent_summary",
     ]
 )
 

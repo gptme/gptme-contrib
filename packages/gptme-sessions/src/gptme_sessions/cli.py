@@ -1398,6 +1398,15 @@ def append(
     default=None,
     help="Override recommended category (from Thompson sampling / CASCADE)",
 )
+@click.option(
+    "--subagent-summary",
+    default=None,
+    help=(
+        "Override subagent summary as a JSON object "
+        "(e.g. '{\"subagents_total\": 3}'). Annotated summaries are frozen "
+        "against re-extraction on sync/regrade."
+    ),
+)
 @click.option("--add-deliverable", multiple=True, help="Add deliverable(s) to existing list")
 @click.option(
     "--json", "as_json", is_flag=True, help="Output updated record as JSON after applying changes"
@@ -1417,6 +1426,7 @@ def annotate(
     trigger: str | None,
     token_count: int | None,
     recommended_category: str | None,
+    subagent_summary: str | None,
     add_deliverable: tuple[str, ...],
     as_json: bool,
 ) -> None:
@@ -1449,6 +1459,7 @@ def annotate(
         and trigger is None
         and token_count is None
         and recommended_category is None
+        and subagent_summary is None
         and not add_deliverable
     )
     if nothing_supplied:
@@ -1516,6 +1527,20 @@ def annotate(
             set_annotated("token_count", token_count)
         if recommended_category is not None:
             set_annotated("recommended_category", recommended_category)
+        if subagent_summary is not None:
+            try:
+                parsed_summary = json.loads(subagent_summary)
+            except json.JSONDecodeError as e:
+                raise click.BadParameter(
+                    f"--subagent-summary must be a valid JSON object: {e}",
+                    param_hint="--subagent-summary",
+                ) from e
+            if not isinstance(parsed_summary, dict):
+                raise click.BadParameter(
+                    "--subagent-summary must be a JSON object (e.g. '{\"subagents_total\": 3}')",
+                    param_hint="--subagent-summary",
+                )
+            set_annotated("subagent_summary", parsed_summary)
         if add_deliverable:
             existing = list(record.deliverables or [])
             for d in add_deliverable:

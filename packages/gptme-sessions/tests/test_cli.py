@@ -738,6 +738,48 @@ class TestAnnotateCommand:
         record = [r for r in updated if r.session_id == session_id][0]
         assert record.model == "haiku"
 
+    def test_annotate_updates_subagent_summary(self, tmp_path: Path):
+        """annotate --subagent-summary sets the field and the operator marker."""
+        import json
+
+        store = _seed_store(tmp_path)
+        records = store.load_all()
+        session_id = records[0].session_id
+        override = '{"subagents_total": 5, "corrected": true}'
+        rc, out = _invoke(
+            ["annotate", session_id, "--subagent-summary", override],
+            tmp_path,
+        )
+        assert rc == 0
+        updated = store.load_all()
+        record = [r for r in updated if r.session_id == session_id][0]
+        assert record.subagent_summary == json.loads(override)
+        assert "subagent_summary" in record.annotated_fields
+
+    def test_annotate_subagent_summary_rejects_non_object(self, tmp_path: Path):
+        """annotate --subagent-summary rejects JSON that is not an object."""
+        _seed_store(tmp_path)
+        records = SessionStore(sessions_dir=tmp_path).load_all()
+        session_id = records[0].session_id
+        rc, out = _invoke(
+            ["annotate", session_id, "--subagent-summary", "[1, 2]"],
+            tmp_path,
+        )
+        assert rc != 0
+        assert "JSON object" in out
+
+    def test_annotate_subagent_summary_rejects_invalid_json(self, tmp_path: Path):
+        """annotate --subagent-summary rejects malformed JSON."""
+        _seed_store(tmp_path)
+        records = SessionStore(sessions_dir=tmp_path).load_all()
+        session_id = records[0].session_id
+        rc, out = _invoke(
+            ["annotate", session_id, "--subagent-summary", "not json"],
+            tmp_path,
+        )
+        assert rc != 0
+        assert "valid JSON" in out
+
     def test_annotate_not_found(self, tmp_path: Path):
         """annotate with unknown session ID fails."""
         _seed_store(tmp_path)
