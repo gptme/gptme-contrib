@@ -259,12 +259,12 @@ def _append_history_line(history_path: Path, note: dict) -> None:
                 tail = fh.read()
                 last_nl = tail.rfind(b"\n")
                 if last_nl < 0 and tail_start > 0:
-                    # No newline anywhere in the tail window, but the file
-                    # extends further back than we read: we cannot tell
-                    # whether this is a torn record or just one larger than
-                    # our window, so don't guess — skip repair rather than
-                    # truncating data we never inspected.
-                    pass
+                    # No newline in the tail window, file extends beyond it:
+                    # we cannot truncate safely without reading more data.
+                    # Write a newline separator so the new record lands on its
+                    # own line; loaders skip the malformed fragment on reverse
+                    # scan (json.loads fails on the partial line, skips it).
+                    fh.write(b"\n")
                 else:
                     candidate = tail[last_nl + 1 :] if last_nl >= 0 else tail
                     if candidate.strip():

@@ -1244,12 +1244,16 @@ def test_append_repairs_torn_tail(tmp_path):
 
 
 def test_append_does_not_wipe_history_on_oversized_torn_tail(tmp_path):
-    """A torn tail larger than the read window must not nuke earlier history.
+    """A torn tail larger than the read window must not nuke earlier history or
+    lose the new append.
 
     Regression for: when no newline is found inside the bounded tail-repair
     window but the file extends further back than the window, the repair
     logic used to truncate the file to byte 0 — destroying every prior
-    record instead of just the torn one.
+    record instead of just the torn one.  The second regression (the prior
+    'pass' path): after skipping repair, the new record was appended directly
+    onto the torn-tail bytes, producing one un-parseable concatenated line so
+    the new call was silently dropped.
     """
     from gptme_voice.realtime.missed_call_context import (
         _HISTORY_TAIL_BYTES,
@@ -1279,6 +1283,16 @@ def test_append_does_not_wipe_history_on_oversized_torn_tail(tmp_path):
     # The legitimate first record must still be present — the ambiguous
     # torn tail must not have wiped it.
     assert history.read_text().startswith(before)
+    # The new (second) record must also be readable — the torn tail must not
+    # have swallowed it by being concatenated onto it as one malformed line.
+    readable = []
+    for ln in history.read_text().splitlines():
+        try:
+            readable.append(json.loads(ln))
+        except ValueError:
+            pass  # torn-tail fragment is expected to be malformed
+    sids = [r["sid"] for r in readable]
+    assert "CAsecondrecordmarker0000000000000" in sids, f"new record lost; sids={sids}"
 
 
 def test_append_drops_oversized_inline_context(tmp_path):
