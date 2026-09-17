@@ -112,7 +112,6 @@ ALLOWED_ROOT_ENTRIES = frozenset(
         "uv.lock",
         # Directories (trailing slash for readability — checked by name)
         ".github",
-        "demos",
         "docs",
         "dotfiles",
         "lessons",

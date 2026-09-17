@@ -171,7 +171,7 @@ gptme-sessions blame src/hello.py --records /path/to/session-records.jsonl
 ```
 
 A runnable, self-contained demo lives in
-[`demos/sessions-blame/`](../../demos/sessions-blame/README.md) — it builds a
+[`examples/sessions-blame/`](examples/sessions-blame/README.md) — it builds a
 throwaway repo, makes a commit inside a sample session window, and shows the
 attribution (`./demo.sh`).
 

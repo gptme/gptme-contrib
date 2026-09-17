@@ -1,6 +1,6 @@
 # sessions-blame demo
 
-A self-contained, runnable demo of [`gptme-sessions blame`](../../packages/gptme-sessions/README.md)
+A self-contained, runnable demo of [`gptme-sessions blame`](../../README.md)
 — the tool that answers *"which AI session produced this line / commit?"* by
 correlating git author-dates with session time-windows.
 
