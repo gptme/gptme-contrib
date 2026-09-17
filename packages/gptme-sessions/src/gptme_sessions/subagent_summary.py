@@ -931,8 +931,10 @@ def summarize_subagents(
         # strongest available signal that the child's result was delivered and
         # available for consumption.  "Parent was busy while child ran"
         # (parent_turns >= 1) is kept-working, not result consumption.
-        notif_ts_for_child = notif_by_id.get(agent_id) or (
-            notif_by_id.get(str(child.tool_use_id)) if child.tool_use_id else None
+        notif_ts_for_child = (
+            notif_by_id.get(agent_id)
+            or notif_by_id.get(child.session_id)
+            or (notif_by_id.get(str(child.tool_use_id)) if child.tool_use_id else None)
         )
         child_rows[i]["result_used"] = notif_ts_for_child is not None
     summary["spawns_parent_kept_working"] = kept
