@@ -3761,3 +3761,93 @@ def test_claim_prewarm_never_cancels_finalizing_task_on_expiry() -> None:
         await task
 
     asyncio.run(_exercise())
+
+
+# Call-end inbound history recording (PR #1675 review)
+
+
+def _history_server(tmpdir: str, scheduled: list[str]) -> VoiceServer:
+    server = VoiceServer(workspace=tmpdir)
+    # VoiceServer.state_dir defaults to a cwd-relative path; keep every write
+    # inside tmp_path so a recent-call record cannot leak into the shared
+    # working directory and poison unrelated bootstrap tests.
+    server.state_dir = Path(tmpdir) / "state"
+
+    async def _fake_schedule(caller_id, record_paths) -> None:
+        scheduled.append(caller_id)
+
+    server._schedule_post_call = _fake_schedule  # type: ignore[method-assign]
+    return server
+
+
+def _history_rows(tmpdir: str) -> list[dict]:
+    history = Path(tmpdir) / "state" / "voice-calls" / "callback-history.jsonl"
+    if not history.exists():
+        return []
+    return [
+        json.loads(line) for line in history.read_text().splitlines() if line.strip()
+    ]
+
+
+def test_inbound_twilio_call_end_records_history_row(tmp_path) -> None:
+    scheduled: list[str] = []
+    server = _history_server(str(tmp_path), scheduled)
+
+    asyncio.run(
+        server._on_call_end_locked(
+            "+46700000001",
+            "twilio",
+            [],
+            {"call_sid": "CA" + "a" * 32, "direction": "inbound"},
+        )
+    )
+
+    assert [row["direction"] for row in _history_rows(str(tmp_path))] == ["inbound"]
+    assert scheduled == ["+46700000001"]
+
+
+def test_outbound_twilio_call_end_does_not_record_inbound_history(tmp_path) -> None:
+    scheduled: list[str] = []
+    server = _history_server(str(tmp_path), scheduled)
+
+    asyncio.run(
+        server._on_call_end_locked(
+            "+46700000001",
+            "twilio",
+            [],
+            {"call_sid": "CA" + "b" * 32, "direction": "outbound"},
+        )
+    )
+
+    # Outbound calls already own a history row written when they were placed;
+    # the same websocket completion path must not add an inbound duplicate.
+    assert _history_rows(str(tmp_path)) == []
+    assert scheduled == ["+46700000001"]
+
+
+def test_history_write_failure_does_not_abort_finalization(
+    tmp_path, monkeypatch
+) -> None:
+    scheduled: list[str] = []
+    server = _history_server(str(tmp_path), scheduled)
+
+    def _boom(*_args, **_kwargs) -> None:
+        raise OSError("read-only workspace")
+
+    monkeypatch.setattr(
+        "gptme_voice.realtime.missed_call_context.record_inbound_call", _boom
+    )
+
+    asyncio.run(
+        server._on_call_end_locked(
+            "+46700000001",
+            "twilio",
+            [],
+            {"call_sid": "CA" + "c" * 32, "direction": "inbound"},
+        )
+    )
+
+    # A failed history append must not skip recent-call persistence,
+    # post-call scheduling, or archive finalization.
+    assert scheduled == ["+46700000001"]
+    assert server._recent_call_path("+46700000001").exists()

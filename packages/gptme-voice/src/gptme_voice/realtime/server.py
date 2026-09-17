@@ -2293,6 +2293,33 @@ class VoiceServer:
             self._pending_call_groups[caller_id] = call_group_id
         record.call_group_id = call_group_id
         record_path = self._save_call_record(record)
+        # Answered *outbound* calls reach this same handler with
+        # source="twilio" (source is the transport, not the direction), and
+        # they already own an outbound history row written when they were
+        # placed. Recording them here as inbound would mislabel them and
+        # duplicate that row.
+        if (
+            self.workspace
+            and source in ("twilio", "browser", "local")
+            and cleaned_metadata.get("direction") != "outbound"
+        ):
+            # History is an observability side-write. A read-only workspace,
+            # missing permission, full disk, or fsync failure must not abort
+            # call-end finalization (recent-call persistence, post-call
+            # scheduling, archive finalization, transcript promotion below).
+            try:
+                from .missed_call_context import record_inbound_call
+
+                record_inbound_call(
+                    self.workspace,
+                    caller=caller_id,
+                    sid=cleaned_metadata.get("call_sid"),
+                    session_file=str(record_path),
+                )
+            except Exception as exc:  # noqa: BLE001 - never block teardown
+                logger.warning(
+                    "Failed to record inbound call history for %s: %s", caller_id, exc
+                )
         pending_record_paths.append(record_path)
         deduped_record_paths = self._dedupe_record_paths(pending_record_paths)
         record.archive_record_paths = [str(path) for path in deduped_record_paths]
@@ -2478,12 +2505,18 @@ class VoiceServer:
                     handoff_id = custom_params.get("handoff_id") or None
                     standup_brief = custom_params.get("standup_brief") or None
                     caller_id = remote_party or call_sid or stream_sid
+                    # Twilio marks outbound legs via the TwiML custom parameters
+                    # set by outbound_identity_params; every other Twilio stream
+                    # is an inbound call. Label only — never an authorization
+                    # input (customParameters are client-replayable).
+                    call_direction = custom_params.get("direction") or "inbound"
                     metadata = {
                         "from_number": from_number,
                         "remote_party": remote_party,
                         "call_sid": call_sid,
                         "stream_sid": stream_sid,
                         "provider": self.provider,
+                        "direction": call_direction,
                     }
                     if handoff_id:
                         metadata["handoff_id"] = handoff_id

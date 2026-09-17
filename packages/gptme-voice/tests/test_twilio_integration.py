@@ -272,6 +272,7 @@ def test_outbound_identity_params_preserve_dialed_remote_party():
         "handoff_id": "abc",
         "from_number": "+46701234567",
         "remote_party": "+46701234567",
+        "direction": "outbound",
     }
 
 

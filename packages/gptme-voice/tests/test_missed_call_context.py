@@ -1331,6 +1331,74 @@ def test_append_drops_oversized_inline_context(tmp_path):
     assert record["sid"] == CALL_SID
 
 
+def test_append_bounds_oversized_scalar_field(tmp_path):
+    """A huge caller value must not produce an oversized row.
+
+    ``caller`` on an inbound row comes from the Twilio ``customParameters``
+    of an unauthenticated Media Stream, so it can be arbitrarily long. An
+    oversized row escapes both the reader's tail window and the writer's
+    torn-tail repair, silently hiding the whole history.
+    """
+    from gptme_voice.realtime.missed_call_context import (
+        _MAX_PAYLOAD_BYTES,
+        _append_history_line,
+    )
+
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    history = voice / "callback-history.jsonl"
+    now = datetime.now(timezone.utc)
+    _append_history_line(
+        history,
+        {
+            "direction": "inbound",
+            "sid": CALL_SID,
+            "date": now.date().isoformat(),
+            "placed_at": now.isoformat(),
+            "caller": "9" * (_MAX_PAYLOAD_BYTES * 2),
+        },
+    )
+    lines = [ln for ln in history.read_text().splitlines() if ln.strip()]
+    assert len(lines) == 1
+    assert len(lines[0].encode("utf-8")) <= _MAX_PAYLOAD_BYTES
+    record = json.loads(lines[0])
+    assert record["caller"].startswith("9999")
+    assert record["sid"] == CALL_SID
+
+
+def test_oversized_caller_does_not_hide_history_index(tmp_path):
+    """The index still shows recent calls after an oversized caller row.
+
+    End-to-end guard for the row-length cap: the oversized row must neither
+    push earlier history out of the read window nor blank the index.
+    """
+    from gptme_voice.realtime.missed_call_context import record_inbound_call
+
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    history = voice / "callback-history.jsonl"
+    now = datetime.now(timezone.utc)
+    history.write_text(
+        json.dumps(
+            {
+                "type": "general",
+                "sid": CALL_SID,
+                "date": now.date().isoformat(),
+                "placed_at": now.isoformat(),
+                "caller": PHONE,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    record_inbound_call(str(tmp_path), caller="9" * 200_000, now=now)
+
+    index = load_callback_history_index(str(tmp_path))
+    assert index is not None
+    assert "(inbound)" in index
+    assert PHONE in index
+
+
 def test_index_sanitizes_injected_control_characters(tmp_path):
     """Newlines/control chars in history fields can't inject instruction lines.
 
@@ -1381,3 +1449,123 @@ def test_index_reads_only_tail_of_large_history(tmp_path):
     index = load_callback_history_index(str(tmp_path), n=5)
     assert index is not None
     assert "CALL HISTORY (last 5)" in index
+
+
+# record_inbound_call
+
+
+def test_record_inbound_call_appends_to_history(tmp_path):
+    """record_inbound_call writes one JSONL entry with direction=inbound."""
+    from gptme_voice.realtime.missed_call_context import record_inbound_call
+
+    now = datetime.now(timezone.utc)
+    record_inbound_call(
+        str(tmp_path),
+        caller=PHONE,
+        sid=CALL_SID,
+        now=now,
+    )
+    history = tmp_path / "state" / "voice-calls" / "callback-history.jsonl"
+    assert history.exists()
+    lines = [ln for ln in history.read_text().splitlines() if ln.strip()]
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["direction"] == "inbound"
+    assert entry["caller"] == PHONE
+    assert entry["sid"] == CALL_SID
+    assert entry["placed_at"].startswith(now.date().isoformat())
+
+
+def test_record_inbound_call_noop_for_empty_workspace(tmp_path, monkeypatch):
+    from gptme_voice.realtime import missed_call_context as mcc
+
+    appended: list[tuple] = []
+    monkeypatch.setattr(mcc, "_append_history_line", lambda *a, **k: appended.append(a))
+
+    mcc.record_inbound_call(None, caller=PHONE)
+    mcc.record_inbound_call("", caller=PHONE)
+
+    # A falsy workspace must return before reaching the append helper — no
+    # history write anywhere, not just no write under an unrelated tmp_path.
+    assert appended == []
+
+
+def test_record_inbound_call_noop_for_empty_caller(tmp_path):
+    from gptme_voice.realtime.missed_call_context import record_inbound_call
+
+    record_inbound_call(str(tmp_path), caller="")
+    history = tmp_path / "state" / "voice-calls" / "callback-history.jsonl"
+    assert not history.exists()
+
+
+def test_record_inbound_call_with_session_file(tmp_path):
+    """session_file stored as workspace-relative path."""
+    from gptme_voice.realtime.missed_call_context import record_inbound_call
+
+    now = datetime.now(timezone.utc)
+    session_f = tmp_path / "state" / "voice-calls" / "calls" / "rec.json"
+    session_f.parent.mkdir(parents=True, exist_ok=True)
+    session_f.write_text("{}", encoding="utf-8")
+    record_inbound_call(
+        str(tmp_path),
+        caller=PHONE,
+        session_file=str(session_f),
+        now=now,
+    )
+    history = tmp_path / "state" / "voice-calls" / "callback-history.jsonl"
+    entry = json.loads(history.read_text().strip())
+    assert entry["session_file"] == "state/voice-calls/calls/rec.json"
+
+
+def test_record_inbound_call_session_file_outside_workspace_stored_absolute(tmp_path):
+    """session_file outside workspace is stored as-is (absolute) rather than dropped."""
+    from gptme_voice.realtime.missed_call_context import record_inbound_call
+
+    now = datetime.now(timezone.utc)
+    # Simulate default state_dir=/tmp/gptme-voice-call-state: not under workspace.
+    outside = tmp_path.parent / "outside-workspace" / "archive" / "rec.json"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("{}", encoding="utf-8")
+    record_inbound_call(
+        str(tmp_path),
+        caller=PHONE,
+        session_file=str(outside),
+        now=now,
+    )
+    history = tmp_path / "state" / "voice-calls" / "callback-history.jsonl"
+    entry = json.loads(history.read_text().strip())
+    # Must not be silently dropped — store the absolute path.
+    assert "session_file" in entry
+    assert entry["session_file"] == str(outside)
+
+
+def test_load_callback_history_index_shows_inbound_direction(tmp_path):
+    """Inbound entries are labelled (inbound) in the index; outbound are not."""
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    history = voice / "callback-history.jsonl"
+    now = datetime.now(timezone.utc)
+    outbound = {
+        "type": "general",
+        "date": now.date().isoformat(),
+        "placed_at": now.isoformat(),
+        "caller": "+15550000001",
+        "sid": CALL_SID,
+    }
+    inbound = {
+        "direction": "inbound",
+        "date": now.date().isoformat(),
+        "placed_at": now.isoformat(),
+        "caller": "+15550000002",
+    }
+    with history.open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps(outbound, ensure_ascii=False) + "\n")
+        fh.write(json.dumps(inbound, ensure_ascii=False) + "\n")
+    index = load_callback_history_index(str(tmp_path))
+    assert index is not None
+    lines = index.splitlines()
+    # First displayed entry is inbound (most recent first)
+    assert "(inbound)" in lines[1]
+    # Second displayed entry is outbound (no direction tag)
+    assert "(inbound)" not in lines[2]
+    assert "(outbound)" not in lines[2]
