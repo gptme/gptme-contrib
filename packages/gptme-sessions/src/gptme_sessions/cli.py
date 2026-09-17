@@ -1402,9 +1402,10 @@ def append(
     "--subagent-summary",
     default=None,
     help=(
-        "Override subagent summary as a JSON object "
-        "(e.g. '{\"subagents_total\": 3}'). Annotated summaries are frozen "
-        "against re-extraction on sync/regrade."
+        "Override subagent summary fields as a JSON object merged into the "
+        "extracted summary (e.g. '{\"subagents_total\": 3}' corrects just "
+        "that counter). Annotated summaries are frozen against re-extraction "
+        "on sync/regrade."
     ),
 )
 @click.option("--add-deliverable", multiple=True, help="Add deliverable(s) to existing list")
@@ -1528,9 +1529,13 @@ def annotate(
         if recommended_category is not None:
             set_annotated("recommended_category", recommended_category)
         if subagent_summary is not None:
+
+            def _reject_constant(name: str) -> None:
+                raise ValueError(f"non-finite JSON constant {name!r} is not allowed")
+
             try:
-                parsed_summary = json.loads(subagent_summary)
-            except json.JSONDecodeError as e:
+                parsed_summary = json.loads(subagent_summary, parse_constant=_reject_constant)
+            except ValueError as e:
                 raise click.BadParameter(
                     f"--subagent-summary must be a valid JSON object: {e}",
                     param_hint="--subagent-summary",
@@ -1540,7 +1545,11 @@ def annotate(
                     "--subagent-summary must be a JSON object (e.g. '{\"subagents_total\": 3}')",
                     param_hint="--subagent-summary",
                 )
-            set_annotated("subagent_summary", parsed_summary)
+            # Merge into the extracted summary so a partial correction does
+            # not silently drop the other extracted counters.
+            merged_summary: dict[str, Any] = dict(record.subagent_summary or {})
+            merged_summary.update(parsed_summary)
+            set_annotated("subagent_summary", merged_summary)
         if add_deliverable:
             existing = list(record.deliverables or [])
             for d in add_deliverable:

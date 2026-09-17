@@ -756,6 +756,38 @@ class TestAnnotateCommand:
         assert record.subagent_summary == json.loads(override)
         assert "subagent_summary" in record.annotated_fields
 
+    def test_annotate_subagent_summary_merges_into_extracted(self, tmp_path: Path):
+        """annotate --subagent-summary merges into the existing summary."""
+        store = _seed_store(tmp_path)
+        records = store.load_all()
+        session_id = records[0].session_id
+        # Seed an extracted summary directly, then partially correct it.
+        store_records = store.load_all()
+        rec = [r for r in store_records if r.session_id == session_id][0]
+        rec.subagent_summary = {"subagents_total": 2, "subagents_depth_max": 1}
+        store.rewrite(store_records)
+
+        rc, out = _invoke(
+            ["annotate", session_id, "--subagent-summary", '{"subagents_total": 5}'],
+            tmp_path,
+        )
+        assert rc == 0
+        updated = store.load_all()
+        record = [r for r in updated if r.session_id == session_id][0]
+        assert record.subagent_summary == {"subagents_total": 5, "subagents_depth_max": 1}
+        assert "subagent_summary" in record.annotated_fields
+
+    def test_annotate_subagent_summary_rejects_nonfinite(self, tmp_path: Path):
+        """annotate --subagent-summary rejects NaN/Infinity JSON constants."""
+        _seed_store(tmp_path)
+        records = SessionStore(sessions_dir=tmp_path).load_all()
+        session_id = records[0].session_id
+        rc, out = _invoke(
+            ["annotate", session_id, "--subagent-summary", '{"subagents_total": NaN}'],
+            tmp_path,
+        )
+        assert rc != 0
+
     def test_annotate_subagent_summary_rejects_non_object(self, tmp_path: Path):
         """annotate --subagent-summary rejects JSON that is not an object."""
         _seed_store(tmp_path)
