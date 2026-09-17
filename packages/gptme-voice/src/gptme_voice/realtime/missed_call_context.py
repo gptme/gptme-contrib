@@ -712,7 +712,7 @@ def load_callback_history_index(
         except ValueError:
             placed_str = placed_raw[:16] if placed_raw else "unknown"
         caller = _sanitize_index_field(entry.get("caller", "unknown"))
-        direction = entry.get("direction", "outbound")
+        direction = _sanitize_index_field(entry.get("direction", "outbound"))
         direction_tag = f" ({direction})" if direction != "outbound" else ""
         parts = [f"- {placed_str} — {caller}{direction_tag}"]
         for key, label in (
