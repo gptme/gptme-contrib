@@ -151,6 +151,29 @@ they remain parser-shape coverage only. Network/download failures are errors
 rather than false green checks. Update the parser and retained fixtures before
 advancing the pin.
 
+### Session provenance (`blame`)
+
+`gptme-sessions blame` answers *"which AI session produced this line / commit?"*
+by correlating git author-dates with session time-windows from the records store.
+
+```bash
+# Attribute the commits touching a file to their authoring session(s)
+gptme-sessions blame scripts/watchdog.py
+gptme-sessions blame scripts/watchdog.py --line 42
+gptme-sessions blame scripts/watchdog.py --limit 5 --json
+
+# GitHub refs (PR or issue) — no local git history needed
+gptme-sessions blame gptme/gptme-contrib#1252
+
+# Point at a specific records store (default: auto-detected from git root)
+gptme-sessions blame src/hello.py --records /path/to/session-records.jsonl
+```
+
+A runnable, self-contained demo lives in
+[`demos/sessions-blame/`](../../demos/sessions-blame/README.md) — it builds a
+throwaway repo, makes a commit inside a sample session window, and shows the
+attribution (`./demo.sh`).
+
 ## Model Normalization
 
 Model names are automatically normalized to short canonical forms:
