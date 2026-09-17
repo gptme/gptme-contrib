@@ -306,8 +306,9 @@ def test_markdown_mention_suppressed_when_issue_is_closed() -> None:
         )
         assert result.returncode in (0, 1), result.stderr
         # Closed mention must not appear in the markdown notification line.
+        # Either no notification line at all, or the count must be 0 actionable.
         assert (
-            "notifications" not in result.stdout or "0 actionable" not in result.stdout
+            "notifications" not in result.stdout or "0 actionable" in result.stdout
         ), f"Unexpected notification count in markdown output: {result.stdout!r}"
         # State file must still be persisted (so the item is not retried).
         state_file = state_dir / f"notif-{NOTIF_ID}.state"
