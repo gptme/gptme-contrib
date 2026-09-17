@@ -615,10 +615,7 @@ def load_callback_history_index(
     if not workspace:
         return None
     history_path = Path(workspace) / "state" / "voice-calls" / _HISTORY_FILE
-    try:
-        lines = history_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return None
+    lines = _read_tail_lines(history_path)
     entries: list[dict] = []
     for line in lines:
         line = line.strip()
