@@ -3258,18 +3258,45 @@ def extract_from_path(jsonl_path: Path) -> dict:
     msgs = parse_trajectory(jsonl_path)
     parent_msgs = list(msgs)
     subagent_msgs: list[list[dict]] = []
+    child_specs: list = []
     # Include subagent records so their tool calls and file writes count toward
     # the parent session (trajectory attribution, item 1). Keep each transcript
     # separate for usage extraction: a stream-json ``result`` is cumulative for
     # one transcript and must not replace assistant usage from its siblings.
     # Best-effort: subagent resolution must never break signal extraction.
     try:
+        from .subagent_summary import ChildSpec
         from .transcript import subagent_record_files
 
         for sub_file in subagent_record_files(jsonl_path):
             child_msgs = parse_trajectory(sub_file)
             subagent_msgs.append(child_msgs)
             msgs.extend(child_msgs)
+            meta: dict = {}
+            meta_path = sub_file.with_name(f"{sub_file.stem}.meta.json")
+            if meta_path.exists():
+                try:
+                    loaded = json.loads(meta_path.read_text())
+                    if isinstance(loaded, dict):
+                        meta = loaded
+                except (OSError, json.JSONDecodeError):
+                    meta = {}
+            # Guard each child's depth independently: a nonnumeric spawnDepth in
+            # one metadata file must not abort the loop-wide best-effort block
+            # and silently drop every later child.
+            try:
+                depth = int(meta.get("spawnDepth") or 1)
+            except (TypeError, ValueError):
+                depth = 1
+            child_specs.append(
+                ChildSpec(
+                    records=child_msgs,
+                    spawn_depth=depth,
+                    session_id=sub_file.stem,
+                    tool_use_id=meta.get("toolUseId"),
+                    agent_type=meta.get("agentType"),
+                )
+            )
     except Exception:
         pass
     fmt = detect_format(msgs)
@@ -3310,4 +3337,26 @@ def extract_from_path(jsonl_path: Path) -> dict:
         timings = extract_timings_gptme(msgs)
         if timings:
             result["timings"] = timings
+    # Subagent structure (count/depth/concurrency/classifier) reuses
+    # child_specs already built from the transcripts loaded above so the
+    # usage roll-up and this summary cannot diverge. A second tree walk
+    # here could resolve a different child set than the usage numbers.
+    try:
+        from .subagent_summary import empty_summary, summarize_subagents
+
+        harness_map = {
+            "gptme": "gptme",
+            "claude_code": "claude-code",
+            "codex": "codex",
+            "copilot": "copilot",
+            "grok": "grok",
+            "pi": "pi",
+        }
+        result["subagent_summary"] = summarize_subagents(
+            parent_msgs, child_specs, harness=harness_map.get(fmt, fmt)
+        )
+    except Exception:
+        from .subagent_summary import empty_summary
+
+        result["subagent_summary"] = empty_summary()
     return result
