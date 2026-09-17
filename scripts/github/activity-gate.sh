@@ -2152,13 +2152,15 @@ def notification_priority:
         # Count new notifications and create state files (process substitution avoids subshell)
         local new_count=0
         while IFS= read -r line; do
-            local notif_id notif_updated state_file map_file prior repo number
+            local notif_id notif_updated state_file map_file prior repo number notif_reason
             notif_id=${line%%$'\t'*}
             remaining=${line#*$'\t'}
             notif_updated=${remaining%%$'\t'*}
             remaining=${remaining#*$'\t'}
             repo=${remaining%%$'\t'*}
-            number=${remaining#*$'\t'}
+            remaining=${remaining#*$'\t'}
+            number=${remaining%%$'\t'*}
+            notif_reason=${remaining#*$'\t'}
             state_file="$STATE_DIR/notif-${notif_id}.state"
             map_file="$STATE_DIR/notif-${notif_id}.map"
             prior=""
@@ -2174,9 +2176,17 @@ def notification_priority:
             elif [ -z "$prior" ] || [ "$prior" \< "$notif_updated" ]; then
                 printf '%s' "$notif_updated" > "$state_file"
                 [ "$number" -gt 0 ] 2>/dev/null && printf '%s#%s' "$repo" "$number" > "$map_file"
+                # Mirror the jsonl branch's drop-only staleness filter: a mention
+                # on a closed/merged thread has nothing actionable — suppress it
+                # without counting it as new (state already persisted above).
+                if [ "$notif_reason" = "mention" ] \
+                        && [ "$number" -gt 0 ] 2>/dev/null \
+                        && mention_subject_is_closed "$repo" "$number"; then
+                    continue
+                fi
                 new_count=$((new_count + 1))
             fi
-        done < <(echo "$notifs" | jq -r '"\(.id)\t\(.updated_at)\t\(.repository.full_name)\t(.subject.url // "" | split("/") | last | tonumber? // 0)"' 2>/dev/null)
+        done < <(echo "$notifs" | jq -r '"\(.id)\t\(.updated_at)\t\(.repository.full_name)\t\(.subject.url // "" | split("/") | last | tonumber? // 0)\t\(.reason // "")"' 2>/dev/null)
         echo "$new_count"
     fi
 }

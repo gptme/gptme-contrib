@@ -6,8 +6,8 @@ long after the issue was resolved and closed. Dispatching those produces NOOP
 sessions that conflict with the per-dispatch mandate (no-comment on closed threads).
 
 This test verifies the drop-only staleness filter added in
-gptme-contrib#XXXX (session 6a1e, 2026-09-17):
- - mention on a CLOSED issue/PR → state file written, item NOT emitted
+gptme-contrib#1676 (sessions 6a1e/c777, 2026-09-17):
+ - mention on a CLOSED issue/PR → state file written, item NOT emitted (jsonl + markdown)
  - mention on an OPEN issue/PR  → still emitted (normal path)
 """
 
@@ -248,3 +248,85 @@ def test_mention_emits_when_pr_is_open() -> None:
             len(emitted) == 1
         ), f"Expected mention on open PR to dispatch, got: {result.stdout!r}"
         assert emitted[0]["detail"] == "mention"
+
+
+def _run_gate_markdown(
+    tmp: Path,
+    state_dir: Path,
+    *,
+    reason: str = "mention",
+    subject_type: str = "Issue",
+    issue_state: str = "open",
+) -> subprocess.CompletedProcess[str]:
+    """Same as _run_gate but with --format markdown (the default used by cron previews)."""
+    fake_gh = tmp / "gh"
+    if not fake_gh.exists():
+        fake_gh.write_text(FAKE_GH)
+        fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
+
+    env = os.environ.copy()
+    env["TEST_NOTIF_ID"] = NOTIF_ID
+    env["TEST_NOTIF_REPO"] = NOTIF_REPO
+    env["TEST_NOTIF_NUMBER"] = str(NOTIF_NUMBER)
+    env["TEST_NOTIF_REASON"] = reason
+    env["TEST_SUBJECT_TYPE"] = subject_type
+    env["TEST_ISSUE_STATE"] = issue_state
+    env["PATH"] = f"{tmp}:{env['PATH']}"
+
+    (state_dir / "notif-99999999999.state").write_text("2026-09-01T00:00:00Z")
+
+    return subprocess.run(
+        [
+            str(SCRIPT),
+            "--author",
+            "test-author",
+            "--org",
+            "ActivityWatch",
+            "--repo",
+            NOTIF_REPO,
+            "--state-dir",
+            str(state_dir),
+            "--format",
+            "markdown",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def test_markdown_mention_suppressed_when_issue_is_closed() -> None:
+    """Markdown branch: a mention on a closed issue must not add to the actionable count."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate_markdown(
+            tmp, state_dir, reason="mention", issue_state="closed"
+        )
+        assert result.returncode in (0, 1), result.stderr
+        # Closed mention must not appear in the markdown notification line.
+        assert (
+            "notifications" not in result.stdout or "0 actionable" not in result.stdout
+        ), f"Unexpected notification count in markdown output: {result.stdout!r}"
+        # State file must still be persisted (so the item is not retried).
+        state_file = state_dir / f"notif-{NOTIF_ID}.state"
+        assert (
+            state_file.exists()
+        ), "State file must be written even when suppressed in markdown mode"
+
+
+def test_markdown_mention_emits_when_issue_is_open() -> None:
+    """Markdown branch: an open-issue mention must still count as actionable."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate_markdown(
+            tmp, state_dir, reason="mention", issue_state="open"
+        )
+        assert result.returncode in (0, 1), result.stderr
+        # An open mention must produce a non-zero notification count.
+        assert (
+            "notifications" in result.stdout
+        ), f"Expected open mention to appear in markdown output, got: {result.stdout!r}"
