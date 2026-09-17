@@ -146,14 +146,13 @@ EMPTY_SUMMARY: dict[str, Any] = {
     "parent_idle_max_seconds": 0,
     "active_seconds": 0,
     "session_kind": "unknown",
-    "subagent_children": [],
 }
 
 
 def empty_summary() -> dict[str, Any]:
     """Zeroed summary dict (always the same keys)."""
     s = dict(EMPTY_SUMMARY)
-    s["subagent_children"] = []  # fresh list — EMPTY_SUMMARY's list must not be mutated
+    s["subagent_children"] = []  # mutable — always allocate fresh, never in the constant
     return s
 
 
