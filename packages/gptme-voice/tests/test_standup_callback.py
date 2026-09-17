@@ -245,8 +245,8 @@ def test_invalid_local_evidence_skips_lookup(callback_case, mutation):
     elif mutation == "replacement_brief":
         brief["generated_at"] = now.isoformat()
     elif mutation == "old_call":
-        stamp["placed_at"] = (now - timedelta(minutes=31)).isoformat()
-        brief["generated_at"] = (now - timedelta(hours=1)).isoformat()
+        stamp["placed_at"] = (now - timedelta(hours=5)).isoformat()
+        brief["generated_at"] = (now - timedelta(hours=5)).isoformat()
     elif mutation == "future_call":
         stamp["placed_at"] = (now + timedelta(minutes=1)).isoformat()
     elif mutation == "yesterday":
@@ -387,3 +387,22 @@ def test_callback_crossing_utc_midnight_is_not_same_day(callback_case):
         )
         is None
     )
+
+
+def test_trusted_callback_at_58_minutes_receives_prepared_brief(callback_case):
+    """Regression: same-morning callback 58 min after the missed standup must
+    deliver the prepared brief — the 2026-09-17 failure case."""
+    run, _, _, requests, state, stamp, brief = callback_case
+    now = datetime.now(timezone.utc)
+    # Outbound was 58 minutes ago; context was generated 3.5h ago
+    stamp["placed_at"] = (now - timedelta(minutes=58)).isoformat()
+    stamp["date"] = now.date().isoformat()
+    brief["generated_at"] = (now - timedelta(hours=3, minutes=30)).isoformat()
+    (state / "standup-brief.json").write_text(json.dumps(brief))
+    (state / "voice-calls/last-standup-call-sid.txt").write_text(json.dumps(stamp))
+    cfg = run()
+    assert (
+        MARKER in cfg.instructions
+    ), "58-minute same-morning callback must inject the prepared standup brief"
+    assert "callback" in cfg.initial_response_instructions.lower()
+    assert len(requests) == 1

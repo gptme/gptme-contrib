@@ -36,7 +36,7 @@ from pathlib import Path
 import httpx
 
 logger = logging.getLogger(__name__)
-CALLBACK_WINDOW = timedelta(minutes=30)
+CALLBACK_WINDOW = timedelta(hours=4)
 MAX_CONTEXT_AGE = timedelta(hours=4)
 _MAX_PAYLOAD_BYTES = 16000
 _CONTEXT_NOTE_FILE = "missed-call-context.json"

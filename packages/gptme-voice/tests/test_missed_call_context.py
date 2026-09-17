@@ -40,6 +40,18 @@ def workspace(tmp_path):
     return tmp_path, now, note, voice
 
 
+def test_candidate_accepts_near_window_edge(workspace):
+    """A context near the 4 h edge of CALLBACK_WINDOW stays eligible."""
+    ws, now, note, voice = workspace
+    # Place the call 3 h 55 m ago with context generated just before the
+    # call (generated_at <= placed_at is required), so both ages sit just
+    # inside the widened 4 h window.
+    note["placed_at"] = (now - timedelta(hours=3, minutes=55)).isoformat()
+    note["context"]["generated_at"] = (now - timedelta(hours=3, minutes=58)).isoformat()
+    (voice / "missed-call-context.json").write_text(json.dumps(note))
+    assert load_callback_candidate(str(ws)) is not None
+
+
 # ---------------------------------------------------------------------------
 # write_missed_call_context
 # ---------------------------------------------------------------------------
@@ -195,8 +207,8 @@ def test_invalid_note_returns_none(workspace, mutation):
     ws, now, note, voice = workspace
     ctx = note["context"]
     if mutation == "old_call":
-        note["placed_at"] = (now - timedelta(minutes=31)).isoformat()
-        ctx["generated_at"] = (now - timedelta(hours=1)).isoformat()
+        note["placed_at"] = (now - timedelta(hours=5)).isoformat()
+        ctx["generated_at"] = (now - timedelta(hours=5)).isoformat()
     elif mutation == "future_call":
         note["placed_at"] = (now + timedelta(minutes=1)).isoformat()
     elif mutation == "yesterday":
@@ -881,3 +893,53 @@ def test_utc_midnight_crossing_is_not_same_day(tmp_path):
         )
         is None
     )
+
+
+def test_callback_at_58_minutes_is_recognized(tmp_path):
+    """Same-morning callback 58 minutes after a missed outbound call receives
+    the prepared brief — the regression case from 2026-09-17."""
+    now = datetime(2026, 9, 17, 8, 58, 25, tzinfo=timezone.utc)
+    placed = datetime(2026, 9, 17, 8, 0, 15, tzinfo=timezone.utc)
+    generated = datetime(2026, 9, 17, 5, 32, 57, tzinfo=timezone.utc)
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    note = {
+        "type": "standup",
+        "sid": CALL_SID,
+        "date": placed.date().isoformat(),
+        "placed_at": placed.isoformat(),
+        "caller": PHONE,
+        "context": {
+            "generated_at": generated.isoformat(),
+            "text": MARKER,
+        },
+    }
+    (voice / "missed-call-context.json").write_text(json.dumps(note))
+    result = load_callback_candidate(str(tmp_path), now=now, caller=PHONE)
+    assert (
+        result is not None
+    ), "58-minute same-morning callback must be recognized as a standup continuation"
+    sid, payload, placed_at = result
+    assert sid == CALL_SID
+    assert MARKER in payload
+
+
+def test_callback_beyond_4h_window_rejected(tmp_path):
+    """A callback more than 4 hours after the outbound call is rejected."""
+    now = datetime.now(timezone.utc)
+    placed = now - timedelta(hours=5)
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    note = {
+        "type": "standup",
+        "sid": CALL_SID,
+        "date": placed.date().isoformat(),
+        "placed_at": placed.isoformat(),
+        "caller": PHONE,
+        "context": {
+            "generated_at": placed.isoformat(),
+            "text": MARKER,
+        },
+    }
+    (voice / "missed-call-context.json").write_text(json.dumps(note))
+    assert load_callback_candidate(str(tmp_path), now=now, caller=PHONE) is None
