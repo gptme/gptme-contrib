@@ -40,6 +40,18 @@ def workspace(tmp_path):
     return tmp_path, now, note, voice
 
 
+def test_candidate_accepts_near_window_edge(workspace):
+    """A context near the 4 h edge of CALLBACK_WINDOW stays eligible."""
+    ws, now, note, voice = workspace
+    # Place the call 3 h 55 m ago with context generated just before the
+    # call (generated_at <= placed_at is required), so both ages sit just
+    # inside the widened 4 h window.
+    note["placed_at"] = (now - timedelta(hours=3, minutes=55)).isoformat()
+    note["context"]["generated_at"] = (now - timedelta(hours=3, minutes=58)).isoformat()
+    (voice / "missed-call-context.json").write_text(json.dumps(note))
+    assert load_callback_candidate(str(ws)) is not None
+
+
 # ---------------------------------------------------------------------------
 # write_missed_call_context
 # ---------------------------------------------------------------------------
