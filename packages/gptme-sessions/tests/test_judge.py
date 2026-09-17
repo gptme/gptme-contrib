@@ -29,6 +29,7 @@ from gptme_sessions.judge import (
     _strip_anthropic_prefix,
     format_intent_context,
     format_routing_context,
+    format_subagent_context,
     judge_and_writeback,
     judge_from_signals,
     judge_session,
@@ -87,6 +88,7 @@ class TestJudgeSession:
             category="code",
             routing_context="",
             intent_context="",
+            subagent_context="",
             journal="Did some work",
         )
         assert "Test goals" in prompt
@@ -109,6 +111,7 @@ class TestJudgeSession:
             category="infrastructure",
             routing_context="",
             intent_context="",
+            subagent_context="",
             journal="Reduced future friction",
         )
         assert "Category Interpretation" in prompt
@@ -131,6 +134,7 @@ class TestJudgeSession:
             category="cleanup",
             routing_context="",
             intent_context="",
+            subagent_context="",
             journal="Cleaned up stale references",
         )
         assert "## Worked Examples" in prompt
@@ -292,6 +296,51 @@ class TestJudgeSession:
         assert "## Session Intent" in block
         assert "**Self-assigned alignment**: on_track" in block
 
+    def test_format_subagent_context_returns_empty_for_none(self) -> None:
+        """None summary returns empty string."""
+        assert format_subagent_context(None) == ""
+
+    def test_format_subagent_context_returns_empty_for_zero_subagents(self) -> None:
+        """A summary with subagents_total=0 (the common case) omits the block —
+        the bias guard means no-delegation sessions get no annotation prompt."""
+        assert format_subagent_context({"subagents_total": 0}) == ""
+
+    def test_format_subagent_context_renders_counts_and_children(self) -> None:
+        """A non-empty summary renders aggregate counts and a per-child line."""
+        block = format_subagent_context(
+            {
+                "subagents_total": 2,
+                "subagents_readonly": 1,
+                "subagents_scratch": 0,
+                "subagents_acting": 1,
+                "subagent_tokens_total": 500,
+                "spawns_parent_kept_working": 2,
+                "subagent_children": [
+                    {
+                        "agent_type": "Explore",
+                        "label": "readonly",
+                        "duration_s": 12,
+                        "tokens": 300,
+                        "result_used": True,
+                    },
+                    {
+                        "agent_type": "general-purpose",
+                        "label": "acting",
+                        "duration_s": 40,
+                        "tokens": 200,
+                        "result_used": False,
+                    },
+                ],
+            }
+        )
+        assert "## Subagent Usage" in block
+        assert "2 subagent(s)" in block
+        assert "readonly=1" in block
+        assert "acting=1" in block
+        assert "500" in block
+        assert "Explore" in block and "used" in block
+        assert "general-purpose" in block and "unused" in block
+
     def test_prompt_template_uses_canonical_alignment_verdict_vocabulary(self) -> None:
         """The prompt vocabulary must match the values accepted by the parser."""
         prompt = JUDGE_PROMPT_TEMPLATE.format(
@@ -306,6 +355,7 @@ class TestJudgeSession:
                     "expected_artifact": "a PR",
                 }
             ),
+            subagent_context="",
             journal="Fixed the bug",
         )
 
@@ -358,6 +408,81 @@ class TestJudgeSession:
         assert result["alignment_score"] == 0.90
         assert result["pivot_verdict"] == "on_track"
         mock_format.assert_called_once_with(intent)
+
+    def test_judge_session_passes_subagent_summary_into_prompt(self) -> None:
+        """When subagent_summary is provided, the prompt carries the block and
+        the judge's delegation verdict is parsed through."""
+        mock_anthropic = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = [
+            MagicMock(
+                text=json.dumps(
+                    {
+                        "score": 0.80,
+                        "reason": "Good delegation",
+                        "delegation": {"verdict": "good", "reason": "Explore spared context"},
+                    }
+                )
+            )
+        ]
+        mock_anthropic.Anthropic.return_value.messages.create.return_value = mock_response
+
+        summary = {
+            "subagents_total": 1,
+            "subagents_readonly": 1,
+            "subagents_scratch": 0,
+            "subagents_acting": 0,
+            "subagent_tokens_total": 100,
+            "spawns_parent_kept_working": 1,
+            "subagent_children": [
+                {
+                    "agent_type": "Explore",
+                    "label": "readonly",
+                    "duration_s": 5,
+                    "tokens": 100,
+                    "result_used": True,
+                }
+            ],
+        }
+
+        with (
+            patch.dict("sys.modules", {"anthropic": mock_anthropic}),
+            patch("gptme_sessions.judge._get_api_key", return_value="fake-key"),
+            patch(
+                "gptme_sessions.judge.format_subagent_context",
+                wraps=format_subagent_context,
+            ) as mock_format,
+        ):
+            result = judge_session(
+                "Delegated exploration",
+                category="code",
+                api_key="fake-key",
+                subagent_summary=summary,
+            )
+
+        assert result is not None
+        assert result["delegation"] == {"verdict": "good", "reason": "Explore spared context"}
+        mock_format.assert_called_once_with(summary)
+
+    def test_judge_session_omits_delegation_without_subagent_summary(self) -> None:
+        """delegation stays None when no subagent_summary is passed, even if the
+        judge tries to return one (a well-formed judge follows the prompt, but
+        the caller-facing contract must not depend on that)."""
+        mock_anthropic = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = [
+            MagicMock(text=json.dumps({"score": 0.6, "reason": "No subagents here"}))
+        ]
+        mock_anthropic.Anthropic.return_value.messages.create.return_value = mock_response
+
+        with (
+            patch.dict("sys.modules", {"anthropic": mock_anthropic}),
+            patch("gptme_sessions.judge._get_api_key", return_value="fake-key"),
+        ):
+            result = judge_session("Solo work", category="code", api_key="fake-key")
+
+        assert result is not None
+        assert result.get("delegation") is None
 
     def test_judge_session_passes_routing_context_into_prompt(self) -> None:
         """When cascade_context names Tier 3, the prompt carries the block."""
@@ -815,6 +940,7 @@ class TestModelRouting:
             "model": "openai-subscription/gpt-5.4",
             "alignment_score": None,
             "pivot_verdict": None,
+            "delegation": None,
             "meta": {
                 "backend": "gptme-fallback",
                 "judge_version": JUDGE_VERSION,
@@ -880,6 +1006,35 @@ class TestModelRouting:
         assert normalized["score"] is None
         assert normalized["judge_status"] == JUDGE_STATUS_COMPLIANCE_FAILURE
         assert normalized["raw_response"] == '{"score": 0.42}'
+
+    def test_normalize_judge_verdict_passes_through_valid_delegation(self) -> None:
+        """A recognised delegation verdict+reason round-trips."""
+        normalized = normalize_judge_verdict(
+            {
+                "score": 0.70,
+                "reason": "test",
+                "model": "test",
+                "delegation": {"verdict": "wasteful", "reason": "child result unused"},
+            }
+        )
+        assert normalized["delegation"] == {"verdict": "wasteful", "reason": "child result unused"}
+
+    def test_normalize_judge_verdict_rejects_invalid_delegation_verdict(self) -> None:
+        """An unrecognised delegation verdict string is coerced to None, not guessed."""
+        normalized = normalize_judge_verdict(
+            {
+                "score": 0.70,
+                "reason": "test",
+                "model": "test",
+                "delegation": {"verdict": "excellent", "reason": "nice"},
+            }
+        )
+        assert normalized["delegation"] is None
+
+    def test_normalize_judge_verdict_defaults_delegation_to_none(self) -> None:
+        """No delegation key in the payload normalizes to None."""
+        normalized = normalize_judge_verdict({"score": 0.70, "reason": "test", "model": "test"})
+        assert normalized["delegation"] is None
 
 
 class TestSessionRecordJudgeFields:
@@ -1310,6 +1465,7 @@ class TestSessionRecordJudgeFields:
             "model": "openai-subscription/gpt-5.4",
             "alignment_score": None,
             "pivot_verdict": None,
+            "delegation": None,
             "meta": {
                 "backend": "gptme-fallback",
                 "judge_version": JUDGE_VERSION,
@@ -1344,6 +1500,39 @@ class TestSessionRecordJudgeFields:
         legacy_fields = getattr(updated, "_legacy_fields", {})
         assert legacy_fields["alignment_score"] == 0.35
         assert legacy_fields["pivot_verdict"] == "pivot"
+
+    def test_writeback_persists_delegation_annotation(self, tmp_path: Path) -> None:
+        """The delegation annotation survives into legacy_fields, separate from score."""
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(SessionRecord(session_id="abc123", outcome="productive"))
+
+        with patch(
+            "gptme_sessions.judge.judge_session",
+            return_value={
+                "score": 0.85,
+                "reason": "Solid delegation",
+                "model": "claude-haiku-4-5",
+                "delegation": {"verdict": "good", "reason": "Explore spared context"},
+            },
+        ):
+            result = judge_and_writeback(
+                text="session text",
+                category="code",
+                goals="ship useful work",
+                session_id="abc123",
+                sessions_dir=tmp_path,
+                subagent_summary={"subagents_total": 1},
+            )
+
+        assert result["status"] == "ok"
+        updated = SessionStore(sessions_dir=tmp_path).load_all()[0]
+        legacy_fields = getattr(updated, "_legacy_fields", {})
+        assert legacy_fields["delegation"] == {
+            "verdict": "good",
+            "reason": "Explore spared context",
+        }
+        # The strategic-value score must not be perturbed by delegation.
+        assert updated.llm_judge_score == 0.85
 
     def test_writeback_skips_legacy_when_alignment_absent(self, tmp_path: Path) -> None:
         """When the judge returns no alignment fields, legacy_fields stays clean."""

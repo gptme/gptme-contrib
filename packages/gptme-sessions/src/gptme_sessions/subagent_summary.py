@@ -146,6 +146,7 @@ EMPTY_SUMMARY: dict[str, Any] = {
     "parent_idle_max_seconds": 0,
     "active_seconds": 0,
     "session_kind": "unknown",
+    "subagent_children": [],
 }
 
 
@@ -757,6 +758,11 @@ def summarize_subagents(
     seconds_total = 0
     tool_output_bytes = 0
     child_done_ts: dict[str, float] = {}
+    # Per-child rows, aligned with `children` by index — populated here with
+    # everything the first pass already computes, then annotated with
+    # `result_used` in the kept-working pass below (top-level children only;
+    # nested (depth>1) children keep `result_used=None` — not computed).
+    child_rows: list[dict[str, Any]] = []
 
     sticky = harness in ("claude-code", "claude_code", None)
     for child in children:
@@ -766,22 +772,37 @@ def summarize_subagents(
             scanned.tools, scanned.bash_cmds, scanned.write_paths, sticky_cwd=sticky
         )
         labels[label] += 1
+        child_tokens = 0
         try:
-            tokens_total += _child_tokens(child.records, harness)
+            child_tokens = _child_tokens(child.records, harness)
+            tokens_total += child_tokens
         except Exception:
             # Best-effort per child: one malformed child's usage extraction
             # must not abort the whole summary (the caller wraps the entire
             # summarize_subagents call, so an unguarded raise would replace
             # every computed field with empty_summary).
             pass
+        duration_s = 0
         if scanned.first_ts is not None and scanned.last_ts is not None:
             intervals.append((scanned.first_ts, scanned.last_ts))
-            seconds_total += int(round(scanned.last_ts - scanned.first_ts))
+            duration_s = int(round(scanned.last_ts - scanned.first_ts))
+            seconds_total += duration_s
             agent_id = child.session_id.removeprefix("agent-")
             child_done_ts[agent_id] = scanned.last_ts
             if child.tool_use_id:
                 child_done_ts[str(child.tool_use_id)] = scanned.last_ts
         tool_output_bytes += scanned.result_bytes
+        child_rows.append(
+            {
+                "agent_type": child.agent_type or "default",
+                "label": label,
+                "spawn_depth": child.spawn_depth,
+                "duration_s": duration_s,
+                "tokens": child_tokens,
+                "tool_output_bytes": scanned.result_bytes,
+                "result_used": None,
+            }
+        )
 
     summary["subagents_total"] = len(children)
     summary["subagents_depth_max"] = depth_max
@@ -904,7 +925,9 @@ def summarize_subagents(
         )
         if parent_turns >= 1:
             kept += 1
+        child_rows[i]["result_used"] = parent_turns >= 1
     summary["spawns_parent_kept_working"] = kept
+    summary["subagent_children"] = child_rows
 
     idle_max = 0.0
     if intervals and len(parent.turn_ts) > 1:

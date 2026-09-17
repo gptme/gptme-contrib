@@ -365,6 +365,12 @@ def test_concurrency_and_parent_kept_working(tmp_path: Path) -> None:
     assert summary["subagent_seconds_total"] >= 8
     assert summary["session_kind"] == "interactive"
     assert summary["parent_idle_max_seconds"] >= 0
+    children = summary["subagent_children"]
+    assert len(children) == 2
+    assert {c["agent_type"] for c in children} == {"Explore"}
+    assert {c["label"] for c in children} == {"readonly"}
+    assert all(c["result_used"] is True for c in children)
+    assert sum(c["tool_output_bytes"] for c in children) == 70
 
 
 def test_kept_working_uses_launch_ts_when_agent_call_has_no_id() -> None:
