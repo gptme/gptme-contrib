@@ -1331,6 +1331,74 @@ def test_append_drops_oversized_inline_context(tmp_path):
     assert record["sid"] == CALL_SID
 
 
+def test_append_bounds_oversized_scalar_field(tmp_path):
+    """A huge caller value must not produce an oversized row.
+
+    ``caller`` on an inbound row comes from the Twilio ``customParameters``
+    of an unauthenticated Media Stream, so it can be arbitrarily long. An
+    oversized row escapes both the reader's tail window and the writer's
+    torn-tail repair, silently hiding the whole history.
+    """
+    from gptme_voice.realtime.missed_call_context import (
+        _MAX_PAYLOAD_BYTES,
+        _append_history_line,
+    )
+
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    history = voice / "callback-history.jsonl"
+    now = datetime.now(timezone.utc)
+    _append_history_line(
+        history,
+        {
+            "direction": "inbound",
+            "sid": CALL_SID,
+            "date": now.date().isoformat(),
+            "placed_at": now.isoformat(),
+            "caller": "9" * (_MAX_PAYLOAD_BYTES * 2),
+        },
+    )
+    lines = [ln for ln in history.read_text().splitlines() if ln.strip()]
+    assert len(lines) == 1
+    assert len(lines[0].encode("utf-8")) <= _MAX_PAYLOAD_BYTES
+    record = json.loads(lines[0])
+    assert record["caller"].startswith("9999")
+    assert record["sid"] == CALL_SID
+
+
+def test_oversized_caller_does_not_hide_history_index(tmp_path):
+    """The index still shows recent calls after an oversized caller row.
+
+    End-to-end guard for the row-length cap: the oversized row must neither
+    push earlier history out of the read window nor blank the index.
+    """
+    from gptme_voice.realtime.missed_call_context import record_inbound_call
+
+    voice = tmp_path / "state" / "voice-calls"
+    voice.mkdir(parents=True)
+    history = voice / "callback-history.jsonl"
+    now = datetime.now(timezone.utc)
+    history.write_text(
+        json.dumps(
+            {
+                "type": "general",
+                "sid": CALL_SID,
+                "date": now.date().isoformat(),
+                "placed_at": now.isoformat(),
+                "caller": PHONE,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    record_inbound_call(str(tmp_path), caller="9" * 200_000, now=now)
+
+    index = load_callback_history_index(str(tmp_path))
+    assert index is not None
+    assert "(inbound)" in index
+    assert PHONE in index
+
+
 def test_index_sanitizes_injected_control_characters(tmp_path):
     """Newlines/control chars in history fields can't inject instruction lines.
 

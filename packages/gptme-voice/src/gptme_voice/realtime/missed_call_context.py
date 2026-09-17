@@ -230,6 +230,50 @@ def _snapshot_context_file(voice_dir: Path, relative: str, current: datetime) ->
     return relative
 
 
+# Longest scalar (non-context) field kept verbatim in a history row. The cap
+# is what makes _MAX_PAYLOAD_BYTES a guarantee rather than a hope: a row whose
+# `caller` came from an unauthenticated Twilio custom parameter could otherwise
+# be arbitrarily long.
+_HISTORY_FIELD_MAX_CHARS = 2000
+# The fields a row is still useful without — everything else can go if a row
+# somehow remains oversized after clamping.
+_HISTORY_CORE_FIELDS = ("direction", "date", "placed_at", "sid", "caller")
+
+
+def _encoded_size(note: dict) -> int:
+    return len(json.dumps(note, ensure_ascii=False).encode("utf-8")) + 1
+
+
+def _bounded_history_note(note: dict) -> dict:
+    """Clamp a note so its encoded row fits in ``_MAX_PAYLOAD_BYTES``.
+
+    A single row larger than ``_HISTORY_TAIL_BYTES`` is unrecoverable: the
+    reader's window can no longer reach the previous complete line, and the
+    writer can no longer tell a torn tail from a huge-but-complete row. The
+    writers are not fully trusted (an inbound row's ``caller`` comes from an
+    unauthenticated Twilio custom parameter), so the cap belongs here rather
+    than at each call site.
+    """
+    bounded = {
+        key: (
+            value[: _HISTORY_FIELD_MAX_CHARS - 1] + "…"
+            if isinstance(value, str) and len(value) > _HISTORY_FIELD_MAX_CHARS
+            else value
+        )
+        for key, value in note.items()
+    }
+    if _encoded_size(bounded) <= _MAX_PAYLOAD_BYTES:
+        return bounded
+    # An inlined `context` snapshot is the only unbounded non-scalar field
+    # (file-backed snapshots are already capped by _read_capped_bytes).
+    # Drop it — the loader falls back to context_file when it is absent.
+    without_context = {k: v for k, v in bounded.items() if k != "context"}
+    if _encoded_size(without_context) <= _MAX_PAYLOAD_BYTES:
+        return without_context
+    # Last resort: keep only the compact identity fields.
+    return {k: v for k, v in without_context.items() if k in _HISTORY_CORE_FIELDS}
+
+
 def _append_history_line(history_path: Path, note: dict) -> None:
     """Durably append one JSON line, locking and repairing a torn tail.
 
@@ -238,15 +282,7 @@ def _append_history_line(history_path: Path, note: dict) -> None:
     otherwise skip the joined malformed line and lose both calls).
     """
     history_path.parent.mkdir(parents=True, exist_ok=True)
-    encoded = json.dumps(note, ensure_ascii=False) + "\n"
-    if len(encoded.encode("utf-8")) > _MAX_PAYLOAD_BYTES and "context" in note:
-        # Keep every line well under the tail-repair window: an inlined
-        # `context` snapshot is the only unbounded field (file-backed
-        # snapshots are already capped by _read_capped_bytes). Drop it
-        # rather than write an oversized line — the loader already falls
-        # back to context_file when context is absent.
-        note = {k: v for k, v in note.items() if k != "context"}
-        encoded = json.dumps(note, ensure_ascii=False) + "\n"
+    encoded = json.dumps(_bounded_history_note(note), ensure_ascii=False) + "\n"
     with history_path.open("a+b") as fh:
         if fcntl is not None:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
