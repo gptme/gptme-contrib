@@ -1517,6 +1517,28 @@ def test_record_inbound_call_with_session_file(tmp_path):
     assert entry["session_file"] == "state/voice-calls/calls/rec.json"
 
 
+def test_record_inbound_call_session_file_outside_workspace_stored_absolute(tmp_path):
+    """session_file outside workspace is stored as-is (absolute) rather than dropped."""
+    from gptme_voice.realtime.missed_call_context import record_inbound_call
+
+    now = datetime.now(timezone.utc)
+    # Simulate default state_dir=/tmp/gptme-voice-call-state: not under workspace.
+    outside = tmp_path.parent / "outside-workspace" / "archive" / "rec.json"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("{}", encoding="utf-8")
+    record_inbound_call(
+        str(tmp_path),
+        caller=PHONE,
+        session_file=str(outside),
+        now=now,
+    )
+    history = tmp_path / "state" / "voice-calls" / "callback-history.jsonl"
+    entry = json.loads(history.read_text().strip())
+    # Must not be silently dropped — store the absolute path.
+    assert "session_file" in entry
+    assert entry["session_file"] == str(outside)
+
+
 def test_load_callback_history_index_shows_inbound_direction(tmp_path):
     """Inbound entries are labelled (inbound) in the index; outbound are not."""
     voice = tmp_path / "state" / "voice-calls"

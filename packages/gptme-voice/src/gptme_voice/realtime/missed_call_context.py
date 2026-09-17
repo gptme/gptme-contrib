@@ -271,7 +271,17 @@ def _bounded_history_note(note: dict) -> dict:
     if _encoded_size(without_context) <= _MAX_PAYLOAD_BYTES:
         return without_context
     # Last resort: keep only the compact identity fields.
-    return {k: v for k, v in without_context.items() if k in _HISTORY_CORE_FIELDS}
+    core = {k: v for k, v in without_context.items() if k in _HISTORY_CORE_FIELDS}
+    if _encoded_size(core) <= _MAX_PAYLOAD_BYTES:
+        return core
+    # Even core fields can exceed the limit when caller contains many multi-byte
+    # characters (e.g. emoji): _HISTORY_FIELD_MAX_CHARS caps *characters*, not
+    # bytes, so 2000 emoji ≈ 8000 bytes.  Truncate byte-wise on the caller.
+    if "caller" in core:
+        encoded = core["caller"].encode("utf-8")
+        core = dict(core)
+        core["caller"] = encoded[:_HISTORY_FIELD_MAX_CHARS].decode("utf-8", "ignore")
+    return core
 
 
 def _append_history_line(history_path: Path, note: dict) -> None:
@@ -685,8 +695,11 @@ def record_inbound_call(
     Mirrors ``write_missed_call_context`` for the inbound direction so
     ``load_callback_history_index`` covers both call directions.
 
-    *session_file* should be the workspace-relative path of the archived
-    call-record JSON written by the server at call-end.
+    *session_file* is the path to the archived call-record JSON written by the
+    server at call-end.  A workspace-relative path is preferred (agents resolve
+    it via the workspace root), but an absolute path is stored as-is when the
+    archive lives outside the workspace (e.g. the default
+    ``/tmp/gptme-voice-call-state`` state dir).
     """
     if not workspace:
         return
@@ -705,8 +718,9 @@ def record_inbound_call(
     if session_file is not None:
         root = Path(workspace)
         relative = _workspace_relative_path(root, session_file)
-        if relative is not None:
-            note["session_file"] = relative
+        # Use the workspace-relative path when possible; fall back to the
+        # provided path (which may be absolute) so the pointer is never lost.
+        note["session_file"] = relative if relative is not None else session_file
     _append_history_line(voice_dir / _HISTORY_FILE, note)
 
 
