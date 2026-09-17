@@ -44,6 +44,7 @@ from .missed_call_context import (
     CALLBACK_GUIDANCE,
     load_callback_brief,
     load_callback_candidate,
+    load_callback_history_index,
 )
 from .openai_client import (
     OpenAIRealtimeClient,
@@ -1642,6 +1643,14 @@ class VoiceServer:
         if activity_digest and not standup_brief:
             instructions = _prepend_activity_digest(activity_digest, instructions)
 
+        # Inject the compact call history index for operator inbound calls.
+        # CALLBACK_WINDOW no longer gates this — the index covers all recent
+        # calls so the agent can reference them on demand without a time cap.
+        if caller_is_operator and not standup_brief:
+            history_index = load_callback_history_index(self.workspace)
+            if history_index:
+                instructions = history_index + "\n\n" + instructions
+
         # standup_brief takes priority over recent-call resume: an explicit outbound
         # standup should always deliver the brief, not silently resume a prior session.
         if standup_brief:
@@ -2603,16 +2612,26 @@ class VoiceServer:
                         # Cold path: build session from scratch. Callback guidance
                         # offers the brief instead of using the outbound opener.
                         if callback_brief:
+                            # Callback sessions get the call history index too —
+                            # without this, only non-callback operator calls see it.
+                            callback_history = load_callback_history_index(
+                                self.workspace
+                            )
+                            callback_parts = [
+                                CALLBACK_GUIDANCE,
+                                "\n\n",
+                                callback_brief,
+                                "\n\n",
+                            ]
+                            if callback_history:
+                                callback_parts.append(callback_history + "\n\n")
+                            callback_parts.append(
+                                _build_caller_instructions(
+                                    self._instructions, from_number, self.workspace
+                                )
+                            )
                             bootstrap = SessionBootstrap(
-                                instructions=(
-                                    CALLBACK_GUIDANCE
-                                    + "\n\n"
-                                    + callback_brief
-                                    + "\n\n"
-                                    + _build_caller_instructions(
-                                        self._instructions, from_number, self.workspace
-                                    )
-                                ),
+                                instructions="".join(callback_parts),
                                 should_greet_first=True,
                                 initial_response_instructions=CALLBACK_GREETING,
                             )
