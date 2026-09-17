@@ -2364,3 +2364,139 @@ class TestRegradeCommand:
         assert persisted.outcome == "productive"
         assert persisted.model == "concurrent-model"
         assert "model" in persisted.annotated_fields
+
+
+# -- subagent_summary propagation through sync/regrade/dedup helpers ---------
+
+
+class TestSubagentSummaryPropagation:
+    """extract_from_path's subagent_summary must reach persisted records on
+    every lifecycle path, not just post_session (gptme-contrib#1672 review)."""
+
+    @staticmethod
+    def _extract_result() -> dict:
+        return {
+            "productive": True,
+            "session_duration_s": 120,
+            "deliverables": [],
+            "deliverable_details": [],
+            "inferred_category": "code",
+            "subagent_summary": {
+                "subagents_total": 2,
+                "subagents_depth_max": 1,
+            },
+            "usage": None,
+        }
+
+    def test_backfill_record_gains_subagent_summary(self) -> None:
+        from gptme_sessions.cli import _apply_extract_result_to_record
+
+        record = SessionRecord(session_id="s1", harness="gptme")
+        changed = _apply_extract_result_to_record(record, self._extract_result())
+
+        assert changed is True
+        assert record.subagent_summary == {
+            "subagents_total": 2,
+            "subagents_depth_max": 1,
+        }
+
+    def test_backfill_preserves_existing_subagent_summary(self) -> None:
+        from gptme_sessions.cli import _apply_extract_result_to_record
+
+        existing = {"subagents_total": 9, "subagents_depth_max": 3}
+        record = SessionRecord(session_id="s1", harness="gptme", subagent_summary=existing)
+        _apply_extract_result_to_record(record, self._extract_result())
+
+        assert record.subagent_summary == existing
+
+    def test_kwargs_populates_subagent_summary(self) -> None:
+        from gptme_sessions.cli import _apply_extract_result_to_kwargs
+
+        kwargs: dict = {}
+        _apply_extract_result_to_kwargs(kwargs, self._extract_result())
+
+        assert kwargs["subagent_summary"] == {
+            "subagents_total": 2,
+            "subagents_depth_max": 1,
+        }
+
+    def test_kwargs_omits_non_dict_subagent_summary(self) -> None:
+        from gptme_sessions.cli import _apply_extract_result_to_kwargs
+
+        kwargs: dict = {}
+        result = self._extract_result()
+        result["subagent_summary"] = None
+        _apply_extract_result_to_kwargs(kwargs, result)
+
+        assert "subagent_summary" not in kwargs
+
+    def test_regrade_backfills_subagent_summary(self, tmp_path: Path, monkeypatch) -> None:
+        """Regrade's re-extraction must not persist None after a successful extract."""
+        store = SessionStore(sessions_dir=tmp_path)
+        traj = tmp_path / "traj.jsonl"
+        traj.write_text("{}\n", encoding="utf-8")
+        record = SessionRecord(
+            session_id="regrade-sum",
+            harness="codex",
+            outcome="noop",
+            trajectory_path=str(traj),
+            deliverables=[],
+        )
+        store.append(record)
+
+        monkeypatch.setattr(
+            "gptme_sessions.cli.extract_from_path",
+            lambda _: self._extract_result(),
+        )
+
+        from click.testing import CliRunner
+
+        from gptme_sessions.cli import cli
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["--sessions-dir", str(tmp_path), "regrade", "--harness", "codex"]
+        )
+        assert result.exit_code == 0, result.output
+
+        persisted = store.load_all()[0]
+        assert persisted.subagent_summary == {
+            "subagents_total": 2,
+            "subagents_depth_max": 1,
+        }
+
+    def test_dedup_keeper_gains_subagent_summary_from_duplicate(self, tmp_path: Path) -> None:
+        """Dedup must copy an available summary into a keeper that lacks it."""
+        store = SessionStore(sessions_dir=tmp_path)
+        store.append(
+            SessionRecord(
+                session_id="keeper",
+                harness="claude-code",
+                start_time="2026-05-31T10:00:00+00:00",
+                end_time="2026-05-31T10:10:00+00:00",
+                category="code",
+            )
+        )
+        store.append(
+            SessionRecord(
+                session_id="dup",
+                harness="claude-code",
+                start_time="2026-05-31T10:02:00+00:00",
+                end_time="2026-05-31T10:12:00+00:00",
+                subagent_summary={"subagents_total": 4, "subagents_depth_max": 2},
+            )
+        )
+
+        from click.testing import CliRunner
+
+        from gptme_sessions.cli import cli
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--sessions-dir", str(tmp_path), "dedup"])
+        assert result.exit_code == 0, result.output
+
+        reloaded = {r.session_id: r for r in store.load_all()}
+        assert reloaded["keeper"].subagent_summary == {
+            "subagents_total": 4,
+            "subagents_depth_max": 2,
+        }

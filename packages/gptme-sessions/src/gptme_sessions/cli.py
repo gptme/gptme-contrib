@@ -181,6 +181,9 @@ def _apply_extract_result_to_record(record: SessionRecord, result: dict) -> bool
         record, "deliverable_details", result.get("deliverable_details", [])
     )
     changed |= _assign_extracted_if_missing(record, "category", result.get("inferred_category"))
+    _subagent_summary = result.get("subagent_summary")
+    if isinstance(_subagent_summary, dict):
+        changed |= _assign_extracted_if_missing(record, "subagent_summary", _subagent_summary)
 
     usage = result.get("usage")
     if isinstance(usage, dict):
@@ -311,6 +314,9 @@ def _apply_extract_result_to_kwargs(record_kwargs: dict, result: dict) -> None:
     record_kwargs["deliverable_details"] = result.get("deliverable_details", [])
     if result.get("inferred_category"):
         record_kwargs["category"] = result["inferred_category"]
+    _subagent_summary = result.get("subagent_summary")
+    if isinstance(_subagent_summary, dict):
+        record_kwargs["subagent_summary"] = _subagent_summary
 
     usage = result.get("usage")
     if not isinstance(usage, dict):
@@ -701,6 +707,7 @@ _RICHNESS_FIELDS: tuple[str, ...] = (
     "context_peak_tokens",
     "harm_category",
     "span_aggregates",
+    "subagent_summary",
 )
 
 # Values that count as "empty" for richness/merge purposes.
