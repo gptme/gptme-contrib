@@ -660,17 +660,39 @@ def load_callback_history_index(
             placed_str = placed.strftime("%Y-%m-%d %H:%MZ")
         except ValueError:
             placed_str = placed_raw[:16] if placed_raw else "unknown"
-        caller = entry.get("caller", "unknown")
+        caller = _sanitize_index_field(entry.get("caller", "unknown"))
         parts = [f"- {placed_str} — {caller}"]
-        if "context_file" in entry:
-            parts.append(f"brief: {entry['context_file']}")
-        if "transcript_file" in entry:
-            parts.append(f"transcript: {entry['transcript_file']}")
-        if "session_file" in entry:
-            parts.append(f"session: {entry['session_file']}")
+        for key, label in (
+            ("context_file", "brief"),
+            ("transcript_file", "transcript"),
+            ("session_file", "session"),
+        ):
+            if key in entry:
+                parts.append(f"{label}: {_sanitize_index_field(entry[key])}")
         lines_out.append(" | ".join(parts))
     lines_out.append(_HISTORY_INDEX_GUIDANCE)
     return "\n".join(lines_out)
+
+
+_INDEX_FIELD_MAX_CHARS = 200
+
+
+def _sanitize_index_field(value: object) -> str:
+    """Make a history-row value safe to splice into trusted instructions.
+
+    History rows are our own past outbound-call notes, not directly
+    attacker-controlled today — but this index is injected verbatim into
+    every inbound operator session's instructions, so treat every field as
+    untrusted text rather than assuming the write path stayed clean. Strips
+    control/newline characters (no injected instruction lines) and clamps
+    length (bounded blast radius from a corrupted or oversized field).
+    """
+    text = str(value)
+    text = "".join(ch for ch in text if ch >= " " or ch == "\t")
+    text = " ".join(text.split())
+    if len(text) > _INDEX_FIELD_MAX_CHARS:
+        text = text[:_INDEX_FIELD_MAX_CHARS] + "…"
+    return text
 
 
 async def load_callback_brief(
