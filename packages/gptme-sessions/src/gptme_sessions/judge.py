@@ -51,6 +51,11 @@ class JudgeMetadata(TypedDict):
     judge_version: str
 
 
+class DelegationVerdict(TypedDict):
+    verdict: str  # good | neutral | wasteful | missed
+    reason: str
+
+
 class JudgeVerdict(TypedDict, total=False):
     # ``None`` when the judge returned a payload without a usable score, or
     # when an otherwise parseable payload violated the judge contract. Never
@@ -62,6 +67,7 @@ class JudgeVerdict(TypedDict, total=False):
     model: str
     alignment_score: float | None
     pivot_verdict: str | None
+    delegation: DelegationVerdict | None
     raw_response: str
     meta: JudgeMetadata
 
@@ -77,6 +83,7 @@ JUDGE_PROMPT_TEMPLATE = """\
 {category}
 {routing_context}
 {intent_context}
+{subagent_context}
 ## Session Journal
 {journal}
 
@@ -244,7 +251,42 @@ alignment verdict (``on_track`` / ``partial`` / ``pivot`` / ``off_target``),
 use it as calibration — your score should agree in direction unless you
 have strong evidence otherwise.
 
-Return JSON: {{"score": <float>, "reason": "<1 sentence>", "alignment_score": <float or null>, "pivot_verdict": <"on_track"|"partial"|"pivot"|"off_target"|null>}}"""
+## Delegation Annotation
+When a `## Subagent Usage` block is present above, separately annotate whether
+delegating to subagents was the right call for this session. This is a
+**separate annotation, not a score term** — do not raise or lower the
+strategic-value score based on subagent use.
+
+**Delegation verdict** (`delegation.verdict`):
+- ``"good"``: Read-only/exploration work was offloaded to subagents while the
+  parent kept working or synthesizing, and the subagents' results were
+  actually used (`result_used: true`). Do not pick ``"good"`` for children
+  with `result_used: unknown` — that means no usage data was recorded.
+- ``"neutral"``: No subagents were used, or subagent use was incidental and
+  neither clearly helped nor hurt. **Default to this** — not delegating is
+  the correct default for short, simple, or single-file tasks. A session with
+  zero subagents should almost always get `neutral`, never `missed`.
+- ``"wasteful"``: Subagents were spawned but their results were not used
+  (`result_used: false`), duplicated work the parent already did, or the
+  overhead (tokens/duration) was disproportionate to what was returned.
+  Do **not** treat `result_used: unknown` as evidence of waste — it means
+  no data was recorded (nested children or missing timestamps), not that
+  results were discarded; treat it as neutral evidence.
+- ``"missed"``: The session did a long serial exploration (many sequential
+  read-only tool calls) that a read-only subagent should clearly have done
+  in parallel, and no subagent was used.
+
+**Bias guard**: Do not reward subagent use for its own sake. A session that
+solved a simple task directly, with no subagents, is not worse than one that
+delegated unnecessarily — if anything, unnecessary delegation for a trivial
+task should be flagged `wasteful`, not `good`. Only pick `missed` when the
+serial-exploration evidence is clear in the journal/signals; when in doubt
+between `neutral` and `missed`, pick `neutral`.
+
+If no `## Subagent Usage` block is present, omit the `delegation` field
+entirely (return `null`).
+
+Return JSON: {{"score": <float>, "reason": "<1 sentence>", "alignment_score": <float or null>, "pivot_verdict": <"on_track"|"partial"|"pivot"|"off_target"|null>, "delegation": {{"verdict": <"good"|"neutral"|"wasteful"|"missed">, "reason": "<1 sentence>"}} or null}}"""
 
 
 def format_intent_context(intent: dict | None) -> str:
@@ -281,6 +323,73 @@ def format_intent_context(intent: dict | None) -> str:
     alignment = intent.get("outcome_alignment")
     if alignment is not None:
         lines.append(f"- **Self-assigned alignment**: {alignment}")
+    return "\n".join(lines) + "\n"
+
+
+def format_subagent_context(subagent_summary: dict | None) -> str:
+    """Render a `## Subagent Usage` block from a ``subagent_summary`` dict.
+
+    Returns an empty string when ``subagent_summary`` is missing or reports
+    zero subagents — the judge omits the ``delegation`` field in that case
+    (see the bias guard in ``JUDGE_PROMPT_TEMPLATE``: no subagents is the
+    correct default for most sessions, not an absence of signal worth
+    describing).
+
+    Expects the shape produced by
+    :func:`gptme_sessions.subagent_summary.summarize_subagents`: aggregate
+    counts/tokens/durations plus a ``subagent_children`` list (one dict per
+    child: ``agent_type``, ``label``, ``duration_s``, ``tokens``,
+    ``tool_output_bytes``, ``result_used``).
+
+    ``subagents_total`` counts every descendant, but ``subagent_children``
+    deliberately exposes only top-level children (nested rows would inflate the
+    delegation signal). The rendered block keeps those two figures consistent:
+    the count line names the top-level and nested populations separately, and
+    the kept-working ratio uses the same top-level denominator as the list, so
+    the judge never reads a count that disagrees with the rows below it.
+    """
+    if not subagent_summary or not isinstance(subagent_summary, dict):
+        return ""
+    total = subagent_summary.get("subagents_total") or 0
+    if not total:
+        return ""
+    children = [
+        child
+        for child in (subagent_summary.get("subagent_children") or [])
+        if (child.get("spawn_depth", 1) or 1) <= 1
+    ]
+    if children:
+        nested = max(total - len(children), 0)
+        count_note = (
+            f"{len(children)} top-level + {nested} nested descendant(s)"
+            if nested
+            else f"{len(children)} subagent(s)"
+        )
+    else:
+        # No per-child breakdown (e.g. a stored summary that predates this
+        # field). Say so, rather than implying a list that is not rendered.
+        count_note = f"{total} subagent(s), no per-child breakdown available"
+    denominator = len(children) or total
+    lines = [
+        "",
+        "## Subagent Usage",
+        f"- **Count**: {count_note} "
+        f"(readonly={subagent_summary.get('subagents_readonly', 0)}, "
+        f"scratch={subagent_summary.get('subagents_scratch', 0)}, "
+        f"acting={subagent_summary.get('subagents_acting', 0)})",
+        f"- **Tokens spent by subagents**: {subagent_summary.get('subagent_tokens_total', 0)}",
+        f"- **Parent kept working while subagents ran**: "
+        f"{subagent_summary.get('spawns_parent_kept_working', 0)}/{denominator}",
+    ]
+    if children:
+        lines.append("- **Per-child**:")
+        for child in children[:10]:
+            used = child.get("result_used")
+            used_str = "used" if used else ("unused" if used is False else "unknown")
+            lines.append(
+                f"  - {child.get('agent_type', 'default')} ({child.get('label', '?')}, "
+                f"{child.get('duration_s', 0)}s, {child.get('tokens', 0)} tokens): {used_str}"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -494,6 +603,7 @@ def _build_judge_meta(*, model: str) -> JudgeMetadata:
 
 
 VALID_ALIGNMENT_VALUES = frozenset({"on_track", "partial", "pivot", "off_target"})
+VALID_DELEGATION_VERDICTS = frozenset({"good", "neutral", "wasteful", "missed"})
 
 
 JUDGE_STATUS_OK = "ok"
@@ -615,6 +725,26 @@ def _coerce_pivot_verdict(raw: Any) -> str | None:
     return s if s in VALID_ALIGNMENT_VALUES else None
 
 
+def _coerce_delegation(raw: Any) -> DelegationVerdict | None:
+    """Normalize a delegation payload to a recognised verdict+reason or None.
+
+    Deliberately strict: an unrecognised verdict string or a missing
+    ``reason`` degrades to ``None`` rather than substituting a default —
+    the same "no silent neutral default" discipline used for the score
+    (see ``_coerce_score``), so the annotation is either trustworthy or
+    absent, never guessed.
+    """
+    if not raw or not isinstance(raw, dict):
+        return None
+    verdict = str(raw.get("verdict", "")).strip()
+    if verdict not in VALID_DELEGATION_VERDICTS:
+        return None
+    reason_raw = str(raw.get("reason", "")).strip()
+    if not reason_raw:
+        return None
+    return {"verdict": verdict, "reason": reason_raw}
+
+
 def normalize_judge_verdict(payload: dict[str, Any]) -> JudgeVerdict:
     """Attach stable metadata to a raw judge verdict.
 
@@ -645,6 +775,7 @@ def normalize_judge_verdict(payload: dict[str, Any]) -> JudgeVerdict:
         "model": model,
         "alignment_score": _coerce_alignment_score(payload.get("alignment_score")),
         "pivot_verdict": _coerce_pivot_verdict(payload.get("pivot_verdict")),
+        "delegation": _coerce_delegation(payload.get("delegation")),
         "meta": {
             "backend": str(meta.get("backend", base_meta["backend"])),
             "judge_version": str(meta.get("judge_version", base_meta["judge_version"])),
@@ -717,6 +848,9 @@ def _parse_judge_payload(text: str, model: str) -> dict | None:
     pivot_verdict = _coerce_pivot_verdict(verdict.get("pivot_verdict"))
     if pivot_verdict is not None:
         result["pivot_verdict"] = pivot_verdict
+    delegation = _coerce_delegation(verdict.get("delegation"))
+    if delegation is not None:
+        result["delegation"] = delegation
     return result
 
 
@@ -840,6 +974,7 @@ def judge_session(
     api_key: str | None = None,
     cascade_context: dict | None = None,
     intent: dict | None = None,
+    subagent_summary: dict | None = None,
     temperature: float = 0.3,
 ) -> dict | None:
     """Score a session's strategic value using an LLM judge.
@@ -871,6 +1006,12 @@ def judge_session(
             Expected keys: ``session_id``, ``lane``, ``objective``,
             ``expected_artifact``, and optionally ``outcome_alignment``
             (self-assigned pre-closeout verdict).
+        subagent_summary: Optional ``subagent_summary`` dict (see
+            :func:`gptme_sessions.subagent_summary.summarize_subagents`).
+            When provided and non-empty (``subagents_total > 0``), a
+            ``## Subagent Usage`` block is injected and the judge is asked to
+            return a separate ``delegation`` annotation (not a score term).
+            Pass ``None`` (default) to omit the block and the annotation.
         temperature: Sampling temperature for the judge model (default 0.3).
             Higher values increase score variance; 0.0 produces near-constant
             scores that undermine calibration.
@@ -887,19 +1028,28 @@ def judge_session(
     # str.format() only parses {placeholder} in the template itself — values
     # passed as keyword arguments are substituted verbatim without re-parsing.
     # No escaping of {/} in user content is needed or correct.
+    subagent_ctx = format_subagent_context(subagent_summary)
     prompt = JUDGE_PROMPT_TEMPLATE.format(
         goals=goals,
         category=category or "unknown",
         routing_context=format_routing_context(cascade_context),
         intent_context=format_intent_context(intent),
+        subagent_context=subagent_ctx,
         journal=truncated,
     )
 
     if _is_anthropic_direct_model(model):
-        return _judge_via_anthropic_direct(
+        result = _judge_via_anthropic_direct(
             prompt, model=model, api_key=api_key, temperature=temperature
         )
-    return _judge_via_gptme(prompt, model=model)
+    else:
+        result = _judge_via_gptme(prompt, model=model)
+
+    # Omission contract: if no subagent context was injected, any delegation
+    # the model fabricates violates the contract — strip it unconditionally.
+    if result is not None and not subagent_ctx:
+        result.pop("delegation", None)
+    return result
 
 
 def judge_session_with_fallback(
@@ -912,6 +1062,7 @@ def judge_session_with_fallback(
     api_key: str | None = None,
     cascade_context: dict | None = None,
     intent: dict | None = None,
+    subagent_summary: dict | None = None,
     temperature: float = 0.3,
 ) -> dict | None:
     """Score a session, trying fallback models if the primary is unavailable.
@@ -925,6 +1076,7 @@ def judge_session_with_fallback(
         api_key: Anthropic API key (Anthropic-direct path only).
         cascade_context: Optional CASCADE selector payload. See :func:`judge_session`.
         intent: Optional pre-session intent dict. See :func:`judge_session`.
+        subagent_summary: Optional subagent summary dict. See :func:`judge_session`.
         temperature: Sampling temperature forwarded to :func:`judge_session`.
 
     Returns:
@@ -946,6 +1098,7 @@ def judge_session_with_fallback(
             api_key=api_key,
             cascade_context=cascade_context,
             intent=intent,
+            subagent_summary=subagent_summary,
             temperature=temperature,
         )
         if result is not None:
@@ -1094,6 +1247,8 @@ def write_alignment_grade(
                 legacy_fields["alignment_score"] = normalized["alignment_score"]
             if normalized.get("pivot_verdict") is not None:
                 legacy_fields["pivot_verdict"] = normalized["pivot_verdict"]
+            if normalized.get("delegation") is not None:
+                legacy_fields["delegation"] = normalized["delegation"]
             if normalized.get("raw_response") is not None:
                 legacy_fields["llm_judge_raw_response"] = normalized["raw_response"]
             # Caller-supplied extra fields: merged in the same rewrite to avoid
@@ -1132,12 +1287,14 @@ def judge_and_writeback(
     api_key: str | None = None,
     cascade_context: dict | None = None,
     intent: dict | None = None,
+    subagent_summary: dict | None = None,
     temperature: float = 0.3,
 ) -> dict[str, Any]:
     """Judge a session and persist the verdict via SessionStore.
 
     If ``fallback_models`` is provided, tries them in order when ``model`` fails.
-    See :func:`judge_session` for ``cascade_context`` semantics.
+    See :func:`judge_session` for ``cascade_context`` and ``subagent_summary``
+    semantics.
     """
     if fallback_models:
         verdict = judge_session_with_fallback(
@@ -1149,6 +1306,7 @@ def judge_and_writeback(
             api_key=api_key,
             cascade_context=cascade_context,
             intent=intent,
+            subagent_summary=subagent_summary,
             temperature=temperature,
         )
     else:
@@ -1160,6 +1318,7 @@ def judge_and_writeback(
             api_key=api_key,
             cascade_context=cascade_context,
             intent=intent,
+            subagent_summary=subagent_summary,
             temperature=temperature,
         )
     if verdict is None:

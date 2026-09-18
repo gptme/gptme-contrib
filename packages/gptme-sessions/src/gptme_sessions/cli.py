@@ -3127,6 +3127,14 @@ def judge(
     effective_goals = goals or DEFAULT_GOALS
     results: list[dict] = []
 
+    # Preload store to get per-session subagent_summary (needed for delegation annotation).
+    # Loaded once here so --update-store can reuse the same instance below.
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    preloaded_records = store.load_all()
+    record_summary_map: dict[str, Any] = {
+        rec.session_id: rec.subagent_summary for rec in preloaded_records if rec.subagent_summary
+    }
+
     for entry in entries:
         try:
             text = entry.read_text(encoding="utf-8")
@@ -3156,7 +3164,11 @@ def judge(
                 continue
 
             verdict = judge_session(
-                text, category=cat, goals=effective_goals, model=effective_model
+                text,
+                category=cat,
+                goals=effective_goals,
+                model=effective_model,
+                subagent_summary=record_summary_map.get(sid),
             )
             score = verdict["score"] if verdict else None
             reason = verdict["reason"] if verdict else None
@@ -3179,8 +3191,7 @@ def judge(
 
     # Write scores back to store if requested
     if update_store:
-        store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
-        records = store.load_all()
+        records = preloaded_records
         score_map = {r["session_id"]: r for r in results if r.get("llm_judge_score") is not None}
         updated = 0
         for rec in records:
