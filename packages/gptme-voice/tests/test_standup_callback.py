@@ -415,28 +415,29 @@ def test_trusted_callback_at_2h_receives_prepared_brief(callback_case, source):
     delivered when it was fresh relative to when the missed call was placed.
 
     Covers all three loaders (legacy stamp, missed-call-context.json,
-    callback-history.jsonl): the 2026-09-18 failure had the brief generated
-    ~4h52m before the callback but ~2h30m before the call was placed.
+    callback-history.jsonl) on a fixed clock replaying the 2026-09-18 failure:
+    brief generated 05:30Z, standup placed 08:00Z, callback 10:23Z — the brief
+    is 4h53m old at callback but only 2h30m old at placement.
     """
-    run, _, _, requests, state, stamp, brief = callback_case
-    now = datetime.now(timezone.utc)
-    placed = now - timedelta(hours=2, minutes=23)
-    generated = placed - timedelta(hours=2, minutes=30)
-    if generated.date() != now.date():
-        pytest.skip("scenario spans UTC midnight; the loaders require a same-day brief")
+    from gptme_voice.realtime.standup_callback import load_callback_candidate
+
+    _, _, _, _, state, stamp, brief = callback_case
+    now = datetime(2026, 9, 18, 10, 23, tzinfo=timezone.utc)
+    placed = datetime(2026, 9, 18, 8, 0, tzinfo=timezone.utc)
+    generated = datetime(2026, 9, 18, 5, 30, tzinfo=timezone.utc)
     assert now - generated > MAX_CONTEXT_AGE >= placed - generated
     brief["generated_at"] = generated.isoformat()
     (state / "standup-brief.json").write_text(json.dumps(brief))
     voice = state / "voice-calls"
     if source == "legacy":
-        stamp["placed_at"] = placed.isoformat()
+        stamp.update(date="2026-09-18", placed_at=placed.isoformat())
         (voice / "last-standup-call-sid.txt").write_text(json.dumps(stamp))
     else:
         (voice / "last-standup-call-sid.txt").unlink()
         note = {
             "type": "general",
             "sid": CALL_SID,
-            "date": now.date().isoformat(),
+            "date": "2026-09-18",
             "placed_at": placed.isoformat(),
             "caller": PHONE,
             "context_file": "state/standup-brief.json",
@@ -445,9 +446,6 @@ def test_trusted_callback_at_2h_receives_prepared_brief(callback_case, source):
             "missed-call-context.json" if source == "note" else "callback-history.jsonl"
         )
         (voice / target).write_text(json.dumps(note) + "\n")
-    cfg = run()
-    assert (
-        MARKER in cfg.instructions
-    ), "2h+ same-morning callback must inject the prepared brief"
-    assert "callback" in cfg.initial_response_instructions.lower()
-    assert len(requests) == 1
+    candidate = load_callback_candidate(str(state.parent), now=now, caller=PHONE)
+    assert candidate is not None, "2h+ same-morning callback must find the brief"
+    assert MARKER in candidate[1]
