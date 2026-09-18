@@ -172,18 +172,20 @@ def classify_failure_reason(
         return FAILURE_REASON_TIMEOUT
     if error_text:
         lower = error_text.lower()
-        if ("rate" in lower and "limit" in lower) or "429" in error_text or "weekly limit" in lower:
-            return FAILURE_REASON_RATE_LIMIT
         # Check invalid_request_error BEFORE auth: a 400 bad-request from a
         # provider (e.g. deepseek rejecting tool_calls format) is NOT an auth
         # failure even if the error blob contains lesson names like "Auth Blueprint".
         if "invalid_request_error" in lower:
             return FAILURE_REASON_INVALID_REQUEST
-        # Check quota/spending-limit BEFORE auth: a 403 that says the account
-        # ran out of credits (e.g. Grok `personal-team-blocked:spending-limit`,
-        # "You have run out of credits") is a billing/quota failure, not a
-        # credential failure. The bare `403` auth check below would otherwise
-        # mislabel it as auth and pollute friction/bandit post-mortems.
+        # Check quota/spending-limit BEFORE the generic 429/rate-limit and auth
+        # checks: an account that ran out of credits (Grok
+        # `personal-team-blocked:spending-limit`, "You have run out of credits",
+        # OpenAI `insufficient_quota`) is a billing/quota failure, not a
+        # credential failure and not a transient rate limit. OpenAI reports
+        # insufficient_quota with HTTP 429 and a "check your plan and billing
+        # details" body, so the bare `429` branch below would otherwise swallow
+        # it as rate_limit and the `403` auth check would mislabel the Grok
+        # form — both pollute friction/bandit post-mortems.
         if (
             "spending-limit" in lower
             or "spending_limit" in lower
@@ -192,6 +194,8 @@ def classify_failure_reason(
             or "billing" in lower
         ):
             return FAILURE_REASON_QUOTA
+        if ("rate" in lower and "limit" in lower) or "429" in error_text or "weekly limit" in lower:
+            return FAILURE_REASON_RATE_LIMIT
         if (
             "authentication" in lower
             or "unauthorized" in lower
