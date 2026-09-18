@@ -99,6 +99,7 @@ class _SlotBreaker:
         self._state: CircuitState = CircuitState.CLOSED
         self._failure_count: int = 0
         self._opened_at: float | None = None
+        self._probe_pending: bool = False
 
     @property
     def state(self) -> CircuitState:
@@ -115,10 +116,14 @@ class _SlotBreaker:
         if self._state == CircuitState.OPEN:
             if self._opened_at is not None and (now - self._opened_at) >= self.cooldown:
                 self._state = CircuitState.HALF_OPEN
-                return False  # allow one probe
-            return True
-        # HALF_OPEN: exactly one probe allowed
-        return False
+                self._probe_pending = True
+            else:
+                return True
+        # HALF_OPEN: exactly one probe allowed — consume the slot on first call
+        if self._probe_pending:
+            self._probe_pending = False
+            return False
+        return True
 
     def record_failure(self, now: float) -> None:
         if self._state == CircuitState.HALF_OPEN:
@@ -135,6 +140,7 @@ class _SlotBreaker:
         self._state = CircuitState.CLOSED
         self._failure_count = 0
         self._opened_at = None
+        self._probe_pending = False
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +159,7 @@ def _locked_state(state_file: Path) -> Iterator[dict[str, Any]]:
     fd = os.open(state_file, os.O_RDWR | os.O_CREAT, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        raw = os.read(fd, 1 << 20).decode("utf-8") or "{}"
+        raw = os.read(fd, 1 << 20).decode("utf-8", errors="replace") or "{}"
         try:
             data = json.loads(raw)
             if not isinstance(data, dict):
@@ -175,22 +181,33 @@ def _load_breaker(
     threshold: int,
     cooldown: float,
 ) -> _SlotBreaker:
-    """Hydrate a :class:`_SlotBreaker` from persisted wall-clock JSON."""
+    """Hydrate a :class:`_SlotBreaker` from persisted wall-clock JSON.
+
+    Any malformed field resets the whole slot to CLOSED rather than crashing
+    dispatch — a corrupt state file must never brick the spawn loop.
+    """
     b = _SlotBreaker(failure_threshold=threshold, cooldown=cooldown)
-    b._failure_count = int(slot_state.get("failure_count", 0))
     try:
-        b._state = CircuitState[str(slot_state.get("state", "CLOSED")).upper()]
-    except KeyError:
-        b._state = CircuitState.CLOSED
-    opened_at = slot_state.get("opened_at")
-    if (
-        b._state in (CircuitState.OPEN, CircuitState.HALF_OPEN)
-        and opened_at is not None
-    ):
+        b._failure_count = int(slot_state.get("failure_count", 0))
         try:
-            b._opened_at = float(opened_at)
-        except (TypeError, ValueError):
-            b._opened_at = None
+            b._state = CircuitState[str(slot_state.get("state", "CLOSED")).upper()]
+        except KeyError:
+            b._state = CircuitState.CLOSED
+        opened_at = slot_state.get("opened_at")
+        if (
+            b._state in (CircuitState.OPEN, CircuitState.HALF_OPEN)
+            and opened_at is not None
+        ):
+            try:
+                b._opened_at = float(opened_at)
+            except (TypeError, ValueError):
+                b._opened_at = None
+        b._probe_pending = bool(slot_state.get("probe_pending", False))
+    except Exception:
+        b._state = CircuitState.CLOSED
+        b._failure_count = 0
+        b._opened_at = None
+        b._probe_pending = False
     return b
 
 
@@ -200,6 +217,7 @@ def _save_breaker(b: _SlotBreaker) -> dict[str, Any]:
         "failure_count": b._failure_count,
         "state": b._state.name,
         "opened_at": b._opened_at,
+        "probe_pending": b._probe_pending,
     }
     return out
 

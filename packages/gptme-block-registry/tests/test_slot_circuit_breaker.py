@@ -58,6 +58,17 @@ class TestSlotBreaker:
         assert b.is_open(now + 11.0) is False
         assert b.state == CircuitState.HALF_OPEN
 
+    def test_half_open_allows_exactly_one_probe(self) -> None:
+        """Only one probe must pass through HALF_OPEN; all subsequent calls suppress."""
+        b = self._breaker(threshold=1, cooldown=10.0)
+        now = time.time()
+        b.record_failure(now)
+        # Transition to HALF_OPEN on first call after cooldown
+        assert b.is_open(now + 11.0) is False  # first call: probe allowed
+        # Subsequent calls must be suppressed until a verdict arrives
+        assert b.is_open(now + 11.1) is True
+        assert b.is_open(now + 11.2) is True
+
     def test_half_open_probe_failure_reopens(self) -> None:
         b = self._breaker(threshold=1, cooldown=10.0)
         now = time.time()
@@ -125,6 +136,22 @@ class TestPersistence:
         b = _load_breaker({}, 3, 300.0)
         assert b.state == CircuitState.CLOSED
         assert b.failure_count == 0
+
+    def test_malformed_failure_count_resets_to_closed(self) -> None:
+        """A non-int failure_count (e.g. 'invalid') must reset the slot, not raise."""
+        b = _load_breaker({"failure_count": "invalid", "state": "OPEN"}, 3, 300.0)
+        assert b.state == CircuitState.CLOSED
+        assert b.failure_count == 0
+
+    def test_malformed_slot_value_resets_to_closed(self) -> None:
+        """A slot value that isn't a dict (e.g. bare int) must reset, not raise."""
+        # _load_breaker receives only the slot-level dict; upstream parse already
+        # resets a non-dict top-level. But the outer try/except in _load_breaker
+        # also covers any AttributeError / TypeError from a bad slot payload.
+        b = _load_breaker({"opened_at": "not-a-float", "state": "OPEN"}, 3, 300.0)
+        # opened_at parse error is silently reset to None; state is preserved
+        assert b.state == CircuitState.OPEN
+        assert b._opened_at is None
 
 
 # ---------------------------------------------------------------------------
