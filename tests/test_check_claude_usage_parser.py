@@ -36,6 +36,8 @@ def test_auth_failure_reports_auth_not_version() -> None:
     assert "not a version problem" in proc.stderr
     # The misleading version hint must NOT appear.
     assert "requires Claude Code v2.1.183" not in proc.stderr
+    # The --raw instruction is printed once (by main), not duplicated.
+    assert proc.stderr.count("--raw") == 1
 
 
 def test_http_failure_reports_network() -> None:
@@ -45,6 +47,24 @@ def test_http_failure_reports_network() -> None:
     assert proc.returncode == 1
     assert "Could not authenticate" in proc.stderr
     assert "network failure" in proc.stderr
+    assert "requires Claude Code v2.1.183" not in proc.stderr
+
+
+def test_unable_to_authenticate_wording_detected() -> None:
+    """'unable to authenticate' (common CC wording) must be detected."""
+    raw = "Error: unable to authenticate with the API.\n"
+    proc = run_parser(raw)
+    assert proc.returncode == 1
+    assert "Could not authenticate" in proc.stderr
+    assert "requires Claude Code v2.1.183" not in proc.stderr
+
+
+def test_timeout_failure_reports_network() -> None:
+    """A timeout must name network, not the version."""
+    raw = "Request timed out while fetching usage data.\n"
+    proc = run_parser(raw)
+    assert proc.returncode == 1
+    assert "Could not authenticate" in proc.stderr
     assert "requires Claude Code v2.1.183" not in proc.stderr
 
 

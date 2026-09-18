@@ -136,15 +136,15 @@ AUTH_FAILURE_SIGNALS = [
     "not signed in",
     "sign in to",
     "please sign in",
-    "authentication",
+    "authentication failed",
+    "unable to authenticate",
     "unauthorized",
-    "401",
-    "403",
+    "401 unauthorized",
+    "403 forbidden",
     "invalid api key",
-    "api key",
+    "api key is invalid",
     "token expired",
     "token has expired",
-    "credential",
     "re-login",
     "relogin",
     "login required",
@@ -157,7 +157,14 @@ AUTH_FAILURE_SIGNALS = [
     "request failed",
     "http error",
     "server error",
-    "offline",
+    "timed out",
+    "timeout",
+    "tls",
+    "econnreset",
+    "gateway",
+    "502",
+    "503",
+    "504",
 ]
 
 
@@ -178,8 +185,7 @@ def detect_auth_failure(text: str) -> str | None:
                 "Error: Could not authenticate to Claude Code /usage "
                 "(auth or network failure detected).\n"
                 "This is not a version problem — check the credential slot "
-                "(~/.claude/.credentials.json) and network connectivity.\n"
-                "Run with --raw to see raw output for debugging."
+                "(~/.claude/.credentials.json) and network connectivity."
             )
     return None
 
