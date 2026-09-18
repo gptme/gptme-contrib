@@ -336,6 +336,29 @@ def test_classify_quota_precedes_rate_limit_marker():
     assert result == FAILURE_REASON_QUOTA
 
 
+def test_classify_auth_with_incidental_billing_mention():
+    """A 401 mentioning billing is auth, not quota.
+
+    Guards the breadth of the quota branch. Because quota is checked before auth,
+    any generic billing phrase would mask a credential failure: the bare
+    "billing" substring matched "contact billing support", and "billing details"
+    matched OpenAI's own 401 body ("Check your plan and billing details."), which
+    describes an invalid API key. Neither phrase may appear in the quota markers.
+    """
+    for message in (
+        "Invalid API key. Contact billing support if you believe this is an error.",
+        "Incorrect API key provided. Check your plan and billing details.",
+    ):
+        result = classify_failure_reason(
+            exit_code=1,
+            duration_seconds=30,
+            input_tokens=0,
+            has_assistant_turn=False,
+            error_text=f"Error code: 401 - {{'error': {{'message': '{message}'}}}}",
+        )
+        assert result == FAILURE_REASON_AUTH, message
+
+
 def test_record_has_any_content_tool_use():
     """_record_has_any_content returns True for tool_use-only CC assistant turns."""
     rec = {

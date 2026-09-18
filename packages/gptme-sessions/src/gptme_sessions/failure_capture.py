@@ -186,12 +186,20 @@ def classify_failure_reason(
         # details" body, so the bare `429` branch below would otherwise swallow
         # it as rate_limit and the `403` auth check would mislabel the Grok
         # form — both pollute friction/bandit post-mortems.
+        #
+        # Keep the markers unconditionally specific to quota exhaustion. This
+        # branch runs before the auth/rate-limit checks, so any generic term
+        # ("billing", "billing details") can match an incidental mention in a
+        # 401/403 body and mask a credential failure as quota — the same class
+        # of misclassification this classifier exists to prevent. Only phrases
+        # that cannot describe an auth failure belong here.
         if (
             "spending-limit" in lower
             or "spending_limit" in lower
             or "run out of credits" in lower
             or "insufficient_quota" in lower
-            or "billing" in lower
+            or "exceeded your current quota" in lower
+            or "billing hard limit" in lower
         ):
             return FAILURE_REASON_QUOTA
         if ("rate" in lower and "limit" in lower) or "429" in error_text or "weekly limit" in lower:
