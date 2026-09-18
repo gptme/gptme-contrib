@@ -11,6 +11,7 @@ FAILURE_REASON_AUTH = "auth"
 FAILURE_REASON_INVALID_REQUEST = "invalid_request"
 FAILURE_REASON_NONZERO = "nonzero_exit_unclassified"
 FAILURE_REASON_PRE_RESPONSE = "pre_response_api_failure"
+FAILURE_REASON_QUOTA = "quota"
 FAILURE_REASON_RATE_LIMIT = "rate_limit"
 FAILURE_REASON_TIMEOUT = "timeout"
 
@@ -171,13 +172,38 @@ def classify_failure_reason(
         return FAILURE_REASON_TIMEOUT
     if error_text:
         lower = error_text.lower()
-        if ("rate" in lower and "limit" in lower) or "429" in error_text or "weekly limit" in lower:
-            return FAILURE_REASON_RATE_LIMIT
         # Check invalid_request_error BEFORE auth: a 400 bad-request from a
         # provider (e.g. deepseek rejecting tool_calls format) is NOT an auth
         # failure even if the error blob contains lesson names like "Auth Blueprint".
         if "invalid_request_error" in lower:
             return FAILURE_REASON_INVALID_REQUEST
+        # Check quota/spending-limit BEFORE the generic 429/rate-limit and auth
+        # checks: an account that ran out of credits (Grok
+        # `personal-team-blocked:spending-limit`, "You have run out of credits",
+        # OpenAI `insufficient_quota`) is a billing/quota failure, not a
+        # credential failure and not a transient rate limit. OpenAI reports
+        # insufficient_quota with HTTP 429 and a "check your plan and billing
+        # details" body, so the bare `429` branch below would otherwise swallow
+        # it as rate_limit and the `403` auth check would mislabel the Grok
+        # form — both pollute friction/bandit post-mortems.
+        #
+        # Keep the markers unconditionally specific to quota exhaustion. This
+        # branch runs before the auth/rate-limit checks, so any generic term
+        # ("billing", "billing details") can match an incidental mention in a
+        # 401/403 body and mask a credential failure as quota — the same class
+        # of misclassification this classifier exists to prevent. Only phrases
+        # that cannot describe an auth failure belong here.
+        if (
+            "spending-limit" in lower
+            or "spending_limit" in lower
+            or "run out of credits" in lower
+            or "insufficient_quota" in lower
+            or "exceeded your current quota" in lower
+            or "billing hard limit" in lower
+        ):
+            return FAILURE_REASON_QUOTA
+        if ("rate" in lower and "limit" in lower) or "429" in error_text or "weekly limit" in lower:
+            return FAILURE_REASON_RATE_LIMIT
         if (
             "authentication" in lower
             or "unauthorized" in lower

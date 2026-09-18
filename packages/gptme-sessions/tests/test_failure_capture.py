@@ -11,6 +11,7 @@ from gptme_sessions.failure_capture import (
     FAILURE_REASON_INVALID_REQUEST,
     FAILURE_REASON_NONZERO,
     FAILURE_REASON_PRE_RESPONSE,
+    FAILURE_REASON_QUOTA,
     FAILURE_REASON_RATE_LIMIT,
     FAILURE_REASON_TIMEOUT,
     _record_has_any_content,
@@ -280,6 +281,82 @@ def test_classify_auth_unauthorized_text():
         error_text="Error: Unauthorized access, check your API key",
     )
     assert result == FAILURE_REASON_AUTH
+
+
+def test_classify_quota_grok_spending_limit():
+    """Grok 403 spending-limit (run out of credits) → FAILURE_REASON_QUOTA, not auth."""
+    result = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=30,
+        input_tokens=0,
+        has_assistant_turn=False,
+        error_text=(
+            "Error code: 403 - {'code': 'personal-team-blocked:spending-limit', "
+            "'error': 'You have run out of credits or need a Grok subscription. "
+            "Add credits at https://console.x.ai'}"
+        ),
+    )
+    assert result == FAILURE_REASON_QUOTA
+
+
+def test_classify_quota_insufficient_quota():
+    """OpenAI-style 429 insufficient_quota → FAILURE_REASON_QUOTA, not rate_limit.
+
+    The status code matters: the generic `429` rate-limit branch runs before the
+    auth branch, so a real OpenAI quota-exhaustion error (which carries both
+    `429` and `insufficient_quota`) regressed to rate_limit until the quota
+    markers were checked first. Keep the status in the fixture so the precedence
+    stays covered.
+    """
+    result = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=30,
+        input_tokens=0,
+        has_assistant_turn=False,
+        error_text=(
+            "Error code: 429 - {'error': {'message': 'You exceeded your current "
+            "quota, please check your plan and billing details.', "
+            "'type': 'insufficient_quota', 'code': 'insufficient_quota'}}"
+        ),
+    )
+    assert result == FAILURE_REASON_QUOTA
+
+
+def test_classify_quota_precedes_rate_limit_marker():
+    """429 body that also says 'rate limit' of an account with no credits → quota."""
+    result = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=30,
+        input_tokens=0,
+        has_assistant_turn=False,
+        error_text=(
+            "HTTP 429 rate limit exceeded - insufficient_quota: You exceeded your current quota"
+        ),
+    )
+    assert result == FAILURE_REASON_QUOTA
+
+
+def test_classify_auth_with_incidental_billing_mention():
+    """A 401 mentioning billing is auth, not quota.
+
+    Guards the breadth of the quota branch. Because quota is checked before auth,
+    any generic billing phrase would mask a credential failure: the bare
+    "billing" substring matched "contact billing support", and "billing details"
+    matched OpenAI's own 401 body ("Check your plan and billing details."), which
+    describes an invalid API key. Neither phrase may appear in the quota markers.
+    """
+    for message in (
+        "Invalid API key. Contact billing support if you believe this is an error.",
+        "Incorrect API key provided. Check your plan and billing details.",
+    ):
+        result = classify_failure_reason(
+            exit_code=1,
+            duration_seconds=30,
+            input_tokens=0,
+            has_assistant_turn=False,
+            error_text=f"Error code: 401 - {{'error': {{'message': '{message}'}}}}",
+        )
+        assert result == FAILURE_REASON_AUTH, message
 
 
 def test_record_has_any_content_tool_use():
