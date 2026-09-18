@@ -32,10 +32,12 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 QUOTA_GATE = SCRIPTS / "quota-gate.sh"
 CHECK_USAGE = SCRIPTS / "check-claude-usage.sh"
+PARSER = SCRIPTS / "check-claude-usage-parser.py"
 
 # The top-level keys the gate depends on. Kept here as the single written-down
-# statement of the contract; both scripts are asserted against it below.
+# statement of the contract; all three scripts are asserted against it below.
 CONTRACT_KEYS = ("five_hour", "seven_day", "seven_day_sonnet")
+PACING_KEY = "_pacing"
 UTIL_FIELD = "utilization"
 
 
@@ -171,15 +173,92 @@ def test_malformed_json_fails_open() -> None:
     assert r.returncode == 0
 
 
+def test_at_session_threshold_skips() -> None:
+    # The gate uses strict-less-than, so utilization == threshold must block.
+    r = _run_gate(_usage(five=0.90, weekly=0.10))
+    assert r.returncode == 1, r.stderr
+    assert "SKIPPING" in r.stderr
+    assert "5h session" in r.stderr
+
+
+def test_at_weekly_threshold_skips() -> None:
+    r = _run_gate(_usage(five=0.10, weekly=0.90))
+    assert r.returncode == 1, r.stderr
+    assert "SKIPPING" in r.stderr
+    assert "weekly" in r.stderr
+
+
+def test_at_overridden_threshold_skips() -> None:
+    # Confirm equality boundary also works for env-overridden thresholds.
+    r = _run_gate(
+        _usage(five=0.40, weekly=0.10),
+        env={"QUOTA_GATE_SESSION_THRESHOLD": "0.40"},
+    )
+    assert r.returncode == 1, r.stderr
+    assert "SKIPPING" in r.stderr
+
+
+# --- 2b. Direct execution ---------------------------------------------------
+
+
+def test_direct_execution_proceeds() -> None:
+    """quota-gate.sh executed directly (not sourced) must run the gate."""
+    with tempfile.TemporaryDirectory() as td:
+        fake = Path(td) / "check-claude-usage.sh"
+        fake.write_text(
+            "#!/usr/bin/env bash\ncat <<'JSON'\n"
+            + _usage(five=0.10, weekly=0.10)
+            + "\nJSON\n"
+        )
+        fake.chmod(0o755)
+        r = subprocess.run(
+            ["bash", str(QUOTA_GATE)],
+            capture_output=True,
+            text=True,
+            env={"PATH": "/usr/bin:/bin", "QUOTA_CHECK_SCRIPT": str(fake)},
+        )
+        assert r.returncode == 0, r.stderr
+        assert "quota OK" in r.stderr
+
+
+def test_direct_execution_blocks_over_threshold() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        fake = Path(td) / "check-claude-usage.sh"
+        fake.write_text(
+            "#!/usr/bin/env bash\ncat <<'JSON'\n"
+            + _usage(five=0.95, weekly=0.10)
+            + "\nJSON\n"
+        )
+        fake.chmod(0o755)
+        r = subprocess.run(
+            ["bash", str(QUOTA_GATE)],
+            capture_output=True,
+            text=True,
+            env={"PATH": "/usr/bin:/bin", "QUOTA_CHECK_SCRIPT": str(fake)},
+        )
+        assert r.returncode == 1, r.stderr
+        assert "SKIPPING" in r.stderr
+
+
 # --- 3. Key binding (static) ------------------------------------------------
 
 
 def test_gate_and_probe_agree_on_contract_keys() -> None:
     gate = QUOTA_GATE.read_text()
     probe = CHECK_USAGE.read_text()
+    parser = PARSER.read_text()
     for key in CONTRACT_KEYS:
-        assert key in gate, f"quota-gate.sh no longer reads {key!r}"
+        # Gate reads via .get('key', ...) — check the quoted form to avoid
+        # false-positive matches against variable names or comments.
+        assert f"'{key}'" in gate, f"quota-gate.sh no longer reads {key!r}"
+        # Parser is the actual JSON emitter; shell wrapper is thin.
+        assert key in parser, f"check-claude-usage-parser.py no longer emits {key!r}"
         assert key in probe, f"check-claude-usage.sh no longer emits {key!r}"
+    # _pacing key must be present in both the gate (which reads it) and the parser (which emits it).
+    assert f"'{PACING_KEY}'" in gate, "quota-gate.sh no longer reads '_pacing'"
+    assert (
+        PACING_KEY in parser
+    ), "check-claude-usage-parser.py no longer emits '_pacing'"
     # The nested field the gate divides on must exist on both sides too.
     assert UTIL_FIELD in gate
-    assert UTIL_FIELD in probe
+    assert UTIL_FIELD in parser

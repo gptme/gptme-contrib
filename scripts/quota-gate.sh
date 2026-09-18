@@ -14,7 +14,7 @@
 # ANTHROPIC_API_KEY must NOT be set in environment.
 
 QUOTA_GATE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-QUOTA_CHECK_SCRIPT="$QUOTA_GATE_SCRIPT_DIR/check-claude-usage.sh"
+QUOTA_CHECK_SCRIPT="${QUOTA_CHECK_SCRIPT:-$QUOTA_GATE_SCRIPT_DIR/check-claude-usage.sh}"
 
 # Thresholds: skip session if utilization exceeds these values
 QUOTA_GATE_SESSION_THRESHOLD="${QUOTA_GATE_SESSION_THRESHOLD:-0.90}"   # 5h session window
