@@ -94,6 +94,20 @@ def test_parse_until_garbled_is_none(raw: str) -> None:
     assert parse_until(raw) is None
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "2026-09-19 00:00:00+00:00",  # space separator instead of T
+        "2026-09-19 00:00:00",  # naive with space separator
+        "2026-09-19T00:00:00+02:00",  # non-UTC offset
+        "2026-09-19T00:00:00-05:00",  # non-UTC offset (negative)
+    ],
+)
+def test_parse_until_rejects_non_canonical_shapes(raw: str) -> None:
+    """Non-canonical parseable timestamps must fail open, not block an arm."""
+    assert parse_until(raw) is None
+
+
 def test_canonical_timestamp_detection() -> None:
     assert is_canonical_timestamp("2026-09-19T00:00:00+00:00")
     # A trailing newline is tolerated (writers append one).

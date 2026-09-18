@@ -218,6 +218,42 @@ class TestApplyVerdict:
         assert suppress is True
         assert b.state == CircuitState.OPEN  # not closed prematurely
 
+    def _half_open_probe_sent(self) -> _SlotBreaker:
+        """Breaker in HALF_OPEN with the single probe already consumed."""
+        b = _SlotBreaker(failure_threshold=1, cooldown=0.0)
+        b.record_failure(0.0)
+        # cooldown=0 → is_open transitions OPEN→HALF_OPEN and consumes the probe
+        # in one call (the OPEN branch sets _probe_pending then falls through to
+        # the HALF_OPEN branch, which clears it and returns False).
+        assert b.is_open(time.time()) is False  # probe allowed
+        assert b._state == CircuitState.HALF_OPEN
+        assert not b._probe_pending
+        return b
+
+    def test_productive_probe_outcome_closes_breaker(self) -> None:
+        """PRODUCTIVE after probe was sent must close the breaker."""
+        b = self._half_open_probe_sent()
+        suppress = _apply_verdict(b, PRODUCTIVE, time.time())
+        assert suppress is False
+        assert b.state == CircuitState.CLOSED
+
+    def test_auth_death_probe_outcome_reopens_breaker(self) -> None:
+        """AUTH_DEATH after probe was sent must re-open the breaker."""
+        b = self._half_open_probe_sent()
+        suppress = _apply_verdict(b, AUTH_DEATH, time.time())
+        assert suppress is True
+        assert b.state == CircuitState.OPEN
+
+    def test_productive_while_open_cooldown_elapsed_does_not_close(self) -> None:
+        """PRODUCTIVE arriving after cooldown elapsed must not close without a probe."""
+        b = _SlotBreaker(failure_threshold=1, cooldown=0.0)
+        b.record_failure(0.0)
+        # Cooldown elapsed — next NEUTRAL would allow a probe, but a stale
+        # PRODUCTIVE from before the breaker opened must still suppress.
+        suppress = _apply_verdict(b, PRODUCTIVE, time.time())
+        assert suppress is True
+        assert b.state == CircuitState.OPEN  # must not close without a probe
+
 
 # ---------------------------------------------------------------------------
 # Integration: decide_respawn with a real state file

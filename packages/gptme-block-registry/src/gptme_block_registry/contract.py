@@ -94,18 +94,27 @@ def is_canonical_timestamp(raw: str) -> bool:
 def parse_until(raw: str) -> datetime | None:
     """Parse a deadline; ``None`` means garbled/empty (reader fails open).
 
-    Naive timestamps are read as UTC rather than rejected — the wire shape is
-    UTC and a missing offset is a writer bug we can still interpret safely.
+    Accepts only the canonical ``+00:00`` UTC shape, Z-suffixed UTC, and bare
+    naive timestamps (interpreted as UTC).  Any other form — including
+    space-separated separators or non-UTC offsets — fails open so a malformed
+    block file never silently blocks an arm.
     """
     stripped = raw.strip()
     if not stripped:
         return None
+    normalised = stripped.replace("Z", "+00:00")
     try:
-        ts = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+        ts = datetime.fromisoformat(normalised)
     except ValueError:
         return None
     if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
+        # Naive: only accept the T-separated ISO shape, not a space separator.
+        if len(stripped) < 11 or stripped[10] != "T":
+            return None
+        return ts.replace(tzinfo=timezone.utc)
+    # Tz-aware: only the canonical +00:00 UTC shape is trusted.
+    if format_timestamp(ts) != normalised:
+        return None
     return ts
 
 

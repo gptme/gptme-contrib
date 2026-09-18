@@ -281,17 +281,40 @@ def _apply_verdict(b: _SlotBreaker, verdict: str, now: float) -> bool:
         # Check-only: advance the cooldown clock but record nothing.
         return b.is_open(now)
 
+    # Capture state *before* any side effects — is_open() transitions
+    # OPEN→HALF_OPEN as a side effect, which must not influence verdict routing.
+    state = b._state
+
     if verdict == AUTH_DEATH:
-        if b.is_open(now):
-            # Already / still open — record nothing, suppress.
+        if state == CircuitState.OPEN:
+            # Already / still open — suppress without recording.
             return True
+        if state == CircuitState.HALF_OPEN:
+            if b._probe_pending:
+                # No probe sent yet; auth-death is from before the breaker
+                # opened — suppress.
+                return True
+            # Probe was sent and returned AUTH_DEATH → re-open.
+            b.record_failure(now)
+            return True
+        # CLOSED → record the failure.
         b.record_failure(now)
         return b.is_open(now)
 
     # PRODUCTIVE
-    if b.is_open(now):
-        # Breaker open — record nothing, suppress (the productive run happened
-        # *before* this call; closing on its behalf would be premature).
+    if state == CircuitState.OPEN:
+        # Breaker open — suppress without closing (closing without a confirmed
+        # probe would be premature; the productive run happened before the
+        # breaker opened or while it was suppressing).
         return True
+    if state == CircuitState.HALF_OPEN:
+        if b._probe_pending:
+            # No probe sent yet; productive run is from before the breaker
+            # opened — suppress.
+            return True
+        # Probe was sent and returned PRODUCTIVE → close.
+        b.record_success()
+        return False
+    # CLOSED
     b.record_success()
     return False
