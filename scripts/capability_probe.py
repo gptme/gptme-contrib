@@ -29,7 +29,7 @@ importing it (the probe must work even when that module isn't present yet).
 Usage:
     capability_probe.py                # human-readable report, exit 0
     capability_probe.py --json         # machine-readable
-    capability_probe.py --strict       # exit 1 if no working out-of-band Tier-1
+    capability_probe.py --strict       # exit 1 if no configured out-of-band Tier-1
                                        # channel (useful as a `doctor`/setup gate)
 """
 
@@ -324,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--strict",
         action="store_true",
-        help="exit 1 if no working out-of-band Tier-1 channel (setup/doctor gate)",
+        help="exit 1 if no configured out-of-band Tier-1 channel (setup/doctor gate)",
     )
     args = ap.parse_args(argv)
 
