@@ -95,21 +95,49 @@ trajectory_units() {
     esac
 }
 
+# Null-delimited variant of trajectory_units — safe for paths with spaces,
+# quotes, and backslashes (Claude Code project paths inherit these from the
+# workspace name). Pipe to xargs -0 or while IFS= read -r -d '' for safe use.
+trajectory_units_0() {
+    local dir="$1" spec="$2"
+    local kind="${spec%%:*}" glob="${spec#*:}"
+    [[ -d "$dir" ]] || return 0
+    case "$kind" in
+        file)  find "$dir" -maxdepth 1 -type f -name "$glob" -print0 2>/dev/null ;;
+        dir)   find "$dir" -maxdepth 1 -mindepth 1 -type d -name "$glob" -print0 2>/dev/null ;;
+        rfile) find "$dir" -type f -name "$glob" -print0 2>/dev/null ;;
+        *)     echo "trajectory_units_0: unknown unit kind '$kind'" >&2; return 1 ;;
+    esac
+}
+
 # Count trajectory units in a source dir. Usage: trajectory_count <dir> <spec>
 trajectory_count() {
     trajectory_units "$1" "$2" | wc -l
 }
 
 # Newest unit mtime (epoch seconds), or empty if none.
+# For dir-type harnesses, derives freshness from content inside each trajectory
+# dir — the dir mtime itself does not update when a resumed conversation appends
+# to conversation.jsonl without touching the parent directory.
 # Usage: trajectory_newest_mtime <dir> <spec>
 trajectory_newest_mtime() {
-    trajectory_units "$1" "$2" | xargs -r stat -c %Y 2>/dev/null | sort -rn | head -1
+    local dir="$1" spec="$2"
+    local kind="${spec%%:*}"
+    if [[ "$kind" == "dir" ]]; then
+        {
+            while IFS= read -r -d '' traj_dir; do
+                find "$traj_dir" -type f -print0 2>/dev/null
+            done < <(trajectory_units_0 "$dir" "$spec")
+        } | xargs -0 -r stat -c %Y 2>/dev/null | sort -rn | head -1
+    else
+        trajectory_units_0 "$dir" "$spec" | xargs -0 -r stat -c %Y 2>/dev/null | sort -rn | head -1
+    fi
 }
 
 # Oldest unit mtime (epoch seconds), or empty if none.
 # Usage: trajectory_oldest_mtime <dir> <spec>
 trajectory_oldest_mtime() {
-    trajectory_units "$1" "$2" | xargs -r stat -c %Y 2>/dev/null | sort -n | head -1
+    trajectory_units_0 "$1" "$2" | xargs -0 -r stat -c %Y 2>/dev/null | sort -n | head -1
 }
 
 # Count units last modified before <cutoff epoch>. Used for backup-coverage
@@ -117,6 +145,29 @@ trajectory_oldest_mtime() {
 # backup run, so they are not yet expected to be present in the backup.
 # Usage: trajectory_count_older_than <dir> <spec> <cutoff epoch>
 trajectory_count_older_than() {
-    trajectory_units "$1" "$2" | xargs -r stat -c %Y 2>/dev/null \
+    trajectory_units_0 "$1" "$2" | xargs -0 -r stat -c %Y 2>/dev/null \
         | awk -v cutoff="$3" '$1 < cutoff' | wc -l
+}
+
+# Count settled live units (older than cutoff) that are present in the backup.
+# Checks identity by name, not just aggregate counts — retained-but-deleted
+# entries in the backup cannot mask newly missing trajectories.
+# Usage: trajectory_count_covered <src> <dest> <spec> <cutoff epoch>
+trajectory_count_covered() {
+    local src="$1" dest="$2" spec="$3" cutoff="$4"
+    local kind="${spec%%:*}"
+    local count=0
+    while IFS= read -r -d '' unit; do
+        local mtime
+        mtime=$(stat -c %Y "$unit" 2>/dev/null) || continue
+        if [[ "$mtime" -ge "$cutoff" ]]; then continue; fi
+        case "$kind" in
+            file|dir)
+                if [[ -e "$dest/$(basename "$unit")" ]]; then count=$(( count + 1 )); fi ;;
+            rfile)
+                local rel="${unit#$src/}"
+                if [[ -e "$dest/$rel" ]]; then count=$(( count + 1 )); fi ;;
+        esac
+    done < <(trajectory_units_0 "$src" "$spec")
+    echo "$count"
 }

@@ -95,30 +95,52 @@ for TRAJ_ENTRY in "${TRAJECTORY_SOURCES[@]}"; do
     echo "    Oldest: $(date -d "@$OLDEST_MTIME" +%Y-%m-%d) — ${OLDEST_AGE_DAYS}d ago"
     echo "    Newest: $(date -d "@$NEWEST_MTIME" +%Y-%m-%d) — ${NEWEST_AGE_DAYS}d ago"
 
-    # 1. Deletion
+    # 1. Deletion — two complementary checks.
+    # a) Absolute floor: oldest trajectory must be old enough. Set WARN_DAYS below
+    #    the natural age of your oldest trajectory so it passes normally and only
+    #    fires when recent files vanished.
     if [[ "$OLDEST_AGE_DAYS" -lt "$WARN_DAYS" ]]; then
         echo "    ⚠️  WARNING: oldest trajectory is only ${OLDEST_AGE_DAYS}d old (expected >${WARN_DAYS}d)"
         echo "       This suggests trajectories are being deleted. Check your cleanup script!"
         EXIT_CODE=1
     else
-        echo "    ✅ Oldest trajectory is ${OLDEST_AGE_DAYS}d old (no sign of deletion)"
+        echo "    ✅ Oldest trajectory is ${OLDEST_AGE_DAYS}d old (no sign of full deletion)"
+    fi
+    # b) Partial deletion: if backup holds older history than live, some live
+    #    trajectories were pruned even though the oldest remaining one passes the
+    #    threshold above. This catches partial wipeouts the stateless check misses.
+    if [[ -d "$TRAJ_DEST" ]]; then
+        BACKUP_OLDEST_MTIME=$(trajectory_oldest_mtime "$TRAJ_DEST" "$TRAJ_UNIT")
+        if [[ -n "$BACKUP_OLDEST_MTIME" && -n "$OLDEST_MTIME" && "$BACKUP_OLDEST_MTIME" -lt "$OLDEST_MTIME" ]]; then
+            BACKUP_OLDEST_AGE_DAYS=$(( (NOW_SECS - BACKUP_OLDEST_MTIME) / 86400 ))
+            LOST_DAYS=$(( (OLDEST_MTIME - BACKUP_OLDEST_MTIME) / 86400 ))
+            echo "    ⚠️  WARNING: backup has trajectories ${BACKUP_OLDEST_AGE_DAYS}d old but live oldest is ${OLDEST_AGE_DAYS}d"
+            echo "       Partial deletion detected — ~${LOST_DAYS}d of history missing from live source"
+            EXIT_CODE=1
+        fi
     fi
 
-    # 2. Backup coverage. Backup >= live is healthy: the backup keeps units the
-    # live dir no longer has, which is the whole point. Only units older than
-    # BACKUP_GRACE_HOURS are *expected* in the backup — newer ones may post-date
-    # the last backup run. If the backup stops entirely the shortfall grows past
-    # the grace window within a day and pages anyway.
-    EXPECTED_COUNT=$(trajectory_count_older_than "$TRAJ_SRC" "$TRAJ_UNIT" "$(( NOW_SECS - BACKUP_GRACE_HOURS * 3600 ))")
+    # 2. Backup coverage. Only units older than BACKUP_GRACE_HOURS are expected in
+    # the backup — newer ones may post-date the last backup run. We check which
+    # settled live units are actually present in the backup (identity, not just
+    # aggregate count) — retained-but-deleted entries can inflate backup count
+    # above the expected count while newer live units remain unprotected.
+    CUTOFF=$(( NOW_SECS - BACKUP_GRACE_HOURS * 3600 ))
+    EXPECTED_COUNT=$(trajectory_count_older_than "$TRAJ_SRC" "$TRAJ_UNIT" "$CUTOFF")
     if [[ ! -d "$TRAJ_DEST" ]]; then
         echo "    ⚠️  WARNING: no backup dir at $TRAJ_DEST — this harness is UNPROTECTED"
         EXIT_CODE=1
-    elif [[ "$BACKUP_COUNT" -lt "$EXPECTED_COUNT" ]]; then
-        echo "    ⚠️  WARNING: backup holds $BACKUP_COUNT of $EXPECTED_COUNT settled units — $(( EXPECTED_COUNT - BACKUP_COUNT )) unprotected"
-        echo "       Run trajectory-backup.sh to refresh the hardlink backup."
-        EXIT_CODE=1
+    elif [[ "$EXPECTED_COUNT" -eq 0 ]]; then
+        echo "    ✅ Backup: no settled units yet (all younger than ${BACKUP_GRACE_HOURS}h grace window)"
     else
-        echo "    ✅ Backup: $BACKUP_COUNT units (>= $EXPECTED_COUNT settled of $LIVE_COUNT live)"
+        COVERED_COUNT=$(trajectory_count_covered "$TRAJ_SRC" "$TRAJ_DEST" "$TRAJ_UNIT" "$CUTOFF")
+        if [[ "$COVERED_COUNT" -lt "$EXPECTED_COUNT" ]]; then
+            echo "    ⚠️  WARNING: backup covers $COVERED_COUNT of $EXPECTED_COUNT settled units — $(( EXPECTED_COUNT - COVERED_COUNT )) unprotected"
+            echo "       Run trajectory-backup.sh to refresh the hardlink backup."
+            EXIT_CODE=1
+        else
+            echo "    ✅ Backup: $COVERED_COUNT/$EXPECTED_COUNT settled units covered ($BACKUP_COUNT total in backup)"
+        fi
     fi
 
     # 3. Stopped growing — only meaningful for the harness(es) currently in use.
