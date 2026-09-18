@@ -152,3 +152,20 @@ def test_blocked_until_suppresses_max_interval(tmp_path: Path) -> None:
     state = json.loads((tmp_path / "state" / "session-gate.json").read_text())
     assert state["last_decision"] == "skip"
     assert "blocked-until" in state["last_reasons"]
+
+
+def test_state_write_failure_exits_error_not_skip(tmp_path: Path) -> None:
+    # Contract: the three exit codes are distinct — SKIP=0, RUN=1, ERROR=2.
+    # A gate that fails to persist its decision must exit ERROR (2), NOT SKIP (0):
+    # a caller distinguishing "don't run" from "gate is broken" relies on this, and
+    # a regression that swallowed the OSError into SKIP would make a broken 3am gate
+    # look perfectly healthy. Make write_state fail by pointing --state-file at a path
+    # whose parent is a regular file, so mkdir(parents=True, exist_ok=True) raises FileExistsError.
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("i am a file, not a directory\n")
+    bad_state = blocker / "session-gate.json"
+
+    exit_code = run_gate(tmp_path, "--state-file", str(bad_state))
+
+    assert exit_code == session_gate.ERROR
+    assert exit_code != session_gate.SKIP
