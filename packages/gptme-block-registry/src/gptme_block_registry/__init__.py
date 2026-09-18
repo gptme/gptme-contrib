@@ -34,6 +34,15 @@ from .contract import (
     parse_until,
     pool_block_path,
 )
+from .fallback import (
+    LIGHTS_ON_CATEGORIES,
+    LIGHTS_ON_SCOPE,
+    FallbackArm,
+    FallbackConfig,
+    FallbackDecision,
+    decide_fallback,
+    load_fallback_config,
+)
 from .openrouter import block_deadline, limit_window_from_text
 from .registry import BlockCheck, BlockRegistry, BlockVerdict
 from .slot_circuit_breaker import (
@@ -52,16 +61,23 @@ __all__ = [
     "BlockRegistry",
     "BlockVerdict",
     "CircuitState",
+    "FallbackArm",
+    "FallbackConfig",
+    "FallbackDecision",
+    "LIGHTS_ON_CATEGORIES",
+    "LIGHTS_ON_SCOPE",
     "NEUTRAL",
     "PRODUCTIVE",
     "arm_block_path",
     "backend_block_path",
     "block_deadline",
     "clear_block",
+    "decide_fallback",
     "decide_respawn",
     "format_timestamp",
     "is_canonical_timestamp",
     "limit_window_from_text",
+    "load_fallback_config",
     "model_safe",
     "openrouter_block_path",
     "parse_until",
