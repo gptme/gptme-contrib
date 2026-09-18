@@ -84,6 +84,18 @@ def test_openrouter_scoped_and_shared_contexts_are_distinct(tmp_path: Path) -> N
     assert not registry.check([registry.openrouter_check()], now=NOW).blocked
 
 
+def test_naive_now_is_treated_as_utc(tmp_path: Path) -> None:
+    """A caller-supplied naive `now` must not crash the comparison against the
+    tz-aware parsed deadline (P2 regression)."""
+    registry = BlockRegistry(tmp_path)
+    checks = registry.arm_checks("gptme", "glm-5.2")
+    write_block(checks[0].path, FUTURE)
+    naive_now = NOW.replace(tzinfo=None)
+    verdict = registry.check(checks, now=naive_now)
+    assert verdict.blocked is True
+    assert verdict.reason == "crash_loop"
+
+
 def test_verdict_as_dict_shape(tmp_path: Path) -> None:
     registry = BlockRegistry(tmp_path)
     write_block(registry.arm_checks("gptme", "m")[0].path, FUTURE)

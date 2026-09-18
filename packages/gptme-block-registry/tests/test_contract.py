@@ -148,6 +148,71 @@ def test_write_block_overwrites_non_canonical_existing(tmp_path: Path) -> None:
     assert read_block_until(path) == now
 
 
+def test_write_block_concurrent_writes_never_shorten(tmp_path: Path) -> None:
+    """Two racing writers: the longer deadline must always win, regardless of
+    which one reads the (empty) existing file first (P1 regression)."""
+    import threading
+
+    path = tmp_path / "block.txt"
+    short = datetime(2026, 9, 18, 12, tzinfo=UTC)
+    long_deadline = datetime(2026, 9, 19, tzinfo=UTC)
+    barrier = threading.Barrier(2)
+
+    def write_short() -> None:
+        barrier.wait()
+        write_block(path, short)
+
+    def write_long() -> None:
+        barrier.wait()
+        write_block(path, long_deadline)
+
+    for _ in range(20):
+        if path.exists():
+            path.unlink()
+        barrier.reset()
+        t1 = threading.Thread(target=write_short)
+        t2 = threading.Thread(target=write_long)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+        assert read_block_until(path) == long_deadline
+
+
+def test_write_block_concurrent_writers_never_observe_partial_file(
+    tmp_path: Path,
+) -> None:
+    """A concurrent reader must always see a complete, parseable timestamp —
+    never a truncated/empty file mid-write (P1 regression)."""
+    import threading
+
+    path = tmp_path / "block.txt"
+    write_block(path, datetime(2026, 9, 18, tzinfo=UTC))
+    stop = threading.Event()
+    observed_empty = False
+
+    def writer() -> None:
+        hour = 0
+        while not stop.is_set():
+            write_block(path, datetime(2026, 9, 19, hour % 24, tzinfo=UTC))
+            hour += 1
+
+    def reader() -> None:
+        nonlocal observed_empty
+        for _ in range(300):
+            if read_block_until(path) is None:
+                observed_empty = True
+
+    t_writer = threading.Thread(target=writer)
+    t_reader = threading.Thread(target=reader)
+    t_writer.start()
+    t_reader.start()
+    t_reader.join()
+    stop.set()
+    t_writer.join()
+    assert not observed_empty
+
+
 def test_clear_block(tmp_path: Path) -> None:
     path = tmp_path / "block.txt"
     write_block(path, datetime(2026, 9, 19, tzinfo=UTC))
@@ -166,8 +231,11 @@ def test_clear_block(tmp_path: Path) -> None:
         ("Key limit exceeded (monthly limit)", "monthly"),
         # phrase without a window falls back to the historical default
         ("Key limit exceeded", "daily"),
+        # credit exhaustion is a distinct 402 error shape, classified separately
+        ("Insufficient credits", "credits"),
+        ("This request requires more credits, or fewer max_tokens.", "credits"),
         # unrelated errors are not a limit at all
-        ("insufficient credits", None),
+        ("rate limit exceeded", None),
         ("", None),
     ],
 )

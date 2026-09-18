@@ -12,6 +12,11 @@ answer:
 * ``credits`` → now + 4h (account credit exhaustion has no scheduled reset; an
   operator top-up should be noticed within hours).
 * anything unrecognized → ``daily``.
+
+Key-limit exhaustion ("Key limit exceeded (... limit)") and credit exhaustion
+("Insufficient credits" / "requires more credits") are reported by OpenRouter
+as two distinct error shapes — a 402 credits body never contains the phrase
+"key limit exceeded" — so they are classified independently below.
 """
 
 from __future__ import annotations
@@ -22,19 +27,23 @@ from datetime import datetime, timedelta, timezone
 _WINDOW_RE = re.compile(
     r"key limit exceeded[^)]*\((daily|weekly|monthly) limit\)", re.IGNORECASE
 )
+_CREDITS_RE = re.compile(r"insufficient credits|requires more credits", re.IGNORECASE)
 
 
 def limit_window_from_text(text: str) -> str | None:
-    """Classify the limit window named in an OpenRouter 403 body.
+    """Classify the limit window named in an OpenRouter 403/402 body.
 
-    Returns ``daily``/``weekly``/``monthly``, or ``daily`` when the phrase is
-    present without a window (the historical default), or ``None`` when the
-    text does not report a key-limit at all.
+    Returns ``daily``/``weekly``/``monthly``, or ``daily`` when the key-limit
+    phrase is present without a window (the historical default), ``credits``
+    for a credit-exhaustion body, or ``None`` when the text reports neither.
     """
-    if "key limit exceeded" not in text.lower():
-        return None
-    match = _WINDOW_RE.search(text)
-    return match.group(1).lower() if match else "daily"
+    lowered = text.lower()
+    if "key limit exceeded" in lowered:
+        match = _WINDOW_RE.search(text)
+        return match.group(1).lower() if match else "daily"
+    if _CREDITS_RE.search(text):
+        return "credits"
+    return None
 
 
 def block_deadline(window: str, now: datetime | None = None) -> datetime:

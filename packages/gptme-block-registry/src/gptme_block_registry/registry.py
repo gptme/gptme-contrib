@@ -112,6 +112,8 @@ class BlockRegistry:
             )
         if now is None:
             now = datetime.now(timezone.utc)
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
         if until > now:
             return True, until, None
         return False, None, None
