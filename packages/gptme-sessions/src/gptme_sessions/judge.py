@@ -340,24 +340,38 @@ def format_subagent_context(subagent_summary: dict | None) -> str:
     counts/tokens/durations plus a ``subagent_children`` list (one dict per
     child: ``agent_type``, ``label``, ``duration_s``, ``tokens``,
     ``tool_output_bytes``, ``result_used``).
+
+    ``subagents_total`` counts every descendant, but ``subagent_children``
+    deliberately exposes only top-level children (nested rows would inflate the
+    delegation signal). The rendered block keeps those two figures consistent:
+    the count line names the top-level and nested populations separately, and
+    the kept-working ratio uses the same top-level denominator as the list, so
+    the judge never reads a count that disagrees with the rows below it.
     """
     if not subagent_summary or not isinstance(subagent_summary, dict):
         return ""
     total = subagent_summary.get("subagents_total") or 0
     if not total:
         return ""
+    children = subagent_summary.get("subagent_children") or []
+    top_level = len(children) if children else total
+    nested = max(total - top_level, 0)
+    count_note = (
+        f"{top_level} top-level + {nested} nested descendant(s)"
+        if nested
+        else f"{top_level} subagent(s)"
+    )
     lines = [
         "",
         "## Subagent Usage",
-        f"- **Count**: {total} subagent(s) "
+        f"- **Count**: {count_note} "
         f"(readonly={subagent_summary.get('subagents_readonly', 0)}, "
         f"scratch={subagent_summary.get('subagents_scratch', 0)}, "
         f"acting={subagent_summary.get('subagents_acting', 0)})",
         f"- **Tokens spent by subagents**: {subagent_summary.get('subagent_tokens_total', 0)}",
         f"- **Parent kept working while subagents ran**: "
-        f"{subagent_summary.get('spawns_parent_kept_working', 0)}/{total}",
+        f"{subagent_summary.get('spawns_parent_kept_working', 0)}/{top_level}",
     ]
-    children = subagent_summary.get("subagent_children") or []
     if children:
         lines.append("- **Per-child**:")
         for child in children[:10]:

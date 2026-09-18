@@ -341,6 +341,37 @@ class TestJudgeSession:
         assert "Explore" in block and "used" in block
         assert "general-purpose" in block and "unused" in block
 
+    def test_format_subagent_context_separates_nested_from_top_level(self) -> None:
+        """Nested descendants are reported separately so the count line agrees
+        with the top-level per-child list and the kept-working denominator.
+
+        ``subagents_total`` counts every descendant while ``subagent_children``
+        is top-level only; rendering the raw total as the block's count made
+        the prompt say "4 subagent(s)" above a list of one row.
+        """
+        block = format_subagent_context(
+            {
+                "subagents_total": 4,
+                "subagents_readonly": 1,
+                "subagents_scratch": 0,
+                "subagents_acting": 0,
+                "subagent_tokens_total": 900,
+                "spawns_parent_kept_working": 1,
+                "subagent_children": [
+                    {
+                        "agent_type": "Explore",
+                        "label": "readonly",
+                        "duration_s": 12,
+                        "tokens": 300,
+                        "result_used": True,
+                    }
+                ],
+            }
+        )
+        assert "1 top-level + 3 nested descendant(s)" in block
+        assert "1/1" in block
+        assert "4 subagent(s)" not in block
+
     def test_format_subagent_context_unknown_result_used(self) -> None:
         """A child with result_used=None renders as 'unknown', and the rubric
         text in the prompt clarifies that 'unknown' is neutral evidence, not waste."""
