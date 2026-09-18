@@ -406,3 +406,28 @@ def test_trusted_callback_at_58_minutes_receives_prepared_brief(callback_case):
     ), "58-minute same-morning callback must inject the prepared standup brief"
     assert "callback" in cfg.initial_response_instructions.lower()
     assert len(requests) == 1
+
+
+def test_trusted_callback_at_2h_receives_prepared_brief(callback_case):
+    """Regression: 2h+ callback after missed standup must deliver the brief.
+
+    Brief generated at ~05:30, standup placed at ~08:00, callback at ~10:23
+    is the 2026-09-18 failure case. The brief age relative to the CALLBACK is
+    ~4h52min which exceeded the old MAX_CONTEXT_AGE check anchored to current.
+    Fix: anchor the age check to placed_at, not the callback time.
+    """
+    run, _, _, requests, state, stamp, brief = callback_case
+    now = datetime.now(timezone.utc)
+    # Standup placed 2h 23min ago; brief generated 2.5h before that (4h53min ago total)
+    placed = now - timedelta(hours=2, minutes=23)
+    stamp["placed_at"] = placed.isoformat()
+    stamp["date"] = placed.date().isoformat()
+    brief["generated_at"] = (placed - timedelta(hours=2, minutes=30)).isoformat()
+    (state / "standup-brief.json").write_text(json.dumps(brief))
+    (state / "voice-calls/last-standup-call-sid.txt").write_text(json.dumps(stamp))
+    cfg = run()
+    assert (
+        MARKER in cfg.instructions
+    ), "2h+ same-morning callback must inject the prepared standup brief"
+    assert "callback" in cfg.initial_response_instructions.lower()
+    assert len(requests) == 1

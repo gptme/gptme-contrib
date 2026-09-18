@@ -407,9 +407,8 @@ def _serialize_context(
     except ValueError:
         return None
     if not (
-        generated.date() == current.date()
-        and timedelta(0) <= current - generated <= MAX_CONTEXT_AGE
-        and generated <= placed
+        generated.date() == placed.date()
+        and timedelta(0) <= placed - generated <= MAX_CONTEXT_AGE
     ):
         return None
     if not isinstance(context.get("text"), str) or not context["text"].strip():
@@ -652,10 +651,10 @@ def _load_legacy(state: Path, current: datetime) -> tuple[str, str, float] | Non
         generated = _timestamp(brief.get("generated_at"))
         if not (
             stamp.get("date") == current.date().isoformat()
-            and placed.date() == generated.date() == current.date()
+            and placed.date() == current.date()
             and timedelta(0) <= current - placed <= CALLBACK_WINDOW
-            and timedelta(0) <= current - generated <= MAX_CONTEXT_AGE
-            and generated <= placed
+            and generated.date() == placed.date()
+            and timedelta(0) <= placed - generated <= MAX_CONTEXT_AGE
         ):
             return None
         if not isinstance(brief.get("text"), str) or not brief["text"].strip():
