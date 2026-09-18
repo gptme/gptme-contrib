@@ -1,8 +1,8 @@
 """Shared block-file registry for gptme agent arm dispatch.
 
-The credential-survival sublayer extracted from Bob's fleet so that a second
-consumer (any forked agent) can make the same dispatch decision from the same
-files, without importing Bob-only modules.
+The credential-survival sublayer extracted from an agent's fleet so that a
+second consumer (any forked agent) can make the same dispatch decision from
+the same files, without importing fleet-internal modules.
 
 Policy-free by design: this package owns the *wire contract* (filenames,
 timestamp shape, fail-open reads, never-shorten writes) and the *evaluation

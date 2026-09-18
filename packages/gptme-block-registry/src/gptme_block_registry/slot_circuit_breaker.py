@@ -1,9 +1,9 @@
 """Per-slot circuit breaker — shared credential-survival reaction layer.
 
-Extracted from Bob's ``scripts/runs/autonomous/slot_circuit_breaker.py`` so
-that any agent can use the same breaker state without importing fleet-internal
-modules.  The original module stays in Bob's repo as a thin CLI wrapper and
-caller; this package owns the portable logic.
+Extracted from an agent's ``scripts/runs/autonomous/slot_circuit_breaker.py``
+so that any agent can use the same breaker state without importing
+fleet-internal modules.  The original module stays in the owning agent's repo
+as a thin CLI wrapper and caller; this package owns the portable logic.
 
 Design
 ------
@@ -65,7 +65,7 @@ NEUTRAL = "neutral"
 _VERDICTS = (AUTH_DEATH, PRODUCTIVE, NEUTRAL)
 
 # ---------------------------------------------------------------------------
-# Defaults — callers may override; there are no Bob-repo-specific paths here
+# Defaults — callers may override; there are no agent-repo-specific paths here
 # ---------------------------------------------------------------------------
 
 DEFAULT_THRESHOLD = 3
@@ -243,7 +243,7 @@ def decide_respawn(
         Path to the JSON file holding per-slot breaker state (caller supplies;
         typically ``workspace / "state" / "slot-circuit-breaker.json"``).
     slot:
-        The credential slot identity (e.g. ``"bob"``, ``"alice"``).  Callers
+        The credential slot identity (e.g. ``"arm-a"``, ``"arm-b"``).  Callers
         resolve the active slot; this function is policy-free.
     verdict:
         The previous attempt's three-way outcome — :data:`AUTH_DEATH`,

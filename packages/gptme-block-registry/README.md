@@ -3,7 +3,7 @@
 Shared **state-dir block-file contract and registry** for gptme agent arm
 dispatch — the credential-survival sublayer, extracted so any forked agent can
 read the same block files and make the same dispatch decision without importing
-Bob-only modules.
+another agent's fleet-internal modules.
 
 Policy-free by design. This package owns the *wire contract* and the
 *evaluation semantics*; the caller owns the policy (which route, which scoped
