@@ -51,9 +51,15 @@ ENV_PRINCIPAL = "PRINCIPAL_NOTIFY_PRINCIPAL"
 ENV_PUSHOVER = ("PUSHOVER_USER_KEY", "PUSHOVER_API_TOKEN")
 ENV_TELEGRAM = ("PRINCIPAL_NOTIFY_TG_TOKEN", "PRINCIPAL_NOTIFY_TG_CHAT")
 
-# Injectable seams so tests never touch the real PATH or spawn processes.
+# Injectable seams so tests never touch the real PATH, spawn processes, or the FS.
 Which = Callable[[str], "str | None"]
 Run = Callable[[list[str]], "tuple[int, str]"]
+CanWrite = Callable[[], bool]
+
+
+def _cwd_writable() -> bool:
+    """True iff the working directory accepts writes (the local-alert path)."""
+    return os.access(os.getcwd(), os.W_OK)
 
 
 def _default_run(cmd: list[str]) -> tuple[int, str]:
@@ -91,6 +97,16 @@ class Report:
         return any(c.tier == 1 and c.name != "local" and c.ok for c in self.caps)
 
 
+def _present(env: dict[str, str], key: str) -> bool:
+    """True iff the env var is set to a non-blank value.
+
+    A whitespace-only value (a common copy-paste artifact) is treated as unset:
+    it would never authenticate a real channel, so reporting it as ready would
+    make ``--strict`` pass on a channel that cannot fire.
+    """
+    return bool((env.get(key) or "").strip())
+
+
 def _gh_login(run: Run) -> str | None:
     """Return the authenticated gh login, or None if gh is absent/unauthed."""
     rc, out = run(["gh", "api", "user", "--jq", ".login"])
@@ -109,10 +125,24 @@ def probe_github(env: dict[str, str], which: Which, run: Run) -> Capability:
         return Capability(
             1, "github", "misconfigured", "gh present but not authenticated", without
         )
-    principal = env.get(ENV_PRINCIPAL)
-    if principal and login == principal:
+    principal = (env.get(ENV_PRINCIPAL) or "").strip()
+    if not principal:
+        # No principal declared, so the identity guard cannot run: we cannot
+        # tell whether this PAT belongs to the agent or to the person it is
+        # meant to alert. Report the gap rather than silently passing it.
+        return Capability(
+            1,
+            "github",
+            "misconfigured",
+            f"gh authenticated as {login}, but {ENV_PRINCIPAL} is unset — the "
+            "identity guard cannot verify the PAT is the agent's and not the "
+            "principal's; set it to enable the guard",
+            without,
+        )
+    if login.casefold() == principal.casefold():
         # Gordon's PAT-as-Erik anti-pattern: escalation would appear to come
-        # from the very person it is meant to alert.
+        # from the very person it is meant to alert. GitHub logins are
+        # case-insensitive, so compare case-folded.
         return Capability(
             1,
             "github",
@@ -126,28 +156,44 @@ def probe_github(env: dict[str, str], which: Which, run: Run) -> Capability:
 
 def probe_pushover(env: dict[str, str]) -> Capability:
     without = "no Pushover push notifications to the principal's phone"
-    missing = [k for k in ENV_PUSHOVER if not env.get(k)]
+    missing = [k for k in ENV_PUSHOVER if not _present(env, k)]
     if missing:
         return Capability(
-            1, "pushover", "absent", f"unset: {', '.join(missing)}", without
+            1, "pushover", "absent", f"unset or blank: {', '.join(missing)}", without
         )
     return Capability(1, "pushover", "ok", "user key + api token set", without)
 
 
 def probe_telegram(env: dict[str, str]) -> Capability:
     without = "no Telegram escalation channel"
-    missing = [k for k in ENV_TELEGRAM if not env.get(k)]
+    missing = [k for k in ENV_TELEGRAM if not _present(env, k)]
     if missing:
         return Capability(
-            1, "telegram", "absent", f"unset: {', '.join(missing)}", without
+            1, "telegram", "absent", f"unset or blank: {', '.join(missing)}", without
         )
     return Capability(1, "telegram", "ok", "bot token + chat id set", without)
 
 
-def probe_service_manager(which: Which) -> Capability:
+def probe_service_manager(which: Which, run: Run) -> Capability:
     without = "no OS-managed scheduling; autonomous runs need cron or a manual loop"
     if which("systemctl"):
-        return Capability(2, "systemd", "ok", "systemctl on PATH", without)
+        # A binary on PATH is not enough: containers and WSL often ship
+        # systemctl with no running user manager, so `systemctl --user` fails.
+        # Probe the user manager itself before claiming Tier 2 is usable.
+        rc, _out = run(["systemctl", "--user", "is-system-running"])
+        # is-system-running exits non-zero for degraded/starting states but
+        # still proves the user manager answers; rc 127/timeout means it does
+        # not. `offline`/no-bus manifests as a non-zero rc with no usable state.
+        if rc == 127:
+            return Capability(
+                2,
+                "systemd",
+                "misconfigured",
+                "systemctl on PATH but the --user manager is not reachable "
+                "(no session bus / not running) — scheduled runs cannot install",
+                without,
+            )
+        return Capability(2, "systemd", "ok", "systemctl --user reachable", without)
     if which("launchctl"):
         return Capability(2, "launchd", "ok", "launchctl on PATH", without)
     return Capability(
@@ -175,23 +221,40 @@ def build_report(
     env: dict[str, str] | None = None,
     which: Which | None = None,
     run: Run | None = None,
+    can_write: CanWrite | None = None,
 ) -> Report:
     env = dict(os.environ) if env is None else env
     which = shutil.which if which is None else which
     run = _default_run if run is None else run
+    can_write = _cwd_writable if can_write is None else can_write
 
     r = Report()
 
-    # Tier 0 — universal. Always present by definition; report the local-alert path.
-    r.add(
-        Capability(
-            0,
-            "local-alert",
-            "ok",
-            "filesystem + python3 (Tier-0 fallback always fires)",
-            "nothing — this is the universal floor",
+    # Tier 0 — the universal floor, but only if the FS is actually writable:
+    # a read-only or full workspace means the local-alert file cannot be written
+    # and the agent has *no* alarm path at all, so this must not report a false ok.
+    local_writable = can_write()
+    if local_writable:
+        r.add(
+            Capability(
+                0,
+                "local-alert",
+                "ok",
+                "filesystem writable + python3 (Tier-0 fallback fires)",
+                "nothing — this is the universal floor",
+            )
         )
-    )
+    else:
+        r.add(
+            Capability(
+                0,
+                "local-alert",
+                "misconfigured",
+                "working directory is not writable — the local-alert file cannot "
+                "be written, so even the Tier-0 fallback would fail silently",
+                "no alarm path at all: a dark agent cannot even leave a local trace",
+            )
+        )
 
     # Tier 1 — only probe the backends the agent actually selected, plus always
     # report the always-on local fallback so the report shows the full ladder.
@@ -205,19 +268,26 @@ def build_report(
         if name in probes:
             r.add(probes[name]())
         elif name == "local":
+            status = "ok" if local_writable else "misconfigured"
+            detail = (
+                "Tier-0 fallback (in-workspace file, not out-of-band)"
+                if local_writable
+                else "selected but the workspace is not writable — the fallback "
+                "file cannot be written"
+            )
             r.add(
                 Capability(
                     1,
                     "local",
-                    "ok",
-                    "Tier-0 fallback (in-workspace file, not out-of-band)",
+                    status,
+                    detail,
                     "nothing extra — but this alone is not out-of-band escalation",
                 )
             )
         # Unknown backend names are silently ignored (open registry).
 
     # Tier 2 + Tier 3 — environment-level, independent of notify config.
-    r.add(probe_service_manager(which))
+    r.add(probe_service_manager(which, run))
     r.add(probe_ssh(which))
     return r
 
