@@ -164,6 +164,93 @@ def test_no_repo_skips_github_but_writes_alert(tmp_path: Path, monkeypatch) -> N
     assert cfg.alert_file.exists()
 
 
+def test_auth_reason_matches_default(tmp_path: Path) -> None:
+    # "auth" is what the session recorder emits for 401/403 — must match by default.
+    write_records(
+        tmp_path,
+        [rec(40, "productive")] + [rec(h, "failed", "auth") for h in (1, 2, 3, 4)],
+    )
+    status = assess(tmp_path)
+    assert status["auth_failures_in_window"] == 4
+    assert status["outage"] is True
+
+
+def test_no_history_with_auth_failures_is_outage(tmp_path: Path) -> None:
+    # Fresh workspace: no productive session ever, but auth failures present.
+    # hours_since_prod=None should not suppress the outage signal.
+    write_records(
+        tmp_path,
+        [rec(h, "failed", "api_error_401") for h in (1, 2, 3, 4)],
+    )
+    status = assess(tmp_path)
+    assert status["hours_since_last_productive"] is None
+    assert status["auth_failures_in_window"] == 4
+    assert status["outage"] is True
+
+
+def test_dry_run_does_not_write_alert_file(tmp_path: Path, monkeypatch) -> None:
+    def fake_gh(args: list[str]):
+        class R:
+            returncode = 0
+            stdout = "[]" if args[0] == "issue" and args[1] == "list" else "created"
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr(soc, "_gh", fake_gh)
+    cfg = cfg_for(tmp_path)
+    write_records(
+        tmp_path,
+        [rec(40, "productive")]
+        + [rec(h, "failed", "auth_failure") for h in (1, 2, 3, 4)],
+    )
+    status = assess(tmp_path)
+    assert status["outage"] is True
+    soc.escalate(cfg, status, dry_run=True, now=NOW)
+    assert not cfg.alert_file.exists()
+
+
+def test_aged_out_failures_do_not_clear_alert(tmp_path: Path, monkeypatch) -> None:
+    # auth failures aged out of window, productive still 0 — must NOT close issue.
+    calls: list[list[str]] = []
+
+    def fake_gh(args: list[str]):
+        calls.append(args)
+
+        class R:
+            returncode = 0
+            stdout = "[]"
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr(soc, "_gh", fake_gh)
+    cfg = cfg_for(tmp_path)
+
+    # First: trigger outage to create alert file.
+    write_records(
+        tmp_path,
+        [rec(40, "productive")]
+        + [rec(h, "failed", "auth_failure") for h in (1, 2, 3, 4)],
+    )
+    outage_status = assess(tmp_path)
+    soc.escalate(cfg, outage_status, dry_run=False, now=NOW)
+    assert cfg.alert_file.exists()
+
+    # Now: failures aged out, but still no productive sessions in window.
+    aged_status = {
+        **outage_status,
+        "outage": False,
+        "auth_failures_in_window": 0,
+        "productive_in_window": 0,
+    }
+    soc.escalate(cfg, aged_status, dry_run=False, now=NOW)
+    # Alert file must survive — outage is still active.
+    assert cfg.alert_file.exists()
+    # gh must NOT have been called for a close.
+    assert not any(a[:2] == ["issue", "close"] for a in calls)
+
+
 def test_custom_reasons_override(tmp_path: Path) -> None:
     write_records(
         tmp_path,

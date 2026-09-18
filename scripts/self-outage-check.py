@@ -62,7 +62,7 @@ from pathlib import Path
 # 429 (quota) and 5xx (server) are transient, NOT outages — excluded on purpose.
 # Override with --reasons if your records use a different vocabulary.
 DEFAULT_AUTH_OUTAGE_REASONS = frozenset(
-    {"auth_failure", "api_error_401", "api_error_403"}
+    {"auth", "auth_failure", "api_error_401", "api_error_403"}
 )
 
 # Only re-comment on an existing open issue this often, to avoid daily spam.
@@ -171,8 +171,7 @@ def assess(
     outage = (
         auth_failures >= min_failures
         and productive == 0
-        and hours_since_prod is not None
-        and hours_since_prod >= min_outage_hours
+        and (hours_since_prod is None or hours_since_prod >= min_outage_hours)
     )
 
     return {
@@ -293,13 +292,14 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
     cfg.alert_file.parent.mkdir(parents=True, exist_ok=True)
 
     if status["outage"]:
-        cfg.alert_file.write_text(
-            f"SELF-OUTAGE (auth) detected at {status['checked_at']}\n"
-            f"{status['auth_failures_in_window']} auth failures, "
-            f"0 productive in {status['window_hours']:.0f}h; "
-            f"{status['hours_since_last_productive']}h since last productive.\n"
-            f"Fix: {cfg.reauth_cmd}.\n"
-        )
+        if not dry_run:
+            cfg.alert_file.write_text(
+                f"SELF-OUTAGE (auth) detected at {status['checked_at']}\n"
+                f"{status['auth_failures_in_window']} auth failures, "
+                f"0 productive in {status['window_hours']:.0f}h; "
+                f"{status['hours_since_last_productive']}h since last productive.\n"
+                f"Fix: {cfg.reauth_cmd}.\n"
+            )
         _supplementary_notify_pending = False
         if cfg.repo:
             existing = find_open_issue(cfg)
@@ -356,8 +356,12 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
         if _supplementary_notify_pending and not dry_run:
             _supplementary_notify(cfg, status)
     else:
-        # Healthy — clear alert and close any open outage issue as recovered.
-        if cfg.alert_file.exists():
+        # Only clear and close when productive work actually resumed.
+        # auth failures can age out of the window while the loop stays dead —
+        # outage=False in that case does not mean recovery.
+        if status["productive_in_window"] == 0:
+            return
+        if not dry_run and cfg.alert_file.exists():
             cfg.alert_file.unlink()
         if not cfg.repo:
             return
