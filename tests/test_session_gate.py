@@ -160,7 +160,7 @@ def test_state_write_failure_exits_error_not_skip(tmp_path: Path) -> None:
     # a caller distinguishing "don't run" from "gate is broken" relies on this, and
     # a regression that swallowed the OSError into SKIP would make a broken 3am gate
     # look perfectly healthy. Make write_state fail by pointing --state-file at a path
-    # whose parent is a regular file, so mkdir(parents=True) raises NotADirectoryError.
+    # whose parent is a regular file, so mkdir(parents=True, exist_ok=True) raises FileExistsError.
     blocker = tmp_path / "not-a-dir"
     blocker.write_text("i am a file, not a directory\n")
     bad_state = blocker / "session-gate.json"
