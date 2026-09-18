@@ -148,6 +148,22 @@ def test_write_block_overwrites_non_canonical_existing(tmp_path: Path) -> None:
     assert read_block_until(path) == now
 
 
+def test_write_block_overwrites_binary_existing(tmp_path: Path) -> None:
+    """A block file with non-UTF8 bytes is treated as non-canonical and overwritten."""
+    path = tmp_path / "block.txt"
+    path.write_bytes(b"\xff\xfe binary garbage \x00\x01")
+    now = datetime(2026, 9, 18, tzinfo=UTC)
+    write_block(path, now)
+    assert read_block_until(path) == now
+
+
+def test_read_block_until_binary_fails_open(tmp_path: Path) -> None:
+    """read_block_until on a binary file must return None (fail open), not raise."""
+    path = tmp_path / "block.txt"
+    path.write_bytes(b"\xff\xfe binary garbage \x00\x01")
+    assert read_block_until(path) is None
+
+
 def test_write_block_concurrent_writes_never_shorten(tmp_path: Path) -> None:
     """Two racing writers: the longer deadline must always win, regardless of
     which one reads the (empty) existing file first (P1 regression)."""

@@ -57,6 +57,18 @@ def test_garbled_timestamp_fails_open_with_warning(tmp_path: Path) -> None:
     assert "fail-open" in verdict.warnings[0]
 
 
+def test_binary_block_file_fails_open_with_warning(tmp_path: Path) -> None:
+    """A block file containing non-UTF8 bytes must fail open, not raise UnicodeDecodeError."""
+    registry = BlockRegistry(tmp_path)
+    checks = registry.arm_checks("gptme", "glm-5.2")
+    checks[0].path.parent.mkdir(parents=True, exist_ok=True)
+    checks[0].path.write_bytes(b"\xff\xfe binary garbage \x00\x01")
+    verdict = registry.check(checks, now=NOW)
+    assert verdict.blocked is False
+    assert len(verdict.warnings) == 1
+    assert "fail-open" in verdict.warnings[0]
+
+
 def test_backend_and_pool_checks_compose(tmp_path: Path) -> None:
     registry = BlockRegistry(tmp_path)
     write_block(registry.backend_check("copilot-cli").path, FUTURE)

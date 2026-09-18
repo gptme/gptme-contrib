@@ -100,7 +100,7 @@ class BlockRegistry:
         if not check.path.is_file():
             return False, None, None
         try:
-            raw = check.path.read_text()
+            raw = check.path.read_text(errors="replace")
         except OSError as exc:
             return False, None, f"{check.reason}: unreadable ({exc}) — fail-open"
         until = parse_until(raw)

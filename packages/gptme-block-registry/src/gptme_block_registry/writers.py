@@ -56,7 +56,7 @@ def write_block(path: Path | str, until: datetime) -> Path:
     with _locked(path):
         if path.is_file():
             try:
-                existing_raw = path.read_text()
+                existing_raw = path.read_text(errors="replace")
             except OSError:
                 existing_raw = ""
             if is_canonical_timestamp(existing_raw):
@@ -99,7 +99,7 @@ def read_block_until(path: Path | str) -> datetime | None:
     """Read a deadline; ``None`` when absent, unreadable, or garbled."""
     path = Path(path)
     try:
-        raw = path.read_text()
+        raw = path.read_text(errors="replace")
     except OSError:
         return None
     return parse_until(raw)
