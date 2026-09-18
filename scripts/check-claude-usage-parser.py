@@ -131,6 +131,13 @@ def parse_section_headers(lines: list[str]) -> dict:
     return result if len(result) >= 2 else {}
 
 
+# Signals are matched as case-insensitive substrings, so they must be
+# unambiguous phrases. Bare short tokens are deliberately excluded: as
+# substrings they fire on unrelated text ("tls" in "results", "timeout" in a
+# status line, "502" inside a larger number), and this detection runs only
+# after the parser has already failed — a false positive there would
+# misattribute a genuine parse/version problem to auth/network. Precision is
+# preferred over recall: a miss just falls back to the version hint.
 AUTH_FAILURE_SIGNALS = [
     # Auth / credential problems (the scrape itself failed to authenticate).
     "not signed in",
@@ -138,7 +145,6 @@ AUTH_FAILURE_SIGNALS = [
     "please sign in",
     "authentication failed",
     "unable to authenticate",
-    "unauthorized",
     "401 unauthorized",
     "403 forbidden",
     "invalid api key",
@@ -158,23 +164,11 @@ AUTH_FAILURE_SIGNALS = [
     "http error",
     "server error",
     "timed out",
-    "timeout",
+    "tls handshake",
+    "bad gateway",
+    "gateway timeout",
     "econnreset",
-    "502",
-    "503",
-    "504",
 ]
-
-# Signals that are too short/ambiguous to match as bare substrings: "tls"
-# matches inside "results", "catls", "TLSv1.3" and "gateway" matches inside a
-# hostname or a status line. Match these as whole words instead, so a genuine
-# parse failure (that merely mentions such a word) is not misreported as an
-# auth/network failure.
-AUTH_FAILURE_WORD_SIGNALS = ["tls", "gateway"]
-_AUTH_FAILURE_WORD_RE = re.compile(
-    r"\b(" + "|".join(re.escape(s) for s in AUTH_FAILURE_WORD_SIGNALS) + r")\b",
-    re.IGNORECASE,
-)
 
 _AUTH_FAILURE_MESSAGE = (
     "Error: Could not authenticate to Claude Code /usage "
@@ -198,8 +192,6 @@ def detect_auth_failure(text: str) -> str | None:
     for signal in AUTH_FAILURE_SIGNALS:
         if signal in lowered:
             return _AUTH_FAILURE_MESSAGE
-    if _AUTH_FAILURE_WORD_RE.search(text):
-        return _AUTH_FAILURE_MESSAGE
     return None
 
 

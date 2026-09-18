@@ -88,6 +88,23 @@ def test_auth_signal_substring_inside_word_is_not_auth_failure() -> None:
     assert "Could not authenticate" not in proc.stderr
 
 
+def test_ambiguous_transport_words_do_not_false_positive() -> None:
+    """Realistic parse-failure text that merely contains ambiguous words
+    ("timeout", a number embedding "502", a gateway hostname, "results") must
+    keep the version hint, not be misreported as auth/network."""
+    for raw in (
+        "Usage data loading; retry on timeout. No usage bars found.\n",
+        "Session 1502 active, 503 events seen, no usage bars.\n",
+        "Proxy api-gateway.internal unreachable from this shell.\n",
+        "Compiling results...\n",
+        "Response HTTP 200 OK but no usage bars found.\n",
+    ):
+        proc = run_parser(raw)
+        assert proc.returncode == 1, raw
+        assert "requires Claude Code v2.1.183" in proc.stderr, raw
+        assert "Could not authenticate" not in proc.stderr, raw
+
+
 def test_tls_word_detected_as_auth_failure() -> None:
     """A standalone TLS-failure word is still classified as auth/network."""
     raw = "Error: TLS handshake failed while contacting the usage endpoint.\n"
