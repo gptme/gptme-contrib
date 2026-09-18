@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 from gptme_voice.realtime import server as server_mod
+from gptme_voice.realtime.missed_call_context import MAX_CONTEXT_AGE
 
 from .test_server import _DummyToolBridge, _DummyTwilioWebSocket, _FakeRealtimeClient
 
@@ -406,3 +407,91 @@ def test_trusted_callback_at_58_minutes_receives_prepared_brief(callback_case):
     ), "58-minute same-morning callback must inject the prepared standup brief"
     assert "callback" in cfg.initial_response_instructions.lower()
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("source", ["legacy", "note", "history"])
+def test_trusted_callback_at_2h_receives_prepared_brief(callback_case, source):
+    """Regression: a brief older than MAX_CONTEXT_AGE at callback time is still
+    delivered when it was fresh relative to when the missed call was placed.
+
+    Covers all three loaders (legacy stamp, missed-call-context.json,
+    callback-history.jsonl) on a fixed clock replaying the 2026-09-18 failure:
+    brief generated 05:30Z, standup placed 08:00Z, callback 10:23Z — the brief
+    is 4h53m old at callback but only 2h30m old at placement.
+    """
+    from gptme_voice.realtime.standup_callback import load_callback_candidate
+
+    _, _, _, _, state, stamp, brief = callback_case
+    now = datetime(2026, 9, 18, 10, 23, tzinfo=timezone.utc)
+    placed = datetime(2026, 9, 18, 8, 0, tzinfo=timezone.utc)
+    generated = datetime(2026, 9, 18, 5, 30, tzinfo=timezone.utc)
+    assert now - generated > MAX_CONTEXT_AGE >= placed - generated
+    brief["generated_at"] = generated.isoformat()
+    (state / "standup-brief.json").write_text(json.dumps(brief))
+    voice = state / "voice-calls"
+    if source == "legacy":
+        stamp.update(date="2026-09-18", placed_at=placed.isoformat())
+        (voice / "last-standup-call-sid.txt").write_text(json.dumps(stamp))
+    else:
+        (voice / "last-standup-call-sid.txt").unlink()
+        note = {
+            "type": "general",
+            "sid": CALL_SID,
+            "date": "2026-09-18",
+            "placed_at": placed.isoformat(),
+            "caller": PHONE,
+            "context_file": "state/standup-brief.json",
+        }
+        target = (
+            "missed-call-context.json" if source == "note" else "callback-history.jsonl"
+        )
+        (voice / target).write_text(json.dumps(note) + "\n")
+    candidate = load_callback_candidate(str(state.parent), now=now, caller=PHONE)
+    assert candidate is not None, "2h+ same-morning callback must find the brief"
+    assert MARKER in candidate[1]
+
+
+@pytest.mark.parametrize("source", ["note", "history"])
+@pytest.mark.parametrize(
+    "callback_at",
+    [
+        # Next morning: the brief was fresh at placement, but the callback is a
+        # different UTC day. Anchoring to placed_at must not resurrect it.
+        datetime(2026, 9, 19, 6, 0, tzinfo=timezone.utc),
+        # Same day but just outside CALLBACK_WINDOW (4h after placement).
+        datetime(2026, 9, 18, 12, 1, tzinfo=timezone.utc),
+    ],
+    ids=["next_day", "past_callback_window"],
+)
+def test_placed_at_anchor_does_not_revive_expired_callback(
+    callback_case, source, callback_at
+):
+    """Guard for the placed_at anchor: freshness is judged at placement, but the
+    callback itself must still fall in the same-day CALLBACK_WINDOW that
+    _validate_note enforces for the note/history loaders."""
+    from gptme_voice.realtime.standup_callback import load_callback_candidate
+
+    _, _, _, _, state, stamp, brief = callback_case
+    placed = datetime(2026, 9, 18, 8, 0, tzinfo=timezone.utc)
+    brief["generated_at"] = datetime(
+        2026, 9, 18, 5, 30, tzinfo=timezone.utc
+    ).isoformat()
+    (state / "standup-brief.json").write_text(json.dumps(brief))
+    voice = state / "voice-calls"
+    (voice / "last-standup-call-sid.txt").unlink()
+    note = {
+        "type": "general",
+        "sid": CALL_SID,
+        "date": "2026-09-18",
+        "placed_at": placed.isoformat(),
+        "caller": PHONE,
+        "context_file": "state/standup-brief.json",
+    }
+    target = (
+        "missed-call-context.json" if source == "note" else "callback-history.jsonl"
+    )
+    (voice / target).write_text(json.dumps(note) + "\n")
+    assert (
+        load_callback_candidate(str(state.parent), now=callback_at, caller=PHONE)
+        is None
+    )
