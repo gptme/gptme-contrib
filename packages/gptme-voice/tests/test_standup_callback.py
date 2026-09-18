@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 from gptme_voice.realtime import server as server_mod
+from gptme_voice.realtime.missed_call_context import MAX_CONTEXT_AGE
 
 from .test_server import _DummyToolBridge, _DummyTwilioWebSocket, _FakeRealtimeClient
 
@@ -408,26 +409,45 @@ def test_trusted_callback_at_58_minutes_receives_prepared_brief(callback_case):
     assert len(requests) == 1
 
 
-def test_trusted_callback_at_2h_receives_prepared_brief(callback_case):
-    """Regression: 2h+ callback after missed standup must deliver the brief.
+@pytest.mark.parametrize("source", ["legacy", "note", "history"])
+def test_trusted_callback_at_2h_receives_prepared_brief(callback_case, source):
+    """Regression: a brief older than MAX_CONTEXT_AGE at callback time is still
+    delivered when it was fresh relative to when the missed call was placed.
 
-    Brief generated at ~05:30, standup placed at ~08:00, callback at ~10:23
-    is the 2026-09-18 failure case. The brief age relative to the CALLBACK is
-    ~4h52min which exceeded the old MAX_CONTEXT_AGE check anchored to current.
-    Fix: anchor the age check to placed_at, not the callback time.
+    Covers all three loaders (legacy stamp, missed-call-context.json,
+    callback-history.jsonl): the 2026-09-18 failure had the brief generated
+    ~4h52m before the callback but ~2h30m before the call was placed.
     """
     run, _, _, requests, state, stamp, brief = callback_case
     now = datetime.now(timezone.utc)
-    # Standup placed 2h 23min ago; brief generated 2.5h before that (4h53min ago total)
     placed = now - timedelta(hours=2, minutes=23)
-    stamp["placed_at"] = placed.isoformat()
-    stamp["date"] = placed.date().isoformat()
-    brief["generated_at"] = (placed - timedelta(hours=2, minutes=30)).isoformat()
+    generated = placed - timedelta(hours=2, minutes=30)
+    if generated.date() != now.date():
+        pytest.skip("scenario spans UTC midnight; the loaders require a same-day brief")
+    assert now - generated > MAX_CONTEXT_AGE >= placed - generated
+    brief["generated_at"] = generated.isoformat()
     (state / "standup-brief.json").write_text(json.dumps(brief))
-    (state / "voice-calls/last-standup-call-sid.txt").write_text(json.dumps(stamp))
+    voice = state / "voice-calls"
+    if source == "legacy":
+        stamp["placed_at"] = placed.isoformat()
+        (voice / "last-standup-call-sid.txt").write_text(json.dumps(stamp))
+    else:
+        (voice / "last-standup-call-sid.txt").unlink()
+        note = {
+            "type": "general",
+            "sid": CALL_SID,
+            "date": now.date().isoformat(),
+            "placed_at": placed.isoformat(),
+            "caller": PHONE,
+            "context_file": "state/standup-brief.json",
+        }
+        target = (
+            "missed-call-context.json" if source == "note" else "callback-history.jsonl"
+        )
+        (voice / target).write_text(json.dumps(note) + "\n")
     cfg = run()
     assert (
         MARKER in cfg.instructions
-    ), "2h+ same-morning callback must inject the prepared standup brief"
+    ), "2h+ same-morning callback must inject the prepared brief"
     assert "callback" in cfg.initial_response_instructions.lower()
     assert len(requests) == 1
