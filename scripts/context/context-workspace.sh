@@ -38,4 +38,15 @@ $TREE_PEOPLE
 \`\`\`
 EOF
 
+# Surface Tier-0 alerts from principal_notify so the agent sees them next session.
+if [ -d ./state/alerts ]; then
+    alert_files=( ./state/alerts/*.txt )
+    if [ -f "${alert_files[0]}" ]; then
+        echo -e "\n## Pending Alerts (state/alerts/)"
+        for f in "${alert_files[@]}"; do
+            [ -f "$f" ] && echo "### $(basename "$f")" && cat "$f" && echo
+        done
+    fi
+fi
+
 popd > /dev/null
