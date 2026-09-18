@@ -66,12 +66,12 @@ def test_unknown_backend_recorded(tmp_path):
 
 def test_github_identity_guard_refuses_principal(tmp_path, monkeypatch):
     """The github backend must refuse when gh authenticates as the principal."""
-    monkeypatch.setattr(principal_notify, "_gh_login", lambda cfg: "ErikBjare")
+    monkeypatch.setattr(principal_notify, "_gh_login", lambda cfg: "example-owner")
     c = cfg(
         tmp_path,
         backends=["github"],
-        principal="ErikBjare",
-        gh_repo="ErikBjare/alice",
+        principal="example-owner",
+        gh_repo="example-owner/example-repo",
     )
     res = notify_principal("Outage", "b", dedup_key="k", cfg=c)
     assert res.degraded is True
@@ -81,16 +81,30 @@ def test_github_identity_guard_refuses_principal(tmp_path, monkeypatch):
     assert res.local_alert_path.exists()
 
 
+def test_github_identity_guard_refuses_when_principal_unset(tmp_path, monkeypatch):
+    """The github backend must fail closed when PRINCIPAL_NOTIFY_PRINCIPAL is not set."""
+    monkeypatch.setattr(principal_notify, "_gh_login", lambda cfg: "example-agent")
+    c = cfg(
+        tmp_path,
+        backends=["github"],
+        gh_repo="example-owner/example-repo",
+        # principal deliberately omitted
+    )
+    res = notify_principal("Outage", "b", dedup_key="k", cfg=c)
+    assert res.degraded is True
+    assert "github" in res.failures
+
+
 def test_github_backend_files_issue_as_agent(tmp_path, monkeypatch):
     calls = {}
-    monkeypatch.setattr(principal_notify, "_gh_login", lambda cfg: "TimeToLearnAlice")
+    monkeypatch.setattr(principal_notify, "_gh_login", lambda cfg: "example-agent")
 
     def fake_run(args, **kwargs):
         calls["args"] = args
 
         class R:
             returncode = 0
-            stdout = "https://github.com/ErikBjare/alice/issues/99"
+            stdout = "https://github.com/example-owner/example-repo/issues/99"
             stderr = ""
 
         return R()
@@ -99,8 +113,8 @@ def test_github_backend_files_issue_as_agent(tmp_path, monkeypatch):
     c = cfg(
         tmp_path,
         backends=["github"],
-        principal="ErikBjare",
-        gh_repo="ErikBjare/alice",
+        principal="example-owner",
+        gh_repo="example-owner/example-repo",
     )
     res = notify_principal("Outage", "b", dedup_key="self-outage", cfg=c)
     assert "github" in res.delivered_via
@@ -141,10 +155,10 @@ def test_cli_dry_run_writes_local_only(tmp_path, capsys):
 def test_from_env_parses_backends(monkeypatch, tmp_path):
     env = {
         "PRINCIPAL_NOTIFY_BACKENDS": "github, pushover",
-        "PRINCIPAL_NOTIFY_AGENT_ID": "gordon",
-        "PRINCIPAL_NOTIFY_PRINCIPAL": "ErikBjare",
+        "PRINCIPAL_NOTIFY_AGENT_ID": "example-agent",
+        "PRINCIPAL_NOTIFY_PRINCIPAL": "example-owner",
     }
     c = Config.from_env(workspace=tmp_path, env=env)
     assert c.backends == ["github", "pushover"]
-    assert c.agent_id == "gordon"
-    assert c.principal == "ErikBjare"
+    assert c.agent_id == "example-agent"
+    assert c.principal == "example-owner"

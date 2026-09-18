@@ -33,9 +33,9 @@ CLI:
 
 Config (env; a core script can also pass a Config explicitly):
     PRINCIPAL_NOTIFY_BACKENDS   comma list, e.g. "github,pushover" (default "local")
-    PRINCIPAL_NOTIFY_AGENT_ID   identity stamp, e.g. "alice"
-    PRINCIPAL_NOTIFY_PRINCIPAL  principal's identity, e.g. "ErikBjare" (github guard)
-    PRINCIPAL_NOTIFY_GH_REPO    repo for github backend, e.g. "ErikBjare/alice"
+    PRINCIPAL_NOTIFY_AGENT_ID   identity stamp, e.g. "my-agent"
+    PRINCIPAL_NOTIFY_PRINCIPAL  principal's identity, e.g. "example-owner" (github guard)
+    PRINCIPAL_NOTIFY_GH_REPO    repo for github backend, e.g. "example-owner/example-repo"
     PUSHOVER_USER_KEY / PUSHOVER_API_TOKEN   pushover backend
     PRINCIPAL_NOTIFY_TG_TOKEN / PRINCIPAL_NOTIFY_TG_CHAT   telegram backend
 """
@@ -161,10 +161,14 @@ def backend_github(cfg: Config, subject: str, body: str, dedup_key: str, urgency
     """File a GitHub issue as the agent. Refuses if authenticated as the principal."""
     if not cfg.gh_repo:
         raise BackendError("PRINCIPAL_NOTIFY_GH_REPO not set")
+    if not cfg.principal:
+        raise BackendError(
+            "PRINCIPAL_NOTIFY_PRINCIPAL must be set when using the github backend"
+        )
     login = _gh_login(cfg)
     # Identity rule: never escalate an alarm that appears to come from the person
     # it is meant to alert (Gordon's PAT-as-Erik anti-pattern).
-    if cfg.principal and login and login.lower() == cfg.principal.lower():
+    if login and login.lower() == cfg.principal.lower():
         raise BackendError(
             f"refusing: gh authenticates as principal '{login}' — an escalation "
             "must be attributable to the agent, not the principal"
@@ -224,9 +228,11 @@ def backend_telegram(
     chat = cfg.env.get("PRINCIPAL_NOTIFY_TG_CHAT")
     if not (tg_token and chat):
         raise BackendError("PRINCIPAL_NOTIFY_TG_TOKEN / _TG_CHAT not set")
-    data = urllib.parse.urlencode(
-        {"chat_id": chat, "text": f"[{cfg.agent_id}] {subject}\n\n{body}"}
-    ).encode()
+    _TELEGRAM_MAX = 4096
+    msg = f"[{cfg.agent_id}] {subject}\n\n{body}"
+    if len(msg) > _TELEGRAM_MAX:
+        msg = msg[: _TELEGRAM_MAX - 3] + "..."
+    data = urllib.parse.urlencode({"chat_id": chat, "text": msg}).encode()
     url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
     req = urllib.request.Request(url, data=data)
     try:
