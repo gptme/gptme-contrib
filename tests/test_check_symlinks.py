@@ -87,9 +87,12 @@ def test_forked_unexpected_regular_file_is_error(tmp_path):
 
 def test_forked_builtin_allowlist_accepted(tmp_path):
     """Built-in default allowlist entries pass forked mode → exit 0."""
-    scripts, _ = make_tree(tmp_path)
-    name = next(iter(scanner.DEFAULT_AGENT_SPECIFIC_SCRIPTS))
-    (scripts / name).write_text("#!/bin/sh\necho agent-specific\n")
+    make_tree(tmp_path)
+    # DEFAULT_AGENT_SPECIFIC_SCRIPTS contains workspace-relative paths.
+    entry = next(iter(scanner.DEFAULT_AGENT_SPECIFIC_SCRIPTS))
+    fpath = tmp_path / entry
+    fpath.parent.mkdir(parents=True, exist_ok=True)
+    fpath.write_text("#!/bin/sh\necho agent-specific\n")
     assert run(tmp_path, ["--mode", "forked"]) == 0
 
 
@@ -103,16 +106,18 @@ def test_forked_symlink_accepted(tmp_path):
 
 
 def test_forked_custom_allowlist_file_replaces_builtin(tmp_path):
-    """--allowlist-file replaces the built-in set: only listed names pass."""
+    """--allowlist-file replaces the built-in set: only listed paths pass."""
     scripts, _ = make_tree(tmp_path)
     (scripts / "my-tool.py").write_text("print('local tool')\n")
-    # A built-in default name that is NOT in our custom list must now fail.
+    # A built-in default path NOT in our custom list must now fail.
     builtin = next(iter(scanner.DEFAULT_AGENT_SPECIFIC_SCRIPTS))
-    (scripts / builtin).write_text("#!/bin/sh\necho x\n")
+    builtin_fpath = tmp_path / builtin
+    builtin_fpath.parent.mkdir(parents=True, exist_ok=True)
+    builtin_fpath.write_text("#!/bin/sh\necho x\n")
 
     allow = tmp_path / "allow.txt"
-    allow.write_text("# my agent's local scripts\nmy-tool.py\n")
-    # my-tool.py allowed, but the builtin name is no longer → exit 1.
+    allow.write_text("# my agent's local scripts\nscripts/my-tool.py\n")
+    # scripts/my-tool.py allowed, but the builtin path is no longer → exit 1.
     assert run(tmp_path, ["--mode", "forked", "--allowlist-file", str(allow)]) == 1
 
 
@@ -121,7 +126,7 @@ def test_forked_custom_allowlist_all_listed_passes(tmp_path):
     scripts, _ = make_tree(tmp_path)
     (scripts / "my-tool.py").write_text("print('local tool')\n")
     allow = tmp_path / "allow.txt"
-    allow.write_text("my-tool.py\n")
+    allow.write_text("scripts/my-tool.py\n")
     assert run(tmp_path, ["--mode", "forked", "--allowlist-file", str(allow)]) == 0
 
 
@@ -137,9 +142,13 @@ def test_missing_allowlist_file_is_bad_args(tmp_path):
 def test_load_allowlist_ignores_comments_and_blanks(tmp_path):
     f = tmp_path / "allow.txt"
     f.write_text(
-        "\n" "# a comment\n" "keep.sh\n" "   \n" "also.py  # trailing comment\n"
+        "\n"
+        "# a comment\n"
+        "scripts/keep.sh\n"
+        "   \n"
+        "scripts/also.py  # trailing comment\n"
     )
-    assert scanner.load_allowlist(f) == {"keep.sh", "also.py"}
+    assert scanner.load_allowlist(f) == {"scripts/keep.sh", "scripts/also.py"}
 
 
 # --- arg handling -----------------------------------------------------------
@@ -147,3 +156,19 @@ def test_load_allowlist_ignores_comments_and_blanks(tmp_path):
 
 def test_bad_agent_dir_is_exit_2(tmp_path):
     assert scanner.main([str(tmp_path / "does-not-exist"), "--mode", "default"]) == 2
+
+
+def test_missing_contrib_dir_is_exit_1(tmp_path):
+    """Default mode must fail closed (exit 1) when gptme-contrib is absent."""
+    # No gptme-contrib submodule → scanner should not silently report clean.
+    assert scanner.main([str(tmp_path), "--mode", "default"]) == 1
+
+
+def test_escaping_check_dir_is_exit_2(tmp_path):
+    """--check-dirs with a path that escapes the workspace must be rejected."""
+    assert scanner.main([str(tmp_path), "--check-dirs", "../escape"]) == 2
+
+
+def test_absolute_check_dir_is_exit_2(tmp_path):
+    """--check-dirs with an absolute path must be rejected."""
+    assert scanner.main([str(tmp_path), "--check-dirs", "/etc"]) == 2

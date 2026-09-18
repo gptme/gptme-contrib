@@ -38,28 +38,29 @@ import sys
 from pathlib import Path
 
 # Scripts that are legitimately regular files in a forked agent (forked mode).
-# These are agent utilities that live directly in the template (not in contrib).
-# This is the built-in default used when no --allowlist-file is given; an agent
-# with a different set of local scripts should pass its own list via that flag
-# rather than editing this shared file.
+# Entries are workspace-relative paths (e.g. "scripts/compare.sh"), not bare
+# names, so two scripts in different directories with the same name are
+# distinguished. Use --allowlist-file to override with agent-specific entries.
 DEFAULT_AGENT_SPECIFIC_SCRIPTS = {
-    "compare.sh",  # Benchmarking / harness comparison tool
-    "install-deps.sh",  # Agent-specific dependency installer
-    "migrate-journals.py",  # Journal format migration utility
-    "search.sh",  # Workspace search utility
+    "scripts/compare.sh",  # Benchmarking / harness comparison tool
+    "scripts/install-deps.sh",  # Agent-specific dependency installer
+    "scripts/migrate-journals.py",  # Journal format migration utility
+    "scripts/search.sh",  # Workspace search utility
     # Autonomous run scripts (agent-customized copies of the run loop infrastructure)
-    "autonomous-run.sh",
-    "autonomous-run-cc.sh",
+    "scripts/autonomous-run.sh",
+    "scripts/autonomous-run-cc.sh",
 }
 
 SKIP_DIRS = {".git", "__pycache__", ".venv", ".mypy_cache", "node_modules"}
 
 
 def load_allowlist(path: Path) -> set[str]:
-    """Read a forked-mode allowlist file: one script name per line.
+    """Read a forked-mode allowlist file: one workspace-relative path per line.
 
-    Blank lines and ``#`` comments (whole-line or trailing) are ignored, so an
-    agent can annotate why each script is local. Returns the set of names.
+    Entries should be workspace-relative paths (e.g. ``scripts/compare.sh``),
+    not bare names, so that two scripts with the same name in different
+    directories can be distinguished.  Blank lines and ``#`` comments
+    (whole-line or trailing) are ignored.
     """
     names: set[str] = set()
     for raw in path.read_text().splitlines():
@@ -156,9 +157,9 @@ def check_mode_default(
     (should be symlinks) or share names with contrib files (potential drift).
     """
     if not contrib_dir.exists():
-        print(f"WARNING: gptme-contrib not found at {contrib_dir}", file=sys.stderr)
+        print(f"ERROR: gptme-contrib not found at {contrib_dir}", file=sys.stderr)
         print("  Run: git submodule update --init gptme-contrib", file=sys.stderr)
-        return 0
+        return 1
 
     hash_index, name_index = build_contrib_index(contrib_dir, verbose)
 
@@ -264,9 +265,10 @@ def check_mode_forked(
                 target = os.readlink(fpath)
                 print(f"  OK (symlink): {fpath.relative_to(agent_dir)} -> {target}")
             continue
-        if fpath.name in allowlist:
+        rel = str(fpath.relative_to(agent_dir))
+        if rel in allowlist:
             if verbose:
-                print(f"  OK (agent-specific): {fpath.relative_to(agent_dir)}")
+                print(f"  OK (agent-specific): {rel}")
             continue
 
         unexpected.append(fpath)
@@ -353,6 +355,19 @@ def main(argv: list[str] | None = None) -> int:
     if not agent_dir.is_dir():
         print(f"Error: {agent_dir} is not a directory", file=sys.stderr)
         return 2
+
+    for d in args.check_dirs:
+        p = Path(d)
+        if p.is_absolute():
+            print(
+                f"Error: --check-dirs must be relative paths, got: {d}", file=sys.stderr
+            )
+            return 2
+        try:
+            (agent_dir / p).resolve().relative_to(agent_dir)
+        except ValueError:
+            print(f"Error: --check-dirs path escapes workspace: {d}", file=sys.stderr)
+            return 2
 
     print(f"Checking agent: {agent_dir}")
     print(f"Mode:           {args.mode}")
