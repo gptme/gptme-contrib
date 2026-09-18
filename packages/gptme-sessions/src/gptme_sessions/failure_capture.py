@@ -11,6 +11,7 @@ FAILURE_REASON_AUTH = "auth"
 FAILURE_REASON_INVALID_REQUEST = "invalid_request"
 FAILURE_REASON_NONZERO = "nonzero_exit_unclassified"
 FAILURE_REASON_PRE_RESPONSE = "pre_response_api_failure"
+FAILURE_REASON_QUOTA = "quota"
 FAILURE_REASON_RATE_LIMIT = "rate_limit"
 FAILURE_REASON_TIMEOUT = "timeout"
 
@@ -178,6 +179,19 @@ def classify_failure_reason(
         # failure even if the error blob contains lesson names like "Auth Blueprint".
         if "invalid_request_error" in lower:
             return FAILURE_REASON_INVALID_REQUEST
+        # Check quota/spending-limit BEFORE auth: a 403 that says the account
+        # ran out of credits (e.g. Grok `personal-team-blocked:spending-limit`,
+        # "You have run out of credits") is a billing/quota failure, not a
+        # credential failure. The bare `403` auth check below would otherwise
+        # mislabel it as auth and pollute friction/bandit post-mortems.
+        if (
+            "spending-limit" in lower
+            or "spending_limit" in lower
+            or "run out of credits" in lower
+            or "insufficient_quota" in lower
+            or "billing" in lower
+        ):
+            return FAILURE_REASON_QUOTA
         if (
             "authentication" in lower
             or "unauthorized" in lower

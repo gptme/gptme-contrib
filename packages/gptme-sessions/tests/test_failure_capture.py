@@ -11,6 +11,7 @@ from gptme_sessions.failure_capture import (
     FAILURE_REASON_INVALID_REQUEST,
     FAILURE_REASON_NONZERO,
     FAILURE_REASON_PRE_RESPONSE,
+    FAILURE_REASON_QUOTA,
     FAILURE_REASON_RATE_LIMIT,
     FAILURE_REASON_TIMEOUT,
     _record_has_any_content,
@@ -280,6 +281,34 @@ def test_classify_auth_unauthorized_text():
         error_text="Error: Unauthorized access, check your API key",
     )
     assert result == FAILURE_REASON_AUTH
+
+
+def test_classify_quota_grok_spending_limit():
+    """Grok 403 spending-limit (run out of credits) → FAILURE_REASON_QUOTA, not auth."""
+    result = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=30,
+        input_tokens=0,
+        has_assistant_turn=False,
+        error_text=(
+            "Error code: 403 - {'code': 'personal-team-blocked:spending-limit', "
+            "'error': 'You have run out of credits or need a Grok subscription. "
+            "Add credits at https://console.x.ai'}"
+        ),
+    )
+    assert result == FAILURE_REASON_QUOTA
+
+
+def test_classify_quota_insufficient_quota():
+    """OpenAI-style insufficient_quota 429 → FAILURE_REASON_QUOTA, not rate_limit."""
+    result = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=30,
+        input_tokens=0,
+        has_assistant_turn=False,
+        error_text="insufficient_quota: You exceeded your current quota",
+    )
+    assert result == FAILURE_REASON_QUOTA
 
 
 def test_record_has_any_content_tool_use():
