@@ -153,6 +153,18 @@ class TestPersistence:
         assert b.state == CircuitState.OPEN
         assert b._opened_at is None
 
+    def test_non_bool_probe_pending_resets_to_closed(self) -> None:
+        """A string like "false" is truthy under bool(); the field must be
+        type-checked, not coerced, or a corrupt state file could silently
+        grant an extra half-open probe (P1 regression)."""
+        b = _load_breaker(
+            {"state": "HALF_OPEN", "probe_pending": "false", "opened_at": 1.0},
+            3,
+            300.0,
+        )
+        assert b.state == CircuitState.CLOSED
+        assert b._probe_pending is False
+
 
 # ---------------------------------------------------------------------------
 # _apply_verdict unit tests
@@ -330,3 +342,17 @@ class TestDecideRespawn:
         sf = tmp_path / "cb.json"
         with pytest.raises(ValueError, match="unknown verdict"):
             decide_respawn(state_file=sf, slot="bob", verdict="invalid")
+
+    def test_state_file_replaced_atomically_not_truncated_in_place(
+        self, tmp_path: Path
+    ) -> None:
+        """The state file must be replaced via temp+rename (new inode), not
+        truncated and rewritten in place — a reader that opens it without the
+        lock must never observe a truncated/partial file (P1 regression)."""
+        sf = tmp_path / "cb.json"
+        decide_respawn(state_file=sf, slot="alice", verdict=AUTH_DEATH)
+        inode_before = sf.stat().st_ino
+        decide_respawn(state_file=sf, slot="alice", verdict=AUTH_DEATH)
+        assert sf.stat().st_ino != inode_before
+        # The lock is a sibling file, not the state file itself.
+        assert (tmp_path / "cb.json.lock").exists()

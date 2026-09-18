@@ -40,9 +40,11 @@ Design reference: knowledge/technical-designs/block-registry-credential-survival
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
+import tempfile
 import time
 from contextlib import contextmanager
 from enum import Enum
@@ -152,28 +154,44 @@ class _SlotBreaker:
 def _locked_state(state_file: Path) -> Iterator[dict[str, Any]]:
     """Yield the mutable per-slot state dict under an exclusive file lock.
 
-    The lock file is the state file itself; the dict is written back on exit.
+    Locking uses a sibling ``.lock`` file rather than the state file itself,
+    so the state file can be replaced atomically (temp file + rename) without
+    invalidating an in-progress flock — renaming over a locked fd's own inode
+    would silently detach the lock from the new file. This also means a
+    reader that opens the state file directly (without taking the lock) never
+    observes a truncated or partially written file.
     Fail-safe: a corrupt / missing file yields an empty dict rather than raising.
     """
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(state_file, os.O_RDWR | os.O_CREAT, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        raw = os.read(fd, 1 << 20).decode("utf-8", errors="replace") or "{}"
+    lock_path = state_file.with_name(state_file.name + ".lock")
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
-            data = json.loads(raw)
-            if not isinstance(data, dict):
+            try:
+                raw = state_file.read_text(errors="replace")
+            except OSError:
+                raw = ""
+            try:
+                data = json.loads(raw or "{}")
+                if not isinstance(data, dict):
+                    data = {}
+            except (json.JSONDecodeError, ValueError):
                 data = {}
-        except (json.JSONDecodeError, ValueError):
-            data = {}
-        yield data
-        out = json.dumps(data, indent=2, sort_keys=True).encode("utf-8")
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.ftruncate(fd, 0)
-        os.write(fd, out)
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+            yield data
+            out = json.dumps(data, indent=2, sort_keys=True)
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(state_file.parent), prefix=f".{state_file.name}."
+            )
+            try:
+                with os.fdopen(fd, "w") as tmp_file:
+                    tmp_file.write(out)
+                os.replace(tmp_name, state_file)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_name)
+                raise
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def _load_breaker(
@@ -202,7 +220,10 @@ def _load_breaker(
                 b._opened_at = float(opened_at)
             except (TypeError, ValueError):
                 b._opened_at = None
-        b._probe_pending = bool(slot_state.get("probe_pending", False))
+        probe_pending = slot_state.get("probe_pending", False)
+        if not isinstance(probe_pending, bool):
+            raise ValueError(f"non-bool probe_pending: {probe_pending!r}")
+        b._probe_pending = probe_pending
     except Exception:
         b._state = CircuitState.CLOSED
         b._failure_count = 0

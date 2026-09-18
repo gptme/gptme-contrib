@@ -54,6 +54,10 @@ def write_block(path: Path | str, until: datetime) -> Path:
     new_raw = format_timestamp(until)
 
     with _locked(path):
+        if path.is_dir():
+            raise IsADirectoryError(
+                f"block path {path} is a directory, not a file — misconfigured state dir"
+            )
         if path.is_file():
             try:
                 existing_raw = path.read_text(errors="replace")
@@ -88,6 +92,10 @@ def clear_block(path: Path | str) -> bool:
     """
     path = Path(path)
     with _locked(path):
+        if path.is_dir():
+            raise IsADirectoryError(
+                f"block path {path} is a directory, not a file — misconfigured state dir"
+            )
         try:
             path.unlink()
         except FileNotFoundError:

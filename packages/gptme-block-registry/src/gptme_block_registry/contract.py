@@ -108,8 +108,11 @@ def parse_until(raw: str) -> datetime | None:
     except ValueError:
         return None
     if ts.tzinfo is None:
-        # Naive: only accept the T-separated ISO shape, not a space separator.
-        if len(stripped) < 11 or stripped[10] != "T":
+        # Naive: only accept the fixed-width T-separated HH:MM:SS shape.
+        # `datetime.fromisoformat` also accepts truncated shapes like
+        # "2026-09-19T00" or "2026-09-19T00:00" — reject those explicitly so a
+        # truncated (garbled) timestamp doesn't silently parse as a valid one.
+        if stripped != ts.isoformat(timespec="seconds"):
             return None
         return ts.replace(tzinfo=timezone.utc)
     # Tz-aware: only the canonical +00:00 UTC shape is trusted.

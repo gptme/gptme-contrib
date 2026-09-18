@@ -101,6 +101,8 @@ def test_parse_until_garbled_is_none(raw: str) -> None:
         "2026-09-19 00:00:00",  # naive with space separator
         "2026-09-19T00:00:00+02:00",  # non-UTC offset
         "2026-09-19T00:00:00-05:00",  # non-UTC offset (negative)
+        "2026-09-19T00:00",  # truncated naive (minutes only)
+        "2026-09-19T00",  # truncated naive (hour only)
     ],
 )
 def test_parse_until_rejects_non_canonical_shapes(raw: str) -> None:
@@ -248,6 +250,23 @@ def test_clear_block(tmp_path: Path) -> None:
     write_block(path, datetime(2026, 9, 19, tzinfo=UTC))
     assert clear_block(path) is True
     assert clear_block(path) is False  # idempotent
+
+
+def test_write_block_raises_clear_error_on_directory(tmp_path: Path) -> None:
+    """A directory at the block path is a misconfigured state dir, not a
+    corrupt block file — write_block must raise a clear error instead of an
+    opaque IsADirectoryError from deep inside os.replace."""
+    path = tmp_path / "block.txt"
+    path.mkdir()
+    with pytest.raises(IsADirectoryError):
+        write_block(path, datetime(2026, 9, 19, tzinfo=UTC))
+
+
+def test_clear_block_raises_clear_error_on_directory(tmp_path: Path) -> None:
+    path = tmp_path / "block.txt"
+    path.mkdir()
+    with pytest.raises(IsADirectoryError):
+        clear_block(path)
 
 
 def test_clear_and_write_race_never_interleaves(tmp_path: Path) -> None:
