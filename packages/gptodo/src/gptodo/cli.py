@@ -2053,11 +2053,14 @@ def check(fix: bool, task_files: list[str]):
     # full "check all" validation output (validation/link-check issues), only
     # into dependency-existence and cycle resolution.
     archive_load_errors: list[tuple[Path, str]] = []
-    dependency_universe = list(all_tasks) + [
-        task
-        for task in load_tasks(tasks_dir, recursive=True, errors_out=archive_load_errors)
-        if "archive" in task.path.relative_to(tasks_dir).parts
-    ]
+    # Load recursively from tasks/archive/ directly, so unrelated malformed
+    # files elsewhere in the task tree can't inject phantom dependency IDs.
+    archive_dir = tasks_dir / "archive"
+    dependency_universe = list(all_tasks)
+    if archive_dir.is_dir():
+        dependency_universe += load_tasks(
+            archive_dir, recursive=True, errors_out=archive_load_errors
+        )
 
     # Determine which tasks to validate
     scoped_load_errors: list[tuple[Path, str]] = []
