@@ -162,8 +162,17 @@ trajectory_count_covered() {
         mtime=$(stat -c %Y "$unit" 2>/dev/null) || continue
         if [[ "$mtime" -ge "$cutoff" ]]; then continue; fi
         case "$kind" in
-            file|dir)
+            file)
                 if [[ -e "$dest/$(basename "$unit")" ]]; then count=$(( count + 1 )); fi ;;
+            dir)
+                local bdir
+                bdir="$dest/$(basename "$unit")"
+                # Existence alone is not enough: a stopped backup can leave an
+                # empty directory placeholder. Verify at least one file is
+                # present so a hollow backup dir is not counted as covered.
+                if [[ -d "$bdir" ]] && [[ -n "$(find "$bdir" -maxdepth 1 -type f -print -quit 2>/dev/null)" ]]; then
+                    count=$(( count + 1 ))
+                fi ;;
             rfile)
                 local rel="${unit#$src/}"
                 if [[ -e "$dest/$rel" ]]; then count=$(( count + 1 )); fi ;;
