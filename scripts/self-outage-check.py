@@ -3,12 +3,11 @@
 
 Why this exists
 ---------------
-An autonomous agent loop can go **credential-dead and nobody notices**. Alice's
-loop was 401ing for **23 days** (2026-07-24 → 2026-08-16) and nothing on her
-side caught it: the auth-guard makes the loop **exit 0** on cooldown, so systemd
-saw "success" every run while zero productive work happened. The only thing that
-noticed was a *sibling* agent's cross-fleet check — relying on another agent
-noticing is a single point of failure.
+An autonomous agent loop can go **credential-dead and nobody notices**. One
+agent loop ran 401ing for **23 days** while the auth-guard made it **exit 0**
+on cooldown, so systemd saw "success" every run while zero productive work
+happened. The only thing that noticed was a *sibling* agent's cross-fleet
+check — relying on another agent noticing is a single point of failure.
 
 This is a model-independent detector, deliberately pure ``python3`` + ``gh`` so
 it keeps working while the LLM credential is dead. It reads the agent's session
