@@ -158,20 +158,34 @@ def assess(
 ) -> dict:
     """Compute outage status. Returns a JSON-serialisable dict."""
     records = load_records(records_file, window_hours, now)
-    auth_failures = sum(
-        1
+    auth_failure_records = [
+        r
         for r in records
         if r.get("outcome") == "failed" and r.get("failure_reason") in reasons
-    )
+    ]
+    auth_failures = len(auth_failure_records)
     productive = sum(1 for r in records if r.get("outcome") == "productive")
 
     last_prod = last_productive_ts(records_file, now)
-    hours_since_prod = (now - last_prod).total_seconds() / 3600 if last_prod else None
+    if last_prod is not None:
+        hours_since_prod: float | None = (now - last_prod).total_seconds() / 3600
+    elif auth_failure_records:
+        # No productive history: use the earliest auth failure as a proxy for
+        # how long the outage has been sustained. This prevents a fresh workspace
+        # with only recent failures from triggering before --min-outage-hours.
+        ts_list = [_parse_ts(r.get("timestamp", "")) for r in auth_failure_records]
+        earliest = min((ts for ts in ts_list if ts is not None), default=None)
+        hours_since_prod = (
+            (now - earliest).total_seconds() / 3600 if earliest is not None else None
+        )
+    else:
+        hours_since_prod = None
 
     outage = (
         auth_failures >= min_failures
         and productive == 0
-        and (hours_since_prod is None or hours_since_prod >= min_outage_hours)
+        and hours_since_prod is not None
+        and hours_since_prod >= min_outage_hours
     )
 
     return {
