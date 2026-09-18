@@ -77,6 +77,35 @@ def test_genuine_parse_failure_still_reports_version() -> None:
     assert "requires Claude Code v2.1.183" in proc.stderr
 
 
+def test_auth_signal_substring_inside_word_is_not_auth_failure() -> None:
+    """A parse failure must not be misread as auth just because a signal word
+    appears inside another word (e.g. "tls" inside "results")."""
+    raw = "No usage bars found. Compiling results; retry later.\n"
+    proc = run_parser(raw)
+    assert proc.returncode == 1
+    assert "Could not parse usage data" in proc.stderr
+    assert "requires Claude Code v2.1.183" in proc.stderr
+    assert "Could not authenticate" not in proc.stderr
+
+
+def test_tls_word_detected_as_auth_failure() -> None:
+    """A standalone TLS-failure word is still classified as auth/network."""
+    raw = "Error: TLS handshake failed while contacting the usage endpoint.\n"
+    proc = run_parser(raw)
+    assert proc.returncode == 1
+    assert "Could not authenticate" in proc.stderr
+    assert "requires Claude Code v2.1.183" not in proc.stderr
+
+
+def test_gateway_word_detected_as_auth_failure() -> None:
+    """A standalone gateway error is still classified as auth/network."""
+    raw = "Error: Bad Gateway while fetching usage data.\n"
+    proc = run_parser(raw)
+    assert proc.returncode == 1
+    assert "Could not authenticate" in proc.stderr
+    assert "requires Claude Code v2.1.183" not in proc.stderr
+
+
 def test_normal_usage_parses() -> None:
     """A normal usage TUI still parses to JSON successfully."""
     raw = (

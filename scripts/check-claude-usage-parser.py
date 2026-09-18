@@ -159,13 +159,29 @@ AUTH_FAILURE_SIGNALS = [
     "server error",
     "timed out",
     "timeout",
-    "tls",
     "econnreset",
-    "gateway",
     "502",
     "503",
     "504",
 ]
+
+# Signals that are too short/ambiguous to match as bare substrings: "tls"
+# matches inside "results", "catls", "TLSv1.3" and "gateway" matches inside a
+# hostname or a status line. Match these as whole words instead, so a genuine
+# parse failure (that merely mentions such a word) is not misreported as an
+# auth/network failure.
+AUTH_FAILURE_WORD_SIGNALS = ["tls", "gateway"]
+_AUTH_FAILURE_WORD_RE = re.compile(
+    r"\b(" + "|".join(re.escape(s) for s in AUTH_FAILURE_WORD_SIGNALS) + r")\b",
+    re.IGNORECASE,
+)
+
+_AUTH_FAILURE_MESSAGE = (
+    "Error: Could not authenticate to Claude Code /usage "
+    "(auth or network failure detected).\n"
+    "This is not a version problem — check the credential slot "
+    "(~/.claude/.credentials.json) and network connectivity."
+)
 
 
 def detect_auth_failure(text: str) -> str | None:
@@ -181,12 +197,9 @@ def detect_auth_failure(text: str) -> str | None:
     lowered = text.lower()
     for signal in AUTH_FAILURE_SIGNALS:
         if signal in lowered:
-            return (
-                "Error: Could not authenticate to Claude Code /usage "
-                "(auth or network failure detected).\n"
-                "This is not a version problem — check the credential slot "
-                "(~/.claude/.credentials.json) and network connectivity."
-            )
+            return _AUTH_FAILURE_MESSAGE
+    if _AUTH_FAILURE_WORD_RE.search(text):
+        return _AUTH_FAILURE_MESSAGE
     return None
 
 
