@@ -175,16 +175,32 @@ def test_auth_reason_matches_default(tmp_path: Path) -> None:
     assert status["outage"] is True
 
 
-def test_no_history_with_auth_failures_is_outage(tmp_path: Path) -> None:
-    # Fresh workspace: no productive session ever, but auth failures present.
-    # hours_since_prod=None should not suppress the outage signal.
+def test_no_history_recent_failures_not_outage(tmp_path: Path) -> None:
+    # Fresh workspace: failures only 1-4h ago don't meet the 18h duration threshold.
+    # The earliest failure age (4h) is used as the proxy; 4 < 18 → no outage.
     write_records(
         tmp_path,
         [rec(h, "failed", "api_error_401") for h in (1, 2, 3, 4)],
     )
     status = assess(tmp_path)
-    assert status["hours_since_last_productive"] is None
     assert status["auth_failures_in_window"] == 4
+    assert (
+        round(status["hours_since_last_productive"], 0) == 4.0
+    )  # earliest failure proxy
+    assert status["outage"] is False
+
+
+def test_no_history_sustained_failures_is_outage(tmp_path: Path) -> None:
+    # Fresh workspace: failures spanning 20h satisfy the 18h duration threshold.
+    write_records(
+        tmp_path,
+        [rec(h, "failed", "api_error_401") for h in (1, 10, 15, 20)],
+    )
+    status = assess(tmp_path)
+    assert status["auth_failures_in_window"] == 4
+    assert (
+        round(status["hours_since_last_productive"], 0) == 20.0
+    )  # earliest failure proxy
     assert status["outage"] is True
 
 
