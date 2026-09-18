@@ -79,13 +79,20 @@ def write_block(path: Path | str, until: datetime) -> Path:
 
 
 def clear_block(path: Path | str) -> bool:
-    """Remove a block file. Returns True if a file was removed."""
+    """Remove a block file. Returns True if a file was removed.
+
+    Takes the same lock as ``write_block`` so a clear and a concurrent write
+    cannot interleave — otherwise a write's temp-file rename could resurrect a
+    block right after it was cleared, or a clear could remove a block a writer
+    just placed, with either outcome depending on scheduling.
+    """
     path = Path(path)
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        return False
-    return True
+    with _locked(path):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        return True
 
 
 def read_block_until(path: Path | str) -> datetime | None:

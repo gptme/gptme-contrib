@@ -36,17 +36,29 @@ from .contract import (
 )
 from .openrouter import block_deadline, limit_window_from_text
 from .registry import BlockCheck, BlockRegistry, BlockVerdict
+from .slot_circuit_breaker import (
+    AUTH_DEATH,
+    NEUTRAL,
+    PRODUCTIVE,
+    CircuitState,
+    decide_respawn,
+)
 from .writers import clear_block, read_block_until, write_block
 
 __all__ = [
     "ARM_BLOCK_KINDS",
+    "AUTH_DEATH",
     "BlockCheck",
     "BlockRegistry",
     "BlockVerdict",
+    "CircuitState",
+    "NEUTRAL",
+    "PRODUCTIVE",
     "arm_block_path",
     "backend_block_path",
     "block_deadline",
     "clear_block",
+    "decide_respawn",
     "format_timestamp",
     "is_canonical_timestamp",
     "limit_window_from_text",

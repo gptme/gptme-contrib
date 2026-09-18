@@ -37,12 +37,11 @@ def limit_window_from_text(text: str) -> str | None:
     phrase is present without a window (the historical default), ``credits``
     for a credit-exhaustion body, or ``None`` when the text reports neither.
     """
-    lowered = text.lower()
-    if "key limit exceeded" in lowered:
-        match = _WINDOW_RE.search(text)
-        return match.group(1).lower() if match else "daily"
     if _CREDITS_RE.search(text):
         return "credits"
+    if "key limit exceeded" in text.lower():
+        match = _WINDOW_RE.search(text)
+        return match.group(1).lower() if match else "daily"
     return None
 
 

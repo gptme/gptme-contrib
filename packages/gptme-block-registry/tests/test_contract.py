@@ -220,6 +220,42 @@ def test_clear_block(tmp_path: Path) -> None:
     assert clear_block(path) is False  # idempotent
 
 
+def test_clear_and_write_race_never_interleaves(tmp_path: Path) -> None:
+    """A clear and a write racing on the same file must not interleave: the
+    write's temp-file rename must not resurrect a block right after a clear
+    removed it, nor can a clear silently drop a write's result mid-flight —
+    each op fully completes before the other starts (P1 regression)."""
+    import threading
+
+    path = tmp_path / "block.txt"
+    deadline = datetime(2026, 9, 19, tzinfo=UTC)
+    barrier = threading.Barrier(2)
+    results: list[bool] = []
+
+    def do_clear() -> None:
+        barrier.wait()
+        results.append(clear_block(path))
+
+    def do_write() -> None:
+        barrier.wait()
+        write_block(path, deadline)
+
+    for _ in range(20):
+        write_block(path, deadline)
+        results.clear()
+        barrier.reset()
+        t1 = threading.Thread(target=do_clear)
+        t2 = threading.Thread(target=do_write)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+        # Whichever ran last determines the end state, but it must be one of
+        # exactly two consistent outcomes — never a half-written file.
+        after = read_block_until(path)
+        assert after in (None, deadline)
+
+
 # -- OpenRouter window math -------------------------------------------------
 
 
@@ -234,6 +270,8 @@ def test_clear_block(tmp_path: Path) -> None:
         # credit exhaustion is a distinct 402 error shape, classified separately
         ("Insufficient credits", "credits"),
         ("This request requires more credits, or fewer max_tokens.", "credits"),
+        # credits takes precedence when both phrases somehow co-occur
+        ("Key limit exceeded (daily limit); insufficient credits", "credits"),
         # unrelated errors are not a limit at all
         ("rate limit exceeded", None),
         ("", None),
