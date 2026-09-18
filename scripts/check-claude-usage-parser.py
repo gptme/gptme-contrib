@@ -131,6 +131,59 @@ def parse_section_headers(lines: list[str]) -> dict:
     return result if len(result) >= 2 else {}
 
 
+AUTH_FAILURE_SIGNALS = [
+    # Auth / credential problems (the scrape itself failed to authenticate).
+    "not signed in",
+    "sign in to",
+    "please sign in",
+    "authentication",
+    "unauthorized",
+    "401",
+    "403",
+    "invalid api key",
+    "api key",
+    "token expired",
+    "token has expired",
+    "credential",
+    "re-login",
+    "relogin",
+    "login required",
+    # Transport / HTTP failures (could not reach the usage endpoint).
+    "network error",
+    "connection error",
+    "connection refused",
+    "failed to connect",
+    "could not reach",
+    "request failed",
+    "http error",
+    "server error",
+    "offline",
+]
+
+
+def detect_auth_failure(text: str) -> str | None:
+    """Return a specific error message if the raw TUI output shows an auth/HTTP
+    failure rather than a parse/version problem.
+
+    When CC cannot authenticate (e.g. an auth outage on the same credential the
+    loop uses), the /usage TUI shows an error banner instead of usage bars. The
+    parser then finds no bars and would otherwise blame the version — a red
+    herring that sends debugging to upgrade an already-current binary. Detect
+    the real cause so the error names it.
+    """
+    lowered = text.lower()
+    for signal in AUTH_FAILURE_SIGNALS:
+        if signal in lowered:
+            return (
+                "Error: Could not authenticate to Claude Code /usage "
+                "(auth or network failure detected).\n"
+                "This is not a version problem — check the credential slot "
+                "(~/.claude/.credentials.json) and network connectivity.\n"
+                "Run with --raw to see raw output for debugging."
+            )
+    return None
+
+
 def build_low_usage_result() -> dict:
     """Build a zero-utilization result for the 'Nothing over 10%' case."""
     now = datetime.now(timezone.utc)
@@ -205,12 +258,18 @@ def main():
         if "Nothing over 10%" in text:
             result = build_low_usage_result()
         else:
-            print(
-                "Error: Could not parse usage data.\n"
-                "This script requires Claude Code v2.1.183 or later.\n"
-                "If you're on an older version, upgrade with: claude update",
-                file=sys.stderr,
-            )
+            # Distinguish an auth/HTTP failure (scrape couldn't authenticate)
+            # from a genuine parse/version failure so the error names the cause.
+            auth_msg = detect_auth_failure(text)
+            if auth_msg:
+                print(auth_msg, file=sys.stderr)
+            else:
+                print(
+                    "Error: Could not parse usage data.\n"
+                    "This script requires Claude Code v2.1.183 or later.\n"
+                    "If you're on an older version, upgrade with: claude update",
+                    file=sys.stderr,
+                )
             print("Run with --raw to see raw output for debugging.", file=sys.stderr)
             sys.exit(1)
 
