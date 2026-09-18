@@ -28,6 +28,7 @@ members = [
     "gptme-activity-summary",
     "gptme-attention-tracker",
     "gptme-backoff",
+    "gptme-block-registry",
     "gptme-bob-status",
     "gptme-body-protocol",
     "gptme-browser-semantic",
@@ -1765,6 +1766,24 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.25" },
     { name = "tenacity", specifier = ">=9.0" },
+]
+provides-extras = ["test"]
+
+[[package]]
+name = "gptme-block-registry"
+version = "0.1.0"
+source = { editable = "packages/gptme-block-registry" }
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+    { name = "pytest-cov" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
+    { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0" },
 ]
 provides-extras = ["test"]
 
