@@ -821,6 +821,9 @@ def summarize_subagents(
         for key in (notif.get("task_id"), notif.get("tool_use_id")):
             if key and key not in notif_by_id and notif.get("ts"):
                 notif_by_id[str(key)] = float(notif["ts"])
+    # Whether this harness writes <task-notification> blocks at all. Only then
+    # is a missing notification evidence of non-consumption (see result_used).
+    notifications_supported = bool(parent.notifs)
 
     # Parent-side launch timestamps (from the Agent tool call) are the correct
     # kept-working window start: a non-spawn parent turn between the launch and
@@ -930,12 +933,20 @@ def summarize_subagents(
         # strongest available signal that the child's result was delivered and
         # available for consumption.  "Parent was busy while child ran"
         # (parent_turns >= 1) is kept-working, not result consumption.
-        notif_ts_for_child = (
-            notif_by_id.get(agent_id)
-            or notif_by_id.get(child.session_id)
-            or (notif_by_id.get(str(child.tool_use_id)) if child.tool_use_id else None)
-        )
-        child_rows[i]["result_used"] = notif_ts_for_child is not None
+        #
+        # A missing notification is only evidence of non-consumption when the
+        # harness emits notifications at all. gptme, codex and grok never write
+        # <task-notification> blocks, so without this guard every child there
+        # would be marked False — and the judge rubric treats False as evidence
+        # of waste, mislabelling all delegation in those harnesses. Absence of a
+        # signal is not a signal of absence, so report None (unknown) instead.
+        if notifications_supported:
+            notif_ts_for_child = (
+                notif_by_id.get(agent_id)
+                or notif_by_id.get(child.session_id)
+                or (notif_by_id.get(str(child.tool_use_id)) if child.tool_use_id else None)
+            )
+            child_rows[i]["result_used"] = notif_ts_for_child is not None
     summary["spawns_parent_kept_working"] = kept
     # Only expose top-level (depth <= 1) children in the breakdown — nested
     # descendants would inflate the row count and corrupt the delegation signal.

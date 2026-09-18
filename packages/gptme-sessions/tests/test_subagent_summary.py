@@ -510,6 +510,44 @@ def test_summarize_subagents_direct_without_tree() -> None:
     assert summary["session_kind"] == "autonomous"
 
 
+def test_result_used_unknown_when_harness_emits_no_notifications() -> None:
+    """gptme/codex never write <task-notification> blocks, so a missing
+    notification is absence of signal — not evidence the child's result went
+    unused. Marking it False would label all such delegation as wasteful."""
+    parent = [
+        _cc_user("2026-03-01T10:00:00.000Z", "BOB_SESSION_SENTINEL=deadbeef"),
+        _cc_assistant(
+            "2026-03-01T10:00:01.000Z",
+            tool_name="Agent",
+            tool_id="t1",
+            tool_input={"subagent_type": "general-purpose", "prompt": "x"},
+            entrypoint="sdk-cli",
+        ),
+    ]
+    child = [
+        _cc_assistant(
+            "2026-03-01T10:00:05.000Z",
+            tool_name="Write",
+            tool_id="w1",
+            tool_input={"file_path": "/tmp/out.md", "content": "x"},
+        )
+    ]
+    spec = [ChildSpec(records=child, spawn_depth=1, session_id="agent-x", tool_use_id="t1")]
+    summary = summarize_subagents(parent, spec, harness="gptme")
+    assert summary["subagents_total"] == 1
+    # No notifications in the parent at all → unknown, never False.
+    assert summary["subagent_children"][0]["result_used"] is None
+
+    # Contrast: when the parent *does* carry notifications, a child with no
+    # matching notification is legitimately False — the annotation is
+    # reachable, so the None above is the guard, not a skipped loop.
+    parent_with_notif = parent + [
+        _cc_user("2026-03-01T10:00:06.000Z", _notif("unrelated", "t-other"))
+    ]
+    summary2 = summarize_subagents(parent_with_notif, spec, harness="claude-code")
+    assert summary2["subagent_children"][0]["result_used"] is False
+
+
 def test_active_seconds_caps_long_gaps() -> None:
     parent = [
         _cc_user("2026-03-01T10:00:00.000Z", "hello", entrypoint="cli"),

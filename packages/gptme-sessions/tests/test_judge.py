@@ -372,6 +372,24 @@ class TestJudgeSession:
         assert "1/1" in block
         assert "4 subagent(s)" not in block
 
+    def test_format_subagent_context_without_breakdown_is_explicit(self) -> None:
+        """A stored summary lacking ``subagent_children`` must not imply rows:
+        the aggregate is still reported, but the block says there is no
+        per-child breakdown instead of printing a count above an empty list."""
+        block = format_subagent_context(
+            {
+                "subagents_total": 3,
+                "subagents_readonly": 3,
+                "subagents_scratch": 0,
+                "subagents_acting": 0,
+                "subagent_tokens_total": 400,
+                "spawns_parent_kept_working": 2,
+            }
+        )
+        assert "3 subagent(s), no per-child breakdown available" in block
+        assert "Per-child" not in block
+        assert "2/3" in block
+
     def test_format_subagent_context_unknown_result_used(self) -> None:
         """A child with result_used=None renders as 'unknown', and the rubric
         text in the prompt clarifies that 'unknown' is neutral evidence, not waste."""

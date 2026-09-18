@@ -353,14 +353,23 @@ def format_subagent_context(subagent_summary: dict | None) -> str:
     total = subagent_summary.get("subagents_total") or 0
     if not total:
         return ""
-    children = subagent_summary.get("subagent_children") or []
-    top_level = len(children) if children else total
-    nested = max(total - top_level, 0)
-    count_note = (
-        f"{top_level} top-level + {nested} nested descendant(s)"
-        if nested
-        else f"{top_level} subagent(s)"
-    )
+    children = [
+        child
+        for child in (subagent_summary.get("subagent_children") or [])
+        if (child.get("spawn_depth", 1) or 1) <= 1
+    ]
+    if children:
+        nested = max(total - len(children), 0)
+        count_note = (
+            f"{len(children)} top-level + {nested} nested descendant(s)"
+            if nested
+            else f"{len(children)} subagent(s)"
+        )
+    else:
+        # No per-child breakdown (e.g. a stored summary that predates this
+        # field). Say so, rather than implying a list that is not rendered.
+        count_note = f"{total} subagent(s), no per-child breakdown available"
+    denominator = len(children) or total
     lines = [
         "",
         "## Subagent Usage",
@@ -370,7 +379,7 @@ def format_subagent_context(subagent_summary: dict | None) -> str:
         f"acting={subagent_summary.get('subagents_acting', 0)})",
         f"- **Tokens spent by subagents**: {subagent_summary.get('subagent_tokens_total', 0)}",
         f"- **Parent kept working while subagents ran**: "
-        f"{subagent_summary.get('spawns_parent_kept_working', 0)}/{top_level}",
+        f"{subagent_summary.get('spawns_parent_kept_working', 0)}/{denominator}",
     ]
     if children:
         lines.append("- **Per-child**:")
