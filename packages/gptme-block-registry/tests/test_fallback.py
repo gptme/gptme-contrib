@@ -267,6 +267,34 @@ class TestLoadFallbackConfig:
         with pytest.raises(ValueError, match="missing required field"):
             load_fallback_config(toml)
 
+    def test_unknown_scope_raises(self, tmp_path: Path) -> None:
+        """Typo like 'lights_on' (underscore) must fail closed, not become unrestricted."""
+        toml = tmp_path / "fallback.toml"
+        toml.write_text(
+            "[on_auth_death]\n"
+            'backend = "gptme"\n'
+            'model   = "openrouter/deepseek/deepseek-chat-v3-0324:free"\n'
+            'scope   = "lights_on"\n'  # underscore typo
+            'label   = "fallback:auth-death"\n',
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="not a known scope"):
+            load_fallback_config(toml)
+
+    def test_non_string_scope_raises(self, tmp_path: Path) -> None:
+        """A TOML bool scope (scope = true) must fail, not become unrestricted."""
+        toml = tmp_path / "fallback.toml"
+        toml.write_text(
+            "[on_auth_death]\n"
+            'backend = "gptme"\n'
+            'model   = "openrouter/deepseek/deepseek-chat-v3-0324:free"\n'
+            "scope   = true\n"  # wrong type
+            'label   = "fallback:auth-death"\n',
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="non-empty string"):
+            load_fallback_config(toml)
+
     def test_loaded_config_drives_decide_fallback(self, tmp_path: Path) -> None:
         """Round-trip: load from TOML → decide_fallback fires correctly."""
         toml = tmp_path / "fallback.toml"

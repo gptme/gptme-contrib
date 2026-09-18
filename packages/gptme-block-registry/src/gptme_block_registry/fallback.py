@@ -255,10 +255,25 @@ def load_fallback_config(path: Path) -> FallbackConfig:
             f"[on_auth_death] is missing required field(s): {', '.join(missing)}"
         )
 
+    for field_name in ("backend", "model", "scope", "label"):
+        v = oad[field_name]
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(
+                f"[on_auth_death].{field_name} must be a non-empty string, got {v!r}"
+            )
+
+    scope = str(oad["scope"])
+    known_scopes = {LIGHTS_ON_SCOPE, "unrestricted"}
+    if scope not in known_scopes:
+        raise ValueError(
+            f"[on_auth_death].scope {scope!r} is not a known scope; "
+            f"valid values: {sorted(known_scopes)}"
+        )
+
     arm = FallbackArm(
         backend=str(oad["backend"]),
         model=str(oad["model"]),
-        scope=str(oad["scope"]),
+        scope=scope,
         label=str(oad["label"]),
         note=str(oad.get("note", "")),
     )
