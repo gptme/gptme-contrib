@@ -2046,6 +2046,19 @@ def check(fix: bool, task_files: list[str]):
         console.print("[yellow]No tasks found in tasks directory![/]")
         return
 
+    # Dependency resolution must also see archived tasks (tasks/archive/**),
+    # which the non-recursive glob above skips — otherwise any live task that
+    # depends on a completed, archived task fails with a false "not found".
+    # Scoped separately from `all_tasks` so archived tasks aren't pulled into
+    # full "check all" validation output (validation/link-check issues), only
+    # into dependency-existence and cycle resolution.
+    archive_load_errors: list[tuple[Path, str]] = []
+    dependency_universe = list(all_tasks) + [
+        task
+        for task in load_tasks(tasks_dir, recursive=True, errors_out=archive_load_errors)
+        if "archive" in task.path.relative_to(tasks_dir).parts
+    ]
+
     # Determine which tasks to validate
     scoped_load_errors: list[tuple[Path, str]] = []
     warning_load_errors: list[tuple[Path, str]] = []
@@ -2091,9 +2104,10 @@ def check(fix: bool, task_files: list[str]):
     # A malformed task file still exists for relationship checks. Treating its
     # id as missing would turn a non-blocking out-of-scope parse warning into a
     # blocking dependency error on an otherwise valid scoped task.
-    task_ids = {task.id for task in all_tasks}
+    task_ids = {task.id for task in dependency_universe}
     task_ids.update(path.stem for path, _ in global_load_errors)
     task_ids.update(path.stem for path, _ in scoped_load_errors)
+    task_ids.update(path.stem for path, _ in archive_load_errors)
 
     # Track dependencies in tasks being validated
     tasks_with_deps = [task for task in tasks_to_validate if task.requires]
@@ -2106,8 +2120,9 @@ def check(fix: bool, task_files: list[str]):
             return False
         visited.add(task_id)
         path.add(task_id)
-        # Find task object to get its dependencies (search in ALL tasks)
-        task = next((t for t in all_tasks if t.id == task_id), None)
+        # Find task object to get its dependencies (search in the full
+        # dependency universe, including archived tasks)
+        task = next((t for t in dependency_universe if t.id == task_id), None)
         if task:
             for dep in task.requires:
                 if has_cycle(dep, visited, path):
