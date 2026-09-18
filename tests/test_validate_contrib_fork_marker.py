@@ -52,18 +52,18 @@ def test_universal_marker_passes(tmp_path):
 
 
 def test_per_agent_override_marker_passes(tmp_path, monkeypatch):
-    """CONTRIB_FORK_MARKER accepts an agent-specific token like BOB-LOCAL."""
-    monkeypatch.setenv("CONTRIB_FORK_MARKER", "BOB-LOCAL")
+    """CONTRIB_FORK_MARKER accepts an agent-specific token like MYAGENT-LOCAL."""
+    monkeypatch.setenv("CONTRIB_FORK_MARKER", "MYAGENT-LOCAL")
     scripts, contrib_scripts = make_tree(tmp_path)
     (contrib_scripts / "shared.sh").write_text("#!/bin/sh\necho orig\n")
     fork = scripts / "shared.sh"
-    fork.write_text("#!/bin/sh\n# BOB-LOCAL FORK: bob extension\necho local\n")
+    fork.write_text("#!/bin/sh\n# MYAGENT-LOCAL FORK: agent extension\necho local\n")
     assert run(tmp_path, [str(fork)]) == 0
 
 
 def test_universal_still_accepted_with_override(tmp_path, monkeypatch):
     """Setting an override does not disable the universal AGENT-LOCAL token."""
-    monkeypatch.setenv("CONTRIB_FORK_MARKER", "BOB-LOCAL")
+    monkeypatch.setenv("CONTRIB_FORK_MARKER", "MYAGENT-LOCAL")
     scripts, contrib_scripts = make_tree(tmp_path)
     (contrib_scripts / "shared.sh").write_text("#!/bin/sh\necho orig\n")
     fork = scripts / "shared.sh"
@@ -104,3 +104,33 @@ def test_no_args_passes(tmp_path):
     """No staged files → nothing to check."""
     make_tree(tmp_path)
     assert run(tmp_path, []) == 0
+
+
+def test_string_literal_token_fails(tmp_path):
+    """A token inside a string literal (non-comment) does not satisfy the check."""
+    scripts, contrib_scripts = make_tree(tmp_path)
+    (contrib_scripts / "shared.sh").write_text("#!/bin/sh\necho orig\n")
+    fork = scripts / "shared.sh"
+    fork.write_text('#!/bin/sh\nMARKER="AGENT-LOCAL"\necho local\n')
+    assert run(tmp_path, [str(fork)]) == 1
+
+
+def test_negated_comment_fails(tmp_path):
+    """A negated comment like '# not AGENT-LOCAL' does not satisfy the check."""
+    scripts, contrib_scripts = make_tree(tmp_path)
+    (contrib_scripts / "shared.sh").write_text("#!/bin/sh\necho orig\n")
+    fork = scripts / "shared.sh"
+    fork.write_text("#!/bin/sh\n# not AGENT-LOCAL\necho local\n")
+    assert run(tmp_path, [str(fork)]) == 1
+
+
+def test_unreadable_file_fails(tmp_path):
+    """A file that cannot be read fails closed (treated as missing marker)."""
+    from unittest.mock import patch
+
+    scripts, contrib_scripts = make_tree(tmp_path)
+    (contrib_scripts / "shared.sh").write_text("#!/bin/sh\necho orig\n")
+    fork = scripts / "shared.sh"
+    fork.write_text("#!/bin/sh\n# AGENT-LOCAL FORK\necho local\n")
+    with patch.object(validator.Path, "read_text", side_effect=OSError("denied")):
+        assert run(tmp_path, [str(fork)]) == 1

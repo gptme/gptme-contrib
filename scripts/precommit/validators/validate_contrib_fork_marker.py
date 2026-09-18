@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """Require an AGENT-LOCAL marker on scripts that share a path with gptme-contrib.
 
-Agent-neutral generalization of Bob's ``validate-contrib-fork-marker``
-(ErikBjare/bob, added 2026-08-06). When a file in ``scripts/`` is staged and
-``gptme-contrib/scripts/<same-path>`` exists, the fork must carry a marker in its
-first 30 lines. This prevents the silent-no-op class: a session fixes a
-``scripts/`` file and marks the task done, but the live hook sources contrib's
-copy — which still has the bug. No marker existed to warn the editing session
-that a same-path contrib original exists and may be what actually runs.
+When a file in ``scripts/`` is staged and ``gptme-contrib/scripts/<same-path>``
+exists, the fork must carry a marker comment in its first 30 lines.  This prevents
+the silent-no-op class: a session fixes a ``scripts/`` file and marks the task done,
+but the live hook sources contrib's copy — which still has the bug.  No marker
+existed to warn the editing session that a same-path contrib original exists and may
+be what actually runs.
 
-The marker is the governance primitive for the shared-core convergence arc
-(alice#79): it makes an intentional local fork *declared*, so drift is
-distinguishable from an accidental verbatim copy that should have been a symlink.
+The marker is the governance primitive for the shared-core convergence arc: it makes
+an intentional local fork *declared*, so drift is distinguishable from an accidental
+verbatim copy that should have been a symlink.
+
+Marker format: the **first token** of a comment line must be the marker, e.g.::
+
+    # AGENT-LOCAL FORK: adds foo
 
 Marker token: ``AGENT-LOCAL`` by default. Override per-agent with the
-``CONTRIB_FORK_MARKER`` env var (e.g. ``BOB-LOCAL`` for Bob's existing markers).
+``CONTRIB_FORK_MARKER`` env var (e.g. ``MYAGENT-LOCAL`` for agent-specific markers).
 The universal ``AGENT-LOCAL`` token is *always* accepted in addition to any
 override, so a file marked for one agent stays valid if the tree is reused or
 forked by another.
@@ -32,7 +35,7 @@ Adoption (in a forked agent's ``.pre-commit-config.yaml``)::
 Usage::
 
     python3 validate_contrib_fork_marker.py scripts/git/guard-mass-delete.sh
-    CONTRIB_FORK_MARKER=BOB-LOCAL python3 validate_contrib_fork_marker.py scripts/foo.sh
+    CONTRIB_FORK_MARKER=MYAGENT-LOCAL python3 validate_contrib_fork_marker.py scripts/foo.sh
 """
 
 from __future__ import annotations
@@ -50,7 +53,7 @@ def markers() -> set[str]:
     """The set of accepted marker tokens (lowercased).
 
     Always includes the universal ``AGENT-LOCAL``; adds the per-agent override
-    from ``CONTRIB_FORK_MARKER`` when set (e.g. ``BOB-LOCAL``).
+    from ``CONTRIB_FORK_MARKER`` when set (e.g. ``MYAGENT-LOCAL``).
     """
     accepted = {UNIVERSAL_MARKER}
     override = os.environ.get("CONTRIB_FORK_MARKER", "").strip().lower()
@@ -63,9 +66,15 @@ def has_marker(path: Path, accepted: set[str]) -> bool:
     try:
         lines = path.read_text(errors="replace").splitlines()[:CHECK_LINES]
     except OSError:
-        return True  # can't read → not our problem
-    lowered = [line.lower() for line in lines]
-    return any(marker in line for marker in accepted for line in lowered)
+        return False  # fail closed: unreadable file treated as missing marker
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            continue
+        comment_content = stripped[1:].strip().lower()
+        if any(comment_content.startswith(marker) for marker in accepted):
+            return True
+    return False
 
 
 def get_repo_root() -> Path:
