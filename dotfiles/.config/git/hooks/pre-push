@@ -265,11 +265,28 @@ command -v git-lfs >/dev/null 2>&1 && printf '%s\n' "${STDIN_LINES[@]}" | git lf
 # and warns when a live sibling session holds the claim. No-op without a
 # session id in the environment; never blocks unless
 # BOB_WORKTREE_PUSH_GUARD_DENY=1 is set. See scripts/hooks/worktree-push-guard.
-_GUARD="$REPO_ROOT/scripts/hooks/worktree-push-guard"
-[ -n "$REPO_ROOT" ] || _GUARD=""
-[ -n "$_GUARD" ] && [ -x "$_GUARD" ] || _GUARD="$(dirname "$SCRIPT_DIR")/../../../scripts/hooks/worktree-push-guard"
+_GUARD=""
+if [ -n "$REPO_ROOT" ] && [ -x "$REPO_ROOT/scripts/hooks/worktree-push-guard" ]; then
+    _GUARD="$REPO_ROOT/scripts/hooks/worktree-push-guard"
+else
+    # Fallback: resolve the guard from the hook's real location. `$SCRIPT_DIR`
+    # may be a symlinked global hooks dir (core.hooksPath), so traversing it
+    # with `../..` lands outside the checkout; `readlink -f` + `git -C` finds
+    # the checkout that actually owns this hook file.
+    _HOOKS_REAL="$(readlink -f "$SCRIPT_DIR" 2>/dev/null || printf '%s' "$SCRIPT_DIR")"
+    _HOOK_REPO="$(git -C "$_HOOKS_REAL" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [ -n "$_HOOK_REPO" ] && [ -x "$_HOOK_REPO/scripts/hooks/worktree-push-guard" ]; then
+        _GUARD="$_HOOK_REPO/scripts/hooks/worktree-push-guard"
+    fi
+fi
 if [ -n "$_GUARD" ] && [ -x "$_GUARD" ]; then
-    printf '%s\n' "${STDIN_LINES[@]}" | "$_GUARD" || true
+    # Honor a deny (exit 1) from the guard: `|| true` here would swallow it and
+    # let the push proceed even with BOB_WORKTREE_PUSH_GUARD_DENY=1 set.
+    _GUARD_RC=0
+    printf '%s\n' "${STDIN_LINES[@]}" | "$_GUARD" || _GUARD_RC=$?
+    if [ "$_GUARD_RC" -ne 0 ]; then
+        exit "$_GUARD_RC"
+    fi
 fi
 
 exit 0

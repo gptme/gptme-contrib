@@ -72,6 +72,32 @@ def _get_agent_id() -> str:
     return ""
 
 
+def _get_marker_agent_id() -> str:
+    """Authoritative agent id for the occupancy marker (env-provided only).
+
+    ``_get_agent_id`` synthesizes an id from any session id so push-claim
+    identity always exists, but a synthesized id cannot be liveness-probed.
+    Recording it in the occupancy marker would make a dead holder look
+    permanently alive, so takeover could never happen. The marker therefore
+    stores only an env-provided id; an empty value means the PID is the sole
+    liveness signal, and a dead PID is treated as a dead holder.
+    """
+    return os.environ.get("BOB_AUTONOMOUS_AGENT_ID", "")
+
+
+_TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _env_flag(name: str) -> bool:
+    """Parse a documented ``=1`` boolean env flag.
+
+    Plain truthiness treats ``"0"`` (and ``"false"``) as enabled, so a
+    conventional ``=0`` configuration would switch the guard *on*. Only an
+    explicit affirmative value enables the flag.
+    """
+    return os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES
+
+
 def _get_git_dir() -> Path | None:
     import subprocess
 
@@ -242,30 +268,37 @@ def _is_holder_alive(marker: dict[str, Any]) -> bool:
 
     Probe order:
     1. Direct ``/proc/<pid>`` check — fast and conclusive when the pid is fresh.
-    2. Identity-aware liveness via ``coordination.health``:
-       - PID shape (``...-preselect-<PID>``, ``bob-monitor-<PID>``): check
-         that PID.
-       - autonomous shape (``bob-autonomous-<harness>-<hash>``): sentinel scan.
-    3. Fail-safe-alive for any shape we cannot verify (no agent_id, or a
-       non-autonomous claimer) — same policy as
-       ``coordination.work.has_provable_liveness``.
+    2. No authoritative ``agent_id`` recorded → the dead PID is conclusive:
+       treat the holder as dead so dead-holder takeover can proceed.
+    3. Authoritative ``agent_id`` present → fail-safe-alive. The brain repo
+       additionally probes claim-shape-aware liveness via ``coordination.health``
+       (sentinel scans for autonomous session ids); until that lands upstream,
+       an unverifiable holder is treated as alive rather than stolen.
+
+    The marker only records an env-provided ``agent_id`` (see
+    ``_get_marker_agent_id``), so a synthesized id can never mask a dead PID.
     """
     holder_pid = marker.get("pid", 0)
     if is_pid_alive(holder_pid):
         return True
 
-    agent_id = marker.get("agent_id", "")
-    if not agent_id:
-        # PID already confirmed dead and no agent_id to probe further — treat as dead.
-        # A transient parent PID (git process) stored during a no-env commit would
-        # otherwise keep the worktree permanently stuck in would_deny.
-        return False
+    # PID is dead. Only an authoritative agent id can keep the holder "alive"
+    # for further probing; otherwise the dead PID is conclusive.
+    return bool(marker.get("agent_id", ""))
 
-    # Contrib port: the brain repo additionally probes claim-shape-aware
-    # liveness via coordination.health (sentinel scans for autonomous session
-    # ids). Until that lands upstream, a dead PID without further probe
-    # capability is treated fail-safe-alive for non-trivial agent ids.
-    return True
+
+def _claim_expired(claim: Any) -> bool:
+    """Whether a coordination claim is past its ``expires_at``.
+
+    Expired claims intentionally keep ``status == 'claimed'``, so a status
+    check alone treats an abandoned claim as a live sibling holder.
+    """
+    expires_at = getattr(claim, "expires_at", None)
+    if expires_at is None:
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    return expires_at < datetime.now(UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -396,9 +429,7 @@ def run_push_guard(
         return 0
 
     should_deny = (
-        deny
-        if deny is not None
-        else bool(os.environ.get("BOB_WORKTREE_PUSH_GUARD_DENY"))
+        deny if deny is not None else _env_flag("BOB_WORKTREE_PUSH_GUARD_DENY")
     )
     try:
         from gptme_coordination.db import CoordinationDB, resolve_coordination_db_path
@@ -414,7 +445,12 @@ def run_push_guard(
                 key = f"pr-branch:{slug}#{branch}"
                 legacy_key = legacy_pr_branch_key(key)
                 legacy = work.get(legacy_key) if legacy_key else None
-                if legacy and legacy.status == "claimed" and legacy.claimer != aid:
+                if (
+                    legacy
+                    and legacy.status == "claimed"
+                    and legacy.claimer != aid
+                    and not _claim_expired(legacy)
+                ):
                     now = datetime.now(UTC).isoformat()
                     event = "push_deny" if should_deny else "push_would_deny"
                     append_ledger(
@@ -551,10 +587,10 @@ def run_guard(
         return 0
 
     spid = pid if pid is not None else _get_session_pid()
-    aid = agent_id if agent_id is not None else _get_agent_id()
-    do_force = (
-        force if force is not None else bool(os.environ.get("BOB_WORKTREE_GUARD_FORCE"))
-    )
+    # Marker agent id: only an env-provided id is recorded, so a synthesized id
+    # cannot make a dead holder look permanently alive (see _get_marker_agent_id).
+    aid = agent_id if agent_id is not None else _get_marker_agent_id()
+    do_force = force if force is not None else _env_flag("BOB_WORKTREE_GUARD_FORCE")
     now_iso = datetime.now(UTC).isoformat()
 
     # 3. No marker → try to adopt

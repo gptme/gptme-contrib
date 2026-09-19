@@ -48,3 +48,67 @@ def test_entry_point_fails_open_without_package() -> None:
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_env_flag_rejects_zero_and_false(monkeypatch) -> None:
+    """A conventional `=0` must not switch a guard on (Greptile P2)."""
+    from gptme_coordination.worktree_guard import _env_flag
+
+    for value in ("1", "true", "TRUE", "yes", "on"):
+        monkeypatch.setenv("GUARD_FLAG", value)
+        assert _env_flag("GUARD_FLAG") is True, value
+
+    for value in ("0", "false", "no", "off", "", "  "):
+        monkeypatch.setenv("GUARD_FLAG", value)
+        assert _env_flag("GUARD_FLAG") is False, value
+
+    monkeypatch.delenv("GUARD_FLAG", raising=False)
+    assert _env_flag("GUARD_FLAG") is False
+
+
+def test_claim_expired_handles_naive_and_aware() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from gptme_coordination.work import WorkClaim
+    from gptme_coordination.worktree_guard import _claim_expired
+
+    now = datetime.now(UTC)
+
+    def claim(expires_at):
+        return WorkClaim(
+            task_id="t",
+            claimer="other",
+            epoch=1,
+            claimed_at=now,
+            expires_at=expires_at,
+            status="claimed",
+        )
+
+    assert _claim_expired(claim(now - timedelta(minutes=1))) is True
+    assert (
+        _claim_expired(claim(now.replace(tzinfo=None) - timedelta(minutes=1))) is True
+    )
+    assert _claim_expired(claim(now + timedelta(minutes=1))) is False
+    assert _claim_expired(claim(None)) is False
+
+
+def test_dead_pid_without_authoritative_agent_id_is_dead() -> None:
+    """A dead PID must not stay 'alive' on a synthesized marker agent id."""
+    from gptme_coordination.worktree_guard import _is_holder_alive
+
+    dead_pid = 2**22  # > pid_max on Linux default configurations
+    assert _is_holder_alive({"pid": dead_pid, "agent_id": ""}) is False
+    assert _is_holder_alive({"pid": dead_pid, "agent_id": "bob-autonomous-x"}) is True
+
+
+def test_worktree_guard_entry_point_fails_open_without_package() -> None:
+    """Post-commit occupancy entry point exits 0 when the package is missing."""
+    env = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"}
+    result = subprocess.run(
+        [sys.executable, str(CONTRIB_ROOT / "scripts/hooks/worktree-guard")],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr

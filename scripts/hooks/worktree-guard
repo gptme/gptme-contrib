@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Post-commit entry point for the worktree occupancy guard (Phase 1 — warn).
+
+Wired from the contrib ``post-commit`` hook. Marks the current worktree as
+owned by this session and warns (never blocks) when a live sibling session
+holds it. Fails open (exit 0) when the coordination package is unavailable —
+availability beats enforcement. See
+``packages/gptme-coordination/src/gptme_coordination/worktree_guard.py``.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+
+def _locate_package() -> None:
+    """Add the gptme-coordination ``src/`` dir to ``sys.path`` if not importable."""
+    here = Path(__file__).resolve()
+    roots = (
+        [Path(os.environ["AGENT_WORKSPACE"])]
+        if os.environ.get("AGENT_WORKSPACE")
+        else []
+    )
+    roots.append(here.parents[2])  # contrib repo root: scripts/hooks/<this file>
+    for root in roots:
+        package_src = root / "packages" / "gptme-coordination" / "src"
+        if package_src.is_dir():
+            sys.path.insert(0, str(package_src))
+            return
+
+
+def main() -> int:
+    try:
+        _locate_package()
+        from importlib import import_module
+
+        run_guard = import_module("gptme_coordination.worktree_guard").run_guard
+    except Exception as exc:  # noqa: BLE001 — fail-open: never block a commit
+        print(f"[worktree-guard] skipping (import error: {exc})", file=sys.stderr)
+        return 0
+    try:
+        result: int = run_guard()
+        return result
+    except Exception as exc:  # noqa: BLE001 — fail-open: never block a commit
+        print(f"[worktree-guard] skipping (runtime error: {exc})", file=sys.stderr)
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
