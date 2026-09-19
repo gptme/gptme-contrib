@@ -454,9 +454,10 @@ def run_push_guard(
                     # Legacy aliases are repo-ambiguous by construction (they
                     # predate the org/repo-qualified key), so a holder on the
                     # same branch name in a *different* repo is a plausible
-                    # false collision. Warn and proceed — never deny on an
-                    # alias. Only repo-qualified claim collisions (below) can
-                    # deny.
+                    # false collision. Warn only — never deny on an alias — but
+                    # still fall through and claim the repo-qualified key:
+                    # skipping the claim here would leave later sibling pushes
+                    # without the intended collision warning or denial.
                     now = datetime.now(UTC).isoformat()
                     append_ledger(
                         _brain_root,
@@ -476,7 +477,6 @@ def run_push_guard(
                         f"informational only); claiming {key}",
                         file=sys.stderr,
                     )
-                    continue
                 existing_before = work.get(key)
                 claim = work.claim(aid, key, ttl_minutes=60)
                 if not claim:

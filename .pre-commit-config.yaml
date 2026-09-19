@@ -43,7 +43,7 @@ repos:
     pass_filenames: true
     # Extension-less hook entry points are scripts (not importable modules):
     # mypy maps them to `__main__`, colliding with the `scripts` package root.
-    exclude: ^(packages/(bobutils|gptme-backoff|gptme-bob-status|gptme-lessons-extras|gptme-runloops|gptme-contrib-lib|gptodo|gptmail|gptme-activity-summary|gptme-voice|gptme-dashboard|gptme-sessions|gptme-daily-briefing|gptme-codegraph|gptme-coordination|gptme-rag|gptme-cc-memory|gptme-vision-node)/|plugins/|scripts/hooks/worktree-push-guard$)
+    exclude: ^(packages/(bobutils|gptme-backoff|gptme-bob-status|gptme-lessons-extras|gptme-runloops|gptme-contrib-lib|gptodo|gptmail|gptme-activity-summary|gptme-voice|gptme-dashboard|gptme-sessions|gptme-daily-briefing|gptme-codegraph|gptme-coordination|gptme-rag|gptme-cc-memory|gptme-vision-node)/|plugins/|scripts/hooks/worktree-(push-)?guard$)
 - repo: local
   hooks:
   - id: check-markdown-links

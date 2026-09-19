@@ -6,18 +6,19 @@ command -v git-lfs >/dev/null 2>&1 && git lfs post-commit "$@" 2>/dev/null || tr
 # Marks /tmp/worktrees/** checkouts as owned by this session and warns when a
 # live sibling session holds the worktree. No-op outside /tmp/worktrees; never
 # blocks a commit. See scripts/hooks/worktree-guard.
-_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+#
+# SECURITY: resolve the guard from the checkout that owns this hook — never
+# from the repository being committed. This hook is installed globally and runs
+# on every `git commit`; executing a repo-supplied script at the same path
+# would let any cloned repository run arbitrary code with the user's
+# privileges. `$0` may live in a symlinked global hooks dir (core.hooksPath),
+# so `readlink -f` resolves the real location before walking up to its
+# checkout. If it cannot be resolved the guard is skipped (fail-open).
+_HOOKS_REAL="$(readlink -f "$(dirname "$0")" 2>/dev/null || true)"
+_HOOK_REPO="$(git -C "$_HOOKS_REAL" rev-parse --show-toplevel 2>/dev/null || true)"
 _GUARD=""
-if [ -n "$_REPO_ROOT" ] && [ -x "$_REPO_ROOT/scripts/hooks/worktree-guard" ]; then
-    _GUARD="$_REPO_ROOT/scripts/hooks/worktree-guard"
-else
-    # `$0` may live in a symlinked global hooks dir (core.hooksPath), so
-    # resolve the real location before walking up to the checkout.
-    _HOOKS_REAL="$(readlink -f "$(dirname "$0")" 2>/dev/null || true)"
-    _HOOK_REPO="$(git -C "$_HOOKS_REAL" rev-parse --show-toplevel 2>/dev/null || true)"
-    if [ -n "$_HOOK_REPO" ] && [ -x "$_HOOK_REPO/scripts/hooks/worktree-guard" ]; then
-        _GUARD="$_HOOK_REPO/scripts/hooks/worktree-guard"
-    fi
+if [ -n "$_HOOK_REPO" ] && [ -x "$_HOOK_REPO/scripts/hooks/worktree-guard" ]; then
+    _GUARD="$_HOOK_REPO/scripts/hooks/worktree-guard"
 fi
 if [ -n "$_GUARD" ]; then
     "$_GUARD" || true

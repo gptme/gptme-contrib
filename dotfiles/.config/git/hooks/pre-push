@@ -265,19 +265,18 @@ command -v git-lfs >/dev/null 2>&1 && printf '%s\n' "${STDIN_LINES[@]}" | git lf
 # and warns when a live sibling session holds the claim. No-op without a
 # session id in the environment; never blocks unless
 # BOB_WORKTREE_PUSH_GUARD_DENY=1 is set. See scripts/hooks/worktree-push-guard.
+#
+# SECURITY: resolve the guard from the checkout that owns this hook — never
+# from the repository being pushed ($REPO_ROOT). This hook is installed
+# globally; executing a repo-supplied script at the same path would let any
+# cloned repository run arbitrary code with the user's privileges. `$SCRIPT_DIR`
+# may be a symlinked global hooks dir (core.hooksPath), so `readlink -f` + `git
+# -C` finds the checkout that actually owns this hook file.
+_HOOKS_REAL="$(readlink -f "$SCRIPT_DIR" 2>/dev/null || printf '%s' "$SCRIPT_DIR")"
+_HOOK_REPO="$(git -C "$_HOOKS_REAL" rev-parse --show-toplevel 2>/dev/null || true)"
 _GUARD=""
-if [ -n "$REPO_ROOT" ] && [ -x "$REPO_ROOT/scripts/hooks/worktree-push-guard" ]; then
-    _GUARD="$REPO_ROOT/scripts/hooks/worktree-push-guard"
-else
-    # Fallback: resolve the guard from the hook's real location. `$SCRIPT_DIR`
-    # may be a symlinked global hooks dir (core.hooksPath), so traversing it
-    # with `../..` lands outside the checkout; `readlink -f` + `git -C` finds
-    # the checkout that actually owns this hook file.
-    _HOOKS_REAL="$(readlink -f "$SCRIPT_DIR" 2>/dev/null || printf '%s' "$SCRIPT_DIR")"
-    _HOOK_REPO="$(git -C "$_HOOKS_REAL" rev-parse --show-toplevel 2>/dev/null || true)"
-    if [ -n "$_HOOK_REPO" ] && [ -x "$_HOOK_REPO/scripts/hooks/worktree-push-guard" ]; then
-        _GUARD="$_HOOK_REPO/scripts/hooks/worktree-push-guard"
-    fi
+if [ -n "$_HOOK_REPO" ] && [ -x "$_HOOK_REPO/scripts/hooks/worktree-push-guard" ]; then
+    _GUARD="$_HOOK_REPO/scripts/hooks/worktree-push-guard"
 fi
 if [ -n "$_GUARD" ] && [ -x "$_GUARD" ]; then
     # Honor a deny (exit 1) from the guard: `|| true` here would swallow it and

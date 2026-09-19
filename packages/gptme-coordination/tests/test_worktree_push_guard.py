@@ -128,3 +128,40 @@ def test_worktree_guard_entry_point_fails_open_without_package() -> None:
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_legacy_alias_does_not_skip_qualified_claim(tmp_path: Path) -> None:
+    """A live legacy alias must still result in a qualified claim.
+
+    Regression for Greptile P1 on gptme/gptme-contrib#1693: the legacy-alias
+    branch logged "claiming <key>" and then `continue`d, so the repo-qualified
+    claim was never created and later sibling pushes had nothing to collide
+    with. The alias is informational only; the qualified claim must still land.
+    """
+    from gptme_coordination.db import CoordinationDB
+    from gptme_coordination.work import WorkClaimManager
+    from gptme_coordination.worktree_guard import run_push_guard
+
+    db_path = tmp_path / "coord.db"
+    with CoordinationDB(db_path) as db:
+        assert WorkClaimManager(db).claim(
+            "other-agent", "pr-branch:feat", ttl_minutes=60
+        )
+
+    rc = run_push_guard(
+        ["refs/heads/feat abc123 refs/heads/feat def456"],
+        worktree_root=tmp_path / "wt",
+        brain_root=tmp_path / "brain",
+        remote_url="git@github.com:org/repo.git",
+        session_id="sess-1",
+        agent_id="agent-b",
+        deny=False,
+        db_path=db_path,
+    )
+    assert rc == 0
+
+    with CoordinationDB(db_path) as db:
+        qualified = WorkClaimManager(db).get("pr-branch:org/repo#feat")
+    assert qualified is not None, "qualified claim was skipped on legacy alias"
+    assert qualified.claimer == "agent-b"
+    assert qualified.status == "claimed"
