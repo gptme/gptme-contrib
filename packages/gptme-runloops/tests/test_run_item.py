@@ -1629,6 +1629,29 @@ def test_post_session_timeout_records_unknown(tmp_path) -> None:
     assert record["outcome"] == "unknown"
 
 
+def test_post_session_lock_busy_exit_is_not_recorded_as_failure(tmp_path) -> None:
+    """Exit 75/76 (scoped-lock / lock-busy) is a transient defer, not a failure.
+
+    Regression: the arc record labelled it "failed" with an "inspect the failed
+    run" hint, so the next session chased a non-failure (gptme-contrib#1692,
+    2026-09-19). 75/76 are the fleet's lock conventions and are declared as
+    SuccessExitStatus in project-monitoring-lib.sh.
+    """
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, exit_code=76, types=("notification",)
+    )
+    run_post_session(plan, item, outcome, config, hooks)
+
+    arc_calls = [c["argv"] for c in run_cmd.find("/fake/arc.py")]
+    update = next(c for c in arc_calls if c[1] == "update")
+    delta = update[update.index("--progress-delta") + 1]
+    hint = update[update.index("--next-step-hint") + 1]
+    assert "lock-busy" in delta
+    assert "failed" not in delta
+    assert "failed" not in hint
+    assert "no investigation needed" in hint
+
+
 def test_post_session_orphan_delivery_latency_outcome(tmp_path) -> None:
     config, item, plan, outcome, hooks, run_cmd, latency_calls = _post_session_fixture(
         tmp_path

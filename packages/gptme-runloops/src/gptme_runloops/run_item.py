@@ -2416,6 +2416,22 @@ def run_post_session(
                 f"Re-run the monitoring lane for {plan.repo}#{plan.number} after "
                 "checking the timeout cause."
             )
+        elif exit_code in (75, 76):
+            # 75/76 are the fleet's scoped-lock / lock-busy conventions
+            # (declared SuccessExitStatus in project-monitoring-lib.sh), so the
+            # slot never shows as failed. Recording them as "failed" writes a
+            # misleading "inspect the failed run" hint that sends the next
+            # session chasing a non-failure (observed on gptme-contrib#1692,
+            # 2026-09-19).
+            progress = (
+                f"project-monitoring hit a lock-busy defer (exit {exit_code}) on "
+                f"{types_text} for {plan.repo}#{plan.number}"
+            )
+            hint = (
+                f"Transient lock collision (exit {exit_code}) for "
+                f"{plan.repo}#{plan.number}; the dispatcher retries on its own — "
+                "no investigation needed."
+            )
         elif exit_code != 0:
             progress = f"project-monitoring failed on {types_text} for {plan.repo}#{plan.number}"
             hint = (
