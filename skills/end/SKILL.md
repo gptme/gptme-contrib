@@ -83,6 +83,25 @@ Also do the **judgment checks** the script can't:
 - Did you promise "I'll …" anywhere in the last few messages? → do it or retract it.
 - Is a subagent or background job still running that produces a deliverable? → wait or kill it explicitly.
 - Is a task/claim still marked active for this session? → release it (Bob: `uv run coordination work-list --claimed`, then `work-complete`; `gptodo edit <id> --set state …`).
+- **Review settled decisions and corrections before losing this context**, including after resolving any initial mechanical-gate blockers. Read the canonical files changed or cited this session, and use the configured memory reader to inspect related entries. Similar search results do not prove capture; an empty result does not prove absence. Save missing durable decisions through the existing authorized writer, preserving scope and source; avoid duplicating an existing canonical doc. Report covered/saved/conflicting/unverified items in the normal closeout or journal. Keep proposals and transient progress out of durable memory. If context or a source is unavailable, disclose that limit. Respect `--dry-run`: report proposals only. After writes, rerun the mechanical gate with every newly touched artifact included in its declared `--paths`.
+
+### Pre-close decision review (memory)
+
+The review above is a judgment check, not a new executable. When a memory CLI
+is available (gptme: `gptme memory`), use it to inspect related entries and
+persist missing settled items:
+
+```bash
+gptme memory roots        # resolved roots, nearest layer first
+gptme memory recall "topic"   # possible coverage — a hit is not proof of capture
+gptme memory show <name>  # read one entry / its source path
+gptme memory save <name> "description" --type general < body.md  # persist a missing durable decision (body from stdin or --body-file)
+```
+
+A workspace without that CLI performs the same review through its native file
+reader/writer. Keep this generic skill independent of any one agent's paths or
+queue; the memory commands above are illustrative of the shipped CLI, not a
+required dependency.
 
 ## Step 2 — If BLOCKED: say so, then fix
 
