@@ -260,4 +260,16 @@ printf '%s\n' "${STDIN_LINES[@]}" | "$SCRIPT_DIR/validate-worktree-tracking.sh" 
 # --- Git LFS support (don't fail hook if LFS has issues) ---
 command -v git-lfs >/dev/null 2>&1 && printf '%s\n' "${STDIN_LINES[@]}" | git lfs pre-push "$@" 2>/dev/null || true
 
+# --- Worktree branch-binding guard (fail-open) ---
+# Auto-claims pushed branches as pr-branch:org/repo#branch coordination keys
+# and warns when a live sibling session holds the claim. No-op without a
+# session id in the environment; never blocks unless
+# BOB_WORKTREE_PUSH_GUARD_DENY=1 is set. See scripts/hooks/worktree-push-guard.
+_GUARD="$REPO_ROOT/scripts/hooks/worktree-push-guard"
+[ -n "$REPO_ROOT" ] || _GUARD=""
+[ -n "$_GUARD" ] && [ -x "$_GUARD" ] || _GUARD="$(dirname "$SCRIPT_DIR")/../../../scripts/hooks/worktree-push-guard"
+if [ -n "$_GUARD" ] && [ -x "$_GUARD" ]; then
+    printf '%s\n' "${STDIN_LINES[@]}" | "$_GUARD" || true
+fi
+
 exit 0
