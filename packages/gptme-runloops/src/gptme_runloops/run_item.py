@@ -1749,6 +1749,13 @@ def execute_plan(
             f"WARN: Item {plan.index} timed out after {plan.timeout}s ({plan.time_desc})"
         )
         timed_out = True
+    elif exit_code in (75, 76):
+        # 75/76 are the fleet's scoped-lock / lock-busy conventions (declared
+        # SuccessExitStatus in project-monitoring-lib.sh): a transient defer,
+        # not a failure. Contaminating the failure count here would contradict
+        # the arc record's lock-busy classification below and the ledger's
+        # bash parity note (skips count as successes).
+        _log(f"Item {plan.index} lock-busy defer (exit {exit_code}) — not a failure")
     elif exit_code != 0:
         _log(f"WARN: Item {plan.index} exited with code {exit_code}")
         counted_failure = True
@@ -2415,6 +2422,22 @@ def run_post_session(
             hint = (
                 f"Re-run the monitoring lane for {plan.repo}#{plan.number} after "
                 "checking the timeout cause."
+            )
+        elif exit_code in (75, 76):
+            # 75/76 are the fleet's scoped-lock / lock-busy conventions
+            # (declared SuccessExitStatus in project-monitoring-lib.sh), so the
+            # slot never shows as failed. Recording them as "failed" writes a
+            # misleading "inspect the failed run" hint that sends the next
+            # session chasing a non-failure (observed on gptme-contrib#1692,
+            # 2026-09-19).
+            progress = (
+                f"project-monitoring hit a lock-busy defer (exit {exit_code}) on "
+                f"{types_text} for {plan.repo}#{plan.number}"
+            )
+            hint = (
+                f"Transient lock collision (exit {exit_code}) for "
+                f"{plan.repo}#{plan.number}; the dispatcher retries on its own — "
+                "no investigation needed."
             )
         elif exit_code != 0:
             progress = f"project-monitoring failed on {types_text} for {plan.repo}#{plan.number}"

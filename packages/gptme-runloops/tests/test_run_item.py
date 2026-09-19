@@ -1629,6 +1629,32 @@ def test_post_session_timeout_records_unknown(tmp_path) -> None:
     assert record["outcome"] == "unknown"
 
 
+@pytest.mark.parametrize("lock_busy_exit", [75, 76])
+def test_post_session_lock_busy_exit_is_not_recorded_as_failure(
+    tmp_path, lock_busy_exit
+) -> None:
+    """Exit 75/76 (scoped-lock / lock-busy) is a transient defer, not a failure.
+
+    Regression: the arc record labelled it "failed" with an "inspect the failed
+    run" hint, so the next session chased a non-failure (gptme-contrib#1692,
+    2026-09-19). 75/76 are the fleet's lock conventions and are declared as
+    SuccessExitStatus in project-monitoring-lib.sh.
+    """
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, exit_code=lock_busy_exit, types=("notification",)
+    )
+    run_post_session(plan, item, outcome, config, hooks)
+
+    arc_calls = [c["argv"] for c in run_cmd.find("/fake/arc.py")]
+    update = next(c for c in arc_calls if c[1] == "update")
+    delta = update[update.index("--progress-delta") + 1]
+    hint = update[update.index("--next-step-hint") + 1]
+    assert "lock-busy" in delta
+    assert "failed" not in delta
+    assert "failed" not in hint
+    assert "no investigation needed" in hint
+
+
 def test_post_session_orphan_delivery_latency_outcome(tmp_path) -> None:
     config, item, plan, outcome, hooks, run_cmd, latency_calls = _post_session_fixture(
         tmp_path
@@ -2389,6 +2415,66 @@ def test_timeout_tier_direct_mention_gets_assigned_issue_budget(tmp_path) -> Non
 
 
 # --- Claim behavior via execute path ---
+
+
+@pytest.mark.parametrize("lock_busy_exit", [75, 76])
+def test_execute_plan_lock_busy_exit_is_not_counted_failure(
+    tmp_path, lock_busy_exit
+) -> None:
+    """A lock-busy defer (75/76) must not contaminate the failure count.
+
+    The arc record and ledger outcome both classify 75/76 as defers; the
+    item-level `counted_failure` flag is the third place the same exit was
+    treated as a failure (Greptile finding on gptme-contrib#1695).
+    """
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("/fake/run.sh", returncode=lock_busy_exit)
+    hooks = make_hooks(run_cmd=run_cmd)
+    item = make_item(types=["notification"], number=0)
+    plan = plan_item(
+        item,
+        index=1,
+        config=config,
+        backend="codex",
+        model="",
+        monitoring_rules="",
+        lifecycle=LifecycleResult(),
+        arc=None,
+        run_salt=1,
+        records_dir=tmp_path,
+        runner=hooks.runner,
+        sysprompt_file="",
+    )
+    outcome = execute_plan(plan, item, config, hooks)
+    assert outcome.exit_code == lock_busy_exit
+    assert outcome.counted_failure is False
+    assert outcome.timed_out is False
+
+
+def test_execute_plan_generic_nonzero_exit_is_counted_failure(tmp_path) -> None:
+    """Sanity: a plain non-zero exit (not 75/76/124) still counts as failure."""
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("/fake/run.sh", returncode=3)
+    hooks = make_hooks(run_cmd=run_cmd)
+    item = make_item(types=["notification"], number=0)
+    plan = plan_item(
+        item,
+        index=1,
+        config=config,
+        backend="codex",
+        model="",
+        monitoring_rules="",
+        lifecycle=LifecycleResult(),
+        arc=None,
+        run_salt=1,
+        records_dir=tmp_path,
+        runner=hooks.runner,
+        sysprompt_file="",
+    )
+    outcome = execute_plan(plan, item, config, hooks)
+    assert outcome.counted_failure is True
 
 
 def test_execute_plan_pr_before_snapshot_only_for_pr_items(tmp_path) -> None:

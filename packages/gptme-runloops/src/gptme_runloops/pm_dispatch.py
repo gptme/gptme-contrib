@@ -289,7 +289,10 @@ def derive_dispatch_outcome(
 
     :data:`OUTCOME_FAILED`
         ``exit_code`` present and non-zero, or ``failures`` greater than
-        zero. Either bad signal is sufficient.
+        zero. Either bad signal is sufficient. Exceptions: lock-busy defer
+        exits 75/76 (the fleet's ``SuccessExitStatus`` conventions in
+        project-monitoring-lib.sh) are not failure signals — the row keeps
+        the raw exit code so a reader can still see the defer.
     :data:`OUTCOME_NO_EFFECT`
         Clean exit, but the item was observed *not* to change — no push, no
         comment, no state transition. The worker exited 0 and may well have
@@ -314,7 +317,8 @@ def derive_dispatch_outcome(
     fails = _maybe_int(failures)
     effect_norm = str(effect).strip().lower() if effect else ""
 
-    if (code is not None and code != 0) or (fails is not None and fails > 0):
+    code_is_failure = code is not None and code != 0 and code not in (75, 76)
+    if code_is_failure or (fails is not None and fails > 0):
         return OUTCOME_FAILED
     if effect_norm == EFFECT_NONE:
         # Exit status says fine; the world says nothing happened. The world wins.
