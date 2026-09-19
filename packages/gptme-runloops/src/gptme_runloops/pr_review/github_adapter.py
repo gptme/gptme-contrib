@@ -44,6 +44,12 @@ _MIN_CONFIDENCE = 0.6
 _FP_PREFIX = "<!-- pr-review-fp:"
 _FP_SUFFIX = " -->"
 
+# Human-facing label for the reviewer identity in posted comments. This is the
+# forge-neutral, agent-neutral package: it must not hardcode any one agent's
+# name (the whole point of extracting it into contrib). Any agent adopting it
+# gets the same signature. See gptme-agent shared-core-convergence arc.
+_REVIEWER_LABEL = "self-hosted PR reviewer"
+
 
 def _gh(*args: str, repo: str | None = None) -> str:
     """Run a ``gh`` CLI command and return stdout as text.
@@ -214,7 +220,7 @@ def _build_inline_comment_body(finding: ReviewFinding) -> str:
         lines += ["", "```", finding.evidence, "```"]
     if finding.fix_hint:
         lines += ["", f"**Suggested fix**: {finding.fix_hint}"]
-    lines += ["", "*Automated finding — self-hosted PR reviewer (Bob)*"]
+    lines += ["", f"*Automated finding — {_REVIEWER_LABEL}*"]
     return "\n".join(lines)
 
 
@@ -269,7 +275,7 @@ def _build_summary_comment_body(
     lines += [
         "",
         f"*Model: `{artifact.model}` · Prompt: `{artifact.prompt_version}`*",
-        "*Self-hosted PR reviewer (Bob) — Phase 2*",
+        f"*{_REVIEWER_LABEL[0].upper() + _REVIEWER_LABEL[1:]} — Phase 2*",
     ]
     return "\n".join(lines)
 
