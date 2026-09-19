@@ -968,6 +968,63 @@ class TestSummaryComment:
         assert "**1 finding(s)**: 1 high" in body
         assert "medium" not in body
 
+    def test_summary_footer_is_agent_neutral(self):
+        from gptme_runloops.pr_review.github_adapter import _build_summary_comment_body
+
+        finding = ReviewFinding(
+            id="f1",
+            category="correctness",
+            severity=Severity.high,
+            confidence=0.9,
+            file_path="src/foo.py",
+            line_range="1",
+            title="A bug",
+            description="desc",
+            evidence="x = 1",
+        )
+        artifact = ReviewArtifact(
+            target=ReviewTarget(
+                repo="org/repo",
+                pr_number=1,
+                base_sha="base" * 10,
+                head_sha="head" * 10,
+            ),
+            model="test",
+            prompt_version="v1",
+            started_at=datetime.now(tz=timezone.utc),
+            completed_at=datetime.now(tz=timezone.utc),
+            summary="ok",
+            merge_safety=MergeSafety.safe,
+            findings=[finding],
+        )
+
+        body = _build_summary_comment_body(artifact, posted_count=1, skipped_count=0)
+
+        assert "*Self-hosted PR reviewer — Phase 2*" in body
+        assert "Bob" not in body
+
+
+class TestBuildInlineCommentBody:
+    def test_inline_footer_is_agent_neutral(self):
+        from gptme_runloops.pr_review.github_adapter import _build_inline_comment_body
+
+        finding = ReviewFinding(
+            id="fp1234567890abcd",
+            category="correctness",
+            severity=Severity.high,
+            confidence=0.9,
+            file_path="src/foo.py",
+            line_range="10",
+            title="A bug",
+            description="desc",
+            evidence="x = 1",
+        )
+
+        body = _build_inline_comment_body(finding)
+
+        assert "*Automated finding — self-hosted PR reviewer*" in body
+        assert "Bob" not in body
+
 
 class TestPublishArtifactShadowMode:
     """publish_artifact() in shadow mode must not call any GitHub API."""
