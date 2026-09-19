@@ -1749,6 +1749,13 @@ def execute_plan(
             f"WARN: Item {plan.index} timed out after {plan.timeout}s ({plan.time_desc})"
         )
         timed_out = True
+    elif exit_code in (75, 76):
+        # 75/76 are the fleet's scoped-lock / lock-busy conventions (declared
+        # SuccessExitStatus in project-monitoring-lib.sh): a transient defer,
+        # not a failure. Contaminating the failure count here would contradict
+        # the arc record's lock-busy classification below and the ledger's
+        # bash parity note (skips count as successes).
+        _log(f"Item {plan.index} lock-busy defer (exit {exit_code}) — not a failure")
     elif exit_code != 0:
         _log(f"WARN: Item {plan.index} exited with code {exit_code}")
         counted_failure = True

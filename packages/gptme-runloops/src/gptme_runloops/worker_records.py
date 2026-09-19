@@ -413,9 +413,11 @@ def fallback_outcome(exit_code: int) -> str:
 
     NOTE(parity): a timeout (exit 124) records as ``"unknown"``, not
     ``"failed"`` or ``"timeout"`` — only non-zero non-124 exits are
-    ``"failed"``. Preserved.
+    ``"failed"``. Preserved. Lock-busy defers (75/76) also record as
+    ``"unknown"``: they are the fleet's SuccessExitStatus conventions, not
+    failures.
     """
-    if exit_code != 0 and exit_code != 124:
+    if exit_code != 0 and exit_code not in (75, 76, 124):
         return "failed"
     return "unknown"
 

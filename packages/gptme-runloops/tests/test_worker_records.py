@@ -476,10 +476,18 @@ def test_item_types_golden(case: dict[str, Any]) -> None:
 
 @pytest.mark.parametrize(
     ("exit_code", "expected"),
-    [(0, "unknown"), (124, "unknown"), (1, "failed"), (75, "failed"), (2, "failed")],
+    [
+        (0, "unknown"),
+        (124, "unknown"),
+        (75, "unknown"),
+        (76, "unknown"),
+        (1, "failed"),
+        (2, "failed"),
+    ],
 )
 def test_fallback_outcome(exit_code: int, expected: str) -> None:
-    # NOTE(parity) under test: timeout (124) records "unknown", not "failed".
+    # NOTE(parity) under test: timeout (124) and lock-busy defers (75/76)
+    # record "unknown", not "failed".
     assert fallback_outcome(exit_code) == expected
 
 

@@ -48,6 +48,21 @@ class TestDeriveDispatchOutcome:
         # The exact #3468 shape: worker exited 1, item accounting said fine.
         assert derive_dispatch_outcome("completed", 1, 0) == OUTCOME_FAILED
 
+    @pytest.mark.parametrize("lock_busy_exit", [75, 76])
+    def test_lock_busy_defer_exit_is_not_failure(self, lock_busy_exit) -> None:
+        # 75/76 are the fleet's SuccessExitStatus lock conventions; the raw
+        # exit code stays on the row, but the derived outcome is not "failed".
+        assert (
+            derive_dispatch_outcome("completed", lock_busy_exit, 0) == OUTCOME_SUCCEEDED
+        )
+        # String coercion must behave the same way.
+        assert (
+            derive_dispatch_outcome("completed", str(lock_busy_exit), "0")
+            == OUTCOME_SUCCEEDED
+        )
+        # And they do not mask real item failures.
+        assert derive_dispatch_outcome("completed", lock_busy_exit, 1) == OUTCOME_FAILED
+
     def test_failures_are_failed_even_with_zero_exit(self) -> None:
         # The bash executor always exits 0; `failures` is the only signal.
         assert derive_dispatch_outcome("completed", 0, 1) == OUTCOME_FAILED
