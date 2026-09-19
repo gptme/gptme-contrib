@@ -362,7 +362,10 @@ def legacy_pr_branch_key(task_id: str) -> str | None:
     referent = task_id.removeprefix(prefix)
     if "#" not in referent:
         return None
-    return f"{prefix}{referent.rsplit('#', 1)[1]}"
+    # Keys are built as ``pr-branch:{org}/{repo}#{branch}``. Repo names never
+    # contain '#', but branch names may, so the branch is everything after the
+    # FIRST '#' (rsplit would truncate a branch like ``feat#x``).
+    return f"{prefix}{referent.split('#', 1)[1]}"
 
 
 def run_push_guard(

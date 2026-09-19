@@ -19,6 +19,8 @@ def test_legacy_key_unqualifies_repo_qualified_branch_claim() -> None:
     assert legacy_pr_branch_key("pr-branch:org/repo#feat") == "pr-branch:feat"
     assert legacy_pr_branch_key("pr-branch:feat") is None
     assert legacy_pr_branch_key("github:org/repo#1") is None
+    # Branch names may contain "#" (repo names cannot): split on the FIRST "#".
+    assert legacy_pr_branch_key("pr-branch:org/repo#feat#x") == "pr-branch:feat#x"
 
 
 def test_origin_slug() -> None:
