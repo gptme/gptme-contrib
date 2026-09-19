@@ -40,7 +40,14 @@ def main() -> int:
             file=sys.stderr,
         )
         return 0
-    result: int = run_push_guard(sys.stdin.read().splitlines())
+    try:
+        result: int = run_push_guard(sys.stdin.read().splitlines())
+    except Exception as exc:  # noqa: BLE001 - fail-open: never block a push
+        print(
+            f"[worktree-push-guard] skipping (runtime error: {exc})",
+            file=sys.stderr,
+        )
+        return 0
     return result
 
 

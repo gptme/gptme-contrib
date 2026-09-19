@@ -451,12 +451,17 @@ def run_push_guard(
                     and legacy.claimer != aid
                     and not _claim_expired(legacy)
                 ):
+                    # Legacy aliases are repo-ambiguous by construction (they
+                    # predate the org/repo-qualified key), so a holder on the
+                    # same branch name in a *different* repo is a plausible
+                    # false collision. Warn and proceed — never deny on an
+                    # alias. Only repo-qualified claim collisions (below) can
+                    # deny.
                     now = datetime.now(UTC).isoformat()
-                    event = "push_deny" if should_deny else "push_would_deny"
                     append_ledger(
                         _brain_root,
                         {
-                            "type": event,
+                            "type": "push_legacy_alias",
                             "session_id": sid,
                             "agent_id": aid,
                             "key": key,
@@ -466,11 +471,11 @@ def run_push_guard(
                         },
                     )
                     print(
-                        _push_deny_message(key, legacy.claimer or "unknown"),
+                        f"[worktree-push-guard] legacy alias {legacy_key} held by "
+                        f"{legacy.claimer or 'unknown'} (repo-ambiguous — "
+                        f"informational only); claiming {key}",
                         file=sys.stderr,
                     )
-                    if should_deny:
-                        return 1
                     continue
                 existing_before = work.get(key)
                 claim = work.claim(aid, key, ttl_minutes=60)
@@ -530,7 +535,7 @@ def run_push_guard(
                     "at": datetime.now(UTC).isoformat(),
                 },
             )
-        except OSError:
+        except Exception:  # noqa: BLE001 - ledger must never block a push
             pass
         print(
             f"[worktree-push-guard] skipping (DB unavailable: {exc})", file=sys.stderr

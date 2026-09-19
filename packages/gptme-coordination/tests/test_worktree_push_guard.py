@@ -38,7 +38,15 @@ def test_pushed_branches_filters_deletes_and_non_heads() -> None:
 
 def test_entry_point_fails_open_without_package() -> None:
     """Guard entry point exits 0 when the coordination package is missing."""
-    env = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"}
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/nonexistent",
+        # Hermetic: guard env inputs must not leak in from the test runner.
+        "AGENT_WORKSPACE": "",
+        "BOB_SESSION_ID": "",
+        "GIT_COMMITTER_SESSION_ID": "",
+        "BOB_AUTONOMOUS_AGENT_ID": "",
+    }
     result = subprocess.run(
         [sys.executable, str(CONTRIB_ROOT / "scripts/hooks/worktree-push-guard")],
         input="refs/heads/feat abc refs/heads/feat def\n",
@@ -103,7 +111,15 @@ def test_dead_pid_without_authoritative_agent_id_is_dead() -> None:
 
 def test_worktree_guard_entry_point_fails_open_without_package() -> None:
     """Post-commit occupancy entry point exits 0 when the package is missing."""
-    env = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"}
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/nonexistent",
+        # Hermetic: guard env inputs must not leak in from the test runner.
+        "AGENT_WORKSPACE": "",
+        "BOB_SESSION_ID": "",
+        "GIT_COMMITTER_SESSION_ID": "",
+        "BOB_AUTONOMOUS_AGENT_ID": "",
+    }
     result = subprocess.run(
         [sys.executable, str(CONTRIB_ROOT / "scripts/hooks/worktree-guard")],
         capture_output=True,
