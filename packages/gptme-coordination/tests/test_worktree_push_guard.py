@@ -130,7 +130,7 @@ def test_entry_point_fails_open_without_package(tmp_path: Path) -> None:
     }
     script = _copied_entry_point_without_package(tmp_path, "worktree-push-guard")
     result = subprocess.run(
-        [sys.executable, "-I", str(script)],
+        [sys.executable, "-I", "-S", str(script)],
         input="refs/heads/feat abc refs/heads/feat def\n",
         capture_output=True,
         text=True,
@@ -248,7 +248,7 @@ def test_worktree_guard_entry_point_fails_open_without_package(
     }
     script = _copied_entry_point_without_package(tmp_path, "worktree-guard")
     result = subprocess.run(
-        [sys.executable, "-I", str(script)],
+        [sys.executable, "-I", "-S", str(script)],
         capture_output=True,
         text=True,
         env=env,
