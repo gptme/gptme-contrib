@@ -383,6 +383,11 @@ def write_post_session_record(
     trajectory = resolve_trajectory(trajectory_path)
 
     store = make_store(record_path.parent)
+    # gptme-sessions treats every non-zero exit except 124 as a failed
+    # session. Lock-busy exits are process-level defers, so normalize them to
+    # the same non-failure sentinel as a timeout while retaining the raw exit
+    # in the final record for auditability.
+    recorded_exit_code = 124 if exit_code in (75, 76) else exit_code
     result = post_session(
         store=store,
         harness=harness,
@@ -392,7 +397,7 @@ def write_post_session_record(
         run_type="monitoring",
         trigger="timer",
         category="pm-react",
-        exit_code=exit_code,
+        exit_code=recorded_exit_code,
         duration_seconds=duration_seconds,
         trajectory_path=trajectory,
         session_id=session_id,
@@ -400,6 +405,11 @@ def write_post_session_record(
     record = finalize_post_session_record(
         result.record.to_dict(), result.grade, item_timeout
     )
+    if exit_code in (75, 76):
+        record["exit_code"] = exit_code
+        record["outcome"] = "unknown"
+        record.pop("failure_reason", None)
+        record.pop("error", None)
     augment_with_outcome_subtype(record, trajectory)
     with locked_state_file(record_path):
         _write_record(record_path, record)

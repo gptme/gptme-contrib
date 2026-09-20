@@ -280,6 +280,49 @@ def test_post_session_record_golden(case: dict[str, Any], ws: Path) -> None:
     assert json.loads(record_file.read_text()) == subst(case["expected_record"], ws)
 
 
+@pytest.mark.parametrize("lock_busy_exit", [75, 76])
+def test_post_session_record_normalizes_lock_busy_for_primary_writer(
+    tmp_path: Path, lock_busy_exit: int
+) -> None:
+    """The canonical gptme-sessions path must not classify a defer as failed."""
+    seen: list[int] = []
+
+    def post_session(**kwargs: Any) -> _StubResult:
+        seen.append(kwargs["exit_code"])
+        return _StubResult(
+            _StubRecord(
+                {
+                    "exit_code": kwargs["exit_code"],
+                    "outcome": "failed",
+                    "failure_reason": "unknown",
+                    "error": "non-zero exit",
+                }
+            ),
+            "stub-grade",
+        )
+
+    record_file = tmp_path / "record.json"
+    write_post_session_record(
+        record_file,
+        harness="codex",
+        model="gpt-5",
+        session_id="session",
+        exit_code=lock_busy_exit,
+        duration_seconds=1,
+        item_timeout=900,
+        trajectory_path=None,
+        post_session=post_session,
+        make_store=StubStore,
+    )
+
+    assert seen == [124], "gptme-sessions must receive its non-failure sentinel"
+    record = json.loads(record_file.read_text())
+    assert record["exit_code"] == lock_busy_exit
+    assert record["outcome"] == "unknown"
+    assert "failure_reason" not in record
+    assert "error" not in record
+
+
 # --- Golden: legacy fallback record write (worker.sh:325-373) ---
 
 

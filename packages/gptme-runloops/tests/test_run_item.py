@@ -2449,7 +2449,54 @@ def test_execute_plan_lock_busy_exit_is_not_counted_failure(
     outcome = execute_plan(plan, item, config, hooks)
     assert outcome.exit_code == lock_busy_exit
     assert outcome.counted_failure is False
+    assert outcome.deferred is True
     assert outcome.timed_out is False
+
+
+@pytest.mark.parametrize("lock_busy_exit", [75, 76])
+def test_run_work_file_lock_busy_defer_preserves_item_for_retry(
+    tmp_path, monkeypatch, lock_busy_exit
+) -> None:
+    """A harness lock collision must not finalize or consume the item."""
+    monkeypatch.setenv("PM_DISPATCH_COOLDOWN_DIR", str(tmp_path / "cooldown"))
+    monkeypatch.setenv("PM_SLOT_KEY", "gptme/gptme-contrib#1234")
+    item = make_item(types=["notification"], number=1234)
+    work_file = _write_work_file(tmp_path, item)
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    run_cmd.on("/fake/run.sh", returncode=lock_busy_exit)
+    hooks = make_hooks(run_cmd=run_cmd)
+
+    config.pending_state_dir.mkdir(parents=True)
+    pending = config.pending_state_dir / "gptme-gptme-contrib-pr-1234-update.state"
+    pending.write_text("pending")
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("pending notification")
+    cooldown = tmp_path / "cooldown"
+    cooldown.mkdir()
+    marker = cooldown / "gptme-gptme-contrib-1234.event"
+    marker.write_text("fingerprint")
+
+    assert (
+        run_work_file(
+            work_file,
+            config,
+            hooks,
+            backend="codex",
+            slot_key="gptme/gptme-contrib#1234",
+        )
+        == lock_busy_exit
+    )
+
+    assert pending.exists(), "ordinary item state must remain pending"
+    assert not (config.state_dir / pending.name).exists()
+    assert not marker.exists(), "launch event marker must be cleared for retry"
+    assert not (config.pending_state_dir / "notif-555.state").exists()
+    assert run_cmd.find("/fake/check-delivery.py") == []
+    completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+    assert completed["successes"] == 0
+    assert completed["failures"] == 0
+    assert completed["outcome"] == "deferred"
 
 
 def test_execute_plan_generic_nonzero_exit_is_counted_failure(tmp_path) -> None:

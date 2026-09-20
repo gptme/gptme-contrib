@@ -18,6 +18,7 @@ from gptme_runloops.pm_dispatch import (
     EFFECT_NONE,
     EFFECT_OBSERVED,
     EFFECT_UNKNOWN,
+    OUTCOME_DEFERRED,
     OUTCOME_FAILED,
     OUTCOME_NO_EFFECT,
     OUTCOME_SUCCEEDED,
@@ -50,15 +51,15 @@ class TestDeriveDispatchOutcome:
 
     @pytest.mark.parametrize("lock_busy_exit", [75, 76])
     def test_lock_busy_defer_exit_is_not_failure(self, lock_busy_exit) -> None:
-        # 75/76 are the fleet's SuccessExitStatus lock conventions; the raw
-        # exit code stays on the row, but the derived outcome is not "failed".
+        # 75/76 are the fleet's SuccessExitStatus lock conventions. They did
+        # no work, so preserve the raw code and classify them as deferred.
         assert (
-            derive_dispatch_outcome("completed", lock_busy_exit, 0) == OUTCOME_SUCCEEDED
+            derive_dispatch_outcome("completed", lock_busy_exit, 0) == OUTCOME_DEFERRED
         )
         # String coercion must behave the same way.
         assert (
             derive_dispatch_outcome("completed", str(lock_busy_exit), "0")
-            == OUTCOME_SUCCEEDED
+            == OUTCOME_DEFERRED
         )
         # And they do not mask real item failures.
         assert derive_dispatch_outcome("completed", lock_busy_exit, 1) == OUTCOME_FAILED

@@ -1506,6 +1506,9 @@ class RunItemOutcome:
     ack_result_json: str
     rate_limited: bool = False
     counted_failure: bool = False
+    #: The harness could not start because its scoped lock was busy (75/76).
+    #: No work ran, so post-session finalization must not consume item state.
+    deferred: bool = False
     #: Worker was hard-killed at its time budget (exit 124). Deliberately NOT a
     #: ``counted_failure`` — an infra timeout must not contaminate the quality
     #: signal — but it is emphatically not a success either, so it is tracked
@@ -1742,6 +1745,7 @@ def execute_plan(
 
     rate_limited = False
     counted_failure = False
+    deferred = False
     timed_out = False
     infra_failure: str | None = None
     if exit_code == 124:
@@ -1752,10 +1756,10 @@ def execute_plan(
     elif exit_code in (75, 76):
         # 75/76 are the fleet's scoped-lock / lock-busy conventions (declared
         # SuccessExitStatus in project-monitoring-lib.sh): a transient defer,
-        # not a failure. Contaminating the failure count here would contradict
-        # the arc record's lock-busy classification below and the ledger's
-        # bash parity note (skips count as successes).
+        # not a failure. Mark it explicitly so callers skip ordinary
+        # post-session finalization and leave the item re-emittable.
         _log(f"Item {plan.index} lock-busy defer (exit {exit_code}) — not a failure")
+        deferred = True
     elif exit_code != 0:
         _log(f"WARN: Item {plan.index} exited with code {exit_code}")
         counted_failure = True
@@ -1796,6 +1800,7 @@ def execute_plan(
         ack_result_json=ack_result_json,
         rate_limited=rate_limited,
         counted_failure=counted_failure,
+        deferred=deferred,
         timed_out=timed_out,
         infra_failure=infra_failure,
     )
@@ -3052,6 +3057,7 @@ def run_work_file(
         infra_failure: str | None = None
         overall_exit = 0
         item_effects: list[str] = []
+        deferred_items = 0
 
         for index, item in enumerate(items, start=1):
             _log("")
@@ -3143,16 +3149,29 @@ def run_work_file(
                     infra_failure = item_outcome.infra_failure
                 if item_outcome.exit_code != 0 and overall_exit == 0:
                     overall_exit = item_outcome.exit_code
-                item_effect = run_post_session(plan, item, item_outcome, config, hooks)
-                item_effects.append(item_effect)
-                if bandit is not None:
-                    _record_shadow_bandit_outcome(
-                        bandit,
-                        item_types=item.types,
-                        repo=item.repo,
-                        model=model,
-                        item_effect=item_effect,
+                if item_outcome.deferred:
+                    deferred_items += 1
+                    clear_slot_event_markers(
+                        config, resolve_slot_key(config, item, fallback=slot_key)
                     )
+                    purge_pending_notif_state(config, item.repo, item.number)
+                    _log(
+                        f"Deferred {plan.repo}#{plan.number}: preserved pending "
+                        "state for the next dispatcher cycle"
+                    )
+                else:
+                    item_effect = run_post_session(
+                        plan, item, item_outcome, config, hooks
+                    )
+                    item_effects.append(item_effect)
+                    if bandit is not None:
+                        _record_shadow_bandit_outcome(
+                            bandit,
+                            item_types=item.types,
+                            repo=item.repo,
+                            model=model,
+                            item_effect=item_effect,
+                        )
             finally:
                 # bash EXIT-trap parity: the claim is abandoned on every exit
                 # path, including SIGTERM (the CLI converts it to SystemExit
@@ -3169,16 +3188,10 @@ def run_work_file(
         # fixing the metric is a post-cutover behavior change (both sides of
         # the A/B would otherwise diverge on every skip).
         #
-        # EXCEPT timeouts. A worker hard-killed at its time budget (exit 124)
-        # sets neither `counted_failure` (deliberately: an infra kill must not
-        # contaminate the quality signal) nor, before this, anything else — so
-        # `group_count - failures` counted it as a SUCCESS. Measured on
-        # state/project-monitoring-dispatch.jsonl 2026-08-11: all 17 rows with
-        # exit_code 124 recorded successes=1, failures=0, outcome="failed". A
-        # row that is simultaneously a success and a failure makes every metric
-        # summing `successes` an over-count, and makes "succeeded" in this
-        # ledger unverifiable. A timeout is neither: subtract it from both.
-        successes = group_count - failures - timeouts
+        # EXCEPT timeouts and lock-busy defers. Neither did successful work, so
+        # subtract both from the success count without calling either a quality
+        # failure. The raw exit code and derived outcome keep them distinct.
+        successes = group_count - failures - timeouts - deferred_items
         duration = int(time.time()) - run_start
         # INVARIANT: the ledger's `outcome` is derived from `exit_code`,
         # `failures`, and the observable external `effect`

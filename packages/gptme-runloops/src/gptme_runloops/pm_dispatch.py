@@ -261,6 +261,7 @@ TERMINAL_LEDGER_PHASES = frozenset({"completed"})
 OUTCOME_SUCCEEDED = "succeeded"
 OUTCOME_FAILED = "failed"
 OUTCOME_NO_EFFECT = "no_effect"
+OUTCOME_DEFERRED = "deferred"
 
 # Observable-effect verdicts (see worker_records.derive_effect_signal).
 EFFECT_OBSERVED = "observed"
@@ -289,10 +290,10 @@ def derive_dispatch_outcome(
 
     :data:`OUTCOME_FAILED`
         ``exit_code`` present and non-zero, or ``failures`` greater than
-        zero. Either bad signal is sufficient. Exceptions: lock-busy defer
-        exits 75/76 (the fleet's ``SuccessExitStatus`` conventions in
-        project-monitoring-lib.sh) are not failure signals — the row keeps
-        the raw exit code so a reader can still see the defer.
+        zero. Either bad signal is sufficient.
+    :data:`OUTCOME_DEFERRED`
+        Lock-busy exit 75/76: the session did no work and the item remains
+        pending for a later dispatcher cycle. The row keeps the raw exit code.
     :data:`OUTCOME_NO_EFFECT`
         Clean exit, but the item was observed *not* to change — no push, no
         comment, no state transition. The worker exited 0 and may well have
@@ -317,8 +318,11 @@ def derive_dispatch_outcome(
     fails = _maybe_int(failures)
     effect_norm = str(effect).strip().lower() if effect else ""
 
-    code_is_failure = code is not None and code != 0 and code not in (75, 76)
-    if code_is_failure or (fails is not None and fails > 0):
+    if fails is not None and fails > 0:
+        return OUTCOME_FAILED
+    if code in (75, 76):
+        return OUTCOME_DEFERRED
+    if code is not None and code != 0:
         return OUTCOME_FAILED
     if effect_norm == EFFECT_NONE:
         # Exit status says fine; the world says nothing happened. The world wins.
