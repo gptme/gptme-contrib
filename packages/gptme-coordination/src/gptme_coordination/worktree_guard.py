@@ -320,8 +320,11 @@ def append_ledger(brain_root: Path, record: dict[str, Any]) -> None:
 
 
 def origin_slug(remote_url: str) -> str | None:
-    """Return ``org/repo`` from a GitHub-style origin URL, if present."""
-    match = re.search(r"(?:github\.com[/:])([^/ :]+/[^/ :]+?)(?:\.git)?$", remote_url)
+    """Return ``org/repo`` from a GitHub origin URL, if present."""
+    match = re.fullmatch(
+        r"(?:https?://github\.com/|git@github\.com:)([^/ :]+/[^/ :]+?)(?:\.git)?",
+        remote_url,
+    )
     return match.group(1) if match else None
 
 

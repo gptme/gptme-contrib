@@ -279,12 +279,12 @@ if [ -n "$_HOOK_REPO" ] && [ -x "$_HOOK_REPO/scripts/hooks/worktree-push-guard" 
     _GUARD="$_HOOK_REPO/scripts/hooks/worktree-push-guard"
 fi
 if [ -n "$_GUARD" ] && [ -x "$_GUARD" ]; then
-    # Honor a deny (exit 1) from the guard: `|| true` here would swallow it and
-    # let the push proceed even with BOB_WORKTREE_PUSH_GUARD_DENY=1 set.
+    # Exit 1 is the guard's deliberate deny signal. Startup/infrastructure
+    # failures use other codes and must remain fail-open.
     _GUARD_RC=0
     printf '%s\n' "${STDIN_LINES[@]}" | "$_GUARD" || _GUARD_RC=$?
-    if [ "$_GUARD_RC" -ne 0 ]; then
-        exit "$_GUARD_RC"
+    if [ "$_GUARD_RC" -eq 1 ]; then
+        exit 1
     fi
 fi
 

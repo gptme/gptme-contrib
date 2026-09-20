@@ -26,7 +26,9 @@ def test_legacy_key_unqualifies_repo_qualified_branch_claim() -> None:
 def test_origin_slug() -> None:
     assert origin_slug("git@github.com:org/repo.git") == "org/repo"
     assert origin_slug("https://github.com/org/repo") == "org/repo"
+    assert origin_slug("http://github.com/org/repo.git") == "org/repo"
     assert origin_slug("https://gitlab.com/org/repo.git") is None
+    assert origin_slug("https://evil.com/github.com/org/repo") is None
 
 
 def test_pushed_branches_filters_deletes_and_non_heads() -> None:
@@ -38,19 +40,28 @@ def test_pushed_branches_filters_deletes_and_non_heads() -> None:
     assert pushed_branches(lines) == ["feat"]
 
 
-def test_entry_point_fails_open_without_package() -> None:
+def _copied_entry_point_without_package(tmp_path: Path, script_name: str) -> Path:
+    """Copy an entry point away from contrib so its package lookup must fail."""
+    script = tmp_path / script_name
+    script.write_text((CONTRIB_ROOT / "scripts/hooks" / script_name).read_text())
+    return script
+
+
+def test_entry_point_fails_open_without_package(tmp_path: Path) -> None:
     """Guard entry point exits 0 when the coordination package is missing."""
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": "/nonexistent",
-        # Hermetic: guard env inputs must not leak in from the test runner.
         "AGENT_WORKSPACE": "",
-        "BOB_SESSION_ID": "",
+        "PYTHONPATH": "",
+        "PYTHONNOUSERSITE": "1",
+        "BOB_SESSION_ID": "session-under-test",
         "GIT_COMMITTER_SESSION_ID": "",
-        "BOB_AUTONOMOUS_AGENT_ID": "",
+        "BOB_AUTONOMOUS_AGENT_ID": "agent-under-test",
     }
+    script = _copied_entry_point_without_package(tmp_path, "worktree-push-guard")
     result = subprocess.run(
-        [sys.executable, str(CONTRIB_ROOT / "scripts/hooks/worktree-push-guard")],
+        [sys.executable, "-I", str(script)],
         input="refs/heads/feat abc refs/heads/feat def\n",
         capture_output=True,
         text=True,
@@ -58,6 +69,7 @@ def test_entry_point_fails_open_without_package() -> None:
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
+    assert "skipping (import error:" in result.stderr
 
 
 def test_env_flag_rejects_zero_and_false(monkeypatch) -> None:
@@ -111,25 +123,30 @@ def test_dead_pid_without_authoritative_agent_id_is_dead() -> None:
     assert _is_holder_alive({"pid": dead_pid, "agent_id": "bob-autonomous-x"}) is True
 
 
-def test_worktree_guard_entry_point_fails_open_without_package() -> None:
+def test_worktree_guard_entry_point_fails_open_without_package(
+    tmp_path: Path,
+) -> None:
     """Post-commit occupancy entry point exits 0 when the package is missing."""
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": "/nonexistent",
-        # Hermetic: guard env inputs must not leak in from the test runner.
         "AGENT_WORKSPACE": "",
-        "BOB_SESSION_ID": "",
+        "PYTHONPATH": "",
+        "PYTHONNOUSERSITE": "1",
+        "BOB_SESSION_ID": "session-under-test",
         "GIT_COMMITTER_SESSION_ID": "",
-        "BOB_AUTONOMOUS_AGENT_ID": "",
+        "BOB_AUTONOMOUS_AGENT_ID": "agent-under-test",
     }
+    script = _copied_entry_point_without_package(tmp_path, "worktree-guard")
     result = subprocess.run(
-        [sys.executable, str(CONTRIB_ROOT / "scripts/hooks/worktree-guard")],
+        [sys.executable, "-I", str(script)],
         capture_output=True,
         text=True,
         env=env,
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
+    assert "skipping (import error:" in result.stderr
 
 
 def test_legacy_alias_does_not_skip_qualified_claim(tmp_path: Path) -> None:
