@@ -10,25 +10,17 @@ availability beats enforcement. See
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
 
 def _locate_package() -> None:
-    """Add the gptme-coordination ``src/`` dir to ``sys.path`` if not importable."""
+    """Import only from the trusted checkout that owns this hook."""
     here = Path(__file__).resolve()
-    roots = (
-        [Path(os.environ["AGENT_WORKSPACE"])]
-        if os.environ.get("AGENT_WORKSPACE")
-        else []
-    )
-    roots.append(here.parents[2])  # contrib repo root: scripts/hooks/<this file>
-    for root in roots:
-        package_src = root / "packages" / "gptme-coordination" / "src"
-        if package_src.is_dir():
-            sys.path.insert(0, str(package_src))
-            return
+    root = here.parents[2]  # contrib repo root: scripts/hooks/<this file>
+    package_src = root / "packages" / "gptme-coordination" / "src"
+    if package_src.is_dir():
+        sys.path.insert(0, str(package_src))
 
 
 def main() -> int:

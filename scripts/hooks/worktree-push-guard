@@ -8,26 +8,16 @@ package is unavailable — availability beats push enforcement. See
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
 
 def main(remote_url: str | None = None) -> int:
     here = Path(__file__).resolve()
-    roots = (
-        [Path(os.environ["AGENT_WORKSPACE"])]
-        if os.environ.get("AGENT_WORKSPACE")
-        else []
-    )
-    roots.append(here.parents[2])  # contrib repo root: scripts/hooks/<this file>
-    for root in roots:
-        for package_src in (
-            root / "packages" / "gptme-coordination" / "src",
-            root / "gptme-contrib" / "packages" / "gptme-coordination" / "src",
-        ):
-            if package_src.is_dir():
-                sys.path.insert(0, str(package_src))
+    root = here.parents[2]  # contrib repo root: scripts/hooks/<this file>
+    package_src = root / "packages" / "gptme-coordination" / "src"
+    if package_src.is_dir():
+        sys.path.insert(0, str(package_src))
     try:
         from importlib import import_module
 

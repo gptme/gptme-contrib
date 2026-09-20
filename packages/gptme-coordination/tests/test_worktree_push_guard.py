@@ -183,6 +183,15 @@ def test_claim_expired_handles_naive_and_aware() -> None:
     assert _claim_expired(claim(None)) is False
 
 
+def test_session_pid_requires_launcher_pid(monkeypatch) -> None:
+    from gptme_coordination.worktree_guard import _get_session_pid
+
+    monkeypatch.delenv("BOB_SESSION_PID", raising=False)
+    assert _get_session_pid() == 0
+    monkeypatch.setenv("BOB_SESSION_PID", "12345")
+    assert _get_session_pid() == 12345
+
+
 def test_brain_root_honors_workspace_env(monkeypatch, tmp_path: Path) -> None:
     from gptme_coordination.worktree_guard import _get_brain_root
 
@@ -221,6 +230,37 @@ def test_push_guard_uses_workspace_db_env(monkeypatch, tmp_path: Path) -> None:
     assert claim.claimer == "agent-b"
 
 
+def test_push_guard_defaults_to_brain_root_db(monkeypatch, tmp_path: Path) -> None:
+    from gptme_coordination.db import CoordinationDB
+    from gptme_coordination.work import WorkClaimManager
+    from gptme_coordination.worktree_guard import run_push_guard
+
+    brain_root = tmp_path / "brain"
+    worktree = tmp_path / "worktree"
+    monkeypatch.delenv("COORDINATION_DB", raising=False)
+    monkeypatch.delenv("BOB_WORKSPACE", raising=False)
+    monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
+    monkeypatch.delenv("BOB_BRAIN_ROOT", raising=False)
+
+    rc = run_push_guard(
+        ["refs/heads/feat abc123 refs/heads/feat def456"],
+        worktree_root=worktree,
+        brain_root=brain_root,
+        remote_url="git@github.com:org/repo.git",
+        session_id="sess-1",
+        agent_id="agent-b",
+        deny=False,
+    )
+    assert rc == 0
+
+    db_path = brain_root / "state" / "coordination" / "coord.db"
+    with CoordinationDB(db_path) as db:
+        claim = WorkClaimManager(db).get("pr-branch:org/repo#feat")
+    assert claim is not None
+    assert claim.claimer == "agent-b"
+    assert not (worktree / "state" / "coordination" / "coord.db").exists()
+
+
 def test_dead_pid_without_authoritative_agent_id_is_dead() -> None:
     """A dead PID must not stay 'alive' on a synthesized marker agent id."""
     from gptme_coordination.worktree_guard import _is_holder_alive
@@ -228,6 +268,36 @@ def test_dead_pid_without_authoritative_agent_id_is_dead() -> None:
     dead_pid = 2**22  # > pid_max on Linux default configurations
     assert _is_holder_alive({"pid": dead_pid, "agent_id": ""}) is False
     assert _is_holder_alive({"pid": dead_pid, "agent_id": "bob-autonomous-x"}) is True
+
+
+def test_worktree_guard_locates_only_owning_checkout(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """AGENT_WORKSPACE is data, not a trusted Python import root."""
+    import importlib.machinery
+    import importlib.util
+
+    malicious = tmp_path / "malicious" / "packages" / "gptme-coordination" / "src"
+    malicious.mkdir(parents=True)
+    monkeypatch.setenv("AGENT_WORKSPACE", str(tmp_path / "malicious"))
+
+    script = CONTRIB_ROOT / "scripts" / "hooks" / "worktree-guard"
+    loader = importlib.machinery.SourceFileLoader(
+        "test_worktree_guard_hook", str(script)
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+
+    before = list(sys.path)
+    try:
+        module._locate_package()
+        trusted = CONTRIB_ROOT / "packages" / "gptme-coordination" / "src"
+        assert sys.path[0] == str(trusted)
+        assert str(malicious) not in sys.path
+    finally:
+        sys.path[:] = before
 
 
 def test_worktree_guard_entry_point_fails_open_without_package(

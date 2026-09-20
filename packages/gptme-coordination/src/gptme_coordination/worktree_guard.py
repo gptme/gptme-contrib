@@ -51,17 +51,16 @@ def _get_session_id() -> str | None:
 
 
 def _get_session_pid() -> int:
-    """Best-effort session PID for recording in the marker.
+    """Return the launcher-provided long-lived session PID, or 0.
 
-    ``gptme-runloops`` exports the long-lived dispatcher PID as
-    ``BOB_SESSION_PID`` for every backend. Otherwise we fall back to the parent
-    PID (the git process), which is only a fail-open hook-window signal for
-    callers outside that launcher contract.
+    The hook's parent is the short-lived Git process, not the agent session. A
+    parent-PID fallback makes a marker look dead immediately after commit and
+    is worse than recording no liveness signal.
     """
     raw = os.environ.get("BOB_SESSION_PID", "")
     if raw.isdigit():
         return int(raw)
-    return os.getppid()
+    return 0
 
 
 def _get_agent_id() -> str:
@@ -472,7 +471,7 @@ def run_push_guard(
             legacy_pr_branch_key,  # local, below
         )
 
-        resolved_db = db_path or resolve_coordination_db_path()
+        resolved_db = db_path or resolve_coordination_db_path(_brain_root)
         with CoordinationDB(resolved_db) as db:
             work = WorkClaimManager(db)
             for branch in pushed_branches(refspec_lines):
@@ -513,13 +512,6 @@ def run_push_guard(
                     )
                 existing_before = work.get(key)
                 claim = work.claim(aid, key, ttl_minutes=60)
-                if not claim:
-                    # Dead-holder recovery (when available) before treating a
-                    # live-TTL row as a sibling collision.
-                    reap = getattr(work, "reap_dead_holders", None)
-                    if callable(reap):
-                        reap()
-                    claim = work.claim(aid, key, ttl_minutes=60)
                 now = datetime.now(UTC).isoformat()
                 if claim:
                     event = (
@@ -626,6 +618,10 @@ def run_guard(
         return 0
 
     spid = pid if pid is not None else _get_session_pid()
+    # Without a stable session PID, the hook cannot prove liveness after Git
+    # exits. Skip marker mutation rather than create an immediately stale lock.
+    if spid <= 0:
+        return 0
     # Marker agent id: only an env-provided id is recorded, so a synthesized id
     # cannot make a dead holder look permanently alive (see _get_marker_agent_id).
     aid = agent_id if agent_id is not None else _get_marker_agent_id()
