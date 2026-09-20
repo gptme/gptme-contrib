@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +28,7 @@ def test_origin_slug() -> None:
     assert origin_slug("git@github.com:org/repo.git") == "org/repo"
     assert origin_slug("https://github.com/org/repo") == "org/repo"
     assert origin_slug("http://github.com/org/repo.git") == "org/repo"
+    assert origin_slug("ssh://git@github.com/org/repo.git") == "org/repo"
     assert origin_slug("https://gitlab.com/org/repo.git") is None
     assert origin_slug("https://evil.com/github.com/org/repo") is None
 
@@ -45,6 +47,64 @@ def _copied_entry_point_without_package(tmp_path: Path, script_name: str) -> Pat
     script = tmp_path / script_name
     script.write_text((CONTRIB_ROOT / "scripts/hooks" / script_name).read_text())
     return script
+
+
+def test_entry_point_uses_pushed_remote_url(tmp_path: Path) -> None:
+    """Git's argv URL, not the checkout's ``origin``, reaches the guard."""
+    script = tmp_path / "worktree-push-guard"
+    script.write_text((CONTRIB_ROOT / "scripts/hooks/worktree-push-guard").read_text())
+    package = tmp_path / "gptme_coordination"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "worktree_guard.py").write_text(
+        "import pathlib\n"
+        "def run_push_guard(lines, *, remote_url=None):\n"
+        "    pathlib.Path(__file__).with_name('seen').write_text(remote_url or '')\n"
+        "    return 0\n"
+    )
+    remote_url = "ssh://git@github.com/org/mirror.git"
+    result = subprocess.run(
+        [sys.executable, str(script), "mirror", remote_url],
+        input="refs/heads/feat abc refs/heads/feat def\n",
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/nonexistent",
+            "AGENT_WORKSPACE": str(tmp_path),
+            "PYTHONPATH": "",
+            "PYTHONNOUSERSITE": "1",
+        },
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (package / "seen").read_text() == remote_url
+
+
+def test_entry_point_fails_open_on_incompatible_module(tmp_path: Path) -> None:
+    """Missing ``run_push_guard`` is startup failure, never a deny."""
+    script = tmp_path / "worktree-push-guard"
+    script.write_text((CONTRIB_ROOT / "scripts/hooks/worktree-push-guard").read_text())
+    package = tmp_path / "gptme_coordination"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "worktree_guard.py").write_text("INCOMPATIBLE = True\n")
+    result = subprocess.run(
+        [sys.executable, str(script), "origin", "git@github.com:org/repo.git"],
+        input="refs/heads/feat abc refs/heads/feat def\n",
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/nonexistent",
+            "AGENT_WORKSPACE": str(tmp_path),
+            "PYTHONPATH": "",
+            "PYTHONNOUSERSITE": "1",
+        },
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "skipping (import error:" in result.stderr
 
 
 def test_entry_point_fails_open_without_package(tmp_path: Path) -> None:
@@ -114,6 +174,44 @@ def test_claim_expired_handles_naive_and_aware() -> None:
     assert _claim_expired(claim(None)) is False
 
 
+def test_brain_root_honors_workspace_env(monkeypatch, tmp_path: Path) -> None:
+    from gptme_coordination.worktree_guard import _get_brain_root
+
+    workspace = tmp_path / "custom-workspace"
+    monkeypatch.setenv("BOB_BRAIN_ROOT", str(tmp_path / "legacy-brain"))
+    monkeypatch.setenv("BOB_WORKSPACE", str(workspace))
+    monkeypatch.setenv("AGENT_WORKSPACE", str(tmp_path / "other"))
+    assert _get_brain_root() == workspace
+
+
+def test_push_guard_uses_workspace_db_env(monkeypatch, tmp_path: Path) -> None:
+    from gptme_coordination.db import CoordinationDB
+    from gptme_coordination.work import WorkClaimManager
+    from gptme_coordination.worktree_guard import run_push_guard
+
+    workspace = tmp_path / "custom-workspace"
+    monkeypatch.delenv("COORDINATION_DB", raising=False)
+    monkeypatch.setenv("BOB_BRAIN_ROOT", str(tmp_path / "legacy-brain"))
+    monkeypatch.setenv("BOB_WORKSPACE", str(workspace))
+    monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
+
+    rc = run_push_guard(
+        ["refs/heads/feat abc123 refs/heads/feat def456"],
+        worktree_root=tmp_path / "wt",
+        remote_url="git@github.com:org/repo.git",
+        session_id="sess-1",
+        agent_id="agent-b",
+        deny=False,
+    )
+    assert rc == 0
+
+    db_path = workspace / "state" / "coordination" / "coord.db"
+    with CoordinationDB(db_path) as db:
+        claim = WorkClaimManager(db).get("pr-branch:org/repo#feat")
+    assert claim is not None
+    assert claim.claimer == "agent-b"
+
+
 def test_dead_pid_without_authoritative_agent_id_is_dead() -> None:
     """A dead PID must not stay 'alive' on a synthesized marker agent id."""
     from gptme_coordination.worktree_guard import _is_holder_alive
@@ -147,6 +245,44 @@ def test_worktree_guard_entry_point_fails_open_without_package(
     )
     assert result.returncode == 0, result.stderr
     assert "skipping (import error:" in result.stderr
+
+
+def test_dead_holder_takeover_revalidates_under_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from gptme_coordination import worktree_guard
+
+    git_dir = tmp_path / "git"
+    git_dir.mkdir()
+    old = {
+        "session_id": "dead",
+        "pid": 2**22,
+        "agent_id": "",
+        "started_at": "old",
+        "takeovers": [],
+    }
+    current = {
+        "session_id": "winner",
+        "pid": 123,
+        "agent_id": "winner-agent",
+        "started_at": "new",
+        "takeovers": [],
+    }
+    marker = git_dir / worktree_guard.MARKER_NAME
+    marker.write_text(json.dumps(current))
+    monkeypatch.setattr(worktree_guard, "is_pid_alive", lambda pid: pid == 123)
+
+    wrote = worktree_guard._update_marker_with_history(
+        git_dir,
+        "loser",
+        456,
+        "loser-agent",
+        {"from": "dead", "to": "loser", "at": "now", "reason": "dead"},
+        expected_holder=old,
+    )
+
+    assert wrote is False
+    assert json.loads(marker.read_text()) == current
 
 
 def test_legacy_alias_does_not_skip_qualified_claim(tmp_path: Path) -> None:

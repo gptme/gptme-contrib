@@ -132,13 +132,18 @@ def _get_worktree_root() -> Path | None:
 
 
 def _get_brain_root() -> Path:
-    """Resolve the brain repo root for ledger writes.
+    """Resolve the agent workspace root for ledger writes.
 
-    Checks ``BOB_BRAIN_ROOT`` first, then derives from the home directory
-    convention (``/home/<user>/<user>`` → e.g. ``/home/bob/bob``).
+    Honor the standard workspace variables before the legacy brain-root alias,
+    then fall back to the home-directory convention (``/home/<user>/<user>``).
+    This matches ``resolve_coordination_db_path`` so the ledger and coordination
+    claims live under the same root.
     """
-    if brain := os.environ.get("BOB_BRAIN_ROOT"):
-        return Path(brain)
+    for var in ("BOB_WORKSPACE", "AGENT_WORKSPACE", "BOB_BRAIN_ROOT"):
+        if workspace := os.environ.get(var):
+            path = Path(workspace)
+            if path.is_absolute():
+                return path
     home = Path.home()
     candidate = home / home.name  # /home/bob → /home/bob/bob
     if candidate.is_dir():
@@ -190,14 +195,18 @@ def _update_marker_with_history(
     pid: int,
     agent_id: str,
     new_takeover: dict[str, str],
-) -> None:
-    """Write a new marker, appending *new_takeover* to the history, under an
-    exclusive lock so concurrent force/takeover calls cannot drop each other's
-    entries from the persisted marker.
+    *,
+    expected_holder: dict[str, Any] | None = None,
+    require_dead: bool = True,
+) -> bool:
+    """Conditionally replace a marker and preserve takeover history.
 
-    Uses ``fcntl.flock`` on a dedicated lock file (not the marker itself) so
-    the read-modify-write is serialised. Falls back to a best-effort write if
-    the lock cannot be acquired (fail-open: Phase 1 never blocks).
+    The holder observed before acquiring the lock is passed as
+    ``expected_holder``. Under the lock, a changed holder wins and is not
+    overwritten. Dead-holder takeover also re-probes liveness under the lock;
+    force takeover sets ``require_dead=False`` but still uses compare-and-swap.
+    Returns whether this session wrote the marker. If the lock itself is
+    unavailable, fail open without replacing an unvalidated holder.
     """
     import fcntl
 
@@ -209,18 +218,31 @@ def _update_marker_with_history(
             try:
                 try:
                     existing = json.loads(marker.read_text())
-                    takeovers: list[dict[str, str]] = list(
-                        existing.get("takeovers", [])
-                    )
                 except (FileNotFoundError, json.JSONDecodeError, OSError):
-                    takeovers = []
+                    existing = None
+
+                if expected_holder is not None:
+                    if existing is None:
+                        return False
+                    holder_fields = ("session_id", "pid", "agent_id", "started_at")
+                    if any(
+                        existing.get(field) != expected_holder.get(field)
+                        for field in holder_fields
+                    ):
+                        return False
+                    if require_dead and _is_holder_alive(existing):
+                        return False
+
+                takeovers: list[dict[str, str]] = (
+                    list(existing.get("takeovers", [])) if existing else []
+                )
                 takeovers.append(new_takeover)
                 write_marker(git_dir, session_id, pid, agent_id, takeovers=takeovers)
+                return True
             finally:
                 fcntl.flock(_lf.fileno(), fcntl.LOCK_UN)
     except OSError:
-        # Lock file unwritable — best-effort write without history preservation.
-        write_marker(git_dir, session_id, pid, agent_id, takeovers=[new_takeover])
+        return False
 
 
 def write_marker_atomic_new(
@@ -321,9 +343,10 @@ def append_ledger(brain_root: Path, record: dict[str, Any]) -> None:
 
 
 def origin_slug(remote_url: str) -> str | None:
-    """Return ``org/repo`` from a GitHub origin URL, if present."""
+    """Return ``org/repo`` from a GitHub remote URL, if present."""
     match = re.fullmatch(
-        r"(?:https?://github\.com/|git@github\.com:)([^/ :]+/[^/ :]+?)(?:\.git)?",
+        r"(?:https?://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+        r"([^/ :]+/[^/ :]+?)(?:\.git)?",
         remote_url,
     )
     return match.group(1) if match else None
@@ -409,6 +432,9 @@ def run_push_guard(
     aid = agent_id if agent_id is not None else _get_agent_id()
     if not aid:
         return 0
+    # Git supplies the actual push destination as pre-push argv[2]. Falling
+    # back to ``origin`` is only for direct/test callers that do not provide
+    # the hook arguments.
     url = remote_url
     if url is None:
         import subprocess
@@ -445,7 +471,7 @@ def run_push_guard(
             legacy_pr_branch_key,  # local, below
         )
 
-        resolved_db = db_path or resolve_coordination_db_path(_brain_root)
+        resolved_db = db_path or resolve_coordination_db_path()
         with CoordinationDB(resolved_db) as db:
             work = WorkClaimManager(db)
             for branch in pushed_branches(refspec_lines):
@@ -633,15 +659,21 @@ def run_guard(
     holder_session = marker.get("session_id", "unknown")
     holder_pid = marker.get("pid", 0)
 
-    # Force override
+    # Force override: still compare-and-swap against the holder we observed, so
+    # a stale force decision cannot overwrite a session that acquired the
+    # marker while this process was waiting for the lock.
     if do_force:
-        _update_marker_with_history(
+        replaced = _update_marker_with_history(
             gd,
             sid,
             spid,
             aid,
             {"from": holder_session, "to": sid, "at": now_iso, "reason": "force"},
+            expected_holder=marker,
+            require_dead=False,
         )
+        if not replaced:
+            return 0
         append_ledger(
             _brain_root,
             {
@@ -679,13 +711,16 @@ def run_guard(
         return 0  # Phase 1: warn mode, never block
     else:
         # Dead holder → takeover
-        _update_marker_with_history(
+        took_over = _update_marker_with_history(
             gd,
             sid,
             spid,
             aid,
             {"from": holder_session, "to": sid, "at": now_iso, "reason": "dead"},
+            expected_holder=marker,
         )
+        if not took_over:
+            return 0
         append_ledger(
             _brain_root,
             {

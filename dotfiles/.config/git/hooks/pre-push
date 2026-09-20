@@ -282,7 +282,7 @@ if [ -n "$_GUARD" ] && [ -x "$_GUARD" ]; then
     # Exit 1 is the guard's deliberate deny signal. Startup/infrastructure
     # failures use other codes and must remain fail-open.
     _GUARD_RC=0
-    printf '%s\n' "${STDIN_LINES[@]}" | "$_GUARD" || _GUARD_RC=$?
+    printf '%s\n' "${STDIN_LINES[@]}" | "$_GUARD" "$@" || _GUARD_RC=$?
     if [ "$_GUARD_RC" -eq 1 ]; then
         exit 1
     fi

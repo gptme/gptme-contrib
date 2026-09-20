@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 
-def main() -> int:
+def main(remote_url: str | None = None) -> int:
     here = Path(__file__).resolve()
     roots = (
         [Path(os.environ["AGENT_WORKSPACE"])]
@@ -34,14 +34,16 @@ def main() -> int:
         run_push_guard = import_module(
             "gptme_coordination.worktree_guard"
         ).run_push_guard
-    except ImportError as exc:
+    except Exception as exc:  # noqa: BLE001 - startup failures must fail open
         print(
             f"[worktree-push-guard] skipping (import error: {exc})",
             file=sys.stderr,
         )
         return 0
     try:
-        result: int = run_push_guard(sys.stdin.read().splitlines())
+        result: int = run_push_guard(
+            sys.stdin.read().splitlines(), remote_url=remote_url
+        )
     except Exception as exc:  # noqa: BLE001 - fail-open: never block a push
         print(
             f"[worktree-push-guard] skipping (runtime error: {exc})",
@@ -52,4 +54,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(remote_url=sys.argv[2] if len(sys.argv) > 2 else None))
