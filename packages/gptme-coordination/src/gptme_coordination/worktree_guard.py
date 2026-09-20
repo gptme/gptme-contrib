@@ -26,7 +26,7 @@ import json
 import os
 import re
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,7 @@ MARKER_NAME = "bob-session-lock"
 LEDGER_REL = Path("state/coordination/worktree-guard.jsonl")
 _WORKTREE_PREFIX = "/tmp/worktrees/"
 _ZERO_SHA = "0" * 40
+UTC = timezone.utc  # datetime.UTC was added in Python 3.11.
 
 
 # ---------------------------------------------------------------------------

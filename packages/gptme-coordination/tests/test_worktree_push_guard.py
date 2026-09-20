@@ -158,12 +158,12 @@ def test_env_flag_rejects_zero_and_false(monkeypatch) -> None:
 
 
 def test_claim_expired_handles_naive_and_aware() -> None:
-    from datetime import UTC, datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     from gptme_coordination.work import WorkClaim
     from gptme_coordination.worktree_guard import _claim_expired
 
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
 
     def claim(expires_at):
         return WorkClaim(

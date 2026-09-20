@@ -18,11 +18,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from gptme_coordination.auth import compute_hmac as _compute_hmac
 from gptme_coordination.db import CoordinationDB
+
+UTC = timezone.utc  # datetime.UTC was added in Python 3.11.
 
 DEFAULT_WORK_TTL_MINUTES = 60
 
