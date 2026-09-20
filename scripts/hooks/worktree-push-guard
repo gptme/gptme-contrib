@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Pre-push entry point for the worktree branch-binding guard.
+
+Wired from the contrib ``pre-push`` hook. Fails open (exit 0) when the
+package is unavailable — availability beats push enforcement. See
+``packages/gptme-coordination/src/gptme_coordination/worktree_guard.py``.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+
+def main(remote_url: str | None = None) -> int:
+    here = Path(__file__).resolve()
+    root = here.parents[2]  # contrib repo root: scripts/hooks/<this file>
+    package_src = root / "packages" / "gptme-coordination" / "src"
+    if package_src.is_dir():
+        sys.path.insert(0, str(package_src))
+    try:
+        from importlib import import_module
+
+        run_push_guard = import_module(
+            "gptme_coordination.worktree_guard"
+        ).run_push_guard
+    except Exception as exc:  # noqa: BLE001 - startup failures must fail open
+        print(
+            f"[worktree-push-guard] skipping (import error: {exc})",
+            file=sys.stderr,
+        )
+        return 0
+    try:
+        result: int = run_push_guard(
+            sys.stdin.read().splitlines(), remote_url=remote_url
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-open: never block a push
+        print(
+            f"[worktree-push-guard] skipping (runtime error: {exc})",
+            file=sys.stderr,
+        )
+        return 0
+    return result
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(remote_url=sys.argv[2] if len(sys.argv) > 2 else None))

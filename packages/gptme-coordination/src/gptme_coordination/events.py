@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from gptme_coordination.db import CoordinationDB
+
+UTC = timezone.utc  # datetime.UTC was added in Python 3.11.
 
 # Default age-boost cap: events gain at most this many priority points
 # as they age (prevents very old events from monopolizing the queue).

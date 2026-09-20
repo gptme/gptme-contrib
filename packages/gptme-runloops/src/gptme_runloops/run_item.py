@@ -1407,7 +1407,10 @@ def plan_item(
 
     # Every backend shares the recorded id with launch receipts and nested
     # dispatchers; retain backend-specific aliases for trajectory discovery.
-    runner_env: dict[str, str] = {"BOB_SESSION_ID": session_id}
+    # Occupancy uses a separate executor-scoped identity added by execute_plan.
+    runner_env: dict[str, str] = {
+        "BOB_SESSION_ID": session_id,
+    }
     if backend == "claude-code":
         runner_env["CC_SESSION_ID"] = session_id
     elif backend == "grok-build":
@@ -1725,6 +1728,12 @@ def execute_plan(
     env = os.environ.copy()
     env.update(ambient_env or {})
     env.update(plan.runner_env)
+    # The project-monitoring executor owns one item at a time. Give occupancy
+    # one executor-scoped identity while preserving the per-item BOB_SESSION_ID
+    # used by trajectories and receipts. Sequential items therefore refresh
+    # the same marker holder instead of seeing a live foreign holder.
+    env["BOB_AUTONOMOUS_AGENT_ID"] = f"project-monitoring-{os.getpid()}"
+    env["BOB_SESSION_PID"] = str(os.getpid())
     exit_code = 0
     try:
         proc = hooks.run_cmd(

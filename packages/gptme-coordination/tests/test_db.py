@@ -85,6 +85,18 @@ class TestResolveCoordinationDbPath:
             result = resolve_coordination_db_path(cwd=submodule, env=env)
             assert result == brain_dir / "state/coordination/coord.db"
 
+    def test_bob_brain_root_beats_git_root(self):
+        """Legacy BOB_BRAIN_ROOT matches the guard's workspace resolver."""
+        with tempfile.TemporaryDirectory() as tmp:
+            brain_dir = Path(tmp) / "brain"
+            brain_dir.mkdir()
+            submodule = Path(tmp) / "gptme-contrib"
+            submodule.mkdir()
+            subprocess.run(["git", "init"], cwd=submodule, capture_output=True)
+            env = {"BOB_BRAIN_ROOT": str(brain_dir)}
+            result = resolve_coordination_db_path(cwd=submodule, env=env)
+            assert result == brain_dir / "state/coordination/coord.db"
+
     def test_workspace_env_var_ignored(self):
         """Generic WORKSPACE env var (e.g. from GitHub Actions) is ignored."""
         with tempfile.TemporaryDirectory() as tmp:
