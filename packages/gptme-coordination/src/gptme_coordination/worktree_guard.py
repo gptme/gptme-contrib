@@ -321,7 +321,7 @@ def _claim_expired(claim: Any) -> bool:
         return False
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=UTC)
-    return expires_at < datetime.now(UTC)
+    return bool(expires_at < datetime.now(UTC))
 
 
 # ---------------------------------------------------------------------------
