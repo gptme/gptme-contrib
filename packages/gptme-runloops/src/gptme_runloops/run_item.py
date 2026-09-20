@@ -1407,7 +1407,12 @@ def plan_item(
 
     # Every backend shares the recorded id with launch receipts and nested
     # dispatchers; retain backend-specific aliases for trajectory discovery.
-    runner_env: dict[str, str] = {"BOB_SESSION_ID": session_id}
+    # The runner process owns the session lifetime, so its PID remains stable
+    # across short-lived git hook subprocesses and can back worktree occupancy.
+    runner_env: dict[str, str] = {
+        "BOB_SESSION_ID": session_id,
+        "BOB_SESSION_PID": str(os.getpid()),
+    }
     if backend == "claude-code":
         runner_env["CC_SESSION_ID"] = session_id
     elif backend == "grok-build":

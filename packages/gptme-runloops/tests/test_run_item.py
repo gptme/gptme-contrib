@@ -493,6 +493,7 @@ def test_plan_runner_argv_and_env(tmp_path) -> None:
     assert flags[9:11] == ["--model", "claude-sonnet-4-6"]
     assert plan.runner_env == {
         "BOB_SESSION_ID": plan.session_id,
+        "BOB_SESSION_PID": str(os.getpid()),
         "CC_SESSION_ID": plan.session_id,
     }
     assert plan.trajectory_path.endswith(f"/{plan.session_id}.jsonl")
@@ -500,7 +501,10 @@ def test_plan_runner_argv_and_env(tmp_path) -> None:
 
 def test_plan_gptme_env(tmp_path) -> None:
     plan, _, _ = _plan_for(tmp_path, make_item(), FakeLifecycleIO(), backend="gptme")
-    assert plan.runner_env == {"BOB_SESSION_ID": plan.session_id}
+    assert plan.runner_env == {
+        "BOB_SESSION_ID": plan.session_id,
+        "BOB_SESSION_PID": str(os.getpid()),
+    }
     assert plan.trajectory_path == ""
 
 
@@ -510,6 +514,7 @@ def test_plan_grok_build_env(tmp_path) -> None:
     )
     assert plan.runner_env == {
         "BOB_SESSION_ID": plan.session_id,
+        "BOB_SESSION_PID": str(os.getpid()),
         "GROK_BUILD_SESSION_ID": plan.session_id,
     }
     assert plan.trajectory_path == ""  # CC prediction only
@@ -521,6 +526,7 @@ def test_plan_grok_build_env(tmp_path) -> None:
 def test_plan_shares_record_id_with_every_backend(tmp_path, backend) -> None:
     plan, _, _ = _plan_for(tmp_path, make_item(), FakeLifecycleIO(), backend=backend)
     assert plan.runner_env["BOB_SESSION_ID"] == plan.session_id
+    assert plan.runner_env["BOB_SESSION_PID"] == str(os.getpid())
 
 
 # --- Dry-run ExecutionPlan ---
