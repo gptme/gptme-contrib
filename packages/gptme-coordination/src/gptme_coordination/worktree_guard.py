@@ -52,9 +52,10 @@ def _get_session_id() -> str | None:
 def _get_session_pid() -> int:
     """Best-effort session PID for recording in the marker.
 
-    When ``BOB_SESSION_PID`` is set by the session launcher, we use it directly.
-    Otherwise we fall back to the parent PID (the git process), which at least
-    provides a signal that is alive during the hook execution window.
+    ``gptme-runloops`` exports the long-lived dispatcher PID as
+    ``BOB_SESSION_PID`` for every backend. Otherwise we fall back to the parent
+    PID (the git process), which is only a fail-open hook-window signal for
+    callers outside that launcher contract.
     """
     raw = os.environ.get("BOB_SESSION_PID", "")
     if raw.isdigit():
