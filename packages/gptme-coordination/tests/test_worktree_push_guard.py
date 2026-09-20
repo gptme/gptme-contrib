@@ -33,6 +33,13 @@ def test_origin_slug() -> None:
     assert origin_slug("https://evil.com/github.com/org/repo") is None
 
 
+def test_origin_slug_rejects_unsupported_github_url_forms() -> None:
+    """Unsupported URL syntax fails open instead of creating a wrong key."""
+    assert origin_slug("https://user:token@github.com/org/repo.git") is None
+    assert origin_slug("https://github.com:443/org/repo.git") is None
+    assert origin_slug("https://github.com/org/repo/") is None
+
+
 def test_pushed_branches_filters_deletes_and_non_heads() -> None:
     lines = [
         "refs/heads/feat abc123 refs/heads/feat def456",
@@ -113,6 +120,8 @@ def test_entry_point_fails_open_without_package(tmp_path: Path) -> None:
         "PATH": "/usr/bin:/bin",
         "HOME": "/nonexistent",
         "AGENT_WORKSPACE": "",
+        "BOB_WORKSPACE": "",
+        "BOB_BRAIN_ROOT": "",
         "PYTHONPATH": "",
         "PYTHONNOUSERSITE": "1",
         "BOB_SESSION_ID": "session-under-test",
@@ -229,6 +238,8 @@ def test_worktree_guard_entry_point_fails_open_without_package(
         "PATH": "/usr/bin:/bin",
         "HOME": "/nonexistent",
         "AGENT_WORKSPACE": "",
+        "BOB_WORKSPACE": "",
+        "BOB_BRAIN_ROOT": "",
         "PYTHONPATH": "",
         "PYTHONNOUSERSITE": "1",
         "BOB_SESSION_ID": "session-under-test",
