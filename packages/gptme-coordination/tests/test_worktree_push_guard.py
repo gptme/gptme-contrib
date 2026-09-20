@@ -29,6 +29,7 @@ def test_origin_slug() -> None:
     assert origin_slug("https://github.com/org/repo") == "org/repo"
     assert origin_slug("http://github.com/org/repo.git") == "org/repo"
     assert origin_slug("ssh://git@github.com/org/repo.git") == "org/repo"
+    assert origin_slug("HTTPS://GITHUB.COM/Org/Repo.git") == "org/repo"
     assert origin_slug("https://gitlab.com/org/repo.git") is None
     assert origin_slug("https://evil.com/github.com/org/repo") is None
 
@@ -38,6 +39,27 @@ def test_origin_slug_rejects_unsupported_github_url_forms() -> None:
     assert origin_slug("https://user:token@github.com/org/repo.git") is None
     assert origin_slug("https://github.com:443/org/repo.git") is None
     assert origin_slug("https://github.com/org/repo/") is None
+
+
+def test_initial_marker_is_never_exposed_partially(tmp_path: Path, monkeypatch) -> None:
+    from gptme_coordination import worktree_guard
+
+    git_dir = tmp_path / "git"
+    git_dir.mkdir()
+    real_link = worktree_guard.os.link
+
+    def inspect_before_install(source: Path, destination: Path) -> None:
+        assert json.loads(Path(source).read_text())["session_id"] == "session-a"
+        assert not Path(destination).exists()
+        real_link(source, destination)
+
+    monkeypatch.setattr(worktree_guard.os, "link", inspect_before_install)
+    assert worktree_guard.write_marker_atomic_new(git_dir, "session-a", 123, "agent-a")
+    assert (
+        json.loads((git_dir / worktree_guard.MARKER_NAME).read_text())["session_id"]
+        == "session-a"
+    )
+    assert list(git_dir.glob(f"{worktree_guard.MARKER_NAME}.*.tmp")) == []
 
 
 def test_pushed_branches_filters_deletes_and_non_heads() -> None:
@@ -268,6 +290,50 @@ def test_dead_pid_without_authoritative_agent_id_is_dead() -> None:
     dead_pid = 2**22  # > pid_max on Linux default configurations
     assert _is_holder_alive({"pid": dead_pid, "agent_id": ""}) is False
     assert _is_holder_alive({"pid": dead_pid, "agent_id": "bob-autonomous-x"}) is True
+
+
+def test_sequential_items_from_same_executor_do_not_collide(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from gptme_coordination.worktree_guard import run_guard
+
+    worktree = tmp_path / "worktrees" / "pr"
+    git_dir = worktree / "git"
+    git_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        "gptme_coordination.worktree_guard._WORKTREE_PREFIX",
+        f"{tmp_path}/worktrees/",
+    )
+
+    assert (
+        run_guard(
+            worktree_root=worktree,
+            git_dir=git_dir,
+            brain_root=tmp_path,
+            session_id="item-1",
+            pid=123,
+            agent_id="executor-1",
+        )
+        == 0
+    )
+    assert (
+        run_guard(
+            worktree_root=worktree,
+            git_dir=git_dir,
+            brain_root=tmp_path,
+            session_id="item-2",
+            pid=123,
+            agent_id="executor-1",
+        )
+        == 0
+    )
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "state/coordination/worktree-guard.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert [row["type"] for row in rows] == ["adopt"]
 
 
 def test_worktree_guard_locates_only_owning_checkout(

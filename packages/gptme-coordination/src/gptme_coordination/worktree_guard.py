@@ -251,11 +251,12 @@ def write_marker_atomic_new(
     pid: int,
     agent_id: str = "",
 ) -> bool:
-    """Create the marker only if it does not exist (O_EXCL adopt race).
+    """Create the marker only if it does not exist (hard-link CAS).
 
     Returns True if we successfully adopted the worktree, False if another
     session beat us to it (caller should re-read the marker and proceed to
-    the live-holder check).
+    the live-holder check). The final marker is never exposed until its JSON
+    is complete, so interruption cannot strand a malformed marker.
     """
     data: dict[str, Any] = {
         "session_id": session_id,
@@ -265,13 +266,19 @@ def write_marker_atomic_new(
         "takeovers": [],
     }
     marker = git_dir / MARKER_NAME
+    tmp = marker.parent / f"{MARKER_NAME}.{os.getpid()}.{session_id}.tmp"
     try:
-        fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        with os.fdopen(fd, "w") as f:
+        with tmp.open("x") as f:
             json.dump(data, f)
-        return True
-    except FileExistsError:
-        return False
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.link(tmp, marker)
+            return True
+        except FileExistsError:
+            return False
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -343,13 +350,14 @@ def append_ledger(brain_root: Path, record: dict[str, Any]) -> None:
 
 
 def origin_slug(remote_url: str) -> str | None:
-    """Return ``org/repo`` from a GitHub remote URL, if present."""
+    """Return the lowercase ``org/repo`` identity for a GitHub remote."""
     match = re.fullmatch(
         r"(?:https?://github\.com/|git@github\.com:|ssh://git@github\.com/)"
         r"([^/ :]+/[^/ :]+?)(?:\.git)?",
         remote_url,
+        flags=re.IGNORECASE,
     )
-    return match.group(1) if match else None
+    return match.group(1).lower() if match else None
 
 
 def pushed_branches(refspec_lines: list[str]) -> list[str]:
@@ -648,8 +656,11 @@ def run_guard(
         if marker is None:
             return 0  # marker disappeared between create-fail and re-read → proceed
 
-    # 4. Same session → proceed
-    if marker.get("session_id") == sid:
+    # 4. Same session or executor → proceed. Project-monitoring runs sequential
+    # per-item session ids under one executor identity and PID.
+    if marker.get("session_id") == sid or (
+        aid and marker.get("agent_id") == aid and marker.get("pid") == spid
+    ):
         return 0
 
     # 5. Different session

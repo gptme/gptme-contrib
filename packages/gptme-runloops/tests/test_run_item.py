@@ -493,7 +493,6 @@ def test_plan_runner_argv_and_env(tmp_path) -> None:
     assert flags[9:11] == ["--model", "claude-sonnet-4-6"]
     assert plan.runner_env == {
         "BOB_SESSION_ID": plan.session_id,
-        "BOB_SESSION_PID": str(os.getpid()),
         "CC_SESSION_ID": plan.session_id,
     }
     assert plan.trajectory_path.endswith(f"/{plan.session_id}.jsonl")
@@ -503,7 +502,6 @@ def test_plan_gptme_env(tmp_path) -> None:
     plan, _, _ = _plan_for(tmp_path, make_item(), FakeLifecycleIO(), backend="gptme")
     assert plan.runner_env == {
         "BOB_SESSION_ID": plan.session_id,
-        "BOB_SESSION_PID": str(os.getpid()),
     }
     assert plan.trajectory_path == ""
 
@@ -514,7 +512,6 @@ def test_plan_grok_build_env(tmp_path) -> None:
     )
     assert plan.runner_env == {
         "BOB_SESSION_ID": plan.session_id,
-        "BOB_SESSION_PID": str(os.getpid()),
         "GROK_BUILD_SESSION_ID": plan.session_id,
     }
     assert plan.trajectory_path == ""  # CC prediction only
@@ -526,7 +523,7 @@ def test_plan_grok_build_env(tmp_path) -> None:
 def test_plan_shares_record_id_with_every_backend(tmp_path, backend) -> None:
     plan, _, _ = _plan_for(tmp_path, make_item(), FakeLifecycleIO(), backend=backend)
     assert plan.runner_env["BOB_SESSION_ID"] == plan.session_id
-    assert plan.runner_env["BOB_SESSION_PID"] == str(os.getpid())
+    assert "BOB_SESSION_PID" not in plan.runner_env
 
 
 # --- Dry-run ExecutionPlan ---
@@ -2420,6 +2417,13 @@ def test_execute_plan_pr_before_snapshot_only_for_pr_items(tmp_path) -> None:
     outcome = execute_plan(plan, item, config, hooks)
     assert outcome.pr_before_json == ""
     assert [c for c in run_cmd.calls if c["argv"][0] == "gh"] == []
+    runner_call = run_cmd.find("/fake/run.sh")[0]
+    assert runner_call["env"]["BOB_SESSION_ID"] == plan.session_id
+    assert (
+        runner_call["env"]["BOB_AUTONOMOUS_AGENT_ID"]
+        == f"project-monitoring-{os.getpid()}"
+    )
+    assert runner_call["env"]["BOB_SESSION_PID"] == str(os.getpid())
 
 
 @pytest.mark.parametrize(
