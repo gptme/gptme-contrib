@@ -1756,8 +1756,9 @@ def execute_plan(
     elif exit_code in (75, 76):
         # 75/76 are the fleet's scoped-lock / lock-busy conventions (declared
         # SuccessExitStatus in project-monitoring-lib.sh): a transient defer,
-        # not a failure. Mark it explicitly so callers skip ordinary
-        # post-session finalization and leave the item re-emittable.
+        # not a failure. Mark it explicitly so callers skip consuming
+        # post-session finalization (state promotion, delivery checks) while
+        # still writing the lock-busy arc hint, and leave the item re-emittable.
         _log(f"Item {plan.index} lock-busy defer (exit {exit_code}) — not a failure")
         deferred = True
     elif exit_code != 0:
@@ -2068,6 +2069,96 @@ def _inspect_cc_failure(
 
 
 # --- Post-session bookkeeping (worker.sh:192-664; composes worker_records) ---
+
+
+def _arc_continuation_messages(
+    exit_code: int, types: Sequence[str], repo: str, number: str
+) -> tuple[str, str]:
+    """Progress delta and next-step hint for one item's arc update."""
+    types_text = "\n".join(types)
+    if exit_code == 124:
+        return (
+            f"project-monitoring timed out on {types_text} for {repo}#{number}",
+            f"Re-run the monitoring lane for {repo}#{number} after "
+            "checking the timeout cause.",
+        )
+    if exit_code in (75, 76):
+        # 75/76 are the fleet's scoped-lock / lock-busy conventions
+        # (declared SuccessExitStatus in project-monitoring-lib.sh), so the
+        # slot never shows as failed. Recording them as "failed" writes a
+        # misleading "inspect the failed run" hint that sends the next
+        # session chasing a non-failure (observed on gptme-contrib#1692,
+        # 2026-09-19).
+        return (
+            f"project-monitoring hit a lock-busy defer (exit {exit_code}) on "
+            f"{types_text} for {repo}#{number}",
+            f"Transient lock collision (exit {exit_code}) for {repo}#{number}; "
+            "the dispatcher retries on its own — no investigation needed.",
+        )
+    if exit_code != 0:
+        return (
+            f"project-monitoring failed on {types_text} for {repo}#{number}",
+            f"Inspect the failed monitoring run for {repo}#{number} "
+            "and retry once the cause is clear.",
+        )
+    return (
+        f"project-monitoring handled {types_text} for {repo}#{number}",
+        f"Review the latest monitoring result for {repo}#{number} "
+        "and continue from there.",
+    )
+
+
+def _update_arc_continuation(
+    plan: ItemPlan,
+    item: RunItem,
+    exit_code: int,
+    config: RunItemConfig,
+    hooks: RunItemHooks,
+) -> None:
+    """Write the arc progress/hint for this item. Non-fatal; no auto-close."""
+    if not plan.arc_id or hooks.arc_manager is None:
+        return
+    progress, hint = _arc_continuation_messages(
+        exit_code, item.types, plan.repo, plan.number
+    )
+    try:
+        hooks.run_cmd(
+            [
+                *hooks.arc_manager,
+                "update",
+                plan.arc_id,
+                "--session-id",
+                plan.session_id,
+                "--progress-delta",
+                progress,
+                "--next-step-hint",
+                hint,
+                "--owner-lane",
+                "pm-react",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(config.workspace),
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _exit_severity(code: int) -> int:
+    """Rank a worker exit so a later timeout/failure can override a lock-busy.
+
+    0 success < 1 lock-busy defer (75/76) < 2 timeout (124) < 3 failure.
+    ``overall_exit`` used to keep the first non-zero code, so a 75/76 defer
+    before a 124 timeout made ``derive_dispatch_outcome`` report ``deferred``
+    and hide the timeout.
+    """
+    if code == 0:
+        return 0
+    if code in (75, 76):
+        return 1
+    if code == 124:
+        return 2
+    return 3
 
 
 def run_post_session(
@@ -2414,63 +2505,7 @@ def run_post_session(
 
     # 7. Arc continuation record + auto-close (worker.sh:618-659)
     if plan.arc_id and hooks.arc_manager is not None:
-        types_text = "\n".join(item.types)
-        progress = (
-            f"project-monitoring handled {types_text} for {plan.repo}#{plan.number}"
-        )
-        hint = (
-            f"Review the latest monitoring result for {plan.repo}#{plan.number} "
-            "and continue from there."
-        )
-        if exit_code == 124:
-            progress = f"project-monitoring timed out on {types_text} for {plan.repo}#{plan.number}"
-            hint = (
-                f"Re-run the monitoring lane for {plan.repo}#{plan.number} after "
-                "checking the timeout cause."
-            )
-        elif exit_code in (75, 76):
-            # 75/76 are the fleet's scoped-lock / lock-busy conventions
-            # (declared SuccessExitStatus in project-monitoring-lib.sh), so the
-            # slot never shows as failed. Recording them as "failed" writes a
-            # misleading "inspect the failed run" hint that sends the next
-            # session chasing a non-failure (observed on gptme-contrib#1692,
-            # 2026-09-19).
-            progress = (
-                f"project-monitoring hit a lock-busy defer (exit {exit_code}) on "
-                f"{types_text} for {plan.repo}#{plan.number}"
-            )
-            hint = (
-                f"Transient lock collision (exit {exit_code}) for "
-                f"{plan.repo}#{plan.number}; the dispatcher retries on its own — "
-                "no investigation needed."
-            )
-        elif exit_code != 0:
-            progress = f"project-monitoring failed on {types_text} for {plan.repo}#{plan.number}"
-            hint = (
-                f"Inspect the failed monitoring run for {plan.repo}#{plan.number} "
-                "and retry once the cause is clear."
-            )
-        try:
-            hooks.run_cmd(
-                [
-                    *hooks.arc_manager,
-                    "update",
-                    plan.arc_id,
-                    "--session-id",
-                    plan.session_id,
-                    "--progress-delta",
-                    progress,
-                    "--next-step-hint",
-                    hint,
-                    "--owner-lane",
-                    "pm-react",
-                ],
-                capture_output=True,
-                text=True,
-                cwd=str(config.workspace),
-            )
-        except (OSError, subprocess.SubprocessError):
-            pass
+        _update_arc_continuation(plan, item, exit_code, config, hooks)
 
         pr_state_after = ""
         if record_file.is_file():
@@ -3147,7 +3182,11 @@ def run_work_file(
                     rate_limited = True
                 if item_outcome.infra_failure and not infra_failure:
                     infra_failure = item_outcome.infra_failure
-                if item_outcome.exit_code != 0 and overall_exit == 0:
+                if item_outcome.exit_code != 0 and (
+                    overall_exit == 0
+                    or _exit_severity(item_outcome.exit_code)
+                    > _exit_severity(overall_exit)
+                ):
                     overall_exit = item_outcome.exit_code
                 if item_outcome.deferred:
                     deferred_items += 1
@@ -3155,6 +3194,12 @@ def run_work_file(
                         config, resolve_slot_key(config, item, fallback=slot_key)
                     )
                     purge_pending_notif_state(config, item.repo, item.number)
+                    # Arc update is advisory and must still run: skipping the
+                    # rest of post-session is what preserves retry, but the
+                    # lock-busy hint is the stated fix of this change.
+                    _update_arc_continuation(
+                        plan, item, item_outcome.exit_code, config, hooks
+                    )
                     _log(
                         f"Deferred {plan.repo}#{plan.number}: preserved pending "
                         "state for the next dispatcher cycle"

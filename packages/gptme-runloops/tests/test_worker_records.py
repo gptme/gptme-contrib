@@ -284,7 +284,7 @@ def test_post_session_record_golden(case: dict[str, Any], ws: Path) -> None:
 def test_post_session_record_normalizes_lock_busy_for_primary_writer(
     tmp_path: Path, lock_busy_exit: int
 ) -> None:
-    """The canonical gptme-sessions path must not classify a defer as failed."""
+    """A lock-busy defer must not be persisted through gptme-sessions."""
     seen: list[int] = []
 
     def post_session(**kwargs: Any) -> _StubResult:
@@ -315,10 +315,11 @@ def test_post_session_record_normalizes_lock_busy_for_primary_writer(
         make_store=StubStore,
     )
 
-    assert seen == [124], "gptme-sessions must receive its non-failure sentinel"
+    assert seen == [], "gptme-sessions must not persist a lock-busy defer"
     record = json.loads(record_file.read_text())
     assert record["exit_code"] == lock_busy_exit
     assert record["outcome"] == "unknown"
+    assert record.get("grade") is None
     assert "failure_reason" not in record
     assert "error" not in record
 

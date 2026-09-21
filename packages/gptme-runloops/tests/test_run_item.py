@@ -2465,7 +2465,20 @@ def test_run_work_file_lock_busy_defer_preserves_item_for_retry(
     config = make_config(tmp_path)
     run_cmd = FakeRunCmd()
     run_cmd.on("/fake/run.sh", returncode=lock_busy_exit)
-    hooks = make_hooks(run_cmd=run_cmd)
+    run_cmd.on(
+        "find",
+        stdout=json.dumps(
+            {
+                "arc_id": "arc-1",
+                "next_step_hint": (
+                    "Inspect the failed monitoring run for "
+                    "gptme/gptme-contrib#1234 and retry once the cause is clear."
+                ),
+                "sessions": ["s1"],
+            }
+        ),
+    )
+    hooks = make_hooks(run_cmd=run_cmd, arc_manager=["/fake/arc.py"])
 
     config.pending_state_dir.mkdir(parents=True)
     pending = config.pending_state_dir / "gptme-gptme-contrib-pr-1234-update.state"
@@ -2493,10 +2506,73 @@ def test_run_work_file_lock_busy_defer_preserves_item_for_retry(
     assert not marker.exists(), "launch event marker must be cleared for retry"
     assert not (config.pending_state_dir / "notif-555.state").exists()
     assert run_cmd.find("/fake/check-delivery.py") == []
+    arc_calls = [c["argv"] for c in run_cmd.find("/fake/arc.py")]
+    updates = [c for c in arc_calls if "update" in c]
+    assert len(updates) == 1, "lock-busy defer must still write the arc hint"
+    delta = updates[0][updates[0].index("--progress-delta") + 1]
+    hint = updates[0][updates[0].index("--next-step-hint") + 1]
+    assert "lock-busy" in delta
+    assert "failed" not in delta
+    assert "failed" not in hint
+    assert "no investigation needed" in hint
+    assert not any("close" in c for c in arc_calls)
     completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
     assert completed["successes"] == 0
     assert completed["failures"] == 0
     assert completed["outcome"] == "deferred"
+
+
+@pytest.mark.parametrize(
+    ("first_exit", "second_exit", "expected_exit", "expected_outcome"),
+    [
+        (75, 124, 124, "failed"),
+        (76, 124, 124, "failed"),
+        (124, 75, 124, "failed"),
+        (75, 1, 1, "failed"),
+        (75, 76, 75, "deferred"),
+    ],
+)
+def test_run_work_file_overall_exit_ranks_timeout_above_lock_busy(
+    tmp_path,
+    first_exit: int,
+    second_exit: int,
+    expected_exit: int,
+    expected_outcome: str,
+) -> None:
+    """A lock-busy defer must not hide a later timeout or failure.
+
+    ``overall_exit`` used to keep the first non-zero code, so a 75/76 before
+    a 124 made the completed row look deferred even though a real timeout ran.
+    """
+    item_a = make_item(types=["notification"], number=1234)
+    item_b = make_item(types=["notification"], number=5678, all_numbers=["5678"])
+    work_file = _write_work_file(tmp_path, item_a, item_b)
+    config = make_config(tmp_path)
+    run_codes = [first_exit, second_exit]
+    inner = FakeRunCmd()
+
+    def run_cmd(argv, **kwargs):
+        argv = [str(a) for a in argv]
+        inner.calls.append({"argv": argv, **kwargs})
+        if any("/fake/run.sh" in a for a in argv):
+            return subprocess.CompletedProcess(argv, run_codes.pop(0), "", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    hooks = make_hooks(run_cmd=run_cmd)
+    assert (
+        run_work_file(
+            work_file,
+            config,
+            hooks,
+            backend="codex",
+            slot_key="gptme/gptme-contrib#1234",
+        )
+        == expected_exit
+    )
+    completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+    assert completed["exit_code"] == expected_exit
+    assert completed["outcome"] == expected_outcome
+    assert completed["failures"] == (1 if expected_exit == 1 else 0)
 
 
 def test_execute_plan_generic_nonzero_exit_is_counted_failure(tmp_path) -> None:

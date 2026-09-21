@@ -382,12 +382,33 @@ def write_post_session_record(
     record_path.parent.mkdir(parents=True, exist_ok=True)
     trajectory = resolve_trajectory(trajectory_path)
 
+    # gptme_sessions treats every non-zero exit except 124 as failed, and 124
+    # as a timeout. Lock-busy (75/76) is neither: no session ran. Passing 124
+    # as a sentinel would grade/persist the session with timeout semantics
+    # before this function could rewrite the returned dict. Write a local
+    # non-failure record instead and skip the canonical writer.
+    if exit_code in (75, 76):
+        record: dict[str, Any] = {
+            "harness": harness,
+            "model": model if model else None,
+            "run_type": "monitoring",
+            "trigger": "timer",
+            "category": "pm-react",
+            "session_id": session_id,
+            "duration_seconds": duration_seconds,
+            "exit_code": exit_code,
+            "outcome": "unknown",
+        }
+        if item_timeout > 0:
+            record["timeout_seconds"] = item_timeout
+        if trajectory is not None:
+            record["trajectory_path"] = str(trajectory)
+        augment_with_outcome_subtype(record, trajectory)
+        with locked_state_file(record_path):
+            _write_record(record_path, record)
+        return
+
     store = make_store(record_path.parent)
-    # gptme-sessions treats every non-zero exit except 124 as a failed
-    # session. Lock-busy exits are process-level defers, so normalize them to
-    # the same non-failure sentinel as a timeout while retaining the raw exit
-    # in the final record for auditability.
-    recorded_exit_code = 124 if exit_code in (75, 76) else exit_code
     result = post_session(
         store=store,
         harness=harness,
@@ -397,7 +418,7 @@ def write_post_session_record(
         run_type="monitoring",
         trigger="timer",
         category="pm-react",
-        exit_code=recorded_exit_code,
+        exit_code=exit_code,
         duration_seconds=duration_seconds,
         trajectory_path=trajectory,
         session_id=session_id,
@@ -405,11 +426,6 @@ def write_post_session_record(
     record = finalize_post_session_record(
         result.record.to_dict(), result.grade, item_timeout
     )
-    if exit_code in (75, 76):
-        record["exit_code"] = exit_code
-        record["outcome"] = "unknown"
-        record.pop("failure_reason", None)
-        record.pop("error", None)
     augment_with_outcome_subtype(record, trajectory)
     with locked_state_file(record_path):
         _write_record(record_path, record)
