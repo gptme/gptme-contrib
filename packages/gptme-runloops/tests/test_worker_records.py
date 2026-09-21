@@ -280,6 +280,50 @@ def test_post_session_record_golden(case: dict[str, Any], ws: Path) -> None:
     assert json.loads(record_file.read_text()) == subst(case["expected_record"], ws)
 
 
+@pytest.mark.parametrize("lock_busy_exit", [75, 76])
+def test_post_session_record_normalizes_lock_busy_for_primary_writer(
+    tmp_path: Path, lock_busy_exit: int
+) -> None:
+    """A lock-busy defer must not be persisted through gptme-sessions."""
+    seen: list[int] = []
+
+    def post_session(**kwargs: Any) -> _StubResult:
+        seen.append(kwargs["exit_code"])
+        return _StubResult(
+            _StubRecord(
+                {
+                    "exit_code": kwargs["exit_code"],
+                    "outcome": "failed",
+                    "failure_reason": "unknown",
+                    "error": "non-zero exit",
+                }
+            ),
+            "stub-grade",
+        )
+
+    record_file = tmp_path / "record.json"
+    write_post_session_record(
+        record_file,
+        harness="codex",
+        model="gpt-5",
+        session_id="session",
+        exit_code=lock_busy_exit,
+        duration_seconds=1,
+        item_timeout=900,
+        trajectory_path=None,
+        post_session=post_session,
+        make_store=StubStore,
+    )
+
+    assert seen == [], "gptme-sessions must not persist a lock-busy defer"
+    record = json.loads(record_file.read_text())
+    assert record["exit_code"] == lock_busy_exit
+    assert record["outcome"] == "unknown"
+    assert record.get("grade") is None
+    assert "failure_reason" not in record
+    assert "error" not in record
+
+
 # --- Golden: legacy fallback record write (worker.sh:325-373) ---
 
 
@@ -476,10 +520,18 @@ def test_item_types_golden(case: dict[str, Any]) -> None:
 
 @pytest.mark.parametrize(
     ("exit_code", "expected"),
-    [(0, "unknown"), (124, "unknown"), (1, "failed"), (75, "failed"), (2, "failed")],
+    [
+        (0, "unknown"),
+        (124, "unknown"),
+        (75, "unknown"),
+        (76, "unknown"),
+        (1, "failed"),
+        (2, "failed"),
+    ],
 )
 def test_fallback_outcome(exit_code: int, expected: str) -> None:
-    # NOTE(parity) under test: timeout (124) records "unknown", not "failed".
+    # NOTE(parity) under test: timeout (124) and lock-busy defers (75/76)
+    # record "unknown", not "failed".
     assert fallback_outcome(exit_code) == expected
 
 
