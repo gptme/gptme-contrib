@@ -1,0 +1,367 @@
+#!/bin/bash
+# git-safe-push-master: Publish local trunk to the remote without touching the working tree.
+#
+# Synchronizes the local trunk branch with its remote counterpart using an
+# off-tree squash + serialized push. Guarantees: never mutates the main working
+# tree, serializes with git-safe-commit, fails cleanly.
+#
+# Trunk/remote are derived, not hardcoded (a fork whose default branch is `main`
+# works with no changes):
+#   - remote: $GIT_SAFE_REMOTE, else `origin`
+#   - trunk:  $GIT_SAFE_TRUNK, else `$REMOTE/HEAD` (git symbolic-ref), else `master`
+# The name "push-master" is kept for back-compat; it publishes whatever the
+# derived trunk is.
+#
+# Usage: git-safe-push-master
+#        GIT_SAFE_PUSH_LOCK_TIMEOUT=30 git-safe-push-master
+#        GIT_SAFE_TRUNK=main git-safe-push-master          # override derived trunk
+#        GIT_SAFE_REMOTE=upstream git-safe-push-master     # override remote
+#
+# Exit codes:
+#   0 = success (published local commits to the remote, or already in sync)
+#   1 = conflict (merge conflict, commits remain local)
+#   2 = error (lock timeout, fetch failed, or push rejected after 3 retries)
+#
+# Push retry: the squash-push step retries up to 3 times only when the remote
+# actually advances between our rejected push and a refetch. Local hook/auth/policy
+# failures are surfaced verbatim and stop immediately; they are not remote races.
+#
+# Design: creates a single squash commit (one parent = remote trunk) to avoid merge
+# commits, which are prohibited by some repository rulesets. The squash collapses
+# multiple local commits into one "sync" commit in the remote's history, but
+# correctly preserves all file content. The local trunk is updated only AFTER a
+# successful push — this prevents merge-commit accumulation from failed pushes.
+#
+# Known trade-off: individual commit granularity is not preserved on the remote
+# trunk. This is acceptable for a shared hot-trunk model where many sessions
+# commit concurrently. A cherry-pick approach would preserve history but fails on
+# empty-commit scenarios caused by auto-sync merge commit content.
+
+set -uo pipefail
+
+GIT_DIR="$(git rev-parse --git-dir 2>/dev/null)" || {
+    echo "error: not in a git repository" >&2
+    exit 2
+}
+
+# --- Derive remote + trunk (no hardcoded `master`/`origin`). ---
+REMOTE="${GIT_SAFE_REMOTE:-origin}"
+TRUNK="${GIT_SAFE_TRUNK:-}"
+if [ -z "$TRUNK" ]; then
+    # `git symbolic-ref refs/remotes/<remote>/HEAD` yields e.g. "origin/main".
+    TRUNK="$(git symbolic-ref --short "refs/remotes/$REMOTE/HEAD" 2>/dev/null | sed "s|^$REMOTE/||")"
+fi
+[ -n "$TRUNK" ] || TRUNK="master"
+
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" || true
+if [ "$CURRENT_BRANCH" != "$TRUNK" ]; then
+    echo "error: git-safe-push-master only works on the trunk branch '$TRUNK' (on: $CURRENT_BRANCH)" >&2
+    echo "       set GIT_SAFE_TRUNK to override the derived trunk if this is wrong" >&2
+    exit 2
+fi
+
+LOCKFILE="$GIT_DIR/commit.lock"
+LOCK_TIMEOUT=${GIT_SAFE_PUSH_LOCK_TIMEOUT:-60}
+case "$LOCK_TIMEOUT" in
+    *[!0-9]*) echo "error: GIT_SAFE_PUSH_LOCK_TIMEOUT must be a positive integer" >&2; exit 2 ;;
+    *) [ "$LOCK_TIMEOUT" -ge 1 ] || { echo "error: GIT_SAFE_PUSH_LOCK_TIMEOUT must be >= 1" >&2; exit 2; } ;;
+esac
+
+# Cleanup trap: release the lock
+trap 'exec 9>&-' EXIT
+
+# Acquire the shared commit lock (same flock as git-safe-commit)
+exec 9>"$LOCKFILE"
+if ! flock --timeout "$LOCK_TIMEOUT" 9; then
+    echo "error: timed out waiting for commit lock (${LOCK_TIMEOUT}s)" >&2
+    exit 2
+fi
+
+if ! git fetch "$REMOTE" "$TRUNK" 2>/dev/null; then
+    echo "error: git fetch $REMOTE $TRUNK failed" >&2
+    exit 2
+fi
+
+LOCAL_SHA=$(git rev-parse HEAD 2>/dev/null) || { echo "error: could not resolve HEAD" >&2; exit 2; }
+REMOTE_SHA=$(git rev-parse "$REMOTE/$TRUNK" 2>/dev/null) || { echo "error: could not resolve $REMOTE/$TRUNK" >&2; exit 2; }
+
+if [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
+    echo "✓ Already in sync with $REMOTE/$TRUNK"
+    exit 0
+fi
+
+# Get count of local non-merge commits to report
+LOCAL_COMMIT_COUNT=$(git log --no-merges --format="%H" "$REMOTE_SHA".."$LOCAL_SHA" | wc -l)
+
+if [ "$LOCAL_COMMIT_COUNT" -eq 0 ]; then
+    # Only merge commits locally — accumulated from previous failed pushes; discard them
+    if git update-ref "refs/heads/$TRUNK" "$REMOTE_SHA" "$LOCAL_SHA" 2>/dev/null; then
+        echo "✓ Discarded local-only merge commits; reset to $REMOTE/$TRUNK"
+    else
+        echo "warning: could not update local $TRUNK (concurrent commit?)" >&2
+    fi
+    exit 0
+fi
+
+push_with_output() {
+    local output_file="$1" trace_file="$2"
+    shift 2
+    if GIT_TRACE2_EVENT="$trace_file" git push "$@" >"$output_file" 2>&1; then
+        cat "$output_file"
+        return 0
+    fi
+    return 1
+}
+
+push_rejected_by_local_hook() {
+    local trace_file="$1"
+    python3 - "$trace_file" <<'PY'
+import json
+import sys
+
+started_hooks: set[int] = set()
+with open(sys.argv[1], encoding="utf-8") as trace:
+    for line in trace:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("event") == "child_start" and event.get("child_class") == "hook":
+            started_hooks.add(event.get("child_id"))
+        elif (
+            event.get("event") == "child_exit"
+            and event.get("child_id") in started_hooks
+            and event.get("code", 0) != 0
+        ):
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+push_failure_or_retry_race() {
+    local output_file="$1" trace_file="$2" attempt="$3" previous_remote="$4" refreshed_remote
+
+    if push_rejected_by_local_hook "$trace_file"; then
+        cat "$output_file" >&2
+        echo "error: local pre-push hook rejected the push; not retrying." >&2
+        return 2
+    fi
+    if ! git fetch "$REMOTE" "$TRUNK" >/dev/null 2>&1; then
+        cat "$output_file" >&2
+        echo "error: git fetch $REMOTE $TRUNK failed after rejected push" >&2
+        return 2
+    fi
+    refreshed_remote=$(git rev-parse "$REMOTE/$TRUNK" 2>/dev/null) || {
+        cat "$output_file" >&2
+        echo "error: could not resolve $REMOTE/$TRUNK after rejected push" >&2
+        return 2
+    }
+    if [ "$refreshed_remote" = "$previous_remote" ]; then
+        cat "$output_file" >&2
+        echo "error: local pre-push hook, authentication, or remote policy rejected the push; $REMOTE/$TRUNK did not advance" >&2
+        echo "       Not retrying: this was not a remote race." >&2
+        return 2
+    fi
+    echo "  Push attempt $attempt rejected because the remote raced ahead, recomputing..." >&2
+    REMOTE_SHA="$refreshed_remote"
+    return 0
+}
+
+# Fast path: if local has no merge commits and is a simple descendant, try direct push.
+# Keep failure output until a refetch proves whether this was a real race.
+LOCAL_MERGE_COUNT=$(git log --merges --format="%H" "$REMOTE_SHA".."$LOCAL_SHA" | wc -l)
+if [ "$LOCAL_MERGE_COUNT" -eq 0 ] && git merge-base --is-ancestor "$REMOTE_SHA" "$LOCAL_SHA" 2>/dev/null; then
+    PUSH_OUTPUT=$(mktemp)
+    PUSH_TRACE=$(mktemp)
+    if push_with_output "$PUSH_OUTPUT" "$PUSH_TRACE" "$REMOTE" "$TRUNK"; then
+        rm -f "$PUSH_OUTPUT" "$PUSH_TRACE"
+        echo "✓ Fast-forward pushed $LOCAL_COMMIT_COUNT commit(s) to $REMOTE/$TRUNK"
+        exit 0
+    fi
+    push_failure_or_retry_race "$PUSH_OUTPUT" "$PUSH_TRACE" 1 "$REMOTE_SHA"
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        rm -f "$PUSH_OUTPUT" "$PUSH_TRACE"
+        exit "$status"
+    fi
+    rm -f "$PUSH_OUTPUT" "$PUSH_TRACE"
+    echo "  (remote advanced during direct push; falling back to squash path)" >&2
+fi
+
+echo "  Squashing $LOCAL_COMMIT_COUNT local commit(s) onto $REMOTE/$TRUNK..." >&2
+
+# Compute the merged tree off-tree (no working directory mutation)
+MERGE_OUTPUT=$(git merge-tree --write-tree "$REMOTE_SHA" "$LOCAL_SHA" 2>&1) || {
+    # Parse conflict info
+    CONFLICTS=$(echo "$MERGE_OUTPUT" | grep "^CONFLICT " | sed 's/^CONFLICT /  /')
+    echo "error: merge conflict detected" >&2
+    if [ -n "$CONFLICTS" ]; then
+        echo "Conflicting paths:" >&2
+        echo "$CONFLICTS" >&2
+    fi
+    echo "" >&2
+    echo "Resolution: Commits remain local. Resolve conflict and retry." >&2
+    exit 1
+}
+
+MERGE_TREE="$MERGE_OUTPUT"
+
+# Rebuild from the current source range on every attempt: a competing push may
+# publish some local commits, changing both the summary and the session set.
+build_commit_message() {
+    local subjects session_ids
+    LOCAL_COMMIT_COUNT=$(git rev-list --count --no-merges "$REMOTE_SHA".."$LOCAL_SHA") || return 1
+    subjects=$(git log --reverse --no-merges --format="  %s" "$REMOTE_SHA".."$LOCAL_SHA") || return 1
+    # Git parses only the actual trailer block, excluding body examples. Include
+    # plural provenance from earlier squashes and deduplicate in source order.
+    session_ids=$(git log --reverse \
+        --format='%(trailers:key=Git-Session-Id,key=Git-Session-Ids,valueonly,unfold)' \
+        "$REMOTE_SHA".."$LOCAL_SHA" | awk '
+        BEGIN { FS = "[,[:space:]]+" }
+        { for (i = 1; i <= NF; i++) {
+            if ($i != "" && !seen[$i]++) {
+                printf "%s%s", separator, $i
+                separator = ", "
+            }
+        } }
+    ') || return 1
+    COMMIT_MSG="sync: squash $LOCAL_COMMIT_COUNT local commit(s) to $REMOTE/$TRUNK
+
+Squashed due to accumulated auto-sync merge commits blocking linear push.
+Local commits are preserved in git reflog.
+
+$(echo "$subjects" | head -10)"
+    if [ "$LOCAL_COMMIT_COUNT" -gt 10 ]; then
+        COMMIT_MSG="$COMMIT_MSG
+  ... and $((LOCAL_COMMIT_COUNT - 10)) more"
+    fi
+    if [ -n "$session_ids" ]; then
+        COMMIT_MSG="$COMMIT_MSG
+
+Git-Session-Ids: $session_ids"
+    fi
+}
+
+build_commit_message || {
+    echo "error: failed to collect squash commit metadata" >&2
+    exit 2
+}
+
+# Create a squash (linear) commit with only REMOTE_SHA as parent (no merge commits)
+SQUASH_COMMIT=$(git commit-tree \
+    -p "$REMOTE_SHA" \
+    -m "$COMMIT_MSG" \
+    "$MERGE_TREE" 2>/dev/null) || {
+    echo "error: failed to create squash commit" >&2
+    exit 2
+}
+
+# Push WITHOUT updating the local trunk first (push-then-update, not update-then-push)
+# Retry loop: if the remote races ahead between our fetch and push, refetch + recompute and retry.
+# On a hot day with many concurrent sessions, non-fast-forward rejections are transient races
+# (not real errors) and should be retried, not reported as exit 2.
+MAX_PUSH_RETRIES=3
+PUSH_ATTEMPT=0
+while [ "$PUSH_ATTEMPT" -lt "$MAX_PUSH_RETRIES" ]; do
+    PUSH_ATTEMPT=$((PUSH_ATTEMPT + 1))
+    PUSH_OUTPUT=$(mktemp)
+    PUSH_TRACE=$(mktemp)
+    if push_with_output "$PUSH_OUTPUT" "$PUSH_TRACE" "$REMOTE" "${SQUASH_COMMIT}:refs/heads/$TRUNK"; then
+        rm -f "$PUSH_OUTPUT" "$PUSH_TRACE"
+        break  # success — fall through to update-ref below
+    fi
+    push_failure_or_retry_race "$PUSH_OUTPUT" "$PUSH_TRACE" "$PUSH_ATTEMPT" "$REMOTE_SHA"
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        rm -f "$PUSH_OUTPUT" "$PUSH_TRACE"
+        exit "$status"
+    fi
+    rm -f "$PUSH_OUTPUT" "$PUSH_TRACE"
+    if [ "$PUSH_ATTEMPT" -ge "$MAX_PUSH_RETRIES" ]; then
+        echo "error: $REMOTE/$TRUNK advanced during all $MAX_PUSH_RETRIES push attempts" >&2
+        echo "       Local $TRUNK NOT modified. Retry git-safe-push-master." >&2
+        exit 2
+    fi
+    sleep "${GIT_SAFE_PUSH_RETRY_SLEEP:-$((PUSH_ATTEMPT * 2))}"
+    if [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
+        echo "✓ Already in sync with $REMOTE/$TRUNK (after retry)"
+        exit 0
+    fi
+    REMAINING=$(git log --no-merges --format="%H" "$REMOTE_SHA".."$LOCAL_SHA" | wc -l)
+    if [ "$REMAINING" -eq 0 ]; then
+        # Our commits were already published by a sibling session in their squash
+        git update-ref "refs/heads/$TRUNK" "$REMOTE_SHA" "$LOCAL_SHA" 2>/dev/null || true
+        echo "✓ Commits already published by sibling session (after retry)"
+        exit 0
+    fi
+    MERGE_TREE=$(git merge-tree --write-tree "$REMOTE_SHA" "$LOCAL_SHA" 2>&1) || {
+        echo "error: merge conflict on retry $PUSH_ATTEMPT" >&2
+        exit 1
+    }
+    build_commit_message || {
+        echo "error: failed to collect squash commit metadata on retry $PUSH_ATTEMPT" >&2
+        exit 2
+    }
+    SQUASH_COMMIT=$(git commit-tree -p "$REMOTE_SHA" -m "$COMMIT_MSG" "$MERGE_TREE" 2>/dev/null) || {
+        echo "error: failed to create squash commit on retry $PUSH_ATTEMPT" >&2
+        exit 2
+    }
+done
+
+# Push succeeded: update the local trunk to the squash commit (removes accumulated merge commits)
+if ! git update-ref "refs/heads/$TRUNK" "$SQUASH_COMMIT" "$LOCAL_SHA" 2>/dev/null; then
+    echo "warning: pushed OK but failed to update local $TRUNK (concurrent commit?)" >&2
+    echo "         Run: git fetch $REMOTE && git reset --hard $REMOTE/$TRUNK" >&2
+    exit 0
+fi
+
+# Materialize upstream-only changes to index and worktree for paths untouched by sessions.
+# The squash path advances refs/heads/<trunk> but leaves index+worktree at LOCAL_SHA content.
+# For every path that differs between LOCAL_SHA and SQUASH_COMMIT (i.e., came from upstream),
+# if neither the index nor the worktree was modified by any session, we update both to the
+# squash blob. Dirty paths (session-modified index or worktree) are skipped — zero clobber risk.
+SQUASH_CHANGED=$(git diff --name-only "$LOCAL_SHA" "$SQUASH_COMMIT" 2>/dev/null) || true
+if [ -n "$SQUASH_CHANGED" ]; then
+    MATERIALIZED=0
+    SKIPPED_DIRTY=0
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        local_blob=$(git ls-tree "$LOCAL_SHA" -- "$path" 2>/dev/null | awk '{print $3}')
+        index_blob=$(git ls-files -s -- "$path" 2>/dev/null | awk '{print $2}')
+        # Skip: session modified the index
+        if [ "$local_blob" != "$index_blob" ]; then
+            SKIPPED_DIRTY=$((SKIPPED_DIRTY + 1)); continue
+        fi
+        # Skip: session modified the worktree for a path that existed in local
+        if [ -n "$local_blob" ] && [ -f "$path" ]; then
+            disk_blob=$(git hash-object -- "$path" 2>/dev/null)
+            if [ "$disk_blob" != "$local_blob" ]; then
+                SKIPPED_DIRTY=$((SKIPPED_DIRTY + 1)); continue
+            fi
+        fi
+        # Safe to materialize: update index + worktree to squash content
+        squash_blob=$(git ls-tree "$SQUASH_COMMIT" -- "$path" 2>/dev/null | awk '{print $3}')
+        if [ -n "$squash_blob" ]; then
+            if git checkout "$SQUASH_COMMIT" -- "$path" 2>/dev/null; then
+                MATERIALIZED=$((MATERIALIZED + 1))
+            else
+                SKIPPED_DIRTY=$((SKIPPED_DIRTY + 1))
+            fi
+        else
+            # Path was deleted upstream: remove from index and disk
+            git rm --cached -f -- "$path" 2>/dev/null || true
+            rm -f "$path" 2>/dev/null || true
+            MATERIALIZED=$((MATERIALIZED + 1))
+        fi
+    done <<< "$SQUASH_CHANGED"
+    if [ "$MATERIALIZED" -gt 0 ]; then
+        skip_note=$([ "$SKIPPED_DIRTY" -gt 0 ] && echo " ($SKIPPED_DIRTY session-modified skipped)" || true)
+        echo "  Materialized $MATERIALIZED upstream path(s) to index+worktree${skip_note}"
+    fi
+fi
+
+MERGE_SKIPPED=$((LOCAL_MERGE_COUNT + 0))
+echo "✓ Published $(git rev-parse --short "$SQUASH_COMMIT" 2>/dev/null) to $REMOTE/$TRUNK"
+echo "  Squashed $LOCAL_COMMIT_COUNT commit(s)$([ "$MERGE_SKIPPED" -gt 0 ] && echo " (skipped $MERGE_SKIPPED local merge commit(s))" || true)"
+
+exit 0
