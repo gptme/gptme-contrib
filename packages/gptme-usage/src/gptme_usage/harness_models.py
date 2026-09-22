@@ -536,6 +536,7 @@ def estimate_session_cost(
 # a synthetic pressure term once quota gets tight.
 SUBSCRIPTION_BACKED_MODELS: set[tuple[str, str]] = {
     ("claude-code", "opus"),
+    ("claude-code", "opus-5-5"),  # 2026-09-22: same Claude Max pool as opus
     ("claude-code", "sonnet"),
     ("claude-code", "fable-5"),
     ("grok-build", "grok-build"),
@@ -647,6 +648,13 @@ CC_MODEL_VERSIONS: dict[str, str] = {
     # opus-4-6 (the actual historical majority) and opus-4-7 restarted from
     # priors.
     "opus": "opus-4-8",
+    # Opus 5.5 succession arm (2026-09-22, ErikBjare/bob#1284). Distinct from
+    # the "opus" alias (still maps to opus-4-8). $4/$20 per MTok (20% under
+    # Opus 5 $5/$25). CC rejects short "opus-5-5" (unrecognized_model, probed
+    # 2026-09-22) — harness dispatches as "claude-opus-5-5". Parallel window vs
+    # claude-code:opus; warm-started from opus-5 posterior (n0=8, E[p]=0.646).
+    "opus-5-5": "opus-5-5",
+    "claude-opus-5-5": "opus-5-5",
     "sonnet": "sonnet-4-6",
     "haiku": "haiku-4-5",
     # Fable 5 — Mythos-class frontier model, released 2026-06-09. ~10x Opus
