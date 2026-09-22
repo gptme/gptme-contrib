@@ -21,9 +21,16 @@
 # All functions honour a trailing `dry_run` arg ("true"/"false"): when true they
 # report what they would do and change nothing.
 
-# Cap the *user* systemd journal (no root required — only touches the invoking
-# user's journals, never the system journal). Bounds both size and age so a
-# months-long VM can't let the user journal grow without limit.
+# Cap the *user* systemd journal. Bounds both size and age so a months-long VM
+# can't let the user journal grow without limit. Only touches the invoking user's
+# journals, never the system journal.
+#
+# Root is NOT required *when the journal is genuinely user-owned* (Storage=auto
+# with per-user journals the user can write). It is NOT usable when the host
+# stores everything in a root-owned system journal under /var/log/journal and
+# `journalctl --user` merely filters it by UID — there the vacuum fails with
+# "Permission denied" and this function WARNs rather than pretending it capped
+# anything. That case is a host/root config task (SystemMaxUse), not an agent one.
 #
 # Usage: hygiene_vacuum_user_journal <max_size> <max_time> [dry_run]
 #   e.g. hygiene_vacuum_user_journal 200M 30d false
@@ -44,13 +51,29 @@ hygiene_vacuum_user_journal() {
         return 0
     fi
 
-    # vacuum-size and vacuum-time are independent caps; run both.
-    journalctl --user --vacuum-size="$max_size" >/dev/null 2>&1 || true
-    journalctl --user --vacuum-time="$max_time" >/dev/null 2>&1 || true
+    # vacuum-size and vacuum-time are independent caps; run both. Capture stderr
+    # so a permission failure is a visible WARN, not a silent no-op: on a host where
+    # `journalctl --user` maps to a root-owned system journal (Storage=persistent
+    # under /var/log/journal), a non-root agent cannot vacuum it — the calls fail
+    # with "Permission denied". Swallowing that would make the function *look* like
+    # it capped the journal while reclaiming nothing (the capability-tier trap: a
+    # Tier-1 action that silently does nothing).
+    local vac_err
+    vac_err=$(
+        journalctl --user --vacuum-size="$max_size" 2>&1 >/dev/null
+        journalctl --user --vacuum-time="$max_time" 2>&1 >/dev/null
+    )
 
     local after
     after=$(journalctl --user --disk-usage 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="up") print $(i+1)}')
     echo "  User journal after:  ${after:-unknown}"
+
+    if grep -qi 'permission denied\|failed to' <<<"$vac_err"; then
+        echo "  WARN: journal is not user-manageable here (system-owned under" \
+            "/var/log/journal). Vacuum reclaimed nothing — capping needs root" \
+            "(set SystemMaxUse in journald.conf). This is a host/root task, not" \
+            "an agent task."
+    fi
 }
 
 # Delete files under a directory older than N days, matched by a glob. Reports

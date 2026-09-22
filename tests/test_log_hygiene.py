@@ -76,3 +76,56 @@ def test_missing_dir_is_safe(tmp_path: Path) -> None:
         tmp_path / "does-not-exist", "*.state", keep_days=14, dry_run="false"
     )
     assert count == 0
+
+
+def _vacuum_with_fake_journalctl(
+    tmp_path: Path, vacuum_exit: int, vacuum_stderr: str
+) -> str:
+    """Run hygiene_vacuum_user_journal with a stubbed journalctl on PATH; return stdout.
+
+    The stub answers --disk-usage with a fixed size and makes the vacuum calls
+    behave per the args, so we can exercise the permission-denied branch without
+    a real (root-owned) journal.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "journalctl"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        'for a in "$@"; do\n'
+        '  if [[ "$a" == "--disk-usage" ]]; then\n'
+        '    echo "Archived and active journals take up 1.2G in the file system."\n'
+        "    exit 0\n"
+        "  fi\n"
+        "done\n"
+        f'>&2 printf "%s" "{vacuum_stderr}"\n'
+        f"exit {vacuum_exit}\n"
+    )
+    fake.chmod(0o755)
+    script = f'source "{LIB}"; hygiene_vacuum_user_journal 200M 30d false'
+    proc = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={"PATH": f"{bindir}:/usr/bin:/bin"},
+    )
+    return proc.stdout
+
+
+def test_journal_permission_denied_warns_not_silent(tmp_path: Path) -> None:
+    # A root-owned system journal (Storage=persistent) rejects a non-root vacuum.
+    # The function must WARN, never pretend it capped anything.
+    out = _vacuum_with_fake_journalctl(
+        tmp_path, vacuum_exit=1, vacuum_stderr="Failed to ...: Permission denied\n"
+    )
+    assert "WARN" in out
+    assert "not user-manageable" in out
+
+
+def test_journal_clean_vacuum_does_not_warn(tmp_path: Path) -> None:
+    # When the user genuinely owns the journal, the vacuum succeeds silently and
+    # the honesty WARN must NOT fire (no false alarm on healthy forks).
+    out = _vacuum_with_fake_journalctl(tmp_path, vacuum_exit=0, vacuum_stderr="")
+    assert "WARN" not in out
+    assert "User journal after" in out
