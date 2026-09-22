@@ -4,24 +4,11 @@
 
 set -e
 
-# Get current branch
-current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-if [ -z "$current_branch" ]; then
-    exit 0  # Not in a git repo
-fi
-
-# Skip check on detached HEAD (common in submodules, rebases, branch deletions)
-if [ "$current_branch" = "HEAD" ]; then
-    exit 0
-fi
-
-# Skip check on master/main branches (usually tracked correctly)
-if [ "$current_branch" = "master" ] || [ "$current_branch" = "main" ]; then
-    exit 0
-fi
-
-# Read push refspecs from stdin early (stdin can only be read once).
+# Read push refspecs from stdin early — BEFORE any early exits.
 # Pre-push hook receives: local_ref local_sha remote_ref remote_sha
+# If we exit without consuming stdin, the caller's `printf | this-script`
+# pipeline gets SIGPIPE (exit 141 with pipefail) even when the caller is
+# pushing to a feature branch and everything should succeed.
 ZERO="0000000000000000000000000000000000000000"
 push_remote_refs=()
 all_deletions=true
@@ -42,6 +29,22 @@ while read -r _local_ref local_sha remote_ref _remote_sha || [ -n "${_local_ref:
         all_deletions=false
     fi
 done
+
+# Get current branch (after reading stdin so we don't leave the pipe unread).
+current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+if [ -z "$current_branch" ]; then
+    exit 0  # Not in a git repo
+fi
+
+# Skip check on detached HEAD (common in submodules, rebases, branch deletions)
+if [ "$current_branch" = "HEAD" ]; then
+    exit 0
+fi
+
+# Skip check on master/main branches (usually tracked correctly)
+if [ "$current_branch" = "master" ] || [ "$current_branch" = "main" ]; then
+    exit 0
+fi
 
 # Nothing actually being pushed (empty stdin / up-to-date) — nothing to validate.
 if [ "$any_pushed" = false ]; then
