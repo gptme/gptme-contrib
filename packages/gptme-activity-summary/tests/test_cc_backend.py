@@ -191,7 +191,7 @@ def test_call_claude_code_quota_exhausted_raises_immediately(mock_run, mock_slee
     with pytest.raises(ClaudeQuotaExhaustedError) as exc_info:
         call_claude_code("test prompt", max_retries=3)
     assert exc_info.value.returncode == 1
-    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+    mock_gptme.assert_called_once_with("test prompt", timeout=360)
     assert mock_run.call_count == 1  # primary tried once; no retry-loop
     assert mock_sleep.call_count == 0  # no backoff sleep burned
 
@@ -226,7 +226,7 @@ def test_call_claude_code_fable_limit_uses_backend_fallback(mock_run, mock_sleep
     mock_gptme.return_value = '{"narrative": "fallback summary"}'
 
     assert call_claude_code("test prompt", max_retries=3) == ('{"narrative": "fallback summary"}')
-    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+    mock_gptme.assert_called_once_with("test prompt", timeout=360)
     assert mock_run.call_count == 1
     assert mock_sleep.call_count == 0
 
@@ -246,7 +246,7 @@ def test_call_claude_code_quota_is_called_process_error_subtype(mock_run, mock_s
         assert False, "Should have raised ClaudeQuotaExhaustedError"
     except subprocess.CalledProcessError as e:
         assert isinstance(e, ClaudeQuotaExhaustedError)
-    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+    mock_gptme.assert_called_once_with("test prompt", timeout=360)
 
 
 @patch.dict(
@@ -641,7 +641,7 @@ def test_call_claude_code_quota_fallback_empty_exhaustion_returns_empty(
 
     assert mock_fallback.call_count == 2
     mock_sleep.assert_called_once()
-    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+    mock_gptme.assert_called_once_with("test prompt", timeout=360)
 
 
 @patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
@@ -669,7 +669,7 @@ def test_call_claude_code_quota_fallback_all_exhausted(
     ):
         with pytest.raises(ClaudeQuotaExhaustedError):
             call_claude_code("test prompt")
-    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+    mock_gptme.assert_called_once_with("test prompt", timeout=360)
 
 
 @patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
@@ -792,7 +792,7 @@ def test_call_claude_code_quota_fallback_non_quota_then_quota_raises_quota_error
     ):
         with pytest.raises(ClaudeQuotaExhaustedError):
             call_claude_code("test prompt", max_retries=1)
-    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+    mock_gptme.assert_called_once_with("test prompt", timeout=360)
 
 
 @patch("gptme_activity_summary.cc_backend.call_gptme", return_value="")
@@ -824,7 +824,7 @@ def test_call_claude_code_quota_fallback_missing_file_skipped(
             os.environ["GPTME_CC_FALLBACK_CREDS"] = prev
 
     mock_fallback.assert_not_called()  # missing file never attempted
-    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+    mock_gptme.assert_called_once_with("test prompt", timeout=360)
 
 
 @patch.dict("os.environ", {}, clear=True)
@@ -881,7 +881,7 @@ def test_call_claude_code_quota_falls_back_to_gptme(
 
     assert result == gptme_response
     assert mock_gptme.call_count == 1
-    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+    mock_gptme.assert_called_once_with("test prompt", timeout=360)
 
 
 @pytest.mark.parametrize(
@@ -907,7 +907,7 @@ def test_call_claude_code_rejects_invalid_gptme_fallback(
     with pytest.raises(ClaudeQuotaExhaustedError):
         call_claude_code("test prompt", max_retries=1)
 
-    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+    mock_gptme.assert_called_once_with("test prompt", timeout=360)
 
 
 @pytest.mark.parametrize(
@@ -937,7 +937,7 @@ def test_call_claude_code_rejects_non_string_narrative_in_gptme_fallback(
     with pytest.raises(ClaudeQuotaExhaustedError):
         call_claude_code("test prompt", max_retries=1)
 
-    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+    mock_gptme.assert_called_once_with("test prompt", timeout=360)
 
 
 @patch("gptme_activity_summary.cc_backend.call_gptme")
@@ -969,7 +969,7 @@ def test_call_claude_code_disabled_fallback_slots_reach_gptme(
 
     assert result == '{"narrative": "from-gptme"}'
     mock_fallback.assert_called_once()
-    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+    mock_gptme.assert_called_once_with("test prompt", timeout=360)
 
 
 @patch.dict("os.environ", {}, clear=True)
@@ -985,21 +985,24 @@ def test_call_claude_code_quota_gptme_failure_raises_original(mock_run, mock_sle
 
     with pytest.raises(ClaudeQuotaExhaustedError):
         call_claude_code("test prompt", max_retries=3)
-    mock_gptme.assert_called_once_with("test prompt", timeout=120)
+    mock_gptme.assert_called_once_with("test prompt", timeout=360)
 
 
 @patch.dict("os.environ", {}, clear=True)
 @patch("gptme_activity_summary.cc_backend.call_gptme")
 @patch("gptme_activity_summary.cc_backend.time.sleep")
 @patch("subprocess.run")
-def test_call_claude_code_quota_gptme_fallback_passes_timeout(mock_run, mock_sleep, mock_gptme):
-    """The gptme fallback inherits the caller's timeout."""
+@pytest.mark.parametrize("caller_timeout,expected_timeout", [(99, 360), (420, 420)])
+def test_call_claude_code_quota_gptme_fallback_has_independent_timeout_floor(
+    mock_run, mock_sleep, mock_gptme, caller_timeout, expected_timeout
+):
+    """A short Claude timeout must not starve the large-prompt fallback."""
     mock_run.return_value = _make_completed_process(
         returncode=1, stdout="You've hit your weekly limit"
     )
     mock_gptme.return_value = '{"narrative": "ok"}'
-    call_claude_code("test prompt", timeout=99, max_retries=1)
-    mock_gptme.assert_called_once_with("test prompt", timeout=99)
+    call_claude_code("test prompt", timeout=caller_timeout, max_retries=1)
+    mock_gptme.assert_called_once_with("test prompt", timeout=expected_timeout)
 
 
 @patch("gptme_activity_summary.cc_backend.call_gptme")
