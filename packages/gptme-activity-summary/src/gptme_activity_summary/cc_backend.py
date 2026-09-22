@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 # Retry configuration for empty CC responses (nesting detection, transient failures)
 _MAX_RETRIES = 3
 _RETRY_DELAY_S = 5
+# The subscription fallback handles much larger prompts than ordinary Claude
+# calls. Daily summaries reached 391 KiB and exceeded 180 seconds under load;
+# successful runs of the same route have taken 124+ seconds. Keep a separate
+# floor so a caller's shorter Claude timeout does not starve the fallback.
+_GPTME_FALLBACK_TIMEOUT_S = 300
 
 # Truly permanent subscription failures — quota resets require waiting until
 # the next billing period; org blocks require admin action. Retrying the same
@@ -339,7 +344,7 @@ def call_claude_code(
                 # credential slot (e.g. stale auth, returncode=2) does not
                 # prevent gptme from producing a summary when the primary slot is
                 # subscription-exhausted.
-                gptme_response = call_gptme(prompt, timeout=timeout)
+                gptme_response = call_gptme(prompt, timeout=max(timeout, _GPTME_FALLBACK_TIMEOUT_S))
                 if gptme_response:
                     gptme_result = extract_json_from_response(gptme_response)
 
