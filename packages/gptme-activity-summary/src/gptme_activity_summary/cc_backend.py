@@ -25,10 +25,10 @@ logger = logging.getLogger(__name__)
 _MAX_RETRIES = 3
 _RETRY_DELAY_S = 5
 # The subscription fallback handles much larger prompts than ordinary Claude
-# calls. Daily summaries reached 391 KiB and exceeded 180 seconds under load;
-# successful runs of the same route have taken 124+ seconds. Keep a separate
+# calls. A 391 KiB daily summary took 259 seconds on this route after exceeding
+# 180 seconds under load. Keep a separate
 # floor so a caller's shorter Claude timeout does not starve the fallback.
-_GPTME_FALLBACK_TIMEOUT_S = 300
+_GPTME_FALLBACK_TIMEOUT_S = 360
 
 # Truly permanent subscription failures — quota resets require waiting until
 # the next billing period; org blocks require admin action. Retrying the same
