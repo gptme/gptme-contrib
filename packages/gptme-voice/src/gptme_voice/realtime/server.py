@@ -50,6 +50,7 @@ from .openai_client import (
     OpenAIRealtimeClient,
     SessionConfig,
     _detect_agent_repo,
+    _get_agent_name_from_workspace,
     _get_openai_api_key,
     _load_project_instructions,
 )
@@ -802,6 +803,7 @@ class VoiceServer:
         self._agent_name = (
             _get_config_env("GPTME_VOICE_AGENT_NAME")
             or _get_config_env("AGENT_NAME")
+            or _get_agent_name_from_workspace(self.workspace)
             or "bob"
         )
         # Prepend the stable persona name and truthful runtime identity so neither
@@ -832,15 +834,17 @@ class VoiceServer:
         # Cross-agent handoff writer (optional — only active when GPTME_VOICE_HANDOFF_DIR set)
         handoff_dir_env = _get_config_env("GPTME_VOICE_HANDOFF_DIR")
         handoff_agent_name = (
-            _get_config_env("GPTME_VOICE_AGENT_NAME") or "bob"
+            _get_config_env("GPTME_VOICE_AGENT_NAME")
+            or _get_agent_name_from_workspace(self.workspace)
+            or "bob"
         ).lower()
         handoff_secret_env = _get_config_env("GPTME_VOICE_HANDOFF_SECRET")
         handoff_agents_env = _get_config_env("GPTME_VOICE_HANDOFF_AGENTS")
         # Comma-separated list of agents the running server can hand off to.
-        # Defaults to the known agents minus the current protocol identity.
-        _default_agents = [
-            a for a in ["alice", "gordon", "sven", "bob"] if a != handoff_agent_name
-        ]
+        # When GPTME_VOICE_HANDOFF_AGENTS is unset there are no known peers —
+        # the operator must configure the roster explicitly. The previous
+        # hard-coded list (alice/gordon/sven/bob) was Bob-specific.
+        _default_agents: list[str] = []
         self._available_agents: list[str] = (
             [a.strip() for a in handoff_agents_env.split(",") if a.strip()]
             if handoff_agents_env

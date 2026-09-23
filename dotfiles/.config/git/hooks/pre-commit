@@ -55,14 +55,15 @@ fi
 
 # --- Part 0.5: Validate git commit identity (~1ms, runs unconditionally) ---
 # Guards against a repo-local user.email override that shadows the correct global
-# identity. Historical corruption: bob@timetobuildbob.com and timetolearnbob@gmail.com
-# (typo-blends of Bob's two real identities) landed in submodules/worktrees whose
-# local config overrode ~/.gitconfig. The brain repo enforces this via prek, but
-# that only covers the brain — this GLOBAL hook covers EVERY repo Bob commits in
-# (submodules like gptme-contrib, projects/*, /tmp worktrees).
+# identity. Example: a typo-blend email landed in a worktree whose local config
+# overrode ~/.gitconfig. The agent brain repo enforces this via prek, but that
+# only covers the brain — this GLOBAL hook covers EVERY repo the agent commits in
+# (submodules, projects/*, /tmp worktrees).
 # Bypass (rare, deliberate): ALLOW_GIT_IDENTITY=1 git commit ...
-# Forkable: an optional allowed-identities.conf (next to allowed-repos.conf) may
-# define IDENTITY_ALLOWLIST=(...) to override the built-in Bob defaults.
+# The allowlist is read from ~/.config/git/allowed-identities.conf (written by
+# dotfiles/install.sh from the installing agent's git user.email). The built-in
+# fallback below is kept for Bob's own install; other agents override it entirely
+# via the conf file.
 if [ "${ALLOW_GIT_IDENTITY:-0}" != "1" ]; then
     IDENTITY_ALLOWLIST=(
         "bob@superuserlabs.org"
@@ -73,7 +74,8 @@ if [ "${ALLOW_GIT_IDENTITY:-0}" != "1" ]; then
     COMMIT_EMAIL="$(git config user.email 2>/dev/null || echo "")"
     if [ -z "$COMMIT_EMAIL" ]; then
         echo -e "${RED}ABORT: git user.email is not set — refusing to commit with an unknown identity.${NC}"
-        echo    "   Fix: git config user.email bob@superuserlabs.org"
+        echo    "   Fix: git config --global user.email your@email.com"
+        echo    "   Then re-run dotfiles/install.sh to update allowed-identities.conf."
         exit 1
     fi
     _identity_ok=false
@@ -84,7 +86,8 @@ if [ "${ALLOW_GIT_IDENTITY:-0}" != "1" ]; then
         echo -e "${RED}ABORT: git user.email '${COMMIT_EMAIL}' is NOT an allowed identity.${NC}"
         echo    "   Allowed: ${IDENTITY_ALLOWLIST[*]}"
         echo    "   This usually means a repo-local config override shadowed the correct global identity."
-        echo    "   Fix in THIS repo:  git config user.email bob@superuserlabs.org"
+        echo    "   Fix in THIS repo:  git config user.email <your-global-email>"
+        echo    "   Or update ~/.config/git/allowed-identities.conf to add this address."
         echo    "   (bypass if truly intended: ALLOW_GIT_IDENTITY=1 git commit ...)"
         exit 1
     fi

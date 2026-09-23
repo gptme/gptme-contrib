@@ -7,6 +7,7 @@ instead of relying on LLM guessing.
 
 import json
 import logging
+import re
 import subprocess
 from collections import Counter
 from dataclasses import dataclass, field
@@ -15,7 +16,6 @@ from datetime import date, datetime, timezone
 logger = logging.getLogger(__name__)
 
 DEFAULT_REPOS = [
-    "ErikBjare/gptme-bob",
     "gptme/gptme",
     "gptme/gptme-contrib",
 ]
@@ -709,6 +709,22 @@ def get_user_events(start: date, end: date, username: str, pages: int = 3) -> li
     return events
 
 
+def _get_workspace_repo(workspace: str) -> str | None:
+    """Derive owner/repo from a git workspace's origin remote URL.
+
+    Returns a ``owner/repo`` string (no ``.git`` suffix), or None if the remote
+    is absent or not a github.com URL.
+    """
+    url = _run_command(["git", "-C", workspace, "remote", "get-url", "origin"])
+    if not url:
+        return None
+    # Normalise SSH and HTTPS GitHub remotes:
+    #   git@github.com:owner/repo.git  →  owner/repo
+    #   https://github.com/owner/repo  →  owner/repo
+    m = re.search(r"github\.com[:/](.+?)(?:\.git)?$", url)
+    return m.group(1).rstrip("/") if m else None
+
+
 def fetch_activity(
     start: date,
     end: date,
@@ -722,6 +738,8 @@ def fetch_activity(
         start: Start date (inclusive)
         end: End date (inclusive)
         repos: List of GitHub repos (owner/name). Defaults to DEFAULT_REPOS.
+            When None, the workspace's origin remote is prepended automatically
+            so the agent's own brain repo is always included.
         workspace: Path to local git workspace for commit counting.
 
     Returns:
@@ -729,6 +747,10 @@ def fetch_activity(
     """
     if repos is None:
         repos = list(DEFAULT_REPOS)
+        if workspace:
+            workspace_repo = _get_workspace_repo(workspace)
+            if workspace_repo and workspace_repo not in repos:
+                repos = [workspace_repo] + repos
 
     activity = GitHubActivity(start_date=start, end_date=end)
     has_gh = _gh_available()

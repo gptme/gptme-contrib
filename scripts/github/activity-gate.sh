@@ -1527,7 +1527,7 @@ check_own_pr_review_state() {
 #: The account the trigger addresses, and whose reactions are the watermark.
 #: Matches ``REVIEWER_LOGIN`` in scripts/github/ai-review-sweep.py so the two
 #: triggers read identically to an operator.
-FIX_TRIGGER_LOGIN="TimeToBuildBob"
+FIX_TRIGGER_LOGIN="${BOT_USERNAME:-TimeToBuildBob}"
 
 #: Whole-line trigger, case-insensitive. Same shape as ai-review-sweep.py's
 #: ``TRIGGER_RE``: prose that merely mentions the phrase must not fire it.

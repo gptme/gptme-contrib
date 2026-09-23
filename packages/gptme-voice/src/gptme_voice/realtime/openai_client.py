@@ -79,6 +79,16 @@ def _detect_agent_repo() -> str | None:
     return None
 
 
+def _get_agent_name_from_workspace(workspace: str | None) -> str | None:
+    """Read [agent].name from the workspace's gptme.toml, or return None."""
+    if not workspace:
+        return None
+    project_config = get_project_config(Path(workspace), quiet=True)
+    if project_config and project_config.agent and project_config.agent.name:
+        return project_config.agent.name
+    return None
+
+
 def _load_project_instructions(workspace: str | None = None) -> str:
     """Load personality/instructions from gptme project config files.
 

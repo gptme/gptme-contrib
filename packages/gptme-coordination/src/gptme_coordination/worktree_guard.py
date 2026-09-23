@@ -57,19 +57,21 @@ def _get_session_pid() -> int:
     parent-PID fallback makes a marker look dead immediately after commit and
     is worse than recording no liveness signal.
     """
-    raw = os.environ.get("BOB_SESSION_PID", "")
-    if raw.isdigit():
-        return int(raw)
+    for var in ("AGENT_SESSION_PID", "BOB_SESSION_PID"):
+        raw = os.environ.get(var, "")
+        if raw.isdigit():
+            return int(raw)
     return 0
 
 
 def _get_agent_id() -> str:
     """Autonomous agent ID for sentinel-based liveness fallback."""
-    if agent_id := os.environ.get("BOB_AUTONOMOUS_AGENT_ID"):
-        return agent_id
+    for var in ("AGENT_AUTONOMOUS_AGENT_ID", "BOB_AUTONOMOUS_AGENT_ID"):
+        if agent_id := os.environ.get(var):
+            return agent_id
     if session_id := _get_session_id():
         harness = os.environ.get("BOB_AMBIENT_HARNESS", "agent")
-        return f"bob-autonomous-{harness}-{session_id}"
+        return f"agent-autonomous-{harness}-{session_id}"
     return ""
 
 
@@ -83,7 +85,10 @@ def _get_marker_agent_id() -> str:
     stores only an env-provided id; an empty value means the PID is the sole
     liveness signal, and a dead PID is treated as a dead holder.
     """
-    return os.environ.get("BOB_AUTONOMOUS_AGENT_ID", "")
+    for var in ("AGENT_AUTONOMOUS_AGENT_ID", "BOB_AUTONOMOUS_AGENT_ID"):
+        if agent_id := os.environ.get(var):
+            return agent_id
+    return ""
 
 
 _TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -470,7 +475,12 @@ def run_push_guard(
         return 0
 
     should_deny = (
-        deny if deny is not None else _env_flag("BOB_WORKTREE_PUSH_GUARD_DENY")
+        deny
+        if deny is not None
+        else (
+            _env_flag("AGENT_WORKTREE_PUSH_GUARD_DENY")
+            or _env_flag("BOB_WORKTREE_PUSH_GUARD_DENY")
+        )
     )
     try:
         from gptme_coordination.db import CoordinationDB, resolve_coordination_db_path
@@ -633,7 +643,14 @@ def run_guard(
     # Marker agent id: only an env-provided id is recorded, so a synthesized id
     # cannot make a dead holder look permanently alive (see _get_marker_agent_id).
     aid = agent_id if agent_id is not None else _get_marker_agent_id()
-    do_force = force if force is not None else _env_flag("BOB_WORKTREE_GUARD_FORCE")
+    do_force = (
+        force
+        if force is not None
+        else (
+            _env_flag("AGENT_WORKTREE_GUARD_FORCE")
+            or _env_flag("BOB_WORKTREE_GUARD_FORCE")
+        )
+    )
     now_iso = datetime.now(UTC).isoformat()
 
     # 3. No marker → try to adopt
