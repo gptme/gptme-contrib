@@ -648,10 +648,10 @@ CC_MODEL_VERSIONS: dict[str, str] = {
     # opus-4-6 (the actual historical majority) and opus-4-7 restarted from
     # priors.
     "opus": "opus-4-8",
-    # Opus 5.5 succession arm (2026-09-22, ErikBjare/bob#1284). Distinct from
-    # the "opus" alias (still maps to opus-4-8). $4/$20 per MTok (20% under
-    # Opus 5 $5/$25). CC rejects short "opus-5-5" (unrecognized_model, probed
-    # 2026-09-22) — harness dispatches as "claude-opus-5-5". Parallel window vs
+    # Opus 5.5 succession arm (2026-09-22). Distinct from the "opus" alias
+    # (still maps to opus-4-8). $4/$20 per MTok (20% under Opus 5 $5/$25).
+    # CC rejects short "opus-5-5" (unrecognized_model, probed 2026-09-22) —
+    # harness dispatches as "claude-opus-5-5". Parallel window vs
     # claude-code:opus; warm-started from opus-5 posterior (n0=8, E[p]=0.646).
     "opus-5-5": "opus-5-5",
     "claude-opus-5-5": "opus-5-5",
