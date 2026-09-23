@@ -112,6 +112,51 @@ def test_classified_401_writes_marker_and_retries_once(tmp_path: Path) -> None:
     assert (stale / "claude-code-test-auth-stale.txt").exists()
 
 
+def test_classified_401_retry_recovers(tmp_path: Path) -> None:
+    stale = tmp_path / "state"
+    stale.mkdir()
+    classify = tmp_path / "child.log"
+    classify.write_text("API Error: 401 Unauthorized\n")
+    counter = tmp_path / "count"
+    counter.write_text("")
+    flag = tmp_path / "failed_once"
+    # Fail (401) on the first attempt, succeed on the retry.
+    cmd = (
+        f'bash -c "echo x >> {counter}; '
+        f'if [ -f {flag} ]; then exit 0; fi; touch {flag}; exit 3"'
+    )
+    res = _bash(
+        f"with_auth_resilience --skip-preflight --backoff 0 "
+        f'--classify-file "{classify}" -- {cmd}',
+        env={
+            "STALE_DIR": str(stale),
+            "AUTH_SINGLE_SLOT": "1",
+            "AUTH_SLOT_NAME": "test",
+        },
+    )
+    assert res.returncode == 0, res.stderr  # retry recovered
+    assert counter.read_text().count("x") == 2  # initial attempt + one retry
+    # The first-attempt 401 still wrote a slot-scoped marker before recovery.
+    assert (stale / "claude-code-test-auth-stale.txt").exists()
+
+
+# --- write_marker skips the /login window ---
+
+
+def test_write_marker_skips_when_slot_unknown(tmp_path: Path) -> None:
+    # AUTH_SINGLE_SLOT with no AUTH_SLOT_NAME resolves the slot to "unknown"
+    # (the /login credential-swap window). A marker written then would block
+    # every slot fleet-wide, so write_marker must return 2 and write nothing.
+    stale = tmp_path / "state"
+    stale.mkdir()
+    res = _bash(
+        f'auth_resilience_write_marker --source test --dir "{stale}"',
+        env={"AUTH_SINGLE_SLOT": "1"},
+    )
+    assert res.returncode == 2
+    assert not list(stale.glob("*auth-stale*"))  # nothing written
+
+
 def test_non_401_failure_does_not_retry_or_mark(tmp_path: Path) -> None:
     stale = tmp_path / "state"
     stale.mkdir()
