@@ -252,3 +252,45 @@ def test_claim_unknown_task_fails(workspace: Path) -> None:
 # Sanity check: GPTODO_AGENT_NAME must not leak from the test runner's environment.
 def test_runner_env_does_not_leak(workspace: Path) -> None:
     assert "GPTODO_AGENT_NAME" not in os.environ
+
+
+def _added_meta(workspace: Path, title_slug: str) -> dict:
+    return load_meta(workspace / "tasks" / f"{title_slug}.md")
+
+
+def test_add_defaults_assignee_from_gptme_toml(workspace: Path) -> None:
+    """``add`` without --assigned-to uses the workspace agent, not a hardcoded name."""
+    (workspace / "gptme.toml").write_text('[agent]\nname = "Erik"\n')
+
+    result = CliRunner().invoke(cli, ["add", "Some task"])
+
+    assert result.exit_code == 0, result.output
+    assert _added_meta(workspace, "some-task")["assigned_to"] == "erik"
+
+
+def test_add_defaults_assignee_from_env(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GPTODO_AGENT_NAME", "alice")
+
+    result = CliRunner().invoke(cli, ["add", "Env task"])
+
+    assert result.exit_code == 0, result.output
+    assert _added_meta(workspace, "env-task")["assigned_to"] == "alice"
+
+
+def test_add_defaults_assignee_to_agent_without_config(workspace: Path) -> None:
+    (workspace / "gptme.toml").unlink()
+    (workspace / ".git").mkdir()  # keep find_repo_root anchored at the workspace
+
+    result = CliRunner().invoke(cli, ["add", "Bare task"])
+
+    assert result.exit_code == 0, result.output
+    assert _added_meta(workspace, "bare-task")["assigned_to"] == "agent"
+
+
+def test_add_explicit_assignee_wins(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GPTODO_AGENT_NAME", "alice")
+
+    result = CliRunner().invoke(cli, ["add", "Explicit task", "--assigned-to", "gordon"])
+
+    assert result.exit_code == 0, result.output
+    assert _added_meta(workspace, "explicit-task")["assigned_to"] == "gordon"

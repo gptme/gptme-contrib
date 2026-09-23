@@ -5788,8 +5788,8 @@ def list_all_locks(cleanup: bool, output_json: bool):
 )
 @click.option(
     "--assigned-to",
-    default="bob",
-    help="Who the task is assigned to",
+    default=None,
+    help="Who the task is assigned to (default: GPTODO_AGENT_NAME, then [agent].name from gptme.toml, else 'agent')",
 )
 @click.option(
     "--state",
@@ -5823,7 +5823,7 @@ def add(
     title: str,
     priority: str,
     tags: str | None,
-    assigned_to: str,
+    assigned_to: str | None,
     state: str,
     task_type: str,
 ):
@@ -5856,6 +5856,7 @@ def add(
     console = Console()
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
+    assigned_to = _resolve_agent_name(repo_root, assigned_to)
 
     # Ensure tasks directory exists
     tasks_dir.mkdir(parents=True, exist_ok=True)
