@@ -1525,8 +1525,8 @@ check_own_pr_review_state() {
 # fetch, which is a separate cost decision.
 
 #: The account the trigger addresses, and whose reactions are the watermark.
-#: Resolved from $BOT_USERNAME (default: TimeToBuildBob) so a non-Bob agent
-#: responds to ``@<its-login> fix`` and not to ``@TimeToBuildBob fix``.
+#: Resolved from $BOT_USERNAME (default: TimeToBuildBob) so another agent
+#: responds to ``@<its-login> fix`` and not to the default login's trigger.
 #: Matches the rest of this script, which already honors $BOT_USERNAME.
 FIX_TRIGGER_LOGIN="${BOT_USERNAME:-TimeToBuildBob}"
 
