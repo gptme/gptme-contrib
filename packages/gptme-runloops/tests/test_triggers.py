@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 from gptme_runloops.triggers import (
+    SuppressorSpec,
     TriggerDecision,
     TriggerSpec,
     TriggerState,
@@ -294,3 +295,111 @@ def test_record_then_mark_is_the_full_lifecycle(tmp_path):
     reloaded = load_state(p)
     assert reloaded.last_session_ts == 1000.0
     assert reloaded.last_reasons == ("inbox: 1 unread",)
+
+
+# --- shadow mode (soak a gate before flipping it on) -----------------------
+
+
+def test_shadow_trigger_records_would_fire_without_running():
+    # A shadow trigger that would fire is recorded, but does NOT set should_run.
+    d = evaluate(
+        [TriggerSpec("candidate", _fires("would fire"), shadow=True)], TriggerState()
+    )
+    assert d.should_run is False
+    assert d.reasons == ()
+    assert d.shadow_fired == (("candidate", "would fire"),)
+
+
+def test_shadow_trigger_does_not_rescue_an_otherwise_quiet_slot():
+    d = evaluate(
+        [
+            TriggerSpec("quiet", _quiet()),
+            TriggerSpec("candidate", _fires("would fire"), shadow=True),
+        ],
+        TriggerState(),
+    )
+    assert d.should_run is False
+    assert d.shadow_fired == (("candidate", "would fire"),)
+
+
+def test_live_trigger_fires_alongside_shadow_trigger():
+    # Live fires drive should_run; shadow fires are recorded separately, side by side.
+    d = evaluate(
+        [
+            TriggerSpec("inbox", _fires("1 unread")),
+            TriggerSpec("candidate", _fires("would fire"), shadow=True),
+        ],
+        TriggerState(),
+    )
+    assert d.should_run is True
+    assert d.reasons == (("inbox", "1 unread"),)
+    assert d.shadow_fired == (("candidate", "would fire"),)
+
+
+def test_quiet_shadow_trigger_records_nothing():
+    d = evaluate([TriggerSpec("candidate", _quiet(), shadow=True)], TriggerState())
+    assert d.should_run is False
+    assert d.shadow_fired == ()
+
+
+def test_shadow_suppressor_does_not_veto_but_is_recorded():
+    # The safest gate to soak: a would-be veto is observed, but the trigger still fires.
+    d = evaluate(
+        [TriggerSpec("routine", _fires("r"), suppressible=True)],
+        TriggerState(),
+        suppressors=[SuppressorSpec("new_quota", _suppress("would veto"), shadow=True)],
+    )
+    assert d.should_run is True
+    assert d.reasons == (("routine", "r"),)
+    assert d.suppressed == ()  # live veto set is empty
+    assert d.shadow_suppressed == (("new_quota", "would veto"),)
+
+
+def test_live_and_shadow_suppressors_are_recorded_separately():
+    d = evaluate(
+        [TriggerSpec("routine", _fires("r"), suppressible=True)],
+        TriggerState(),
+        suppressors=[
+            ("quota", _suppress("over-pace")),  # live: bare tuple, back-compat
+            SuppressorSpec("new_quota", _suppress("would veto"), shadow=True),
+        ],
+    )
+    assert d.should_run is False  # the live suppressor vetoes the suppressible trigger
+    assert d.suppressed == (("quota", "over-pace"),)
+    assert d.shadow_suppressed == (("new_quota", "would veto"),)
+
+
+def test_shadow_suppressible_trigger_is_skipped_under_live_suppression():
+    # Faithful counterfactual: if this shadow trigger were live it would be suppressed
+    # here, so it does not even evaluate → nothing recorded in shadow_fired.
+    d = evaluate(
+        [
+            TriggerSpec(
+                "candidate", _fires("would fire"), suppressible=True, shadow=True
+            )
+        ],
+        TriggerState(),
+        suppressors=[("quota", _suppress("over-pace"))],
+    )
+    assert d.should_run is False
+    assert d.shadow_fired == ()
+    assert d.suppressed == (("quota", "over-pace"),)
+
+
+def test_bare_tuple_suppressor_still_supported_for_backcompat():
+    # The pre-shadow API (Iterable[tuple[str, Suppressor]]) must keep working unchanged.
+    d = evaluate(
+        [TriggerSpec("routine", _fires("r"), suppressible=True)],
+        TriggerState(),
+        suppressors=[("quota", _suppress("over-pace"))],
+    )
+    assert d.should_run is False
+    assert d.suppressed == (("quota", "over-pace"),)
+    assert d.shadow_suppressed == ()
+
+
+def test_decision_shadow_fields_default_empty():
+    # Back-compat: a TriggerDecision can be built without the shadow fields.
+    d = TriggerDecision(should_run=True, reasons=(("x", "y"),), suppressed=())
+    assert d.shadow_fired == ()
+    assert d.shadow_suppressed == ()

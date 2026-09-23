@@ -30,17 +30,23 @@ Design contract (per the shared-core arc's mechanism-vs-policy rule):
 * State is a single durable JSON file with ``blocked_until`` and a ``last_reasons`` audit
   trail. Observation vs. commit is a clean split: the gate persists *observation* state;
   advancing ``last_session_ts`` is a separate post-session call (:func:`mark_session`).
+* A trigger or suppressor may be marked **shadow** (Bob's autonomous-gate.sh "shadow
+  mode"): it is evaluated against live state exactly as it would be if enforced, but its
+  verdict does *not* affect the fire/skip outcome — it is recorded separately in
+  :class:`TriggerDecision` (``shadow_fired`` / ``shadow_suppressed``) so a new gate can be
+  soaked against real traffic before it is flipped on. This is how a fork adds a gate
+  without risking a wedge on day one.
 
 Domain triggers (Gordon's settlement/NYSE checks, Alice's Sunday/late-night calendar)
 are **not** part of this library — they register as local plugins. The library owns the
 framework: the uniform signature, the suppressor concept, the durable state, and the
 ``max_skip`` floor.
 
-This first cut ships the two pieces both agents already agree on semantically — the
-durable :class:`TriggerState` contract and the :func:`max_skip_trigger` floor — plus the
-:func:`evaluate` composer that wires triggers and suppressors together. Remaining domain
-triggers follow as local plugins; the decision table here is pinned by contract tests so
-the eventual cut-over from the bash/inline gates is provably behaviour-preserving.
+This first cut ships the pieces both agents already agree on semantically — the durable
+:class:`TriggerState` contract, the :func:`max_skip_trigger` floor, and shadow mode — plus
+the :func:`evaluate` composer that wires triggers and suppressors together. Remaining
+domain triggers follow as local plugins; the decision table here is pinned by contract
+tests so the eventual cut-over from the bash/inline gates is provably behaviour-preserving.
 """
 
 from __future__ import annotations
@@ -167,11 +173,36 @@ class TriggerSpec:
     ``suppressible=False`` marks a signal that always runs regardless of backoff/quota
     suppressors (inbox, settlement, the ``max_skip`` floor). ``suppressible=True`` marks
     a signal that a suppressor may veto (routine work-signal checks).
+
+    ``shadow=True`` marks a trigger being *soaked*: it is evaluated under the same rules as
+    a live trigger, but a fire is recorded in :attr:`TriggerDecision.shadow_fired` instead
+    of contributing to ``should_run``. Flip it to ``shadow=False`` once the soak shows it
+    fires when (and only when) it should.
     """
 
     name: str
     check: Trigger
     suppressible: bool = True
+    shadow: bool = False
+
+
+@dataclass(frozen=True)
+class SuppressorSpec:
+    """A registered suppressor plus whether it is being soaked in shadow mode.
+
+    ``shadow=True`` evaluates the suppressor but does *not* let its veto affect the fire
+    decision — an active shadow suppressor is recorded in
+    :attr:`TriggerDecision.shadow_suppressed` only. This is the safest gate to soak: a new
+    suppressor is the thing that can *stop* runs, so you want to see how often it would
+    have vetoed before it actually can.
+
+    :func:`evaluate` also accepts a bare ``(name, suppressor)`` tuple for back-compat; such
+    an entry is treated as a live (non-shadow) suppressor.
+    """
+
+    name: str
+    check: Suppressor
+    shadow: bool = False
 
 
 @dataclass(frozen=True)
@@ -179,13 +210,20 @@ class TriggerDecision:
     """Outcome of a trigger-gate evaluation.
 
     ``should_run`` is the fire decision; ``reasons`` is the ``(name, reason)`` list that
-    justified it (empty when skipping); ``suppressed`` records which suppressors were
-    active, for the audit trail even on a run.
+    justified it (empty when skipping); ``suppressed`` records which *live* suppressors
+    were active, for the audit trail even on a run.
+
+    ``shadow_fired`` / ``shadow_suppressed`` carry the counterfactual verdicts of any
+    shadow-mode triggers/suppressors — what they *would* have done had they been live.
+    They never affect ``should_run``; they exist so a soak can be tallied. Both are empty
+    when nothing is being soaked.
     """
 
     should_run: bool
     reasons: tuple[tuple[str, str], ...]
     suppressed: tuple[tuple[str, str], ...]
+    shadow_fired: tuple[tuple[str, str], ...] = ()
+    shadow_suppressed: tuple[tuple[str, str], ...] = ()
 
 
 def _run_check(check: Trigger, state: TriggerState) -> tuple[bool, str | None]:
@@ -196,49 +234,72 @@ def _run_check(check: Trigger, state: TriggerState) -> tuple[bool, str | None]:
         return False, None
 
 
+def _as_suppressor_spec(
+    entry: SuppressorSpec | tuple[str, Suppressor],
+) -> SuppressorSpec:
+    """Normalize a suppressor entry, accepting bare ``(name, suppressor)`` for back-compat."""
+    if isinstance(entry, SuppressorSpec):
+        return entry
+    name, suppressor = entry
+    return SuppressorSpec(name=name, check=suppressor)
+
+
 def evaluate(
     triggers: Iterable[TriggerSpec],
     state: TriggerState,
     *,
-    suppressors: Iterable[tuple[str, Suppressor]] = (),
+    suppressors: Iterable[SuppressorSpec | tuple[str, Suppressor]] = (),
 ) -> TriggerDecision:
     """Compose triggers and suppressors into a single fire/skip decision.
 
     Semantics (Gordon's, made first-class):
 
-    1. Run every suppressor. Each ``(suppressed, reason)`` that is true records a veto.
-    2. If any suppressor is active, only **non-suppressible** triggers are evaluated;
-       otherwise every trigger is evaluated.
+    1. Run every suppressor. Each active *live* veto records into ``suppressed``; an active
+       *shadow* veto records into ``shadow_suppressed`` instead and does not gate anything.
+    2. If any live suppressor is active, only **non-suppressible** triggers are evaluated;
+       otherwise every trigger is evaluated. (Shadow suppressors never gate triggers — that
+       is the whole point of soaking them.)
     3. Each evaluated trigger runs fail-closed (an exception → not fired).
-    4. ``should_run`` is true iff at least one trigger fired. The fired ``(name, reason)``
-       pairs become ``reasons`` (and the caller should persist them to
-       ``TriggerState.last_reasons`` via :func:`record_decision`).
+    4. ``should_run`` is true iff at least one **live** trigger fired. Live fires become
+       ``reasons`` (and the caller should persist them to ``TriggerState.last_reasons`` via
+       :func:`record_decision`); shadow fires become ``shadow_fired`` and never set
+       ``should_run``.
 
     The composite is fail-open provided a non-suppressible :func:`max_skip_trigger` is
     among ``triggers`` — that guarantees an eventual fire no matter what suppressors do.
+
+    Suppressor entries may be :class:`SuppressorSpec` (to mark ``shadow=True``) or a bare
+    ``(name, suppressor)`` tuple (treated as live).
     """
     active_suppressors: list[tuple[str, str]] = []
-    for name, suppressor in suppressors:
+    shadow_suppressed: list[tuple[str, str]] = []
+    for entry in suppressors:
+        sup = _as_suppressor_spec(entry)
         try:
-            suppressed, reason = suppressor(state)
+            suppressed, reason = sup.check(state)
         except Exception:  # noqa: BLE001 - a broken suppressor must not veto everything
             continue
         if suppressed:
-            active_suppressors.append((name, reason or name))
+            pair = (sup.name, reason or sup.name)
+            (shadow_suppressed if sup.shadow else active_suppressors).append(pair)
 
     any_suppressed = bool(active_suppressors)
     fired: list[tuple[str, str]] = []
+    shadow_fired: list[tuple[str, str]] = []
     for spec in triggers:
         if any_suppressed and spec.suppressible:
             continue
         did_fire, reason = _run_check(spec.check, state)
         if did_fire:
-            fired.append((spec.name, reason or spec.name))
+            pair = (spec.name, reason or spec.name)
+            (shadow_fired if spec.shadow else fired).append(pair)
 
     return TriggerDecision(
         should_run=bool(fired),
         reasons=tuple(fired),
         suppressed=tuple(active_suppressors),
+        shadow_fired=tuple(shadow_fired),
+        shadow_suppressed=tuple(shadow_suppressed),
     )
 
 
