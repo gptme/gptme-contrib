@@ -129,3 +129,70 @@ def test_journal_clean_vacuum_does_not_warn(tmp_path: Path) -> None:
     out = _vacuum_with_fake_journalctl(tmp_path, vacuum_exit=0, vacuum_stderr="")
     assert "WARN" not in out
     assert "User journal after" in out
+
+
+def _prune_uv_cache(tmp_path: Path, dry_run: str = "false") -> tuple[str, str]:
+    """Run hygiene_prune_uv_cache with a stubbed uv binary; return (stdout, stderr)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    cachedir = tmp_path / "uv-cache"
+    cachedir.mkdir()
+    # Stub that reports a fake cache dir and records which subcommand was called.
+    call_log = tmp_path / "uv-calls.log"
+    fake_uv = bindir / "uv"
+    fake_uv.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "$@" >> "{call_log}"\n'
+        # For `uv cache dir` → echo the fake cache dir
+        'if [[ "$1 $2" == "cache dir" ]]; then\n'
+        f'  echo "{cachedir}"\n'
+        "  exit 0\n"
+        "fi\n"
+        # For `uv cache prune --force` → pretend to prune
+        'if [[ "$1 $2 $3" == "cache prune --force" ]]; then\n'
+        '  echo "Pruned 12 packages"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n"
+    )
+    fake_uv.chmod(0o755)
+    script = f'source "{LIB}"; hygiene_prune_uv_cache {dry_run}'
+    proc = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+    )
+    return proc.stdout, proc.stderr
+
+
+def test_uv_prune_calls_force_flag(tmp_path: Path) -> None:
+    # Must use `uv cache prune --force`, never `uv cache clean` or bare `prune`.
+    _, _ = _prune_uv_cache(tmp_path, dry_run="false")
+    call_log = tmp_path / "uv-calls.log"
+    calls = call_log.read_text().splitlines()
+    assert any("cache prune --force" in c for c in calls), f"unexpected calls: {calls}"
+    assert not any("cache clean" in c for c in calls), "must not call uv cache clean"
+
+
+def test_uv_prune_dry_run_skips_prune(tmp_path: Path) -> None:
+    out, _ = _prune_uv_cache(tmp_path, dry_run="true")
+    call_log = tmp_path / "uv-calls.log"
+    calls = call_log.read_text().splitlines() if call_log.exists() else []
+    assert "dry-run" in out
+    assert not any("prune --force" in c for c in calls), "dry-run must not prune"
+
+
+def test_uv_prune_degrades_when_absent(tmp_path: Path) -> None:
+    # When uv is not in PATH, the function degrades visibly (no error, skip message).
+    script = f'source "{LIB}"; hygiene_prune_uv_cache false'
+    proc = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+    )
+    assert "not present" in proc.stdout
+    assert "degrade" in proc.stdout
