@@ -170,7 +170,12 @@ def _pr(comments: list[dict]) -> dict:
 
 
 def _run_gate(
-    tmp: Path, fixture: dict, *, state_dir: Path, gh_log: Path
+    tmp: Path,
+    fixture: dict,
+    *,
+    state_dir: Path,
+    gh_log: Path,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[dict]]:
     """Run activity-gate.sh once. Returns (result, reaction POSTs made)."""
     fixture_path = tmp / "fixture.json"
@@ -184,6 +189,10 @@ def _run_gate(
     env["GH_FIXTURE"] = str(fixture_path)
     env["GH_LOG"] = str(gh_log)
     env["PATH"] = f"{tmp}:{env['PATH']}"
+    # Pin the default login so ambient BOT_USERNAME cannot retarget the trigger.
+    env["BOT_USERNAME"] = BOT
+    if extra_env:
+        env.update(extra_env)
 
     result = subprocess.run(
         [
@@ -546,3 +555,43 @@ def test_trigger_on_its_own_line_in_a_longer_comment_fires() -> None:
             gh_log=tmp / "gh.log",
         )
         assert len(_fix_items(result)) == 1, result.stdout
+
+
+def test_bot_username_override_fires_for_that_login() -> None:
+    """A non-Bob agent must respond to ``@<its-login> fix``, not only Bob's."""
+    other = "TimeToLearnAlice"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        result, posts = _run_gate(
+            tmp,
+            _fixture([_comment(body=f"@{other} fix")]),
+            state_dir=state_dir,
+            gh_log=tmp / "gh.log",
+            extra_env={"BOT_USERNAME": other},
+        )
+        assert result.returncode in (0, 1), result.stderr
+        items = _fix_items(result)
+        assert len(items) == 1, f"expected one fix item, got {items}\n{result.stdout}"
+        assert len(posts) == 1, posts
+
+
+def test_bot_username_override_ignores_timetobuildbob_trigger() -> None:
+    """Hard-coded ``@TimeToBuildBob fix`` must not trigger another agent's worker."""
+    other = "TimeToLearnAlice"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        result, posts = _run_gate(
+            tmp,
+            _fixture(_trusted_request()),
+            state_dir=state_dir,
+            gh_log=tmp / "gh.log",
+            extra_env={"BOT_USERNAME": other},
+        )
+        assert _fix_items(result) == [], result.stdout
+        assert posts == [], posts

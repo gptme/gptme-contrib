@@ -1525,9 +1525,10 @@ check_own_pr_review_state() {
 # fetch, which is a separate cost decision.
 
 #: The account the trigger addresses, and whose reactions are the watermark.
-#: Matches ``REVIEWER_LOGIN`` in scripts/github/ai-review-sweep.py so the two
-#: triggers read identically to an operator.
-FIX_TRIGGER_LOGIN="TimeToBuildBob"
+#: Resolved from $BOT_USERNAME (default: TimeToBuildBob) so a non-Bob agent
+#: responds to ``@<its-login> fix`` and not to ``@TimeToBuildBob fix``.
+#: Matches the rest of this script, which already honors $BOT_USERNAME.
+FIX_TRIGGER_LOGIN="${BOT_USERNAME:-TimeToBuildBob}"
 
 #: Whole-line trigger, case-insensitive. Same shape as ai-review-sweep.py's
 #: ``TRIGGER_RE``: prose that merely mentions the phrase must not fire it.

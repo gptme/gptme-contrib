@@ -283,14 +283,17 @@ _is_permission_blocked_merge_ready_pr_uncached() {
     [[ "$is_draft" == "false" ]] || return 1
     [[ "$non_success_count" == "0" ]] || return 1
 
-    # Check Bob's full comment history, not just the last comment — later
+    # Check the bot's full comment history, not just the last comment — later
     # routine "CI is now green" status updates often bury the canonical
     # waiting phrase without invalidating the acknowledgment. Matches the
     # signal set used by activity-gate.sh so the two suppression paths stay
     # aligned (see ErikBjare/bob#680).
-    local bot_comments
+    # Bot username is resolved from $BOT_USERNAME (default: TimeToBuildBob) to
+    # keep the helper reusable across forks — same pattern as activity-gate.sh.
+    local bot bot_comments
+    bot="${BOT_USERNAME:-TimeToBuildBob}"
     bot_comments=$(gh api "repos/$repo/issues/$number/comments?per_page=100" \
-        --jq '[.[] | select(.user.login == "TimeToBuildBob") | .body] | join("\n")' 2>/dev/null) || return 2
+        --jq "[.[] | select(.user.login == \"$bot\") | .body] | join(\"\n\")" 2>/dev/null) || return 2
 
     [[ -n "$bot_comments" ]] || return 1
 
@@ -311,10 +314,10 @@ _is_permission_blocked_merge_ready_pr_uncached() {
     return 1
 }
 
-# Suppress notifications for PRs that are already merge-ready and where Bob has
-# already left a maintainer-facing "waiting only on a maintainer click" status
-# comment. These stay OPEN from the notification system's perspective, but
-# revisiting them produces fake-ready work and repeated comment churn.
+# Suppress notifications for PRs that are already merge-ready and where the
+# bot has already left a maintainer-facing "waiting only on a maintainer click"
+# status comment. These stay OPEN from the notification system's perspective,
+# but revisiting them produces fake-ready work and repeated comment churn.
 is_permission_blocked_merge_ready_pr() {
     local repo=$1
     local number=$2
