@@ -3331,12 +3331,13 @@ def extract_from_path(jsonl_path: Path) -> dict:
     }
     if usage:
         result["usage"] = usage
-    # Attach per-step phase timings for gptme sessions (gptme/gptme#3436).
-    # Other formats don't carry per-message timing metadata so we skip them.
-    if fmt == "gptme":
-        timings = extract_timings_gptme(msgs)
-        if timings:
-            result["timings"] = timings
+    # Attach per-step phase timings when available (gptme/gptme#3436).
+    # extract_timings_gptme is format-agnostic: it looks for metadata.timings
+    # on any assistant message and returns {} if none found, so it's safe to
+    # call for all formats.
+    timings = extract_timings_gptme(msgs)
+    if timings:
+        result["timings"] = timings
     # Subagent structure (count/depth/concurrency/classifier) reuses
     # child_specs already built from the transcripts loaded above so the
     # usage roll-up and this summary cannot diverge. A second tree walk
