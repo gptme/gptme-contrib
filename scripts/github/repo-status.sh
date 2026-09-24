@@ -215,6 +215,19 @@ check_repo() {
         run_json="$product_json"
     fi
 
+    # Filter out startup_failure runs from deleted/ghost workflows. GitHub keeps
+    # historical check-suite records for workflows that were added with invalid YAML
+    # and then deleted (state=deleted, path=BuildFailed). These fire as push-event
+    # startup_failure runs with an empty name on every commit and mask real CI status.
+    # project-monitoring-dispatch.sh already excludes startup_failure via the same
+    # logic. Only filter when non-startup_failure runs remain so a repo with a
+    # genuinely broken workflow still surfaces.
+    local non_startup_json
+    non_startup_json=$(echo "$run_json" | jq '[.[] | select(.conclusion != "startup_failure")]')
+    if [ "$(echo "$non_startup_json" | jq 'length')" -gt 0 ]; then
+        run_json="$non_startup_json"
+    fi
+
     local conclusion status in_progress=""
     conclusion=$(echo "$run_json" | jq -r '.[0].conclusion // ""')
     status=$(echo "$run_json" | jq -r '.[0].status // ""')
