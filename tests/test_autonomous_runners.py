@@ -199,3 +199,67 @@ def test_cc_runner_lock_excludes_overlapping_processes(tmp_path: Path) -> None:
         timeout=5,
     )
     assert third.returncode == 0, third.stdout
+
+
+def test_autonomous_loop_direct_mode_runs_n_times(tmp_path: Path) -> None:
+    """Tier-0 direct mode (-d) runs the run script N times without systemd."""
+    workspace = tmp_path / "workspace"
+    loop = _copy_runner("autonomous-loop.sh", workspace)
+    call_log = tmp_path / "runs.log"
+    run_script = workspace / "run.sh"
+    _write_executable(run_script, f'#!/bin/bash\necho run >> "{call_log}"\n')
+
+    env = _clean_environment(tmp_path)
+    env["AGENT_LOOP_COOLDOWN"] = "0"
+    result = subprocess.run(
+        [str(loop), "-d", "-r", str(run_script), "-n", "2"],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stdout
+    assert "Mode: direct" in result.stdout
+    assert call_log.read_text().count("run") == 2
+
+
+def test_autonomous_loop_direct_mode_continues_on_failure(tmp_path: Path) -> None:
+    """A non-zero run exit is one failed session, not a loop abort."""
+    workspace = tmp_path / "workspace"
+    loop = _copy_runner("autonomous-loop.sh", workspace)
+    run_script = workspace / "fail.sh"
+    _write_executable(run_script, "#!/bin/bash\nexit 1\n")
+
+    env = _clean_environment(tmp_path)
+    env["AGENT_LOOP_COOLDOWN"] = "0"
+    result = subprocess.run(
+        [str(loop), "-d", "-r", str(run_script), "-n", "2"],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=10,
+    )
+    # Loop completes its requested runs even though every session failed.
+    assert result.returncode == 0, result.stdout
+    assert "2 failed to start" in result.stdout
+
+
+def test_autonomous_loop_direct_mode_errors_without_run_script(tmp_path: Path) -> None:
+    """Direct mode with no resolvable run command fails loudly (exit 1)."""
+    workspace = tmp_path / "workspace"
+    loop = _copy_runner("autonomous-loop.sh", workspace)
+
+    env = _clean_environment(tmp_path)
+    result = subprocess.run(
+        [str(loop), "-d", "-n", "1"],
+        cwd=str(tmp_path / "home"),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=10,
+    )
+    assert result.returncode == 1
+    assert "could not find an autonomous run script" in result.stdout
