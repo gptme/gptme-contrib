@@ -104,6 +104,16 @@ def _run(
     }
 
 
+def _ts(seconds_ago: int, *, fractional: bool = False) -> str:
+    """Fixture timestamp relative to now, so tests stay inside the gate's
+    3-day --created window regardless of when they run (hermetic suite)."""
+    t = (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).replace(
+        microsecond=0
+    )
+    base = t.strftime("%Y-%m-%dT%H:%M:%S")
+    return base + (".000Z" if fractional else "Z")
+
+
 def _failed_run(run_id: int, event: str) -> dict:
     return _run(run_id, event)
 
@@ -166,14 +176,14 @@ def test_newer_success_of_same_workflow_suppresses_stale_failure(
             "schedule",
             conclusion="failure",
             name="Tests",
-            created_at="2026-09-12T14:33:34Z",
+            created_at=_ts(2 * 86400),
         ),
         _run(
             202,
             "schedule",
             conclusion="success",
             name="Tests",
-            created_at="2026-09-23T10:24:29Z",
+            created_at=_ts(3600),
         ),
     ]
     result = _run_gate(tmp_path, runs)
@@ -190,14 +200,14 @@ def test_nightly_failure_is_not_push_ci_master_failure(tmp_path: Path) -> None:
             "schedule",
             conclusion="failure",
             name="Tests (Full — Nightly)",
-            created_at="2026-09-23T09:44:23Z",
+            created_at=_ts(2 * 86400 + 2406),
         ),
         _run(
             302,
             "schedule",
             conclusion="success",
             name="Tests",
-            created_at="2026-09-23T10:24:29Z",
+            created_at=_ts(2 * 86400),
         ),
     ]
     result = _run_gate(tmp_path, runs)
@@ -215,20 +225,21 @@ def test_success_with_fractional_second_precision_still_suppresses(
     (``.000Z``) sorts lexicographically before the bare-``Z`` failure even
     though it is not earlier in time; normalization must suppress the failure.
     """
+    instant = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0)
     runs = [
         _run(
             501,
             "schedule",
             conclusion="failure",
             name="Tests",
-            created_at="2026-09-23T10:24:29Z",
+            created_at=instant.strftime("%Y-%m-%dT%H:%M:%SZ"),
         ),
         _run(
             502,
             "schedule",
             conclusion="success",
             name="Tests",
-            created_at="2026-09-23T10:24:29.000Z",
+            created_at=instant.strftime("%Y-%m-%dT%H:%M:%S") + ".000Z",
         ),
     ]
     result = _run_gate(tmp_path, runs)
@@ -244,14 +255,14 @@ def test_unrecovered_tests_failure_is_still_emitted(tmp_path: Path) -> None:
             "schedule",
             conclusion="failure",
             name="Tests",
-            created_at="2026-09-23T02:13:44Z",
+            created_at=_ts(2 * 86400),
         ),
         _run(
             402,
             "schedule",
             conclusion="success",
             name="Pre-commit",
-            created_at="2026-09-23T11:39:43Z",
+            created_at=_ts(3600),
         ),
     ]
     result = _run_gate(tmp_path, runs)
