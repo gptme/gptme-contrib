@@ -290,10 +290,15 @@ _is_permission_blocked_merge_ready_pr_uncached() {
     # aligned (see ErikBjare/bob#680).
     # Bot username is resolved from $BOT_USERNAME (default: TimeToBuildBob) to
     # keep the helper reusable across forks — same pattern as activity-gate.sh.
-    local bot bot_comments
+    # Passed to jq with --arg rather than interpolated into the filter: an
+    # env-supplied login containing a quote or backslash would otherwise break
+    # the jq program (and is an injection vector). ``gh api --jq`` has no --arg
+    # equivalent, so the JSON is fetched first and piped to jq directly.
+    local bot bot_json bot_comments
     bot="${BOT_USERNAME:-TimeToBuildBob}"
-    bot_comments=$(gh api "repos/$repo/issues/$number/comments?per_page=100" \
-        --jq "[.[] | select(.user.login == \"$bot\") | .body] | join(\"\n\")" 2>/dev/null) || return 2
+    bot_json=$(gh api "repos/$repo/issues/$number/comments?per_page=100" 2>/dev/null) || return 2
+    bot_comments=$(printf '%s' "$bot_json" | jq -r --arg bot "$bot" \
+        '[.[] | select(.user.login == $bot) | .body] | join("\n")' 2>/dev/null) || return 2
 
     [[ -n "$bot_comments" ]] || return 1
 

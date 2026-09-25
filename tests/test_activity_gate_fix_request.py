@@ -595,3 +595,31 @@ def test_bot_username_override_ignores_timetobuildbob_trigger() -> None:
         )
         assert _fix_items(result) == [], result.stdout
         assert posts == [], posts
+
+
+def test_bot_username_with_jq_special_characters_still_reads_reactions() -> None:
+    """A login containing ``"`` must not break the served-ness jq filter.
+
+    ``$FIX_TRIGGER_LOGIN`` now comes from ``$BOT_USERNAME``. If it is
+    interpolated into the jq program instead of passed with ``--arg``, the
+    program is invalid for such a login, the reaction query comes back empty,
+    and the gate reads every trigger as already served — silently dropping the
+    maintainer's fix request.
+    """
+    other = 'Bad"Name'
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        result, posts = _run_gate(
+            tmp,
+            _fixture([_comment(body=f"@{other} fix")]),
+            state_dir=state_dir,
+            gh_log=tmp / "gh.log",
+            extra_env={"BOT_USERNAME": other},
+        )
+        assert result.returncode in (0, 1), result.stderr
+        items = _fix_items(result)
+        assert len(items) == 1, f"expected one fix item, got {items}\n{result.stdout}"
+        assert len(posts) == 1, posts

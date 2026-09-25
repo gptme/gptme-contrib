@@ -1581,10 +1581,15 @@ pending_fix_request() {
     # the comment as unserved and emit again on every cycle — an unbounded
     # dispatch loop, the exact shape of the 29x @greptileai incident. --slurp
     # wraps the pages in an outer array, hence the `.[][]` flatten.
-    ours=$(gh api "repos/${repo}/issues/comments/${comment_id}/reactions" \
-        --paginate --slurp -F per_page=100 \
-        --jq "[.[][] | select(((.user // {}).login // \"\") == \"$FIX_TRIGGER_LOGIN\")] | length" \
-        2>/dev/null) || return 0
+    # $FIX_TRIGGER_LOGIN comes from $BOT_USERNAME, so it is interpolated via
+    # jq --arg rather than into the filter text — a login containing a quote or
+    # backslash would otherwise break the jq program (and is an injection
+    # vector). ``gh api --jq`` has no --arg equivalent, hence the pipe.
+    local ours_json
+    ours_json=$(gh api "repos/${repo}/issues/comments/${comment_id}/reactions" \
+        --paginate --slurp -F per_page=100 2>/dev/null) || return 0
+    ours=$(printf '%s' "$ours_json" | jq -r --arg me "$FIX_TRIGGER_LOGIN" \
+        '[.[][] | select(((.user // {}).login // "") == $me)] | length' 2>/dev/null) || return 0
     # Empty output means the call failed or returned something unparseable →
     # treat as served, same as a real reaction. Never as pending.
     [ -z "$ours" ] && return 0
