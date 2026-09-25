@@ -19,6 +19,7 @@ token auth (OpenAI remote MCP sends this on every request).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import ipaddress
 import json
@@ -28,6 +29,7 @@ import secrets
 import sys
 import threading
 from collections import defaultdict
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -103,6 +105,13 @@ class ChatGPTBridge:
         # reply is not delivered to two simultaneous callers.
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        # Sessions with a thread that has been handed the lock and has not yet
+        # left the critical section. Eviction must never reclaim one of these:
+        # a lock picked up but not yet acquired is invisible to `.locked()`, and
+        # dropping it would let a second caller create a fresh lock for the same
+        # session — two threads then hold different locks and race on the
+        # surfaced ledger (duplicate delivery).
+        self._in_flight: dict[str, int] = {}
 
         # FastMCP server — tools registered below
         self.mcp = FastMCP("bob-chatgpt-bridge")
@@ -117,29 +126,53 @@ class ChatGPTBridge:
     def _auth_ok(self, request: Request) -> bool:
         return self._auth_ok_headers(request.headers)
 
-    def _session_lock(self, session_id: str) -> threading.Lock:
+    @contextlib.contextmanager
+    def _session_lock(self, session_id: str) -> Iterator[None]:
+        """Hold this session's lock across the check-and-add critical section.
+
+        The lock reference and the in-flight registration are taken under
+        ``_locks_guard``, *before* the lock is acquired, so eviction can never
+        run between the two: a lock that has been handed to a caller is always
+        counted in ``_in_flight`` until that caller leaves the section.
+        """
         with self._locks_guard:
             lock = self._locks.get(session_id)
             if lock is None:
                 self._evict_idle_sessions()
                 lock = threading.Lock()
                 self._locks[session_id] = lock
-            return lock
+            self._in_flight[session_id] = self._in_flight.get(session_id, 0) + 1
+        try:
+            with lock:
+                yield
+        finally:
+            with self._locks_guard:
+                remaining = self._in_flight[session_id] - 1
+                if remaining:
+                    self._in_flight[session_id] = remaining
+                else:
+                    del self._in_flight[session_id]
 
     def _evict_idle_sessions(self) -> None:
         """Keep the per-session maps bounded on a long-lived server.
 
-        Caller must hold ``self._locks_guard``. Only sessions with an unheld
-        lock and no live surfaced ids are evicted: dropping a lock that is in
-        use would reopen the check-and-add race the lock exists for, and a
-        non-empty ledger still gates re-delivery.
+        Caller must hold ``self._locks_guard``. Only sessions with no in-flight
+        caller, an unheld lock, and no live surfaced ids are evicted: dropping a
+        lock that is in use would reopen the check-and-add race the lock exists
+        for, and a non-empty ledger still gates re-delivery. ``locked()`` is
+        kept alongside ``_in_flight`` so a lock handed out by a test (or any
+        holder not registered through ``_session_lock``) is still respected.
         """
         if len(self._locks) < _MAX_TRACKED_SESSIONS:
             return
         for session_id in list(self._locks):
             if len(self._locks) < _MAX_TRACKED_SESSIONS:
                 break
-            if self._locks[session_id].locked() or self._surfaced.get(session_id):
+            if (
+                self._in_flight.get(session_id)
+                or self._locks[session_id].locked()
+                or self._surfaced.get(session_id)
+            ):
                 continue
             del self._locks[session_id]
             self._surfaced.pop(session_id, None)
@@ -151,13 +184,20 @@ class ChatGPTBridge:
         if not auth.lower().startswith("bearer "):
             return False
         # constant-time compare: a plain == leaks the token byte-by-byte to a
-        # timing attacker who can reach the port. Compared as UTF-8 bytes:
+        # timing attacker who can reach the port. Compared as bytes:
         # secrets.compare_digest(str, str) raises TypeError on non-ASCII
         # input (Starlette decodes headers as latin-1, so the credential is
         # attacker-controlled), while bytes input never raises — a malformed
         # header gets a clean 401 instead of a 500 traceback.
+        # The header side is re-encoded as latin-1, not UTF-8: Starlette
+        # decoded the raw header bytes as latin-1, so latin-1 is the exact
+        # inverse and recovers the bytes the client actually sent (a UTF-8
+        # token). Encoding the decoded string as UTF-8 instead would mangle
+        # every non-ASCII byte (`é` → `Ã©`), rejecting a valid non-ASCII
+        # token forever. latin-1 is total over latin-1-decoded strings, so
+        # this cannot raise either.
         return secrets.compare_digest(
-            auth[7:].strip().encode("utf-8"),
+            auth[7:].strip().encode("latin-1"),
             self._token.encode("utf-8"),
         )
 
