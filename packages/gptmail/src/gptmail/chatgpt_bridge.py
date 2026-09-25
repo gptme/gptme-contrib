@@ -191,10 +191,19 @@ class ChatGPTBridge:
                     if path.is_symlink() or not resolved.is_relative_to(transport.outbox.resolve()):
                         continue
                     try:
+                        # O_NOFOLLOW closes the check-to-read symlink swap
+                        # (TOCTOU): the open fails on a symlinked final
+                        # component instead of following it.
+                        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                    except OSError:
+                        continue
+                    try:
+                        with os.fdopen(fd, "rb") as f:
+                            raw = f.read()
                         # decode bytes directly: a file that was concurrently
                         # deleted or holds invalid UTF-8 must not break the
                         # whole call for every other reply in the session.
-                        content = path.read_bytes().decode("utf-8", errors="replace")
+                        content = raw.decode("utf-8", errors="replace")
                     except OSError:
                         continue
                     body = self._extract_body(content)
