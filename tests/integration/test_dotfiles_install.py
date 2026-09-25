@@ -135,5 +135,39 @@ def test_missing_identity_does_not_fail_install(fake_home):
     assert not (fake_home / ".config" / "git" / "allowed-identities.conf").exists()
 
 
+def test_repo_local_identity_is_never_used_for_the_conf(fake_home, tmp_path):
+    """The cwd's repo-local identity is not the agent's commit identity.
+
+    install.sh is normally run from the dotfiles checkout (see README), so
+    falling back to ``git config user.email`` would read that checkout's config.
+    A conf naming the wrong identity blocks every commit, which is worse than
+    writing no conf at all — so the fallback must not exist.
+    """
+    env = _clean_git_env()
+    env["HOME"] = str(fake_home)
+    env["DOTFILES_FORCE"] = "1"
+    env.pop("XDG_CONFIG_HOME", None)
+
+    # A checkout with a repo-local identity, and no global identity at all.
+    checkout = tmp_path / "dotfiles-checkout"
+    checkout.mkdir()
+    for args in (
+        ["git", "init"],
+        ["git", "config", "--local", "user.email", "checkout-owner@example.com"],
+        ["git", "config", "--local", "user.name", "Checkout Owner"],
+    ):
+        subprocess.run(args, cwd=checkout, env=env, check=True, capture_output=True)
+
+    result = _run_install(env, cwd=checkout)
+    assert result.returncode == 0, result.stderr
+
+    conf = fake_home / ".config" / "git" / "allowed-identities.conf"
+    assert not conf.exists(), (
+        "repo-local identity leaked into allowed-identities.conf: "
+        f"{conf.read_text() if conf.exists() else ''}"
+    )
+    assert "not set" in result.stdout
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

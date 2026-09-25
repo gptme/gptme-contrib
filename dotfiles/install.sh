@@ -120,17 +120,20 @@ handle_existing_hooks_dir() {
 install_allowed_identities() {
     local conf="$HOME/.config/git/allowed-identities.conf"
     local email
-    # Prefer the agent's global identity; fall back to whatever the current
-    # repo resolves so a repo-local-only setup still works.
+    # Only the global identity is authoritative. `git config user.email` without
+    # --global resolves the config of whatever repo this script is run from
+    # (README: the dotfiles checkout), which is not necessarily the agent's
+    # commit identity. A conf that names the wrong identity blocks every commit
+    # outright, which is strictly worse than writing none — so never infer it
+    # from the cwd's repo-local config.
     email="$(git config --global user.email 2>/dev/null || true)"
-    if [ -z "$email" ]; then
-        email="$(git config user.email 2>/dev/null || true)"
-    fi
 
     if [ -z "$email" ]; then
-        echo -e "${YELLOW}⚠️  git user.email is not set — skipping allowed-identities.conf${NC}"
+        echo -e "${YELLOW}⚠️  git --global user.email is not set — skipping allowed-identities.conf${NC}"
         echo "   The pre-commit hook will refuse every commit until an identity is set."
         echo "   Fix: git config --global user.email you@example.com; then re-run this script."
+        echo "   (An identity set only in one repo's local config is not read here — add"
+        echo "    it to $conf by hand if you commit with it.)"
         return 0
     fi
 
