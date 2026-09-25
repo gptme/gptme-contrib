@@ -132,8 +132,11 @@ hygiene_prune_uv_cache() {
         return 0
     fi
 
-    local before
-    before=$(uv cache dir 2>/dev/null)
+    local before=""
+    # Neutralize the assignment status: a plain `before=$(...)` fails under
+    # `set -e` if `uv cache dir` exits non-zero (misconfigured cache, wrapper),
+    # aborting this prune AND every subsequent hygiene step in the caller.
+    before=$(uv cache dir 2>/dev/null) || before=""
     local before_size="unknown"
     if [[ -n "$before" && -d "$before" ]]; then
         # Capture the value, then fall back on emptiness: `du | cut || echo` never
