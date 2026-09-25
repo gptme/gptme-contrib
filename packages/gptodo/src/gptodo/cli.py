@@ -3648,10 +3648,15 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
 
     # Build a dependency-resolution dict that also includes archived tasks so that
     # tasks whose prerequisites were moved to tasks/archive/ are not falsely blocked.
-    dep_dict: Dict[str, TaskInfo] = dict(tasks_dict)
+    # Archived tasks are added first and live tasks overlaid on top: a live task with
+    # the same name must win, matching `gptodo check`'s dependency_universe (which
+    # lists live tasks first). Otherwise a stale archived copy would shadow the live
+    # task's state and falsely unblock anything depending on that name.
+    dep_dict: Dict[str, TaskInfo] = {}
     archive_dir = tasks_dir / "archive"
     if archive_dir.is_dir():
         dep_dict.update({t.name: t for t in load_tasks(archive_dir, recursive=True)})
+    dep_dict.update(tasks_dict)
 
     # Load cache if requested
     issue_cache: Dict[str, Any] | None = None
@@ -3912,10 +3917,15 @@ def next_(output_json, use_cache, pool_filter, exclude_pool, limit, order):
 
     # Build a dependency-resolution dict that also includes archived tasks so that
     # tasks whose prerequisites were moved to tasks/archive/ are not falsely blocked.
-    dep_dict: Dict[str, TaskInfo] = dict(tasks_dict)
+    # Archived tasks are added first and live tasks overlaid on top: a live task with
+    # the same name must win, matching `gptodo check`'s dependency_universe (which
+    # lists live tasks first). Otherwise a stale archived copy would shadow the live
+    # task's state and falsely unblock anything depending on that name.
+    dep_dict: Dict[str, TaskInfo] = {}
     archive_dir = tasks_dir / "archive"
     if archive_dir.is_dir():
         dep_dict.update({t.name: t for t in load_tasks(archive_dir, recursive=True)})
+    dep_dict.update(tasks_dict)
 
     # Load cache if requested
     issue_cache: Dict[str, Any] | None = None
