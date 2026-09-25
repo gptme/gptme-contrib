@@ -109,7 +109,11 @@ def _load_chatgpt_bridge_main():
     if _chatgpt_bridge_main is None:
         try:
             from gptmail.chatgpt_bridge import main as main_
-        except ModuleNotFoundError as e:
+        except ImportError as e:
+            # ImportError, not ModuleNotFoundError: the bridge module imports
+            # starlette/mcp at module top level, so a partially-installed extra
+            # (or a transitive import that moved) raises the base class. Catch
+            # it all so the user gets the install hint, not a traceback.
             raise click.ClickException(
                 "chatgpt-bridge requires the bridge extra: pip install 'gptmail[bridge]'"
             ) from e
