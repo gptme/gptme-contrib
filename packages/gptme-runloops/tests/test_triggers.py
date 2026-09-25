@@ -132,6 +132,16 @@ def test_max_skip_fresh_fork_fires_immediately():
     assert fired is True
 
 
+def test_max_skip_future_timestamp_forces_run():
+    # A future last_session_ts (clock skew / cross-machine write / corrupt edit)
+    # gives negative elapsed. The floor must NOT silently stay quiet — that would
+    # wedge the fail-open safety valve, the exact failure it exists to prevent.
+    state = TriggerState(last_session_ts=100 * 3600)
+    fired, reason = max_skip_trigger(state, max_skip_hours=6.0, now=1 * 3600)
+    assert fired is True
+    assert reason is not None and "future" in reason
+
+
 # --- evaluate: core truth table -------------------------------------------
 
 
