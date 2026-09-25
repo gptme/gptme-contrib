@@ -17,6 +17,7 @@ from gptme_voice.handoff import (
     build_handoff,
     caller_hash,
     compute_hmac,
+    get_valid_agents,
     make_state_dirs,
     validate,
 )
@@ -276,3 +277,120 @@ def test_archive_filename_encodes_both_agents_and_id():
     assert name.startswith("1777000000-bob-alice-")
     assert payload["handoff_id"] in name
     assert name.endswith(".json")
+
+
+# ---------- configurable agent roster ----------
+
+
+CUSTOM_ROSTER = frozenset({"charlie", "delta"})
+
+
+def test_build_handoff_with_custom_roster():
+    """A non-default agent name works when valid_agents is supplied."""
+    payload = build_handoff(
+        from_agent="charlie",
+        to_agent="delta",
+        caller_id="test-caller",
+        reason="escalation",
+        secret=SECRET,
+        now=SAMPLE_NOW,
+        valid_agents=CUSTOM_ROSTER,
+    )
+    result = validate(
+        payload,
+        secret=SECRET,
+        now=SAMPLE_VALIDATION_NOW,
+        valid_agents=CUSTOM_ROSTER,
+    )
+    assert result.ok, result.reason
+    assert payload["from_agent"] == "charlie"
+    assert payload["to_agent"] == "delta"
+
+
+def test_build_handoff_custom_agent_rejected_without_explicit_roster():
+    """Without an explicit roster, a non-default name must still fail."""
+    with pytest.raises(ValueError, match="not in"):
+        build_handoff(
+            from_agent="charlie",
+            to_agent="delta",
+            caller_id="test-caller",
+            reason="escalation",
+            secret=SECRET,
+            now=SAMPLE_NOW,
+        )
+
+
+def test_validate_rejects_non_roster_agent_with_custom_roster():
+    """validate() rejects an agent not in the supplied roster."""
+    payload = build_handoff(
+        from_agent="charlie",
+        to_agent="delta",
+        caller_id="test-caller",
+        reason="escalation",
+        secret=SECRET,
+        now=SAMPLE_NOW,
+        valid_agents=CUSTOM_ROSTER,
+    )
+    # Validating with the default roster must reject charlie/delta.
+    result = validate(payload, secret=SECRET, now=SAMPLE_VALIDATION_NOW)
+    assert not result.ok
+    assert "charlie" in result.reason or "delta" in result.reason
+
+
+def test_handoff_writer_with_custom_roster(tmp_path: Path):
+    """HandoffWriter accepts a non-default from_agent when valid_agents is provided."""
+    writer = HandoffWriter(
+        tmp_path,
+        from_agent="charlie",
+        secret=SECRET,
+        valid_agents=CUSTOM_ROSTER,
+    )
+    published = writer.initiate(
+        to_agent="delta",
+        caller_id="+15550001234",
+        reason="escalation",
+    )
+    assert published.path.is_file()
+    result = validate(
+        published.payload,
+        secret=SECRET,
+        now=SAMPLE_VALIDATION_NOW,
+        valid_agents=CUSTOM_ROSTER,
+    )
+    assert result.ok, result.reason
+
+
+def test_handoff_writer_rejects_unknown_agent_with_default_roster(tmp_path: Path):
+    """Without a custom roster, HandoffWriter still rejects non-default names."""
+    with pytest.raises(ValueError, match="not in"):
+        HandoffWriter(tmp_path, from_agent="charlie", secret=SECRET)
+
+
+def test_get_valid_agents_reads_env_var(monkeypatch):
+    """GPTME_VOICE_AGENT_ROSTER overrides the built-in roster."""
+    monkeypatch.setenv("GPTME_VOICE_AGENT_ROSTER", "charlie, delta, echo")
+    roster = get_valid_agents()
+    assert roster == frozenset({"charlie", "delta", "echo"})
+
+
+def test_get_valid_agents_falls_back_to_default(monkeypatch):
+    """Without the env var the built-in VALID_AGENTS is returned."""
+    monkeypatch.delenv("GPTME_VOICE_AGENT_ROSTER", raising=False)
+    from gptme_voice.handoff import VALID_AGENTS
+
+    assert get_valid_agents() == VALID_AGENTS
+
+
+def test_env_var_roster_enables_non_default_agent_roundtrip(monkeypatch):
+    """End-to-end: GPTME_VOICE_AGENT_ROSTER lets a fork's agent name work."""
+    monkeypatch.setenv("GPTME_VOICE_AGENT_ROSTER", "charlie,delta")
+    payload = build_handoff(
+        from_agent="charlie",
+        to_agent="delta",
+        caller_id="caller-1",
+        reason="transfer",
+        secret=SECRET,
+        now=SAMPLE_NOW,
+    )
+    result = validate(payload, secret=SECRET, now=SAMPLE_VALIDATION_NOW)
+    assert result.ok, result.reason

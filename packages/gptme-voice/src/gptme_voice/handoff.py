@@ -54,6 +54,27 @@ VALID_AGENTS: frozenset[str] = frozenset({"bob", "alice", "gordon", "sven"})
 
 STATE_SUBDIRS: tuple[str, ...] = ("handoff", "claimed", "archive", "rejected")
 
+
+def get_valid_agents() -> frozenset[str]:
+    """Return the effective agent roster for this deployment.
+
+    Reads ``GPTME_VOICE_AGENT_ROSTER`` (comma-separated agent names) when set;
+    falls back to the built-in :data:`VALID_AGENTS` frozenset.  This lets any
+    fork that names its agent something other than bob/alice/gordon/sven
+    participate in the handoff protocol without patching the library.
+
+    Example::
+
+        GPTME_VOICE_AGENT_ROSTER=bob,alice,charlie gptme-voice ...
+    """
+    env_roster = os.environ.get("GPTME_VOICE_AGENT_ROSTER", "").strip()
+    if env_roster:
+        agents = frozenset(n.strip() for n in env_roster.split(",") if n.strip())
+        if agents:
+            return agents
+    return VALID_AGENTS
+
+
 _DEFAULT_TTL_SECONDS = 60
 
 
@@ -93,11 +114,16 @@ def validate(
     *,
     secret: bytes | None = None,
     now: datetime | None = None,
+    valid_agents: frozenset[str] | None = None,
 ) -> ValidationResult:
     """Validate a handoff payload against protocol v1.
 
     If ``secret`` is provided, HMAC is verified. If omitted, HMAC field presence is
     checked but its value is not verified (useful for draft validation before signing).
+
+    ``valid_agents`` overrides the effective roster.  When *None* (the default),
+    :func:`get_valid_agents` is called, which reads ``GPTME_VOICE_AGENT_ROSTER``
+    from the environment and falls back to the built-in set.
     """
     if not isinstance(payload, dict):
         return ValidationResult(False, "payload is not a JSON object")
@@ -115,11 +141,12 @@ def validate(
         if field not in payload:
             return ValidationResult(False, f"missing required field: {field}")
 
+    roster = valid_agents if valid_agents is not None else get_valid_agents()
     for agent_field in ("from_agent", "to_agent"):
-        if payload[agent_field] not in VALID_AGENTS:
+        if payload[agent_field] not in roster:
             return ValidationResult(
                 False,
-                f"{agent_field}={payload[agent_field]!r} not in {sorted(VALID_AGENTS)}",
+                f"{agent_field}={payload[agent_field]!r} not in {sorted(roster)}",
             )
     if payload["from_agent"] == payload["to_agent"]:
         return ValidationResult(False, "from_agent and to_agent must differ")
@@ -187,6 +214,7 @@ def build_handoff(
     ttl_seconds: int = _DEFAULT_TTL_SECONDS,
     now: datetime | None = None,
     extra: dict[str, Any] | None = None,
+    valid_agents: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Construct and sign a protocol-v1 handoff payload.
 
@@ -194,11 +222,14 @@ def build_handoff(
     Pass ``extra`` for optional fields (``context_summary``, ``pending_actions``,
     ``resume_hint``, etc.) that aren't required by the validator but are useful
     for the target agent.
+
+    ``valid_agents`` overrides the effective roster (default: :func:`get_valid_agents`).
     """
-    if from_agent not in VALID_AGENTS:
-        raise ValueError(f"from_agent={from_agent!r} not in {sorted(VALID_AGENTS)}")
-    if to_agent not in VALID_AGENTS:
-        raise ValueError(f"to_agent={to_agent!r} not in {sorted(VALID_AGENTS)}")
+    roster = valid_agents if valid_agents is not None else get_valid_agents()
+    if from_agent not in roster:
+        raise ValueError(f"from_agent={from_agent!r} not in {sorted(roster)}")
+    if to_agent not in roster:
+        raise ValueError(f"to_agent={to_agent!r} not in {sorted(roster)}")
     if from_agent == to_agent:
         raise ValueError("from_agent and to_agent must differ")
 
@@ -308,14 +339,17 @@ class HandoffWriter:
         *,
         from_agent: str,
         secret: bytes,
+        valid_agents: frozenset[str] | None = None,
     ) -> None:
-        if from_agent not in VALID_AGENTS:
-            raise ValueError(f"from_agent={from_agent!r} not in {sorted(VALID_AGENTS)}")
+        roster = valid_agents if valid_agents is not None else get_valid_agents()
+        if from_agent not in roster:
+            raise ValueError(f"from_agent={from_agent!r} not in {sorted(roster)}")
         if not secret:
             raise ValueError("secret must be non-empty bytes")
         self.state_dir = state_dir
         self.from_agent = from_agent
         self.secret = secret
+        self._valid_agents = roster
         self._dirs = make_state_dirs(state_dir)
 
     @property
@@ -350,6 +384,7 @@ class HandoffWriter:
             ttl_seconds=ttl_seconds,
             now=now,
             extra=extra,
+            valid_agents=self._valid_agents,
         )
         digest = payload["caller_hash"]
         seq = _next_sequence(self.handoff_dir, digest)
@@ -374,15 +409,18 @@ class HandoffHubWriter:
         bearer_token: str,
         from_agent: str,
         secret: bytes,
+        valid_agents: frozenset[str] | None = None,
     ) -> None:
-        if from_agent not in VALID_AGENTS:
-            raise ValueError(f"from_agent={from_agent!r} not in {sorted(VALID_AGENTS)}")
+        roster = valid_agents if valid_agents is not None else get_valid_agents()
+        if from_agent not in roster:
+            raise ValueError(f"from_agent={from_agent!r} not in {sorted(roster)}")
         if not secret:
             raise ValueError("secret must be non-empty bytes")
         self.hub_url = hub_url.rstrip("/")
         self.bearer_token = bearer_token
         self.from_agent = from_agent
         self.secret = secret
+        self._valid_agents = roster
 
     def initiate(
         self,
@@ -415,6 +453,7 @@ class HandoffHubWriter:
             ttl_seconds=ttl_seconds,
             now=now,
             extra=extra,
+            valid_agents=self._valid_agents,
         )
         body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         req = urllib.request.Request(
@@ -466,6 +505,7 @@ __all__ = [
     "build_handoff",
     "caller_hash",
     "compute_hmac",
+    "get_valid_agents",
     "make_state_dirs",
     "validate",
 ]
