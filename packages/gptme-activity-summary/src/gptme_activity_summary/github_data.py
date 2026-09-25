@@ -28,24 +28,44 @@ PROJECT_REPOS = [
 LIST_LIMIT = 100
 
 
+#: Hosts whose ``owner/name`` this module may hand to the GitHub CLI.
+_GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
+
+
+def _remote_host(url: str) -> str | None:
+    """Return the lowercased host of a git remote URL, or None if it has none.
+
+    Strips userinfo (``git@``) and an optional port, so ``ssh://git@github.com:22/x``
+    and ``git@github.com:x`` both yield ``github.com``.
+    """
+    if url.startswith("git@") and ":" in url:
+        netloc = url.split(":", 1)[0]
+    elif "://" in url:
+        netloc = url.split("://", 1)[1].split("/", 1)[0]
+    else:
+        return None
+    netloc = netloc.rsplit("@", 1)[-1].split(":", 1)[0]
+    return netloc.lower() or None
+
+
 def repo_from_remote_url(url: str) -> str | None:
-    """Extract ``owner/name`` from a git remote URL, or None if unparseable.
+    """Extract ``owner/name`` from a GitHub remote URL, or None if unparseable.
 
     Handles the common spellings: ``git@github.com:owner/name.git``,
     ``https://github.com/owner/name(.git)`` and ``ssh://git@github.com/...``.
+    Non-GitHub remotes return None: ``owner/name`` is only meaningful to the
+    GitHub CLI, which every caller feeds it to.
     """
     url = url.strip()
-    if not url:
+    if not url or _remote_host(url) not in _GITHUB_HOSTS:
         return None
     if url.startswith("git@") and ":" in url:
         path = url.split(":", 1)[1]
-    elif "://" in url:
+    else:
         after_scheme = url.split("://", 1)[1]
         if "/" not in after_scheme:
             return None
         path = after_scheme.split("/", 1)[1]
-    else:
-        path = url
     # Normalise before suffix-stripping: a trailing slash after `.git`
     # (`.../name.git/`) would otherwise leave `name.git` as the repo name.
     path = path.strip("/")
@@ -793,9 +813,15 @@ def fetch_activity(
 
     activity = GitHubActivity(start_date=start, end_date=end)
     has_gh = _gh_available()
-    requested_repos = list(repos)
+    # De-duplicate both the names as requested and the names GitHub resolves them
+    # to. A stale remote name that redirects to a project repo (or a repeated
+    # ``--repo``) would otherwise be fetched twice, double-counting its merged
+    # PRs, closed issues and reviews.
+    requested_repos = list(dict.fromkeys(repos))
     if has_gh:
-        repos = [_canonical_repo(repo) for repo in repos]
+        repos = list(dict.fromkeys(_canonical_repo(repo) for repo in requested_repos))
+    else:
+        repos = requested_repos
 
     for repo in repos:
         repo_activity = RepoActivity(repo=repo)

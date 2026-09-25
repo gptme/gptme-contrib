@@ -35,6 +35,11 @@ from gptme_activity_summary.github_data import (
 )
 
 
+#: Tests that shell out to ``git`` skip (rather than fail) on a runner without
+#: it — the same guard used by ``test_get_commit_count_excludes_adjacent_days``.
+requires_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+
+
 def _init_repo_with_remote(path, url: str) -> None:
     """Create a git repo at ``path`` whose ``origin`` is ``url``."""
     subprocess.run(["git", "init", "-q", str(path)], check=True)
@@ -51,6 +56,11 @@ def _init_repo_with_remote(path, url: str) -> None:
         ("https://github.com/NewAgent/agent-brain/", "NewAgent/agent-brain"),
         ("https://github.com/NewAgent/agent-brain.git/", "NewAgent/agent-brain"),
         ("git@github.com:NewAgent/agent-brain.git/", "NewAgent/agent-brain"),
+        ("ssh://git@github.com:2222/NewAgent/agent-brain.git", "NewAgent/agent-brain"),
+        ("https://www.github.com/NewAgent/agent-brain", "NewAgent/agent-brain"),
+        ("https://gitlab.com/NewAgent/agent-brain.git", None),
+        ("git@gitlab.com:NewAgent/agent-brain.git", None),
+        ("ssh://git@gitlab.com/NewAgent/agent-brain.git", None),
         ("", None),
         ("/home/bob/bob", None),
         ("https://github.com/only-owner", None),
@@ -61,6 +71,7 @@ def test_repo_from_remote_url(url: str, expected: str | None):
     assert repo_from_remote_url(url) == expected
 
 
+@requires_git
 def test_detect_workspace_repo_reads_origin(tmp_path):
     """The workspace repo comes from its origin remote."""
     _init_repo_with_remote(tmp_path, "git@github.com:NewAgent/agent-brain.git")
@@ -68,6 +79,7 @@ def test_detect_workspace_repo_reads_origin(tmp_path):
     assert detect_workspace_repo(tmp_path) == "NewAgent/agent-brain"
 
 
+@requires_git
 def test_detect_workspace_repo_none_without_remote_or_workspace(tmp_path):
     """No remote (or no workspace) means no detectable repo."""
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
@@ -76,6 +88,7 @@ def test_detect_workspace_repo_none_without_remote_or_workspace(tmp_path):
     assert detect_workspace_repo(None) is None
 
 
+@requires_git
 def test_default_repos_derives_workspace_repo_not_bob(tmp_path):
     """A non-Bob workspace must summarize its own repo, never ErikBjare/gptme-bob."""
     _init_repo_with_remote(tmp_path, "git@github.com:NewAgent/agent-brain.git")
@@ -87,6 +100,7 @@ def test_default_repos_derives_workspace_repo_not_bob(tmp_path):
     assert "ErikBjare/gptme-bob" not in repos
 
 
+@requires_git
 def test_default_repos_without_workspace_repo_has_no_bob_repo(tmp_path):
     """With no remote to derive from, no Bob-specific repo may appear."""
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
@@ -96,6 +110,7 @@ def test_default_repos_without_workspace_repo_has_no_bob_repo(tmp_path):
     assert "ErikBjare/gptme-bob" not in default_repos(None)
 
 
+@requires_git
 def test_fetch_activity_defaults_to_workspace_repo(tmp_path):
     """The default fetch target follows the workspace, not a hard-coded repo."""
     _init_repo_with_remote(tmp_path, "git@github.com:NewAgent/agent-brain.git")
@@ -108,6 +123,7 @@ def test_fetch_activity_defaults_to_workspace_repo(tmp_path):
     assert "ErikBjare/gptme-bob" not in fetched
 
 
+@requires_git
 def test_default_repos_dedupes_project_repo_workspace(tmp_path):
     """A workspace that *is* a project repo is not summarized twice."""
     _init_repo_with_remote(tmp_path, "git@github.com:gptme/gptme-contrib.git")
@@ -118,6 +134,46 @@ def test_default_repos_dedupes_project_repo_workspace(tmp_path):
     assert len(repos) == len(set(repos))
 
 
+@requires_git
+def test_fetch_activity_dedupes_repos_that_canonicalize_together(tmp_path):
+    """A stale remote name that redirects to a project repo is not fetched twice."""
+    _init_repo_with_remote(tmp_path, "git@github.com:OldOrg/gptme-contrib.git")
+
+    def fake_canonical(repo: str) -> str:
+        return "gptme/gptme-contrib" if repo == "OldOrg/gptme-contrib" else repo
+
+    with (
+        patch("gptme_activity_summary.github_data._gh_available", return_value=True),
+        patch("gptme_activity_summary.github_data._canonical_repo", side_effect=fake_canonical),
+        patch("gptme_activity_summary.github_data.get_merged_prs", return_value=[]),
+        patch("gptme_activity_summary.github_data.get_closed_issues", return_value=[]),
+        patch("gptme_activity_summary.github_data.count_merged_prs", return_value=0),
+        patch("gptme_activity_summary.github_data.count_closed_issues", return_value=0),
+        patch("gptme_activity_summary.github_data.get_reviews_received", return_value=[]),
+        patch("gptme_activity_summary.github_data.get_cross_repo_prs", return_value=[]),
+        patch("gptme_activity_summary.github_data.get_commit_count", return_value=0),
+    ):
+        activity = fetch_activity(date(2026, 8, 1), date(2026, 8, 1), workspace=str(tmp_path))
+
+    fetched = [repo.repo for repo in activity.repos]
+    assert fetched == ["gptme/gptme-contrib", "gptme/gptme"]
+    assert len(fetched) == len(set(fetched))
+
+
+def test_fetch_activity_dedupes_explicit_repos():
+    """A repeated ``--repo`` value is fetched once."""
+    with patch("gptme_activity_summary.github_data._gh_available", return_value=False):
+        activity = fetch_activity(
+            date(2026, 8, 1),
+            date(2026, 8, 1),
+            repos=["gptme/gptme", "gptme/gptme"],
+            workspace=None,
+        )
+
+    assert [repo.repo for repo in activity.repos] == ["gptme/gptme"]
+
+
+@requires_git
 def test_fetch_activity_attributes_commits_to_workspace_repo(tmp_path):
     """Local commits belong to the workspace repo, not to a project repo."""
     _init_repo_with_remote(tmp_path, "git@github.com:NewAgent/agent-brain.git")
@@ -133,6 +189,7 @@ def test_fetch_activity_attributes_commits_to_workspace_repo(tmp_path):
     assert activity.total_commits == 7
 
 
+@requires_git
 def test_fetch_activity_does_not_credit_project_repo_without_workspace_repo(tmp_path):
     """With no derivable workspace repo, commits stay 'local', not gptme/gptme."""
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
