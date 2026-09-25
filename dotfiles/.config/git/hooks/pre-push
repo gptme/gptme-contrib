@@ -13,6 +13,22 @@ SCRIPT_DIR="$(dirname "$0")"
 # config dir textually, and the agent's own allowed-repos.conf is read instead
 # of the shared checkout's template copy (see pre-commit for the full note).
 HOOK_CONF_DIR="$(dirname "$SCRIPT_DIR")"
+_read_hook_conf() {
+    # Sourced in a subshell and serialized back with `declare -p`, so a stray
+    # `exit` in a hand-edited conf cannot terminate this hook and skip the
+    # guards below it (see pre-commit for the full note).
+    local name="$1" var="$2"
+    local _serialized
+    _serialized="$(
+        set +e
+        # shellcheck source=/dev/null
+        source "$HOOK_CONF_DIR/$name"
+        declare -p "$var" 2>/dev/null || exit 1
+    )" || return 1
+    [ -n "$_serialized" ] || return 1
+    eval "${_serialized/#declare -a/declare -ga}" || return 1
+    return 0
+}
 
 # Git invokes: pre-push <remote-name> <remote-url>
 # Used to skip origin-specific work when pushing to a mirror or other remote.
@@ -218,7 +234,7 @@ fi
 # Falls back to empty array if config doesn't exist (backwards compatible)
 # No "$SCRIPT_DIR/.." fallback: through the installed hooks symlink that would
 # load the shared checkout's template config instead of the agent's own.
-source "$HOOK_CONF_DIR/allowed-repos.conf" 2>/dev/null || ALLOWED_PATTERNS=()
+_read_hook_conf allowed-repos.conf ALLOWED_PATTERNS || ALLOWED_PATTERNS=()
 
 REMOTE_URL=$(git remote get-url origin 2>/dev/null || echo "")
 

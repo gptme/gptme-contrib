@@ -26,14 +26,30 @@ HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 # textual, so it gives the agent's config dir for both layouts.
 HOOK_CONF_DIR="$(dirname "$HOOK_DIR")"
 _read_hook_conf() {
-    # Source the agent's config file. HOOK_CONF_DIR already covers both layouts
-    # (symlinked install and real-directory install), so there is deliberately
-    # no "$HOOK_DIR/.." fallback: through a symlink that would load the shared
-    # checkout's template config instead of the agent's own.
-    local name="$1"
-    # shellcheck source=/dev/null
-    source "$HOOK_CONF_DIR/$name" 2>/dev/null && return 0
-    return 1
+    # Source the agent's config file into `var`. HOOK_CONF_DIR already covers
+    # both layouts (symlinked install and real-directory install), so there is
+    # deliberately no "$HOOK_DIR/.." fallback: through a symlink that would load
+    # the shared checkout's template config instead of the agent's own.
+    #
+    # The file is sourced in a subshell and the array is serialized back with
+    # `declare -p`. Sourcing it directly would let a hand-edited conf containing
+    # `exit` terminate this hook outright — git would see a successful pre-commit
+    # and every guard below would be skipped, with no way for the caller to
+    # notice. Inside a subshell the worst case is an empty serialization, which
+    # is exactly the fail-closed signal the callers act on.
+    local name="$1" var="$2"
+    local _serialized
+    _serialized="$(
+        set +e
+        # shellcheck source=/dev/null
+        source "$HOOK_CONF_DIR/$name"
+        declare -p "$var" 2>/dev/null || exit 1
+    )" || return 1
+    # Empty output means the conf stopped early (e.g. `exit 0`): fail closed.
+    [ -n "$_serialized" ] || return 1
+    # -g because eval runs inside this function, where a bare `declare` is local.
+    eval "${_serialized/#declare -a/declare -ga}" || return 1
+    return 0
 }
 
 # --- Part 0: Mass-deletion guard (~1ms, runs unconditionally) ---
@@ -92,7 +108,8 @@ if [ "${ALLOW_GIT_IDENTITY:-0}" != "1" ]; then
     # An existing-but-unparsable conf must fail closed: silently keeping the
     # built-in allowlist would ignore an override the agent wrote on purpose.
     _identity_conf="$HOOK_CONF_DIR/allowed-identities.conf"
-    if [ -f "$_identity_conf" ] && ! _read_hook_conf allowed-identities.conf; then
+    if [ -f "$_identity_conf" ] &&
+        ! _read_hook_conf allowed-identities.conf IDENTITY_ALLOWLIST; then
         echo -e "${RED}ABORT: ${_identity_conf} exists but could not be sourced.${NC}"
         echo    "   Fix the file (syntax error?), or bypass this commit with ALLOW_GIT_IDENTITY=1."
         exit 1
@@ -167,7 +184,7 @@ if [ "$BRANCH" = "master" ] || [ "$BRANCH" = "main" ]; then
 
     # Source allowed repos from config file (shared with pre-push hook)
     # Falls back to empty array if config doesn't exist (backwards compatible)
-    _read_hook_conf allowed-repos.conf || ALLOWED_PATTERNS=()
+    _read_hook_conf allowed-repos.conf ALLOWED_PATTERNS || ALLOWED_PATTERNS=()
 
     is_allowed=false
 

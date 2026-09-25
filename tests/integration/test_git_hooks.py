@@ -219,6 +219,19 @@ class TestMasterMainProtection:
         assert result.returncode == 1
         assert "blocked" in result.stdout.lower() or "error" in result.stdout.lower()
 
+    def test_conf_with_exit_cannot_disable_master_protection(self, hook_env):
+        """A conf containing `exit 0` must not turn the pre-push guard off."""
+        (hook_env / ".git" / "allowed-repos.conf").write_text(
+            'ALLOWED_PATTERNS=(\n    "other/repo"\n)\nexit 0\n'
+        )
+        result = run_pre_push_hook(
+            hook_env,
+            remote_url="https://github.com/random/repo",
+            ref_info="refs/heads/feature abc123 refs/heads/master def456",
+        )
+        assert result.returncode == 1
+        assert "blocked" in result.stdout.lower() or "error" in result.stdout.lower()
+
     def test_allows_push_to_feature_branch(self, hook_env):
         """Push to feature branches should be allowed."""
         result = run_pre_push_hook(
@@ -603,6 +616,20 @@ class TestGitIdentityValidation:
             'IDENTITY_ALLOWLIST=(\n    "unterminated\n'
         )
         result = run_pre_commit_hook(hook_env, "bob@superuserlabs.org")
+        assert result.returncode != 0
+        assert "could not be sourced" in (result.stdout + result.stderr)
+
+    def test_conf_with_exit_cannot_switch_the_hook_off(self, hook_env):
+        """A conf containing `exit 0` must not make the whole hook exit 0.
+
+        The conf is sourced into the hook's own shell, so an `exit` there used
+        to skip the identity guard, the master guard and everything else, while
+        git saw a successful pre-commit. It must fail closed instead.
+        """
+        (hook_env / ".git" / "allowed-identities.conf").write_text(
+            'IDENTITY_ALLOWLIST=(\n    "other@example.com"\n)\nexit 0\n'
+        )
+        result = run_pre_commit_hook(hook_env, "agent@example.com")
         assert result.returncode != 0
         assert "could not be sourced" in (result.stdout + result.stderr)
 
