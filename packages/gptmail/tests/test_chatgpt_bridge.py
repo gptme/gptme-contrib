@@ -338,6 +338,51 @@ class TestChatGPTBridge:
         delivered = sum(len(json.loads(r)["replies"]) for r in results)
         assert delivered == 1
 
+    @pytest.mark.anyio
+    async def test_limit_counts_new_replies_not_surfaced_ones(
+        self,
+        bridge: ChatGPTBridge,
+        session_id: str,
+        bob_transport: AgentTransport,
+    ) -> None:
+        """Already-surfaced messages must not consume the limit.
+
+        The cap is checked against ``len(replies)`` (collected *new* replies),
+        not against iterations, so a session with many read replies still
+        reaches an unread one at ``limit=1``.
+        """
+        for i in range(5):
+            bob_transport.send(to="chatgpt", subject=f"Old {i}", content="body")
+        await bridge.mcp.call_tool("bob_replies", {"session_id": session_id, "limit": 5})
+
+        bob_transport.send(to="chatgpt", subject="New", content="body")
+        result = await bridge.mcp.call_tool("bob_replies", {"session_id": session_id, "limit": 1})
+        data = self._parse_result(result)
+        assert [r["subject"] for r in data["replies"]] == ["New"]
+
+    @pytest.mark.anyio
+    async def test_ledger_is_pruned_when_outbox_message_disappears(
+        self,
+        bridge: ChatGPTBridge,
+        session_id: str,
+        bob_transport: AgentTransport,
+    ) -> None:
+        """bob_replies alone must flush stale ids, else the session is pinned.
+
+        The eviction sweep skips sessions with a non-empty ledger, so a session
+        that never calls bob_status would otherwise retain ids for messages it
+        can never be offered again.
+        """
+        bob_transport.send(to="chatgpt", subject="Gone soon", content="body")
+        await bridge.mcp.call_tool("bob_replies", {"session_id": session_id})
+        assert bridge._surfaced[session_id]
+
+        for entry in list(bob_transport.outbox.iterdir()):
+            entry.unlink()
+
+        await bridge.mcp.call_tool("bob_replies", {"session_id": session_id})
+        assert not bridge._surfaced[session_id]
+
     def test_explicit_empty_token_disables_auth_over_env(
         self, tmp_msgs: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -545,6 +590,34 @@ class TestOutboxConfinement:
         ids = [r["id"] for r in data["replies"]]
         assert f"..{os.sep}outside.txt" not in ids
         assert all("secret" not in r["body"] for r in data["replies"])
+
+    @pytest.mark.anyio
+    async def test_symlinked_outbox_dir_is_refused(
+        self,
+        bridge: ChatGPTBridge,
+        session_id: str,
+        bob_transport: AgentTransport,
+    ) -> None:
+        """A symlinked outbox directory must not be followed.
+
+        ``resolve()`` resolves *through* the link, so the containment check
+        passes while every read lands in the link target. The directory itself
+        is therefore opened with O_NOFOLLOW and reads fail closed.
+        """
+        bob_transport.send(to="chatgpt", subject="Secret", content="body")
+
+        real_outbox = bob_transport.outbox
+        elsewhere = real_outbox.parent / "elsewhere"
+        elsewhere.mkdir()
+        for entry in list(real_outbox.iterdir()):
+            entry.rename(elsewhere / entry.name)
+        real_outbox.rmdir()
+        real_outbox.symlink_to(elsewhere)
+
+        result = await bridge.mcp.call_tool("bob_replies", {"session_id": session_id})
+        data = json.loads(result[0][0].text)
+        assert data["replies"] == []
+        assert all("Secret" not in r["body"] for r in data["replies"])
 
     def test_idle_sessions_are_evicted(self, tmp_msgs: Path) -> None:
         """The per-session maps stay bounded on a long-lived server."""
