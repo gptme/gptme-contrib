@@ -448,6 +448,19 @@ class TestChatGPTBridge:
         assert bridge._auth_ok(_make_request({"authorization": "Bearer nope"})) is False
         assert bridge._auth_ok(_make_request({"authorization": "Bearer s3cret"})) is True
 
+    def test_non_ascii_token_authenticates(self, tmp_msgs: Path) -> None:
+        """A non-ASCII token must survive the latin-1 header round-trip.
+
+        The client sends the token as UTF-8 bytes; Starlette decodes raw header
+        bytes as latin-1. Comparing a UTF-8 re-encoding of that latin-1 string
+        against the UTF-8 token mangles every non-ASCII byte (`é` → `Ã©`), so a
+        valid non-ASCII credential would 401 forever. ``_make_request`` builds
+        the header through Starlette, so this exercises the real decode path.
+        """
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token="sécret")
+        assert bridge._auth_ok(_make_request({"authorization": "Bearer sécret"})) is True
+        assert bridge._auth_ok(_make_request({"authorization": "Bearer wrong"})) is False
+
     def test_non_ascii_bearer_is_401_not_crash(self, tmp_msgs: Path) -> None:
         """compare_digest(str, str) raises TypeError on non-ASCII; bytes must not.
 
@@ -625,10 +638,32 @@ class TestOutboxConfinement:
         for i in range(_MAX_TRACKED_SESSIONS):
             bridge._locks[f"idle-{i}"] = threading.Lock()
 
-        lock = bridge._session_lock("fresh")
+        with bridge._session_lock("fresh"):
+            assert "fresh" in bridge._locks
 
-        assert bridge._locks["fresh"] is lock
+        assert "fresh" in bridge._locks
         assert len(bridge._locks) <= _MAX_TRACKED_SESSIONS
+
+    def test_in_flight_lock_is_not_evicted(self, tmp_msgs: Path) -> None:
+        """A lock handed out but not yet acquired must survive eviction.
+
+        This is the window between ``_session_lock`` returning and the caller
+        acquiring: ``.locked()`` is False there, so without the in-flight
+        registration eviction would drop the lock and let a second caller
+        create a fresh one for the same session — two threads in the critical
+        section, which is the duplicate-delivery race the lock exists to stop.
+        """
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs)
+        bridge._locks["about-to-acquire"] = threading.Lock()
+        bridge._in_flight["about-to-acquire"] = 1
+        for i in range(_MAX_TRACKED_SESSIONS):
+            bridge._locks[f"idle-{i}"] = threading.Lock()
+
+        with bridge._locks_guard:
+            bridge._evict_idle_sessions()
+
+        assert "about-to-acquire" in bridge._locks
+        assert len(bridge._locks) < _MAX_TRACKED_SESSIONS
 
     def test_held_lock_and_live_ledger_are_not_evicted(self, tmp_msgs: Path) -> None:
         """Eviction must not steal an in-flight lock or a live ledger."""
