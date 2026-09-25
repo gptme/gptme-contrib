@@ -3,8 +3,8 @@
 This is the *runtime-admission* abstraction (does this already-triggered session
 deserve to spend inference?), which is distinct from the *trigger* gate in
 ``session-gate.py`` (should a scheduled slot fire at all?). See the reconciliation
-in alice's ``knowledge/infrastructure/gate-chain-reconciliation.md`` — the two
-things called "gate" are different abstractions and get different libraries.
+in the ``gate-chain-reconciliation`` design note — the two things called "gate"
+are different abstractions and get different libraries.
 
 Design contract (per the shared-core arc's mechanism-vs-policy rule):
 
@@ -17,7 +17,7 @@ Design contract (per the shared-core arc's mechanism-vs-policy rule):
   chain, and the bypass calendar. A thin agent-local wrapper composes these gates.
 
 The first gate extracted here is :func:`state_delta_gate`, lifted byte-for-byte
-from alice's ``autonomous-run-cc.sh`` state-delta pre-gate. Its decision table is
+from the reference ``autonomous-run-cc.sh`` state-delta pre-gate. Its decision table is
 pinned by contract tests so the eventual cut-over from bash is provably
 behaviour-preserving.
 """
@@ -50,7 +50,7 @@ def state_delta_gate(
 ) -> GateDecision:
     """Skip a session when the last one no-op'd and nothing has changed since.
 
-    Mechanism (identical decision table to alice's ``autonomous-run-cc.sh`` stage):
+    Mechanism (identical decision table to the reference ``autonomous-run-cc.sh`` stage):
 
     1. **Gate inactive** when the session is forced or the noop-only streak is 0 —
        there is no reason to suppress a session that isn't part of a noop run.
@@ -63,7 +63,7 @@ def state_delta_gate(
     4. Otherwise **skip**: the session would almost certainly be a status-check noop.
 
     Policy stays with the caller: *which* streak counter is passed as
-    ``noop_only_streak`` (alice deliberately uses NOOP_ONLY_STREAK, not NOOP_STREAK,
+    ``noop_only_streak`` (the reference caller deliberately uses NOOP_ONLY_STREAK, not NOOP_STREAK,
     so runtime failures bypass the gate and reach the fail-guard), the pace-gap
     threshold that sets ``quota_behind_pace``, and what ``changes_detected`` probes.
 

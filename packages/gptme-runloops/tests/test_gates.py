@@ -1,7 +1,7 @@
 """Contract tests for composable runtime-admission gates.
 
 These pin the decision table of :func:`gptme_runloops.gates.state_delta_gate` to
-alice's ``autonomous-run-cc.sh`` state-delta pre-gate, so the eventual cut-over
+the reference ``autonomous-run-cc.sh`` state-delta pre-gate, so the eventual cut-over
 from bash to this function is provably behaviour-preserving. Each case below maps
 to one branch of the bash::
 
