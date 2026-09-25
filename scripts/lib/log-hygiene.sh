@@ -136,7 +136,12 @@ hygiene_prune_uv_cache() {
     before=$(uv cache dir 2>/dev/null)
     local before_size="unknown"
     if [[ -n "$before" && -d "$before" ]]; then
-        before_size=$(du -sh "$before" 2>/dev/null | cut -f1 || echo "unknown")
+        # Capture the value, then fall back on emptiness: `du | cut || echo` never
+        # reaches the fallback (a pipeline's status is cut's, which exits 0 on
+        # empty input), and `2>/dev/null` hides du's failure — leaving a blank
+        # size that silently masks the error.
+        before_size=$(du -sh "$before" 2>/dev/null | cut -f1)
+        [[ -n "$before_size" ]] || before_size="unknown"
     fi
     echo "  uv cache before: ${before_size}"
 
@@ -159,7 +164,8 @@ hygiene_prune_uv_cache() {
 
     local after_size="unknown"
     if [[ -n "$before" && -d "$before" ]]; then
-        after_size=$(du -sh "$before" 2>/dev/null | cut -f1 || echo "unknown")
+        after_size=$(du -sh "$before" 2>/dev/null | cut -f1)
+        [[ -n "$after_size" ]] || after_size="unknown"
     fi
     echo "  uv cache after:  ${after_size}"
 }

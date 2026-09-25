@@ -206,13 +206,16 @@ def test_uv_prune_dry_run_skips_prune(tmp_path: Path) -> None:
 
 def test_uv_prune_degrades_when_absent(tmp_path: Path) -> None:
     # When uv is not in PATH, the function degrades visibly (no error, skip message).
+    # PATH is an empty dir so `command -v uv` cannot find a real uv the runner may
+    # have installed (/usr/bin:/bin is not enough — agent VMs often ship uv there);
+    # bash is invoked by absolute path since the child env no longer resolves it.
     script = f'source "{LIB}"; hygiene_prune_uv_cache false'
     proc = subprocess.run(
-        ["bash", "-c", script],
+        ["/bin/bash", "-c", script],
         capture_output=True,
         text=True,
         check=True,
-        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+        env={"PATH": str(tmp_path), "HOME": str(tmp_path)},
     )
     assert "not present" in proc.stdout
     assert "degrade" in proc.stdout
