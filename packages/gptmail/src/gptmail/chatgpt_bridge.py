@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -71,8 +72,15 @@ class ChatGPTBridge:
     ) -> None:
         self._messages_dir = Path(messages_dir)
         self._self_name = self_name.lower()
-        self._token = token or os.environ.get("CHATGPT_BRIDGE_TOKEN")
+        # `is not None`, not truthiness: an explicit empty --token means
+        # "disable auth" and must override a token in the environment.
+        self._token = token if token is not None else os.environ.get("CHATGPT_BRIDGE_TOKEN")
         self._surfaced: _SurfacedLedger = defaultdict(set)
+        # One lock per session: Tool calls may run concurrently in FastMCP's
+        # threadpool, and the surfaced check-and-add must be atomic so the same
+        # reply is not delivered to two simultaneous callers.
+        self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
 
         # FastMCP server — tools registered below
         self.mcp = FastMCP("bob-chatgpt-bridge")
@@ -86,6 +94,14 @@ class ChatGPTBridge:
     # ------------------------------------------------------------------
     def _auth_ok(self, request: Request) -> bool:
         return self._auth_ok_headers(request.headers)
+
+    def _session_lock(self, session_id: str) -> threading.Lock:
+        with self._locks_guard:
+            lock = self._locks.get(session_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[session_id] = lock
+            return lock
 
     def _auth_ok_headers(self, headers: Headers) -> bool:
         if not self._token:
@@ -110,7 +126,8 @@ class ChatGPTBridge:
             transport = self._transport(mailbox)
             inbox_count = len(transport.list_inbox("inbox"))
             outbox_ids = {msg_id for msg_id, _subject, _ts in transport.list_inbox("outbox")}
-            surfaced = self._surfaced.get(session_id, set())
+            with self._session_lock(session_id):
+                surfaced = set(self._surfaced.get(session_id, set()))
 
             # Compare against the outbox *contents*, not a running subtraction:
             # a surfaced message that is later deleted from the outbox must not
@@ -137,33 +154,37 @@ class ChatGPTBridge:
             """
             mailbox = _session_to_mailbox(session_id)
             transport = self._transport(mailbox)
-            surfaced = self._surfaced[session_id]
 
             replies: list[dict[str, Any]] = []
-            # Read outbox (messages FROM Bob TO chatgpt).
-            # transport.read() is inbox-only, so we read the file directly.
-            for msg_id, subject, _ts in transport.list_inbox("outbox"):
-                if msg_id in surfaced:
-                    continue
-                path = transport.outbox / msg_id
-                try:
-                    # decode bytes directly: a file that was concurrently
-                    # deleted or holds invalid UTF-8 must not break the whole
-                    # call for every other reply in the session.
-                    content = path.read_bytes().decode("utf-8", errors="replace")
-                except OSError:
-                    continue
-                body = self._extract_body(content)
-                replies.append(
-                    {
-                        "id": msg_id,
-                        "subject": subject,
-                        "body": body,
-                    }
-                )
-                surfaced.add(msg_id)
-                if len(replies) >= limit:
-                    break
+            # Hold the per-session lock across the whole check-and-add: two
+            # concurrent calls must not both read an unsurfaced message and
+            # deliver it twice.
+            with self._session_lock(session_id):
+                surfaced = self._surfaced[session_id]
+                # Read outbox (messages FROM Bob TO chatgpt). transport.read()
+                # is inbox-only, so we read the file directly.
+                for msg_id, subject, _ts in transport.list_inbox("outbox"):
+                    if msg_id in surfaced:
+                        continue
+                    path = transport.outbox / msg_id
+                    try:
+                        # decode bytes directly: a file that was concurrently
+                        # deleted or holds invalid UTF-8 must not break the
+                        # whole call for every other reply in the session.
+                        content = path.read_bytes().decode("utf-8", errors="replace")
+                    except OSError:
+                        continue
+                    body = self._extract_body(content)
+                    replies.append(
+                        {
+                            "id": msg_id,
+                            "subject": subject,
+                            "body": body,
+                        }
+                    )
+                    surfaced.add(msg_id)
+                    if len(replies) >= limit:
+                        break
 
             if not replies:
                 return json.dumps(

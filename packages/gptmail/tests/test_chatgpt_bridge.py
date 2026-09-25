@@ -241,6 +241,42 @@ class TestChatGPTBridge:
         assert data["replies"] == []
 
     @pytest.mark.anyio
+    async def test_bob_replies_concurrent_calls_do_not_duplicate(
+        self,
+        bridge: ChatGPTBridge,
+        session_id: str,
+        bob_transport: AgentTransport,
+    ) -> None:
+        """Two overlapping calls must not deliver the same reply twice."""
+        import asyncio
+
+        bob_transport.send(to="chatgpt", subject="Only once", content="body")
+
+        results = await asyncio.gather(
+            bridge.mcp.call_tool("bob_replies", {"session_id": session_id}),
+            bridge.mcp.call_tool("bob_replies", {"session_id": session_id}),
+        )
+        delivered = sum(len(self._parse_result(r)["replies"]) for r in results)
+        assert delivered == 1
+
+    def test_explicit_empty_token_disables_auth_over_env(
+        self, tmp_msgs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit empty token overrides CHATGPT_BRIDGE_TOKEN."""
+        monkeypatch.setenv("CHATGPT_BRIDGE_TOKEN", "from-env")
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token="")
+        assert bridge._auth_ok(_make_request({})) is True
+
+    def test_env_token_used_when_token_omitted(
+        self, tmp_msgs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Omitting the token falls back to the environment."""
+        monkeypatch.setenv("CHATGPT_BRIDGE_TOKEN", "from-env")
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=None)
+        assert bridge._auth_ok(_make_request({})) is False
+        assert bridge._auth_ok(_make_request({"authorization": "Bearer from-env"})) is True
+
+    @pytest.mark.anyio
     async def test_bob_status_after_surfaced_message_deleted(
         self,
         bridge: ChatGPTBridge,
