@@ -8,9 +8,23 @@ which is exactly the mtime-class heuristic these records exist to replace.
 
 from pathlib import Path
 
+import pytest
+
 from gptme_sessions.post_session import post_session
 from gptme_sessions.record import DISPATCH_KINDS, SessionRecord
 from gptme_sessions.store import SessionStore
+
+
+@pytest.fixture(autouse=True)
+def _clear_lineage_env(monkeypatch):
+    """Clear both env spellings so a host-inherited value cannot decide a test."""
+    for var in (
+        "AGENT_PARENT_SESSION_ID",
+        "AGENT_DISPATCH_KIND",
+        "BOB_PARENT_SESSION_ID",
+        "BOB_DISPATCH_KIND",
+    ):
+        monkeypatch.delenv(var, raising=False)
 
 
 def test_record_keeps_valid_lineage():
@@ -84,6 +98,44 @@ def test_post_session_reads_lineage_from_environment(tmp_path: Path, monkeypatch
     )
     assert result.record.parent_session_id == "parent-env"
     assert result.record.dispatch_kind == "fanout"
+
+
+def test_post_session_reads_neutral_lineage_from_environment(tmp_path: Path, monkeypatch):
+    """The neutral AGENT_* names resolve without any BOB_* variable set."""
+    monkeypatch.setenv("AGENT_PARENT_SESSION_ID", "neutral-parent")
+    monkeypatch.setenv("AGENT_DISPATCH_KIND", "fanout")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="sonnet",
+        session_id="neutral-child",
+        duration_seconds=10,
+    )
+    assert result.record.parent_session_id == "neutral-parent"
+    assert result.record.dispatch_kind == "fanout"
+
+
+def test_neutral_lineage_beats_legacy_alias(tmp_path: Path, monkeypatch):
+    """Both spellings present: the neutral name is authoritative.
+
+    Dual-writing spawners keep the two equal, so this only decides a
+    hand-mixed environment -- and there the protocol name must win.
+    """
+    monkeypatch.setenv("AGENT_PARENT_SESSION_ID", "neutral-parent")
+    monkeypatch.setenv("BOB_PARENT_SESSION_ID", "legacy-parent")
+    monkeypatch.setenv("AGENT_DISPATCH_KIND", "worker")
+    monkeypatch.setenv("BOB_DISPATCH_KIND", "fanout")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="sonnet",
+        session_id="neutral-wins",
+        duration_seconds=10,
+    )
+    assert result.record.parent_session_id == "neutral-parent"
+    assert result.record.dispatch_kind == "worker"
 
 
 def test_explicit_argument_beats_environment(tmp_path: Path, monkeypatch):

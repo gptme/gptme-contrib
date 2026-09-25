@@ -30,6 +30,8 @@ TOML format::
     greptile_repos_pattern = "^(gptme/gptme|gptme/gptme-contrib)$"
     self_merge_repos = "ErikBjare/bob owner/repo2"
     ambient_harness_env = "BOB_AMBIENT_HARNESS"
+    # AGENT_AMBIENT_HARNESS is always emitted alongside this configured name,
+    # so "AGENT_AMBIENT_HARNESS" is the forward-looking value to use here.
     extra_sys_path = ["packages/custom/src"]
     # any other RunItemConfig field by name; relative paths resolve
     # against the workspace

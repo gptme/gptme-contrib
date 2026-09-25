@@ -386,12 +386,14 @@ def post_session(
         ``reasoning_effort``, gptme ``metadata.reasoning_effort``).
     parent_session_id:
         ``session_id`` of the session that spawned this one.  Defaults to the
-        ``BOB_PARENT_SESSION_ID`` environment variable so spawners only have to
-        export it once.  Ignored when it equals this session's own id.
+        ``AGENT_PARENT_SESSION_ID`` environment variable (legacy alias:
+        ``BOB_PARENT_SESSION_ID``) so spawners only have to export it once.
+        Ignored when it equals this session's own id.
     dispatch_kind:
         How this session was spawned — one of
         :data:`~gptme_sessions.record.DISPATCH_KINDS`.  Defaults to the
-        ``BOB_DISPATCH_KIND`` environment variable.
+        ``AGENT_DISPATCH_KIND`` environment variable (legacy alias:
+        ``BOB_DISPATCH_KIND``).
     dispatch_id:
         Run-id of the dispatcher when the dispatcher is not itself a recorded
         session (e.g. an autonomous-fanout run, a spawn-workers run, or a
@@ -996,11 +998,23 @@ def post_session(
     if trigger is not None:
         record_kwargs["trigger"] = trigger
     # Dispatch lineage: explicit argument wins, else the spawner's environment.
+    # The neutral AGENT_* name is preferred over the legacy BOB_* alias; both
+    # are accepted so a forked agent can export a non-Bob-named variable.
     # SessionRecord validates both (unknown kind -> None, self-parent -> None).
-    resolved_parent = parent_session_id or os.environ.get("BOB_PARENT_SESSION_ID") or None
+    resolved_parent = (
+        parent_session_id
+        or os.environ.get("AGENT_PARENT_SESSION_ID")
+        or os.environ.get("BOB_PARENT_SESSION_ID")
+        or None
+    )
     if resolved_parent is not None:
         record_kwargs["parent_session_id"] = resolved_parent
-    resolved_dispatch_kind = dispatch_kind or os.environ.get("BOB_DISPATCH_KIND") or None
+    resolved_dispatch_kind = (
+        dispatch_kind
+        or os.environ.get("AGENT_DISPATCH_KIND")
+        or os.environ.get("BOB_DISPATCH_KIND")
+        or None
+    )
     if resolved_dispatch_kind is not None:
         record_kwargs["dispatch_kind"] = resolved_dispatch_kind
     # dispatch_id: the run-id of a dispatcher that is not itself a session.

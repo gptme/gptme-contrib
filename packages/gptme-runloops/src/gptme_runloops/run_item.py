@@ -1408,7 +1408,11 @@ def plan_item(
     # Every backend shares the recorded id with launch receipts and nested
     # dispatchers; retain backend-specific aliases for trajectory discovery.
     # Occupancy uses a separate executor-scoped identity added by execute_plan.
+    # Both spellings are written: the neutral AGENT_* protocol name is
+    # canonical, BOB_* stays as the working legacy alias, and dual-writing
+    # means an inherited neutral value cannot shadow the id assigned here.
     runner_env: dict[str, str] = {
+        "AGENT_SESSION_ID": session_id,
         "BOB_SESSION_ID": session_id,
     }
     if backend == "claude-code":
@@ -1732,9 +1736,10 @@ def execute_plan(
     env.update(ambient_env or {})
     env.update(plan.runner_env)
     # The project-monitoring executor owns one item at a time. Give occupancy
-    # one executor-scoped identity while preserving the per-item BOB_SESSION_ID
-    # used by trajectories and receipts. Sequential items therefore refresh
-    # the same marker holder instead of seeing a live foreign holder.
+    # one executor-scoped identity while preserving the per-item session id
+    # (AGENT_SESSION_ID / BOB_SESSION_ID) used by trajectories and receipts.
+    # Sequential items therefore refresh the same marker holder instead of
+    # seeing a live foreign holder.
     env["BOB_AUTONOMOUS_AGENT_ID"] = f"project-monitoring-{os.getpid()}"
     env["BOB_SESSION_PID"] = str(os.getpid())
     exit_code = 0
@@ -2961,7 +2966,13 @@ def _ambient_env(config: RunItemConfig, backend: str, model: str) -> dict[str, s
         )
     else:
         value = backend
-    return {config.ambient_harness_env: value}
+    # Emit the neutral name unconditionally, plus the configured name when it
+    # differs (e.g. a brain config still naming BOB_AMBIENT_HARNESS), so both
+    # spellings carry the same tag for this run.
+    env = {"AGENT_AMBIENT_HARNESS": value}
+    if config.ambient_harness_env != "AGENT_AMBIENT_HARNESS":
+        env[config.ambient_harness_env] = value
+    return env
 
 
 def run_work_file(

@@ -91,7 +91,10 @@ def _detect_harness(env: Mapping[str, str] | None = None) -> str:
     """Best-effort harness attribution for cross-harness vent events."""
     source = env or os.environ
 
-    explicit = source.get("BOB_AMBIENT_HARNESS", "").strip()
+    explicit = (
+        source.get("AGENT_AMBIENT_HARNESS", "").strip()
+        or source.get("BOB_AMBIENT_HARNESS", "").strip()
+    )
     if explicit:
         return explicit
 
