@@ -111,8 +111,15 @@ class ChatGPTBridge:
         if not auth.lower().startswith("bearer "):
             return False
         # constant-time compare: a plain == leaks the token byte-by-byte to a
-        # timing attacker who can reach the port.
-        return secrets.compare_digest(auth[7:].strip(), self._token)
+        # timing attacker who can reach the port. Compared as UTF-8 bytes:
+        # secrets.compare_digest(str, str) raises TypeError on non-ASCII
+        # input (Starlette decodes headers as latin-1, so the credential is
+        # attacker-controlled), while bytes input never raises — a malformed
+        # header gets a clean 401 instead of a 500 traceback.
+        return secrets.compare_digest(
+            auth[7:].strip().encode("utf-8"),
+            self._token.encode("utf-8"),
+        )
 
     # ------------------------------------------------------------------
     # Tool implementations
@@ -295,7 +302,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.environ.get("CHATGPT_BRIDGE_PORT", "8080")),
+        # String default: argparse applies type conversion to string defaults,
+        # so a malformed CHATGPT_BRIDGE_PORT gets argparse's clean usage error
+        # instead of an eager int() ValueError traceback.
+        default=os.environ.get("CHATGPT_BRIDGE_PORT", "8080"),
         help="Port to bind (default: 8080)",
     )
     parser.add_argument(

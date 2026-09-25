@@ -332,6 +332,15 @@ class TestChatGPTBridge:
         assert bridge._auth_ok(_make_request({"authorization": "Bearer nope"})) is False
         assert bridge._auth_ok(_make_request({"authorization": "Bearer s3cret"})) is True
 
+    def test_non_ascii_bearer_is_401_not_crash(self, tmp_msgs: Path) -> None:
+        """compare_digest(str, str) raises TypeError on non-ASCII; bytes must not.
+
+        Starlette decodes headers as latin-1, so `Bearer <0xFF>` is reachable
+        input. The auth boundary must return False, not 500.
+        """
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token="s3cret")
+        assert bridge._auth_ok(_make_request({"authorization": "Bearer \xff"})) is False
+
     @pytest.mark.anyio
     async def test_messages_endpoint_requires_token(self, tmp_msgs: Path) -> None:
         """The POST /messages/ endpoint rejects unauthenticated requests."""
