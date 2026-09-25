@@ -110,13 +110,16 @@ def chatgpt_bridge(
 ) -> None:
     """Run the ChatGPT ↔ Bob MCP bridge server."""
     argv: list[str] = []
-    if host:
+    # `is not None`, not truthiness: port 0 (bind an ephemeral port) and an
+    # explicit empty --host/--token are meaningful values, and swallowing them
+    # silently falls back to the env var or the 8080 default.
+    if host is not None:
         argv.extend(["--host", host])
-    if port:
+    if port is not None:
         argv.extend(["--port", str(port)])
-    if messages_dir:
+    if messages_dir is not None:
         argv.extend(["--messages-dir", messages_dir])
-    if token:
+    if token is not None:
         argv.extend(["--token", token])
     if verbose:
         argv.append("--verbose")

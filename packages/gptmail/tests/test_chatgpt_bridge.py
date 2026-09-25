@@ -240,6 +240,30 @@ class TestChatGPTBridge:
         data = self._parse_result(result)
         assert data["replies"] == []
 
+    @pytest.mark.anyio
+    async def test_bob_status_after_surfaced_message_deleted(
+        self,
+        bridge: ChatGPTBridge,
+        session_id: str,
+        bob_transport: AgentTransport,
+    ) -> None:
+        """A deleted, already-surfaced message must not mask an unsurfaced one."""
+        bob_transport.send(to="chatgpt", subject="A", content="first")
+        first = await bridge.mcp.call_tool("bob_replies", {"session_id": session_id})
+        surfaced = self._parse_result(first)["replies"]
+        assert len(surfaced) == 1
+
+        bob_transport.send(to="chatgpt", subject="B", content="second")
+        # Bob's cleanup (or the user) deletes the already-surfaced message.
+        (bob_transport.outbox / surfaced[0]["id"]).unlink()
+
+        status = await bridge.mcp.call_tool("bob_status", {"session_id": session_id})
+        data = self._parse_result(status)
+        assert data["outbox"] == 1
+        assert data["surfaced"] == 0
+        assert data["pending_replies"] == 1
+        assert data["has_unread"] is True
+
     def test_auth_disabled_without_token(self, tmp_msgs: Path) -> None:
         """Auth is disabled when no token is set."""
         bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=None)
@@ -301,3 +325,32 @@ class TestExtractBody:
         # frontmatter and must survive intact.
         content = "---\nnot frontmatter"
         assert ChatGPTBridge._extract_body(content) == content
+
+
+class TestChatGPTBridgeCli:
+    """The click wrapper must not swallow falsy-but-meaningful option values."""
+
+    def _invoke(self, monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> list[str]:
+        from click.testing import CliRunner
+
+        import gptmail.cli as cli_mod
+
+        captured: list[list[str]] = []
+        monkeypatch.setattr(cli_mod, "_chatgpt_bridge_main", captured.append)
+        result = CliRunner().invoke(cli_mod.cli, ["chatgpt-bridge", *argv])
+        assert result.exit_code == 0, result.output
+        assert len(captured) == 1
+        return captured[0]
+
+    def test_port_zero_is_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--port 0 (ephemeral bind) reaches the bridge instead of defaulting."""
+        forwarded = self._invoke(monkeypatch, ["--port", "0"])
+        assert "--port" in forwarded
+        assert forwarded[forwarded.index("--port") + 1] == "0"
+
+    def test_explicit_empty_strings_are_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        forwarded = self._invoke(monkeypatch, ["--host", "", "--token", "", "--messages-dir", ""])
+        assert forwarded.count("") == 3
+
+    def test_omitted_options_are_not_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert self._invoke(monkeypatch, []) == []
