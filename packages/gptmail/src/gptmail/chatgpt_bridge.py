@@ -109,16 +109,20 @@ class ChatGPTBridge:
             mailbox = _session_to_mailbox(session_id)
             transport = self._transport(mailbox)
             inbox_count = len(transport.list_inbox("inbox"))
-            outbox_count = len(transport.list_inbox("outbox"))
-            surfaced_count = len(self._surfaced.get(session_id, set()))
+            outbox_ids = {msg_id for msg_id, _subject, _ts in transport.list_inbox("outbox")}
+            surfaced = self._surfaced.get(session_id, set())
 
-            pending = outbox_count - surfaced_count
+            # Compare against the outbox *contents*, not a running subtraction:
+            # a surfaced message that is later deleted from the outbox must not
+            # mask a reply that was never surfaced (it would undercount pending
+            # and report has_unread=False while unread replies remain).
+            pending = len(outbox_ids - surfaced)
             status = {
                 "mailbox": mailbox,
                 "inbox": inbox_count,
-                "outbox": outbox_count,
-                "surfaced": surfaced_count,
-                "pending_replies": max(0, pending),
+                "outbox": len(outbox_ids),
+                "surfaced": len(outbox_ids & surfaced),
+                "pending_replies": pending,
                 "has_unread": pending > 0,
             }
             return json.dumps(status, indent=2)
