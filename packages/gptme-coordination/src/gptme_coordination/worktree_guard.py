@@ -121,6 +121,7 @@ def _get_marker_agent_id() -> str:
 
 
 _TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off"})
 
 
 def _env_flag(*names: str) -> bool:
@@ -129,10 +130,22 @@ def _env_flag(*names: str) -> bool:
     Plain truthiness treats ``"0"`` (and ``"false"``) as enabled, so a
     conventional ``=0`` configuration would switch the guard *on*. Only an
     explicit affirmative value enables the flag.
+
+    Spellings are ordered preferred-first (agent-neutral, then the legacy
+    ``BOB_*`` alias), and the first spelling carrying a **recognized** boolean
+    decides: ``AGENT_...=0`` disables the flag even when a stale legacy
+    ``BOB_...=1`` lingers in the environment. Unset, empty, or unrecognized
+    values are not a decision and fall through to the next spelling — the same
+    "a malformed preferred value must not mask a valid legacy one" rule that
+    :func:`_get_session_pid` applies to non-numeric PIDs.
     """
-    return any(
-        os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES for name in names
-    )
+    for name in names:
+        raw = os.environ.get(name, "").strip().lower()
+        if raw in _TRUE_ENV_VALUES:
+            return True
+        if raw in _FALSE_ENV_VALUES:
+            return False
+    return False
 
 
 def _get_git_dir() -> Path | None:

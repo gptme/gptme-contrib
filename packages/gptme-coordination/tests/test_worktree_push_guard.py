@@ -553,6 +553,44 @@ def test_env_flag_accepts_agent_neutral_and_legacy_spellings(monkeypatch) -> Non
             assert _env_flag(*names) is False, (names, name)
 
 
+def test_env_flag_prefers_first_set_spelling(monkeypatch) -> None:
+    """A recognized preferred value wins; anything else falls through.
+
+    Pins the precedence model the module docstring claims: a recognized
+    agent-neutral value is authoritative, so an explicit ``AGENT_...=0``
+    disables the flag even when a stale ``BOB_...=1`` is still exported. Unset,
+    empty, or unrecognized values are not a decision and fall through to the
+    legacy alias.
+    """
+    from gptme_coordination.worktree_guard import (
+        _GUARD_FORCE_ENV,
+        _PUSH_GUARD_DENY_ENV,
+        _env_flag,
+    )
+
+    for names in (_GUARD_FORCE_ENV, _PUSH_GUARD_DENY_ENV):
+        neutral, legacy = names
+
+        # Deliberate neutral disable beats a stale legacy enable.
+        monkeypatch.setenv(neutral, "0")
+        monkeypatch.setenv(legacy, "1")
+        assert _env_flag(*names) is False, (names, "0/1")
+
+        # Empty string is "unset": the legacy spelling still applies.
+        monkeypatch.setenv(neutral, "")
+        assert _env_flag(*names) is True, (names, "/1")
+
+        # An unrecognized value is not a decision either: it must not mask a
+        # valid legacy enable.
+        monkeypatch.setenv(neutral, "definitely-not-a-flag")
+        assert _env_flag(*names) is True, (names, "garbage/1")
+
+        # Explicit neutral enable beats a legacy disable.
+        monkeypatch.setenv(neutral, "yes")
+        monkeypatch.setenv(legacy, "0")
+        assert _env_flag(*names) is True, (names, "1/0")
+
+
 def test_push_guard_deny_via_agent_neutral_flag(tmp_path: Path, monkeypatch) -> None:
     """AGENT_WORKTREE_PUSH_GUARD_DENY=1 drives the Phase-3 deny path.
 
