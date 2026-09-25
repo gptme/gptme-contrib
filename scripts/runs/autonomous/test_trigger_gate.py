@@ -54,6 +54,13 @@ def test_load_state_corrupt_json_fails_open(tmp_path: Path) -> None:
     assert load_state(path) == {}
 
 
+def test_load_state_invalid_utf8_fails_open(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    path.write_bytes(b"\xff\xfe{garbage}")
+    # Invalid UTF-8 (UnicodeDecodeError) must fail open, not crash the gate.
+    assert load_state(path) == {}
+
+
 def test_load_state_non_object_fails_open(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     path.write_text("[1, 2, 3]")
