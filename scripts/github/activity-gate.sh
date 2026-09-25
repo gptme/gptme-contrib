@@ -984,6 +984,9 @@ check_master_ci() {
     # A failure superseded by a newer success of the same workflow is recovered.
     # Suppression is event-consistent: manual/dispatch runs are excluded from
     # both sides, so a workflow_dispatch success cannot clear a push failure.
+    # "Newer" is strict: the timestamp normalization below drops fractional
+    # seconds, so a same-second success must not clear a failure (fail closed —
+    # a hidden regression costs more than one re-emitted failure).
     local failures
     failures=$(echo "$runs" | jq -c '
         def detached:
@@ -1002,7 +1005,7 @@ check_master_ci() {
                        and .event == $f.event
                        and ((.createdAt
                              | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)
-                           >= ($f.createdAt
+                           > ($f.createdAt
                              | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)))]
                   | length == 0
               )

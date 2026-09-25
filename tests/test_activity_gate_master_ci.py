@@ -248,14 +248,14 @@ def test_nightly_failure_is_not_push_ci_master_failure(tmp_path: Path) -> None:
     assert result.stdout == ""
 
 
-def test_success_with_fractional_second_precision_still_suppresses(
-    tmp_path: Path,
-) -> None:
+def test_earlier_success_in_same_second_does_not_suppress(tmp_path: Path) -> None:
     """Timestamps must be compared chronologically, not lexicographically.
 
-    A success at the same instant rendered with fractional-second precision
-    (``.000Z``) sorts lexicographically before the bare-``Z`` failure even
-    though it is not earlier in time; normalization must suppress the failure.
+    The success here is *earlier* (``:29Z`` = 29.000) than the failure
+    (``:29.500Z``), but raw string comparison puts it *after* the failure
+    because ``Z`` (0x5A) > ``.`` (0x2E). Without normalization this failure
+    would be wrongly suppressed; with it, the success is not newer and the
+    failure is emitted.
     """
     instant = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0)
     runs = [
@@ -264,10 +264,42 @@ def test_success_with_fractional_second_precision_still_suppresses(
             "schedule",
             conclusion="failure",
             name="Tests",
-            created_at=instant.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            created_at=instant.strftime("%Y-%m-%dT%H:%M:%S") + ".500Z",
         ),
         _run(
             502,
+            "schedule",
+            conclusion="success",
+            name="Tests",
+            created_at=instant.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        ),
+    ]
+    result = _run_gate(tmp_path, runs)
+
+    assert result.returncode == 0, result.stderr
+    items = [json.loads(line) for line in result.stdout.splitlines()]
+    assert ("master_ci_failure", 501) in [
+        (item["type"], item["number"]) for item in items
+    ]
+
+
+def test_same_second_success_is_not_strictly_newer(tmp_path: Path) -> None:
+    """Normalization collapses fractional seconds, so equal is not "newer".
+
+    A same-second success must not clear a failure: the sub-second order is
+    unrecoverable after normalization and the gate fails closed.
+    """
+    instant = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(microsecond=0)
+    runs = [
+        _run(
+            503,
+            "schedule",
+            conclusion="failure",
+            name="Tests",
+            created_at=instant.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        ),
+        _run(
+            504,
             "schedule",
             conclusion="success",
             name="Tests",
@@ -276,8 +308,11 @@ def test_success_with_fractional_second_precision_still_suppresses(
     ]
     result = _run_gate(tmp_path, runs)
 
-    assert result.returncode == 1, result.stderr
-    assert result.stdout == ""
+    assert result.returncode == 0, result.stderr
+    items = [json.loads(line) for line in result.stdout.splitlines()]
+    assert ("master_ci_failure", 503) in [
+        (item["type"], item["number"]) for item in items
+    ]
 
 
 def test_unrecovered_tests_failure_is_still_emitted(tmp_path: Path) -> None:
