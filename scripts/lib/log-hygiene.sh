@@ -145,7 +145,17 @@ hygiene_prune_uv_cache() {
         return 0
     fi
 
-    uv cache prune --force 2>&1 | tail -1 || true
+    # Capture the exit status so a failed prune is a visible WARN, not a silent
+    # no-op. Same reasoning as hygiene_vacuum_user_journal: a caller trusts this
+    # to reclaim disk, so swallowing a failure would make it *look* like space
+    # was freed while reclaiming nothing (the capability-tier trap).
+    local prune_rc=0
+    local prune_out
+    prune_out=$(uv cache prune --force 2>&1) || prune_rc=$?
+    echo "$prune_out" | tail -1
+    if [[ $prune_rc -ne 0 ]]; then
+        echo "  WARN: uv cache prune failed (exit ${prune_rc}) — cache not reclaimed"
+    fi
 
     local after_size="unknown"
     if [[ -n "$before" && -d "$before" ]]; then

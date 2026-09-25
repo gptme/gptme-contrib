@@ -131,7 +131,9 @@ def test_journal_clean_vacuum_does_not_warn(tmp_path: Path) -> None:
     assert "User journal after" in out
 
 
-def _prune_uv_cache(tmp_path: Path, dry_run: str = "false") -> tuple[str, str]:
+def _prune_uv_cache(
+    tmp_path: Path, dry_run: str = "false", prune_exit: int = 0
+) -> tuple[str, str]:
     """Run hygiene_prune_uv_cache with a stubbed uv binary; return (stdout, stderr)."""
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
@@ -139,6 +141,13 @@ def _prune_uv_cache(tmp_path: Path, dry_run: str = "false") -> tuple[str, str]:
     cachedir.mkdir()
     # Stub that reports a fake cache dir and records which subcommand was called.
     call_log = tmp_path / "uv-calls.log"
+    # `uv cache prune --force` either succeeds or fails, per prune_exit.
+    prune_body = (
+        "  echo 'Pruned 12 packages'\n" f"  exit {prune_exit}\n"
+        if prune_exit == 0
+        else "  echo 'error: prune failed (permission denied)' >&2\n"
+        f"  exit {prune_exit}\n"
+    )
     fake_uv = bindir / "uv"
     fake_uv.write_text(
         "#!/usr/bin/env bash\n"
@@ -148,10 +157,9 @@ def _prune_uv_cache(tmp_path: Path, dry_run: str = "false") -> tuple[str, str]:
         f'  echo "{cachedir}"\n'
         "  exit 0\n"
         "fi\n"
-        # For `uv cache prune --force` → pretend to prune
+        # For `uv cache prune --force` → prune (or fail)
         'if [[ "$1 $2 $3" == "cache prune --force" ]]; then\n'
-        '  echo "Pruned 12 packages"\n'
-        "  exit 0\n"
+        f"{prune_body}"
         "fi\n"
         "exit 1\n"
     )
@@ -172,8 +180,20 @@ def test_uv_prune_calls_force_flag(tmp_path: Path) -> None:
     _, _ = _prune_uv_cache(tmp_path, dry_run="false")
     call_log = tmp_path / "uv-calls.log"
     calls = call_log.read_text().splitlines()
-    assert any("cache prune --force" in c for c in calls), f"unexpected calls: {calls}"
+    # Exact line match: the call log records one full argument vector per line,
+    # so `in calls` pins the exact command. A substring check would also accept
+    # `cache prune --forceful` or `cache prune --force --extra`.
+    assert "cache prune --force" in calls, f"unexpected calls: {calls}"
     assert not any("cache clean" in c for c in calls), "must not call uv cache clean"
+
+
+def test_uv_prune_warns_on_failure(tmp_path: Path) -> None:
+    # A failed prune must be a visible WARN, not a silent no-op: callers trust
+    # this to reclaim disk, so swallowing the failure would report success while
+    # reclaiming nothing.
+    out, _ = _prune_uv_cache(tmp_path, dry_run="false", prune_exit=1)
+    assert "WARN" in out
+    assert "uv cache prune failed" in out
 
 
 def test_uv_prune_dry_run_skips_prune(tmp_path: Path) -> None:
