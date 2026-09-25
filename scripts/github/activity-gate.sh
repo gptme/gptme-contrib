@@ -931,7 +931,7 @@ _master_ci_created_since() {
 _list_default_branch_runs() {
     local repo=$1 branch=$2 extra=$3 cache_key=$4 since=$5
     local created=""
-    [ -n "$since" ] && created="--created '>=${since}'"
+    [ -n "$since" ] && created="--created \">=${since}\""
     gh_cache_get_or_fetch "$cache_key" "$GH_CACHE_TTL_RUN" \
         "gh run list --repo '$repo' --branch $branch $extra $created --limit 15 \
             --json databaseId,name,conclusion,createdAt,event 2>/dev/null" \
@@ -985,7 +985,12 @@ check_master_ci() {
             | select(nightly | not)
             | select(
                 . as $f
-                | [$passes[] | select(.name == $f.name and .createdAt >= $f.createdAt)]
+                | [$passes[]
+                   | select(.name == $f.name
+                       and ((.createdAt
+                             | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)
+                           >= ($f.createdAt
+                             | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)))]
                   | length == 0
               )
           ]

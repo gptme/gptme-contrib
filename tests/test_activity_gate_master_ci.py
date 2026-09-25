@@ -186,6 +186,37 @@ def test_nightly_failure_is_not_push_ci_master_failure(tmp_path: Path) -> None:
     assert result.stdout == ""
 
 
+def test_success_with_fractional_second_precision_still_suppresses(
+    tmp_path: Path,
+) -> None:
+    """Timestamps must be compared chronologically, not lexicographically.
+
+    A success at the same instant rendered with fractional-second precision
+    (``.000Z``) sorts lexicographically before the bare-``Z`` failure even
+    though it is not earlier in time; normalization must suppress the failure.
+    """
+    runs = [
+        _run(
+            501,
+            "schedule",
+            conclusion="failure",
+            name="Tests",
+            created_at="2026-09-23T10:24:29Z",
+        ),
+        _run(
+            502,
+            "schedule",
+            conclusion="success",
+            name="Tests",
+            created_at="2026-09-23T10:24:29.000Z",
+        ),
+    ]
+    result = _run_gate(tmp_path, runs)
+
+    assert result.returncode == 1, result.stderr
+    assert result.stdout == ""
+
+
 def test_unrecovered_tests_failure_is_still_emitted(tmp_path: Path) -> None:
     runs = [
         _run(
