@@ -922,10 +922,20 @@ check_assigned_issues() {
 # adding `--created '>=<3d>'` returned current Tests/Pre-commit verdicts.
 # `--status` splits keep skipped issue-resolver runs from filling the window.
 _master_ci_created_since() {
-    python3 -c "from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc)-timedelta(days=3)).strftime('%Y-%m-%d'))" 2>/dev/null \
+    # jq backstops the chain: it is a hard dependency of this script (the gate
+    # pipes through it everywhere), unlike python3/date which may be absent.
+    # An empty window silently restores the stale-branch-index behaviour this
+    # change exists to fix, so a total failure is announced, not swallowed.
+    local since
+    since=$(python3 -c "from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc)-timedelta(days=3)).strftime('%Y-%m-%d'))" 2>/dev/null \
         || date -u -d '3 days ago' +%Y-%m-%d 2>/dev/null \
         || date -u -v-3d +%Y-%m-%d 2>/dev/null \
-        || true
+        || jq -nr 'now - 259200 | strftime("%Y-%m-%d")' 2>/dev/null \
+        || true)
+    if [ -z "$since" ]; then
+        echo "WARN: could not compute the master-CI --created window; fetching unfiltered (a stale branch index may hide a recovered failure)" >&2
+    fi
+    printf '%s\n' "$since"
 }
 
 _list_default_branch_runs() {
