@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -291,7 +292,12 @@ class ChatGPTBridge:
 
     @staticmethod
     def _is_loopback(host: str) -> bool:
-        return host in ("127.0.0.1", "localhost", "::1", "::1%1")
+        if host == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False  # unknown host forms are treated as public
 
     def run(self, host: str = "127.0.0.1", port: int = 8080) -> None:
         # fail closed: binding a non-loopback interface with auth disabled
