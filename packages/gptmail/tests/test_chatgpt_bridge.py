@@ -313,29 +313,33 @@ class TestChatGPTBridge:
     ) -> None:
         """Two overlapping calls must not deliver the same reply twice.
 
-        ``call_tool`` runs the synchronous tool inline on the event loop, so
-        gathering two calls serializes them and cannot exercise the race (with
-        a barrier it deadlocks on the barrier). Drive the registered tool
-        function from two threads instead, with the barrier forcing both into
-        the critical section before either takes the per-session lock: without
-        the lock both read an unsurfaced message and deliver it twice.
+        Driven through ``mcp.call_tool`` (the real dispatch path), not the bare
+        tool function. FastMCP runs a synchronous tool inline on the *calling*
+        loop, so two coroutines on one loop serialize — and a barrier between
+        them would deadlock. Boxing each call in its own thread with its own
+        loop makes the two dispatches genuinely concurrent, with the barrier
+        forcing both into the critical section before either takes the
+        per-session lock: without the lock both read an unsurfaced message and
+        deliver it twice.
         """
         import asyncio
 
         bob_transport.send(to="chatgpt", subject="Only once", content="body")
 
-        fn = bridge.mcp._tool_manager._tools["bob_replies"].fn
         barrier = threading.Barrier(2, timeout=10)
 
-        def call() -> str:
+        def call() -> dict:
+            async def dispatch() -> tuple:
+                return await bridge.mcp.call_tool("bob_replies", {"session_id": session_id})
+
             barrier.wait()
-            return fn(session_id)
+            return type(self)._parse_result(asyncio.run(dispatch()))
 
         results = await asyncio.gather(
             asyncio.to_thread(call),
             asyncio.to_thread(call),
         )
-        delivered = sum(len(json.loads(r)["replies"]) for r in results)
+        delivered = sum(len(r["replies"]) for r in results)
         assert delivered == 1
 
     @pytest.mark.anyio
@@ -559,10 +563,20 @@ class TestOutboxConfinement:
         session_id: str,
         bob_transport: AgentTransport,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # `_transport` builds a fresh AgentTransport per call, so patching the
+        # fixture *instance* would be invisible to the tool code (the listing
+        # poisoning below would never be consulted). Route the lookup to this
+        # transport so the planted entry actually reaches the guard.
+        monkeypatch.setattr(ChatGPTBridge, "_transport", lambda self, mailbox: bob_transport)
+
         bob_transport.send(to="chatgpt", subject="Real", content="body")
-        secret = tmp_path / "secret.txt"
-        secret.write_text("outside", encoding="utf-8")
+        real = next(bob_transport.outbox.glob("*.md"))
+        # The planted entry must be a *listable* message (valid frontmatter),
+        # else list_inbox drops it and the guard is never exercised.
+        secret = tmp_path / "secret.md"
+        secret.write_text(real.read_text(encoding="utf-8"), encoding="utf-8")
         # plant a symlink inside the outbox pointing outside
         link = bob_transport.outbox / "20260101T000000-evil.md"
         link.symlink_to(secret)
@@ -587,6 +601,11 @@ class TestOutboxConfinement:
         poisoned to plant one; asserting against a name that was never listed
         would pass with the guard removed.
         """
+        # Route the tool's transport lookup to this instance (see
+        # test_symlinked_outbox_entry_is_skipped): otherwise the poisoned
+        # listing is never consulted and this test passes vacuously.
+        monkeypatch.setattr(ChatGPTBridge, "_transport", lambda self, mailbox: bob_transport)
+
         outside = bob_transport.outbox.parent / "outside.txt"
         outside.write_text("secret", encoding="utf-8")
 
@@ -603,6 +622,45 @@ class TestOutboxConfinement:
         ids = [r["id"] for r in data["replies"]]
         assert f"..{os.sep}outside.txt" not in ids
         assert all("secret" not in r["body"] for r in data["replies"])
+
+    @pytest.mark.anyio
+    async def test_intermediate_symlink_from_listing_is_skipped(
+        self,
+        bridge: ChatGPTBridge,
+        session_id: str,
+        bob_transport: AgentTransport,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A name whose *intermediate* component is a symlink must be skipped.
+
+        ``O_NOFOLLOW`` only protects the final component, so
+        ``subdir/secret.txt`` would follow ``subdir`` out of the outbox if the
+        containment check were final-component only. ``Path.resolve()`` follows
+        every component, so ``resolved.is_relative_to(outbox)`` is False and
+        the entry is dropped before the open.
+        """
+        # Route the tool's transport lookup to this instance, else the poisoned
+        # listing below never reaches bob_replies (it constructs its own
+        # AgentTransport per call) and the test passes vacuously.
+        monkeypatch.setattr(ChatGPTBridge, "_transport", lambda self, mailbox: bob_transport)
+
+        elsewhere = bob_transport.outbox.parent / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "secret.txt").write_text("outside", encoding="utf-8")
+        (bob_transport.outbox / "subdir").symlink_to(elsewhere)
+
+        real_list = bob_transport.list_inbox
+
+        def poisoned(folder: str):  # type: ignore[no-untyped-def]
+            for entry in real_list(folder):
+                yield entry
+            yield (f"subdir{os.sep}secret.txt", "Evil", "0")
+
+        monkeypatch.setattr(bob_transport, "list_inbox", poisoned)
+        result = await bridge.mcp.call_tool("bob_replies", {"session_id": session_id})
+        data = json.loads(result[0][0].text)
+        assert f"subdir{os.sep}secret.txt" not in [r["id"] for r in data["replies"]]
+        assert all("outside" not in r["body"] for r in data["replies"])
 
     @pytest.mark.anyio
     async def test_symlinked_outbox_dir_is_refused(
@@ -714,3 +772,32 @@ class TestFailClosedBind:
         assert not ChatGPTBridge._is_loopback("0.0.0.0")
         assert not ChatGPTBridge._is_loopback("192.168.1.5")
         assert ChatGPTBridge._is_loopback("::1")
+
+
+class TestBridgeLazyImport:
+    """The lazy bridge import must yield an install hint, not a traceback."""
+
+    def test_import_error_yields_install_hint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A partially-installed extra raises ImportError, not ModuleNotFoundError.
+
+        The bridge module imports starlette/mcp at top level, so a missing
+        *transitive* dependency surfaces as plain ``ImportError``. Catching only
+        ``ModuleNotFoundError`` would let that escape as a raw traceback.
+        """
+        import sys
+        import types
+
+        import click
+
+        import gptmail.cli as cli_mod
+
+        # A present-but-incomplete module raises plain ImportError on the
+        # `from ... import main` — the shape a partially-installed extra has.
+        monkeypatch.setitem(
+            sys.modules, "gptmail.chatgpt_bridge", types.ModuleType("gptmail.chatgpt_bridge")
+        )
+        monkeypatch.setattr(cli_mod, "_chatgpt_bridge_main", None)
+
+        with pytest.raises(click.ClickException) as excinfo:
+            cli_mod._load_chatgpt_bridge_main()
+        assert "bridge extra" in str(excinfo.value)
