@@ -182,6 +182,13 @@ class ChatGPTBridge:
                     if msg_id in surfaced:
                         continue
                     path = transport.outbox / msg_id
+                    # confinement: msg_id is a filename from a directory
+                    # listing, but if anything ever plants a crafted name
+                    # (traversal component, symlink) the read must not leave
+                    # the outbox.
+                    resolved = path.resolve()
+                    if path.is_symlink() or not resolved.is_relative_to(transport.outbox.resolve()):
+                        continue
                     try:
                         # decode bytes directly: a file that was concurrently
                         # deleted or holds invalid UTF-8 must not break the
@@ -282,7 +289,20 @@ class ChatGPTBridge:
             ],
         )
 
+    @staticmethod
+    def _is_loopback(host: str) -> bool:
+        return host in ("127.0.0.1", "localhost", "::1", "::1%1")
+
     def run(self, host: str = "127.0.0.1", port: int = 8080) -> None:
+        # fail closed: binding a non-loopback interface with auth disabled
+        # exposes the mailbox to the local network. Dev usage on loopback
+        # (the default) is unaffected.
+        if not self._token and not self._is_loopback(host):
+            raise SystemExit(
+                "chatgpt-bridge: refusing to bind %s without CHATGPT_BRIDGE_TOKEN "
+                "(auth would be disabled on a public interface). Set a token or "
+                "bind to 127.0.0.1." % host
+            )
         """Start the bridge server."""
         import uvicorn
 
