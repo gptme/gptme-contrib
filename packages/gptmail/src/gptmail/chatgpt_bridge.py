@@ -178,16 +178,14 @@ class ChatGPTBridge:
             outbox_ids = {msg_id for msg_id, _subject, _ts in transport.list_inbox("outbox")}
             with self._session_lock(session_id):
                 # Prune ids whose outbox message is gone: they can never be
-                # delivered again, and retaining them would make the ledger
-                # grow without bound on a long-lived server. Intersecting with
-                # the outbox does not change `pending`: ids outside the outbox
-                # were already excluded by `outbox_ids - surfaced`.
-                live = self._surfaced.get(session_id, set()) & outbox_ids
-                if live:
-                    self._surfaced[session_id] = live
-                else:
-                    self._surfaced.pop(session_id, None)
-                surfaced = set(live)
+                # delivered again, and retaining them would keep the session
+                # un-evictable (the sweep skips non-empty ledgers). This does
+                # not change `pending`: ids outside the outbox were already
+                # excluded by `outbox_ids - surfaced`.
+                ledger = self._surfaced.get(session_id)
+                if ledger is not None:
+                    ledger.intersection_update(outbox_ids)
+                surfaced = set(ledger or ())
 
             # Compare against the outbox *contents*, not a running subtraction:
             # a surfaced message that is later deleted from the outbox must not
@@ -225,48 +223,91 @@ class ChatGPTBridge:
             with self._session_lock(session_id):
                 surfaced = self._surfaced[session_id]
                 # Read outbox (messages FROM Bob TO chatgpt). transport.read()
-                # is inbox-only, so we read the file directly.
-                for msg_id, subject, _ts in transport.list_inbox("outbox"):
-                    # check the cap before reading/marking: with limit<=0 no
-                    # message may be consumed (a reply marked surfaced here
-                    # would never be delivered again).
-                    if len(replies) >= limit:
-                        break
-                    if msg_id in surfaced:
-                        continue
-                    path = transport.outbox / msg_id
-                    # confinement: msg_id is a filename from a directory
-                    # listing, but if anything ever plants a crafted name
-                    # (traversal component, symlink) the read must not leave
-                    # the outbox.
-                    resolved = path.resolve()
-                    if path.is_symlink() or not resolved.is_relative_to(transport.outbox.resolve()):
-                        continue
+                # is inbox-only, so we read the file directly. Materialize the
+                # listing so the ledger can be pruned against the whole outbox
+                # before the loop (a session that only ever polls bob_replies
+                # never runs bob_status' flush, and a stale id both misleads
+                # nothing and keeps the session un-evictable).
+                entries = list(transport.list_inbox("outbox"))
+                surfaced.intersection_update(mid for mid, _s, _t in entries)
+
+                # Open the outbox directory itself with O_NOFOLLOW. A symlinked
+                # outbox would otherwise be followed, and the containment check
+                # below resolves *through* it — so that check passes while reads
+                # land wherever the link points. O_DIRECTORY|O_NOFOLLOW fails
+                # closed (ELOOP) instead, and the file is then opened relative to
+                # this fd rather than by path.
+                outbox_fd: int | None = None
+                if entries:
                     try:
-                        # O_NOFOLLOW closes the check-to-read symlink swap
-                        # (TOCTOU): the open fails on a symlinked final
-                        # component instead of following it.
-                        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                        outbox_fd = os.open(
+                            transport.outbox,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        )
                     except OSError:
-                        continue
-                    try:
-                        with os.fdopen(fd, "rb") as f:
-                            raw = f.read()
-                        # decode bytes directly: a file that was concurrently
-                        # deleted or holds invalid UTF-8 must not break the
-                        # whole call for every other reply in the session.
-                        content = raw.decode("utf-8", errors="replace")
-                    except OSError:
-                        continue
-                    body = self._extract_body(content)
-                    replies.append(
-                        {
-                            "id": msg_id,
-                            "subject": subject,
-                            "body": body,
-                        }
-                    )
-                    newly_surfaced.append(msg_id)
+                        logger.warning(
+                            "chatgpt-bridge: refusing to read outbox %s (symlinked or unreadable)",
+                            transport.outbox,
+                        )
+                        return json.dumps(
+                            {"replies": [], "note": "No new replies from Bob."},
+                            indent=2,
+                        )
+                try:
+                    for msg_id, subject, _ts in entries:
+                        # The cap counts *collected* replies, not iterations, so
+                        # already-surfaced messages never consume it. Checked
+                        # before reading/marking: with limit<=0 no message may be
+                        # consumed (a reply marked surfaced here would never be
+                        # delivered again).
+                        if len(replies) >= limit:
+                            break
+                        if msg_id in surfaced:
+                            continue
+                        path = transport.outbox / msg_id
+                        # confinement: msg_id is a filename from a directory
+                        # listing, but if anything ever plants a crafted name
+                        # (traversal component, symlink) the read must not
+                        # leave the outbox. Still needed alongside dir_fd:
+                        # a ".."-bearing relative name traverses from the fd.
+                        resolved = path.resolve()
+                        if path.is_symlink() or not resolved.is_relative_to(
+                            transport.outbox.resolve()
+                        ):
+                            continue
+                        try:
+                            # O_NOFOLLOW closes the check-to-read symlink swap
+                            # (TOCTOU): the open fails on a symlinked final
+                            # component instead of following it.
+                            fd = os.open(
+                                msg_id,
+                                os.O_RDONLY | os.O_NOFOLLOW,
+                                dir_fd=outbox_fd,
+                            )
+                        except OSError:
+                            continue
+                        try:
+                            with os.fdopen(fd, "rb") as f:
+                                raw = f.read()
+                            # decode bytes directly: a file that was
+                            # concurrently deleted or holds invalid UTF-8 must
+                            # not break the whole call for every other reply in
+                            # the session.
+                            content = raw.decode("utf-8", errors="replace")
+                        except OSError:
+                            continue
+                        body = self._extract_body(content)
+                        replies.append(
+                            {
+                                "id": msg_id,
+                                "subject": subject,
+                                "body": body,
+                            }
+                        )
+                        newly_surfaced.append(msg_id)
+                finally:
+                    if outbox_fd is not None:
+                        os.close(outbox_fd)
 
                 # The commit to the ledger stays inside the lock: moving it
                 # outside would reopen the check-and-add race the lock exists
