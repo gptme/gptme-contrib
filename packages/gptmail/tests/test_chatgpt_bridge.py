@@ -4,11 +4,49 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
+from starlette.requests import Request
 
 from gptmail.chatgpt_bridge import ChatGPTBridge, _session_to_mailbox
 from gptmail.transport.agent import AgentTransport
+
+
+def _make_request(headers: dict[str, str]) -> Request:
+    """Build a Starlette Request carrying the given headers (no ASGI server)."""
+    raw = [(k.lower().encode(), v.encode()) for k, v in headers.items()]
+    return Request({"type": "http", "method": "GET", "path": "/sse", "headers": raw})
+
+
+async def _call_asgi(app: Any, headers: dict[str, str], body: bytes = b"{}") -> tuple[int, bytes]:
+    """Invoke an ASGI app directly and return (status, body)."""
+    all_headers = {"content-type": "application/json", **headers}
+    raw = [(k.lower().encode(), v.encode()) for k, v in all_headers.items()]
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/messages/",
+        "raw_path": b"/messages/",
+        "query_string": b"",
+        "headers": raw,
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "client": ("testclient", 1),
+        "root_path": "",
+    }
+    messages: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        messages.append(message)
+
+    await app(scope, receive, send)
+    start = next(m for m in messages if m["type"] == "http.response.start")
+    payload = b"".join(m.get("body", b"") for m in messages if m["type"] == "http.response.body")
+    return start["status"], payload
 
 
 class TestSessionToMailbox:
@@ -205,5 +243,61 @@ class TestChatGPTBridge:
     def test_auth_disabled_without_token(self, tmp_msgs: Path) -> None:
         """Auth is disabled when no token is set."""
         bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=None)
-        # _auth_ok should return True when no token configured
-        assert bridge._auth_ok  # type: ignore[attr-defined]
+        assert bridge._auth_ok(_make_request({})) is True
+
+    def test_auth_required_when_token_set(self, tmp_msgs: Path) -> None:
+        """A configured token gates every request."""
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token="s3cret")
+        assert bridge._auth_ok(_make_request({})) is False
+        assert bridge._auth_ok(_make_request({"authorization": "s3cret"})) is False
+        assert bridge._auth_ok(_make_request({"authorization": "Bearer nope"})) is False
+        assert bridge._auth_ok(_make_request({"authorization": "Bearer s3cret"})) is True
+
+    @pytest.mark.anyio
+    async def test_messages_endpoint_requires_token(self, tmp_msgs: Path) -> None:
+        """The POST /messages/ endpoint rejects unauthenticated requests."""
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token="s3cret")
+
+        status, _ = await _call_asgi(bridge._handle_messages, headers={})
+        assert status == 401
+
+        # With a valid token we reach the transport, which rejects the missing
+        # session_id — proving the auth check passed and delegation happened.
+        status, body = await _call_asgi(
+            bridge._handle_messages, headers={"authorization": "Bearer s3cret"}
+        )
+        assert status == 400
+        assert b"session_id is required" in body
+
+    @pytest.mark.anyio
+    async def test_messages_endpoint_auth_disabled_without_token(self, tmp_msgs: Path) -> None:
+        """Without a configured token the POST endpoint delegates without auth."""
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=None)
+        status, body = await _call_asgi(bridge._handle_messages, headers={})
+        assert status == 400
+        assert b"session_id is required" in body
+
+
+class TestExtractBody:
+    """Frontmatter stripping only treats line-delimited ``---`` as fences."""
+
+    def test_strips_leading_frontmatter(self) -> None:
+        content = "---\nsubject: Hi\n---\n\nBody line\n"
+        assert ChatGPTBridge._extract_body(content) == "Body line"
+
+    def test_horizontal_rule_in_body_is_preserved(self) -> None:
+        content = "---\nsubject: Hi\n---\nfirst\n---\nsecond\n"
+        assert ChatGPTBridge._extract_body(content) == "first\n---\nsecond"
+
+    def test_no_frontmatter(self) -> None:
+        assert ChatGPTBridge._extract_body("plain body") == "plain body"
+
+    def test_unterminated_frontmatter_returned_as_is(self) -> None:
+        content = "---\nsubject: Hi\nbody without close"
+        assert ChatGPTBridge._extract_body(content) == content
+
+    def test_leading_hr_without_frontmatter(self) -> None:
+        # A body that *starts* with --- but has no closing fence is not
+        # frontmatter and must survive intact.
+        content = "---\nnot frontmatter"
+        assert ChatGPTBridge._extract_body(content) == content

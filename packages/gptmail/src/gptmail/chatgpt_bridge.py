@@ -31,9 +31,11 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
+from starlette.datastructures import Headers
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
+from starlette.types import Receive, Scope, Send
 
 from gptmail.transport.agent import AgentTransport
 
@@ -83,9 +85,12 @@ class ChatGPTBridge:
     # Auth helpers
     # ------------------------------------------------------------------
     def _auth_ok(self, request: Request) -> bool:
+        return self._auth_ok_headers(request.headers)
+
+    def _auth_ok_headers(self, headers: Headers) -> bool:
         if not self._token:
             return True  # auth disabled (dev only)
-        auth = request.headers.get("authorization", "")
+        auth = headers.get("authorization", "")
         if not auth.lower().startswith("bearer "):
             return False
         return auth[7:].strip() == self._token
@@ -137,9 +142,13 @@ class ChatGPTBridge:
                 if msg_id in surfaced:
                     continue
                 path = transport.outbox / msg_id
-                if not path.exists():
+                try:
+                    # decode bytes directly: a file that was concurrently
+                    # deleted or holds invalid UTF-8 must not break the whole
+                    # call for every other reply in the session.
+                    content = path.read_bytes().decode("utf-8", errors="replace")
+                except OSError:
                     continue
-                content = path.read_text()
                 body = self._extract_body(content)
                 replies.append(
                     {
@@ -173,18 +182,41 @@ class ChatGPTBridge:
 
     @staticmethod
     def _extract_body(content: str) -> str:
-        """Strip YAML frontmatter and return the markdown body."""
-        if content.startswith("---"):
-            parts = content.split("---", 2)
-            if len(parts) >= 3:
-                return parts[2].strip()
+        """Strip a leading YAML frontmatter block and return the markdown body.
+
+        Only the *line-delimited* ``---`` fences count as frontmatter
+        delimiters, so a ``---`` horizontal rule inside the body (or inside a
+        frontmatter string) is left intact.
+        """
+        lines = content.splitlines()
+        if lines and lines[0].strip() == "---":
+            for i in range(1, len(lines)):
+                if lines[i].strip() == "---":
+                    return "\n".join(lines[i + 1 :]).strip()
         return content.strip()
 
     # ------------------------------------------------------------------
     # Starlette app (SSE endpoint + health)
     # ------------------------------------------------------------------
+    async def _handle_messages(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """ASGI wrapper around the SSE transport's POST endpoint.
+
+        ``SseServerTransport.handle_post_message`` is only usable with a
+        ``session_id`` issued over the bearer-authenticated ``/sse`` handshake,
+        so it is not world-callable on its own. The bearer token is still
+        enforced here explicitly: defence in depth, and it keeps the auth
+        boundary in one visible place instead of resting on an SDK-internal
+        capability for its security.
+        """
+        request = Request(scope, receive)
+        if not self._auth_ok(request):
+            response = JSONResponse({"error": "Unauthorized"}, status_code=401)
+            await response(scope, receive, send)
+            return
+        await self._sse.handle_post_message(scope, receive, send)
+
     def _create_app(self) -> Starlette:
-        async def handle_sse(request: Request) -> None:
+        async def handle_sse(request: Request) -> Response:
             if not self._auth_ok(request):
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
             async with self._sse.connect_sse(request.scope, request.receive, request._send) as (
@@ -196,6 +228,9 @@ class ChatGPTBridge:
                     write_stream,
                     self.mcp._mcp_server.create_initialization_options(),
                 )
+            # The SSE response was already written via request._send; Starlette
+            # still expects a Response object from the endpoint.
+            return Response()
 
         async def health(request: Request) -> JSONResponse:
             return JSONResponse({"status": "ok", "bridge": "bob-chatgpt-bridge"})
@@ -205,7 +240,7 @@ class ChatGPTBridge:
             routes=[
                 Route("/health", health),
                 Route("/sse", endpoint=handle_sse),
-                Mount("/messages/", app=self._sse.handle_post_message),
+                Mount("/messages/", app=self._handle_messages),
             ],
         )
 
