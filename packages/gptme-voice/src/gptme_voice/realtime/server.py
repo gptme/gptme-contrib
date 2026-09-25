@@ -34,7 +34,7 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
 from ..body import body_adapter_from_env, body_tool_schemas
-from ..handoff import HandoffWriter
+from ..handoff import VALID_AGENTS, HandoffWriter
 from ..rag import VoiceRag, rag_instruction_preamble, rag_tool_schema
 from ..vision import VisionSessionBridge, vision_tool_schema
 from .audio import AudioConverter
@@ -49,6 +49,7 @@ from .missed_call_context import (
 from .openai_client import (
     OpenAIRealtimeClient,
     SessionConfig,
+    _detect_agent_name,
     _detect_agent_repo,
     _get_openai_api_key,
     _load_project_instructions,
@@ -361,13 +362,38 @@ def _external_caller_guidance(caller_identity: CallerIdentity | None) -> str:
     )
 
 
+def _resolve_protocol_identity(workspace: str | None, configured: str | None) -> str:
+    """Map a configured agent name to the handoff protocol identity.
+
+    The protocol identity is the roster key that signs handoffs, deliberately
+    independent of the display name: an agent presenting as "Alice Smith"
+    still signs as "alice". An explicit ``GPTME_VOICE_AGENT_NAME`` is taken
+    verbatim (lowercased); otherwise the workspace's declared ``[agent].name``
+    is matched against the registered agents by its first word, then as a
+    whole. A name that matches no registered agent is returned as-is so the
+    caller can fail loudly instead of signing as somebody else, and a
+    deployment that declares nothing keeps the legacy ``"bob"`` default.
+    """
+    if configured:
+        return configured.lower()
+    declared = _detect_agent_name(workspace)
+    if not declared:
+        return "bob"
+    normalized = declared.lower()
+    first_word = normalized.split()[0]
+    return first_word if first_word in VALID_AGENTS else normalized
+
+
 def _build_fresh_call_greeting_instructions(
-    from_number: str, workspace: str | None, agent_name: str = "bob"
+    from_number: str, workspace: str | None, agent_name: str | None = None
 ) -> str:
     caller_identity = (
         _lookup_caller_identity(from_number, workspace) if from_number else None
     )
-    self_identity = f"You are {agent_name.capitalize()}. "
+    # Callers that pass no explicit identity get the workspace's declared agent
+    # name; "bob" stays only as the legacy generic-install fallback.
+    resolved_name = agent_name or _detect_agent_name(workspace) or "bob"
+    self_identity = f"You are {resolved_name.capitalize()}. "
     if caller_identity:
         spoken_name = caller_identity.preferred_spoken_name
         canonical_name = caller_identity.canonical_name
@@ -398,7 +424,7 @@ def _build_fresh_call_greeting_instructions(
     return (
         self_identity
         + "A fresh inbound phone call has just connected and the caller is unknown. "
-        f"Say 'Hello, this is {agent_name.capitalize()}. Who am I speaking to?' "
+        f"Say 'Hello, this is {resolved_name.capitalize()}. Who am I speaking to?' "
         "Do NOT say 'thanks for calling' or use other stock phone greetings. "
         "Then stop and wait for them to answer."
     )
@@ -802,6 +828,7 @@ class VoiceServer:
         self._agent_name = (
             _get_config_env("GPTME_VOICE_AGENT_NAME")
             or _get_config_env("AGENT_NAME")
+            or _detect_agent_name(self.workspace)
             or "bob"
         )
         # Prepend the stable persona name and truthful runtime identity so neither
@@ -831,16 +858,16 @@ class VoiceServer:
 
         # Cross-agent handoff writer (optional — only active when GPTME_VOICE_HANDOFF_DIR set)
         handoff_dir_env = _get_config_env("GPTME_VOICE_HANDOFF_DIR")
-        handoff_agent_name = (
-            _get_config_env("GPTME_VOICE_AGENT_NAME") or "bob"
-        ).lower()
+        handoff_agent_name = _resolve_protocol_identity(
+            self.workspace, _get_config_env("GPTME_VOICE_AGENT_NAME")
+        )
         handoff_secret_env = _get_config_env("GPTME_VOICE_HANDOFF_SECRET")
         handoff_agents_env = _get_config_env("GPTME_VOICE_HANDOFF_AGENTS")
         # Comma-separated list of agents the running server can hand off to.
-        # Defaults to the known agents minus the current protocol identity.
-        _default_agents = [
-            a for a in ["alice", "gordon", "sven", "bob"] if a != handoff_agent_name
-        ]
+        # Defaults to the protocol's registered agents minus this server's own
+        # identity, so registering an agent in ``handoff.VALID_AGENTS`` extends
+        # every deployment's roster from one place instead of two.
+        _default_agents = sorted(VALID_AGENTS - {handoff_agent_name})
         self._available_agents: list[str] = (
             [a.strip() for a in handoff_agents_env.split(",") if a.strip()]
             if handoff_agents_env
@@ -862,6 +889,17 @@ class VoiceServer:
                     "GPTME_VOICE_HANDOFF_SECRET not set while GPTME_VOICE_HANDOFF_DIR is "
                     "configured — handoff disabled. Set GPTME_VOICE_HANDOFF_SECRET "
                     "to a strong random value; never fall back to a known default."
+                )
+            elif handoff_agent_name not in VALID_AGENTS:
+                # A forked agent that is not yet a protocol participant must not
+                # crash the call server at startup (HandoffWriter rejects
+                # unknown identities) nor silently sign as another agent.
+                logger.error(
+                    "Handoff identity %r is not a registered protocol agent (%s) — "
+                    "handoff disabled. Set GPTME_VOICE_AGENT_NAME to a registered "
+                    "agent, or register this agent in gptme_voice.handoff.VALID_AGENTS.",
+                    handoff_agent_name,
+                    ", ".join(sorted(VALID_AGENTS)),
                 )
             else:
                 self._handoff_writer = HandoffWriter(
