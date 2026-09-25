@@ -101,6 +101,16 @@ def _detect_agent_name(workspace: str | Path | None = None) -> str | None:
     return name.strip()
 
 
+def _without_handoff_tool(tools: list[dict]) -> list[dict]:
+    """Drop the handoff tool when there is no target to hand off to.
+
+    Advertising ``handoff_to_agent`` with an empty (or unservable) roster
+    makes the model offer transfers that then fail. Callers pass the built-in
+    tool list when ``available_agents`` is empty.
+    """
+    return [tool for tool in tools if tool.get("name") != "handoff_to_agent"]
+
+
 def _load_project_instructions(workspace: str | None = None) -> str:
     """Load personality/instructions from gptme project config files.
 
@@ -658,6 +668,10 @@ class OpenAIRealtimeClient:
                 },
             ],
         }
+        if not self.session_config.available_agents:
+            # No handoff targets (handoff disabled or unregistered identity):
+            # drop the tool instead of advertising an empty enum.
+            session_params["tools"] = _without_handoff_tool(session_params["tools"])
         if self.session_config.extra_tools:
             session_params["tools"] = list(session_params["tools"]) + list(
                 self.session_config.extra_tools

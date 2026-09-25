@@ -11,7 +11,10 @@ from pathlib import Path
 
 import pytest
 from gptme_voice.realtime.audio import AudioConverter
-from gptme_voice.realtime.openai_client import _detect_agent_name
+from gptme_voice.realtime.openai_client import (
+    _detect_agent_name,
+    _without_handoff_tool,
+)
 from gptme_voice.realtime.server import (
     _VOICE_DIGEST_MAX_AGE_SECONDS,
     RecentCallRecord,
@@ -3207,12 +3210,22 @@ def test_resolve_protocol_identity_prefers_explicit_override(tmp_path: Path) -> 
     assert _resolve_protocol_identity(str(workspace), "Alice") == "alice"
 
 
-def test_resolve_protocol_identity_maps_display_name_to_registered_agent(
+def test_resolve_protocol_identity_does_not_infer_from_display_name(
     tmp_path: Path,
 ) -> None:
-    workspace = _write_agent_config(tmp_path, "Alice Smith")
+    """A display name must not silently claim a registered agent's identity.
 
-    assert _resolve_protocol_identity(str(workspace), None) == "alice"
+    "Alice Smith" and "Alice Nova" are indistinguishable from the name alone,
+    so neither may be mapped to the registered ``alice``. An unregistered
+    workspace name is returned verbatim so the caller fails loudly.
+    """
+    for declared, slug in (("Alice Smith", "smith"), ("Alice Nova", "nova")):
+        # Distinct directories: the workspace config reader caches per path.
+        case_dir = tmp_path / slug
+        case_dir.mkdir()
+        workspace = _write_agent_config(case_dir, declared)
+
+        assert _resolve_protocol_identity(str(workspace), None) == declared.lower()
 
 
 def test_resolve_protocol_identity_keeps_unregistered_name_and_legacy_default(
@@ -3227,10 +3240,16 @@ def test_resolve_protocol_identity_keeps_unregistered_name_and_legacy_default(
     assert _resolve_protocol_identity(None, None) == "bob"
 
 
-def test_server_multi_word_workspace_name_maps_to_protocol_identity(
+def test_server_multi_word_workspace_name_keeps_display_and_disables_handoff(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A human-readable declared name must not cost the agent its handoffs."""
+    """A display name that is not exactly a registered agent fails loudly.
+
+    The human-readable name is preserved for the greeting; because it cannot
+    be resolved to exactly one protocol identity, handoff is disabled with an
+    explicit error instead of silently signing as the first name's registered
+    agent.
+    """
     _fake_config_env(
         monkeypatch,
         {
@@ -3243,8 +3262,8 @@ def test_server_multi_word_workspace_name_maps_to_protocol_identity(
     server = VoiceServer(workspace=str(workspace))
 
     assert server._agent_name == "Alice Smith"
-    assert server._handoff_writer is not None
-    assert server._handoff_writer.from_agent == "alice"
+    assert server._handoff_writer is None
+    assert server._available_agents == []
 
 
 def test_server_unregistered_workspace_name_disables_handoff(
@@ -3262,6 +3281,7 @@ def test_server_unregistered_workspace_name_disables_handoff(
     server = VoiceServer(workspace=str(workspace))
 
     assert server._handoff_writer is None
+    assert server._available_agents == []
 
 
 def test_server_unregistered_handoff_identity_disables_handoff(
@@ -3285,7 +3305,23 @@ def test_server_unregistered_handoff_identity_disables_handoff(
 
     assert server._agent_name == "dave"
     assert server._handoff_writer is None
-    assert "bob" in server._available_agents
+    # No writer -> nothing to hand off to, so no targets are advertised.
+    assert server._available_agents == []
+
+
+def test_without_handoff_tool_drops_only_handoff() -> None:
+    """The handoff tool is removed from the tool list when no target exists."""
+    tools = [
+        {"type": "function", "name": "subagent"},
+        {"type": "function", "name": "handoff_to_agent"},
+        {"type": "function", "name": "hangup"},
+    ]
+
+    filtered = _without_handoff_tool(tools)
+
+    assert [t["name"] for t in filtered] == ["subagent", "hangup"]
+    # The input list is not mutated in place.
+    assert len(tools) == 3
 
 
 def test_greeting_default_name_comes_from_workspace_config(tmp_path: Path) -> None:

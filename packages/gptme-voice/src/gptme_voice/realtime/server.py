@@ -366,22 +366,33 @@ def _resolve_protocol_identity(workspace: str | None, configured: str | None) ->
     """Map a configured agent name to the handoff protocol identity.
 
     The protocol identity is the roster key that signs handoffs, deliberately
-    independent of the display name: an agent presenting as "Alice Smith"
-    still signs as "alice". An explicit ``GPTME_VOICE_AGENT_NAME`` is taken
-    verbatim (lowercased); otherwise the workspace's declared ``[agent].name``
-    is matched against the registered agents by its first word, then as a
-    whole. A name that matches no registered agent is returned as-is so the
-    caller can fail loudly instead of signing as somebody else, and a
-    deployment that declares nothing keeps the legacy ``"bob"`` default.
+    independent of the display name. It is taken only from a source that
+    states it unambiguously:
+
+    - ``configured`` (``GPTME_VOICE_AGENT_NAME``) verbatim (lowercased): the
+      operator is naming the protocol identity directly.
+    - otherwise the workspace's declared ``[agent].name`` when it is an exact,
+      case-insensitive match for a registered agent.
+
+    A workspace name that is not a registered agent — including a
+    human-readable multi-word display name such as ``"Alice Smith"`` — is
+    returned as-is so the caller fails loudly (handoff disabled with a remedy
+    in the log) instead of signing as somebody else.
+
+    Inferring the identity from a display name's first word is deliberately
+    *not* done. ``"Alice Smith"`` (the registered alice) and ``"Alice Nova"``
+    (a different agent whose first name happens to be Alice) are
+    indistinguishable from the name alone, so that heuristic would let any
+    fork silently sign handoffs as the registered ``alice`` — exactly the
+    impersonation this function exists to prevent. A deployment that declares
+    nothing keeps the legacy ``"bob"`` default.
     """
     if configured:
         return configured.lower()
     declared = _detect_agent_name(workspace)
     if not declared:
         return "bob"
-    normalized = declared.lower()
-    first_word = normalized.split()[0]
-    return first_word if first_word in VALID_AGENTS else normalized
+    return declared.lower()
 
 
 def _build_fresh_call_greeting_instructions(
@@ -912,6 +923,14 @@ class VoiceServer:
                     handoff_agent_name,
                     handoff_dir_env,
                 )
+
+        if self._handoff_writer is None:
+            # Never advertise targets we cannot serve. A deployment without a
+            # handoff writer has no way to complete a transfer, so listing
+            # agents would make the model promise transfers that then fail
+            # with "not_supported". Emptying the roster also lets the client
+            # drop the handoff tool entirely.
+            self._available_agents = []
 
         # Active connections: call_sid -> (twilio_ws, realtime_client)
         self._connections: dict[str, tuple] = {}
