@@ -506,10 +506,14 @@ def test_agent_id_reads_agent_neutral_spelling(monkeypatch) -> None:
         _get_marker_agent_id,
     )
 
+    # Clear every spelling that any accepted neutralisation of this module can
+    # read, so the assertion does not depend on the ambient test environment.
     for var in (
         "AGENT_ID",
         "BOB_AUTONOMOUS_AGENT_ID",
+        "AGENT_AMBIENT_HARNESS",
         "BOB_AMBIENT_HARNESS",
+        "AGENT_SESSION_ID",
         "GIT_COMMITTER_SESSION_ID",
         "BOB_SESSION_ID",
         "CC_SESSION_ID",
