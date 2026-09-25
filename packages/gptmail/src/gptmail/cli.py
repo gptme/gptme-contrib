@@ -90,8 +90,37 @@ def cli() -> None:
 # importable/testable in isolated LXC sessions with no email infra. Registered
 # here only as a subgroup for muscle-memory ergonomics (`gptmail agent …`).
 from gptmail.agent_cli import agent as _agent_group  # noqa: E402
+from gptmail.chatgpt_bridge import main as _chatgpt_bridge_main  # noqa: E402
 
 cli.add_command(_agent_group)
+
+
+@cli.command("chatgpt-bridge")
+@click.option("--host", default=None, help="Host to bind (default: 127.0.0.1)")
+@click.option("--port", type=int, default=None, help="Port to bind (default: 8080)")
+@click.option("--messages-dir", default=None, help="Path to gptmail messages directory")
+@click.option("--token", default=None, help="Bearer token for auth")
+@click.option("--verbose", is_flag=True, help="Enable debug logging")
+def chatgpt_bridge(
+    host: str | None,
+    port: int | None,
+    messages_dir: str | None,
+    token: str | None,
+    verbose: bool,
+) -> None:
+    """Run the ChatGPT ↔ Bob MCP bridge server."""
+    argv: list[str] = []
+    if host:
+        argv.extend(["--host", host])
+    if port:
+        argv.extend(["--port", str(port)])
+    if messages_dir:
+        argv.extend(["--messages-dir", messages_dir])
+    if token:
+        argv.extend(["--token", token])
+    if verbose:
+        argv.append("--verbose")
+    _chatgpt_bridge_main(argv)
 
 
 @cli.command()
