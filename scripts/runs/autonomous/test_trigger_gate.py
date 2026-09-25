@@ -183,6 +183,17 @@ def test_trigger_that_raises_fails_toward_skip() -> None:
     assert result.reasons == [("ok", "still works")]
 
 
+def test_only_broken_trigger_fails_toward_skip() -> None:
+    # When the sole trigger raises, run_gate must not crash and must not force a
+    # run — should_run=False and reasons=[] satisfy the fail-toward-skip contract.
+    def boom(state):
+        raise RuntimeError("kaboom")
+
+    result = run_gate({}, [TriggerSpec("broken", boom)])
+    assert not result.should_run
+    assert result.reasons == []
+
+
 def test_composite_fails_open_via_max_skip_when_everything_else_breaks() -> None:
     def boom(state):
         raise RuntimeError("kaboom")
