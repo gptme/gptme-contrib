@@ -12,7 +12,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Sequence
 
 import websockets  # type: ignore
 from gptme.config import get_config, get_project_config
@@ -111,11 +111,31 @@ def _without_handoff_tool(tools: list[dict]) -> list[dict]:
     return [tool for tool in tools if tool.get("name") != "handoff_to_agent"]
 
 
-def _load_project_instructions(workspace: str | None = None) -> str:
+def _display_name(name: str) -> str:
+    """Capitalize the first character, preserving the rest of the name.
+
+    ``str.capitalize()`` lowercases every later character, so it mangles
+    multi-word display names: ``"Alice Smith".capitalize() == "Alice smith"``.
+    Workspace-declared names are display names, so only the first character
+    should be normalized.
+    """
+    return name[:1].upper() + name[1:] if name else name
+
+
+def _load_project_instructions(
+    workspace: str | None = None,
+    available_agents: Sequence[str] | None = None,
+) -> str:
     """Load personality/instructions from gptme project config files.
 
     Loads personality-relevant files from the workspace's gptme.toml config,
     prioritizing ABOUT.md and keeping instructions concise for voice mode.
+
+    ``available_agents`` is the deployment's live handoff roster. The HANDOFF
+    section is only emitted when it is non-empty, so the prompt never directs
+    the model to call ``handoff_to_agent`` in a deployment where the tool is
+    absent (no handoff writer) — the model would otherwise announce a transfer
+    and leave the caller hanging on an API error.
     """
     if not workspace:
         return _DEFAULT_INSTRUCTIONS
@@ -212,16 +232,21 @@ def _load_project_instructions(workspace: str | None = None) -> str:
         "farewell delay gives your goodbye time to play before the line drops.\n"
         "- If you have already said goodbye verbally and the caller is still on the "
         "line, that means you forgot to call the tool. Call it now.\n\n"
-        "HANDOFF TO ANOTHER AGENT:\n"
-        "- Use handoff_to_agent ONLY when the caller explicitly asks to speak with "
-        "Alice, Gordon, or Sven, or when the topic is clearly outside your expertise "
-        "and another specific agent is better suited.\n"
-        "- Always say a brief handoff notice before calling the tool "
-        "(e.g. 'I'll transfer you to Alice now — one moment.').\n"
-        "- The full transcript is forwarded automatically. You don't need to summarise "
-        "the conversation unless there's important context not obvious from the transcript.\n"
-        "- Do not use handoff as a way to avoid answering a question.\n\n"
     )
+
+    if available_agents:
+        roster = ", ".join(_display_name(a) for a in sorted(available_agents))
+        preamble += (
+            "HANDOFF TO ANOTHER AGENT:\n"
+            "- Use handoff_to_agent ONLY when the caller explicitly asks to speak with "
+            f"{roster}, or when the topic is clearly outside your expertise "
+            "and another specific agent is better suited.\n"
+            "- Always say a brief handoff notice before calling the tool "
+            "(e.g. 'I'll transfer you to Alice now — one moment.').\n"
+            "- The full transcript is forwarded automatically. You don't need to summarise "
+            "the conversation unless there's important context not obvious from the transcript.\n"
+            "- Do not use handoff as a way to avoid answering a question.\n\n"
+        )
 
     if not parts:
         return preamble  # guards still apply even with no personality files
@@ -509,6 +534,10 @@ class OpenAIRealtimeClient:
             f"Session instructions ({len(instructions)} chars): {instructions[:100]}..."
         )
 
+        handoff_targets = ", ".join(
+            _display_name(a) for a in self.session_config.available_agents
+        )
+
         # Configure session
         session_params: dict = {
             "modalities": ["text", "audio"],
@@ -629,9 +658,7 @@ class OpenAIRealtimeClient:
                     "name": "handoff_to_agent",
                     "description": (
                         "Transfer the caller to another AI agent ("
-                        + ", ".join(
-                            a.capitalize() for a in self.session_config.available_agents
-                        )
+                        + handoff_targets
                         + "). "
                         "Use this when the caller explicitly asks to speak with a different "
                         "agent, or when the topic is clearly outside your expertise and "

@@ -51,6 +51,7 @@ from .openai_client import (
     SessionConfig,
     _detect_agent_name,
     _detect_agent_repo,
+    _display_name,
     _get_openai_api_key,
     _load_project_instructions,
 )
@@ -404,7 +405,7 @@ def _build_fresh_call_greeting_instructions(
     # Callers that pass no explicit identity get the workspace's declared agent
     # name; "bob" stays only as the legacy generic-install fallback.
     resolved_name = agent_name or _detect_agent_name(workspace) or "bob"
-    self_identity = f"You are {resolved_name.capitalize()}. "
+    self_identity = f"You are {_display_name(resolved_name)}. "
     if caller_identity:
         spoken_name = caller_identity.preferred_spoken_name
         canonical_name = caller_identity.canonical_name
@@ -435,7 +436,7 @@ def _build_fresh_call_greeting_instructions(
     return (
         self_identity
         + "A fresh inbound phone call has just connected and the caller is unknown. "
-        f"Say 'Hello, this is {resolved_name.capitalize()}. Who am I speaking to?' "
+        f"Say 'Hello, this is {_display_name(resolved_name)}. Who am I speaking to?' "
         "Do NOT say 'thanks for calling' or use other stock phone greetings. "
         "Then stop and wait for them to answer."
     )
@@ -842,15 +843,6 @@ class VoiceServer:
             or _detect_agent_name(self.workspace)
             or "bob"
         )
-        # Prepend the stable persona name and truthful runtime identity so neither
-        # gets lost when the compact voice prompt truncates personality files.
-        self._instructions = (
-            f"IDENTITY: You are {self._agent_name.capitalize()}. "
-            "Never claim to be another agent.\n\n"
-            + _build_runtime_identity_instructions(self.provider, self.model)
-            + "\n\n"
-            + _load_project_instructions(self.workspace)
-        )
         self.resume_window_seconds = int(
             _get_config_env("GPTME_VOICE_RESUME_WINDOW_SECONDS")
             or _DEFAULT_RESUME_WINDOW_SECONDS
@@ -931,6 +923,21 @@ class VoiceServer:
             # with "not_supported". Emptying the roster also lets the client
             # drop the handoff tool entirely.
             self._available_agents = []
+
+        # Prepend the stable persona name and truthful runtime identity so neither
+        # gets lost when the compact voice prompt truncates personality files.
+        # Built here, after the handoff roster is resolved, so the prompt never
+        # describes a handoff tool the deployment cannot serve (the client drops
+        # the tool when ``_available_agents`` is empty).
+        self._instructions = (
+            f"IDENTITY: You are {_display_name(self._agent_name)}. "
+            "Never claim to be another agent.\n\n"
+            + _build_runtime_identity_instructions(self.provider, self.model)
+            + "\n\n"
+            + _load_project_instructions(
+                self.workspace, available_agents=self._available_agents
+            )
+        )
 
         # Active connections: call_sid -> (twilio_ws, realtime_client)
         self._connections: dict[str, tuple] = {}

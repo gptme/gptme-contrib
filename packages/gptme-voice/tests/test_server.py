@@ -3109,7 +3109,8 @@ def test_server_uses_general_agent_name_for_identity(
     server = VoiceServer()
 
     assert server._agent_name == "Alice Smith"
-    assert server._instructions.startswith("IDENTITY: You are Alice smith.")
+    # ``str.capitalize()`` would render "Alice smith" and mangle the surname.
+    assert server._instructions.startswith("IDENTITY: You are Alice Smith.")
 
 
 def test_server_general_display_name_does_not_change_handoff_identity(
@@ -3140,9 +3141,20 @@ def test_server_voice_agent_name_overrides_general_name(
     assert server._instructions.startswith("IDENTITY: You are Sven.")
 
 
-def _write_agent_config(workspace: Path, name: str) -> Path:
-    """Write a minimal workspace gptme.toml declaring ``[agent].name``."""
-    (workspace / "gptme.toml").write_text(f'[agent]\nname = "{name}"\n')
+def _write_agent_config(
+    workspace: Path, name: str, with_personality: bool = False
+) -> Path:
+    """Write a minimal workspace gptme.toml declaring ``[agent].name``.
+
+    ``with_personality`` also declares a ``[prompt] files`` entry so
+    ``_load_project_instructions`` takes the personality path (which carries the
+    guards preamble and the handoff section) instead of the bare default.
+    """
+    config = f'[agent]\nname = "{name}"\n'
+    if with_personality:
+        (workspace / "ABOUT.md").write_text(f"# ABOUT\nYou are {name}.\n")
+        config += '[prompt]\nfiles = ["ABOUT.md"]\n'
+    (workspace / "gptme.toml").write_text(config)
     return workspace
 
 
@@ -3257,13 +3269,62 @@ def test_server_multi_word_workspace_name_keeps_display_and_disables_handoff(
             "GPTME_VOICE_HANDOFF_SECRET": "test-secret",
         },
     )
-    workspace = _write_agent_config(tmp_path, "Alice Smith")
+    workspace = _write_agent_config(tmp_path, "Alice Smith", with_personality=True)
 
     server = VoiceServer(workspace=str(workspace))
 
     assert server._agent_name == "Alice Smith"
     assert server._handoff_writer is None
     assert server._available_agents == []
+    # The display name must survive into the rendered identity and greeting —
+    # ``str.capitalize()`` used to turn "Alice Smith" into "Alice smith".
+    assert "IDENTITY: You are Alice Smith." in server._instructions
+    greeting = _build_fresh_call_greeting_instructions(
+        "+1555000000", str(workspace), server._agent_name
+    )
+    assert "You are Alice Smith." in greeting
+    assert "this is Alice Smith" in greeting
+    # Handoff is disabled, so the prompt must not direct the model to a tool
+    # the client has dropped.
+    assert "HANDOFF TO ANOTHER AGENT" not in server._instructions
+    assert "handoff_to_agent" not in server._instructions
+
+
+def test_server_prompt_describes_handoff_only_when_served(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The HANDOFF preamble must match the roster the deployment can serve.
+
+    Regression: ``connect()`` drops the ``handoff_to_agent`` tool when
+    ``available_agents`` is empty, but the static preamble still told the model
+    to call it, so the model promised transfers the API could not perform.
+    """
+    _fake_config_env(
+        monkeypatch,
+        {
+            "GPTME_VOICE_HANDOFF_DIR": str(tmp_path / "handoff-state"),
+            "GPTME_VOICE_HANDOFF_SECRET": "test-secret",
+        },
+    )
+    workspace = _write_agent_config(tmp_path, "Alice", with_personality=True)
+
+    served = VoiceServer(workspace=str(workspace))
+
+    assert served._handoff_writer is not None
+    assert "HANDOFF TO ANOTHER AGENT:" in served._instructions
+    # The roster is rendered from the live list, not hard-coded agent names.
+    for agent in served._available_agents:
+        assert agent.capitalize() in served._instructions
+    assert "alice" not in served._available_agents
+
+    fork_dir = tmp_path / "fork"
+    fork_dir.mkdir()
+    disabled = VoiceServer(
+        workspace=_write_agent_config(fork_dir, "Nova", with_personality=True)
+    )
+
+    assert disabled._available_agents == []
+    assert "HANDOFF TO ANOTHER AGENT:" not in disabled._instructions
 
 
 def test_server_unregistered_workspace_name_disables_handoff(
