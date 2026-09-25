@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -467,3 +468,178 @@ def test_legacy_alias_does_not_skip_qualified_claim(tmp_path: Path) -> None:
     assert qualified is not None, "qualified claim was skipped on legacy alias"
     assert qualified.claimer == "agent-b"
     assert qualified.status == "claimed"
+
+
+def test_session_pid_reads_agent_neutral_spelling(monkeypatch) -> None:
+    """AGENT_SESSION_PID is honored, with BOB_SESSION_PID as legacy alias.
+
+    Regression for gptme/gptme-contrib#1705: a guard that resolves holder
+    liveness only from ``BOB_*`` is a silent no-op for every other agent.
+    """
+    from gptme_coordination.worktree_guard import _get_session_pid
+
+    monkeypatch.delenv("AGENT_SESSION_PID", raising=False)
+    monkeypatch.delenv("BOB_SESSION_PID", raising=False)
+    assert _get_session_pid() == 0
+
+    monkeypatch.setenv("AGENT_SESSION_PID", "23456")
+    assert _get_session_pid() == 23456
+
+    # Legacy spelling still works on its own.
+    monkeypatch.delenv("AGENT_SESSION_PID", raising=False)
+    monkeypatch.setenv("BOB_SESSION_PID", "12345")
+    assert _get_session_pid() == 12345
+
+    # Preferred spelling wins when both are set.
+    monkeypatch.setenv("AGENT_SESSION_PID", "23456")
+    assert _get_session_pid() == 23456
+
+    # A malformed preferred value must not mask a valid legacy one.
+    monkeypatch.setenv("AGENT_SESSION_PID", "not-a-pid")
+    assert _get_session_pid() == 12345
+
+
+def test_agent_id_reads_agent_neutral_spelling(monkeypatch) -> None:
+    """AGENT_ID is honored; BOB_AUTONOMOUS_AGENT_ID stays the legacy alias."""
+    from gptme_coordination.worktree_guard import (
+        _get_agent_id,
+        _get_marker_agent_id,
+    )
+
+    for var in (
+        "AGENT_ID",
+        "BOB_AUTONOMOUS_AGENT_ID",
+        "BOB_AMBIENT_HARNESS",
+        "GIT_COMMITTER_SESSION_ID",
+        "BOB_SESSION_ID",
+        "CC_SESSION_ID",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    # No env-provided id: synthesized from a session id, but the marker records
+    # only env-provided ids so a dead holder can never look permanently alive.
+    monkeypatch.setenv("GIT_COMMITTER_SESSION_ID", "sess-1")
+    assert _get_agent_id() == "bob-autonomous-agent-sess-1"
+    assert _get_marker_agent_id() == ""
+
+    monkeypatch.setenv("BOB_AUTONOMOUS_AGENT_ID", "legacy-agent")
+    assert _get_agent_id() == "legacy-agent"
+    assert _get_marker_agent_id() == "legacy-agent"
+
+    monkeypatch.setenv("AGENT_ID", "neutral-agent")
+    assert _get_agent_id() == "neutral-agent"
+    assert _get_marker_agent_id() == "neutral-agent"
+
+
+def test_env_flag_accepts_agent_neutral_and_legacy_spellings(monkeypatch) -> None:
+    """Both guard flags accept either env spelling."""
+    from gptme_coordination.worktree_guard import (
+        _GUARD_FORCE_ENV,
+        _PUSH_GUARD_DENY_ENV,
+        _env_flag,
+    )
+
+    for names in (_GUARD_FORCE_ENV, _PUSH_GUARD_DENY_ENV):
+        for name in names:
+            for other in names:
+                monkeypatch.delenv(other, raising=False)
+            monkeypatch.setenv(name, "1")
+            assert _env_flag(*names) is True, (names, name)
+            monkeypatch.setenv(name, "0")
+            assert _env_flag(*names) is False, (names, name)
+
+
+def test_push_guard_deny_via_agent_neutral_flag(tmp_path: Path, monkeypatch) -> None:
+    """AGENT_WORKTREE_PUSH_GUARD_DENY=1 drives the Phase-3 deny path.
+
+    Fails on pre-fix code: the flag was read only from the BOB_* spelling, so
+    the guard warned instead of denying.
+    """
+    from gptme_coordination.db import CoordinationDB
+    from gptme_coordination.work import WorkClaimManager
+    from gptme_coordination.worktree_guard import run_push_guard
+
+    db_path = tmp_path / "coord.db"
+    with CoordinationDB(db_path) as db:
+        assert WorkClaimManager(db).claim(
+            "holder-agent", "pr-branch:org/repo#feat", ttl_minutes=60
+        )
+
+    monkeypatch.delenv("BOB_WORKTREE_PUSH_GUARD_DENY", raising=False)
+    monkeypatch.delenv("AGENT_WORKTREE_PUSH_GUARD_DENY", raising=False)
+
+    kwargs = {
+        "worktree_root": tmp_path / "wt",
+        "brain_root": tmp_path / "brain",
+        "remote_url": "git@github.com:org/repo.git",
+        "session_id": "sess-1",
+        "agent_id": "agent-b",
+        "db_path": db_path,
+    }
+    refspec = ["refs/heads/feat abc123 refs/heads/feat def456"]
+
+    # Warn mode by default.
+    assert run_push_guard(refspec, **kwargs) == 0
+
+    # Neutral spelling is enough to block.
+    monkeypatch.setenv("AGENT_WORKTREE_PUSH_GUARD_DENY", "1")
+    assert run_push_guard(refspec, **kwargs) == 1
+
+    # Legacy spelling still blocks too.
+    monkeypatch.delenv("AGENT_WORKTREE_PUSH_GUARD_DENY", raising=False)
+    monkeypatch.setenv("BOB_WORKTREE_PUSH_GUARD_DENY", "1")
+    assert run_push_guard(refspec, **kwargs) == 1
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "brain/state/coordination/worktree-guard.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert [row["type"] for row in rows] == [
+        "push_would_deny",
+        "push_deny",
+        "push_deny",
+    ]
+
+
+def test_guard_force_via_agent_neutral_flag(tmp_path: Path, monkeypatch) -> None:
+    """AGENT_WORKTREE_GUARD_FORCE=1 takes over from a live holder.
+
+    Fails on pre-fix code: the force flag was read only from BOB_*, so an
+    otherwise-live holder produced ``would_deny`` instead of ``force``.
+    """
+    from gptme_coordination.worktree_guard import run_guard
+
+    worktree = tmp_path / "worktrees" / "pr"
+    git_dir = worktree / "git"
+    git_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        "gptme_coordination.worktree_guard._WORKTREE_PREFIX",
+        f"{tmp_path}/worktrees/",
+    )
+    monkeypatch.delenv("BOB_WORKTREE_GUARD_FORCE", raising=False)
+    monkeypatch.delenv("AGENT_WORKTREE_GUARD_FORCE", raising=False)
+
+    common = {
+        "worktree_root": worktree,
+        "git_dir": git_dir,
+        "brain_root": tmp_path,
+        # A live PID: the holder cannot be reaped, so only force can take over.
+        "pid": os.getpid(),
+    }
+    assert (
+        run_guard(session_id="holder-session", agent_id="holder-agent", **common) == 0
+    )
+    assert run_guard(session_id="my-session", agent_id="my-agent", **common) == 0
+
+    monkeypatch.setenv("AGENT_WORKTREE_GUARD_FORCE", "1")
+    assert run_guard(session_id="my-session", agent_id="my-agent", **common) == 0
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "state/coordination/worktree-guard.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert [row["type"] for row in rows] == ["adopt", "would_deny", "force"]
