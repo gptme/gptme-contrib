@@ -48,6 +48,9 @@ def _init_repo_with_remote(path, url: str) -> None:
         ("https://github.com/NewAgent/agent-brain.git", "NewAgent/agent-brain"),
         ("https://github.com/NewAgent/agent-brain", "NewAgent/agent-brain"),
         ("ssh://git@github.com/NewAgent/agent-brain.git", "NewAgent/agent-brain"),
+        ("https://github.com/NewAgent/agent-brain/", "NewAgent/agent-brain"),
+        ("https://github.com/NewAgent/agent-brain.git/", "NewAgent/agent-brain"),
+        ("git@github.com:NewAgent/agent-brain.git/", "NewAgent/agent-brain"),
         ("", None),
         ("/home/bob/bob", None),
         ("https://github.com/only-owner", None),
@@ -103,6 +106,47 @@ def test_fetch_activity_defaults_to_workspace_repo(tmp_path):
     fetched = [repo.repo for repo in activity.repos]
     assert fetched == ["NewAgent/agent-brain", *PROJECT_REPOS]
     assert "ErikBjare/gptme-bob" not in fetched
+
+
+def test_default_repos_dedupes_project_repo_workspace(tmp_path):
+    """A workspace that *is* a project repo is not summarized twice."""
+    _init_repo_with_remote(tmp_path, "git@github.com:gptme/gptme-contrib.git")
+
+    repos = default_repos(tmp_path)
+
+    assert repos == ["gptme/gptme-contrib", "gptme/gptme"]
+    assert len(repos) == len(set(repos))
+
+
+def test_fetch_activity_attributes_commits_to_workspace_repo(tmp_path):
+    """Local commits belong to the workspace repo, not to a project repo."""
+    _init_repo_with_remote(tmp_path, "git@github.com:NewAgent/agent-brain.git")
+
+    with (
+        patch("gptme_activity_summary.github_data._gh_available", return_value=False),
+        patch("gptme_activity_summary.github_data.get_commit_count", return_value=7),
+    ):
+        activity = fetch_activity(date(2026, 8, 1), date(2026, 8, 1), workspace=str(tmp_path))
+
+    assert activity.repos[0].repo == "NewAgent/agent-brain"
+    assert activity.repos[0].commits == 7
+    assert activity.total_commits == 7
+
+
+def test_fetch_activity_does_not_credit_project_repo_without_workspace_repo(tmp_path):
+    """With no derivable workspace repo, commits stay 'local', not gptme/gptme."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+    with (
+        patch("gptme_activity_summary.github_data._gh_available", return_value=False),
+        patch("gptme_activity_summary.github_data.get_commit_count", return_value=5),
+    ):
+        activity = fetch_activity(date(2026, 8, 1), date(2026, 8, 1), workspace=str(tmp_path))
+
+    by_name = {repo.repo: repo.commits for repo in activity.repos}
+    assert by_name["local"] == 5
+    assert all(by_name[repo] == 0 for repo in PROJECT_REPOS)
+    assert activity.total_commits == 5
 
 
 def test_run_command_success():

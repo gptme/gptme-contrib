@@ -46,6 +46,9 @@ def repo_from_remote_url(url: str) -> str | None:
         path = after_scheme.split("/", 1)[1]
     else:
         path = url
+    # Normalise before suffix-stripping: a trailing slash after `.git`
+    # (`.../name.git/`) would otherwise leave `name.git` as the repo name.
+    path = path.strip("/")
     path = path.removesuffix(".git").strip("/")
     parts = path.split("/")
     if len(parts) != 2 or not all(parts):
@@ -204,7 +207,9 @@ def default_repos(workspace: str | Path | None = None) -> list[str]:
     """
     workspace_repo = detect_workspace_repo(workspace)
     if workspace_repo:
-        return [workspace_repo, *PROJECT_REPOS]
+        # A workspace that *is* a project repo (e.g. gptme-contrib) must not be
+        # listed twice.
+        return list(dict.fromkeys([workspace_repo, *PROJECT_REPOS]))
     return list(PROJECT_REPOS)
 
 
@@ -819,11 +824,25 @@ def fetch_activity(
 
         activity.repos.append(repo_activity)
 
-    # Get commit count from local workspace if available
+    # Get commit count from local workspace if available. Attribute it to the
+    # workspace's own repo — never to a project repo the agent merely happens to
+    # summarize, which is the misattribution this change exists to prevent
+    # (#1705). When the workspace repo cannot be matched, keep the commits under
+    # a "local" entry instead.
     if workspace:
         commit_count = get_commit_count(start, end, workspace)
-        if activity.repos:
-            activity.repos[0].commits = commit_count
+        workspace_repo = detect_workspace_repo(workspace)
+        target = next(
+            (r for r in activity.repos if workspace_repo and r.repo == workspace_repo),
+            None,
+        )
+        if target is None and workspace_repo and has_gh:
+            # The remote name may be stale (GitHub redirects on rename); compare
+            # against the canonical name the list was resolved to.
+            canonical = _canonical_repo(workspace_repo)
+            target = next((r for r in activity.repos if r.repo == canonical), None)
+        if target is not None:
+            target.commits = commit_count
         else:
             activity.repos.append(RepoActivity(repo="local", commits=commit_count))
 
