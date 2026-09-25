@@ -1530,10 +1530,29 @@ check_own_pr_review_state() {
 #: Matches the rest of this script, which already honors $BOT_USERNAME.
 FIX_TRIGGER_LOGIN="${BOT_USERNAME:-TimeToBuildBob}"
 
+#: Regex-escape a literal. The login is a literal token, not a pattern, so a
+#: metacharacter from an env-supplied ``$BOT_USERNAME`` must not reach the
+#: regex engine as syntax: ``my.bot`` would otherwise also match ``myXbot``,
+#: and a login containing ``(`` would not compile at all. A non-compiling
+#: regex is swallowed by pending_fix_request's ``2>/dev/null`` + fail-toward-
+#: skip path, so the trigger would silently never fire for that agent.
+regex_escape() {
+    local s=$1 out='' i c
+    for (( i = 0; i < ${#s}; i++ )); do
+        c=${s:i:1}
+        # Escape everything that is not provably literal in a regex.
+        case $c in
+            [!A-Za-z0-9_-]) out+="\\$c" ;;
+            *) out+=$c ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
 #: Whole-line trigger, case-insensitive. Same shape as ai-review-sweep.py's
 #: ``TRIGGER_RE``: prose that merely mentions the phrase must not fire it.
 #: Trailing ``\r`` is allowed because GitHub stores comment bodies CRLF.
-FIX_TRIGGER_LINE_RE='^[ \t]*@'"$FIX_TRIGGER_LOGIN"'[ \t]+fix[ \t\r]*$'
+FIX_TRIGGER_LINE_RE='^[ \t]*@'"$(regex_escape "$FIX_TRIGGER_LOGIN")"'[ \t]+fix[ \t\r]*$'
 
 #: Anyone can comment on a public PR; only maintainers can spend worker budget.
 FIX_TRUSTED_ASSOCIATIONS='["OWNER","MEMBER","COLLABORATOR"]'

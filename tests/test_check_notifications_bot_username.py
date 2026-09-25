@@ -85,12 +85,21 @@ sys.stdout.write(r.stdout)
 #: Sources the function bodies from the script under test rather than copying
 #: them, so the test tracks the implementation. ``awk`` extracts each function
 #: by its definition line up to the next column-0 ``}``.
+#:
+#: That pattern assumes the script keeps column-0 closing braces (it does, repo-
+#: wide). If a reformat ever breaks the assumption the extraction would quietly
+#: define nothing and the assertion below would silently test nothing, so each
+#: extraction is checked and the driver exits 99 — a code no test expects.
 DRIVER = r"""
 SCRIPT=$1
 repo=$2
 number=$3
-eval "$(awk '/^_is_permission_blocked_merge_ready_pr_uncached\(\)/,/^}/' "$SCRIPT")"
-eval "$(awk '/^is_permission_blocked_merge_ready_pr\(\)/,/^}/' "$SCRIPT")"
+for fn in _is_permission_blocked_merge_ready_pr_uncached is_permission_blocked_merge_ready_pr; do
+    body=$(awk "/^${fn}\\(\\)/,/^}/" "$SCRIPT")
+    [ -n "$body" ] || { echo "extraction empty for $fn" >&2; exit 99; }
+    eval "$body" || { echo "extraction unparsable for $fn" >&2; exit 99; }
+    type -t "$fn" >/dev/null || { echo "extraction defined no $fn" >&2; exit 99; }
+done
 is_permission_blocked_merge_ready_pr "$repo" "$number"
 """
 

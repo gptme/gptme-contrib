@@ -623,3 +623,52 @@ def test_bot_username_with_jq_special_characters_still_reads_reactions() -> None
         items = _fix_items(result)
         assert len(items) == 1, f"expected one fix item, got {items}\n{result.stdout}"
         assert len(posts) == 1, posts
+
+
+def test_bot_username_with_regex_metacharacters_still_fires() -> None:
+    """A login is literal text: ``a(b`` must still match ``@a(b fix``.
+
+    Interpolated into the trigger regex unescaped, the ``(`` opens a group that
+    never closes, so the pattern does not compile. The failure is swallowed by
+    the fail-toward-skip path and the trigger silently never fires.
+    """
+    other = "a(b"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        result, posts = _run_gate(
+            tmp,
+            _fixture([_comment(body=f"@{other} fix")]),
+            state_dir=state_dir,
+            gh_log=tmp / "gh.log",
+            extra_env={"BOT_USERNAME": other},
+        )
+        assert result.returncode in (0, 1), result.stderr
+        items = _fix_items(result)
+        assert len(items) == 1, f"expected one fix item, got {items}\n{result.stdout}"
+        assert len(posts) == 1, posts
+
+
+def test_regex_metacharacter_login_does_not_match_a_probe_login() -> None:
+    """``my.bot`` is a literal: it must not fire on ``@myXbot fix``.
+
+    Unescaped, the ``.`` is a wildcard and the trigger fires for a login the
+    maintainer never addressed.
+    """
+    other = "my.bot"
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+
+        result, posts = _run_gate(
+            tmp,
+            _fixture([_comment(body="@myXbot fix")]),
+            state_dir=state_dir,
+            gh_log=tmp / "gh.log",
+            extra_env={"BOT_USERNAME": other},
+        )
+        assert _fix_items(result) == [], result.stdout
+        assert posts == [], posts
