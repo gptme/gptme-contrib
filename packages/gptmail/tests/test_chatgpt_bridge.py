@@ -485,3 +485,36 @@ class TestFailClosedBind:
         # must not raise SystemExit from the auth gate; run() would try to
         # bind, so just verify the gate logic passes via _is_loopback + token
         assert bridge._token
+
+    def test_ipv6_any_and_unknown_hosts_are_public(self) -> None:
+        """'::' (IPv6 any) and unparseable hosts are not loopback."""
+        assert not ChatGPTBridge._is_loopback("::")
+        assert not ChatGPTBridge._is_loopback("0.0.0.0")
+        assert not ChatGPTBridge._is_loopback("192.168.1.5")
+        assert ChatGPTBridge._is_loopback("::1")
+
+    @pytest.mark.anyio
+    async def test_traversal_filename_from_listing_is_skipped(
+        self,
+        bridge: ChatGPTBridge,
+        session_id: str,
+        bob_transport: AgentTransport,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A listing that yields a traversal path must not escape the outbox."""
+        outside = bob_transport.outbox.parent / "outside.txt"
+        outside.write_text("secret", encoding="utf-8")
+
+        real_list = bob_transport.list_inbox
+
+        def poisoned(folder: str):  # type: ignore[no-untyped-def]
+            for entry in real_list(folder):
+                yield entry
+            yield (f"..{os.sep}outside.txt", "Evil", "0")
+
+        monkeypatch.setattr(bob_transport, "list_inbox", poisoned)
+        result = await bridge.mcp.call_tool("bob_replies", {"session_id": session_id})
+        data = json.loads(result[0][0].text)
+        ids = [r["id"] for r in data["replies"]]
+        assert f"..{os.sep}outside.txt" not in ids
+        assert all("secret" not in r["body"] for r in data["replies"])
