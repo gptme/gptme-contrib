@@ -7,6 +7,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(dirname "$0")"
+# Config files sit next to the *installed* hooks dir. install.sh symlinks
+# $HOME/.config/git/hooks into the shared dotfiles checkout, and ".." through a
+# symlink is resolved by the kernel against the link target — so derive the
+# config dir textually, and the agent's own allowed-repos.conf is read instead
+# of the shared checkout's template copy (see pre-commit for the full note).
+HOOK_CONF_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Git invokes: pre-push <remote-name> <remote-url>
 # Used to skip origin-specific work when pushing to a mirror or other remote.
@@ -210,7 +216,9 @@ fi
 # --- Master/Main Push Protection ---
 # Source allowed repos from config file (shared with pre-commit hook)
 # Falls back to empty array if config doesn't exist (backwards compatible)
-source "$SCRIPT_DIR/../allowed-repos.conf" 2>/dev/null || ALLOWED_PATTERNS=()
+# No "$SCRIPT_DIR/.." fallback: through the installed hooks symlink that would
+# load the shared checkout's template config instead of the agent's own.
+source "$HOOK_CONF_DIR/allowed-repos.conf" 2>/dev/null || ALLOWED_PATTERNS=()
 
 REMOTE_URL=$(git remote get-url origin 2>/dev/null || echo "")
 

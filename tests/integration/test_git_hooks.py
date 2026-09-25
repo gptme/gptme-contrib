@@ -502,6 +502,15 @@ def test_hooks_exist():
     assert (HOOKS_DIR / "pre-commit").exists(), "pre-commit hook not found"
 
 
+def _install_symlinked_hooks(repo_path: Path) -> Path:
+    """Mimic install.sh: make .git/hooks a symlink to the shared hooks dir."""
+    hooks_dir = repo_path / ".git" / "hooks"
+    if hooks_dir.is_symlink() or hooks_dir.exists():
+        shutil.rmtree(hooks_dir)
+    hooks_dir.symlink_to(HOOKS_DIR)
+    return hooks_dir
+
+
 def run_pre_commit_hook(repo_path: Path, email: str) -> subprocess.CompletedProcess:
     """Stage a change and invoke the pre-commit hook directly with a given
     committing identity. Runs the hook script directly (the fixture disables
@@ -559,6 +568,112 @@ class TestGitIdentityValidation:
         # but the identity guard specifically must not fire.
         assert "NOT an allowed identity" not in (result.stdout + result.stderr)
         assert "user.email is not set" not in (result.stdout + result.stderr)
+
+    def test_allowed_identities_conf_allows_a_forked_identity(self, hook_env):
+        """install.sh writes this file; without it a fork cannot commit at all."""
+        (hook_env / ".git" / "allowed-identities.conf").write_text(
+            'IDENTITY_ALLOWLIST=(\n    "agent@example.com"\n)\n'
+        )
+        result = run_pre_commit_hook(hook_env, "agent@example.com")
+        assert "NOT an allowed identity" not in (result.stdout + result.stderr)
+
+    def test_allowed_identities_conf_replaces_builtin_defaults(self, hook_env):
+        """The conf overrides rather than extends: built-in defaults no longer pass."""
+        (hook_env / ".git" / "allowed-identities.conf").write_text(
+            'IDENTITY_ALLOWLIST=(\n    "agent@example.com"\n)\n'
+        )
+        result = run_pre_commit_hook(hook_env, "bob@superuserlabs.org")
+        assert result.returncode != 0
+        assert "NOT an allowed identity" in (result.stdout + result.stderr)
+
+    def test_refusal_hint_names_the_agents_own_identity(self, hook_env):
+        """The error text must not tell a non-Bob agent to adopt Bob's address."""
+        (hook_env / ".git" / "allowed-identities.conf").write_text(
+            'IDENTITY_ALLOWLIST=(\n    "agent@example.com"\n)\n'
+        )
+        result = run_pre_commit_hook(hook_env, "someone-else@example.com")
+        output = result.stdout + result.stderr
+        assert result.returncode != 0
+        assert "agent@example.com" in output
+        assert "bob@superuserlabs.org" not in output
+
+    def test_unparsable_conf_fails_closed(self, hook_env):
+        """A broken override must not silently fall back to the built-ins."""
+        (hook_env / ".git" / "allowed-identities.conf").write_text(
+            'IDENTITY_ALLOWLIST=(\n    "unterminated\n'
+        )
+        result = run_pre_commit_hook(hook_env, "bob@superuserlabs.org")
+        assert result.returncode != 0
+        assert "could not be sourced" in (result.stdout + result.stderr)
+
+    def test_conf_is_found_through_an_installed_hooks_symlink(self, temp_repo):
+        """install.sh symlinks the hooks dir into the shared checkout.
+
+        "$HOOK_DIR/.." is then resolved by the kernel against the link target,
+        so a conf written next to the *installed* hooks dir was unreachable and
+        every installed agent fell back to the built-in defaults.
+        """
+        _install_symlinked_hooks(temp_repo)
+        (temp_repo / ".git" / "allowed-identities.conf").write_text(
+            'IDENTITY_ALLOWLIST=(\n    "agent@example.com"\n)\n'
+        )
+        result = run_pre_commit_hook(temp_repo, "agent@example.com")
+        assert "NOT an allowed identity" not in (result.stdout + result.stderr)
+
+    def test_allowed_repos_conf_is_found_through_a_hooks_symlink(self, temp_repo):
+        """Same resolution for allowed-repos.conf: the agent's own allowlist
+        must win over the shared checkout's template copy, in both directions."""
+        clean_env = _clean_git_env()
+        # The identity guard must not be what decides this test.
+        clean_env["ALLOW_GIT_IDENTITY"] = "1"
+        for args in (
+            ["git", "checkout", "-q", "-B", "master"],
+            [
+                "git",
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/agent-repo.git",
+            ],
+        ):
+            subprocess.run(
+                args, cwd=temp_repo, check=True, capture_output=True, env=clean_env
+            )
+        hooks_dir = _install_symlinked_hooks(temp_repo)
+        (temp_repo / ".git" / "allowed-repos.conf").write_text(
+            'ALLOWED_PATTERNS=(\n    "example/agent-repo"\n)\n'
+        )
+        (temp_repo / "x.txt").write_text("x")
+        subprocess.run(
+            ["git", "add", "x.txt"],
+            cwd=temp_repo,
+            check=True,
+            capture_output=True,
+            env=clean_env,
+        )
+
+        def run_hook() -> str:
+            result = subprocess.run(
+                ["bash", str(hooks_dir / "pre-commit")],
+                cwd=temp_repo,
+                capture_output=True,
+                text=True,
+                env=clean_env,
+            )
+            return result.stdout + result.stderr
+
+        assert "Cannot commit directly" not in run_hook()
+
+        # A repo the agent's conf does NOT list is still blocked — proving the
+        # conf was read from the installed dir, not the shared template copy.
+        subprocess.run(
+            ["git", "remote", "set-url", "origin", "https://github.com/other/repo.git"],
+            cwd=temp_repo,
+            check=True,
+            capture_output=True,
+            env=clean_env,
+        )
+        assert "Cannot commit directly" in run_hook()
 
     def test_bypass_env_skips_identity_check(self, hook_env):
         """ALLOW_GIT_IDENTITY=1 skips the guard for deliberate exceptions."""

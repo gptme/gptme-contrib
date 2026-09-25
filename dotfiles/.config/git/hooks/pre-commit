@@ -18,6 +18,24 @@ NC='\033[0m' # No Color
 # Get the hooks directory for sourcing config
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Config files sit next to the *installed* hooks dir. install.sh symlinks
+# $HOME/.config/git/hooks into the shared dotfiles checkout, and ".." through a
+# symlink is resolved by the kernel against the link target — so
+# "$HOOK_DIR/.." lands in the shared checkout and the agent's own
+# allowed-repos.conf / allowed-identities.conf are never read. dirname() is
+# textual, so it gives the agent's config dir for both layouts.
+HOOK_CONF_DIR="$(dirname "$HOOK_DIR")"
+_read_hook_conf() {
+    # Source the agent's config file. HOOK_CONF_DIR already covers both layouts
+    # (symlinked install and real-directory install), so there is deliberately
+    # no "$HOOK_DIR/.." fallback: through a symlink that would load the shared
+    # checkout's template config instead of the agent's own.
+    local name="$1"
+    # shellcheck source=/dev/null
+    source "$HOOK_CONF_DIR/$name" 2>/dev/null && return 0
+    return 1
+}
+
 # --- Part 0: Mass-deletion guard (~1ms, runs unconditionally) ---
 # This MUST run before the prek/pre-commit availability check below,
 # because when prek is missing, the hook may exit 0 and all guards are skipped.
@@ -62,18 +80,30 @@ fi
 # (submodules like gptme-contrib, projects/*, /tmp worktrees).
 # Bypass (rare, deliberate): ALLOW_GIT_IDENTITY=1 git commit ...
 # Forkable: an optional allowed-identities.conf (next to allowed-repos.conf) may
-# define IDENTITY_ALLOWLIST=(...) to override the built-in Bob defaults.
+# define IDENTITY_ALLOWLIST=(...) to override the built-in defaults. install.sh
+# writes it from the installing agent's git identity when that identity is not
+# one of the built-ins below, so a forked agent does not have to hand-edit this
+# hook to be able to commit.
 if [ "${ALLOW_GIT_IDENTITY:-0}" != "1" ]; then
     IDENTITY_ALLOWLIST=(
         "bob@superuserlabs.org"
         "timetobuildbob@gmail.com"
     )
-    # shellcheck source=/dev/null
-    source "$HOOK_DIR/../allowed-identities.conf" 2>/dev/null || true
+    # An existing-but-unparsable conf must fail closed: silently keeping the
+    # built-in allowlist would ignore an override the agent wrote on purpose.
+    _identity_conf="$HOOK_CONF_DIR/allowed-identities.conf"
+    if [ -f "$_identity_conf" ] && ! _read_hook_conf allowed-identities.conf; then
+        echo -e "${RED}ABORT: ${_identity_conf} exists but could not be sourced.${NC}"
+        echo    "   Fix the file (syntax error?), or bypass this commit with ALLOW_GIT_IDENTITY=1."
+        exit 1
+    fi
+    # Error text must not hard-code Bob's address: this hook runs for every
+    # agent, and a fork cannot set an identity it was just refused for.
+    _identity_hint="${IDENTITY_ALLOWLIST[0]:-<your git user.email>}"
     COMMIT_EMAIL="$(git config user.email 2>/dev/null || echo "")"
     if [ -z "$COMMIT_EMAIL" ]; then
         echo -e "${RED}ABORT: git user.email is not set — refusing to commit with an unknown identity.${NC}"
-        echo    "   Fix: git config user.email bob@superuserlabs.org"
+        echo    "   Fix: git config user.email ${_identity_hint}"
         exit 1
     fi
     _identity_ok=false
@@ -84,7 +114,8 @@ if [ "${ALLOW_GIT_IDENTITY:-0}" != "1" ]; then
         echo -e "${RED}ABORT: git user.email '${COMMIT_EMAIL}' is NOT an allowed identity.${NC}"
         echo    "   Allowed: ${IDENTITY_ALLOWLIST[*]}"
         echo    "   This usually means a repo-local config override shadowed the correct global identity."
-        echo    "   Fix in THIS repo:  git config user.email bob@superuserlabs.org"
+        echo    "   Fix in THIS repo:  git config user.email ${_identity_hint}"
+        echo    "   To allow another identity for this agent, edit ~/.config/git/allowed-identities.conf"
         echo    "   (bypass if truly intended: ALLOW_GIT_IDENTITY=1 git commit ...)"
         exit 1
     fi
@@ -136,7 +167,7 @@ if [ "$BRANCH" = "master" ] || [ "$BRANCH" = "main" ]; then
 
     # Source allowed repos from config file (shared with pre-push hook)
     # Falls back to empty array if config doesn't exist (backwards compatible)
-    source "$HOOK_DIR/../allowed-repos.conf" 2>/dev/null || ALLOWED_PATTERNS=()
+    _read_hook_conf allowed-repos.conf || ALLOWED_PATTERNS=()
 
     is_allowed=false
 
