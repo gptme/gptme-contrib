@@ -116,6 +116,29 @@ def test_post_session_reads_neutral_lineage_from_environment(tmp_path: Path, mon
     assert result.record.dispatch_kind == "fanout"
 
 
+def test_blank_neutral_lineage_falls_back_to_legacy(tmp_path: Path, monkeypatch):
+    """An exported-but-empty AGENT_* value must not blank out the legacy value.
+
+    ``export AGENT_PARENT_SESSION_ID=`` is a realistic launcher artifact; the
+    resolution is a falsy ``or`` chain, so an empty neutral value has to fall
+    through rather than win as an empty string.
+    """
+    monkeypatch.setenv("AGENT_PARENT_SESSION_ID", "")
+    monkeypatch.setenv("BOB_PARENT_SESSION_ID", "legacy-parent")
+    monkeypatch.setenv("AGENT_DISPATCH_KIND", "")
+    monkeypatch.setenv("BOB_DISPATCH_KIND", "fanout")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="sonnet",
+        session_id="blank-neutral",
+        duration_seconds=10,
+    )
+    assert result.record.parent_session_id == "legacy-parent"
+    assert result.record.dispatch_kind == "fanout"
+
+
 def test_neutral_lineage_beats_legacy_alias(tmp_path: Path, monkeypatch):
     """Both spellings present: the neutral name is authoritative.
 
