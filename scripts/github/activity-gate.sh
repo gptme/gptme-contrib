@@ -982,6 +982,8 @@ check_master_ci() {
     # Nightly full-suite failures have their own handler/key — they must not
     # occupy the push-CI master_ci_failure slot after Tests has gone green.
     # A failure superseded by a newer success of the same workflow is recovered.
+    # Suppression is event-consistent: manual/dispatch runs are excluded from
+    # both sides, so a workflow_dispatch success cannot clear a push failure.
     local failures
     failures=$(echo "$runs" | jq -c '
         def detached:
@@ -997,6 +999,7 @@ check_master_ci() {
                 . as $f
                 | [$passes[]
                    | select(.name == $f.name
+                       and .event == $f.event
                        and ((.createdAt
                              | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)
                            >= ($f.createdAt

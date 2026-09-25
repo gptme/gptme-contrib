@@ -192,6 +192,38 @@ def test_newer_success_of_same_workflow_suppresses_stale_failure(
     assert result.stdout == ""
 
 
+def test_manual_success_does_not_suppress_push_failure(tmp_path: Path) -> None:
+    """Suppression is event-consistent.
+
+    Manual/dispatch runs are excluded as failures because they are unrelated
+    to default-branch health; the same reasoning must apply to successes, or
+    a workflow_dispatch success would silently clear a real push failure.
+    """
+    runs = [
+        _run(
+            601,
+            "push",
+            conclusion="failure",
+            name="Tests",
+            created_at=_ts(7200),
+        ),
+        _run(
+            602,
+            "workflow_dispatch",
+            conclusion="success",
+            name="Tests",
+            created_at=_ts(3600),
+        ),
+    ]
+    result = _run_gate(tmp_path, runs)
+
+    assert result.returncode == 0, result.stderr
+    items = [json.loads(line) for line in result.stdout.splitlines()]
+    assert ("master_ci_failure", 601) in [
+        (item["type"], item["number"]) for item in items
+    ]
+
+
 def test_nightly_failure_is_not_push_ci_master_failure(tmp_path: Path) -> None:
     """Nightly full-suite red must not occupy the push-CI master_ci slot."""
     runs = [
