@@ -180,10 +180,12 @@ def test_composite_fails_open_via_max_skip_when_everything_else_breaks() -> None
     def boom(state):
         raise RuntimeError("kaboom")
 
-    # Every domain trigger is broken and a suppressor is active — the gate would
-    # go silent forever without the non-suppressible floor. It doesn't.
+    # Every domain trigger is broken AND a suppressor is genuinely active — the
+    # gate would go silent forever without the non-suppressible floor. A future
+    # blocked_until is required, otherwise blocked_window() is inactive and the
+    # test wouldn't actually exercise "max_skip fires *through* a suppressor".
     result = run_gate(
-        {},  # empty state => max_skip force-runs
+        {"blocked_until": _iso(datetime.now(UTC) + timedelta(hours=1))},
         [
             TriggerSpec("broken", boom, suppressible=True),
             TriggerSpec("max_skip", max_skip_trigger(4.0), suppressible=False),
@@ -192,6 +194,17 @@ def test_composite_fails_open_via_max_skip_when_everything_else_breaks() -> None
     )
     assert result.should_run
     assert result.reasons[0][0] == "max_skip"
+
+
+def test_max_skip_forces_run_on_future_timestamp() -> None:
+    # A last_session_ts in the future (clock skew, cross-machine state write, or
+    # a corrupt/manual edit) must not silently wedge the floor: hours_since would
+    # be negative and the >= check would never fire. max_skip is the fail-open
+    # valve, so a future timestamp forces a run.
+    future = datetime.now(UTC) + timedelta(hours=5)
+    fired, reason = max_skip_trigger(4.0)({"last_session_ts": _iso(future)})
+    assert fired
+    assert "future" in reason
 
 
 # --- audit trail & observe/commit split ------------------------------------

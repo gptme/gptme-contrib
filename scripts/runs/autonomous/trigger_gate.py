@@ -158,7 +158,18 @@ def max_skip_trigger(hours: float, ts_key: str = "last_session_ts") -> Trigger:
         last = parse_dt(state.get(ts_key))
         if last is None:
             return True, "no previous session recorded — forcing run"
-        hours_since = (datetime.now(UTC) - last).total_seconds() / 3600
+        now = datetime.now(UTC)
+        # A future timestamp (clock skew, cross-machine state write, or a
+        # manual/corrupt edit) would make hours_since negative and silently
+        # defeat the floor — wedging the gate forever. Treat it as invalid and
+        # force a run: max_skip is the fail-open floor, so it must never be the
+        # thing that goes quiet.
+        if last > now:
+            return (
+                True,
+                f"last session timestamp is in the future ({state[ts_key]}) — forcing run",
+            )
+        hours_since = (now - last).total_seconds() / 3600
         if hours_since >= hours:
             return True, f"max skip exceeded: {hours_since:.1f}h since last session"
         return False, None
