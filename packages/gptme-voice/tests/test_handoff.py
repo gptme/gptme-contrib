@@ -17,6 +17,7 @@ from gptme_voice.handoff import (
     build_handoff,
     caller_hash,
     compute_hmac,
+    get_valid_agents,
     make_state_dirs,
     validate,
 )
@@ -254,6 +255,60 @@ def test_handoff_writer_rejects_invalid_from_agent(tmp_path: Path):
 def test_handoff_writer_rejects_empty_secret(tmp_path: Path):
     with pytest.raises(ValueError, match="secret"):
         HandoffWriter(tmp_path, from_agent="bob", secret=b"")
+
+
+# ---------- GPTME_VOICE_AGENTS — deployment-configurable roster ----------
+
+
+def test_get_valid_agents_returns_default_without_env(monkeypatch):
+    monkeypatch.delenv("GPTME_VOICE_AGENTS", raising=False)
+    agents = get_valid_agents()
+    assert agents == frozenset({"bob", "alice", "gordon", "sven"})
+
+
+def test_get_valid_agents_respects_env_override(monkeypatch):
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "alice,charlie,diana")
+    agents = get_valid_agents()
+    assert agents == frozenset({"alice", "charlie", "diana"})
+    assert "bob" not in agents
+
+
+def test_non_default_agent_handoff_writer_succeeds(tmp_path, monkeypatch):
+    """A fork with a non-default agent name can create a HandoffWriter when
+    GPTME_VOICE_AGENTS includes that name — fails on the pre-fix code where
+    VALID_AGENTS was a hardcoded frozenset."""
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "alice,myrtle")
+    writer = HandoffWriter(tmp_path, from_agent="myrtle", secret=SECRET)
+    assert writer.from_agent == "myrtle"
+
+
+def test_non_default_agent_build_and_validate_roundtrip(monkeypatch):
+    """A handoff between two non-default agents validates end-to-end when the
+    roster env var covers both names."""
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "myrtle,oracle")
+    payload = build_handoff(
+        from_agent="myrtle",
+        to_agent="oracle",
+        caller_id="test-caller",
+        reason="routing",
+        secret=SECRET,
+        now=SAMPLE_NOW,
+    )
+    result = validate(payload, secret=SECRET, now=SAMPLE_VALIDATION_NOW)
+    assert result.ok, result.reason
+
+
+def test_non_default_agent_rejected_without_env(monkeypatch):
+    """Without GPTME_VOICE_AGENTS, the default roster still applies."""
+    monkeypatch.delenv("GPTME_VOICE_AGENTS", raising=False)
+    with pytest.raises(ValueError, match="not in"):
+        build_handoff(
+            from_agent="myrtle",
+            to_agent="bob",
+            caller_id="x",
+            reason="r",
+            secret=SECRET,
+        )
 
 
 # ---------- make_state_dirs ----------

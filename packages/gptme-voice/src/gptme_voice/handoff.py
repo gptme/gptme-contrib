@@ -54,6 +54,28 @@ VALID_AGENTS: frozenset[str] = frozenset({"bob", "alice", "gordon", "sven"})
 
 STATE_SUBDIRS: tuple[str, ...] = ("handoff", "claimed", "archive", "rejected")
 
+_ENV_AGENTS = "GPTME_VOICE_AGENTS"
+
+
+def get_valid_agents() -> frozenset[str]:
+    """Return the roster of valid agent names for this deployment.
+
+    By default returns the built-in ``VALID_AGENTS`` set (bob/alice/gordon/sven).
+    Set ``GPTME_VOICE_AGENTS`` to a comma-separated list to replace the roster
+    for a fork or custom deployment::
+
+        GPTME_VOICE_AGENTS=alice,charlie,diana gptme-voice-server ...
+
+    The value completely replaces the default; it does not extend it. Names are
+    lowercased and empty entries are ignored.
+    """
+    raw = os.environ.get(_ENV_AGENTS, "")
+    if not raw.strip():
+        return VALID_AGENTS
+    names = frozenset(n.strip().lower() for n in raw.split(",") if n.strip())
+    return names if names else VALID_AGENTS
+
+
 _DEFAULT_TTL_SECONDS = 60
 
 
@@ -115,11 +137,12 @@ def validate(
         if field not in payload:
             return ValidationResult(False, f"missing required field: {field}")
 
+    valid = get_valid_agents()
     for agent_field in ("from_agent", "to_agent"):
-        if payload[agent_field] not in VALID_AGENTS:
+        if payload[agent_field] not in valid:
             return ValidationResult(
                 False,
-                f"{agent_field}={payload[agent_field]!r} not in {sorted(VALID_AGENTS)}",
+                f"{agent_field}={payload[agent_field]!r} not in {sorted(valid)}",
             )
     if payload["from_agent"] == payload["to_agent"]:
         return ValidationResult(False, "from_agent and to_agent must differ")
@@ -195,10 +218,11 @@ def build_handoff(
     ``resume_hint``, etc.) that aren't required by the validator but are useful
     for the target agent.
     """
-    if from_agent not in VALID_AGENTS:
-        raise ValueError(f"from_agent={from_agent!r} not in {sorted(VALID_AGENTS)}")
-    if to_agent not in VALID_AGENTS:
-        raise ValueError(f"to_agent={to_agent!r} not in {sorted(VALID_AGENTS)}")
+    valid = get_valid_agents()
+    if from_agent not in valid:
+        raise ValueError(f"from_agent={from_agent!r} not in {sorted(valid)}")
+    if to_agent not in valid:
+        raise ValueError(f"to_agent={to_agent!r} not in {sorted(valid)}")
     if from_agent == to_agent:
         raise ValueError("from_agent and to_agent must differ")
 
@@ -309,8 +333,9 @@ class HandoffWriter:
         from_agent: str,
         secret: bytes,
     ) -> None:
-        if from_agent not in VALID_AGENTS:
-            raise ValueError(f"from_agent={from_agent!r} not in {sorted(VALID_AGENTS)}")
+        valid = get_valid_agents()
+        if from_agent not in valid:
+            raise ValueError(f"from_agent={from_agent!r} not in {sorted(valid)}")
         if not secret:
             raise ValueError("secret must be non-empty bytes")
         self.state_dir = state_dir
@@ -375,8 +400,9 @@ class HandoffHubWriter:
         from_agent: str,
         secret: bytes,
     ) -> None:
-        if from_agent not in VALID_AGENTS:
-            raise ValueError(f"from_agent={from_agent!r} not in {sorted(VALID_AGENTS)}")
+        valid = get_valid_agents()
+        if from_agent not in valid:
+            raise ValueError(f"from_agent={from_agent!r} not in {sorted(valid)}")
         if not secret:
             raise ValueError("secret must be non-empty bytes")
         self.hub_url = hub_url.rstrip("/")
@@ -458,6 +484,7 @@ __all__ = [
     "VALID_AGENTS",
     "HandoffHubWriter",
     "HandoffWriter",
+    "get_valid_agents",
     "PublishedHandoff",
     "ValidationResult",
     "archive_filename",
