@@ -182,6 +182,41 @@ class TestChatGPTBridge:
         assert d2["replies"] == []
 
     @pytest.mark.anyio
+    async def test_failed_call_consumes_nothing(
+        self,
+        bridge: ChatGPTBridge,
+        session_id: str,
+        bob_transport: AgentTransport,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A call that fails partway must not mark earlier replies surfaced."""
+        bob_transport.send(to="chatgpt", subject="First", content="Body 1")
+        bob_transport.send(to="chatgpt", subject="Second", content="Body 2")
+
+        calls = {"n": 0}
+        real = ChatGPTBridge._extract_body
+
+        def flaky(content: str) -> str:
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("boom")
+            return real(content)
+
+        monkeypatch.setattr(ChatGPTBridge, "_extract_body", staticmethod(flaky))
+        try:
+            await bridge.mcp.call_tool("bob_replies", {"session_id": session_id, "limit": 5})
+        except Exception:
+            pass
+
+        # the failed call must not have consumed anything
+        assert bridge._surfaced[session_id] == set()
+
+        monkeypatch.undo()
+        r = await bridge.mcp.call_tool("bob_replies", {"session_id": session_id, "limit": 5})
+        data = self._parse_result(r)
+        assert {m["subject"] for m in data["replies"]} == {"First", "Second"}
+
+    @pytest.mark.anyio
     async def test_bob_replies_limit(
         self,
         bridge: ChatGPTBridge,
@@ -472,6 +507,9 @@ class TestFailClosedBind:
 
     def test_public_bind_without_token_refuses(self, tmp_msgs: Path) -> None:
         bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=None)
+        assert not bridge._bind_allowed("0.0.0.0")
+        # "" is what uvicorn binds as all-interfaces, so it must fail closed too
+        assert not bridge._bind_allowed("")
         with pytest.raises(SystemExit):
             bridge.run(host="0.0.0.0", port=8080)
 
@@ -479,12 +517,14 @@ class TestFailClosedBind:
         bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=None)
         assert bridge._is_loopback("127.0.0.1")
         assert bridge._is_loopback("localhost")
+        assert bridge._bind_allowed("127.0.0.1")
 
     def test_public_bind_with_token_is_allowed(self, tmp_msgs: Path) -> None:
         bridge = ChatGPTBridge(messages_dir=tmp_msgs, token="s3cret")
-        # must not raise SystemExit from the auth gate; run() would try to
-        # bind, so just verify the gate logic passes via _is_loopback + token
-        assert bridge._token
+        # exercise the same gate run() consults, without opening a socket:
+        # this fails if the gate is inverted or refuses any host with a token
+        assert bridge._bind_allowed("0.0.0.0")
+        assert bridge._bind_allowed("127.0.0.1")
 
     def test_ipv6_any_and_unknown_hosts_are_public(self) -> None:
         """'::' (IPv6 any) and unparseable hosts are not loopback."""

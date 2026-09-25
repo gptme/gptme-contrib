@@ -167,6 +167,9 @@ class ChatGPTBridge:
             transport = self._transport(mailbox)
 
             replies: list[dict[str, Any]] = []
+            # msg_ids collected by this call; committed to the surfaced ledger
+            # only after the payload is built (see below).
+            newly_surfaced: list[str] = []
             # Hold the per-session lock across the whole check-and-add: two
             # concurrent calls must not both read an unsurfaced message and
             # deliver it twice.
@@ -214,15 +217,25 @@ class ChatGPTBridge:
                             "body": body,
                         }
                     )
-                    surfaced.add(msg_id)
+                    newly_surfaced.append(msg_id)
 
-            if not replies:
-                return json.dumps(
-                    {"replies": [], "note": "No new replies from Bob."},
-                    indent=2,
-                )
+                # The commit to the ledger stays inside the lock: moving it
+                # outside would reopen the check-and-add race the lock exists
+                # for. It is still deferred until the payload is built, so a
+                # failure partway through the call cannot consume replies that
+                # were collected but never returned. Delivery to the client
+                # happens after this function returns and is not observable
+                # here; the outbox on disk remains the source of truth, so a
+                # response dropped in that window is recoverable.
+                if not replies:
+                    return json.dumps(
+                        {"replies": [], "note": "No new replies from Bob."},
+                        indent=2,
+                    )
 
-            return json.dumps({"replies": replies}, indent=2)
+                payload = json.dumps({"replies": replies}, indent=2)
+                surfaced.update(newly_surfaced)
+                return payload
 
     # ------------------------------------------------------------------
     # Transport helpers
@@ -308,11 +321,20 @@ class ChatGPTBridge:
         except ValueError:
             return False  # unknown host forms are treated as public
 
+    def _bind_allowed(self, host: str) -> bool:
+        """Whether the auth gate lets us bind ``host``.
+
+        Fail closed: anything we cannot prove is loopback (including ``""``,
+        ``0.0.0.0``, ``::`` and unknown hostnames) requires a token. Kept as a
+        separate method so the gate is testable without opening a socket.
+        """
+        return bool(self._token) or self._is_loopback(host)
+
     def run(self, host: str = "127.0.0.1", port: int = 8080) -> None:
         # fail closed: binding a non-loopback interface with auth disabled
         # exposes the mailbox to the local network. Dev usage on loopback
         # (the default) is unaffected.
-        if not self._token and not self._is_loopback(host):
+        if not self._bind_allowed(host):
             raise SystemExit(
                 "chatgpt-bridge: refusing to bind %s without CHATGPT_BRIDGE_TOKEN "
                 "(auth would be disabled on a public interface). Set a token or "
