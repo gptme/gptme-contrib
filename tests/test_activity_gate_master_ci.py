@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -27,6 +28,19 @@ if argv[:2] == ["run", "list"]:
     if "--status" in argv:
         status = argv[argv.index("--status") + 1]
         runs = [run for run in runs if run.get("conclusion") == status]
+    if "--created" in argv:
+        # Mirror the real gh contract: plain ISO date or '>=<date>'. Anything
+        # else is malformed and must fail loudly so a regression in the
+        # --created argument is caught instead of silently ignored.
+        created = argv[argv.index("--created") + 1]
+        if created.startswith(">="):
+            since = created[2:]
+            runs = [run for run in runs if run.get("createdAt", "") >= since]
+        else:
+            since = created
+        if len(since) != 10 or not since[:4].isdigit() or since[4] != "-" or not since[5:7].isdigit() or since[7] != "-" or not since[8:].isdigit():
+            print(f"error: invalid --created value: {created!r}", file=sys.stderr)
+            raise SystemExit(2)
     limit = int(argv[argv.index("--limit") + 1])
     print(json.dumps(runs[:limit]))
     raise SystemExit(0)
@@ -73,8 +87,14 @@ def _run(
     *,
     conclusion: str = "failure",
     name: str | None = None,
-    created_at: str = "2026-07-22T13:59:34Z",
+    # Default to inside the gate's 3-day --created window so the fake gh's
+    # (real-contract) window filter does not drop fixtures as they age.
+    created_at: str | None = None,
 ) -> dict:
+    if created_at is None:
+        created_at = (datetime.now(timezone.utc) - timedelta(days=1)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
     return {
         "databaseId": run_id,
         "name": name or f"workflow-{event}",
