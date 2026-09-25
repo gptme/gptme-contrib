@@ -231,6 +231,12 @@ check_repo() {
         (.conclusion != "startup_failure")
         or ((.name // "") != "")
     )]')
+    # The empty-array check above ran BEFORE this filter, so an all-ghost window
+    # would otherwise fall through to conclusion="" and print "Unknown ()".
+    if [ "$(echo "$run_json" | jq 'length')" -eq 0 ]; then
+        echo -e "${YELLOW}-${NC} $label: No runs (only ghost startup_failure runs from deleted workflows)"
+        return
+    fi
 
     local conclusion status in_progress=""
     conclusion=$(echo "$run_json" | jq -r '.[0].conclusion // ""')
