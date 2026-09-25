@@ -11,6 +11,7 @@ import pytest
 
 from gptme_activity_summary.github_data import (
     LIST_LIMIT,
+    PROJECT_REPOS,
     GitHubActivity,
     RepoActivity,
     UserEvent,
@@ -18,6 +19,8 @@ from gptme_activity_summary.github_data import (
     _render_event_line,
     _run_command,
     _search_total_count,
+    default_repos,
+    detect_workspace_repo,
     fetch_activity,
     fetch_user_activity,
     format_activity_for_prompt,
@@ -28,7 +31,78 @@ from gptme_activity_summary.github_data import (
     get_user_events,
     get_user_issues,
     get_user_prs,
+    repo_from_remote_url,
 )
+
+
+def _init_repo_with_remote(path, url: str) -> None:
+    """Create a git repo at ``path`` whose ``origin`` is ``url``."""
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(["git", "-C", str(path), "remote", "add", "origin", url], check=True)
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("git@github.com:NewAgent/agent-brain.git", "NewAgent/agent-brain"),
+        ("https://github.com/NewAgent/agent-brain.git", "NewAgent/agent-brain"),
+        ("https://github.com/NewAgent/agent-brain", "NewAgent/agent-brain"),
+        ("ssh://git@github.com/NewAgent/agent-brain.git", "NewAgent/agent-brain"),
+        ("", None),
+        ("/home/bob/bob", None),
+        ("https://github.com/only-owner", None),
+    ],
+)
+def test_repo_from_remote_url(url: str, expected: str | None):
+    """Remote URL spellings all resolve to a single owner/name."""
+    assert repo_from_remote_url(url) == expected
+
+
+def test_detect_workspace_repo_reads_origin(tmp_path):
+    """The workspace repo comes from its origin remote."""
+    _init_repo_with_remote(tmp_path, "git@github.com:NewAgent/agent-brain.git")
+
+    assert detect_workspace_repo(tmp_path) == "NewAgent/agent-brain"
+
+
+def test_detect_workspace_repo_none_without_remote_or_workspace(tmp_path):
+    """No remote (or no workspace) means no detectable repo."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+    assert detect_workspace_repo(tmp_path) is None
+    assert detect_workspace_repo(None) is None
+
+
+def test_default_repos_derives_workspace_repo_not_bob(tmp_path):
+    """A non-Bob workspace must summarize its own repo, never ErikBjare/gptme-bob."""
+    _init_repo_with_remote(tmp_path, "git@github.com:NewAgent/agent-brain.git")
+
+    repos = default_repos(tmp_path)
+
+    assert repos[0] == "NewAgent/agent-brain"
+    assert repos[1:] == PROJECT_REPOS
+    assert "ErikBjare/gptme-bob" not in repos
+
+
+def test_default_repos_without_workspace_repo_has_no_bob_repo(tmp_path):
+    """With no remote to derive from, no Bob-specific repo may appear."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+    assert default_repos(tmp_path) == PROJECT_REPOS
+    assert default_repos(None) == PROJECT_REPOS
+    assert "ErikBjare/gptme-bob" not in default_repos(None)
+
+
+def test_fetch_activity_defaults_to_workspace_repo(tmp_path):
+    """The default fetch target follows the workspace, not a hard-coded repo."""
+    _init_repo_with_remote(tmp_path, "git@github.com:NewAgent/agent-brain.git")
+
+    with patch("gptme_activity_summary.github_data._gh_available", return_value=False):
+        activity = fetch_activity(date(2026, 8, 1), date(2026, 8, 1), workspace=str(tmp_path))
+
+    fetched = [repo.repo for repo in activity.repos]
+    assert fetched == ["NewAgent/agent-brain", *PROJECT_REPOS]
+    assert "ErikBjare/gptme-bob" not in fetched
 
 
 def test_run_command_success():
