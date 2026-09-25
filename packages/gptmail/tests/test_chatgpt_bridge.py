@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 from starlette.requests import Request
 
-from gptmail.chatgpt_bridge import ChatGPTBridge, _session_to_mailbox
+from gptmail.chatgpt_bridge import (
+    _MAX_TRACKED_SESSIONS,
+    ChatGPTBridge,
+    _session_to_mailbox,
+)
 from gptmail.transport.agent import AgentTransport
 
 
@@ -306,16 +311,31 @@ class TestChatGPTBridge:
         session_id: str,
         bob_transport: AgentTransport,
     ) -> None:
-        """Two overlapping calls must not deliver the same reply twice."""
+        """Two overlapping calls must not deliver the same reply twice.
+
+        ``call_tool`` runs the synchronous tool inline on the event loop, so
+        gathering two calls serializes them and cannot exercise the race (with
+        a barrier it deadlocks on the barrier). Drive the registered tool
+        function from two threads instead, with the barrier forcing both into
+        the critical section before either takes the per-session lock: without
+        the lock both read an unsurfaced message and deliver it twice.
+        """
         import asyncio
 
         bob_transport.send(to="chatgpt", subject="Only once", content="body")
 
+        fn = bridge.mcp._tool_manager._tools["bob_replies"].fn
+        barrier = threading.Barrier(2, timeout=10)
+
+        def call() -> str:
+            barrier.wait()
+            return fn(session_id)
+
         results = await asyncio.gather(
-            bridge.mcp.call_tool("bob_replies", {"session_id": session_id}),
-            bridge.mcp.call_tool("bob_replies", {"session_id": session_id}),
+            asyncio.to_thread(call),
+            asyncio.to_thread(call),
         )
-        delivered = sum(len(self._parse_result(r)["replies"]) for r in results)
+        delivered = sum(len(json.loads(r)["replies"]) for r in results)
         assert delivered == 1
 
     def test_explicit_empty_token_disables_auth_over_env(
@@ -334,6 +354,17 @@ class TestChatGPTBridge:
         bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=None)
         assert bridge._auth_ok(_make_request({})) is False
         assert bridge._auth_ok(_make_request({"authorization": "Bearer from-env"})) is True
+
+    def test_blank_token_is_rejected(self, tmp_msgs: Path) -> None:
+        """A whitespace-only token is a config error, not 'auth disabled'."""
+        with pytest.raises(ValueError):
+            ChatGPTBridge(messages_dir=tmp_msgs, token="   \n")
+
+    def test_token_whitespace_is_normalized(self, tmp_msgs: Path) -> None:
+        """A token with a trailing newline (env var) still authenticates."""
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=" sekret\n")
+        assert bridge._auth_ok(_make_request({"authorization": "Bearer sekret"})) is True
+        assert bridge._auth_ok(_make_request({"authorization": "Bearer wrong"})) is False
 
     @pytest.mark.anyio
     async def test_bob_status_after_surfaced_message_deleted(
@@ -484,22 +515,65 @@ class TestOutboxConfinement:
         assert "20260101T000000-evil.md" not in ids
 
     @pytest.mark.anyio
-    async def test_traversal_filename_is_skipped(
+    async def test_traversal_filename_from_listing_is_skipped(
         self,
         bridge: ChatGPTBridge,
         session_id: str,
         bob_transport: AgentTransport,
-        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        secret = tmp_path / "secret.txt"
-        secret.write_text("outside", encoding="utf-8")
-        traversal = f"..{os.sep}secret.txt"
+        """A listing that yields a traversal path must not escape the outbox.
+
+        The name only reaches ``bob_replies`` through the directory listing
+        (a real directory entry cannot contain a separator), so the listing is
+        poisoned to plant one; asserting against a name that was never listed
+        would pass with the guard removed.
+        """
+        outside = bob_transport.outbox.parent / "outside.txt"
+        outside.write_text("secret", encoding="utf-8")
+
+        real_list = bob_transport.list_inbox
+
+        def poisoned(folder: str):  # type: ignore[no-untyped-def]
+            for entry in real_list(folder):
+                yield entry
+            yield (f"..{os.sep}outside.txt", "Evil", "0")
+
+        monkeypatch.setattr(bob_transport, "list_inbox", poisoned)
         result = await bridge.mcp.call_tool("bob_replies", {"session_id": session_id})
         data = json.loads(result[0][0].text)
-        # the traversal name is not a listed file, so nothing leaks; the
-        # confinement guard exists for defense in depth — assert a normal
-        # reply still round-trips.
-        assert traversal not in [r["id"] for r in data["replies"]]
+        ids = [r["id"] for r in data["replies"]]
+        assert f"..{os.sep}outside.txt" not in ids
+        assert all("secret" not in r["body"] for r in data["replies"])
+
+    def test_idle_sessions_are_evicted(self, tmp_msgs: Path) -> None:
+        """The per-session maps stay bounded on a long-lived server."""
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs)
+        for i in range(_MAX_TRACKED_SESSIONS):
+            bridge._locks[f"idle-{i}"] = threading.Lock()
+
+        lock = bridge._session_lock("fresh")
+
+        assert bridge._locks["fresh"] is lock
+        assert len(bridge._locks) <= _MAX_TRACKED_SESSIONS
+
+    def test_held_lock_and_live_ledger_are_not_evicted(self, tmp_msgs: Path) -> None:
+        """Eviction must not steal an in-flight lock or a live ledger."""
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs)
+        held = threading.Lock()
+        held.acquire()
+        bridge._locks["busy"] = held
+        bridge._surfaced["recent"] = {"msg-1"}
+        for i in range(_MAX_TRACKED_SESSIONS):
+            bridge._locks[f"idle-{i}"] = threading.Lock()
+
+        with bridge._locks_guard:
+            bridge._evict_idle_sessions()
+
+        assert bridge._locks["busy"] is held
+        assert bridge._surfaced["recent"] == {"msg-1"}
+        # the idle entries were reclaimed
+        assert len(bridge._locks) < _MAX_TRACKED_SESSIONS
 
 
 class TestFailClosedBind:
@@ -532,29 +606,3 @@ class TestFailClosedBind:
         assert not ChatGPTBridge._is_loopback("0.0.0.0")
         assert not ChatGPTBridge._is_loopback("192.168.1.5")
         assert ChatGPTBridge._is_loopback("::1")
-
-    @pytest.mark.anyio
-    async def test_traversal_filename_from_listing_is_skipped(
-        self,
-        bridge: ChatGPTBridge,
-        session_id: str,
-        bob_transport: AgentTransport,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A listing that yields a traversal path must not escape the outbox."""
-        outside = bob_transport.outbox.parent / "outside.txt"
-        outside.write_text("secret", encoding="utf-8")
-
-        real_list = bob_transport.list_inbox
-
-        def poisoned(folder: str):  # type: ignore[no-untyped-def]
-            for entry in real_list(folder):
-                yield entry
-            yield (f"..{os.sep}outside.txt", "Evil", "0")
-
-        monkeypatch.setattr(bob_transport, "list_inbox", poisoned)
-        result = await bridge.mcp.call_tool("bob_replies", {"session_id": session_id})
-        data = json.loads(result[0][0].text)
-        ids = [r["id"] for r in data["replies"]]
-        assert f"..{os.sep}outside.txt" not in ids
-        assert all("secret" not in r["body"] for r in data["replies"])

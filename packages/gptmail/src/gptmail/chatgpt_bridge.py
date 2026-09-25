@@ -62,6 +62,11 @@ def _session_to_mailbox(session_id: str) -> str:
     return f"cgpt-{h}"
 
 
+# Cap on sessions whose lock + surfaced ledger are retained. Tool calls are
+# low-frequency (chat polling), so this only ever evicts long-idle sessions.
+_MAX_TRACKED_SESSIONS = 1024
+
+
 class ChatGPTBridge:
     """MCP bridge: ChatGPT chats → gptmail mailboxes."""
 
@@ -77,6 +82,21 @@ class ChatGPTBridge:
         # `is not None`, not truthiness: an explicit empty --token means
         # "disable auth" and must override a token in the environment.
         self._token = token if token is not None else os.environ.get("CHATGPT_BRIDGE_TOKEN")
+        if self._token is not None:
+            # A token sourced from an env var or file routinely carries a
+            # surrounding newline, which an HTTP header cannot: the header
+            # side is stripped before comparison, so an unstripped token would
+            # reject every otherwise-valid request with a 401. Normalize once
+            # here rather than at every comparison.
+            stripped = self._token.strip()
+            if not stripped and self._token:
+                # Fail closed: a whitespace-only token is a config error, not
+                # a request to disable auth (only an explicit "" means that).
+                raise ValueError(
+                    "chatgpt-bridge: token is blank (whitespace only); "
+                    "pass an empty string to disable auth explicitly"
+                )
+            self._token = stripped
         self._surfaced: _SurfacedLedger = defaultdict(set)
         # One lock per session: Tool calls may run concurrently in FastMCP's
         # threadpool, and the surfaced check-and-add must be atomic so the same
@@ -101,9 +121,28 @@ class ChatGPTBridge:
         with self._locks_guard:
             lock = self._locks.get(session_id)
             if lock is None:
+                self._evict_idle_sessions()
                 lock = threading.Lock()
                 self._locks[session_id] = lock
             return lock
+
+    def _evict_idle_sessions(self) -> None:
+        """Keep the per-session maps bounded on a long-lived server.
+
+        Caller must hold ``self._locks_guard``. Only sessions with an unheld
+        lock and no live surfaced ids are evicted: dropping a lock that is in
+        use would reopen the check-and-add race the lock exists for, and a
+        non-empty ledger still gates re-delivery.
+        """
+        if len(self._locks) < _MAX_TRACKED_SESSIONS:
+            return
+        for session_id in list(self._locks):
+            if len(self._locks) < _MAX_TRACKED_SESSIONS:
+                break
+            if self._locks[session_id].locked() or self._surfaced.get(session_id):
+                continue
+            del self._locks[session_id]
+            self._surfaced.pop(session_id, None)
 
     def _auth_ok_headers(self, headers: Headers) -> bool:
         if not self._token:
@@ -138,7 +177,17 @@ class ChatGPTBridge:
             inbox_count = len(transport.list_inbox("inbox"))
             outbox_ids = {msg_id for msg_id, _subject, _ts in transport.list_inbox("outbox")}
             with self._session_lock(session_id):
-                surfaced = set(self._surfaced.get(session_id, set()))
+                # Prune ids whose outbox message is gone: they can never be
+                # delivered again, and retaining them would make the ledger
+                # grow without bound on a long-lived server. Intersecting with
+                # the outbox does not change `pending`: ids outside the outbox
+                # were already excluded by `outbox_ids - surfaced`.
+                live = self._surfaced.get(session_id, set()) & outbox_ids
+                if live:
+                    self._surfaced[session_id] = live
+                else:
+                    self._surfaced.pop(session_id, None)
+                surfaced = set(live)
 
             # Compare against the outbox *contents*, not a running subtraction:
             # a surfaced message that is later deleted from the outbox must not
@@ -407,10 +456,16 @@ def main(argv: list[str] | None = None) -> None:
             )
             sys.exit(1)
 
-    bridge = ChatGPTBridge(
-        messages_dir=messages_dir,
-        token=args.token,
-    )
+    try:
+        bridge = ChatGPTBridge(
+            messages_dir=messages_dir,
+            token=args.token,
+        )
+    except ValueError as exc:
+        # e.g. a whitespace-only --token / CHATGPT_BRIDGE_TOKEN: a clean usage
+        # error beats a traceback from the constructor.
+        logger.error("%s", exc)
+        sys.exit(2)
     bridge.run(host=args.host, port=args.port)
 
 
