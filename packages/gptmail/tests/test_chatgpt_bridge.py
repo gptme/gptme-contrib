@@ -241,6 +241,25 @@ class TestChatGPTBridge:
         assert data["replies"] == []
 
     @pytest.mark.anyio
+    async def test_bob_replies_limit_zero_consumes_nothing(
+        self,
+        bridge: ChatGPTBridge,
+        session_id: str,
+        bob_transport: AgentTransport,
+    ) -> None:
+        """limit<=0 returns nothing and must not mark a reply as surfaced."""
+        bob_transport.send(to="chatgpt", subject="Hi", content="body")
+
+        result = await bridge.mcp.call_tool("bob_replies", {"session_id": session_id, "limit": 0})
+        assert self._parse_result(result)["replies"] == []
+
+        # The reply is still pending, so a later call can deliver it.
+        status = await bridge.mcp.call_tool("bob_status", {"session_id": session_id})
+        assert self._parse_result(status)["pending_replies"] == 1
+        later = await bridge.mcp.call_tool("bob_replies", {"session_id": session_id})
+        assert len(self._parse_result(later)["replies"]) == 1
+
+    @pytest.mark.anyio
     async def test_bob_replies_concurrent_calls_do_not_duplicate(
         self,
         bridge: ChatGPTBridge,

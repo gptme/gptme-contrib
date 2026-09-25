@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import sys
 import threading
 from collections import defaultdict
@@ -109,7 +110,9 @@ class ChatGPTBridge:
         auth = headers.get("authorization", "")
         if not auth.lower().startswith("bearer "):
             return False
-        return auth[7:].strip() == self._token
+        # constant-time compare: a plain == leaks the token byte-by-byte to a
+        # timing attacker who can reach the port.
+        return secrets.compare_digest(auth[7:].strip(), self._token)
 
     # ------------------------------------------------------------------
     # Tool implementations
@@ -164,6 +167,11 @@ class ChatGPTBridge:
                 # Read outbox (messages FROM Bob TO chatgpt). transport.read()
                 # is inbox-only, so we read the file directly.
                 for msg_id, subject, _ts in transport.list_inbox("outbox"):
+                    # check the cap before reading/marking: with limit<=0 no
+                    # message may be consumed (a reply marked surfaced here
+                    # would never be delivered again).
+                    if len(replies) >= limit:
+                        break
                     if msg_id in surfaced:
                         continue
                     path = transport.outbox / msg_id
@@ -183,8 +191,6 @@ class ChatGPTBridge:
                         }
                     )
                     surfaced.add(msg_id)
-                    if len(replies) >= limit:
-                        break
 
             if not replies:
                 return json.dumps(
