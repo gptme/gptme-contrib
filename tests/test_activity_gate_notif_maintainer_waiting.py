@@ -52,6 +52,10 @@ human_review_after_waiting = os.environ.get("TEST_HUMAN_REVIEW_AFTER_WAITING", "
 # Bot re-affirms the handoff AFTER a human comment (regression scenario for last→first fix).
 bot_reaffirm_waiting = os.environ.get("TEST_BOT_REAFFIRM_WAITING", "0")
 comment_count = int(os.environ.get("TEST_COMMENT_COUNT", "1"))
+# Identity that authored the waiting handoff. Defaults to Bob; forks whose
+# `--author` differs (e.g. Alice) serve their own login so the gate must
+# recognise it as a bot identity rather than anonymous human activity.
+comment_author = os.environ.get("TEST_COMMENT_AUTHOR", "TimeToBuildBob")
 
 
 def apply_jq(data, jq_expr):
@@ -115,7 +119,7 @@ if argv[0] == "api":
             # matches the gate's --author. This mirrors the fork-general
             # reality where BOT_USERNAME defaults to --author.
             comments = [{
-                "user": {"login": "test-author", "type": "User"},
+                "user": {"login": comment_author, "type": "User"},
                 "body": waiting_body
                 or "CI-green and mergeable — waiting only on a maintainer click.",
                 "created_at": "2026-08-26T16:00:00Z",
@@ -150,7 +154,7 @@ if argv[0] == "api":
                 # suppressing the notification. With `first` the original handoff
                 # is selected; the human at 17:00 is after 16:00, so it emits.
                 comments.append({
-                    "user": {"login": "test-author", "type": "User"},
+                    "user": {"login": comment_author, "type": "User"},
                     "body": "CI is green again — waiting only on a maintainer click.",
                     "created_at": "2026-08-26T17:30:00Z",
                 })
@@ -199,6 +203,8 @@ def _run_gate(
     comment_count: int = 1,
     waiting_body: str | None = None,
     head_sha: str | None = None,
+    author: str = "test-author",
+    comment_author: str = "TimeToBuildBob",
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
     fake_gh.write_text(FAKE_GH)
@@ -220,6 +226,10 @@ def _run_gate(
     env["TEST_HUMAN_REVIEW_AFTER_WAITING"] = human_review_after_waiting
     env["TEST_BOT_REAFFIRM_WAITING"] = bot_reaffirm_waiting
     env["TEST_COMMENT_COUNT"] = str(comment_count)
+    env["TEST_COMMENT_AUTHOR"] = comment_author
+    # Hermetic: the gate must resolve its own identity from --author, not an
+    # ambient BOT_USERNAME exported in the developer's shell.
+    env.pop("BOT_USERNAME", None)
     env["PATH"] = f"{tmp}:{env['PATH']}"
 
     # Established state dir: seed a sibling so first-sight emits.
@@ -229,7 +239,7 @@ def _run_gate(
         [
             str(SCRIPT),
             "--author",
-            "test-author",
+            author,
             "--org",
             "ActivityWatch",
             "--repo",
@@ -432,6 +442,50 @@ def test_human_merge_marker_reopens_on_human_comment() -> None:
             tmp,
             state_dir,
             waiting_body=PM_HUMAN_MERGE_BODY,
+            human_after_waiting="1",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        emitted = _emitted_notifications(result.stdout)
+        assert len(emitted) == 1, result.stdout
+        assert emitted[0]["detail"] == "author"
+
+
+def test_author_identity_handoff_suppresses_without_bot_username() -> None:
+    """A handoff comment authored by `--author` must suppress, not re-open.
+
+    Forks that pass `--author` but not the ``BOT_USERNAME`` override (Alice's
+    monitoring harness passes ``--author TimeToLearnAlice``) authored the
+    handoff as a login the gate did not recognise. Two failures followed:
+    ``has_maintainer_waiting_comment`` never armed, and
+    ``latest_comment_is_bot_waiting`` treated the gate's own comment as
+    anonymous human activity. The result was the same handoff comment re-posted
+    every cooldown cycle (7 identical posts on gptme/gptme-contrib#1700).
+    """
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            author="TimeToLearnAlice",
+            comment_author="TimeToLearnAlice",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert _emitted_notifications(result.stdout) == [], result.stdout
+
+
+def test_author_identity_handoff_reopens_on_human_comment() -> None:
+    """Author-identity recognition must not silence a later human reply."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            author="TimeToLearnAlice",
+            comment_author="TimeToLearnAlice",
             human_after_waiting="1",
         )
         assert result.returncode in (0, 1), result.stderr
