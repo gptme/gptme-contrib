@@ -96,6 +96,8 @@ class TestJudgeSession:
         assert "Did some work" in prompt
         assert "0.0-1.0" in prompt
         assert "JSON" in JUDGE_SYSTEM
+        assert "optional annotation" in JUDGE_SYSTEM
+        assert "two keys" not in JUDGE_SYSTEM
 
     def test_prompt_template_includes_category_interpretation(self) -> None:
         """The prompt must instruct the judge to score within-category, not penalize support categories.

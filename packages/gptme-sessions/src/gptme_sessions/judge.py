@@ -74,7 +74,9 @@ class JudgeVerdict(TypedDict, total=False):
 
 JUDGE_SYSTEM = """\
 You are evaluating an AI agent's work session for strategic value.
-Return ONLY a JSON object with two keys: "score" (float 0.0-1.0) and "reason" (string, 1 sentence).
+Return ONLY the JSON object requested by the user prompt. Always include "score"
+(float 0.0-1.0) and "reason" (string, 1 sentence), plus any optional annotation
+fields that the user prompt explicitly requests.
 Do not wrap in markdown code blocks.
 IMPORTANT: Use the FULL 0.0-1.0 range. Do not cluster scores at 0.7-0.8. Reserve 0.9+ for exceptional sessions; assign 0.1-0.3 for minimal or blocked sessions."""
 
