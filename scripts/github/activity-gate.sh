@@ -1721,6 +1721,11 @@ has_maintainer_waiting_comment() {
 latest_comment_is_bot_waiting() {
     local repo=$1 number=$2
     local bot="${BOT_USERNAME:-$AUTHOR}"
+    # The running identity (`--author`) is a bot identity too: forks that pass
+    # `--author` without a BOT_USERNAME override otherwise treat their own
+    # handoff comment as anonymous human activity, which both fails to arm the
+    # suppression and reopens the handoff on the next cycle.
+    local author="${AUTHOR:-$bot}"
 
     # Fetch every page before finding the latest handoff. GitHub returns issue
     # comments oldest-first; ``--slurp`` wraps pages in an outer array. Reviews

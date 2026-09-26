@@ -204,7 +204,7 @@ def _run_gate(
     waiting_body: str | None = None,
     head_sha: str | None = None,
     author: str = "test-author",
-    comment_author: str = "TimeToBuildBob",
+    comment_author: str = "test-author",
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
     fake_gh.write_text(FAKE_GH)
