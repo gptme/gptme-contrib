@@ -190,8 +190,12 @@ def test_fetch_activity_attributes_commits_to_workspace_repo(tmp_path):
 
 
 @requires_git
-def test_fetch_activity_stale_remote_matches_basename_without_gh(tmp_path):
-    """No gh + stale remote name: commits still land on the repo with the same basename."""
+def test_fetch_activity_stale_remote_without_gh_stays_local(tmp_path):
+    """No gh + stale remote name: commits stay 'local' — no cross-owner guessing.
+
+    Without gh the rename cannot be resolved, and a basename match could
+    attribute commits to a different repo that happens to share the name.
+    """
     _init_repo_with_remote(tmp_path, "git@github.com:OldOrg/gptme-contrib.git")
 
     with (
@@ -206,8 +210,8 @@ def test_fetch_activity_stale_remote_matches_basename_without_gh(tmp_path):
         )
 
     by_name = {repo.repo: repo.commits for repo in activity.repos}
-    assert by_name["gptme/gptme-contrib"] == 4
-    assert "local" not in by_name
+    assert by_name["gptme/gptme-contrib"] == 0
+    assert by_name["local"] == 4
     assert activity.total_commits == 4
 
 
