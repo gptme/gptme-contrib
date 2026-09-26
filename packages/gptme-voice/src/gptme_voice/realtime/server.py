@@ -893,6 +893,10 @@ class VoiceServer:
         self._prewarm_sessions: dict[str, tuple[OpenAIRealtimeClient, float]] = {}
         # CallSids whose first /twilio start carried a valid stream token.
         self._authenticated_stream_calls: set[str] = set()
+        # Idle-eviction tasks for stream-auth bypass entries.
+        # Mirrors _twilio_grant_idle_tasks: schedule on disconnect-without-stop,
+        # cancel on reconnect.  Prevents indefinite TTL bypass after a drop.
+        self._stream_auth_idle_tasks: dict[str, asyncio.Task[None]] = {}
         # In-flight pre-warm tasks by from_number, so _claim_prewarm can await
         # a pre-warm that hasn't finished connecting yet instead of racing it
         # into a duplicate cold session (observed 2026-08-27: Twilio's "start"
@@ -959,6 +963,8 @@ class VoiceServer:
             yield
         finally:
             await self._cancel_all_twilio_body_grant_idle_revokes()
+            for task in list(self._stream_auth_idle_tasks.values()):
+                task.cancel()
             if self.body_adapter is not None:
                 await self.body_adapter.close()
 
@@ -1074,6 +1080,51 @@ class VoiceServer:
                 task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _cancel_stream_auth_idle_discard(self, call_sid: str | None) -> None:
+        """Cancel a pending idle-discard of the stream-auth bypass for this CallSid."""
+        if not call_sid:
+            return
+        task = self._stream_auth_idle_tasks.pop(call_sid, None)
+        if task is None or task.done():
+            return
+        try:
+            if task is asyncio.current_task():
+                return
+        except RuntimeError:
+            pass
+        task.cancel()
+
+    def _schedule_stream_auth_idle_discard(self, call_sid: str | None) -> None:
+        """Evict CallSid from _authenticated_stream_calls after an idle disconnect.
+
+        Twilio reconnects resend the first start's parameters (including the
+        original token) within seconds; the 90-second window preserves the TTL
+        bypass for those while closing the indefinite-replay window that would
+        otherwise exist when the socket drops without a ``stop`` event.
+        """
+        if not call_sid or call_sid not in self._authenticated_stream_calls:
+            return
+        self._cancel_stream_auth_idle_discard(call_sid)
+        delay = self._twilio_body_grant_idle_s  # same 90-second reconnect window
+
+        async def _idle_discard() -> None:
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+            if call_sid in self._connections:
+                return  # reconnect arrived — keep the bypass in place
+            logger.debug(
+                "Evicting stream-auth bypass for %s after idle disconnect", call_sid
+            )
+            self._authenticated_stream_calls.discard(call_sid)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._stream_auth_idle_tasks[call_sid] = loop.create_task(_idle_discard())
 
     def _schedule_twilio_body_grant_idle_revoke(self, call_sid: str | None) -> None:
         """Revoke pinned grants if this CallSid does not reconnect.
@@ -2487,6 +2538,7 @@ class VoiceServer:
         metadata: dict[str, str] = {}
         handoff_id: str | None = None
         g711_passthrough = self.openai_g711_passthrough
+        stop_received = False
 
         try:
             async for message in websocket.iter_text():
@@ -2763,8 +2815,9 @@ class VoiceServer:
                         await realtime_client.connect()
 
                     self._connections[call_sid] = (websocket, realtime_client)
-                    # A reconnect arrived inside the idle window — keep the grant.
+                    # A reconnect arrived inside the idle window — keep grants and auth.
                     self._cancel_twilio_body_grant_idle_revoke(call_sid)
+                    self._cancel_stream_auth_idle_discard(call_sid)
 
                 elif event == "media":
                     # Audio chunk from Twilio
@@ -2788,9 +2841,11 @@ class VoiceServer:
                     # re-attach motion tools with the stolen start parameters.
                     # Do not revoke in ``finally``: websocket drop is a reconnect.
                     # Idle-revoke in ``finally`` covers the drop-without-stop path.
+                    stop_received = True
                     self._revoke_twilio_body_grants_for_call(call_sid)
                     if call_sid:
                         self._authenticated_stream_calls.discard(call_sid)
+                        self._cancel_stream_auth_idle_discard(call_sid)
                     break
 
         except WebSocketDisconnect:
@@ -2813,6 +2868,11 @@ class VoiceServer:
             # inside the idle window, drop the pinned grant so an abrupt
             # hangup that skipped ``stop`` cannot leave a live bearer token.
             self._schedule_twilio_body_grant_idle_revoke(call_sid)
+            # Same logic for the stream-auth TTL bypass: if no reconnect within
+            # the idle window, evict so a captured token cannot be replayed
+            # indefinitely.  On a clean ``stop`` the discard already ran above.
+            if not stop_received:
+                self._schedule_stream_auth_idle_discard(call_sid)
             await self._on_call_end(
                 caller_id,
                 "twilio",

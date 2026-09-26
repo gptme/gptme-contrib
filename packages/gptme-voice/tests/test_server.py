@@ -3991,6 +3991,51 @@ def test_twilio_reconnect_of_verified_call_outlives_token_ttl(
     assert ws.close_code == 1008
 
 
+def test_twilio_idle_disconnect_evicts_stream_auth_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A drop-without-stop evicts the auth bypass after the idle window expires."""
+    import gptme_voice.realtime.server as server_mod
+    import gptme_voice.realtime.twilio_integration as twilio_mod
+
+    server, run, sessions, _ = _twilio_stream_auth_case(monkeypatch, "secret")
+    now = [1_800_000_000.0]
+    monkeypatch.setattr(twilio_mod.time, "time", lambda: now[0])
+    signed = sign_stream_params({"from_number": "+15551212"}, "secret")
+
+    # First leg drops without stop — CallSid added to the auth bypass set.
+    run(signed, call_sid="CAdisconnect", stop=False)
+    assert "CAdisconnect" in server._authenticated_stream_calls
+
+    # Simulate the idle window expiring with no reconnect: fire the discard task
+    # directly by running the server's own idle method in a fresh loop.
+    async def _fire_idle() -> None:
+        # Replace asyncio.sleep with a no-op so the task completes immediately.
+        orig = asyncio.sleep
+
+        async def _instant(_delay: float) -> None:
+            pass
+
+        asyncio.sleep = _instant  # type: ignore[assignment]
+        try:
+            server._schedule_stream_auth_idle_discard("CAdisconnect")
+            task = server._stream_auth_idle_tasks.get("CAdisconnect")
+            if task:
+                await task
+        finally:
+            asyncio.sleep = orig  # type: ignore[assignment]
+
+    asyncio.run(_fire_idle())
+
+    # After eviction, a replay with an expired token must be rejected.
+    assert "CAdisconnect" not in server._authenticated_stream_calls
+    sessions_before = len(sessions)
+    now[0] += server_mod.STREAM_TOKEN_TTL_SECONDS + 60
+    ws = run(signed, call_sid="CAdisconnect")
+    assert ws.close_code == 1008
+    assert len(sessions) == sessions_before  # rejected at auth, no new session
+
+
 def test_twilio_stream_without_auth_token_keeps_dev_behavior(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
