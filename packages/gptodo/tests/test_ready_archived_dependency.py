@@ -311,3 +311,32 @@ created: 2026-09-26T00:00:00+00:00
         "Task a must surface in the simulation after its live blocker b is "
         f"picked; got steps: {step_names!r}\nFull output:\n{result.output}"
     )
+
+
+def test_archived_duplicate_stem_last_sorted_wins(tmp_path: Path, monkeypatch) -> None:
+    """Duplicate stems across archive subdirs resolve like the eager path did.
+
+    The eager path did ``dep_dict.update({t.name: t ...})`` — the LAST duplicate
+    wins. The lazy index must keep that winner-selection shape (last in sorted
+    order), not first-wins, or a name present in two archive subdirs could
+    resolve to a different file than the eager loader used to pick.
+    """
+    tasks_dir = tmp_path / "tasks"
+    archive_dir = tasks_dir / "archive"
+    (tasks_dir / "archive" / "subdir").mkdir(parents=True)
+
+    (tasks_dir / "foo.md").write_text(DEPENDENT_TASK)
+    (archive_dir / "archived-prereq.md").write_text(ARCHIVED_DONE_TASK)
+    (archive_dir / "subdir" / "archived-prereq.md").write_text(ARCHIVED_ACTIVE_TASK)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(cli, ["ready", "--state", "backlog", "--json"])
+
+    assert result.exit_code == 0, result.output
+    data = _parse_json(result)
+    ready_names = [t["name"] for t in data["ready_tasks"]]
+    assert "foo" not in ready_names, (
+        "The last duplicate (archive/subdir/archived-prereq.md, done) must win, "
+        "matching the eager dep_dict.update() winner-selection; got ready: "
+        f"{ready_names!r}\nFull output:\n{result.output}"
+    )

@@ -1520,7 +1520,12 @@ class _LazyArchiveTasks(Dict[str, TaskInfo]):
                 for path in sorted(self._archive_dir.rglob("*.md")):
                     if any(d in path.parts for d in EXCLUDED_TASK_DIRS):
                         continue
-                    index.setdefault(path.stem, path)
+                    # Overwrite, not setdefault: the pre-lazy eager path built
+                    # its dict with `dep_dict.update(...)` (last duplicate
+                    # wins), so keep that winner-selection shape. Sorted input
+                    # makes the winner deterministic, which glob order alone
+                    # never was.
+                    index[path.stem] = path
             self._archive_index = index
         return self._archive_index.get(name)
 
