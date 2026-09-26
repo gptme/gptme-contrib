@@ -158,6 +158,17 @@ def max_skip_trigger(
     """
     now = time.time() if now is None else now
     elapsed_h = (now - state.last_session_ts) / 3600.0
+    if elapsed_h < 0:
+        # A future ``last_session_ts`` (clock skew, a cross-machine state write, or a
+        # corrupt/manual edit) makes ``elapsed_h`` negative, so the ``>=`` check below
+        # would silently never fire — wedging the gate forever. ``max_skip`` is the
+        # fail-open safety valve, so it must never be the thing that goes quiet: treat
+        # a future timestamp as invalid and force a run.
+        return (
+            True,
+            f"max_skip: last_session_ts is {-elapsed_h:.1f}h in the future "
+            "(clock skew or corrupt state) — forcing run",
+        )
     if elapsed_h >= max_skip_hours:
         return (
             True,
