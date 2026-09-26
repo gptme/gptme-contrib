@@ -11,6 +11,10 @@ from pathlib import Path
 
 import pytest
 from gptme_voice.realtime.audio import AudioConverter
+from gptme_voice.realtime.openai_client import (
+    _detect_agent_name,
+    _without_handoff_tool,
+)
 from gptme_voice.realtime.server import (
     _VOICE_DIGEST_MAX_AGE_SECONDS,
     RecentCallRecord,
@@ -28,6 +32,7 @@ from gptme_voice.realtime.server import (
     _load_voice_digest,
     _lookup_caller_identity,
     _prepend_activity_digest,
+    _resolve_protocol_identity,
     _should_trigger_hangup_transcript_fallback,
     _truncate_resume_transcript,
     _websocket_has_vision,
@@ -3133,6 +3138,199 @@ def test_server_voice_agent_name_overrides_general_name(
 
     assert server._agent_name == "Sven"
     assert server._instructions.startswith("IDENTITY: You are Sven.")
+
+
+def _write_agent_config(workspace: Path, name: str) -> Path:
+    """Write a minimal workspace gptme.toml declaring ``[agent].name``."""
+    (workspace / "gptme.toml").write_text(f'[agent]\nname = "{name}"\n')
+    return workspace
+
+
+def _fake_config_env(monkeypatch: pytest.MonkeyPatch, values: dict[str, str]) -> None:
+    """Hermetic replacement for server._get_config_env.
+
+    ``get_config().get_env`` also reads the machine's user config, so a bare
+    ``monkeypatch.delenv`` cannot make a variable unset. Anything not in
+    ``values`` reads as unset.
+    """
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server._get_config_env",
+        lambda name: values.get(name),
+    )
+
+
+def test_detect_agent_name_reads_workspace_agent_config(tmp_path: Path) -> None:
+    workspace = _write_agent_config(tmp_path, "Nova")
+
+    assert _detect_agent_name(workspace) == "Nova"
+    assert _detect_agent_name(str(workspace)) == "Nova"
+
+
+def test_detect_agent_name_returns_none_without_config(tmp_path: Path) -> None:
+    assert _detect_agent_name(None) is None
+    assert _detect_agent_name(tmp_path) is None
+
+
+def test_server_agent_name_falls_back_to_workspace_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A forked agent's voice server identifies itself without any env var."""
+    _fake_config_env(monkeypatch, {})
+    workspace = _write_agent_config(tmp_path, "Nova")
+
+    server = VoiceServer(workspace=str(workspace))
+
+    assert server._agent_name == "Nova"
+    assert server._instructions.startswith("IDENTITY: You are Nova.")
+
+
+def test_server_handoff_identity_derived_from_workspace_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The workspace name is the protocol identity when it is a registered agent."""
+    _fake_config_env(
+        monkeypatch,
+        {
+            "GPTME_VOICE_HANDOFF_DIR": str(tmp_path / "handoff-state"),
+            "GPTME_VOICE_HANDOFF_SECRET": "test-secret",
+        },
+    )
+    workspace = _write_agent_config(tmp_path, "Alice")
+
+    server = VoiceServer(workspace=str(workspace))
+
+    assert server._handoff_writer is not None
+    assert server._handoff_writer.from_agent == "alice"
+    assert server._available_agents == ["bob", "gordon", "sven"]
+
+
+def test_resolve_protocol_identity_prefers_explicit_override(tmp_path: Path) -> None:
+    workspace = _write_agent_config(tmp_path, "Nova")
+
+    assert _resolve_protocol_identity(str(workspace), "Alice") == "alice"
+
+
+def test_resolve_protocol_identity_does_not_infer_from_display_name(
+    tmp_path: Path,
+) -> None:
+    """A display name must not silently claim a registered agent's identity.
+
+    "Alice Smith" and "Alice Nova" are indistinguishable from the name alone,
+    so neither may be mapped to the registered ``alice``. An unregistered
+    workspace name is returned verbatim so the caller fails loudly.
+    """
+    for declared, slug in (("Alice Smith", "smith"), ("Alice Nova", "nova")):
+        # Distinct directories: the workspace config reader caches per path.
+        case_dir = tmp_path / slug
+        case_dir.mkdir()
+        workspace = _write_agent_config(case_dir, declared)
+
+        assert _resolve_protocol_identity(str(workspace), None) == declared.lower()
+
+
+def test_resolve_protocol_identity_keeps_unregistered_name_and_legacy_default(
+    tmp_path: Path,
+) -> None:
+    workspace = _write_agent_config(tmp_path, "Nova")
+
+    # An unregistered name is preserved so the caller can fail loudly rather
+    # than sign handoffs as another agent...
+    assert _resolve_protocol_identity(str(workspace), None) == "nova"
+    # ...while a deployment that declares nothing keeps the legacy default.
+    assert _resolve_protocol_identity(None, None) == "bob"
+
+
+def test_server_multi_word_workspace_name_keeps_display_and_disables_handoff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A display name that is not exactly a registered agent fails loudly.
+
+    The human-readable name is preserved for the greeting; because it cannot
+    be resolved to exactly one protocol identity, handoff is disabled with an
+    explicit error instead of silently signing as the first name's registered
+    agent.
+    """
+    _fake_config_env(
+        monkeypatch,
+        {
+            "GPTME_VOICE_HANDOFF_DIR": str(tmp_path / "handoff-state"),
+            "GPTME_VOICE_HANDOFF_SECRET": "test-secret",
+        },
+    )
+    workspace = _write_agent_config(tmp_path, "Alice Smith")
+
+    server = VoiceServer(workspace=str(workspace))
+
+    assert server._agent_name == "Alice Smith"
+    assert server._handoff_writer is None
+    assert server._available_agents == []
+
+
+def test_server_unregistered_workspace_name_disables_handoff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake_config_env(
+        monkeypatch,
+        {
+            "GPTME_VOICE_HANDOFF_DIR": str(tmp_path / "handoff-state"),
+            "GPTME_VOICE_HANDOFF_SECRET": "test-secret",
+        },
+    )
+    workspace = _write_agent_config(tmp_path, "Nova")
+
+    server = VoiceServer(workspace=str(workspace))
+
+    assert server._handoff_writer is None
+    assert server._available_agents == []
+
+
+def test_server_unregistered_handoff_identity_disables_handoff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unregistered fork runs the call server, with handoff disabled.
+
+    Previously this crashed ``VoiceServer.__init__`` because ``HandoffWriter``
+    rejects identities outside ``VALID_AGENTS``.
+    """
+    _fake_config_env(
+        monkeypatch,
+        {
+            "GPTME_VOICE_AGENT_NAME": "dave",
+            "GPTME_VOICE_HANDOFF_DIR": str(tmp_path / "handoff-state"),
+            "GPTME_VOICE_HANDOFF_SECRET": "test-secret",
+        },
+    )
+
+    server = VoiceServer()
+
+    assert server._agent_name == "dave"
+    assert server._handoff_writer is None
+    # No writer -> nothing to hand off to, so no targets are advertised.
+    assert server._available_agents == []
+
+
+def test_without_handoff_tool_drops_only_handoff() -> None:
+    """The handoff tool is removed from the tool list when no target exists."""
+    tools = [
+        {"type": "function", "name": "subagent"},
+        {"type": "function", "name": "handoff_to_agent"},
+        {"type": "function", "name": "hangup"},
+    ]
+
+    filtered = _without_handoff_tool(tools)
+
+    assert [t["name"] for t in filtered] == ["subagent", "hangup"]
+    # The input list is not mutated in place.
+    assert len(tools) == 3
+
+
+def test_greeting_default_name_comes_from_workspace_config(tmp_path: Path) -> None:
+    workspace = _write_agent_config(tmp_path, "Nova")
+
+    greeting = _build_fresh_call_greeting_instructions("+1555000000", str(workspace))
+
+    assert "You are Nova" in greeting
+    assert "Hello, this is Nova" in greeting
 
 
 # ---------------------------------------------------------------------------

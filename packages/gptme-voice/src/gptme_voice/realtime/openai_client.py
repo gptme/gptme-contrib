@@ -79,6 +79,38 @@ def _detect_agent_repo() -> str | None:
     return None
 
 
+def _detect_agent_name(workspace: str | Path | None = None) -> str | None:
+    """Read the agent's declared name from the workspace's ``gptme.toml``.
+
+    Agents declare their identity under ``[agent] name = "..."``. Returns
+    ``None`` when there is no workspace, no config, or no declared name, so
+    callers can keep their own fallback instead of inventing an identity.
+    Never raises: a malformed or unreadable config must not break a live call.
+    """
+    if not workspace:
+        return None
+    try:
+        project_config = get_project_config(Path(workspace))
+    except Exception as e:
+        logger.warning(f"Failed to read agent name from {workspace}: {e}")
+        return None
+    agent = getattr(project_config, "agent", None)
+    name = getattr(agent, "name", None) if agent is not None else None
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return name.strip()
+
+
+def _without_handoff_tool(tools: list[dict]) -> list[dict]:
+    """Drop the handoff tool when there is no target to hand off to.
+
+    Advertising ``handoff_to_agent`` with an empty (or unservable) roster
+    makes the model offer transfers that then fail. Callers pass the built-in
+    tool list when ``available_agents`` is empty.
+    """
+    return [tool for tool in tools if tool.get("name") != "handoff_to_agent"]
+
+
 def _load_project_instructions(workspace: str | None = None) -> str:
     """Load personality/instructions from gptme project config files.
 
@@ -636,6 +668,10 @@ class OpenAIRealtimeClient:
                 },
             ],
         }
+        if not self.session_config.available_agents:
+            # No handoff targets (handoff disabled or unregistered identity):
+            # drop the tool instead of advertising an empty enum.
+            session_params["tools"] = _without_handoff_tool(session_params["tools"])
         if self.session_config.extra_tools:
             session_params["tools"] = list(session_params["tools"]) + list(
                 self.session_config.extra_tools
