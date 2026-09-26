@@ -215,6 +215,29 @@ check_repo() {
         run_json="$product_json"
     fi
 
+    # Filter out startup_failure runs from deleted/ghost workflows. GitHub keeps
+    # historical check-suite records for workflows that were added with invalid YAML
+    # and then deleted (state=deleted, path=BuildFailed). These fire as push-event
+    # startup_failure runs with an EMPTY NAME on every commit and mask real CI
+    # status (ErikBjare/bob workflow_id 365726176, path=BuildFailed). Match on the
+    # empty-name shape, not the conclusion alone: a real broken workflow that is
+    # still present reports startup_failure with its own name and must keep
+    # surfacing even alongside passing workflows. Always drop the ghost shape
+    # with no fallback: the runs window is --limit 5 and ghost fires (push +
+    # schedule + issues) can crowd it out entirely, in which case keeping them
+    # would mask the real runs that fell outside the window. A repo left with
+    # only ghost runs reports "No runs", which is accurate.
+    run_json=$(echo "$run_json" | jq '[.[] | select(
+        (.conclusion != "startup_failure")
+        or ((.name // "") != "")
+    )]')
+    # The empty-array check above ran BEFORE this filter, so an all-ghost window
+    # would otherwise fall through to conclusion="" and print "Unknown ()".
+    if [ "$(echo "$run_json" | jq 'length')" -eq 0 ]; then
+        echo -e "${YELLOW}-${NC} $label: No runs (only ghost startup_failure runs from deleted workflows)"
+        return
+    fi
+
     local conclusion status in_progress=""
     conclusion=$(echo "$run_json" | jq -r '.[0].conclusion // ""')
     status=$(echo "$run_json" | jq -r '.[0].status // ""')

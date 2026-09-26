@@ -200,3 +200,59 @@ def test_workflow_dispatch_nightly_failure_still_visible() -> None:
     assert result.returncode == 0, result.stderr
     assert "gptme-cloud: Failing" in result.stdout
     assert "https://example.test/run/nightly" in result.stdout
+
+
+def test_ghost_startup_failure_only_reports_no_runs_not_unknown() -> None:
+    """An all-ghost window (startup_failure, empty name — deleted workflows) must
+    report "No runs", not "Unknown ()". Regression for the post-filter empty-array
+    fall-through (AI review P1, gptme-contrib#1710)."""
+    runs = [
+        {
+            "conclusion": "startup_failure",
+            "status": "completed",
+            "url": "https://example.test/run/ghost1",
+            "name": "",
+            "headSha": "abc1234",
+            "event": "push",
+        },
+        {
+            "conclusion": "startup_failure",
+            "status": "completed",
+            "url": "https://example.test/run/ghost2",
+            "name": "",
+            "headSha": "abc1234",
+            "event": "schedule",
+        },
+    ]
+    result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: No runs" in result.stdout
+    assert "Unknown" not in result.stdout
+
+
+def test_named_startup_failure_still_surfaces_alongside_ghosts() -> None:
+    """A real broken workflow (startup_failure WITH a name) must not be masked by
+    ghost runs from deleted workflows sharing the same window."""
+    runs = [
+        {
+            "conclusion": "startup_failure",
+            "status": "completed",
+            "url": "https://example.test/run/real-broken",
+            "name": "Broken Workflow",
+            "headSha": "abc1234",
+            "event": "push",
+        },
+        {
+            "conclusion": "startup_failure",
+            "status": "completed",
+            "url": "https://example.test/run/ghost",
+            "name": "",
+            "headSha": "abc1234",
+            "event": "push",
+        },
+    ]
+    result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: startup_failure" in result.stdout
+    assert "No runs" not in result.stdout
+    assert "Passing" not in result.stdout
