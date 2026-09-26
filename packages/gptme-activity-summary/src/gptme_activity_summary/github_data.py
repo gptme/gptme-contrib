@@ -862,11 +862,21 @@ def fetch_activity(
             (r for r in activity.repos if workspace_repo and r.repo == workspace_repo),
             None,
         )
-        if target is None and workspace_repo and has_gh:
+        if target is None and workspace_repo:
             # The remote name may be stale (GitHub redirects on rename); compare
-            # against the canonical name the list was resolved to.
-            canonical = _canonical_repo(workspace_repo)
-            target = next((r for r in activity.repos if r.repo == canonical), None)
+            # against the canonical name the list was resolved to. Without ``gh``
+            # we cannot resolve the rename, so also accept a unique match on the
+            # repo's basename (``OldOrg/x`` ≈ ``NewOrg/x``) rather than dropping
+            # the workspace's commits into a bare "local" entry.
+            candidates = [workspace_repo]
+            if has_gh:
+                candidates.append(_canonical_repo(workspace_repo))
+            target = next((r for r in activity.repos if r.repo in candidates), None)
+            if target is None and "/" in workspace_repo:
+                base = workspace_repo.rsplit("/", 1)[1]
+                matches = [r for r in activity.repos if r.repo.rsplit("/", 1)[-1] == base]
+                if len(matches) == 1:
+                    target = matches[0]
         if target is not None:
             target.commits = commit_count
         else:

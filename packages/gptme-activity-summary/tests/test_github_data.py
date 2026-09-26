@@ -190,6 +190,28 @@ def test_fetch_activity_attributes_commits_to_workspace_repo(tmp_path):
 
 
 @requires_git
+def test_fetch_activity_stale_remote_matches_basename_without_gh(tmp_path):
+    """No gh + stale remote name: commits still land on the repo with the same basename."""
+    _init_repo_with_remote(tmp_path, "git@github.com:OldOrg/gptme-contrib.git")
+
+    with (
+        patch("gptme_activity_summary.github_data._gh_available", return_value=False),
+        patch("gptme_activity_summary.github_data.get_commit_count", return_value=4),
+    ):
+        activity = fetch_activity(
+            date(2026, 8, 1),
+            date(2026, 8, 1),
+            repos=["gptme/gptme-contrib"],
+            workspace=str(tmp_path),
+        )
+
+    by_name = {repo.repo: repo.commits for repo in activity.repos}
+    assert by_name["gptme/gptme-contrib"] == 4
+    assert "local" not in by_name
+    assert activity.total_commits == 4
+
+
+@requires_git
 def test_fetch_activity_does_not_credit_project_repo_without_workspace_repo(tmp_path):
     """With no derivable workspace repo, commits stay 'local', not gptme/gptme."""
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
