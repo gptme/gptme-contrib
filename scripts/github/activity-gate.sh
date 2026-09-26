@@ -925,47 +925,101 @@ check_assigned_issues() {
     done
 }
 
+# GitHub's branch-only Actions run index can lag days behind live runs.
+# 2026-09-23 on ErikBjare/bob: `gh run list --branch master` returned
+# 2026-09-12; `--status success --branch master` returned 2026-08-07;
+# adding `--created '>=<3d>'` returned current Tests/Pre-commit verdicts.
+# `--status` splits keep skipped issue-resolver runs from filling the window.
+_master_ci_created_since() {
+    # jq backstops the chain: it is a hard dependency of this script (the gate
+    # pipes through it everywhere), unlike python3/date which may be absent.
+    # An empty window silently restores the stale-branch-index behaviour this
+    # change exists to fix, so a total failure is announced, not swallowed.
+    local since
+    since=$(python3 -c "from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc)-timedelta(days=3)).strftime('%Y-%m-%d'))" 2>/dev/null \
+        || date -u -d '3 days ago' +%Y-%m-%d 2>/dev/null \
+        || date -u -v-3d +%Y-%m-%d 2>/dev/null \
+        || jq -nr 'now - 259200 | strftime("%Y-%m-%d")' 2>/dev/null \
+        || true)
+    if [ -z "$since" ]; then
+        echo "WARN: could not compute the master-CI --created window; fetching unfiltered (a stale branch index may hide a recovered failure)" >&2
+    fi
+    printf '%s\n' "$since"
+}
+
+_list_default_branch_runs() {
+    local repo=$1 branch=$2 extra=$3 cache_key=$4 since=$5
+    local created=""
+    [ -n "$since" ] && created="--created \">=${since}\""
+    gh_cache_get_or_fetch "$cache_key" "$GH_CACHE_TTL_RUN" \
+        "gh run list --repo '$repo' --branch $branch $extra $created --limit 15 \
+            --json databaseId,name,conclusion,createdAt,event 2>/dev/null" \
+        "[]"
+}
+
 # Check for master/main branch CI failures (state-tracked by conclusion hash)
 # These indicate regressions that slipped through — not tied to any specific PR.
 check_master_ci() {
     local repo=$1
-    local runs push_runs
-    runs=$(gh_cache_get_or_fetch "run-master-all-events-${repo}" "$GH_CACHE_TTL_RUN" \
-        "gh run list --repo '$repo' --branch master --limit 3 \
-            --json databaseId,name,conclusion,createdAt,event 2>/dev/null" \
-        "[]")
+    local since fail_runs pass_runs push_runs runs
+    since=$(_master_ci_created_since)
+    fail_runs=$(_list_default_branch_runs "$repo" master "--status failure" "run-master-failure-${repo}" "$since")
+    pass_runs=$(_list_default_branch_runs "$repo" master "--status success" "run-master-success-${repo}" "$since")
     # Fetch push runs separately so detached/manual runs cannot consume the
     # mixed-event result window and hide a real branch regression.
-    push_runs=$(gh_cache_get_or_fetch "run-master-push-${repo}" "$GH_CACHE_TTL_RUN" \
-        "gh run list --repo '$repo' --branch master --event push --limit 3 \
-            --json databaseId,name,conclusion,createdAt,event 2>/dev/null" \
-        "[]")
-    runs=$(jq -cn --argjson recent "$runs" --argjson pushes "$push_runs" \
-        '$recent + $pushes | unique_by(.databaseId)')
+    push_runs=$(_list_default_branch_runs "$repo" master "--event push" "run-master-push-created-${repo}" "$since")
+    [ -n "$fail_runs" ] || fail_runs='[]'
+    [ -n "$pass_runs" ] || pass_runs='[]'
+    [ -n "$push_runs" ] || push_runs='[]'
+    runs=$(jq -cn --argjson fails "$fail_runs" --argjson passes "$pass_runs" --argjson pushes "$push_runs" \
+        '$fails + $passes + $pushes | unique_by(.databaseId)')
 
     # Also try 'main' if master returned nothing.
     if [ "$runs" = "[]" ]; then
-        runs=$(gh_cache_get_or_fetch "run-main-all-events-${repo}" "$GH_CACHE_TTL_RUN" \
-            "gh run list --repo '$repo' --branch main --limit 3 \
-                --json databaseId,name,conclusion,createdAt,event 2>/dev/null" \
-            "[]")
-        push_runs=$(gh_cache_get_or_fetch "run-main-push-${repo}" "$GH_CACHE_TTL_RUN" \
-            "gh run list --repo '$repo' --branch main --event push --limit 3 \
-                --json databaseId,name,conclusion,createdAt,event 2>/dev/null" \
-            "[]")
-        runs=$(jq -cn --argjson recent "$runs" --argjson pushes "$push_runs" \
-            '$recent + $pushes | unique_by(.databaseId)')
+        fail_runs=$(_list_default_branch_runs "$repo" main "--status failure" "run-main-failure-${repo}" "$since")
+        pass_runs=$(_list_default_branch_runs "$repo" main "--status success" "run-main-success-${repo}" "$since")
+        push_runs=$(_list_default_branch_runs "$repo" main "--event push" "run-main-push-created-${repo}" "$since")
+        [ -n "$fail_runs" ] || fail_runs='[]'
+        [ -n "$pass_runs" ] || pass_runs='[]'
+        [ -n "$push_runs" ] || push_runs='[]'
+        runs=$(jq -cn --argjson fails "$fail_runs" --argjson passes "$pass_runs" --argjson pushes "$push_runs" \
+            '$fails + $passes + $pushes | unique_by(.databaseId)')
     fi
     [ "$runs" = "[]" ] || [ -z "$runs" ] && return 0
 
-    # Only detached/manual failures are unrelated to default-branch health.
-    # Scheduled and reusable-workflow failures remain actionable: if those jobs
-    # start failing on the default branch, the workflows should be fixed.
+    # Detached/manual failures are unrelated to default-branch health.
+    # Nightly full-suite failures have their own handler/key — they must not
+    # occupy the push-CI master_ci_failure slot after Tests has gone green.
+    # A failure superseded by a newer success of the same workflow is recovered.
+    # Suppression is event-consistent: manual/dispatch runs are excluded from
+    # both sides, so a workflow_dispatch success cannot clear a push failure.
+    # "Newer" is strict: the timestamp normalization below drops fractional
+    # seconds, so a same-second success must not clear a failure (fail closed —
+    # a hidden regression costs more than one re-emitted failure).
     local failures
-    failures=$(echo "$runs" | jq -c '[.[] | select(
-        .conclusion == "failure"
-        and (.event as $event | ["workflow_dispatch", "repository_dispatch", "dynamic"] | index($event) | not)
-    )]')
+    failures=$(echo "$runs" | jq -c '
+        def detached:
+          .event as $e | ["workflow_dispatch", "repository_dispatch", "dynamic"] | index($e);
+        def nightly:
+          ((.name // "") | ascii_downcase | contains("nightly"));
+        [ .[] | select(.conclusion == "success") ] as $passes
+        | [ .[]
+            | select(.conclusion == "failure")
+            | select(detached | not)
+            | select(nightly | not)
+            | select(
+                . as $f
+                | [$passes[]
+                   | select(.name == $f.name
+                       and .event == $f.event
+                       and ((.createdAt
+                             | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)
+                           > ($f.createdAt
+                             | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)))]
+                  | length == 0
+              )
+          ]
+    ')
     local fail_count
     fail_count=$(echo "$failures" | jq 'length')
     [ "$fail_count" -eq 0 ] && return 0
