@@ -475,6 +475,27 @@ def test_author_identity_handoff_suppresses_without_bot_username() -> None:
         assert _emitted_notifications(result.stdout) == [], result.stdout
 
 
+def test_author_identity_handoff_case_insensitive() -> None:
+    """Handoff suppression must be case-insensitive.
+
+    GitHub logins are case-insensitive, so a fork that passes
+    ``--author TimeToLearnAlice`` while GitHub returns the login as
+    ``timetolearnalice`` (or vice versa) must still suppress.
+    """
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            author="TimeToLearnAlice",
+            comment_author="timetolearnalice",  # lowercase variant as GitHub may return
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert _emitted_notifications(result.stdout) == [], result.stdout
+
+
 def test_author_identity_handoff_reopens_on_human_comment() -> None:
     """Author-identity recognition must not silence a later human reply."""
     with tempfile.TemporaryDirectory() as tmp_str:

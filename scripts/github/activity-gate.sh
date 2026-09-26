@@ -1662,7 +1662,7 @@ has_maintainer_waiting_comment() {
 
     local bot_comments
     bot_comments=$(gh api "repos/$repo/issues/$number/comments?per_page=100" \
-        --jq "[.[] | select(.user.login == \"$bot\" or .user.login == \"$author\") | .body] | join(\"\n\")" 2>/dev/null) || return 1
+        --jq "[.[] | select((.user.login | ascii_downcase) == (\"$bot\" | ascii_downcase) or (.user.login | ascii_downcase) == (\"$author\" | ascii_downcase)) | .body] | join(\"\n\")" 2>/dev/null) || return 1
 
     [ -n "$bot_comments" ] || return 1
 
@@ -1750,7 +1750,8 @@ latest_comment_is_bot_waiting() {
         --argjson comments "$comments_json" \
         --argjson reviews "$reviews_json" '
         def is_bot_author:
-            (.user.login == $bot) or (.user.login == $author);
+            ((.user.login | ascii_downcase) == ($bot | ascii_downcase))
+            or ((.user.login | ascii_downcase) == ($author | ascii_downcase));
         def is_waiting_handoff:
             is_bot_author
             and ((.body // "") | ascii_downcase | (
@@ -1765,8 +1766,8 @@ latest_comment_is_bot_waiting() {
             ));
         def is_human:
             (.user.type // "") == "User"
-            and ((.user.login // "") != $bot)
-            and ((.user.login // "") != $author);
+            and ((.user.login // "" | ascii_downcase) != ($bot | ascii_downcase))
+            and ((.user.login // "" | ascii_downcase) != ($author | ascii_downcase));
         ($comments | flatten) as $comments
         | ($reviews | flatten) as $reviews
         | ($comments | map(select(is_waiting_handoff)) | first) as $handoff
