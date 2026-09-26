@@ -284,6 +284,8 @@ GH_CACHE_TTL_PR="${GH_CACHE_TTL_PR:-480}"
 GH_CACHE_TTL_ISSUE="${GH_CACHE_TTL_ISSUE:-600}"
 GH_CACHE_TTL_RUN="${GH_CACHE_TTL_RUN:-600}"
 GH_CACHE_TTL_LIVE_PR="${GH_CACHE_TTL_LIVE_PR:-180}"
+# Review-thread probe for merge_ready (see pr_has_unresolved_human_thread).
+GH_CACHE_TTL_REVIEW_THREADS="${GH_CACHE_TTL_REVIEW_THREADS:-1800}"
 GH_CACHE_LOCK_TIMEOUT="${GH_CACHE_LOCK_TIMEOUT:-30}"
 
 gh_cache_fetch_and_store() {
@@ -1795,16 +1797,21 @@ latest_comment_is_bot_waiting() {
 # changes" is pr_update (fresh human event), not merge_ready.
 #
 # Echoes the root author login of the first such thread on stdout (for logs).
-pr_has_unresolved_human_thread() {
-    local repo=$1
-    local number=$2
-    local owner=${repo%%/*}
-    local name=${repo#*/}
-    local author="${AUTHOR:-$BOT_USERNAME}"
+#
+# The thread list is cached per (repo, PR, HEAD) in the persistent GH_CACHE_DIR
+# for GH_CACHE_TTL_REVIEW_THREADS seconds (default 1800). The merge-ready
+# cooldown below cannot bound this probe on its own: a merge_ready item held by
+# the dispatcher is never promoted out of the pending state dir, so its
+# cooldown stamp is wiped every cycle and the probe re-ran for every held PR on
+# every 2-4 min cycle (~480 GraphQL calls/hr for ~30 held PRs, 2026-09-26).
+# The cache stays inside the staleness this probe already accepted (once per
+# 12h per HEAD); new maintainer comments still reach PM through pr_update.
+_fetch_review_thread_nodes() {
+    local owner=$1 name=$2 number=$3
     # Paginate: large PRs carry dozens of bot threads ahead of the one human
     # thread, so first:100 alone could miss it and fall through to a merge_ready
     # emit. Bounded at 10 pages (1000 threads) — beyond that, fail open.
-    local raw result page=0 after="" nodes="[]"
+    local raw page=0 after="" nodes="[]"
     local -a cursor_args=()
     while [ "$page" -lt 10 ]; do
         cursor_args=()
@@ -1820,6 +1827,20 @@ pr_has_unresolved_human_thread() {
         after=$(printf '%s' "$raw" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor')
         page=$((page + 1))
     done
+    printf '%s' "$nodes"
+}
+
+pr_has_unresolved_human_thread() {
+    local repo=$1
+    local number=$2
+    local head_sha=${3:-unknown}
+    local owner=${repo%%/*}
+    local name=${repo#*/}
+    local author="${AUTHOR:-$BOT_USERNAME}"
+    local nodes result
+    nodes=$(gh_cache_get_or_fetch "review-threads-${repo}-${number}-${head_sha}" \
+        "$GH_CACHE_TTL_REVIEW_THREADS" \
+        "_fetch_review_thread_nodes '$owner' '$name' '$number'") || return 1
     # gh's --jq has no --arg; run jq itself so AUTHOR can be bound safely.
     result=$(printf '%s' "$nodes" | jq -r --arg author "$author" '
             def is_bot_login:
@@ -1986,7 +2007,7 @@ check_merge_ready() {
         # cooldown armed so the GraphQL probe runs at most once per 12h per HEAD;
         # a new maintainer comment still reaches PM through pr_update.
         local human_thread_author
-        if human_thread_author=$(pr_has_unresolved_human_thread "$repo" "$pr_number"); then
+        if human_thread_author=$(pr_has_unresolved_human_thread "$repo" "$pr_number" "$head_sha"); then
             echo "${head_sha}:${now}" > "$state_file"
             echo "  [merge_ready] skip $repo#$pr_number: unresolved review thread by @${human_thread_author}" >&2
             continue
