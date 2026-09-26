@@ -1,8 +1,8 @@
 """Cross-agent voice handoff protocol (v1).
 
-Library module for initiating and validating voice-call handoffs between agents
-(Bob, Alice, Gordon, Sven). The protocol is specified in
-knowledge/technical-designs/cross-agent-voice-handoff.md (in Bob's workspace).
+Library module for initiating and validating voice-call handoffs between peer
+agents. The protocol is specified in
+knowledge/technical-designs/cross-agent-voice-handoff.md.
 
 This module contains the load-bearing primitives:
 
@@ -13,8 +13,8 @@ This module contains the load-bearing primitives:
 * ``HandoffWriter`` — convenience wrapper for the initiator side: signs a
   payload and publishes it to a shared state directory via atomic rename.
 
-Phase 1 shipped a protocol spec, validator, and a dry-run harness living
-in Bob's workspace (``scripts/voice-handoff-*.py``). This module consolidates
+Phase 1 shipped a protocol spec, validator, and a dry-run harness as
+workspace scripts (``scripts/voice-handoff-*.py``). This module consolidates
 the primitives inside the ``gptme-voice`` package so downstream integrations
 (voice-server write-side, target-agent listener) can depend on a typed,
 unit-tested library instead of importing from a sibling script via
@@ -50,8 +50,6 @@ REQUIRED_FIELDS: tuple[str, ...] = (
     "hmac",
 )
 
-VALID_AGENTS: frozenset[str] = frozenset({"bob", "alice", "gordon", "sven"})
-
 STATE_SUBDIRS: tuple[str, ...] = ("handoff", "claimed", "archive", "rejected")
 
 _ENV_AGENTS = "GPTME_VOICE_AGENTS"
@@ -60,21 +58,20 @@ _ENV_AGENTS = "GPTME_VOICE_AGENTS"
 def get_valid_agents() -> frozenset[str]:
     """Return the roster of valid agent names for this deployment.
 
-    By default returns the built-in ``VALID_AGENTS`` set (bob/alice/gordon/sven).
-    Set ``GPTME_VOICE_AGENTS`` to a comma-separated list to replace the roster
-    for a fork or custom deployment::
+    The roster is **deployment configuration**: set ``GPTME_VOICE_AGENTS`` to a
+    comma-separated list of agent names at launch::
 
-        GPTME_VOICE_AGENTS=alice,charlie,diana gptme-voice-server ...
+        GPTME_VOICE_AGENTS=alpha,charlie,diana gptme-voice-server ...
 
-    The value completely replaces the default; it does not extend it. Names are
-    lowercased and empty entries are ignored. Setting the variable to a blank or
-    separator-only value yields an **empty** roster — every handoff name is then
-    invalid, which is the intended behavior for locking a deployment down. Only
-    an *unset* variable returns the built-in default.
+    There is no built-in default roster — the library does not ship a hard-coded
+    set of agent identities. An **unset or blank** variable yields an **empty**
+    roster, meaning every handoff name is invalid (lockdown) until the operator
+    configures who may hand off. Names are lowercased and empty entries are
+    ignored.
     """
     raw = os.environ.get(_ENV_AGENTS)
     if raw is None:
-        return VALID_AGENTS
+        return frozenset()
     return frozenset(n.strip().lower() for n in raw.split(",") if n.strip())
 
 
@@ -483,7 +480,6 @@ __all__ = [
     "PROTOCOL_VERSION",
     "REQUIRED_FIELDS",
     "STATE_SUBDIRS",
-    "VALID_AGENTS",
     "HandoffHubWriter",
     "HandoffWriter",
     "get_valid_agents",

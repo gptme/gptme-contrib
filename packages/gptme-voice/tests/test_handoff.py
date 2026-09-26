@@ -27,6 +27,13 @@ SAMPLE_NOW = datetime(2026, 4, 21, 10, 0, 0, tzinfo=timezone.utc)
 SAMPLE_VALIDATION_NOW = SAMPLE_NOW + timedelta(seconds=30)
 
 
+@pytest.fixture(autouse=True)
+def _default_test_roster(monkeypatch):
+    """The roster is env-only (no built-in default), so tests that exercise the
+    classic two-agent flow set it here; roster-specific tests override it."""
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "bob,alice,gordon,sven")
+
+
 # ---------- compute_hmac / validate ----------
 
 
@@ -260,10 +267,13 @@ def test_handoff_writer_rejects_empty_secret(tmp_path: Path):
 # ---------- GPTME_VOICE_AGENTS — deployment-configurable roster ----------
 
 
-def test_get_valid_agents_returns_default_without_env(monkeypatch):
+def test_get_valid_agents_unset_env_is_empty_roster(monkeypatch):
+    """No built-in default roster: an unset GPTME_VOICE_AGENTS locks the
+    deployment down (every handoff name invalid) until the operator configures
+    the roster. Regression: pre-env-only code returned a hard-coded four-agent
+    set."""
     monkeypatch.delenv("GPTME_VOICE_AGENTS", raising=False)
-    agents = get_valid_agents()
-    assert agents == frozenset({"bob", "alice", "gordon", "sven"})
+    assert get_valid_agents() == frozenset()
 
 
 def test_get_valid_agents_respects_env_override(monkeypatch):
@@ -308,7 +318,8 @@ def test_non_default_agent_build_and_validate_roundtrip(monkeypatch):
 
 
 def test_non_default_agent_rejected_without_env(monkeypatch):
-    """Without GPTME_VOICE_AGENTS, the default roster still applies."""
+    """Without GPTME_VOICE_AGENTS the roster is empty, so every name —
+    default or otherwise — is rejected."""
     monkeypatch.delenv("GPTME_VOICE_AGENTS", raising=False)
     with pytest.raises(ValueError, match="not in"):
         build_handoff(
