@@ -44,6 +44,34 @@ _FM_DELIM = re.compile(r"^---[ \t]*$", re.MULTILINE)
 _MAILBOX_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
+def split_frontmatter(content: str) -> tuple[dict | None, str]:
+    """Split a message's leading YAML frontmatter from its markdown body.
+
+    Returns ``(meta, body)``: ``meta`` is the parsed mapping or ``None`` when the
+    file has no *valid* frontmatter, and ``body`` is the remainder with the
+    leading block removed. A leading ``---`` line is frontmatter only when a
+    closing fence exists **and** the block between the two fences parses as a
+    YAML mapping — the rule ``meta_of`` has always applied.
+
+    Kept here (next to ``meta_of``) so every caller that needs the *body*
+    shares this rule instead of re-deriving it: a body that merely starts with a
+    ``---`` horizontal rule must never be mistaken for frontmatter. Email-stack-free,
+    preserving the agent transport's isolation.
+    """
+    if not content.startswith("---"):
+        return None, content
+    parts = _FM_DELIM.split(content, maxsplit=2)
+    if len(parts) < 3:
+        return None, content
+    try:
+        meta = yaml.safe_load(parts[1])
+    except yaml.YAMLError:
+        return None, content
+    if not isinstance(meta, dict):
+        return None, content
+    return meta, parts[2].strip()
+
+
 def meta_of(path: Path) -> dict | None:
     """Parse the YAML frontmatter of a message file (``None`` if absent/invalid).
 
@@ -54,16 +82,7 @@ def meta_of(path: Path) -> dict | None:
         content = path.read_text()
     except OSError:
         return None
-    if not content.startswith("---"):
-        return None
-    parts = _FM_DELIM.split(content, maxsplit=2)
-    if len(parts) < 3:
-        return None
-    try:
-        meta = yaml.safe_load(parts[1])
-    except yaml.YAMLError:
-        return None
-    return meta if isinstance(meta, dict) else None
+    return split_frontmatter(content)[0]
 
 
 class AgentTransport:

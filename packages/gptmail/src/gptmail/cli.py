@@ -62,8 +62,13 @@ def load_env_file(workspace_dir: Path) -> None:
             os.environ.setdefault(key.strip(), value.strip())
 
 
-# Load .env file at module initialization
-load_env_file(get_workspace_dir())
+# Load .env file at module initialization. Best-effort: a non-git cwd (pip
+# wheel, bare container, missing git binary) must not make `import gptmail.cli`
+# — and therefore every subcommand — die at import time.
+try:
+    load_env_file(get_workspace_dir())
+except (subprocess.CalledProcessError, OSError):
+    pass
 
 
 def get_editor() -> str:
@@ -92,6 +97,59 @@ def cli() -> None:
 from gptmail.agent_cli import agent as _agent_group  # noqa: E402
 
 cli.add_command(_agent_group)
+
+# The chatgpt-bridge subcommand pulls in mcp/starlette/uvicorn (the `bridge`
+# extra), so it is imported lazily: a module-top import made every other
+# subcommand die with ModuleNotFoundError on installs without the extra.
+_chatgpt_bridge_main = None
+
+
+def _load_chatgpt_bridge_main():
+    global _chatgpt_bridge_main
+    if _chatgpt_bridge_main is None:
+        try:
+            from gptmail.chatgpt_bridge import main as main_
+        except ImportError as e:
+            # ImportError, not ModuleNotFoundError: the bridge module imports
+            # starlette/mcp at module top level, so a partially-installed extra
+            # (or a transitive import that moved) raises the base class. Catch
+            # it all so the user gets the install hint, not a traceback.
+            raise click.ClickException(
+                "chatgpt-bridge requires the bridge extra: pip install 'gptmail[bridge]'"
+            ) from e
+        _chatgpt_bridge_main = main_
+    return _chatgpt_bridge_main
+
+
+@cli.command("chatgpt-bridge")
+@click.option("--host", default=None, help="Host to bind (default: 127.0.0.1)")
+@click.option("--port", type=int, default=None, help="Port to bind (default: 8080)")
+@click.option("--messages-dir", default=None, help="Path to gptmail messages directory")
+@click.option("--token", default=None, help="Bearer token for auth")
+@click.option("--verbose", is_flag=True, help="Enable debug logging")
+def chatgpt_bridge(
+    host: str | None,
+    port: int | None,
+    messages_dir: str | None,
+    token: str | None,
+    verbose: bool,
+) -> None:
+    """Run the ChatGPT ↔ Bob MCP bridge server."""
+    argv: list[str] = []
+    # `is not None`, not truthiness: port 0 (bind an ephemeral port) and an
+    # explicit empty --host/--token are meaningful values, and swallowing them
+    # silently falls back to the env var or the 8080 default.
+    if host is not None:
+        argv.extend(["--host", host])
+    if port is not None:
+        argv.extend(["--port", str(port)])
+    if messages_dir is not None:
+        argv.extend(["--messages-dir", messages_dir])
+    if token is not None:
+        argv.extend(["--token", token])
+    if verbose:
+        argv.append("--verbose")
+    _load_chatgpt_bridge_main()(argv)
 
 
 @cli.command()
