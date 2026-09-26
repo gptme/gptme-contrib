@@ -395,6 +395,153 @@ def test_build_pretool_match_text_empty_input(hook):
     assert text == ""
 
 
+# --- _strip_quoted_spans ---
+
+
+def test_strip_quoted_spans_single_quotes(hook):
+    """Single-quoted spans are removed."""
+    result = hook._strip_quoted_spans("grep 'SKILL\\|skill' file.py")
+    assert "SKILL" not in result
+    assert "skill" not in result
+    assert "grep" in result
+    assert "file.py" in result
+
+
+def test_strip_quoted_spans_double_quotes(hook):
+    """Double-quoted spans are removed."""
+    result = hook._strip_quoted_spans('python -c "import foo; print(foo)"')
+    assert "import foo" not in result
+    assert "python" in result
+
+
+def test_strip_quoted_spans_preserves_unquoted(hook):
+    """Unquoted tokens like subcommands and paths are preserved."""
+    result = hook._strip_quoted_spans("git commit -m 'fix stuff' file.py")
+    assert "git" in result
+    assert "commit" in result
+    assert "file.py" in result
+    assert "fix stuff" not in result
+
+
+def test_strip_quoted_spans_empty(hook):
+    """Empty string returns empty string."""
+    assert hook._strip_quoted_spans("") == ""
+
+
+def test_strip_quoted_spans_no_quotes(hook):
+    """Text without quotes is returned unchanged (modulo whitespace)."""
+    result = hook._strip_quoted_spans("git rebase origin/master")
+    assert "git" in result
+    assert "rebase" in result
+    assert "origin/master" in result
+
+
+def test_strip_quoted_spans_heredoc_body(hook):
+    """Heredoc bodies are removed up to the delimiter; text after it survives."""
+    cmd = "cat > notes.md << 'EOF'\nsubscription skill factory\nEOF\ngit status"
+    result = hook._strip_quoted_spans(cmd)
+    assert "subscription" not in result
+    assert "factory" not in result
+    assert "notes.md" in result
+    assert "git status" in result
+
+
+def test_strip_quoted_spans_heredoc_body_starting_with_word(hook):
+    """A body line starting with a word char does not end the heredoc early."""
+    cmd = "python3 - <<PY\nimport skill\nprint(skill)\nPY\nls"
+    result = hook._strip_quoted_spans(cmd)
+    assert "skill" not in result
+    assert "ls" in result
+
+
+def test_strip_quoted_spans_heredoc_in_commit_message(hook):
+    """The git commit -m "$(cat <<'EOF' ... EOF)" idiom strips the message."""
+    cmd = "git commit -m \"$(cat <<'EOF'\nfeat: subscription skill\nEOF\n)\" file.py"
+    result = hook._strip_quoted_spans(cmd)
+    assert "subscription" not in result
+    assert "git commit" in result
+    assert "file.py" in result
+
+
+def test_strip_quoted_spans_herestring_not_heredoc(hook):
+    """A here-string (<<<) is not a heredoc and must not swallow later lines."""
+    cmd = "grep x <<<foo\ngit rebase origin/master"
+    result = hook._strip_quoted_spans(cmd)
+    assert "git rebase" in result
+
+
+# --- build_pretool_match_text: grep-pattern misfire class (session-72ce fixtures) ---
+
+
+def test_grep_pattern_single_quoted_does_not_match_skill(hook, tmp_path):
+    """grep 'SKILL\\|skill' must NOT trigger lesson injection via the literal.
+
+    Session-72ce misfire: grep 'SKILL\\|skill' injected Subscription Management
+    skill because the quoted literal 'SKILL\\|skill' matched the 'SKILL' keyword.
+    After stripping, only 'grep' remains in the command match text — not enough
+    to match skill keywords.
+    """
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    (lessons_dir / "subscription-management.md").write_text(
+        '---\nmatch:\n  keywords:\n    - "SKILL"\n    - "skill"\nstatus: active\n---\n# Subscription Management\n\n## Rule\nManage subscriptions.\n'
+    )
+    lessons = hook.scan_lessons([lessons_dir])
+
+    # Build match text the same way the hook does for PreToolUse
+    text = hook.build_pretool_match_text("Bash", {"command": "grep 'SKILL\\|skill' ."})
+    results = hook.score_lessons(lessons, text)
+
+    assert (
+        results == []
+    ), f"grep 'SKILL\\|skill' should not trigger subscription lesson; got: {[r['title'] for r in results]}"
+
+
+def test_grep_context_tier_does_not_match_factory(hook, tmp_path):
+    """grep 'context_tier' must NOT trigger Factory-Asset 3D skill injection.
+
+    Session-72ce misfire: grep 'context_tier' matched keywords in the factory
+    skill. After stripping, 'context_tier' (the data) is removed.
+    """
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    (lessons_dir / "factory-asset-3d.md").write_text(
+        '---\nmatch:\n  keywords:\n    - "context_tier"\n    - "factory asset"\nstatus: active\n---\n# Factory Asset 3D\n\n## Rule\nBuild factory assets.\n'
+    )
+    lessons = hook.scan_lessons([lessons_dir])
+
+    text = hook.build_pretool_match_text("Bash", {"command": "grep 'context_tier' ."})
+    results = hook.score_lessons(lessons, text)
+
+    assert (
+        results == []
+    ), f"grep 'context_tier' should not trigger factory lesson; got: {[r['title'] for r in results]}"
+
+
+def test_git_commit_still_matches_commit_lesson(hook, tmp_path):
+    """Genuine git commit command still matches the commit-workflow lesson.
+
+    Regression guard: unquoted tokens like 'commit' and 'conventional' must
+    survive the stripping step so genuinely relevant lessons still fire.
+    """
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    (lessons_dir / "conventional-commits.md").write_text(
+        '---\nmatch:\n  keywords:\n    - "conventional commit"\n    - "git commit"\nstatus: active\n---\n# Conventional Commits\n\n## Rule\nUse conventional commits.\n'
+    )
+    lessons = hook.scan_lessons([lessons_dir])
+
+    text = hook.build_pretool_match_text(
+        "Bash", {"command": "git commit -m 'fix: update' file.py"}
+    )
+    results = hook.score_lessons(lessons, text)
+
+    # 'git commit' (unquoted) must still match; 'fix: update' (quoted) is stripped
+    assert any(
+        "Conventional Commits" == r["title"] for r in results
+    ), f"git commit command should still match commit lesson; got: {[r['title'] for r in results]}"
+
+
 # --- holdout filtering ---
 
 
