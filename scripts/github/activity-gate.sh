@@ -1534,14 +1534,34 @@ check_own_pr_review_state() {
 # fetch, which is a separate cost decision.
 
 #: The account the trigger addresses, and whose reactions are the watermark.
-#: Matches ``REVIEWER_LOGIN`` in scripts/github/ai-review-sweep.py so the two
-#: triggers read identically to an operator.
-FIX_TRIGGER_LOGIN="TimeToBuildBob"
+#: Resolved from $BOT_USERNAME (default: TimeToBuildBob) so another agent
+#: responds to ``@<its-login> fix`` and not to the default login's trigger.
+#: Matches the rest of this script, which already honors $BOT_USERNAME.
+FIX_TRIGGER_LOGIN="${BOT_USERNAME:-TimeToBuildBob}"
+
+#: Regex-escape a literal. The login is a literal token, not a pattern, so a
+#: metacharacter from an env-supplied ``$BOT_USERNAME`` must not reach the
+#: regex engine as syntax: ``my.bot`` would otherwise also match ``myXbot``,
+#: and a login containing ``(`` would not compile at all. A non-compiling
+#: regex is swallowed by pending_fix_request's ``2>/dev/null`` + fail-toward-
+#: skip path, so the trigger would silently never fire for that agent.
+regex_escape() {
+    local s=$1 out='' i c
+    for (( i = 0; i < ${#s}; i++ )); do
+        c=${s:i:1}
+        # Escape everything that is not provably literal in a regex.
+        case $c in
+            [!A-Za-z0-9_-]) out+="\\$c" ;;
+            *) out+=$c ;;
+        esac
+    done
+    printf '%s' "$out"
+}
 
 #: Whole-line trigger, case-insensitive. Same shape as ai-review-sweep.py's
 #: ``TRIGGER_RE``: prose that merely mentions the phrase must not fire it.
 #: Trailing ``\r`` is allowed because GitHub stores comment bodies CRLF.
-FIX_TRIGGER_LINE_RE='^[ \t]*@'"$FIX_TRIGGER_LOGIN"'[ \t]+fix[ \t\r]*$'
+FIX_TRIGGER_LINE_RE='^[ \t]*@'"$(regex_escape "$FIX_TRIGGER_LOGIN")"'[ \t]+fix[ \t\r]*$'
 
 #: Anyone can comment on a public PR; only maintainers can spend worker budget.
 FIX_TRUSTED_ASSOCIATIONS='["OWNER","MEMBER","COLLABORATOR"]'
@@ -1589,10 +1609,15 @@ pending_fix_request() {
     # the comment as unserved and emit again on every cycle — an unbounded
     # dispatch loop, the exact shape of the 29x @greptileai incident. --slurp
     # wraps the pages in an outer array, hence the `.[][]` flatten.
-    ours=$(gh api "repos/${repo}/issues/comments/${comment_id}/reactions" \
-        --paginate --slurp -F per_page=100 \
-        --jq "[.[][] | select(((.user // {}).login // \"\") == \"$FIX_TRIGGER_LOGIN\")] | length" \
-        2>/dev/null) || return 0
+    # $FIX_TRIGGER_LOGIN comes from $BOT_USERNAME, so it is interpolated via
+    # jq --arg rather than into the filter text — a login containing a quote or
+    # backslash would otherwise break the jq program (and is an injection
+    # vector). ``gh api --jq`` has no --arg equivalent, hence the pipe.
+    local ours_json
+    ours_json=$(gh api "repos/${repo}/issues/comments/${comment_id}/reactions" \
+        --paginate --slurp -F per_page=100 2>/dev/null) || return 0
+    ours=$(printf '%s' "$ours_json" | jq -r --arg me "$FIX_TRIGGER_LOGIN" \
+        '[.[][] | select(((.user // {}).login // "") == $me)] | length' 2>/dev/null) || return 0
     # Empty output means the call failed or returned something unparseable →
     # treat as served, same as a real reaction. Never as pending.
     [ -z "$ours" ] && return 0
