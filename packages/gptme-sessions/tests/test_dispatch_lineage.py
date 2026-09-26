@@ -6,11 +6,36 @@ join between a parent and its out-of-process children was timestamp proximity,
 which is exactly the mtime-class heuristic these records exist to replace.
 """
 
+import json
 from pathlib import Path
+
+import pytest
 
 from gptme_sessions.post_session import post_session
 from gptme_sessions.record import DISPATCH_KINDS, SessionRecord
 from gptme_sessions.store import SessionStore
+
+
+@pytest.fixture(autouse=True)
+def _clear_lineage_env(monkeypatch):
+    """Clear every lineage env spelling so a host-inherited value cannot decide a test.
+
+    Covers the dispatch-id and dispatch-cause names too: this PR made
+    ``AGENT_DISPATCH_ID`` authoritative over ``BOB_DISPATCH_ID``/``PM_DISPATCH_ID``,
+    so a host exporting it would otherwise decide the BOB/PM-only tests below.
+    """
+    for var in (
+        "AGENT_PARENT_SESSION_ID",
+        "AGENT_DISPATCH_KIND",
+        "AGENT_DISPATCH_ID",
+        "AGENT_DISPATCH_CAUSE",
+        "BOB_PARENT_SESSION_ID",
+        "BOB_DISPATCH_KIND",
+        "BOB_DISPATCH_ID",
+        "BOB_DISPATCH_CAUSE",
+        "PM_DISPATCH_ID",
+    ):
+        monkeypatch.delenv(var, raising=False)
 
 
 def test_record_keeps_valid_lineage():
@@ -84,6 +109,67 @@ def test_post_session_reads_lineage_from_environment(tmp_path: Path, monkeypatch
     )
     assert result.record.parent_session_id == "parent-env"
     assert result.record.dispatch_kind == "fanout"
+
+
+def test_post_session_reads_neutral_lineage_from_environment(tmp_path: Path, monkeypatch):
+    """The neutral AGENT_* names resolve without any BOB_* variable set."""
+    monkeypatch.setenv("AGENT_PARENT_SESSION_ID", "neutral-parent")
+    monkeypatch.setenv("AGENT_DISPATCH_KIND", "fanout")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="sonnet",
+        session_id="neutral-child",
+        duration_seconds=10,
+    )
+    assert result.record.parent_session_id == "neutral-parent"
+    assert result.record.dispatch_kind == "fanout"
+
+
+def test_blank_neutral_lineage_falls_back_to_legacy(tmp_path: Path, monkeypatch):
+    """An exported-but-empty AGENT_* value must not blank out the legacy value.
+
+    ``export AGENT_PARENT_SESSION_ID=`` is a realistic launcher artifact; the
+    resolution is a falsy ``or`` chain, so an empty neutral value has to fall
+    through rather than win as an empty string.
+    """
+    monkeypatch.setenv("AGENT_PARENT_SESSION_ID", "")
+    monkeypatch.setenv("BOB_PARENT_SESSION_ID", "legacy-parent")
+    monkeypatch.setenv("AGENT_DISPATCH_KIND", "")
+    monkeypatch.setenv("BOB_DISPATCH_KIND", "fanout")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="sonnet",
+        session_id="blank-neutral",
+        duration_seconds=10,
+    )
+    assert result.record.parent_session_id == "legacy-parent"
+    assert result.record.dispatch_kind == "fanout"
+
+
+def test_neutral_lineage_beats_legacy_alias(tmp_path: Path, monkeypatch):
+    """Both spellings present: the neutral name is authoritative.
+
+    Dual-writing spawners keep the two equal, so this only decides a
+    hand-mixed environment -- and there the protocol name must win.
+    """
+    monkeypatch.setenv("AGENT_PARENT_SESSION_ID", "neutral-parent")
+    monkeypatch.setenv("BOB_PARENT_SESSION_ID", "legacy-parent")
+    monkeypatch.setenv("AGENT_DISPATCH_KIND", "worker")
+    monkeypatch.setenv("BOB_DISPATCH_KIND", "fanout")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="sonnet",
+        session_id="neutral-wins",
+        duration_seconds=10,
+    )
+    assert result.record.parent_session_id == "neutral-parent"
+    assert result.record.dispatch_kind == "worker"
 
 
 def test_explicit_argument_beats_environment(tmp_path: Path, monkeypatch):
@@ -289,3 +375,52 @@ def test_dispatch_id_roundtrips_through_store(tmp_path: Path):
     assert result.record.dispatch_id == "bob-pm-gptme-gptme-slot-7"
     reloaded = store.load_all()
     assert any(r.dispatch_id == "bob-pm-gptme-gptme-slot-7" for r in reloaded)
+
+
+def test_post_session_reads_dispatch_id_from_agent_env(tmp_path: Path, monkeypatch):
+    """AGENT_DISPATCH_ID is preferred over the legacy BOB_DISPATCH_ID alias."""
+    monkeypatch.setenv("AGENT_DISPATCH_ID", "agent-fanout-run-77")
+    monkeypatch.setenv("BOB_DISPATCH_ID", "bob-workers-run-99")
+    monkeypatch.setenv("PM_DISPATCH_ID", "bob-pm-gptme-gptme-slot-2")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        session_id="agent-env-child1",
+        dispatch_kind="fanout",
+        duration_seconds=10,
+    )
+    assert result.record.dispatch_id == "agent-fanout-run-77"
+
+
+def test_blank_agent_dispatch_id_falls_back_to_legacy(tmp_path: Path, monkeypatch):
+    """An exported-but-empty AGENT_DISPATCH_ID falls through to BOB_DISPATCH_ID."""
+    monkeypatch.setenv("AGENT_DISPATCH_ID", "")
+    monkeypatch.setenv("BOB_DISPATCH_ID", "bob-workers-run-42")
+    monkeypatch.delenv("PM_DISPATCH_ID", raising=False)
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        session_id="agent-env-child2",
+        dispatch_kind="worker",
+        duration_seconds=10,
+    )
+    assert result.record.dispatch_id == "bob-workers-run-42"
+
+
+def test_post_session_reads_dispatch_cause_from_agent_env(tmp_path: Path, monkeypatch):
+    """AGENT_DISPATCH_CAUSE is preferred over the legacy BOB_DISPATCH_CAUSE."""
+    monkeypatch.setenv("AGENT_DISPATCH_CAUSE", json.dumps({"kind": "agent-env", "id": "run-7"}))
+    monkeypatch.setenv("BOB_DISPATCH_CAUSE", json.dumps({"kind": "legacy-env"}))
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        session_id="agent-cause-child1",
+        duration_seconds=10,
+    )
+    assert result.record.dispatch_cause == {"kind": "agent-env", "id": "run-7"}

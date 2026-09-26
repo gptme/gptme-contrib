@@ -43,8 +43,18 @@ UTC = timezone.utc  # datetime.UTC was added in Python 3.11.
 
 
 def _get_session_id() -> str | None:
-    """Resolve session ID from the standard env chain."""
-    for var in ("GIT_COMMITTER_SESSION_ID", "BOB_SESSION_ID", "CC_SESSION_ID"):
+    """Resolve session ID from the standard env chain.
+
+    ``AGENT_SESSION_ID`` is the neutral protocol spelling; ``BOB_SESSION_ID``
+    stays as the working legacy alias so a forked agent need not set a
+    Bob-named variable to be identified.
+    """
+    for var in (
+        "GIT_COMMITTER_SESSION_ID",
+        "AGENT_SESSION_ID",
+        "BOB_SESSION_ID",
+        "CC_SESSION_ID",
+    ):
         if val := os.environ.get(var):
             return val
     return None
@@ -68,7 +78,11 @@ def _get_agent_id() -> str:
     if agent_id := os.environ.get("BOB_AUTONOMOUS_AGENT_ID"):
         return agent_id
     if session_id := _get_session_id():
-        harness = os.environ.get("BOB_AMBIENT_HARNESS", "agent")
+        harness = (
+            os.environ.get("AGENT_AMBIENT_HARNESS")
+            or os.environ.get("BOB_AMBIENT_HARNESS")
+            or "agent"
+        )
         return f"bob-autonomous-{harness}-{session_id}"
     return ""
 

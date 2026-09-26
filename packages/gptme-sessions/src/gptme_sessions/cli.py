@@ -2869,13 +2869,16 @@ def repair_grades(ctx: click.Context, dry_run: bool) -> None:
 @click.option(
     "--parent-session-id",
     default=None,
-    help="session_id of the session that spawned this one (default: $BOB_PARENT_SESSION_ID)",
+    help=(
+        "session_id of the session that spawned this one "
+        "(default: $AGENT_PARENT_SESSION_ID, $BOB_PARENT_SESSION_ID)"
+    ),
 )
 @click.option(
     "--dispatch-kind",
     default=None,
     type=click.Choice(sorted(DISPATCH_KINDS)),
-    help="How this session was spawned (default: $BOB_DISPATCH_KIND)",
+    help=("How this session was spawned (default: $AGENT_DISPATCH_KIND, $BOB_DISPATCH_KIND)"),
 )
 @click.option(
     "--dispatch-id",

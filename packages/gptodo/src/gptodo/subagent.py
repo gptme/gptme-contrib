@@ -222,10 +222,15 @@ def spawn_agent(
 
     # Dispatch lineage: read the caller's session ID from the environment so
     # the child can record a parent_session_id in its session-records row.
-    # CC_SESSION_ID is set by Claude Code; BOB_SESSION_ID is the Bob-generic
-    # fallback (e.g. gptme or Codex runs).  Neither is cleared by clear_keys
-    # because these are Bob-internal dispatch signals, not API credentials.
-    _parent_session_id = os.environ.get("CC_SESSION_ID") or os.environ.get("BOB_SESSION_ID")
+    # CC_SESSION_ID is set by Claude Code; AGENT_SESSION_ID is the neutral
+    # protocol name and BOB_SESSION_ID the legacy alias for generic runs (e.g.
+    # gptme or Codex).  None is cleared by clear_keys because these are
+    # internal dispatch signals, not API credentials.
+    _parent_session_id = (
+        os.environ.get("CC_SESSION_ID")
+        or os.environ.get("AGENT_SESSION_ID")
+        or os.environ.get("BOB_SESSION_ID")
+    )
 
     session_id = f"agent_{uuid.uuid4().hex[:8]}"
     sessions_dir = get_sessions_dir(workspace)
@@ -314,20 +319,27 @@ def spawn_agent(
             env_exports.append(f"export COORDINATION_DB={shlex.quote(coord_db_path)}")
 
         # Inject dispatch lineage vars — always, regardless of clear_keys.
-        # BOB_SESSION_ID identifies this child so a nested spawn can use it as
-        # its immediate parent. BOB_PARENT_SESSION_ID identifies this child's
-        # caller (and may be absent for standalone gptodo CLI invocations).
+        # Both spellings are exported: AGENT_* is the neutral protocol name
+        # (read first by consumers), BOB_* stays the working legacy alias.
+        # Writing both keeps them from disagreeing when a child inherits an
+        # AGENT_* value from its parent. AGENT_SESSION_ID identifies this child
+        # so a nested spawn can use it as its immediate parent;
+        # AGENT_PARENT_SESSION_ID identifies this child's caller (and may be
+        # absent for standalone gptodo CLI invocations).
         env_exports.extend(
             [
+                f"export AGENT_SESSION_ID={shlex.quote(session_id)}",
+                "export AGENT_DISPATCH_KIND=gptodo-spawn",
                 f"export BOB_SESSION_ID={shlex.quote(session_id)}",
                 "export BOB_DISPATCH_KIND=gptodo-spawn",
             ]
         )
         if _parent_session_id:
+            env_exports.append(f"export AGENT_PARENT_SESSION_ID={shlex.quote(_parent_session_id)}")
             env_exports.append(f"export BOB_PARENT_SESSION_ID={shlex.quote(_parent_session_id)}")
         else:
             # Do not leak an inherited grandparent ID into a standalone spawn.
-            env_unsets.append("BOB_PARENT_SESSION_ID")
+            env_unsets.extend(["AGENT_PARENT_SESSION_ID", "BOB_PARENT_SESSION_ID"])
 
         # Build env setup: unsets first (if any), then exports
         env_commands = []
@@ -404,17 +416,21 @@ def spawn_agent(
         env["COORDINATION_DB"] = coord_db_path
 
     # Inject dispatch lineage vars — always, regardless of clear_keys.
-    # These are Bob-internal signals; they must override whatever the *parent*
-    # process inherited. BOB_SESSION_ID identifies this child so a nested spawn
-    # can use it as its immediate parent.
+    # These are internal dispatch signals; they must override whatever the
+    # *parent* process inherited. Both spellings are written so a child that
+    # prefers the neutral name still sees this spawn's ids.
     if env is None:
         env = os.environ.copy()
+    env["AGENT_SESSION_ID"] = session_id
+    env["AGENT_DISPATCH_KIND"] = "gptodo-spawn"
     env["BOB_SESSION_ID"] = session_id
     env["BOB_DISPATCH_KIND"] = "gptodo-spawn"
     if _parent_session_id:
+        env["AGENT_PARENT_SESSION_ID"] = _parent_session_id
         env["BOB_PARENT_SESSION_ID"] = _parent_session_id
     else:
         # Do not leak an inherited grandparent ID into a standalone spawn.
+        env.pop("AGENT_PARENT_SESSION_ID", None)
         env.pop("BOB_PARENT_SESSION_ID", None)
 
     combined_output = ""

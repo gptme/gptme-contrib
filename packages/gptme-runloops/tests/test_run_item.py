@@ -492,6 +492,7 @@ def test_plan_runner_argv_and_env(tmp_path) -> None:
     assert flags[7:9] == ["--timeout", "900"]
     assert flags[9:11] == ["--model", "claude-sonnet-4-6"]
     assert plan.runner_env == {
+        "AGENT_SESSION_ID": plan.session_id,
         "BOB_SESSION_ID": plan.session_id,
         "CC_SESSION_ID": plan.session_id,
     }
@@ -501,6 +502,7 @@ def test_plan_runner_argv_and_env(tmp_path) -> None:
 def test_plan_gptme_env(tmp_path) -> None:
     plan, _, _ = _plan_for(tmp_path, make_item(), FakeLifecycleIO(), backend="gptme")
     assert plan.runner_env == {
+        "AGENT_SESSION_ID": plan.session_id,
         "BOB_SESSION_ID": plan.session_id,
     }
     assert plan.trajectory_path == ""
@@ -511,10 +513,36 @@ def test_plan_grok_build_env(tmp_path) -> None:
         tmp_path, make_item(), FakeLifecycleIO(), backend="grok-build"
     )
     assert plan.runner_env == {
+        "AGENT_SESSION_ID": plan.session_id,
         "BOB_SESSION_ID": plan.session_id,
         "GROK_BUILD_SESSION_ID": plan.session_id,
     }
     assert plan.trajectory_path == ""  # CC prediction only
+
+
+def test_ambient_env_emits_neutral_and_configured_names(tmp_path) -> None:
+    """Ambient tagging writes the neutral name plus the configured alias."""
+    from gptme_runloops.run_item import _ambient_env
+
+    legacy_config = RunItemConfig(
+        workspace=tmp_path, ambient_harness_env="BOB_AMBIENT_HARNESS"
+    )
+    assert _ambient_env(legacy_config, "claude-code", "") == {
+        "AGENT_AMBIENT_HARNESS": "claude-code",
+        "BOB_AMBIENT_HARNESS": "claude-code",
+    }
+
+    # Already-neutral config: no duplicate spelling emitted.
+    neutral_config = RunItemConfig(
+        workspace=tmp_path, ambient_harness_env="AGENT_AMBIENT_HARNESS"
+    )
+    assert _ambient_env(neutral_config, "claude-code", "") == {
+        "AGENT_AMBIENT_HARNESS": "claude-code",
+    }
+
+    # Unset config keeps meaning "tag nothing".
+    unset_config = RunItemConfig(workspace=tmp_path, ambient_harness_env="")
+    assert _ambient_env(unset_config, "claude-code", "") == {}
 
 
 @pytest.mark.parametrize(
@@ -522,6 +550,7 @@ def test_plan_grok_build_env(tmp_path) -> None:
 )
 def test_plan_shares_record_id_with_every_backend(tmp_path, backend) -> None:
     plan, _, _ = _plan_for(tmp_path, make_item(), FakeLifecycleIO(), backend=backend)
+    assert plan.runner_env["AGENT_SESSION_ID"] == plan.session_id
     assert plan.runner_env["BOB_SESSION_ID"] == plan.session_id
     assert "BOB_SESSION_PID" not in plan.runner_env
 

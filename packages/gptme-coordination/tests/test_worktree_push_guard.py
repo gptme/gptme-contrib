@@ -214,6 +214,60 @@ def test_session_pid_requires_launcher_pid(monkeypatch) -> None:
     assert _get_session_pid() == 12345
 
 
+def test_session_id_prefers_neutral_agent_env(monkeypatch) -> None:
+    """AGENT_SESSION_ID is the neutral name; BOB_SESSION_ID stays the alias."""
+    from gptme_coordination.worktree_guard import _get_session_id
+
+    for var in (
+        "GIT_COMMITTER_SESSION_ID",
+        "AGENT_SESSION_ID",
+        "BOB_SESSION_ID",
+        "CC_SESSION_ID",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    assert _get_session_id() is None
+
+    # The legacy alias alone still resolves (no launcher has to change).
+    monkeypatch.setenv("BOB_SESSION_ID", "legacy-abc")
+    assert _get_session_id() == "legacy-abc"
+
+    # The neutral name alone resolves (a forked agent need not set a BOB_*).
+    monkeypatch.delenv("BOB_SESSION_ID", raising=False)
+    monkeypatch.setenv("AGENT_SESSION_ID", "neutral-abc")
+    assert _get_session_id() == "neutral-abc"
+
+    # Both set: the neutral name is authoritative.
+    monkeypatch.setenv("BOB_SESSION_ID", "legacy-abc")
+    assert _get_session_id() == "neutral-abc"
+
+
+def test_agent_id_harness_prefers_neutral_env(monkeypatch) -> None:
+    """The synthesized agent id accepts either ambient-harness spelling."""
+    from gptme_coordination.worktree_guard import _get_agent_id
+
+    for var in (
+        "BOB_AUTONOMOUS_AGENT_ID",
+        "GIT_COMMITTER_SESSION_ID",
+        "BOB_SESSION_ID",
+        "CC_SESSION_ID",
+        "AGENT_SESSION_ID",
+        "AGENT_AMBIENT_HARNESS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AGENT_SESSION_ID", "s1")
+
+    monkeypatch.setenv("BOB_AMBIENT_HARNESS", "gptme:legacy")
+    assert _get_agent_id() == "bob-autonomous-gptme:legacy-s1"
+
+    monkeypatch.setenv("AGENT_AMBIENT_HARNESS", "gptme:neutral")
+    assert _get_agent_id() == "bob-autonomous-gptme:neutral-s1"
+
+    # Neither spelling set -> the "agent" default.
+    monkeypatch.delenv("AGENT_AMBIENT_HARNESS", raising=False)
+    monkeypatch.delenv("BOB_AMBIENT_HARNESS", raising=False)
+    assert _get_agent_id() == "bob-autonomous-agent-s1"
+
+
 def test_brain_root_honors_workspace_env(monkeypatch, tmp_path: Path) -> None:
     from gptme_coordination.worktree_guard import _get_brain_root
 

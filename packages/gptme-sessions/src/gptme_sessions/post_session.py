@@ -386,23 +386,27 @@ def post_session(
         ``reasoning_effort``, gptme ``metadata.reasoning_effort``).
     parent_session_id:
         ``session_id`` of the session that spawned this one.  Defaults to the
-        ``BOB_PARENT_SESSION_ID`` environment variable so spawners only have to
-        export it once.  Ignored when it equals this session's own id.
+        ``AGENT_PARENT_SESSION_ID`` environment variable (legacy alias:
+        ``BOB_PARENT_SESSION_ID``) so spawners only have to export it once.
+        Ignored when it equals this session's own id.
     dispatch_kind:
         How this session was spawned — one of
         :data:`~gptme_sessions.record.DISPATCH_KINDS`.  Defaults to the
-        ``BOB_DISPATCH_KIND`` environment variable.
+        ``AGENT_DISPATCH_KIND`` environment variable (legacy alias:
+        ``BOB_DISPATCH_KIND``).
     dispatch_id:
         Run-id of the dispatcher when the dispatcher is not itself a recorded
         session (e.g. an autonomous-fanout run, a spawn-workers run, or a
         project-monitoring slot unit name).  Complements ``parent_session_id``;
         use for dispatcher-run→child joins.  Defaults to the harness-neutral
-        ``BOB_DISPATCH_ID`` environment variable, falling back to
-        ``PM_DISPATCH_ID`` for the project-monitoring path.
+        ``AGENT_DISPATCH_ID`` environment variable (legacy alias:
+        ``BOB_DISPATCH_ID``), falling back to ``PM_DISPATCH_ID`` for the
+        project-monitoring path.
     dispatch_cause:
         Launcher-captured cause object, with caller-defined ``kind``/``id``
         and optional ``parent_session_id``, ``task``, ``pr``, or other metadata.
-        When omitted, read JSON from ``BOB_DISPATCH_CAUSE``. Malformed JSON and
+        When omitted, read JSON from ``AGENT_DISPATCH_CAUSE`` (legacy alias:
+        ``BOB_DISPATCH_CAUSE``). Malformed JSON and
         non-object values are ignored. An explicit object, including an empty
         one, takes precedence. This does not change the lineage fields above.
     run_type:
@@ -996,30 +1000,49 @@ def post_session(
     if trigger is not None:
         record_kwargs["trigger"] = trigger
     # Dispatch lineage: explicit argument wins, else the spawner's environment.
+    # The neutral AGENT_* name is preferred over the legacy BOB_* alias; both
+    # are accepted so a forked agent can export a non-Bob-named variable.
     # SessionRecord validates both (unknown kind -> None, self-parent -> None).
-    resolved_parent = parent_session_id or os.environ.get("BOB_PARENT_SESSION_ID") or None
+    resolved_parent = (
+        parent_session_id
+        or os.environ.get("AGENT_PARENT_SESSION_ID")
+        or os.environ.get("BOB_PARENT_SESSION_ID")
+        or None
+    )
     if resolved_parent is not None:
         record_kwargs["parent_session_id"] = resolved_parent
-    resolved_dispatch_kind = dispatch_kind or os.environ.get("BOB_DISPATCH_KIND") or None
+    resolved_dispatch_kind = (
+        dispatch_kind
+        or os.environ.get("AGENT_DISPATCH_KIND")
+        or os.environ.get("BOB_DISPATCH_KIND")
+        or None
+    )
     if resolved_dispatch_kind is not None:
         record_kwargs["dispatch_kind"] = resolved_dispatch_kind
     # dispatch_id: the run-id of a dispatcher that is not itself a session.
     # Distinct from parent_session_id, which links session→session.
     #
-    # BOB_DISPATCH_ID is the harness-neutral name every dispatcher can export
-    # (autonomous-fanout.sh, spawn-workers.sh, ...).  PM_DISPATCH_ID stays as a
+    # AGENT_DISPATCH_ID is the harness-neutral name every dispatcher can export
+    # (autonomous-fanout.sh, spawn-workers.sh, ...).  BOB_DISPATCH_ID is the
+    # legacy alias and PM_DISPATCH_ID stays as a
     # fallback because project-monitoring slot units already set it and its
     # value is joined against the PM ledger; keeping both lets the PM path work
     # unchanged while non-PM dispatchers stop being forced to borrow a
     # PM-flavoured variable name to get their run-id recorded.
     resolved_dispatch_id = (
-        dispatch_id or os.environ.get("BOB_DISPATCH_ID") or os.environ.get("PM_DISPATCH_ID") or None
+        dispatch_id
+        or os.environ.get("AGENT_DISPATCH_ID")
+        or os.environ.get("BOB_DISPATCH_ID")
+        or os.environ.get("PM_DISPATCH_ID")
+        or None
     )
     if resolved_dispatch_id is not None:
         record_kwargs["dispatch_id"] = resolved_dispatch_id
     resolved_dispatch_cause = dispatch_cause
     if resolved_dispatch_cause is None:
-        raw_dispatch_cause = os.environ.get("BOB_DISPATCH_CAUSE")
+        raw_dispatch_cause = os.environ.get("AGENT_DISPATCH_CAUSE") or os.environ.get(
+            "BOB_DISPATCH_CAUSE"
+        )
         if raw_dispatch_cause:
             try:
                 resolved_dispatch_cause = json.loads(raw_dispatch_cause)
