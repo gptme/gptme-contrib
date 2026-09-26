@@ -2,7 +2,11 @@
 Twilio helpers for gptme-voice.
 """
 
+import hashlib
+import hmac
+import json
 import logging
+import time
 from dataclasses import dataclass, field
 from html import escape as _html_escape
 from urllib.parse import urlsplit, urlunsplit
@@ -114,6 +118,74 @@ def outbound_identity_params(
     return params
 
 
+STREAM_TOKEN_PARAM = "stream_token"
+STREAM_TOKEN_TTL_SECONDS = 600
+_STREAM_TOKEN_VERSION = "v1"
+
+
+def _stream_token_digest(
+    auth_token: str, issued_at: int, params: dict[str, str]
+) -> str:
+    # Derive a purpose-bound key so the token is never a raw Twilio-auth HMAC.
+    key = hmac.new(
+        auth_token.encode(), b"gptme-voice-stream-token", hashlib.sha256
+    ).digest()
+    body = {k: v for k, v in params.items() if k != STREAM_TOKEN_PARAM}
+    message = (
+        f"{_STREAM_TOKEN_VERSION}.{issued_at}.".encode()
+        + json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    )
+    return hmac.new(key, message, hashlib.sha256).hexdigest()
+
+
+def sign_stream_params(
+    params: dict[str, str], auth_token: str, *, now: float | None = None
+) -> dict[str, str]:
+    """Return ``params`` plus a ``stream_token`` authenticating all of them.
+
+    The Media Stream WebSocket is public, and ``start.customParameters`` is the
+    only identity it receives. Signing the whole parameter set with a key
+    derived from ``TWILIO_AUTH_TOKEN`` lets the stream handler reject start
+    events that did not come from TwiML we issued. TwiML goes from us to
+    Twilio, never to the caller, so the token is not visible to callers.
+    """
+    issued_at = int(time.time() if now is None else now)
+    signed = {k: v for k, v in params.items() if k != STREAM_TOKEN_PARAM}
+    digest = _stream_token_digest(auth_token, issued_at, signed)
+    signed[STREAM_TOKEN_PARAM] = f"{_STREAM_TOKEN_VERSION}.{issued_at}.{digest}"
+    return signed
+
+
+def verify_stream_params(
+    params: dict[str, str],
+    auth_token: str,
+    *,
+    now: float | None = None,
+    ttl_seconds: int | None = STREAM_TOKEN_TTL_SECONDS,
+) -> bool:
+    """Check that ``params`` carry a valid ``stream_token``.
+
+    ``ttl_seconds=None`` skips the freshness check, for Media Stream
+    reconnects of a call whose first start event was already verified.
+    """
+    token = params.get(STREAM_TOKEN_PARAM)
+    if not isinstance(token, str):
+        return False
+    version, _, rest = token.partition(".")
+    issued_raw, _, digest = rest.partition(".")
+    if version != _STREAM_TOKEN_VERSION or not issued_raw.isdigit() or not digest:
+        return False
+    issued_at = int(issued_raw)
+    current = time.time() if now is None else now
+    # Allow small clock skew between the process that minted and this one.
+    if current < issued_at - 60:
+        return False
+    if ttl_seconds is not None and current > issued_at + ttl_seconds:
+        return False
+    expected = _stream_token_digest(auth_token, issued_at, params)
+    return hmac.compare_digest(expected, digest)
+
+
 def build_connect_stream_twiml(
     stream_url: str, custom_params: dict[str, str] | None = None
 ) -> str:
@@ -187,7 +259,10 @@ def create_outbound_call(
             ) from exc
 
     client = client_cls(settings.account_sid, settings.auth_token)
-    custom_params = outbound_identity_params(to_number, settings.custom_params)
+    custom_params = sign_stream_params(
+        outbound_identity_params(to_number, settings.custom_params),
+        settings.auth_token,
+    )
     call = client.calls.create(
         to=to_number,
         from_=settings.from_number,

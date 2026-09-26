@@ -12,6 +12,7 @@ from .twilio_integration import (
     create_outbound_call,
     outbound_identity_params,
     resolve_outbound_call_settings,
+    sign_stream_params,
 )
 
 
@@ -79,7 +80,10 @@ def main(
 
     twiml = build_connect_stream_twiml(
         settings.stream_url,
-        outbound_identity_params(to_number, settings.custom_params),
+        sign_stream_params(
+            outbound_identity_params(to_number, settings.custom_params),
+            settings.auth_token,
+        ),
     )
     if dry_run:
         click.echo(twiml)
