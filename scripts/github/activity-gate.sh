@@ -286,6 +286,8 @@ GH_CACHE_TTL_RUN="${GH_CACHE_TTL_RUN:-600}"
 GH_CACHE_TTL_LIVE_PR="${GH_CACHE_TTL_LIVE_PR:-180}"
 # Review-thread probe for merge_ready (see pr_has_unresolved_human_thread).
 GH_CACHE_TTL_REVIEW_THREADS="${GH_CACHE_TTL_REVIEW_THREADS:-1800}"
+# Non-comment-bump actor probe (see fetch_pr_noncomment_actor).
+GH_CACHE_TTL_NONCOMMENT_ACTOR="${GH_CACHE_TTL_NONCOMMENT_ACTOR:-1800}"
 GH_CACHE_LOCK_TIMEOUT="${GH_CACHE_LOCK_TIMEOUT:-30}"
 
 gh_cache_fetch_and_store() {
@@ -419,8 +421,40 @@ fetch_live_pr_data() {
 # Returns the actor login on stdout, or empty on error / when no recognized event found.
 # Failure direction: empty output → caller falls through to existing emit behavior.
 # Event types checked: regular push, force push, draft toggle, label/assignee/review-request changes.
-# Args: <owner/repo> <pr_number>
+# Args: <owner/repo> <pr_number> [updated_at]
+#
+# With updated_at, the result is cached per (repo, PR, updatedAt) in the
+# persistent GH_CACHE_DIR for GH_CACHE_TTL_NONCOMMENT_ACTOR seconds (default
+# 1800). The watermark cannot bound this probe on its own: when any item for
+# the PR is dispatched and held, PM never promotes the pending pr-N.state, so
+# the watermark rolls back every cycle and the probe re-ran for the same
+# updatedAt on every 2-4 min cycle (~17 calls/PR/hr, 2026-09-26). A new
+# updatedAt is a new key, so fresh events always re-probe.
 fetch_pr_noncomment_actor() {
+    local repo=$1
+    local pr_number=$2
+    local updated_at=${3:-}
+    if [ -z "$updated_at" ]; then
+        _fetch_pr_noncomment_actor_raw "$repo" "$pr_number" || true
+        return 0
+    fi
+    local actor
+    # "-" is a cacheable "no recognized actor"; gh failures are not cached.
+    actor=$(gh_cache_get_or_fetch \
+        "noncomment-actor-${repo}-${pr_number}-${updated_at//:/}" \
+        "$GH_CACHE_TTL_NONCOMMENT_ACTOR" \
+        "_fetch_pr_noncomment_actor_or_dash '$repo' '$pr_number'" \
+        "") || true
+    [ "$actor" = "-" ] || printf '%s' "$actor"
+}
+
+_fetch_pr_noncomment_actor_or_dash() {
+    local out
+    out=$(_fetch_pr_noncomment_actor_raw "$1" "$2") || return 1
+    printf '%s' "${out:--}"
+}
+
+_fetch_pr_noncomment_actor_raw() {
     local repo=$1
     local pr_number=$2
     local owner="${repo%%/*}"
@@ -454,7 +488,7 @@ fetch_pr_noncomment_actor() {
            )
          | map(select(. != null))
          | last // empty' \
-        2>/dev/null || true
+        2>/dev/null
 }
 
 # Check whether the last activity on a PR was from someone worth responding to.
@@ -694,7 +728,7 @@ check_pr_updates() {
                 ' 2>/dev/null)
                 if [ -z "$latest_comment_time" ] || ! [[ "$latest_comment_time" > "$last_check" ]]; then
                     local noncomment_actor
-                    noncomment_actor=$(fetch_pr_noncomment_actor "$repo" "$pr_number" 2>/dev/null || true)
+                    noncomment_actor=$(fetch_pr_noncomment_actor "$repo" "$pr_number" "$updated_at" 2>/dev/null || true)
                     if [ "$noncomment_actor" = "$AUTHOR" ]; then
                         # Self-triggered non-comment bump — skip, still advance watermark
                         echo "$updated_at" > "$state_file"
