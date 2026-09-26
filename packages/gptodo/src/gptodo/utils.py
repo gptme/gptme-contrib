@@ -444,6 +444,11 @@ CONFIGS = {
     ),
 }
 
+# Directories under a tasks tree that never hold real tasks. Shared by
+# `load_tasks` (recursive glob) and the lazy archive resolver so both agree on
+# which files can resolve a dependency.
+EXCLUDED_TASK_DIRS = {"templates", "video-scripts", "agent-setup-interview"}
+
 PRIORITY_RANK: dict[str | None, int] = {
     "urgent": 4,
     "high": 3,
@@ -1259,7 +1264,7 @@ def load_tasks(
     tasks = []
 
     # Directories to exclude
-    excluded_dirs = {"templates", "video-scripts", "agent-setup-interview"}
+    excluded_dirs = EXCLUDED_TASK_DIRS
 
     # Handle single file case
     if single_file:
@@ -1482,6 +1487,13 @@ class _LazyArchiveTasks(Dict[str, TaskInfo]):
     See :func:`build_dependency_universe` for why this exists. Live tasks are
     held directly; an archived task is parsed only when its name is looked up
     and is not already present.
+
+    Contract: this is a *lookup* structure. ``get``/``[]``/``in`` resolve
+    archived tasks on demand, but iteration, ``len()``, ``keys()`` and
+    ``items()`` only report entries already resolved (the live tasks, plus any
+    archived task fetched earlier). Consumers that need the full archived set
+    must use ``gptodo check``'s eager ``dependency_universe`` instead — the
+    whole point here is to avoid enumerating the archive.
     """
 
     def __init__(
@@ -1501,8 +1513,13 @@ class _LazyArchiveTasks(Dict[str, TaskInfo]):
             index: Dict[str, Path] = {}
             if self._archive_dir.is_dir():
                 # Sorted so the resolution is deterministic when duplicate stems
-                # exist in nested archive subdirectories.
+                # exist in nested archive subdirectories. Mirror load_tasks'
+                # recursive exclusion list, otherwise a file under
+                # archive/templates/ could resolve a dependency here that
+                # `gptodo check` (which uses load_tasks) reports as missing.
                 for path in sorted(self._archive_dir.rglob("*.md")):
+                    if any(d in path.parts for d in EXCLUDED_TASK_DIRS):
+                        continue
                     index.setdefault(path.stem, path)
             self._archive_index = index
         return self._archive_index.get(name)

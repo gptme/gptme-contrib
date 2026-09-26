@@ -238,3 +238,27 @@ def test_ready_resolves_archived_dep_in_nested_subdir(tmp_path: Path, monkeypatc
         "Task depending on an archived-done prerequisite in a nested subdir must be "
         f"ready, got: {ready_names!r}\nFull output:\n{result.output}"
     )
+
+
+def test_ready_ignores_archived_file_in_excluded_dir(tmp_path: Path, monkeypatch) -> None:
+    """A file under tasks/archive/templates/ must not resolve a dependency.
+
+    `load_tasks(recursive=True)` skips `templates`, `video-scripts` and
+    `agent-setup-interview`, so `gptodo check` reports a dependency that only
+    exists there as missing. The lazy archive index must apply the same filter,
+    or `ready`/`next` would unblock a task that `check` calls broken.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "archive" / "templates").mkdir(parents=True)
+    (tasks_dir / "foo.md").write_text(DEPENDENT_TASK)
+    (tasks_dir / "archive" / "templates" / "archived-prereq.md").write_text(ARCHIVED_DONE_TASK)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(cli, ["ready", "--state", "backlog", "--json"])
+
+    assert result.exit_code == 0, result.output
+    data = _parse_json(result)
+    assert data["ready_tasks"] == [], (
+        "A prerequisite that exists only under tasks/archive/templates/ is not a task "
+        f"(load_tasks excludes it), so `foo` must stay blocked; got: {data['ready_tasks']!r}"
+    )
