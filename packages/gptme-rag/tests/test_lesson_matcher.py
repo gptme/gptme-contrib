@@ -2000,3 +2000,66 @@ class TestReposFrontmatterParsing:
         assert lessons[0]["repos"] == []
         assert lessons[0]["repos_restricted"] is True
         assert filter_by_repo(lessons, "erikbjare/bob") == []
+
+
+class TestScoreSkillDescriptorMinOverlap:
+    """_score_skill_descriptor requires >=3 overlapping tokens (not 2).
+
+    Prevents ambient workspace tokens (bob, gptme, session, autonomous) that
+    appear in nearly every agent prompt from triggering unrelated skills.
+    """
+
+    def _make_skill(self, skill_name, description="", when_to_use="", tags=None):
+        return {
+            "is_skill": True,
+            "skill_name": skill_name,
+            "description": description,
+            "when_to_use": when_to_use,
+            "tags": tags or [],
+        }
+
+    def test_two_token_overlap_does_not_fire(self):
+        """A skill sharing only 2 tokens with the prompt must score 0."""
+        from gptme_rag.lesson_matcher import _score_skill_descriptor
+
+        skill = self._make_skill(
+            "marketing-blog-launch",
+            description="Use to publish a gptme blog post",
+            tags=["gptme", "blog"],
+        )
+        # Overlap is exactly {gptme, blog} = 2 tokens: fires at threshold 2,
+        # must not fire at threshold 3. This pins the 2-vs-3 boundary.
+        prompt = "bob autonomous session gptme blog code review"
+        score, matched_by = _score_skill_descriptor(skill, prompt.lower())
+        assert score == 0.0, f"Expected 0 but got {score} via {matched_by}"
+
+    def test_three_token_overlap_fires(self):
+        """A skill with exactly 3 specific token overlap must score > 0.
+
+        Exactly 3 so this pins the lower boundary of the new threshold: the
+        two-token test shows 2 scores 0, this shows 3 scores > 0 (and any
+        larger overlap also fires, since the threshold is >= 3).
+        """
+        from gptme_rag.lesson_matcher import _score_skill_descriptor
+
+        skill = self._make_skill(
+            "marketing-blog-launch",
+            when_to_use="publishing a blog post",
+            tags=[],
+        )
+        prompt = "publishing blog post"  # overlap = {publishing, blog, post} = 3
+        score, matched_by = _score_skill_descriptor(skill, prompt.lower())
+        assert score > 0.0, f"Expected >0 but got {score}"
+
+    def test_ambient_only_startup_prompt_scores_zero(self):
+        """A skill with only ambient tokens (gptme/bob/session) must not fire on a generic startup prompt."""
+        from gptme_rag.lesson_matcher import _score_skill_descriptor
+
+        skill = self._make_skill(
+            "deep-peer-research",
+            description="Use to compare bob and gptme against peer projects",
+            tags=["bob", "gptme"],
+        )
+        prompt = "you are bob starting an autonomous work session in the gptme workspace"
+        score, _ = _score_skill_descriptor(skill, prompt.lower())
+        assert score == 0.0
