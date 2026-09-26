@@ -18,12 +18,22 @@ from gptme_sessions.store import SessionStore
 
 @pytest.fixture(autouse=True)
 def _clear_lineage_env(monkeypatch):
-    """Clear both env spellings so a host-inherited value cannot decide a test."""
+    """Clear every lineage env spelling so a host-inherited value cannot decide a test.
+
+    Covers the dispatch-id and dispatch-cause names too: this PR made
+    ``AGENT_DISPATCH_ID`` authoritative over ``BOB_DISPATCH_ID``/``PM_DISPATCH_ID``,
+    so a host exporting it would otherwise decide the BOB/PM-only tests below.
+    """
     for var in (
         "AGENT_PARENT_SESSION_ID",
         "AGENT_DISPATCH_KIND",
+        "AGENT_DISPATCH_ID",
+        "AGENT_DISPATCH_CAUSE",
         "BOB_PARENT_SESSION_ID",
         "BOB_DISPATCH_KIND",
+        "BOB_DISPATCH_ID",
+        "BOB_DISPATCH_CAUSE",
+        "PM_DISPATCH_ID",
     ):
         monkeypatch.delenv(var, raising=False)
 
