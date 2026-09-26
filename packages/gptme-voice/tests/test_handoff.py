@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -315,6 +316,21 @@ def test_non_default_agent_build_and_validate_roundtrip(monkeypatch):
     )
     result = validate(payload, secret=SECRET, now=SAMPLE_VALIDATION_NOW)
     assert result.ok, result.reason
+
+
+def test_unset_env_warns_once_then_stays_lockdown(monkeypatch, caplog):
+    """Unset GPTME_VOICE_AGENTS logs exactly one loud migration warning
+    (per process) and yields an empty roster — the deprecation signal for
+    deployments that relied on the old built-in default."""
+    import gptme_voice.handoff as handoff_mod
+
+    monkeypatch.delenv("GPTME_VOICE_AGENTS", raising=False)
+    monkeypatch.setattr(handoff_mod, "_warned_unset_roster", False)
+    with caplog.at_level(logging.WARNING, logger="gptme_voice.handoff"):
+        assert get_valid_agents() == frozenset()
+        assert get_valid_agents() == frozenset()
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+    assert "GPTME_VOICE_AGENTS" in caplog.records[0].message
 
 
 def test_non_default_agent_rejected_without_env(monkeypatch):

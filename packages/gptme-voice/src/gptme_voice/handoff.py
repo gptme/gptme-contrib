@@ -27,6 +27,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 import urllib.request
@@ -54,6 +55,13 @@ STATE_SUBDIRS: tuple[str, ...] = ("handoff", "claimed", "archive", "rejected")
 
 _ENV_AGENTS = "GPTME_VOICE_AGENTS"
 
+_log = logging.getLogger(__name__)
+
+#: Set once per process when an unset GPTME_VOICE_AGENTS is first observed, so
+#: existing deployments that have not migrated yet get one loud, actionable
+#: warning instead of silent breakage or per-call log spam.
+_warned_unset_roster = False
+
 
 def get_valid_agents() -> frozenset[str]:
     """Return the roster of valid agent names for this deployment.
@@ -69,8 +77,17 @@ def get_valid_agents() -> frozenset[str]:
     configures who may hand off. Names are lowercased and empty entries are
     ignored.
     """
+    global _warned_unset_roster
+
     raw = os.environ.get(_ENV_AGENTS)
     if raw is None:
+        if not _warned_unset_roster:
+            _log.warning(
+                "GPTME_VOICE_AGENTS is not set — the handoff roster is empty "
+                "(lockdown): every handoff name is rejected. Configure "
+                "GPTME_VOICE_AGENTS for this deployment."
+            )
+            _warned_unset_roster = True
         return frozenset()
     return frozenset(n.strip().lower() for n in raw.split(",") if n.strip())
 
