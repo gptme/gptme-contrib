@@ -1401,3 +1401,64 @@ def test_cc_dropout_withheld_has_effective_epsilon(hook, monkeypatch, tmp_path):
     assert (
         "effective_epsilon" in withheld[0]
     ), "effective_epsilon missing from withheld record in CC hook"
+
+
+# --- format_lessons: SKILL.md pointer-injection on PreToolUse ---
+
+
+def _skill_match(
+    path: str, title: str = "computer-use", body: str = "FULL BODY"
+) -> dict:
+    return {
+        "path": path,
+        "title": title,
+        "body": body,
+        "description": "Use when you need to take screenshots or test web UIs.",
+    }
+
+
+def _lesson_match(
+    path: str, title: str = "merge-conflicts", body: str = "LESSON BODY"
+) -> dict:
+    return {
+        "path": path,
+        "title": title,
+        "body": body,
+        "description": "Resolve merge conflicts cleanly.",
+    }
+
+
+def test_format_lessons_pretool_skill_renders_pointer_not_body(hook):
+    """PreToolUse SKILL.md matches render as a compact pointer, not the full body."""
+    skill = _skill_match("/workspace/skills/computer-use/SKILL.md")
+    context = hook.format_lessons([skill], set(), event_type="PreToolUse")
+    assert "FULL BODY" not in context
+    assert "skill pointer" in context
+    assert "computer-use" in context
+    assert "Use when you need to take screenshots" in context
+    assert "skills/computer-use/SKILL.md" in context
+    assert "Read the full skill" in context
+
+
+def test_format_lessons_userprompt_skill_keeps_full_body(hook):
+    """UserPromptSubmit keeps full-body injection for SKILL.md matches."""
+    skill = _skill_match("/workspace/skills/computer-use/SKILL.md")
+    context = hook.format_lessons([skill], set(), event_type="UserPromptSubmit")
+    assert "FULL BODY" in context
+    assert "skill pointer" not in context
+
+
+def test_format_lessons_pretool_lesson_keeps_full_body(hook):
+    """PreToolUse keeps full-body injection for regular lessons (small by design)."""
+    lesson = _lesson_match("/workspace/lessons/workflow/merge-conflicts.md")
+    context = hook.format_lessons([lesson], set(), event_type="PreToolUse")
+    assert "LESSON BODY" in context
+    assert "skill pointer" not in context
+
+
+def test_format_lessons_default_event_keeps_full_body(hook):
+    """Default event_type (UserPromptSubmit) keeps full-body for backward compat."""
+    skill = _skill_match("/workspace/skills/computer-use/SKILL.md")
+    context = hook.format_lessons([skill], set())
+    assert "FULL BODY" in context
+    assert "skill pointer" not in context
