@@ -3646,6 +3646,18 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
     # Create task lookup dictionary
     tasks_dict = {task.name: task for task in all_tasks}
 
+    # Build a dependency-resolution dict that also includes archived tasks so that
+    # tasks whose prerequisites were moved to tasks/archive/ are not falsely blocked.
+    # Archived tasks are added first and live tasks overlaid on top: a live task with
+    # the same name must win, matching `gptodo check`'s dependency_universe (which
+    # lists live tasks first). Otherwise a stale archived copy would shadow the live
+    # task's state and falsely unblock anything depending on that name.
+    dep_dict: Dict[str, TaskInfo] = {}
+    archive_dir = tasks_dir / "archive"
+    if archive_dir.is_dir():
+        dep_dict.update({t.name: t for t in load_tasks(archive_dir, recursive=True)})
+    dep_dict.update(tasks_dict)
+
     # Load cache if requested
     issue_cache: Dict[str, Any] | None = None
     if use_cache:
@@ -3701,12 +3713,12 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
             if (task.state == "ready_for_review" and not task_has_waiting_blocker(task))
             or (
                 task.state in ["backlog", "todo", "active"]
-                and is_task_ready(task, tasks_dict, issue_cache)
+                and is_task_ready(task, dep_dict, issue_cache)
             )
         ]
     else:
         ready_tasks = [
-            task for task in filtered_tasks if is_task_ready(task, tasks_dict, issue_cache)
+            task for task in filtered_tasks if is_task_ready(task, dep_dict, issue_cache)
         ]
 
     if not ready_tasks:
@@ -3903,6 +3915,18 @@ def next_(output_json, use_cache, pool_filter, exclude_pool, limit, order):
     # Create task lookup dictionary
     tasks_dict = {task.name: task for task in all_tasks}
 
+    # Build a dependency-resolution dict that also includes archived tasks so that
+    # tasks whose prerequisites were moved to tasks/archive/ are not falsely blocked.
+    # Archived tasks are added first and live tasks overlaid on top: a live task with
+    # the same name must win, matching `gptodo check`'s dependency_universe (which
+    # lists live tasks first). Otherwise a stale archived copy would shadow the live
+    # task's state and falsely unblock anything depending on that name.
+    dep_dict: Dict[str, TaskInfo] = {}
+    archive_dir = tasks_dir / "archive"
+    if archive_dir.is_dir():
+        dep_dict.update({t.name: t for t in load_tasks(archive_dir, recursive=True)})
+    dep_dict.update(tasks_dict)
+
     # Load cache if requested
     issue_cache: Dict[str, Any] | None = None
     if use_cache:
@@ -3942,7 +3966,7 @@ def next_(output_json, use_cache, pool_filter, exclude_pool, limit, order):
         return
 
     # Filter for ready (unblocked) tasks
-    ready_tasks = [task for task in workable_tasks if is_task_ready(task, tasks_dict, issue_cache)]
+    ready_tasks = [task for task in workable_tasks if is_task_ready(task, dep_dict, issue_cache)]
 
     if not ready_tasks:
         if output_json:
@@ -3987,7 +4011,7 @@ def next_(output_json, use_cache, pool_filter, exclude_pool, limit, order):
     if limit > 1:
         steps = simulate_sequence(
             candidates=workable_tasks,
-            tasks_dict=tasks_dict,
+            tasks_dict=dep_dict,
             all_tasks=all_tasks,
             limit=limit,
             order=order,
