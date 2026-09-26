@@ -264,7 +264,9 @@ command -v git-lfs >/dev/null 2>&1 && printf '%s\n' "${STDIN_LINES[@]}" | git lf
 # Auto-claims pushed branches as pr-branch:org/repo#branch coordination keys
 # and warns when a live sibling session holds the claim. No-op without a
 # session id in the environment; never blocks unless
-# BOB_WORKTREE_PUSH_GUARD_DENY=1 is set. See scripts/hooks/worktree-push-guard.
+# AGENT_WORKTREE_PUSH_GUARD_DENY=1 (or the legacy
+# BOB_WORKTREE_PUSH_GUARD_DENY=1) is set.
+# See scripts/hooks/worktree-push-guard.
 #
 # SECURITY: resolve the guard from the checkout that owns this hook — never
 # from the repository being pushed ($REPO_ROOT). This hook is installed

@@ -12,8 +12,15 @@ Two guards:
   ``would_deny`` to the ledger.
 - ``run_push_guard`` (pre-push hook): auto-claims pushed branches as
   ``pr-branch:org/repo#branch`` coordination keys and warns (or, with
-  ``BOB_WORKTREE_PUSH_GUARD_DENY=1``, blocks) when a live sibling holds the
-  claim — preventing force-pushes over convergent sibling work.
+  ``AGENT_WORKTREE_PUSH_GUARD_DENY=1`` / ``BOB_WORKTREE_PUSH_GUARD_DENY=1``,
+  blocks) when a live sibling holds the claim — preventing force-pushes over
+  convergent sibling work.
+
+Identity env vars are read agent-neutral first, with the original Bob-specific
+spellings kept as legacy aliases: ``AGENT_SESSION_PID`` then
+``BOB_SESSION_PID``; ``AGENT_ID`` then ``BOB_AUTONOMOUS_AGENT_ID``. A guard that
+only understands ``BOB_*`` is a silent no-op for any other agent in a forked
+workspace, which is the forkability defect tracked in gptme/gptme-contrib#1705.
 
 All outcomes are logged to ``state/coordination/worktree-guard.jsonl`` in the
 workspace root. The guard fails open on every infrastructure error:
@@ -30,6 +37,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Decision (gptme/gptme-contrib#1705): keep the historical marker filename.
+# It lives inside `.git/`, is never user-visible, and renaming it would split
+# the lock across two names for any window where two agents share a worktree
+# on different versions of this package — exactly the collision class the
+# marker exists to prevent. The env spellings above are what forkability
+# actually depends on; the filename is not.
 MARKER_NAME = "bob-session-lock"
 LEDGER_REL = Path("state/coordination/worktree-guard.jsonl")
 _WORKTREE_PREFIX = "/tmp/worktrees/"
@@ -40,6 +53,26 @@ UTC = timezone.utc  # datetime.UTC was added in Python 3.11.
 # ---------------------------------------------------------------------------
 # Environment / identity helpers
 # ---------------------------------------------------------------------------
+
+
+# Agent-neutral spellings first, Bob-specific spellings kept as legacy aliases.
+# Anything that resolves identity from ``BOB_*`` alone silently no-ops for a
+# forked agent; see the module docstring.
+_SESSION_PID_ENV = ("AGENT_SESSION_PID", "BOB_SESSION_PID")
+_AGENT_ID_ENV = ("AGENT_ID", "BOB_AUTONOMOUS_AGENT_ID")
+_GUARD_FORCE_ENV = ("AGENT_WORKTREE_GUARD_FORCE", "BOB_WORKTREE_GUARD_FORCE")
+_PUSH_GUARD_DENY_ENV = (
+    "AGENT_WORKTREE_PUSH_GUARD_DENY",
+    "BOB_WORKTREE_PUSH_GUARD_DENY",
+)
+
+
+def _env_first(*names: str) -> str:
+    """Return the first non-empty value among ``names``, else ``""``."""
+    for name in names:
+        if val := os.environ.get(name):
+            return val
+    return ""
 
 
 def _get_session_id() -> str | None:
@@ -67,15 +100,16 @@ def _get_session_pid() -> int:
     parent-PID fallback makes a marker look dead immediately after commit and
     is worse than recording no liveness signal.
     """
-    raw = os.environ.get("BOB_SESSION_PID", "")
-    if raw.isdigit():
-        return int(raw)
+    for name in _SESSION_PID_ENV:
+        raw = os.environ.get(name, "")
+        if raw.isdigit():
+            return int(raw)
     return 0
 
 
 def _get_agent_id() -> str:
     """Autonomous agent ID for sentinel-based liveness fallback."""
-    if agent_id := os.environ.get("BOB_AUTONOMOUS_AGENT_ID"):
+    if agent_id := _env_first(*_AGENT_ID_ENV):
         return agent_id
     if session_id := _get_session_id():
         harness = (
@@ -97,20 +131,35 @@ def _get_marker_agent_id() -> str:
     stores only an env-provided id; an empty value means the PID is the sole
     liveness signal, and a dead PID is treated as a dead holder.
     """
-    return os.environ.get("BOB_AUTONOMOUS_AGENT_ID", "")
+    return _env_first(*_AGENT_ID_ENV)
 
 
 _TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off"})
 
 
-def _env_flag(name: str) -> bool:
-    """Parse a documented ``=1`` boolean env flag.
+def _env_flag(*names: str) -> bool:
+    """Parse a documented ``=1`` boolean env flag, in any accepted spelling.
 
     Plain truthiness treats ``"0"`` (and ``"false"``) as enabled, so a
     conventional ``=0`` configuration would switch the guard *on*. Only an
     explicit affirmative value enables the flag.
+
+    Spellings are ordered preferred-first (agent-neutral, then the legacy
+    ``BOB_*`` alias), and the first spelling carrying a **recognized** boolean
+    decides: ``AGENT_...=0`` disables the flag even when a stale legacy
+    ``BOB_...=1`` lingers in the environment. Unset, empty, or unrecognized
+    values are not a decision and fall through to the next spelling — the same
+    "a malformed preferred value must not mask a valid legacy one" rule that
+    :func:`_get_session_pid` applies to non-numeric PIDs.
     """
-    return os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES
+    for name in names:
+        raw = os.environ.get(name, "").strip().lower()
+        if raw in _TRUE_ENV_VALUES:
+            return True
+        if raw in _FALSE_ENV_VALUES:
+            return False
+    return False
 
 
 def _get_git_dir() -> Path | None:
@@ -432,7 +481,8 @@ def run_push_guard(
 
     The guard intentionally fails open on database or origin-resolution errors:
     blocking a finished external-repo push during an outage is worse than the
-    status quo.  ``BOB_WORKTREE_PUSH_GUARD_DENY=1`` enables the Phase-3 deny
+    status quo.  ``AGENT_WORKTREE_PUSH_GUARD_DENY=1`` (or the legacy
+    ``BOB_WORKTREE_PUSH_GUARD_DENY=1``) enables the Phase-3 deny
     path after the warn-mode ledger has enough soak data.
     """
     root = worktree_root if worktree_root is not None else _get_worktree_root()
@@ -483,9 +533,7 @@ def run_push_guard(
         )
         return 0
 
-    should_deny = (
-        deny if deny is not None else _env_flag("BOB_WORKTREE_PUSH_GUARD_DENY")
-    )
+    should_deny = deny if deny is not None else _env_flag(*_PUSH_GUARD_DENY_ENV)
     try:
         from gptme_coordination.db import CoordinationDB, resolve_coordination_db_path
         from gptme_coordination.work import WorkClaimManager
@@ -620,7 +668,8 @@ def run_guard(
     5. Marker from a different session → liveness probe:
        - alive → Phase 1: log ``would_deny``, allow.
        - dead  → takeover: rewrite marker, log ``takeover``, allow.
-    6. Force override (``BOB_WORKTREE_GUARD_FORCE=1``) skips liveness and
+    6. Force override (``AGENT_WORKTREE_GUARD_FORCE=1``, or the legacy
+       ``BOB_WORKTREE_GUARD_FORCE=1``) skips liveness and
        rewrites the marker regardless, logging ``force``.
     """
     # 1. Scope
@@ -647,7 +696,7 @@ def run_guard(
     # Marker agent id: only an env-provided id is recorded, so a synthesized id
     # cannot make a dead holder look permanently alive (see _get_marker_agent_id).
     aid = agent_id if agent_id is not None else _get_marker_agent_id()
-    do_force = force if force is not None else _env_flag("BOB_WORKTREE_GUARD_FORCE")
+    do_force = force if force is not None else _env_flag(*_GUARD_FORCE_ENV)
     now_iso = datetime.now(UTC).isoformat()
 
     # 3. No marker → try to adopt
@@ -727,7 +776,7 @@ def run_guard(
             f"[worktree-guard] WARN: worktree owned by live session"
             f" {holder_session} (pid={holder_pid});"
             f" would deny in Phase 2."
-            f" Set BOB_WORKTREE_GUARD_FORCE=1 to override.",
+            f" Set AGENT_WORKTREE_GUARD_FORCE=1 to override.",
             file=sys.stderr,
         )
         return 0  # Phase 1: warn mode, never block
