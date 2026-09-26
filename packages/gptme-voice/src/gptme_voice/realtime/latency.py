@@ -17,10 +17,13 @@ JSONL ``utterance_trace`` events from a live call.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, TextIO
+
+logger = logging.getLogger(__name__)
 
 _SPEECH_STARTED = "input_audio_buffer.speech_started"
 _SPEECH_STOPPED = "input_audio_buffer.speech_stopped"
@@ -178,16 +181,21 @@ class VoiceLatencyTrace:
         if self.sink is None:
             return
         line = trace.to_jsonl() + "\n"
-        if isinstance(self.sink, str):
-            if self.sink == "-":
-                sys.stdout.write(line)
-                sys.stdout.flush()
+        # Tracing is diagnostic: a broken sink must never take down the
+        # realtime receive loop that calls into this tracer.
+        try:
+            if isinstance(self.sink, str):
+                if self.sink == "-":
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                else:
+                    with open(self.sink, "a", encoding="utf-8") as handle:
+                        handle.write(line)
             else:
-                with open(self.sink, "a", encoding="utf-8") as handle:
-                    handle.write(line)
-        else:
-            self.sink.write(line)
-            self.sink.flush()
+                self.sink.write(line)
+                self.sink.flush()
+        except Exception:
+            logger.warning("Failed to write latency trace to sink", exc_info=True)
 
     @property
     def last_trace(self) -> UtteranceTrace | None:

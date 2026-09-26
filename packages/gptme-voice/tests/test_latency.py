@@ -193,3 +193,21 @@ def test_client_hooks_record_utterance_breakdown() -> None:
     import asyncio
 
     asyncio.run(_exercise())
+
+
+def test_broken_sink_does_not_raise(caplog: pytest.LogCaptureFixture) -> None:
+    """A failing trace sink must not propagate into the realtime receive loop."""
+
+    class _BrokenSink:
+        def write(self, _line: str) -> int:
+            raise OSError("disk full")
+
+        def flush(self) -> None:
+            pass
+
+    clock = FakeClock()
+    trace = VoiceLatencyTrace(sink=_BrokenSink(), clock=clock)  # type: ignore[arg-type]
+    _drive_utterance(trace, clock)
+
+    assert trace.last_trace is not None
+    assert "Failed to write latency trace" in caplog.text
