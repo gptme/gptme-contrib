@@ -1,8 +1,12 @@
 #!/bin/bash
 # Continuously run autonomous sessions until failure or limit reached
 #
-# This script wraps systemd service invocation for repeated autonomous runs.
-# Service name is derived from AGENT_NAME environment variable or config.
+# Two modes (capability-tiered — the core must not assume systemd):
+#   systemd (Tier 1, default when systemctl is present): starts a per-agent
+#     ${AGENT_NAME}-autonomous.service and waits for it to go inactive.
+#   direct  (Tier 0, fallback when systemctl is absent, or forced with -d):
+#     invokes the autonomous run script in-process. This is what lets a bare
+#     fork loop on macOS/launchd or a container with no user systemd.
 #
 # Quality note: alice#50 / bob#725 data shows back-to-back sessions (<30 min gap)
 # produce significantly lower quality (mean grade 0.546 vs 0.622 for ≥60 min gaps).
@@ -10,12 +14,14 @@
 # Override via AGENT_LOOP_COOLDOWN env var for testing/burst scenarios.
 #
 # Usage:
-#   ./autonomous-loop.sh [-n number_of_runs] [-s service_name]
+#   ./autonomous-loop.sh [-n number_of_runs] [-c cooldown] [-s service_name] [-d] [-r run_cmd]
 #
 # Examples:
 #   AGENT_NAME=myagent ./autonomous-loop.sh -n 5   # Run 5 times using myagent-autonomous.service
 #   ./autonomous-loop.sh -s custom-autonomous      # Run infinitely using custom-autonomous.service
 #   ./autonomous-loop.sh -c 300                    # 5 min cooldown between sessions
+#   ./autonomous-loop.sh -d -n 3                   # Tier-0 direct mode: run the run-script 3x
+#   AGENT_LOOP_RUN_CMD="./scripts/runs/autonomous/autonomous-run-cc.sh" ./autonomous-loop.sh -d
 
 set -e
 
@@ -46,6 +52,24 @@ get_service_name() {
     echo "$service_name"
 }
 
+# Direct-mode (Tier 0): resolve the command that runs ONE autonomous session.
+# Order: AGENT_LOOP_RUN_CMD env / -r flag (handled by caller) → auto-detect the
+# run script relative to cwd, then one level up. Prefer the Claude Code runner,
+# fall back to the gptme runner. Echoes empty if nothing is found.
+get_run_cmd() {
+    local candidate
+    for base in "." ".."; do
+        for name in autonomous-run-cc.sh autonomous-run.sh; do
+            candidate="$base/scripts/runs/autonomous/$name"
+            if [ -x "$candidate" ]; then
+                echo "$candidate"
+                return 0
+            fi
+        done
+    done
+    echo ""
+}
+
 # Defaults
 counter=0
 failed_starts=0
@@ -56,9 +80,11 @@ if ! [[ "$COOLDOWN" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 SERVICE_NAME=""
+MODE="${AGENT_LOOP_MODE:-}"    # "systemd" | "direct" | "" (auto-detect)
+RUN_CMD="${AGENT_LOOP_RUN_CMD:-}"  # direct-mode command to run one session
 
 # Parse command line arguments
-while getopts "n:s:c:h" opt; do
+while getopts "n:s:c:r:dh" opt; do
     case $opt in
         n)
             max_runs=$OPTARG
@@ -79,16 +105,27 @@ while getopts "n:s:c:h" opt; do
             # Add .service suffix if not present
             [[ "$SERVICE_NAME" != *.service ]] && SERVICE_NAME="${SERVICE_NAME}.service"
             ;;
+        d)
+            MODE="direct"
+            ;;
+        r)
+            RUN_CMD=$OPTARG
+            ;;
         h)
             detected=$(get_service_name)
-            echo "Usage: $0 [-n number_of_runs] [-c cooldown_seconds] [-s service_name]"
+            echo "Usage: $0 [-n number_of_runs] [-c cooldown_seconds] [-s service_name] [-d] [-r run_cmd]"
             echo ""
             echo "Options:"
             echo "  -n: Number of runs (default: infinite)"
             echo "  -c: Cooldown seconds between runs (default: 1800, override via AGENT_LOOP_COOLDOWN)"
-            echo "  -s: Service name (default: derived from AGENT_NAME or gptme.toml)"
+            echo "  -s: Service name (systemd mode; default: derived from AGENT_NAME or gptme.toml)"
+            echo "  -d: Force direct mode (Tier 0 — run the run-script in-process, no systemd)"
+            echo "  -r: Direct-mode command to run one session (default: auto-detected run script)"
             echo ""
-            echo "Service name resolution order:"
+            echo "Mode: systemd when systemctl is present, else direct. Force direct with -d"
+            echo "      or AGENT_LOOP_MODE=direct."
+            echo ""
+            echo "Service name resolution order (systemd mode):"
             echo "  1. -s command line argument"
             echo "  2. AGENT_NAME environment variable"
             echo "  3. agent.name from gptme.toml"
@@ -101,32 +138,59 @@ while getopts "n:s:c:h" opt; do
             exit 0
             ;;
         \?)
-            echo "Usage: $0 [-n number_of_runs] [-c cooldown_seconds] [-s service_name]"
+            echo "Usage: $0 [-n number_of_runs] [-c cooldown_seconds] [-s service_name] [-d] [-r run_cmd]"
             exit 1
             ;;
     esac
 done
 
-# Resolve service name if not explicitly provided
-if [ -z "$SERVICE_NAME" ]; then
-    SERVICE_NAME=$(get_service_name)
+# Auto-detect mode when not forced: systemd if available, else Tier-0 direct.
+if [ -z "$MODE" ]; then
+    if command -v systemctl >/dev/null 2>&1; then
+        MODE="systemd"
+    else
+        MODE="direct"
+    fi
 fi
 
-# Validate service name
-if [ -z "$SERVICE_NAME" ]; then
-    echo "Error: Could not determine service name."
-    echo "Please provide via -s flag, AGENT_NAME env var, or gptme.toml"
-    exit 1
-fi
+if [ "$MODE" = "systemd" ]; then
+    # Resolve service name if not explicitly provided
+    if [ -z "$SERVICE_NAME" ]; then
+        SERVICE_NAME=$(get_service_name)
+    fi
 
-# Verify service exists
-if ! systemctl --user cat "$SERVICE_NAME" &>/dev/null; then
-    echo "Warning: Service '$SERVICE_NAME' may not exist or is not accessible"
-    echo "Continuing anyway in case it will be created..."
+    # Validate service name
+    if [ -z "$SERVICE_NAME" ]; then
+        echo "Error: Could not determine service name."
+        echo "Please provide via -s flag, AGENT_NAME env var, or gptme.toml"
+        echo "(Or use -d for Tier-0 direct mode, which needs no systemd service.)"
+        exit 1
+    fi
+
+    # Verify service exists
+    if ! systemctl --user cat "$SERVICE_NAME" &>/dev/null; then
+        echo "Warning: Service '$SERVICE_NAME' may not exist or is not accessible"
+        echo "Continuing anyway in case it will be created..."
+    fi
+else
+    # Direct mode (Tier 0): resolve the run command.
+    if [ -z "$RUN_CMD" ]; then
+        RUN_CMD=$(get_run_cmd)
+    fi
+    if [ -z "$RUN_CMD" ]; then
+        echo "Error: direct mode could not find an autonomous run script."
+        echo "Provide one via -r <cmd> or AGENT_LOOP_RUN_CMD, or run from a"
+        echo "workspace containing scripts/runs/autonomous/autonomous-run{,-cc}.sh"
+        exit 1
+    fi
 fi
 
 echo "Starting autonomous loop..."
-echo "Service: $SERVICE_NAME"
+if [ "$MODE" = "systemd" ]; then
+    echo "Mode: systemd — service: $SERVICE_NAME"
+else
+    echo "Mode: direct — run command: $RUN_CMD"
+fi
 if [ "$max_runs" -eq -1 ]; then
     echo "Running indefinitely (press Ctrl+C to stop)"
 else
@@ -158,17 +222,33 @@ while true; do
 
     # Don't abort on a single run failure (e.g. transient lock contention,
     # pre-start gate rejection). Log and continue so the loop stays resilient
-    # and systemd doesn't have to bounce the wrapper for every hiccup.
-    if systemctl --user start "$SERVICE_NAME"; then
-        # Wait for the service to complete
-        echo "[$counter] Waiting for service to complete..."
-        while systemctl --user is-active --quiet "$SERVICE_NAME"; do
-            sleep 5
-        done
-        echo "✅ Run $counter completed successfully at $(date '+%Y-%m-%d %H:%M:%S %Z')"
+    # and the wrapper doesn't have to be bounced for every hiccup.
+    if [ "$MODE" = "systemd" ]; then
+        if systemctl --user start "$SERVICE_NAME"; then
+            # Wait for the service to complete
+            echo "[$counter] Waiting for service to complete..."
+            while systemctl --user is-active --quiet "$SERVICE_NAME"; do
+                sleep 5
+            done
+            echo "✅ Run $counter completed successfully at $(date '+%Y-%m-%d %H:%M:%S %Z')"
+        else
+            failed_starts=$((failed_starts + 1))
+            echo "⚠️  Run $counter failed to start — continuing loop after cooldown"
+        fi
     else
-        failed_starts=$((failed_starts + 1))
-        echo "⚠️  Run $counter failed to start — continuing loop after cooldown"
+        # Direct mode: run one session in-process. The run script owns its own
+        # gates/locking; a non-zero exit is one failed session, not a reason to
+        # abort the loop, so temporarily relax `set -e` around it.
+        set +e
+        bash -c "$RUN_CMD"
+        run_rc=$?
+        set -e
+        if [ "$run_rc" -eq 0 ]; then
+            echo "✅ Run $counter completed successfully at $(date '+%Y-%m-%d %H:%M:%S %Z')"
+        else
+            failed_starts=$((failed_starts + 1))
+            echo "⚠️  Run $counter exited $run_rc — continuing loop after cooldown"
+        fi
     fi
     echo ""
 
