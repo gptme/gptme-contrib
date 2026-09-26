@@ -14,9 +14,10 @@
 # agent did — deleting that history is unrecoverable and defeats later analysis.
 # Keep deletion globs scoped to ephemeral state only.
 #
-# Capability tier: Tier 0 (filesystem) for hygiene_prune_old_files; the journal
-# vacuum degrades visibly to a no-op when journalctl is absent (non-systemd
-# hosts), so nothing here assumes root or a specific service manager.
+# Capability tier: Tier 0 (filesystem) for hygiene_prune_old_files and
+# hygiene_prune_uv_cache; the journal vacuum degrades visibly to a no-op when
+# journalctl is absent (non-systemd hosts), so nothing here assumes root or a
+# specific service manager.
 #
 # All functions honour a trailing `dry_run` arg ("true"/"false"): when true they
 # report what they would do and change nothing.
@@ -106,4 +107,68 @@ hygiene_prune_old_files() {
     done < <(find "$dir" -maxdepth 1 -name "$glob" -print0 2>/dev/null)
 
     echo "$deleted"
+}
+
+# Prune unreachable entries from the uv package manager cache.
+#
+# Uses `uv cache prune --force` — NOT `uv cache clean` or plain `uv cache prune`.
+# The distinction matters: on a long-running agent VM the cache lock
+# (~/.cache/uv/.lock) is held permanently by the system service manager and
+# long-lived `uv run` wrappers. `uv cache clean` and `uv cache prune` (without
+# --force) block on that lock and time out after 60s. `--force` removes only
+# unreachable/unused entries without acquiring the exclusive lock, so it is safe
+# to run at any time with live uv consumers.
+#
+# Reports disk usage before and after. Degrades to a visible no-op when uv is not
+# in PATH (Tier-0 safe).
+#
+# Usage: hygiene_prune_uv_cache [dry_run]
+#   e.g. hygiene_prune_uv_cache false
+hygiene_prune_uv_cache() {
+    local dry_run="${1:-false}"
+
+    if ! command -v uv >/dev/null 2>&1; then
+        echo "  uv not present — skipping (Tier-0 degrade)"
+        return 0
+    fi
+
+    local before=""
+    # Neutralize the assignment status: a plain `before=$(...)` fails under
+    # `set -e` if `uv cache dir` exits non-zero (misconfigured cache, wrapper),
+    # aborting this prune AND every subsequent hygiene step in the caller.
+    before=$(uv cache dir 2>/dev/null) || before=""
+    local before_size="unknown"
+    if [[ -n "$before" && -d "$before" ]]; then
+        # Capture the value, then fall back on emptiness: `du | cut || echo` never
+        # reaches the fallback (a pipeline's status is cut's, which exits 0 on
+        # empty input), and `2>/dev/null` hides du's failure — leaving a blank
+        # size that silently masks the error.
+        before_size=$(du -sh "$before" 2>/dev/null | cut -f1)
+        [[ -n "$before_size" ]] || before_size="unknown"
+    fi
+    echo "  uv cache before: ${before_size}"
+
+    if [[ "$dry_run" == "true" ]]; then
+        echo "  [dry-run] Would run: uv cache prune --force"
+        return 0
+    fi
+
+    # Capture the exit status so a failed prune is a visible WARN, not a silent
+    # no-op. Same reasoning as hygiene_vacuum_user_journal: a caller trusts this
+    # to reclaim disk, so swallowing a failure would make it *look* like space
+    # was freed while reclaiming nothing (the capability-tier trap).
+    local prune_rc=0
+    local prune_out
+    prune_out=$(uv cache prune --force 2>&1) || prune_rc=$?
+    echo "$prune_out" | tail -1
+    if [[ $prune_rc -ne 0 ]]; then
+        echo "  WARN: uv cache prune failed (exit ${prune_rc}) — cache not reclaimed"
+    fi
+
+    local after_size="unknown"
+    if [[ -n "$before" && -d "$before" ]]; then
+        after_size=$(du -sh "$before" 2>/dev/null | cut -f1)
+        [[ -n "$after_size" ]] || after_size="unknown"
+    fi
+    echo "  uv cache after:  ${after_size}"
 }
