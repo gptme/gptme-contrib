@@ -2027,8 +2027,9 @@ class TestScoreSkillDescriptorMinOverlap:
             description="Use to publish a gptme blog post",
             tags=["gptme", "blog"],
         )
-        # Prompt contains 'gptme' and 'bob' but NOT specific blog tokens
-        prompt = "bob autonomous session gptme code review"
+        # Overlap is exactly {gptme, blog} = 2 tokens: fires at threshold 2,
+        # must not fire at threshold 3. This pins the 2-vs-3 boundary.
+        prompt = "bob autonomous session gptme blog code review"
         score, matched_by = _score_skill_descriptor(skill, prompt.lower())
         assert score == 0.0, f"Expected 0 but got {score} via {matched_by}"
 
