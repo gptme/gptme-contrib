@@ -110,8 +110,12 @@ if argv[0] == "api":
         sys.exit(0)
     if "/issues/" in endpoint and "/comments" in endpoint:
         if waiting_comment == "1":
+            # The waiting comment is posted by the agent itself (`gh` auth =
+            # the handle it passes as --author), so the fixture's bot login
+            # matches the gate's --author. This mirrors the fork-general
+            # reality where BOT_USERNAME defaults to --author.
             comments = [{
-                "user": {"login": "TimeToBuildBob", "type": "User"},
+                "user": {"login": "test-author", "type": "User"},
                 "body": waiting_body
                 or "CI-green and mergeable — waiting only on a maintainer click.",
                 "created_at": "2026-08-26T16:00:00Z",
@@ -146,7 +150,7 @@ if argv[0] == "api":
                 # suppressing the notification. With `first` the original handoff
                 # is selected; the human at 17:00 is after 16:00, so it emits.
                 comments.append({
-                    "user": {"login": "TimeToBuildBob", "type": "User"},
+                    "user": {"login": "test-author", "type": "User"},
                     "body": "CI is green again — waiting only on a maintainer click.",
                     "created_at": "2026-08-26T17:30:00Z",
                 })

@@ -162,6 +162,13 @@ if [ -z "$AUTHOR" ]; then
     echo "Error: --author is required" >&2
     exit 2
 fi
+# The bot account is almost always the same identity as --author: comments are
+# posted via `gh` auth (the running agent's handle), which is what forks pass as
+# --author. Default BOT_USERNAME to it so a fork does not have to know to set a
+# second identity variable. Override BOT_USERNAME only when the posting account
+# genuinely differs from the author being polled. (Bob passes
+# --author TimeToBuildBob, so this reproduces the old hardcoded default exactly.)
+BOT_USERNAME="${BOT_USERNAME:-$AUTHOR}"
 if [ -z "$ORG" ] && [ ${#EXTRA_REPOS[@]} -eq 0 ]; then
     echo "Error: --org or at least one --repo is required" >&2
     exit 2
@@ -1638,15 +1645,15 @@ check_fix_requests() {
 # but the acknowledgment is still valid — subsequent re-emits would still
 # produce the same "nothing changed" churn.
 #
-# Bot username is resolved from $BOT_USERNAME (default: TimeToBuildBob) to keep
-# the helper reusable across forks.
+# Bot username is resolved from $BOT_USERNAME (defaults to --author) to keep
+# the helper reusable across forks without extra configuration.
 #
 # Returns 0 when the maintainer-waiting signal is present (i.e. SUPPRESS),
 # 1 otherwise (emit as normal).
 has_maintainer_waiting_comment() {
     local repo=$1
     local number=$2
-    local bot="${BOT_USERNAME:-TimeToBuildBob}"
+    local bot="${BOT_USERNAME:-$AUTHOR}"
 
     local bot_comments
     bot_comments=$(gh api "repos/$repo/issues/$number/comments?per_page=100" \
@@ -1708,7 +1715,7 @@ has_maintainer_waiting_comment() {
 # reopen the handoff; a later issue comment or submitted review does.
 latest_comment_is_bot_waiting() {
     local repo=$1 number=$2
-    local bot="${BOT_USERNAME:-TimeToBuildBob}"
+    local bot="${BOT_USERNAME:-$AUTHOR}"
 
     # Fetch every page before finding the latest handoff. GitHub returns issue
     # comments oldest-first; ``--slurp`` wraps pages in an outer array. Reviews
@@ -1779,7 +1786,7 @@ pr_has_unresolved_human_thread() {
     local number=$2
     local owner=${repo%%/*}
     local name=${repo#*/}
-    local author="${AUTHOR:-${BOT_USERNAME:-TimeToBuildBob}}"
+    local author="${AUTHOR:-$BOT_USERNAME}"
     # Paginate: large PRs carry dozens of bot threads ahead of the one human
     # thread, so first:100 alone could miss it and fall through to a merge_ready
     # emit. Bounded at 10 pages (1000 threads) — beyond that, fail open.
