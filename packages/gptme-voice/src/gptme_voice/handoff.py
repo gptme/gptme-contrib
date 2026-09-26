@@ -67,13 +67,15 @@ def get_valid_agents() -> frozenset[str]:
         GPTME_VOICE_AGENTS=alice,charlie,diana gptme-voice-server ...
 
     The value completely replaces the default; it does not extend it. Names are
-    lowercased and empty entries are ignored.
+    lowercased and empty entries are ignored. Setting the variable to a blank or
+    separator-only value yields an **empty** roster — every handoff name is then
+    invalid, which is the intended behavior for locking a deployment down. Only
+    an *unset* variable returns the built-in default.
     """
-    raw = os.environ.get(_ENV_AGENTS, "")
-    if not raw.strip():
+    raw = os.environ.get(_ENV_AGENTS)
+    if raw is None:
         return VALID_AGENTS
-    names = frozenset(n.strip().lower() for n in raw.split(",") if n.strip())
-    return names if names else VALID_AGENTS
+    return frozenset(n.strip().lower() for n in raw.split(",") if n.strip())
 
 
 _DEFAULT_TTL_SECONDS = 60

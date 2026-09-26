@@ -273,6 +273,15 @@ def test_get_valid_agents_respects_env_override(monkeypatch):
     assert "bob" not in agents
 
 
+@pytest.mark.parametrize("value", ["", " , ", ",", " ,,"])
+def test_get_valid_agents_set_but_empty_is_empty_roster(monkeypatch, value):
+    """A set-but-empty GPTME_VOICE_AGENTS yields an empty roster (lockdown),
+    NOT the built-in default — the value replaces the default even when it
+    parses to no names. Regression: pre-fix code fell back to VALID_AGENTS."""
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", value)
+    assert get_valid_agents() == frozenset()
+
+
 def test_non_default_agent_handoff_writer_succeeds(tmp_path, monkeypatch):
     """A fork with a non-default agent name can create a HandoffWriter when
     GPTME_VOICE_AGENTS includes that name — fails on the pre-fix code where
