@@ -1476,6 +1476,89 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
     }
 
 
+class _LazyArchiveTasks(Dict[str, TaskInfo]):
+    """Task lookup that resolves archived tasks on demand.
+
+    See :func:`build_dependency_universe` for why this exists. Live tasks are
+    held directly; an archived task is parsed only when its name is looked up
+    and is not already present.
+    """
+
+    def __init__(
+        self,
+        live_tasks: Dict[str, TaskInfo],
+        archive_dir: Path,
+        errors_out: List[Tuple[Path, str]] | None = None,
+    ) -> None:
+        super().__init__(live_tasks)
+        self._archive_dir = archive_dir
+        self._errors_out = errors_out
+        self._archive_index: Optional[Dict[str, Path]] = None
+
+    def _archived_path(self, name: str) -> Optional[Path]:
+        """Return the archived file for ``name``, indexing the archive on first use."""
+        if self._archive_index is None:
+            index: Dict[str, Path] = {}
+            if self._archive_dir.is_dir():
+                # Sorted so the resolution is deterministic when duplicate stems
+                # exist in nested archive subdirectories.
+                for path in sorted(self._archive_dir.rglob("*.md")):
+                    index.setdefault(path.stem, path)
+            self._archive_index = index
+        return self._archive_index.get(name)
+
+    def _load_archived(self, name: str) -> Optional[TaskInfo]:
+        path = self._archived_path(name)
+        if path is None:
+            return None
+        for task in load_tasks(self._archive_dir, single_file=path, errors_out=self._errors_out):
+            if task.name == name:
+                self[name] = task
+                return task
+        return None
+
+    def get(self, name: str, default: Any = None) -> Any:
+        existing = super().get(name)
+        if existing is not None:
+            return existing
+        return self._load_archived(name) or default
+
+    def __getitem__(self, name: str) -> TaskInfo:
+        try:
+            return super().__getitem__(name)
+        except KeyError:
+            task = self._load_archived(name)
+            if task is None:
+                raise
+            return task
+
+    def __contains__(self, name: object) -> bool:
+        if super().__contains__(name):
+            return True
+        return isinstance(name, str) and self._load_archived(name) is not None
+
+
+def build_dependency_universe(
+    live_tasks: Dict[str, TaskInfo],
+    tasks_dir: Path,
+    errors_out: List[Tuple[Path, str]] | None = None,
+) -> Dict[str, TaskInfo]:
+    """Build the dependency-lookup dict for a task tree, including archived tasks.
+
+    ``load_tasks(tasks_dir)`` only globs the top level, so a task whose
+    prerequisite was moved to ``tasks/archive/`` looks like it has a *missing*
+    dependency and is permanently blocked (``is_task_ready`` treats a missing
+    dependency as blocking). Archived tasks therefore have to be resolvable too.
+
+    Parsing the whole archive up front costs ~0.8s on a large task tree
+    (thousands of files), while only a handful of names are usually referenced.
+    The returned mapping starts from the live tasks and, on a lookup miss,
+    indexes the archive by filename stem and parses only the requested file.
+    Live tasks always win over a same-named archived task.
+    """
+    return _LazyArchiveTasks(live_tasks, tasks_dir / "archive", errors_out)
+
+
 def is_task_ready(
     task: TaskInfo,
     all_tasks: Dict[str, TaskInfo],

@@ -169,3 +169,72 @@ def test_next_treats_archived_done_dep_as_met(tmp_path: Path, monkeypatch) -> No
         "Expected a next task but got None.\nFull output:\n" + result.output
     )
     assert data["next_task"]["name"] == "foo"
+
+
+def test_ready_does_not_parse_whole_archive(tmp_path: Path, monkeypatch) -> None:
+    """Resolving archived deps must not eagerly parse every archived task file.
+
+    Regression guard: `ready`/`next` used to call
+    `load_tasks(archive_dir, recursive=True)` on every invocation, which costs
+    ~0.8s on a large task tree (thousands of archived files) even though only a
+    handful of names are ever referenced. Archived tasks are now resolved on
+    demand — only the referenced file is parsed.
+    """
+    _write_fixtures(tmp_path, ARCHIVED_DONE_TASK)
+    monkeypatch.chdir(tmp_path)
+
+    import gptodo.utils as gptodo_utils
+
+    real_load_tasks = gptodo_utils.load_tasks
+    calls: list[dict] = []
+
+    def spy(tasks_dir, recursive=False, single_file=None, errors_out=None):
+        calls.append(
+            {
+                "tasks_dir": Path(tasks_dir),
+                "recursive": recursive,
+                "single_file": single_file,
+            }
+        )
+        return real_load_tasks(
+            tasks_dir, recursive=recursive, single_file=single_file, errors_out=errors_out
+        )
+
+    monkeypatch.setattr(gptodo_utils, "load_tasks", spy)
+
+    result = CliRunner().invoke(cli, ["ready", "--state", "backlog", "--json"])
+
+    assert result.exit_code == 0, result.output
+    data = _parse_json(result)
+    ready_names = [t["name"] for t in data["ready_tasks"]]
+    assert "foo" in ready_names, result.output
+
+    eager = [c for c in calls if c["recursive"] and c["single_file"] is None]
+    assert eager == [], f"the archive must not be parsed eagerly, got calls: {eager!r}"
+    assert any(
+        c["single_file"] is not None and Path(c["single_file"]).name == "archived-prereq.md"
+        for c in calls
+    ), f"the referenced archived file must be loaded by path, got calls: {calls!r}"
+
+
+def test_ready_resolves_archived_dep_in_nested_subdir(tmp_path: Path, monkeypatch) -> None:
+    """Archived deps nested under tasks/archive/<subdir>/ must still resolve.
+
+    The previous eager load used `recursive=True`, so a lazy resolver that only
+    probed `archive/<name>.md` would regress nested archives.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "archive" / "2026").mkdir(parents=True)
+    (tasks_dir / "foo.md").write_text(DEPENDENT_TASK)
+    (tasks_dir / "archive" / "2026" / "archived-prereq.md").write_text(ARCHIVED_DONE_TASK)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(cli, ["ready", "--state", "backlog", "--json"])
+
+    assert result.exit_code == 0, result.output
+    data = _parse_json(result)
+    ready_names = [t["name"] for t in data["ready_tasks"]]
+    assert "foo" in ready_names, (
+        "Task depending on an archived-done prerequisite in a nested subdir must be "
+        f"ready, got: {ready_names!r}\nFull output:\n{result.output}"
+    )
