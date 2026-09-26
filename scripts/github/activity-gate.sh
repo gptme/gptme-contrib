@@ -1820,14 +1820,11 @@ pr_has_unresolved_human_thread() {
     local repo=$1
     local number=$2
     local head_sha=${3:-unknown}
-    local updated_at=${4:-unknown}
     local owner=${repo%%/*}
     local name=${repo#*/}
     local author="${AUTHOR:-$BOT_USERNAME}"
     local nodes result
-    # Normalize updated_at for a safe filename: strip colons from ISO 8601.
-    local updated_at_norm="${updated_at//:/}"
-    nodes=$(gh_cache_get_or_fetch "review-threads-${repo}-${number}-${head_sha}-${updated_at_norm}" \
+    nodes=$(gh_cache_get_or_fetch "review-threads-${repo}-${number}-${head_sha}" \
         "$GH_CACHE_TTL_REVIEW_THREADS" \
         "_fetch_review_thread_nodes '$owner' '$name' '$number'") || return 1
     # gh's --jq has no --arg; run jq itself so AUTHOR can be bound safely.
@@ -1931,11 +1928,10 @@ check_merge_ready() {
 
     # Filter to PRs with CLEAN merge state and MERGEABLE status
     echo "$prs" | jq -c '.[] | select(.mergeStateStatus == "CLEAN" and .mergeable == "MERGEABLE")' | while read -r pr_data; do
-        local pr_number pr_title head_sha updated_at
+        local pr_number pr_title head_sha
         pr_number=$(echo "$pr_data" | jq -r '.number')
         pr_title=$(echo "$pr_data" | jq -r '.title')
         head_sha=$(echo "$pr_data" | jq -r '.headRefOid // "unknown"')
-        updated_at=$(echo "$pr_data" | jq -r '.updatedAt // "unknown"')
         [ -z "$head_sha" ] && head_sha="unknown"
 
         # Check Greptile score from state file (written by check_greptile_scores).
@@ -1997,7 +1993,7 @@ check_merge_ready() {
         # cooldown armed so the GraphQL probe runs at most once per 12h per HEAD;
         # a new maintainer comment still reaches PM through pr_update.
         local human_thread_author
-        if human_thread_author=$(pr_has_unresolved_human_thread "$repo" "$pr_number" "$head_sha" "$updated_at"); then
+        if human_thread_author=$(pr_has_unresolved_human_thread "$repo" "$pr_number" "$head_sha"); then
             echo "${head_sha}:${now}" > "$state_file"
             echo "  [merge_ready] skip $repo#$pr_number: unresolved review thread by @${human_thread_author}" >&2
             continue
