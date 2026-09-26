@@ -17,6 +17,8 @@ The dotfiles install global git hooks that apply to ALL repositories:
 
 #### pre-commit
 - **Master commit protection**: Blocks direct commits to master/main in external repos
+- **Commit identity guard**: Blocks commits whose `user.email` isn't allowlisted
+  (see [Allowed Commit Identities](#allowed-commit-identities))
 - **Branch base validation**: Warns if branch isn't based on latest origin/master
 - **Pre-commit integration**: Auto-stages files modified by formatters
 
@@ -51,6 +53,32 @@ ALLOWED_PATTERNS=(
 
 This file is sourced by both `pre-commit` and `pre-push` hooks.
 
+### Allowed Commit Identities
+
+`pre-commit` refuses to commit unless `git config user.email` is in an allowlist.
+The built-in defaults are Bob's two addresses; `install.sh` derives the allowlist
+from the installing agent's **global** `user.email` (`git config --global
+user.email`) and writes it to `.config/git/allowed-identities.conf` when that
+identity is not a built-in:
+
+```bash
+IDENTITY_ALLOWLIST=(
+    "you@example.com"
+)
+```
+
+The file overrides (does not extend) the built-in defaults, is sourced next to
+`allowed-repos.conf`, and is only written when absent — so it is safe to hand-edit
+and re-run `install.sh`. A repo-local-only identity is deliberately *not* used
+to derive it: `install.sh` is normally run from the dotfiles checkout, so a
+repo-local identity there is not the agent's commit identity, and a conf naming
+the wrong identity would block every commit. Set the global identity, or add the
+repo-local one to the file by hand.
+
+Forgetting it is the failure mode it exists to prevent: without the file, a
+forked agent's every commit aborts with `NOT an allowed identity`.
+Bypass a single commit with `ALLOW_GIT_IDENTITY=1 git commit ...`.
+
 ## Structure
 
 ```txt
@@ -58,6 +86,8 @@ dotfiles/
 ├── .config/
 │   └── git/
 │       ├── allowed-repos.conf           # Repos where master commits/pushes allowed
+│       ├── allowed-identities.conf      # Commit identities allowed by pre-commit
+│       │                                #   (written by install.sh)
 │       └── hooks/
 │           ├── pre-commit               # Main pre-commit hook
 │           ├── pre-push                 # Pre-push protection + validation

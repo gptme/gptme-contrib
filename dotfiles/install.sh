@@ -111,6 +111,58 @@ handle_existing_hooks_dir() {
     fi
 }
 
+# --- Agent identity allowlist for the global pre-commit hook ---
+# The pre-commit hook refuses commits from any identity outside its built-in
+# defaults unless ~/.config/git/allowed-identities.conf overrides them. A forked
+# agent's identity is NOT a built-in default, so without this file every commit
+# aborts. Derive the allowlist from the installing agent's git identity and
+# leave an existing file untouched (a user may have curated it).
+install_allowed_identities() {
+    local conf="$HOME/.config/git/allowed-identities.conf"
+    local email
+    # Only the global identity is authoritative. `git config user.email` without
+    # --global resolves the config of whatever repo this script is run from
+    # (README: the dotfiles checkout), which is not necessarily the agent's
+    # commit identity. A conf that names the wrong identity blocks every commit
+    # outright, which is strictly worse than writing none — so never infer it
+    # from the cwd's repo-local config.
+    email="$(git config --global user.email 2>/dev/null || true)"
+
+    if [ -z "$email" ]; then
+        echo -e "${YELLOW}⚠️  git --global user.email is not set — skipping allowed-identities.conf${NC}"
+        echo "   The pre-commit hook will refuse every commit until an identity is set."
+        echo "   Fix: git config --global user.email you@example.com; then re-run this script."
+        echo "   (An identity set only in one repo's local config is not read here — add"
+        echo "    it to $conf by hand if you commit with it.)"
+        return 0
+    fi
+
+    case "$email" in
+        bob@superuserlabs.org | timetobuildbob@gmail.com)
+            echo -e "${GREEN}✓${NC} Identity $email is covered by the hook's built-in allowlist"
+            return 0
+            ;;
+    esac
+
+    if [ -f "$conf" ]; then
+        echo -e "${GREEN}✓${NC} Keeping existing allowed-identities.conf"
+        return 0
+    fi
+
+    # The file is shell-sourced by the hook, so the identity must be quoted for
+    # the shell — a crafted user.email (e.g. from a repo-local override) must not
+    # be able to inject commands.
+    {
+        echo "# Allowed git commit identities for this agent."
+        echo "# Sourced by ~/.config/git/hooks/pre-commit, which refuses commits from any"
+        echo "# other identity. Overrides (does not extend) the hook's built-in defaults."
+        echo "IDENTITY_ALLOWLIST=("
+        printf '    %q\n' "$email"
+        echo ")"
+    } >"$conf"
+    echo -e "${GREEN}✓${NC} Wrote allowed-identities.conf for $email"
+}
+
 # --- Main installation ---
 echo "Installing dotfiles from $DOTFILES_DIR"
 echo ""
@@ -132,6 +184,9 @@ echo -e "${GREEN}✓${NC} Linked ~/.config/git/hooks -> $DOTFILES_DIR/.config/gi
 git config --global core.hooksPath ~/.config/git/hooks
 echo -e "${GREEN}✓${NC} Set core.hooksPath to ~/.config/git/hooks"
 
+# Ensure the hook's identity allowlist covers this agent (no-op for Bob)
+install_allowed_identities
+
 # Set up template directory for pre-commit (create if needed)
 mkdir -p ~/.git-templates
 git config --global init.templateDir ~/.git-templates
@@ -146,5 +201,6 @@ echo "  - pre-push: Worktree tracking validation"
 echo "  - post-checkout: Branch base warning on checkout"
 echo "  - prepare-commit-msg: Git-Session-Id trailer when GIT_COMMITTER_SESSION_ID is set"
 echo ""
-echo "Customize ALLOWED_PATTERNS in .config/git/hooks/pre-commit"
-echo "to add repos where direct master commits are permitted."
+echo "Customize .config/git/allowed-repos.conf to list repos where direct"
+echo "master commits/pushes are permitted, and .config/git/allowed-identities.conf"
+echo "to allow more commit identities than the default."
