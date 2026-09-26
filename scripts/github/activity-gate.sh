@@ -1654,10 +1654,15 @@ has_maintainer_waiting_comment() {
     local repo=$1
     local number=$2
     local bot="${BOT_USERNAME:-$AUTHOR}"
+    # The running identity (`--author`) is an accepted handoff author in
+    # addition to $BOT_USERNAME. A harness that passes a non-default `--author`
+    # but not the BOT_USERNAME override otherwise never recognises its own
+    # handoff comment and re-posts it every cooldown cycle.
+    local author="${AUTHOR:-$bot}"
 
     local bot_comments
     bot_comments=$(gh api "repos/$repo/issues/$number/comments?per_page=100" \
-        --jq "[.[] | select(.user.login == \"$bot\") | .body] | join(\"\n\")" 2>/dev/null) || return 1
+        --jq "[.[] | select((.user.login | ascii_downcase) == (\"$bot\" | ascii_downcase) or (.user.login | ascii_downcase) == (\"$author\" | ascii_downcase)) | .body] | join(\"\n\")" 2>/dev/null) || return 1
 
     [ -n "$bot_comments" ] || return 1
 
@@ -1716,6 +1721,11 @@ has_maintainer_waiting_comment() {
 latest_comment_is_bot_waiting() {
     local repo=$1 number=$2
     local bot="${BOT_USERNAME:-$AUTHOR}"
+    # The running identity (`--author`) is a bot identity too: forks that pass
+    # `--author` without a BOT_USERNAME override otherwise treat their own
+    # handoff comment as anonymous human activity, which both fails to arm the
+    # suppression and reopens the handoff on the next cycle.
+    local author="${AUTHOR:-$bot}"
 
     # Fetch every page before finding the latest handoff. GitHub returns issue
     # comments oldest-first; ``--slurp`` wraps pages in an outer array. Reviews
@@ -1736,11 +1746,14 @@ latest_comment_is_bot_waiting() {
     local head_sha
     head_sha=$(gh api "repos/$repo/pulls/$number" --jq '.head.sha' 2>/dev/null) || return 1
 
-    jq -en --arg bot "$bot" --arg head "$head_sha" \
+    jq -en --arg bot "$bot" --arg author "$author" --arg head "$head_sha" \
         --argjson comments "$comments_json" \
         --argjson reviews "$reviews_json" '
+        def is_bot_author:
+            ((.user.login | ascii_downcase) == ($bot | ascii_downcase))
+            or ((.user.login | ascii_downcase) == ($author | ascii_downcase));
         def is_waiting_handoff:
-            (.user.login == $bot)
+            is_bot_author
             and ((.body // "") | ascii_downcase | (
                 contains("waiting only on a maintainer click")
                 or contains("waiting only on a maintainer merge click")
@@ -1753,7 +1766,8 @@ latest_comment_is_bot_waiting() {
             ));
         def is_human:
             (.user.type // "") == "User"
-            and ((.user.login // "") != $bot);
+            and ((.user.login // "" | ascii_downcase) != ($bot | ascii_downcase))
+            and ((.user.login // "" | ascii_downcase) != ($author | ascii_downcase));
         ($comments | flatten) as $comments
         | ($reviews | flatten) as $reviews
         | ($comments | map(select(is_waiting_handoff)) | first) as $handoff
