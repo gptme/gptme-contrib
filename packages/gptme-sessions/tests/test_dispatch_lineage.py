@@ -6,6 +6,7 @@ join between a parent and its out-of-process children was timestamp proximity,
 which is exactly the mtime-class heuristic these records exist to replace.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -364,3 +365,52 @@ def test_dispatch_id_roundtrips_through_store(tmp_path: Path):
     assert result.record.dispatch_id == "bob-pm-gptme-gptme-slot-7"
     reloaded = store.load_all()
     assert any(r.dispatch_id == "bob-pm-gptme-gptme-slot-7" for r in reloaded)
+
+
+def test_post_session_reads_dispatch_id_from_agent_env(tmp_path: Path, monkeypatch):
+    """AGENT_DISPATCH_ID is preferred over the legacy BOB_DISPATCH_ID alias."""
+    monkeypatch.setenv("AGENT_DISPATCH_ID", "agent-fanout-run-77")
+    monkeypatch.setenv("BOB_DISPATCH_ID", "bob-workers-run-99")
+    monkeypatch.setenv("PM_DISPATCH_ID", "bob-pm-gptme-gptme-slot-2")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        session_id="agent-env-child1",
+        dispatch_kind="fanout",
+        duration_seconds=10,
+    )
+    assert result.record.dispatch_id == "agent-fanout-run-77"
+
+
+def test_blank_agent_dispatch_id_falls_back_to_legacy(tmp_path: Path, monkeypatch):
+    """An exported-but-empty AGENT_DISPATCH_ID falls through to BOB_DISPATCH_ID."""
+    monkeypatch.setenv("AGENT_DISPATCH_ID", "")
+    monkeypatch.setenv("BOB_DISPATCH_ID", "bob-workers-run-42")
+    monkeypatch.delenv("PM_DISPATCH_ID", raising=False)
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        session_id="agent-env-child2",
+        dispatch_kind="worker",
+        duration_seconds=10,
+    )
+    assert result.record.dispatch_id == "bob-workers-run-42"
+
+
+def test_post_session_reads_dispatch_cause_from_agent_env(tmp_path: Path, monkeypatch):
+    """AGENT_DISPATCH_CAUSE is preferred over the legacy BOB_DISPATCH_CAUSE."""
+    monkeypatch.setenv("AGENT_DISPATCH_CAUSE", json.dumps({"kind": "agent-env", "id": "run-7"}))
+    monkeypatch.setenv("BOB_DISPATCH_CAUSE", json.dumps({"kind": "legacy-env"}))
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="claude-code",
+        model="sonnet",
+        session_id="agent-cause-child1",
+        duration_seconds=10,
+    )
+    assert result.record.dispatch_cause == {"kind": "agent-env", "id": "run-7"}
