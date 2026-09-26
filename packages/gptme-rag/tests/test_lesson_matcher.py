@@ -2034,15 +2034,19 @@ class TestScoreSkillDescriptorMinOverlap:
         assert score == 0.0, f"Expected 0 but got {score} via {matched_by}"
 
     def test_three_token_overlap_fires(self):
-        """A skill with 3+ specific token overlap must score > 0."""
+        """A skill with exactly 3 specific token overlap must score > 0.
+
+        Exactly 3 so this pins the new threshold: it fails at 4+ just as the
+        two-token test fails at 3.
+        """
         from gptme_rag.lesson_matcher import _score_skill_descriptor
 
         skill = self._make_skill(
             "marketing-blog-launch",
-            when_to_use="Writing and publishing a blog post for a product launch announcement",
-            tags=["blog", "launch", "writing"],
+            when_to_use="publishing a blog post",
+            tags=[],
         )
-        prompt = "write a blog post for the product launch announcement"
+        prompt = "publishing blog post"  # overlap = {publishing, blog, post} = 3
         score, matched_by = _score_skill_descriptor(skill, prompt.lower())
         assert score > 0.0, f"Expected >0 but got {score}"
 
