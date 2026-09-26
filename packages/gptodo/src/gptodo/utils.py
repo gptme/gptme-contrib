@@ -1534,6 +1534,21 @@ class _LazyArchiveTasks(Dict[str, TaskInfo]):
                 return task
         return None
 
+    def copy(self) -> "_LazyArchiveTasks":
+        """Preserve lazy resolution through dict copies.
+
+        ``simulate_sequence`` takes a plain-dict snapshot of the universe, so a
+        plain ``dict(...)`` copy would silently drop lazy resolution: an
+        archived dep that a blocked task never resolved pre-simulation would
+        be missing from the snapshot and the task would stay falsely blocked
+        after its live blocker is simulated done. ``copy()`` keeps the lazy
+        behaviour (and shares the archive index, which is built at most once
+        per source dict anyway).
+        """
+        dup = _LazyArchiveTasks(self, self._archive_dir, self._errors_out)
+        dup._archive_index = self._archive_index
+        return dup
+
     def get(self, name: str, default: Any = None) -> Any:
         existing = super().get(name)
         if existing is not None:

@@ -262,3 +262,52 @@ def test_ready_ignores_archived_file_in_excluded_dir(tmp_path: Path, monkeypatch
         "A prerequisite that exists only under tasks/archive/templates/ is not a task "
         f"(load_tasks excludes it), so `foo` must stay blocked; got: {data['ready_tasks']!r}"
     )
+
+
+def test_next_sim_surfaces_task_blocked_by_unresolved_archived_dep(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A task that only unblocks mid-simulation must still resolve archived deps.
+
+    Regression for the lazy-universe + simulate_sequence interaction: if the
+    task's ``depends`` lists the live (still todo) blocker BEFORE the archived
+    dep, ``is_task_ready`` short-circuits on the live blocker during the
+    initial ready filter and the archived dep is never resolved into the lazy
+    dict. The simulation snapshot must not turn that into a permanently
+    falsely-blocked task once the live blocker is simulated done.
+    """
+    tasks_dir = tmp_path / "tasks"
+    archive_dir = tasks_dir / "archive"
+    archive_dir.mkdir(parents=True)
+
+    (tasks_dir / "a.md").write_text(
+        """\
+---
+state: backlog
+created: 2026-09-26T00:00:00+00:00
+depends: [b, archived-c]
+---
+# Task A (depends on live todo b, then archived done c)
+"""
+    )
+    (tasks_dir / "b.md").write_text(
+        """\
+---
+state: backlog
+created: 2026-09-26T00:00:00+00:00
+---
+# Live task b (ready on its own)
+"""
+    )
+    (archive_dir / "archived-c.md").write_text(ARCHIVED_DONE_TASK)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(cli, ["next", "--limit", "2", "--json"])
+
+    assert result.exit_code == 0, result.output
+    data = _parse_json(result)
+    step_names = [step["task"]["name"] for step in data.get("sequence", [])]
+    assert "a" in step_names, (
+        "Task a must surface in the simulation after its live blocker b is "
+        f"picked; got steps: {step_names!r}\nFull output:\n{result.output}"
+    )
