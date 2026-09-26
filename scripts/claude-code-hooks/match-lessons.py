@@ -1598,14 +1598,44 @@ def get_already_injected(
 # --- Match text extraction ---
 
 
+_HEREDOC_RE = re.compile(
+    r"(?P<head>(?<!<)<<-?(?!<)\s*(?P<q>['\"]?)(?P<word>[A-Za-z_]\w*)(?P=q)[^\n]*)\n"
+    r"(?:.*?^[ \t]*(?P=word)[ \t]*$|.*\Z)",
+    re.DOTALL | re.MULTILINE,
+)
+
+
+def _strip_quoted_spans(text: str) -> str:
+    """Remove single/double-quoted string literals and heredoc bodies from shell text.
+
+    Quoted spans in bash commands are data (grep patterns, python strings, etc.),
+    not intent. Stripping them prevents false lesson matches triggered by literals
+    inside commands like ``grep 'SKILL\\|skill'`` or ``python -c "import foo"``.
+
+    Heredoc bodies (``<< 'EOF' ... EOF``) are also stripped for the same reason.
+    The unquoted command tokens (paths, subcommands) are preserved.
+    """
+    # Heredoc bodies: <<[-]['"]WORD['"] ... up to a line that is exactly WORD.
+    # The operator line itself is kept (it holds the real command); only the body
+    # and terminator go. An unterminated heredoc drops everything after its line.
+    text = _HEREDOC_RE.sub(r"\g<head>", text)
+    # Double-quoted spans (handle backslash escapes inside them)
+    text = re.sub(r'"(?:[^"\\]|\\.)*"', " ", text)
+    # Single-quoted spans (no escapes inside single quotes in POSIX shell)
+    text = re.sub(r"'[^']*'", " ", text)
+    return text
+
+
 def build_pretool_match_text(tool_name: str, tool_input: dict) -> str:
     """Build match text from PreToolUse tool name and input fields."""
     parts = []
 
-    # Extract relevant fields from tool input
+    # Extract relevant fields from tool input.
+    # `command` is handled separately: quoted literals are stripped first because
+    # grep patterns, python -c strings, etc. are data not intent and dominate the
+    # false-match class (measured in session 72ce: every misfire was a quoted literal).
     for key in (
         "file_path",
-        "command",
         "pattern",
         "prompt",
         "query",
@@ -1615,6 +1645,10 @@ def build_pretool_match_text(tool_name: str, tool_input: dict) -> str:
         val = tool_input.get(key)
         if val and isinstance(val, str):
             parts.append(val)
+
+    command = tool_input.get("command")
+    if command and isinstance(command, str):
+        parts.append(_strip_quoted_spans(command))
 
     return " ".join(parts)
 
