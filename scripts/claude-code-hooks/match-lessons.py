@@ -1705,10 +1705,41 @@ def emit_empty(event_name: str) -> None:
         )
 
 
+def _is_skill_path(path: str) -> bool:
+    """True if the matched file is a SKILL.md (pointer-inject on PreToolUse)."""
+    return Path(path).name.lower() == "skill.md"
+
+
+def _render_lesson(m: dict, event_type: str, predicted: bool = False) -> list[str]:
+    """Render one matched lesson as context lines.
+
+    On PreToolUse, whole SKILL.md documents are rendered as a compact pointer
+    (name + description + path) instead of the full body — a ~3,000-token bet
+    on a low-confidence trigger. Lessons (small by design, 30-50 lines) and all
+    UserPromptSubmit matches keep full-body injection.
+    """
+    suffix = " (predicted)" if predicted else ""
+    if event_type == "PreToolUse" and _is_skill_path(m["path"]):
+        desc = m.get("description", "").strip()
+        lines = [f"### {m['title']}{suffix} (skill pointer)"]
+        lines.append(f"*Source: {m['path']}*")
+        if desc:
+            lines.append(f"*Description: {desc}*")
+        lines.append(f"*Read the full skill at `{m['path']}` when relevant.*")
+        return lines
+    return [
+        f"### {m['title']}{suffix}",
+        f"*Source: {m['path']}*\n",
+        m["body"],
+        "",
+    ]
+
+
 def format_lessons(
     matches: list[dict],
     already_injected: set[str],
     predicted: list[dict] | None = None,
+    event_type: str = "UserPromptSubmit",
 ) -> str:
     """Format matched + predicted lessons as markdown context."""
     parts: list[str] = []
@@ -1716,25 +1747,17 @@ def format_lessons(
     for m in matches:
         if m["path"] in already_injected:
             continue
-
         # Don't inject keyword count metadata alongside content — it leaks
         # matching internals and contributes to self-referential corpus matches
         # when analysis tools grep session transcripts (gptme-contrib#341)
-        parts.append(f"### {m['title']}")
-        parts.append(f"*Source: {m['path']}*\n")
-        parts.append(m["body"])
-        parts.append("")
+        parts.extend(_render_lesson(m, event_type))
 
     # Add predicted lessons (from co-occurrence model)
     if predicted:
         for p in predicted:
             if p["path"] in already_injected:
                 continue
-            # Simplified header — no lift score metadata
-            parts.append(f"### {p['title']} (predicted)")
-            parts.append(f"*Source: {p['path']}*\n")
-            parts.append(p["body"])
-            parts.append("")
+            parts.extend(_render_lesson(p, event_type, predicted=True))
 
     if not parts:
         return ""
@@ -2031,7 +2054,7 @@ def main():
     # --- Log structured lesson events for efficacy measurement (Phase 1a) ---
     _log_lesson_events(session_id, event_type, matches, predicted, already_injected)
 
-    context = format_lessons(matches, already_injected, predicted)
+    context = format_lessons(matches, already_injected, predicted, event_type)
 
     if not context:
         emit_empty(event_type)
