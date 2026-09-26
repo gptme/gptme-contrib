@@ -714,7 +714,14 @@ def _score_skill_descriptor(lesson: dict[str, Any], prompt_lower: str) -> tuple[
     """Score a skill lesson's name/description/tags against the prompt.
 
     Returns ``(score, matched_by)`` where ``score > 0`` only for skill files
-    (``is_skill=True``) with at least two matching descriptor tokens.
+    (``is_skill=True``) with at least three matching descriptor tokens.
+
+    The threshold of 3 (raised from 2) prevents ambient workspace tokens like
+    ``bob``, ``gptme``, ``session``, ``autonomous`` — which appear in nearly
+    every agent prompt — from triggering skills that share only those generic
+    tokens with the query. Skills with specific keywords should use
+    ``match.keywords`` for routing; the descriptor path is a soft fallback for
+    skills whose ``when_to_use`` or ``description`` is specific enough.
     """
     if not lesson.get("is_skill"):
         return 0.0, []
@@ -732,7 +739,7 @@ def _score_skill_descriptor(lesson: dict[str, Any], prompt_lower: str) -> tuple[
     tag_overlap = prompt_tokens & _descriptor_tokens(" ".join(tags))
     total_overlap = name_overlap | desc_overlap | tag_overlap
 
-    if len(total_overlap) < 2:
+    if len(total_overlap) < 3:
         return 0.0, []
 
     score = 0.0
