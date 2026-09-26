@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from gptmail.transport import Transport
-from gptmail.transport.agent import AgentTransport, meta_of
+from gptmail.transport.agent import AgentTransport, meta_of, split_frontmatter
 
 
 def _transport(tmp_path: Path, deliver=None) -> AgentTransport:
@@ -204,6 +204,27 @@ def test_meta_of_survives_dashes_in_in_reply_to(tmp_path: Path) -> None:
         meta["in_reply_to"] == tricky_id
     ), f"in_reply_to was truncated: {meta.get('in_reply_to')!r}"
     assert meta["from"] == "bob"
+
+
+def test_split_frontmatter_keeps_body_of_a_horizontal_rule_pair() -> None:
+    """A leading '---' is frontmatter only when it wraps a YAML mapping.
+
+    A body that begins with a '---' horizontal rule and contains a second one is
+    not frontmatter — ``yaml.safe_load`` on the enclosed text yields a string,
+    not a mapping — so nothing is stripped. This is the same rule ``meta_of``
+    applies, and it is why the ChatGPT bridge reuses ``split_frontmatter``
+    instead of splitting on fences alone.
+    """
+    content = "---\nfirst\n---\nsecond"
+    meta, body = split_frontmatter(content)
+    assert meta is None
+    assert body == content
+
+
+def test_split_frontmatter_returns_meta_and_body() -> None:
+    meta, body = split_frontmatter("---\nsubject: Hi\n---\n\nBody line\n")
+    assert meta == {"subject": "Hi"}
+    assert body == "Body line"
 
 
 def test_delivery_failure_stamp_survives_dashes_in_in_reply_to(tmp_path: Path) -> None:
