@@ -8,6 +8,7 @@ import httpx
 import pytest
 from gptme_voice.realtime import server as server_mod
 from gptme_voice.realtime.missed_call_context import MAX_CONTEXT_AGE
+from gptme_voice.realtime.twilio_integration import sign_stream_params
 
 from .test_server import _DummyToolBridge, _DummyTwilioWebSocket, _FakeRealtimeClient
 
@@ -95,7 +96,7 @@ def callback_case(tmp_path, monkeypatch):
                     "start": {
                         "streamSid": "MZinbound",
                         "callSid": "CAinbound",
-                        "customParameters": custom,
+                        "customParameters": sign_stream_params(custom, "test-token"),
                     },
                 },
                 {"event": "stop"},

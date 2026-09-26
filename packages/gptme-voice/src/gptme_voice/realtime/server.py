@@ -56,9 +56,12 @@ from .openai_client import (
 from .sounds import DISPATCH_CUE_MULAW, PCM_CUES, SAMPLE_RATE, TIMEOUT_CUE_MULAW
 from .tool_bridge import GptmeToolBridge
 from .twilio_integration import (
+    STREAM_TOKEN_TTL_SECONDS,
     _get_config_env,
     build_connect_stream_twiml,
     build_stream_url,
+    sign_stream_params,
+    verify_stream_params,
 )
 from .xai_client import XAIRealtimeClient, _get_xai_api_key
 
@@ -888,6 +891,12 @@ class VoiceServer:
         # Pre-warmed realtime connections: from_number -> (client, created_at)
         # Keyed by from_number, claimed and discarded when the Twilio stream starts.
         self._prewarm_sessions: dict[str, tuple[OpenAIRealtimeClient, float]] = {}
+        # CallSids whose first /twilio start carried a valid stream token.
+        self._authenticated_stream_calls: set[str] = set()
+        # Idle-eviction tasks for stream-auth bypass entries.
+        # Mirrors _twilio_grant_idle_tasks: schedule on disconnect-without-stop,
+        # cancel on reconnect.  Prevents indefinite TTL bypass after a drop.
+        self._stream_auth_idle_tasks: dict[str, asyncio.Task[None]] = {}
         # In-flight pre-warm tasks by from_number, so _claim_prewarm can await
         # a pre-warm that hasn't finished connecting yet instead of racing it
         # into a duplicate cold session (observed 2026-08-27: Twilio's "start"
@@ -954,6 +963,8 @@ class VoiceServer:
             yield
         finally:
             await self._cancel_all_twilio_body_grant_idle_revokes()
+            for task in list(self._stream_auth_idle_tasks.values()):
+                task.cancel()
             if self.body_adapter is not None:
                 await self.body_adapter.close()
 
@@ -1069,6 +1080,51 @@ class VoiceServer:
                 task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _cancel_stream_auth_idle_discard(self, call_sid: str | None) -> None:
+        """Cancel a pending idle-discard of the stream-auth bypass for this CallSid."""
+        if not call_sid:
+            return
+        task = self._stream_auth_idle_tasks.pop(call_sid, None)
+        if task is None or task.done():
+            return
+        try:
+            if task is asyncio.current_task():
+                return
+        except RuntimeError:
+            pass
+        task.cancel()
+
+    def _schedule_stream_auth_idle_discard(self, call_sid: str | None) -> None:
+        """Evict CallSid from _authenticated_stream_calls after an idle disconnect.
+
+        Twilio reconnects resend the first start's parameters (including the
+        original token) within seconds; the 90-second window preserves the TTL
+        bypass for those while closing the indefinite-replay window that would
+        otherwise exist when the socket drops without a ``stop`` event.
+        """
+        if not call_sid or call_sid not in self._authenticated_stream_calls:
+            return
+        self._cancel_stream_auth_idle_discard(call_sid)
+        delay = self._twilio_body_grant_idle_s  # same 90-second reconnect window
+
+        async def _idle_discard() -> None:
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+            if call_sid in self._connections:
+                return  # reconnect arrived — keep the bypass in place
+            logger.debug(
+                "Evicting stream-auth bypass for %s after idle disconnect", call_sid
+            )
+            self._authenticated_stream_calls.discard(call_sid)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._stream_auth_idle_tasks[call_sid] = loop.create_task(_idle_discard())
 
     def _schedule_twilio_body_grant_idle_revoke(self, call_sid: str | None) -> None:
         """Revoke pinned grants if this CallSid does not reconnect.
@@ -1608,6 +1664,7 @@ class VoiceServer:
         handoff_id: str | None = None,
         standup_brief: str | None = None,
         consume_recent: bool = True,
+        anonymous_is_operator: bool = True,
     ) -> SessionBootstrap:
         instructions = self._instructions
         if from_number:
@@ -1632,8 +1689,9 @@ class VoiceServer:
         # people file, or unknown numbers) must not get internal work status —
         # the digest both leaks internals and steers the model into ops-speak
         # (Philip's first call was greeted with subagent status, 2026-08-27).
-        # Calls with no from_number (local/browser transport) keep the digest.
-        caller_is_operator = True
+        # Calls with no from_number keep the digest only on the local/browser
+        # transports; phone calls with a withheld number are not the operator.
+        caller_is_operator = anonymous_is_operator
         if from_number:
             identity = _lookup_caller_identity(from_number, self.workspace)
             caller_is_operator = bool(identity and identity.is_operator)
@@ -2452,6 +2510,9 @@ class VoiceServer:
                 )
                 if grant_token:
                     custom_params["body_grant"] = grant_token
+        if auth_token:
+            # Authenticate every parameter the /twilio stream will trust.
+            custom_params = sign_stream_params(custom_params, auth_token)
         twiml = build_connect_stream_twiml(ws_url, custom_params or None)
         return PlainTextResponse(twiml, media_type="text/xml")
 
@@ -2477,6 +2538,7 @@ class VoiceServer:
         metadata: dict[str, str] = {}
         handoff_id: str | None = None
         g711_passthrough = self.openai_g711_passthrough
+        stop_received = False
 
         try:
             async for message in websocket.iter_text():
@@ -2499,7 +2561,33 @@ class VoiceServer:
                         call_sid = stream_sid
 
                     # Inject caller context into instructions (phone + name lookup)
-                    custom_params = start.get("customParameters", {})
+                    custom_params = start.get("customParameters") or {}
+                    # /twilio is public: only trust parameters from TwiML we
+                    # issued. Fail closed whenever Twilio auth is configured.
+                    stream_auth_token = _get_config_env("TWILIO_AUTH_TOKEN")
+                    if stream_auth_token and not (
+                        isinstance(custom_params, dict)
+                        and verify_stream_params(
+                            custom_params,
+                            stream_auth_token,
+                            # Reconnects resend the first start's parameters,
+                            # so a long call may outlive the token TTL.
+                            ttl_seconds=(
+                                None
+                                if call_sid in self._authenticated_stream_calls
+                                else STREAM_TOKEN_TTL_SECONDS
+                            ),
+                        )
+                    ):
+                        logger.warning(
+                            "Rejected Twilio media stream %s: missing or invalid stream token",
+                            call_sid,
+                        )
+                        call_sid = None
+                        await websocket.close(code=1008)
+                        return
+                    if stream_auth_token:
+                        self._authenticated_stream_calls.add(call_sid)
                     from_number = custom_params.get("from_number", "")
                     remote_party = custom_params.get("remote_party") or from_number
                     handoff_id = custom_params.get("handoff_id") or None
@@ -2674,6 +2762,7 @@ class VoiceServer:
                                 from_number=from_number,
                                 handoff_id=handoff_id,
                                 standup_brief=standup_brief,
+                                anonymous_is_operator=False,
                             )
                         instructions = bootstrap.instructions
                         initial_response_instructions = (
@@ -2726,8 +2815,9 @@ class VoiceServer:
                         await realtime_client.connect()
 
                     self._connections[call_sid] = (websocket, realtime_client)
-                    # A reconnect arrived inside the idle window — keep the grant.
+                    # A reconnect arrived inside the idle window — keep grants and auth.
                     self._cancel_twilio_body_grant_idle_revoke(call_sid)
+                    self._cancel_stream_auth_idle_discard(call_sid)
 
                 elif event == "media":
                     # Audio chunk from Twilio
@@ -2751,7 +2841,11 @@ class VoiceServer:
                     # re-attach motion tools with the stolen start parameters.
                     # Do not revoke in ``finally``: websocket drop is a reconnect.
                     # Idle-revoke in ``finally`` covers the drop-without-stop path.
+                    stop_received = True
                     self._revoke_twilio_body_grants_for_call(call_sid)
+                    if call_sid:
+                        self._authenticated_stream_calls.discard(call_sid)
+                        self._cancel_stream_auth_idle_discard(call_sid)
                     break
 
         except WebSocketDisconnect:
@@ -2774,6 +2868,11 @@ class VoiceServer:
             # inside the idle window, drop the pinned grant so an abrupt
             # hangup that skipped ``stop`` cannot leave a live bearer token.
             self._schedule_twilio_body_grant_idle_revoke(call_sid)
+            # Same logic for the stream-auth TTL bypass: if no reconnect within
+            # the idle window, evict so a captured token cannot be replayed
+            # indefinitely.  On a clean ``stop`` the discard already ran above.
+            if not stop_received:
+                self._schedule_stream_auth_idle_discard(call_sid)
             await self._on_call_end(
                 caller_id,
                 "twilio",
