@@ -6,6 +6,7 @@ from gptme_runloops.autonomous import AutonomousRun
 from gptme_runloops.base import BaseRunLoop
 from gptme_runloops.email import EmailRun
 from gptme_runloops.project_monitoring import ProjectMonitoringRun
+from gptme_runloops.session_gates import GateDecision, state_delta_gate
 from gptme_runloops.team import TeamRun
 from gptme_runloops.utils.executor import (
     ClaudeCodeExecutor,
@@ -60,6 +61,9 @@ __all__ = [
     "ClaudeCodeExecutor",
     "get_executor",
     "list_backends",
+    # session_gates (runtime-admission)
+    "GateDecision",
+    "state_delta_gate",
     # pm_dispatch
     "DispatchLedger",
     "LaneDispatcher",
