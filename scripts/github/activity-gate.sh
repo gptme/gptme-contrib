@@ -1654,6 +1654,11 @@ has_maintainer_waiting_comment() {
     local repo=$1
     local number=$2
     local bot="${BOT_USERNAME:-$AUTHOR}"
+    # The running identity (`--author`) is an accepted handoff author in
+    # addition to $BOT_USERNAME. A harness that passes a non-default `--author`
+    # but not the BOT_USERNAME override otherwise never recognises its own
+    # handoff comment and re-posts it every cooldown cycle.
+    local author="${AUTHOR:-$bot}"
 
     local bot_comments
     bot_comments=$(gh api "repos/$repo/issues/$number/comments?per_page=100" \
