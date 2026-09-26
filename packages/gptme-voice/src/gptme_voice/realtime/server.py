@@ -56,9 +56,12 @@ from .openai_client import (
 from .sounds import DISPATCH_CUE_MULAW, PCM_CUES, SAMPLE_RATE, TIMEOUT_CUE_MULAW
 from .tool_bridge import GptmeToolBridge
 from .twilio_integration import (
+    STREAM_TOKEN_TTL_SECONDS,
     _get_config_env,
     build_connect_stream_twiml,
     build_stream_url,
+    sign_stream_params,
+    verify_stream_params,
 )
 from .xai_client import XAIRealtimeClient, _get_xai_api_key
 
@@ -888,6 +891,8 @@ class VoiceServer:
         # Pre-warmed realtime connections: from_number -> (client, created_at)
         # Keyed by from_number, claimed and discarded when the Twilio stream starts.
         self._prewarm_sessions: dict[str, tuple[OpenAIRealtimeClient, float]] = {}
+        # CallSids whose first /twilio start carried a valid stream token.
+        self._authenticated_stream_calls: set[str] = set()
         # In-flight pre-warm tasks by from_number, so _claim_prewarm can await
         # a pre-warm that hasn't finished connecting yet instead of racing it
         # into a duplicate cold session (observed 2026-08-27: Twilio's "start"
@@ -1608,6 +1613,7 @@ class VoiceServer:
         handoff_id: str | None = None,
         standup_brief: str | None = None,
         consume_recent: bool = True,
+        anonymous_is_operator: bool = True,
     ) -> SessionBootstrap:
         instructions = self._instructions
         if from_number:
@@ -1632,8 +1638,9 @@ class VoiceServer:
         # people file, or unknown numbers) must not get internal work status —
         # the digest both leaks internals and steers the model into ops-speak
         # (Philip's first call was greeted with subagent status, 2026-08-27).
-        # Calls with no from_number (local/browser transport) keep the digest.
-        caller_is_operator = True
+        # Calls with no from_number keep the digest only on the local/browser
+        # transports; phone calls with a withheld number are not the operator.
+        caller_is_operator = anonymous_is_operator
         if from_number:
             identity = _lookup_caller_identity(from_number, self.workspace)
             caller_is_operator = bool(identity and identity.is_operator)
@@ -2452,6 +2459,9 @@ class VoiceServer:
                 )
                 if grant_token:
                     custom_params["body_grant"] = grant_token
+        if auth_token:
+            # Authenticate every parameter the /twilio stream will trust.
+            custom_params = sign_stream_params(custom_params, auth_token)
         twiml = build_connect_stream_twiml(ws_url, custom_params or None)
         return PlainTextResponse(twiml, media_type="text/xml")
 
@@ -2499,7 +2509,33 @@ class VoiceServer:
                         call_sid = stream_sid
 
                     # Inject caller context into instructions (phone + name lookup)
-                    custom_params = start.get("customParameters", {})
+                    custom_params = start.get("customParameters") or {}
+                    # /twilio is public: only trust parameters from TwiML we
+                    # issued. Fail closed whenever Twilio auth is configured.
+                    stream_auth_token = _get_config_env("TWILIO_AUTH_TOKEN")
+                    if stream_auth_token and not (
+                        isinstance(custom_params, dict)
+                        and verify_stream_params(
+                            custom_params,
+                            stream_auth_token,
+                            # Reconnects resend the first start's parameters,
+                            # so a long call may outlive the token TTL.
+                            ttl_seconds=(
+                                None
+                                if call_sid in self._authenticated_stream_calls
+                                else STREAM_TOKEN_TTL_SECONDS
+                            ),
+                        )
+                    ):
+                        logger.warning(
+                            "Rejected Twilio media stream %s: missing or invalid stream token",
+                            call_sid,
+                        )
+                        call_sid = None
+                        await websocket.close(code=1008)
+                        return
+                    if stream_auth_token:
+                        self._authenticated_stream_calls.add(call_sid)
                     from_number = custom_params.get("from_number", "")
                     remote_party = custom_params.get("remote_party") or from_number
                     handoff_id = custom_params.get("handoff_id") or None
@@ -2674,6 +2710,7 @@ class VoiceServer:
                                 from_number=from_number,
                                 handoff_id=handoff_id,
                                 standup_brief=standup_brief,
+                                anonymous_is_operator=False,
                             )
                         instructions = bootstrap.instructions
                         initial_response_instructions = (
@@ -2752,6 +2789,8 @@ class VoiceServer:
                     # Do not revoke in ``finally``: websocket drop is a reconnect.
                     # Idle-revoke in ``finally`` covers the drop-without-stop path.
                     self._revoke_twilio_body_grants_for_call(call_sid)
+                    if call_sid:
+                        self._authenticated_stream_calls.discard(call_sid)
                     break
 
         except WebSocketDisconnect:

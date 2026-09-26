@@ -11,6 +11,8 @@ from gptme_voice.realtime.twilio_integration import (
     create_outbound_call,
     outbound_identity_params,
     resolve_outbound_call_settings,
+    sign_stream_params,
+    verify_stream_params,
 )
 
 
@@ -74,7 +76,10 @@ def test_resolve_outbound_call_settings_uses_config_fallbacks(monkeypatch):
     )
 
 
-def test_create_outbound_call_uses_twilio_client():
+def test_create_outbound_call_uses_twilio_client(monkeypatch):
+    monkeypatch.setattr(
+        "gptme_voice.realtime.twilio_integration.time.time", lambda: 1_800_000_000
+    )
     captured = {}
 
     class FakeCalls:
@@ -109,9 +114,37 @@ def test_create_outbound_call_uses_twilio_client():
         "from_": "+15551234567",
         "twiml": build_connect_stream_twiml(
             "wss://voice.example/twilio",
-            outbound_identity_params("+46701234567"),
+            sign_stream_params(outbound_identity_params("+46701234567"), "secret"),
         ),
     }
+    assert 'name="stream_token"' in captured["twiml"]
+
+
+def test_stream_token_authenticates_every_parameter():
+    params = sign_stream_params(
+        {"from_number": "+46701234567", "direction": "outbound"}, "secret", now=1000
+    )
+    assert verify_stream_params(params, "secret", now=1000)
+    # Wrong key, tampered or extra parameters, and a missing token all fail.
+    assert not verify_stream_params(params, "other", now=1000)
+    assert not verify_stream_params(
+        {**params, "from_number": "+15550000000"}, "secret", now=1000
+    )
+    assert not verify_stream_params({**params, "handoff_id": "x"}, "secret", now=1000)
+    assert not verify_stream_params(
+        {k: v for k, v in params.items() if k != "stream_token"}, "secret", now=1000
+    )
+    assert not verify_stream_params(
+        {**params, "stream_token": "v1.1000.deadbeef"}, "secret", now=1000
+    )
+
+
+def test_stream_token_expires_unless_ttl_disabled():
+    params = sign_stream_params({"from_number": "+46701234567"}, "secret", now=1000)
+    assert verify_stream_params(params, "secret", now=1000 + 599)
+    assert not verify_stream_params(params, "secret", now=1000 + 601)
+    assert not verify_stream_params(params, "secret", now=1000 - 120)
+    assert verify_stream_params(params, "secret", now=1000 + 7200, ttl_seconds=None)
 
 
 def test_create_outbound_call_writes_missed_call_context(tmp_path):

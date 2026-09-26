@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import shlex
 import sys
 import tempfile
@@ -33,6 +34,10 @@ from gptme_voice.realtime.server import (
     _websocket_has_vision,
 )
 from gptme_voice.realtime.sounds import PCM_CUES, SAMPLE_RATE
+from gptme_voice.realtime.twilio_integration import (
+    sign_stream_params,
+    verify_stream_params,
+)
 
 
 class _DummyWebSocket:
@@ -94,9 +99,13 @@ class _DummyTwilioWebSocket(_DummyWebSocket):
         super().__init__()
         self._incoming = [json.dumps(message) for message in incoming]
         self.accepted = False
+        self.close_code: int | None = None
 
     async def accept(self) -> None:
         self.accepted = True
+
+    async def close(self, code: int = 1000) -> None:
+        self.close_code = code
 
     def iter_text(self):
         async def _gen():
@@ -498,6 +507,7 @@ def test_twilio_body_grant_idle_revoke_after_websocket_drop_without_stop(
         from_number: str = "",
         handoff_id: str | None = None,
         standup_brief: str | None = None,
+        anonymous_is_operator: bool = True,
     ) -> SessionBootstrap:
         return SessionBootstrap("You are Bob.")
 
@@ -593,6 +603,7 @@ def test_twilio_body_grant_survives_reconnect_start_then_revokes_on_stop(
         from_number: str = "",
         handoff_id: str | None = None,
         standup_brief: str | None = None,
+        anonymous_is_operator: bool = True,
     ) -> SessionBootstrap:
         return SessionBootstrap("You are Bob.")
 
@@ -750,6 +761,10 @@ def test_incoming_mints_body_grant_only_when_signature_valid(
     assert ok_code == 200
     assert "body_grant" in ok_body
     assert ok_grants == 1
+    # The TwiML authenticates every stream parameter it hands to /twilio.
+    params = dict(re.findall(r'<Parameter name="([^"]+)" value="([^"]+)"', ok_body))
+    assert "stream_token" in params
+    assert verify_stream_params(params, "secret")
 
 
 def test_incoming_does_not_mint_body_grant_without_call_sid(
@@ -864,6 +879,7 @@ def test_twilio_websocket_does_not_grant_body_tools_from_spoofed_from_number(
             from_number: str = "",
             handoff_id: str | None = None,
             standup_brief: str | None = None,
+            anonymous_is_operator: bool = True,
         ) -> SessionBootstrap:
             return SessionBootstrap("You are Bob.")
 
@@ -942,6 +958,7 @@ def test_twilio_body_grant_requires_matching_from_and_call_sid(
             from_number: str = "",
             handoff_id: str | None = None,
             standup_brief: str | None = None,
+            anonymous_is_operator: bool = True,
         ) -> SessionBootstrap:
             return SessionBootstrap("You are Bob.")
 
@@ -1040,6 +1057,7 @@ def test_twilio_spoof_cannot_steal_body_capable_prewarm(
             from_number: str = "",
             handoff_id: str | None = None,
             standup_brief: str | None = None,
+            anonymous_is_operator: bool = True,
         ) -> SessionBootstrap:
             return SessionBootstrap("You are Bob.")
 
@@ -1116,6 +1134,7 @@ def test_twilio_websocket_does_not_grant_rag_tools_from_spoofed_from_number(
             from_number: str = "",
             handoff_id: str | None = None,
             standup_brief: str | None = None,
+            anonymous_is_operator: bool = True,
         ) -> SessionBootstrap:
             return SessionBootstrap("You are Bob.")
 
@@ -1197,6 +1216,7 @@ def test_twilio_spoof_cannot_steal_rag_capable_prewarm(
             from_number: str = "",
             handoff_id: str | None = None,
             standup_brief: str | None = None,
+            anonymous_is_operator: bool = True,
         ) -> SessionBootstrap:
             return SessionBootstrap("You are Bob.")
 
@@ -1609,6 +1629,7 @@ def test_handle_twilio_websocket_wires_speech_started_clear_callback_cold_path(
             from_number: str = "",
             handoff_id: str | None = None,
             standup_brief: str | None = None,
+            anonymous_is_operator: bool = True,
         ) -> SessionBootstrap:
             return SessionBootstrap("You are Bob.")
 
@@ -3851,3 +3872,159 @@ def test_history_write_failure_does_not_abort_finalization(
     # post-call scheduling, or archive finalization.
     assert scheduled == ["+46700000001"]
     assert server._recent_call_path("+46700000001").exists()
+
+
+def _twilio_stream_auth_case(monkeypatch: pytest.MonkeyPatch, token: str | None):
+    import gptme_voice.realtime.server as server_mod
+
+    real_get = server_mod._get_config_env
+
+    def fake_get(name: str) -> str | None:
+        if name == "TWILIO_AUTH_TOKEN":
+            return token
+        return real_get(name)
+
+    monkeypatch.setattr(server_mod, "_get_config_env", fake_get)
+    monkeypatch.setattr(server_mod, "GptmeToolBridge", _DummyToolBridge)
+    server = VoiceServer()
+    sessions: list[object] = []
+    bootstraps: list[dict[str, object]] = []
+
+    async def _fake_bootstrap(**kwargs) -> SessionBootstrap:
+        bootstraps.append(kwargs)
+        return SessionBootstrap("You are Bob.")
+
+    monkeypatch.setattr(server, "_build_session_bootstrap", _fake_bootstrap)
+    monkeypatch.setattr(
+        server,
+        "_make_client",
+        lambda cfg, **_kw: sessions.append(cfg) or _FakeRealtimeClient(),
+    )
+
+    async def _noop_end(*_a, **_kw) -> None:
+        return None
+
+    monkeypatch.setattr(server, "_on_call_end", _noop_end)
+
+    def run(custom: dict[str, str], call_sid: str = "CAauth", stop: bool = True):
+        messages: list[dict[str, object]] = [
+            {
+                "event": "start",
+                "start": {
+                    "streamSid": "MZauth",
+                    "callSid": call_sid,
+                    "customParameters": custom,
+                },
+            }
+        ]
+        if stop:
+            messages.append({"event": "stop"})
+        ws = _DummyTwilioWebSocket(messages)
+        asyncio.run(server.handle_twilio_websocket(ws))
+        return ws
+
+    return server, run, sessions, bootstraps
+
+
+@pytest.mark.parametrize(
+    "custom",
+    [
+        {"from_number": "+15551212"},
+        {"from_number": "+15551212", "stream_token": "v1.1.forged"},
+        {},
+    ],
+)
+def test_twilio_stream_without_valid_token_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, custom: dict[str, str]
+) -> None:
+    """With Twilio auth configured, /twilio only accepts TwiML we issued."""
+    _, run, sessions, bootstraps = _twilio_stream_auth_case(monkeypatch, "secret")
+    ws = run(custom)
+    assert ws.close_code == 1008
+    assert sessions == []
+    assert bootstraps == []
+
+
+def test_twilio_stream_rejects_tampered_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, run, sessions, _ = _twilio_stream_auth_case(monkeypatch, "secret")
+    signed = sign_stream_params({"from_number": "+15551212"}, "secret")
+    ws = run({**signed, "from_number": "+46700000001"})
+    assert ws.close_code == 1008
+    assert sessions == []
+
+
+def test_twilio_stream_accepts_signed_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, run, sessions, bootstraps = _twilio_stream_auth_case(monkeypatch, "secret")
+    ws = run(sign_stream_params({"from_number": "+15551212"}, "secret"))
+    assert ws.close_code is None
+    assert len(sessions) == 1
+    assert bootstraps[0]["from_number"] == "+15551212"
+
+
+def test_twilio_reconnect_of_verified_call_outlives_token_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconnects resend the first start's parameters; long calls must survive."""
+    import gptme_voice.realtime.server as server_mod
+    import gptme_voice.realtime.twilio_integration as twilio_mod
+
+    server, run, sessions, _ = _twilio_stream_auth_case(monkeypatch, "secret")
+    now = [1_800_000_000.0]
+    monkeypatch.setattr(twilio_mod.time, "time", lambda: now[0])
+    signed = sign_stream_params({"from_number": "+15551212"}, "secret")
+    # First leg drops without ``stop`` (a reconnect, not a hangup).
+    run(signed, call_sid="CAlong", stop=False)
+    now[0] += server_mod.STREAM_TOKEN_TTL_SECONDS + 60
+    ws = run(signed, call_sid="CAlong")
+    assert ws.close_code is None
+    assert len(sessions) == 2
+    # After ``stop`` the call is over; an expired replay is rejected.
+    ws = run(signed, call_sid="CAlong")
+    assert ws.close_code == 1008
+    assert len(sessions) == 2
+    # An expired token on a call we never verified is rejected too.
+    ws = run(signed, call_sid="CAother")
+    assert ws.close_code == 1008
+
+
+def test_twilio_stream_without_auth_token_keeps_dev_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, run, sessions, _ = _twilio_stream_auth_case(monkeypatch, None)
+    ws = run({"from_number": "+15551212"})
+    assert ws.close_code is None
+    assert len(sessions) == 1
+
+
+def test_twilio_anonymous_caller_is_not_operator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A withheld caller ID on /twilio must not inherit the local operator default."""
+    _, run, _, bootstraps = _twilio_stream_auth_case(monkeypatch, "secret")
+    run(sign_stream_params({}, "secret"))
+    assert bootstraps[0]["from_number"] == ""
+    assert bootstraps[0]["anonymous_is_operator"] is False
+
+
+def test_session_bootstrap_anonymous_digest_follows_transport(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import gptme_voice.realtime.server as server_mod
+
+    monkeypatch.setattr(server_mod, "_load_voice_digest", lambda _ws: "DIGEST-MARKER")
+    server = VoiceServer(workspace=str(tmp_path))
+
+    async def _run(anonymous_is_operator: bool) -> str:
+        bootstrap = await server._build_session_bootstrap(
+            caller_id=None,
+            from_number="",
+            anonymous_is_operator=anonymous_is_operator,
+        )
+        return bootstrap.instructions
+
+    assert "DIGEST-MARKER" in asyncio.run(_run(True))
+    assert "DIGEST-MARKER" not in asyncio.run(_run(False))
