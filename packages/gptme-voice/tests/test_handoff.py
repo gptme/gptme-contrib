@@ -27,6 +27,17 @@ SAMPLE_NOW = datetime(2026, 4, 21, 10, 0, 0, tzinfo=timezone.utc)
 SAMPLE_VALIDATION_NOW = SAMPLE_NOW + timedelta(seconds=30)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_agent_roster_env(monkeypatch):
+    """Keep tests hermetic: default-roster tests must not see an ambient env var.
+
+    ``get_valid_agents()`` reads ``GPTME_VOICE_AGENT_ROSTER``, so a developer or
+    CI environment that sets it would let default-roster rejection tests pass
+    when they should fail. Tests that exercise the env var set it explicitly.
+    """
+    monkeypatch.delenv("GPTME_VOICE_AGENT_ROSTER", raising=False)
+
+
 # ---------- compute_hmac / validate ----------
 
 
