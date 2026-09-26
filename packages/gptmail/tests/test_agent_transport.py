@@ -176,6 +176,22 @@ def test_conversation_id_is_order_free_pair(tmp_path: Path) -> None:
     assert t.conversation_id_for(mid) == "agent:alice|bob"
 
 
+def test_conversation_id_is_scoped_by_named_mailbox(tmp_path: Path) -> None:
+    root = tmp_path / "messages"
+    a = AgentTransport(root, "alice", mailbox="cgpt-aaa")
+    b = AgentTransport(root, "alice", mailbox="cgpt-bbb")
+    mid_a = a.send("bob", "Hi", "body")
+    mid_b = b.send("bob", "Hi", "body")
+    assert a.conversation_id_for(mid_a) == "agent:cgpt-aaa:alice|bob"
+    assert b.conversation_id_for(mid_b) == "agent:cgpt-bbb:alice|bob"
+
+
+def test_conversation_id_default_mailbox_is_unchanged(tmp_path: Path) -> None:
+    t = AgentTransport(tmp_path / "messages", "alice", mailbox="default")
+    mid = t.send("bob", "Hi", "body")
+    assert t.conversation_id_for(mid) == "agent:alice|bob"
+
+
 def test_conversation_id_falls_back_when_unknown(tmp_path: Path) -> None:
     assert _transport(tmp_path).conversation_id_for("ghost.md") == "agent:ghost.md"
 

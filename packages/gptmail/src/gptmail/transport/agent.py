@@ -328,12 +328,16 @@ class AgentTransport:
         return chain
 
     def conversation_id_for(self, message_id: str) -> str:
-        """Conversation ID for the unified tracker: the agent pair, order-free.
+        """Conversation ID for the unified tracker: mailbox + agent pair, order-free.
 
-        All messages between the same two agents share one conversation
-        (``agent:alice|bob``), so the shared ``ConversationTracker`` threads a
-        back-and-forth exchange together regardless of direction. Falls back to
-        the message ID when participants can't be determined.
+        All messages between the same two agents in the same mailbox share one
+        conversation, so the shared ``ConversationTracker`` threads a
+        back-and-forth exchange together regardless of direction. The default
+        mailbox keeps the bare ``agent:alice|bob`` form (stable IDs for existing
+        state); named mailboxes get ``agent:<mailbox>:alice|bob`` so separate
+        mailboxes between the same pair (e.g. one per external chat session)
+        don't collapse into one conversation. Falls back to the message ID when
+        participants can't be determined.
         """
         meta = self._lookup_meta(message_id)
         if not meta:
@@ -343,6 +347,9 @@ class AgentTransport:
         pair = sorted(p for p in (sender, recipient) if p)
         if len(pair) != 2:
             return f"agent:{message_id}"
+        mailbox = str(meta.get("mailbox") or self.mailbox).strip().lower()
+        if mailbox and mailbox != "default":
+            return f"agent:{mailbox}:{pair[0]}|{pair[1]}"
         return f"agent:{pair[0]}|{pair[1]}"
 
     # -- delivery helpers (sync layer; not part of the Protocol) -------------
