@@ -2586,8 +2586,6 @@ class VoiceServer:
                         call_sid = None
                         await websocket.close(code=1008)
                         return
-                    if stream_auth_token:
-                        self._authenticated_stream_calls.add(call_sid)
                     from_number = custom_params.get("from_number", "")
                     remote_party = custom_params.get("remote_party") or from_number
                     handoff_id = custom_params.get("handoff_id") or None
@@ -2818,6 +2816,11 @@ class VoiceServer:
                     # A reconnect arrived inside the idle window — keep grants and auth.
                     self._cancel_twilio_body_grant_idle_revoke(call_sid)
                     self._cancel_stream_auth_idle_discard(call_sid)
+                    # Only mark authenticated after the session is actually established.
+                    # Adding before connect() would let a failed-setup CallSid bypass
+                    # the TTL check for 90 s via _schedule_stream_auth_idle_discard.
+                    if stream_auth_token:
+                        self._authenticated_stream_calls.add(call_sid)
 
                 elif event == "media":
                     # Audio chunk from Twilio
@@ -3316,6 +3319,11 @@ class VoiceServer:
         # Hangup is a real call end even if Twilio never sends ``stop``.
         if "twilio" in source:
             self._revoke_twilio_body_grants_for_call(call_sid)
+            # Revoke the stream-auth TTL bypass immediately on hangup so a captured
+            # token cannot be replayed for the 90 s idle window after the call ends.
+            if call_sid:
+                self._authenticated_stream_calls.discard(call_sid)
+                self._cancel_stream_auth_idle_discard(call_sid)
 
         # Fire-and-forget Twilio REST API call termination (authoritative kill).
         # Do this BEFORE the farewell delay so the call stops accepting audio
