@@ -152,3 +152,35 @@ def test_new_head_reprobes_threads() -> None:
         _run_cycle(tmp, persistent, "b" * 40)
 
         assert _thread_calls(tmp) == 2
+
+
+# Same as FAKE_GH but the reviewThreads response has an unresolved human thread.
+FAKE_GH_WITH_THREAD = FAKE_GH.replace(
+    '"nodes": [],',
+    '"nodes": [{"isResolved": False, "comments": {"nodes": [{"author": {"login": "maintainer"}}]}}],',
+)
+
+
+def test_held_pr_with_unresolved_thread_caches_hold() -> None:
+    """Cached hold result prevents re-probing when the cooldown stamp is wiped.
+
+    This is the primary scenario the cache was added for: a PR blocked by an
+    unresolved human thread, where merge_ready is held by the dispatcher and
+    the cooldown stamp is wiped on every cycle.  Without the cache each cycle
+    would re-probe.  With the cache, only the first cycle probes; subsequent
+    cycles get the cached 'has thread' result and merge_ready is never emitted.
+    """
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        fake = tmp / "gh"
+        fake.write_text(FAKE_GH_WITH_THREAD)
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+        persistent = tmp / "state"
+        persistent.mkdir()
+
+        for _ in range(3):
+            result = _run_cycle(tmp, persistent, "a" * 40)
+            assert result.returncode in (0, 1), result.stderr
+            assert '"type":"merge_ready"' not in result.stdout, result.stdout
+
+        assert _thread_calls(tmp) == 1
