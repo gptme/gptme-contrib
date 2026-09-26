@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from gptme_voice.handoff import (
     build_handoff,
     caller_hash,
     compute_hmac,
+    get_valid_agents,
     make_state_dirs,
     validate,
 )
@@ -24,6 +26,13 @@ from gptme_voice.handoff import (
 SECRET = b"bob-alice-handoff-test-secret-v1!"
 SAMPLE_NOW = datetime(2026, 4, 21, 10, 0, 0, tzinfo=timezone.utc)
 SAMPLE_VALIDATION_NOW = SAMPLE_NOW + timedelta(seconds=30)
+
+
+@pytest.fixture(autouse=True)
+def _default_test_roster(monkeypatch):
+    """The roster is env-only (no built-in default), so tests that exercise the
+    classic two-agent flow set it here; roster-specific tests override it."""
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "bob,alice,gordon,sven")
 
 
 # ---------- compute_hmac / validate ----------
@@ -254,6 +263,127 @@ def test_handoff_writer_rejects_invalid_from_agent(tmp_path: Path):
 def test_handoff_writer_rejects_empty_secret(tmp_path: Path):
     with pytest.raises(ValueError, match="secret"):
         HandoffWriter(tmp_path, from_agent="bob", secret=b"")
+
+
+# ---------- GPTME_VOICE_AGENTS — deployment-configurable roster ----------
+
+
+def test_get_valid_agents_unset_env_is_empty_roster(monkeypatch):
+    """No built-in default roster: an unset GPTME_VOICE_AGENTS locks the
+    deployment down (every handoff name invalid) until the operator configures
+    the roster. Regression: pre-env-only code returned a hard-coded four-agent
+    set."""
+    monkeypatch.delenv("GPTME_VOICE_AGENTS", raising=False)
+    assert get_valid_agents() == frozenset()
+
+
+def test_get_valid_agents_respects_env_override(monkeypatch):
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "alice,charlie,diana")
+    agents = get_valid_agents()
+    assert agents == frozenset({"alice", "charlie", "diana"})
+    assert "bob" not in agents
+
+
+@pytest.mark.parametrize("value", ["", " , ", ",", " ,,"])
+def test_get_valid_agents_set_but_empty_is_empty_roster(monkeypatch, value):
+    """A set-but-empty GPTME_VOICE_AGENTS yields an empty roster (lockdown),
+    NOT the built-in default — the value replaces the default even when it
+    parses to no names. Regression: pre-fix code fell back to VALID_AGENTS."""
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", value)
+    assert get_valid_agents() == frozenset()
+
+
+def test_non_default_agent_handoff_writer_succeeds(tmp_path, monkeypatch):
+    """A fork with a non-default agent name can create a HandoffWriter when
+    GPTME_VOICE_AGENTS includes that name — fails on the pre-fix code where
+    VALID_AGENTS was a hardcoded frozenset."""
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "alice,myrtle")
+    writer = HandoffWriter(tmp_path, from_agent="myrtle", secret=SECRET)
+    assert writer.from_agent == "myrtle"
+
+
+def test_non_default_agent_build_and_validate_roundtrip(monkeypatch):
+    """A handoff between two non-default agents validates end-to-end when the
+    roster env var covers both names."""
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "myrtle,oracle")
+    payload = build_handoff(
+        from_agent="myrtle",
+        to_agent="oracle",
+        caller_id="test-caller",
+        reason="routing",
+        secret=SECRET,
+        now=SAMPLE_NOW,
+    )
+    result = validate(payload, secret=SECRET, now=SAMPLE_VALIDATION_NOW)
+    assert result.ok, result.reason
+
+
+def test_unset_env_warns_once_then_stays_lockdown(monkeypatch, caplog):
+    """Unset GPTME_VOICE_AGENTS logs exactly one loud migration warning
+    (per process) and yields an empty roster — the deprecation signal for
+    deployments that relied on the old built-in default."""
+    import gptme_voice.handoff as handoff_mod
+
+    monkeypatch.delenv("GPTME_VOICE_AGENTS", raising=False)
+    monkeypatch.setattr(handoff_mod, "_warned_unset_roster", False)
+    with caplog.at_level(logging.WARNING, logger="gptme_voice.handoff"):
+        assert get_valid_agents() == frozenset()
+        assert get_valid_agents() == frozenset()
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+    assert "GPTME_VOICE_AGENTS" in caplog.records[0].message
+
+
+def test_non_default_agent_rejected_without_env(monkeypatch):
+    """Without GPTME_VOICE_AGENTS the roster is empty, so every name —
+    default or otherwise — is rejected."""
+    monkeypatch.delenv("GPTME_VOICE_AGENTS", raising=False)
+    with pytest.raises(ValueError, match="not in"):
+        build_handoff(
+            from_agent="myrtle",
+            to_agent="bob",
+            caller_id="x",
+            reason="r",
+            secret=SECRET,
+        )
+
+
+def test_env_roster_matches_payload_case_insensitively(monkeypatch):
+    """The env roster is lowercased, so a deployment spelling names naturally
+    (``Alpha,Charlie``) must accept payloads that use the same capitalization.
+    Previously the roster was lowercased but payload membership checks were raw,
+    so this plausible configuration silently locked every handoff down."""
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "Alpha,Charlie")
+    payload = build_handoff(
+        from_agent="Alpha",
+        to_agent="Charlie",
+        caller_id="test-caller",
+        reason="routing",
+        secret=SECRET,
+        now=SAMPLE_NOW,
+    )
+    assert payload["from_agent"] == "Alpha"
+    result = validate(payload, secret=SECRET, now=SAMPLE_VALIDATION_NOW)
+    assert result.ok, result.reason
+
+
+def test_env_roster_case_only_difference_is_self_handoff(monkeypatch):
+    """Names differing only by case are the same agent, so the self-handoff
+    guard must compare canonical (lowercased) names."""
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "Alpha,Charlie")
+    with pytest.raises(ValueError, match="must differ"):
+        build_handoff(
+            from_agent="Alpha",
+            to_agent="alpha",
+            caller_id="x",
+            reason="r",
+            secret=SECRET,
+        )
+
+
+def test_handoff_writer_accepts_capitalized_from_agent(tmp_path, monkeypatch):
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "Alpha,Charlie")
+    writer = HandoffWriter(tmp_path, from_agent="Alpha", secret=SECRET)
+    assert writer.from_agent == "Alpha"
 
 
 # ---------- make_state_dirs ----------

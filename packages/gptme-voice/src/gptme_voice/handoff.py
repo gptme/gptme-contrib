@@ -1,8 +1,8 @@
 """Cross-agent voice handoff protocol (v1).
 
-Library module for initiating and validating voice-call handoffs between agents
-(Bob, Alice, Gordon, Sven). The protocol is specified in
-knowledge/technical-designs/cross-agent-voice-handoff.md (in Bob's workspace).
+Library module for initiating and validating voice-call handoffs between peer
+agents. The protocol is specified in
+knowledge/technical-designs/cross-agent-voice-handoff.md.
 
 This module contains the load-bearing primitives:
 
@@ -13,8 +13,8 @@ This module contains the load-bearing primitives:
 * ``HandoffWriter`` — convenience wrapper for the initiator side: signs a
   payload and publishes it to a shared state directory via atomic rename.
 
-Phase 1 shipped a protocol spec, validator, and a dry-run harness living
-in Bob's workspace (``scripts/voice-handoff-*.py``). This module consolidates
+Phase 1 shipped a protocol spec, validator, and a dry-run harness as
+workspace scripts (``scripts/voice-handoff-*.py``). This module consolidates
 the primitives inside the ``gptme-voice`` package so downstream integrations
 (voice-server write-side, target-agent listener) can depend on a typed,
 unit-tested library instead of importing from a sibling script via
@@ -27,6 +27,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 import urllib.request
@@ -50,9 +51,59 @@ REQUIRED_FIELDS: tuple[str, ...] = (
     "hmac",
 )
 
-VALID_AGENTS: frozenset[str] = frozenset({"bob", "alice", "gordon", "sven"})
-
 STATE_SUBDIRS: tuple[str, ...] = ("handoff", "claimed", "archive", "rejected")
+
+_ENV_AGENTS = "GPTME_VOICE_AGENTS"
+
+_log = logging.getLogger(__name__)
+
+#: Set once per process when an unset GPTME_VOICE_AGENTS is first observed, so
+#: existing deployments that have not migrated yet get one loud, actionable
+#: warning instead of silent breakage or per-call log spam.
+_warned_unset_roster = False
+
+
+def _roster_name(name: str) -> str:
+    """Canonical form for roster membership checks.
+
+    Must match the normalization applied to ``GPTME_VOICE_AGENTS`` in
+    :func:`get_valid_agents`, so a deployment that spells names naturally
+    (``GPTME_VOICE_AGENTS=Alpha,Charlie``) also accepts a payload built with
+    ``from_agent="Alpha"``.
+    """
+    return name.strip().lower()
+
+
+def get_valid_agents() -> frozenset[str]:
+    """Return the roster of valid agent names for this deployment.
+
+    The roster is **deployment configuration**: set ``GPTME_VOICE_AGENTS`` to a
+    comma-separated list of agent names at launch::
+
+        GPTME_VOICE_AGENTS=alpha,charlie,diana gptme-voice-server ...
+
+    There is no built-in default roster — the library does not ship a hard-coded
+    set of agent identities. An **unset or blank** variable yields an **empty**
+    roster, meaning every handoff name is invalid (lockdown) until the operator
+    configures who may hand off. Roster names are lowercased and empty entries
+    are ignored; payload agent names are matched case-insensitively (same
+    normalization), so ``GPTME_VOICE_AGENTS=Alpha,Charlie`` accepts a payload
+    with ``from_agent="Alpha"``.
+    """
+    global _warned_unset_roster
+
+    raw = os.environ.get(_ENV_AGENTS)
+    if raw is None:
+        if not _warned_unset_roster:
+            _log.warning(
+                "GPTME_VOICE_AGENTS is not set — the handoff roster is empty "
+                "(lockdown): every handoff name is rejected. Configure "
+                "GPTME_VOICE_AGENTS for this deployment."
+            )
+            _warned_unset_roster = True
+        return frozenset()
+    return frozenset(_roster_name(n) for n in raw.split(",") if n.strip())
+
 
 _DEFAULT_TTL_SECONDS = 60
 
@@ -115,13 +166,15 @@ def validate(
         if field not in payload:
             return ValidationResult(False, f"missing required field: {field}")
 
+    valid = get_valid_agents()
     for agent_field in ("from_agent", "to_agent"):
-        if payload[agent_field] not in VALID_AGENTS:
+        name = payload[agent_field]
+        if not isinstance(name, str) or _roster_name(name) not in valid:
             return ValidationResult(
                 False,
-                f"{agent_field}={payload[agent_field]!r} not in {sorted(VALID_AGENTS)}",
+                f"{agent_field}={name!r} not in {sorted(valid)}",
             )
-    if payload["from_agent"] == payload["to_agent"]:
+    if _roster_name(payload["from_agent"]) == _roster_name(payload["to_agent"]):
         return ValidationResult(False, "from_agent and to_agent must differ")
 
     payload_caller_hash = payload["caller_hash"]
@@ -195,11 +248,12 @@ def build_handoff(
     ``resume_hint``, etc.) that aren't required by the validator but are useful
     for the target agent.
     """
-    if from_agent not in VALID_AGENTS:
-        raise ValueError(f"from_agent={from_agent!r} not in {sorted(VALID_AGENTS)}")
-    if to_agent not in VALID_AGENTS:
-        raise ValueError(f"to_agent={to_agent!r} not in {sorted(VALID_AGENTS)}")
-    if from_agent == to_agent:
+    valid = get_valid_agents()
+    if _roster_name(from_agent) not in valid:
+        raise ValueError(f"from_agent={from_agent!r} not in {sorted(valid)}")
+    if _roster_name(to_agent) not in valid:
+        raise ValueError(f"to_agent={to_agent!r} not in {sorted(valid)}")
+    if _roster_name(from_agent) == _roster_name(to_agent):
         raise ValueError("from_agent and to_agent must differ")
 
     now = now or datetime.now(timezone.utc)
@@ -309,8 +363,9 @@ class HandoffWriter:
         from_agent: str,
         secret: bytes,
     ) -> None:
-        if from_agent not in VALID_AGENTS:
-            raise ValueError(f"from_agent={from_agent!r} not in {sorted(VALID_AGENTS)}")
+        valid = get_valid_agents()
+        if _roster_name(from_agent) not in valid:
+            raise ValueError(f"from_agent={from_agent!r} not in {sorted(valid)}")
         if not secret:
             raise ValueError("secret must be non-empty bytes")
         self.state_dir = state_dir
@@ -375,8 +430,9 @@ class HandoffHubWriter:
         from_agent: str,
         secret: bytes,
     ) -> None:
-        if from_agent not in VALID_AGENTS:
-            raise ValueError(f"from_agent={from_agent!r} not in {sorted(VALID_AGENTS)}")
+        valid = get_valid_agents()
+        if _roster_name(from_agent) not in valid:
+            raise ValueError(f"from_agent={from_agent!r} not in {sorted(valid)}")
         if not secret:
             raise ValueError("secret must be non-empty bytes")
         self.hub_url = hub_url.rstrip("/")
@@ -455,9 +511,9 @@ __all__ = [
     "PROTOCOL_VERSION",
     "REQUIRED_FIELDS",
     "STATE_SUBDIRS",
-    "VALID_AGENTS",
     "HandoffHubWriter",
     "HandoffWriter",
+    "get_valid_agents",
     "PublishedHandoff",
     "ValidationResult",
     "archive_filename",
