@@ -716,10 +716,12 @@ def _score_skill_descriptor(lesson: dict[str, Any], prompt_lower: str) -> tuple[
     Returns ``(score, matched_by)`` where ``score > 0`` only for skill files
     (``is_skill=True``) with at least three matching descriptor tokens.
 
-    The threshold of 3 (raised from 2) prevents ambient workspace tokens like
-    ``bob``, ``gptme``, ``session``, ``autonomous`` — which appear in nearly
-    every agent prompt — from triggering skills that share only those generic
-    tokens with the query. Skills with specific keywords should use
+    The threshold of 3 (raised from 2) reduces ambient-token false positives:
+    workspace tokens like ``bob``, ``gptme``, ``session``, ``autonomous``
+    appear in nearly every agent prompt, so a skill sharing only one or two
+    generic tokens no longer fires. This narrows but does not eliminate the
+    problem — a skill whose description contains two ambient tokens plus one
+    specific token will still fire (they are not in ``_DESCRIPTOR_STOPWORDS``). Skills with specific keywords should use
     ``match.keywords`` for routing; the descriptor path is a soft fallback for
     skills whose ``when_to_use`` or ``description`` is specific enough.
     """

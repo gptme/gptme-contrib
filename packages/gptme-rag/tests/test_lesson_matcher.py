@@ -2036,8 +2036,9 @@ class TestScoreSkillDescriptorMinOverlap:
     def test_three_token_overlap_fires(self):
         """A skill with exactly 3 specific token overlap must score > 0.
 
-        Exactly 3 so this pins the new threshold: it fails at 4+ just as the
-        two-token test fails at 3.
+        Exactly 3 so this pins the lower boundary of the new threshold: the
+        two-token test shows 2 scores 0, this shows 3 scores > 0 (and any
+        larger overlap also fires, since the threshold is >= 3).
         """
         from gptme_rag.lesson_matcher import _score_skill_descriptor
 
