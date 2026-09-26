@@ -444,6 +444,11 @@ CONFIGS = {
     ),
 }
 
+# Directories under a tasks tree that never hold real tasks. Shared by
+# `load_tasks` (recursive glob) and the lazy archive resolver so both agree on
+# which files can resolve a dependency.
+EXCLUDED_TASK_DIRS = {"templates", "video-scripts", "agent-setup-interview"}
+
 PRIORITY_RANK: dict[str | None, int] = {
     "urgent": 4,
     "high": 3,
@@ -1259,7 +1264,7 @@ def load_tasks(
     tasks = []
 
     # Directories to exclude
-    excluded_dirs = {"templates", "video-scripts", "agent-setup-interview"}
+    excluded_dirs = EXCLUDED_TASK_DIRS
 
     # Handle single file case
     if single_file:
@@ -1474,6 +1479,121 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
         "coordination_mode": task.coordination_mode,
         "pool": task_pool(task),
     }
+
+
+class _LazyArchiveTasks(Dict[str, TaskInfo]):
+    """Task lookup that resolves archived tasks on demand.
+
+    See :func:`build_dependency_universe` for why this exists. Live tasks are
+    held directly; an archived task is parsed only when its name is looked up
+    and is not already present.
+
+    Contract: this is a *lookup* structure. ``get``/``[]``/``in`` resolve
+    archived tasks on demand, but iteration, ``len()``, ``keys()`` and
+    ``items()`` only report entries already resolved (the live tasks, plus any
+    archived task fetched earlier). Consumers that need the full archived set
+    must use ``gptodo check``'s eager ``dependency_universe`` instead — the
+    whole point here is to avoid enumerating the archive.
+    """
+
+    def __init__(
+        self,
+        live_tasks: Dict[str, TaskInfo],
+        archive_dir: Path,
+        errors_out: List[Tuple[Path, str]] | None = None,
+    ) -> None:
+        super().__init__(live_tasks)
+        self._archive_dir = archive_dir
+        self._errors_out = errors_out
+        self._archive_index: Optional[Dict[str, Path]] = None
+
+    def _archived_path(self, name: str) -> Optional[Path]:
+        """Return the archived file for ``name``, indexing the archive on first use."""
+        if self._archive_index is None:
+            index: Dict[str, Path] = {}
+            if self._archive_dir.is_dir():
+                # Sorted so the resolution is deterministic when duplicate stems
+                # exist in nested archive subdirectories. Mirror load_tasks'
+                # recursive exclusion list, otherwise a file under
+                # archive/templates/ could resolve a dependency here that
+                # `gptodo check` (which uses load_tasks) reports as missing.
+                for path in sorted(self._archive_dir.rglob("*.md")):
+                    if any(d in path.parts for d in EXCLUDED_TASK_DIRS):
+                        continue
+                    # Overwrite, not setdefault: the pre-lazy eager path built
+                    # its dict with `dep_dict.update(...)` (last duplicate
+                    # wins), so keep that winner-selection shape. Sorted input
+                    # makes the winner deterministic, which glob order alone
+                    # never was.
+                    index[path.stem] = path
+            self._archive_index = index
+        return self._archive_index.get(name)
+
+    def _load_archived(self, name: str) -> Optional[TaskInfo]:
+        path = self._archived_path(name)
+        if path is None:
+            return None
+        for task in load_tasks(self._archive_dir, single_file=path, errors_out=self._errors_out):
+            if task.name == name:
+                self[name] = task
+                return task
+        return None
+
+    def copy(self) -> "_LazyArchiveTasks":
+        """Preserve lazy resolution through dict copies.
+
+        ``simulate_sequence`` takes a plain-dict snapshot of the universe, so a
+        plain ``dict(...)`` copy would silently drop lazy resolution: an
+        archived dep that a blocked task never resolved pre-simulation would
+        be missing from the snapshot and the task would stay falsely blocked
+        after its live blocker is simulated done. ``copy()`` keeps the lazy
+        behaviour (and shares the archive index, which is built at most once
+        per source dict anyway).
+        """
+        dup = _LazyArchiveTasks(self, self._archive_dir, self._errors_out)
+        dup._archive_index = self._archive_index
+        return dup
+
+    def get(self, name: str, default: Any = None) -> Any:
+        existing = super().get(name)
+        if existing is not None:
+            return existing
+        return self._load_archived(name) or default
+
+    def __getitem__(self, name: str) -> TaskInfo:
+        try:
+            return super().__getitem__(name)
+        except KeyError:
+            task = self._load_archived(name)
+            if task is None:
+                raise
+            return task
+
+    def __contains__(self, name: object) -> bool:
+        if super().__contains__(name):
+            return True
+        return isinstance(name, str) and self._load_archived(name) is not None
+
+
+def build_dependency_universe(
+    live_tasks: Dict[str, TaskInfo],
+    tasks_dir: Path,
+    errors_out: List[Tuple[Path, str]] | None = None,
+) -> Dict[str, TaskInfo]:
+    """Build the dependency-lookup dict for a task tree, including archived tasks.
+
+    ``load_tasks(tasks_dir)`` only globs the top level, so a task whose
+    prerequisite was moved to ``tasks/archive/`` looks like it has a *missing*
+    dependency and is permanently blocked (``is_task_ready`` treats a missing
+    dependency as blocking). Archived tasks therefore have to be resolvable too.
+
+    Parsing the whole archive up front costs ~0.8s on a large task tree
+    (thousands of files), while only a handful of names are usually referenced.
+    The returned mapping starts from the live tasks and, on a lookup miss,
+    indexes the archive by filename stem and parses only the requested file.
+    Live tasks always win over a same-named archived task.
+    """
+    return _LazyArchiveTasks(live_tasks, tasks_dir / "archive", errors_out)
 
 
 def is_task_ready(

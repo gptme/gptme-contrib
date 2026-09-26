@@ -120,7 +120,9 @@ def simulate_sequence(
         return []
 
     # Simulated view of the world. Never written back to disk.
-    sim_tasks: Dict[str, TaskInfo] = dict(tasks_dict)
+    # .copy() (not dict(...)) so a lazy dependency universe keeps resolving
+    # archived deps in the simulated view; see _LazyArchiveTasks.copy.
+    sim_tasks: Dict[str, TaskInfo] = tasks_dict.copy()
     remaining: List[TaskInfo] = list(candidates)
 
     picked: List[SequenceStep] = []
