@@ -125,11 +125,20 @@ def _structured_error_signals(rec: dict) -> list[str]:
     err = rec.get("error")
     if isinstance(err, str) and err.strip():
         signals.append(err.strip())
+    # Claude Code changed these fields from snake_case to camelCase in its
+    # stream-json output.  Accept both spellings: current OAuth failures carry
+    # only the camelCase form, so missing it leaves the synthetic assistant
+    # turn looking like a normal model response.
     status = rec.get("api_error_status")
+    if status is None:
+        status = rec.get("apiErrorStatus")
     if status is not None:
         signals.append(f"api_error_status:{status}")
+    code = rec.get("api_error_code") or rec.get("apiErrorCode")
+    if isinstance(code, str) and code.strip():
+        signals.append(f"api_error_code:{code.strip()}")
     result = rec.get("result")
-    if rec.get("is_error") and isinstance(result, str) and result.strip():
+    if (rec.get("is_error") or rec.get("isError")) and isinstance(result, str) and result.strip():
         signals.append(result.strip()[:500])
     return signals
 
@@ -137,7 +146,8 @@ def _structured_error_signals(rec: dict) -> list[str]:
 def _extract_trajectory_error_line(trajectory_path: Path | None) -> str | None:
     if trajectory_path is None or not trajectory_path.is_file():
         return None
-    last_match: str | None = None
+    last_structured_match: str | None = None
+    last_content_match: str | None = None
     try:
         with trajectory_path.open(encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -148,16 +158,27 @@ def _extract_trajectory_error_line(trajectory_path: Path | None) -> str | None:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                candidates: list[str] = list(_structured_error_signals(rec))
-                content = _record_content_text(rec)
-                if content:
-                    candidates.extend(part.strip() for part in content.splitlines() if part.strip())
-                for part in candidates:
-                    if part and _ERROR_LINE_RE.search(part):
-                        last_match = part[:500]
+                structured = _structured_error_signals(rec)
+                if structured:
+                    detail = "; ".join(structured)
+                    if _ERROR_LINE_RE.search(detail):
+                        last_structured_match = detail[:500]
+
+                # Prompt/attachment records contain the full injected session
+                # instructions, including words such as "failed", "403", and
+                # "authentication".  They are input, not failure evidence.
+                # Only inspect prose emitted by an assistant or explicit error
+                # result after structured fields have been considered.
+                is_error_record = rec.get("type") in {"error", "result"}
+                is_error_record = bool(is_error_record or rec.get("is_error") or rec.get("isError"))
+                if _record_is_assistant(rec) or is_error_record:
+                    content = _record_content_text(rec)
+                    for part in (part.strip() for part in content.splitlines()):
+                        if part and _ERROR_LINE_RE.search(part):
+                            last_content_match = part[:500]
     except OSError:
         return None
-    return last_match
+    return last_structured_match or last_content_match
 
 
 def classify_failure_reason(

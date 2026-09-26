@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-
 from gptme_sessions.failure_capture import (
     FAILURE_REASON_AUTH,
     FAILURE_REASON_INVALID_REQUEST,
@@ -460,6 +459,59 @@ def test_capture_cc_weekly_limit_stream_json(tmp_path: Path):
     assert reason == FAILURE_REASON_RATE_LIMIT
     assert err is not None
     assert "429" in err or "rate_limit" in err or "weekly limit" in err.lower()
+
+
+def test_capture_cc_camelcase_oauth_error_ignores_prompt_prose(tmp_path: Path):
+    """Current CC OAuth errors outrank unrelated failure words in the prompt."""
+    traj = tmp_path / "conversation.jsonl"
+    records = [
+        {
+            "type": "attachment",
+            "content": "If the selected lane failed, document the blocker.",
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "model": "<synthetic>",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Your organization has disabled Claude subscription "
+                            "access for Claude Code"
+                        ),
+                    }
+                ],
+            },
+            "error": "oauth_org_not_allowed",
+            "isApiErrorMessage": True,
+            "apiErrorStatus": 403,
+            "apiErrorCode": "oauth_not_allowed_for_organization",
+        },
+        {
+            "type": "attachment",
+            "content": "A second claim denied means the selected lane failed.",
+        },
+    ]
+    traj.write_text(
+        "".join(json.dumps(rec) + "\n" for rec in records),
+        encoding="utf-8",
+    )
+
+    reason, err = capture_session_failure(
+        exit_code=1,
+        duration_seconds=48,
+        input_tokens=0,
+        trajectory_path=traj,
+        harness_stderr_path=None,
+    )
+
+    assert reason == FAILURE_REASON_AUTH
+    assert err is not None
+    assert "api_error_status:403" in err
+    assert "oauth_not_allowed_for_organization" in err
+    assert "selected lane failed" not in err
 
 
 def test_capture_allowed_rate_limit_event_not_rate_limit(tmp_path: Path):
