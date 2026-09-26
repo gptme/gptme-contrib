@@ -59,6 +59,19 @@ MIN_BANDIT_OBSERVATIONS = 5
 # Operator escape hatch: set PM_DISPATCH_EXCLUDE_REPOS=owner/repo1,owner/repo2 or owner/*
 # to opt out specific repos.  Set to empty string explicitly to make the intent clear.
 PM_DISPATCH_EXCLUDE_REPOS_ENV = "PM_DISPATCH_EXCLUDE_REPOS"
+
+# Prefix for transient slot unit names (``<prefix>-<lane>-slot-<key>``).
+# Defaults to Bob's ``bob-pm`` so existing deployments keep their unit names;
+# other agents set ``PM_UNIT_PREFIX`` (e.g. ``alice-pm``) so their slots do not
+# collide with, or get counted against, another agent's on a shared host.
+PM_UNIT_PREFIX_ENV = "PM_UNIT_PREFIX"
+DEFAULT_UNIT_PREFIX = "bob-pm"
+
+
+def _resolve_unit_prefix(unit_prefix: str | None = None) -> str:
+    return unit_prefix or os.environ.get(PM_UNIT_PREFIX_ENV) or DEFAULT_UNIT_PREFIX
+
+
 _PM_DISPATCH_EXCLUDE_REPOS_DEFAULT: tuple[str, ...] = ()
 
 
@@ -828,8 +841,9 @@ class LaneDispatcher:
                 slot_key = derive_slot_key(
                     item.repo, item.number, item.types, item.title
                 )
-                unit_name = _derive_unit_name(slot_key, lane)
-                legacy_name = _derive_legacy_unit_name(slot_key)
+                prefix = self.slot_manager.unit_prefix
+                unit_name = _derive_unit_name(slot_key, lane, prefix)
+                legacy_name = _derive_legacy_unit_name(slot_key, prefix)
 
                 # Dedupe: skip if slot is already busy for this key
                 if self.slot_manager._is_busy(unit_name) or self.slot_manager._is_busy(
@@ -1017,13 +1031,15 @@ class LaneDispatcher:
             return False
 
 
-def _derive_unit_name(slot_key: str, lane: str, prefix: str = "bob-pm") -> str:
+def _derive_unit_name(
+    slot_key: str, lane: str, prefix: str = DEFAULT_UNIT_PREFIX
+) -> str:
     """Convert slot key to safe systemd unit name."""
     safe = slot_key.translate(str.maketrans("/#:", "---"))
     return f"{prefix}-{lane}-slot-{safe}"
 
 
-def _derive_legacy_unit_name(slot_key: str, prefix: str = "bob-pm") -> str:
+def _derive_legacy_unit_name(slot_key: str, prefix: str = DEFAULT_UNIT_PREFIX) -> str:
     """Generate the legacy (pre-lane) unit name for backward compat."""
     safe = slot_key.translate(str.maketrans("/#:", "---"))
     return f"{prefix}-slot-{safe}"
@@ -1047,13 +1063,21 @@ class SlotManager:
         count_running: Callable | None = None,
         count_running_lane: Callable | None = None,
         is_busy: Callable | None = None,
+        unit_prefix: str | None = None,
     ) -> None:
         self.slot_cap = slot_cap
         self.fast_burst_allowance = fast_burst_allowance
+        # Single source of truth for unit naming: LaneDispatcher names units
+        # with this prefix and the default probes count units with it.
+        self.unit_prefix = _resolve_unit_prefix(unit_prefix)
 
         # Injected callbacks for testability. Default to systemctl probes.
-        self._count_running = count_running or _default_count_running
-        self._count_running_lane = count_running_lane or _default_count_running_lane
+        self._count_running = count_running or (
+            lambda: _default_count_running(self.unit_prefix)
+        )
+        self._count_running_lane = count_running_lane or (
+            lambda lane: _default_count_running_lane(lane, self.unit_prefix)
+        )
         self._is_busy = is_busy or _default_slot_is_busy
 
     @property
@@ -1091,7 +1115,7 @@ class SlotManager:
         return False
 
 
-def _default_count_running() -> int:
+def _default_count_running(prefix: str = DEFAULT_UNIT_PREFIX) -> int:
     """Count running slot units via systemctl."""
     import subprocess
 
@@ -1100,7 +1124,7 @@ def _default_count_running() -> int:
             "systemctl",
             "--user",
             "list-units",
-            "bob-pm-*-slot-*",
+            f"{prefix}-*-slot-*",
             "--all",
             "--no-legend",
         ],
@@ -1116,7 +1140,7 @@ def _default_count_running() -> int:
     return count
 
 
-def _default_count_running_lane(lane: str) -> int:
+def _default_count_running_lane(lane: str, prefix: str = DEFAULT_UNIT_PREFIX) -> int:
     """Count running slot units for a specific lane."""
     import subprocess
 
@@ -1125,7 +1149,7 @@ def _default_count_running_lane(lane: str) -> int:
             "systemctl",
             "--user",
             "list-units",
-            f"bob-pm-{lane}-slot-*",
+            f"{prefix}-{lane}-slot-*",
             "--all",
             "--no-legend",
         ],
@@ -1437,7 +1461,7 @@ def _sanitize_unit_name(key: str) -> str:
 
 def dispatch_grouped_items(
     items: list[SlotItem],
-    unit_prefix: str = "bob-pm",
+    unit_prefix: str | None = None,
     slot_cap: int = DEFAULT_SLOT_CAP,
     fast_burst_allowance: int = DEFAULT_FAST_BURST_ALLOWANCE,
     ledger: DispatchLedger | None = None,
@@ -1458,7 +1482,8 @@ def dispatch_grouped_items(
     items
         Grouped ``SlotItem`` instances to dispatch.
     unit_prefix
-        Prefix for generated unit names.
+        Prefix for generated unit names. Defaults to ``PM_UNIT_PREFIX`` or
+        ``DEFAULT_UNIT_PREFIX``.
     slot_cap
         Maximum concurrent dispatch slots.
     fast_burst_allowance
@@ -1489,6 +1514,7 @@ def dispatch_grouped_items(
     (``project-monitoring-dispatch.sh``) where ``record_slot_dispatch`` is called
     immediately before ``systemd-run`` with no rollback on failure.
     """
+    unit_prefix = _resolve_unit_prefix(unit_prefix)
     if cooldown_secs is None:
         _env_val = os.environ.get(DISPATCH_COOLDOWN_SECS_ENV, "")
         try:
