@@ -169,3 +169,174 @@ def test_next_treats_archived_done_dep_as_met(tmp_path: Path, monkeypatch) -> No
         "Expected a next task but got None.\nFull output:\n" + result.output
     )
     assert data["next_task"]["name"] == "foo"
+
+
+def test_ready_does_not_parse_whole_archive(tmp_path: Path, monkeypatch) -> None:
+    """Resolving archived deps must not eagerly parse every archived task file.
+
+    Regression guard: `ready`/`next` used to call
+    `load_tasks(archive_dir, recursive=True)` on every invocation, which costs
+    ~0.8s on a large task tree (thousands of archived files) even though only a
+    handful of names are ever referenced. Archived tasks are now resolved on
+    demand — only the referenced file is parsed.
+    """
+    _write_fixtures(tmp_path, ARCHIVED_DONE_TASK)
+    monkeypatch.chdir(tmp_path)
+
+    import gptodo.utils as gptodo_utils
+
+    real_load_tasks = gptodo_utils.load_tasks
+    calls: list[dict] = []
+
+    def spy(tasks_dir, recursive=False, single_file=None, errors_out=None):
+        calls.append(
+            {
+                "tasks_dir": Path(tasks_dir),
+                "recursive": recursive,
+                "single_file": single_file,
+            }
+        )
+        return real_load_tasks(
+            tasks_dir, recursive=recursive, single_file=single_file, errors_out=errors_out
+        )
+
+    monkeypatch.setattr(gptodo_utils, "load_tasks", spy)
+
+    result = CliRunner().invoke(cli, ["ready", "--state", "backlog", "--json"])
+
+    assert result.exit_code == 0, result.output
+    data = _parse_json(result)
+    ready_names = [t["name"] for t in data["ready_tasks"]]
+    assert "foo" in ready_names, result.output
+
+    eager = [c for c in calls if c["recursive"] and c["single_file"] is None]
+    assert eager == [], f"the archive must not be parsed eagerly, got calls: {eager!r}"
+    assert any(
+        c["single_file"] is not None and Path(c["single_file"]).name == "archived-prereq.md"
+        for c in calls
+    ), f"the referenced archived file must be loaded by path, got calls: {calls!r}"
+
+
+def test_ready_resolves_archived_dep_in_nested_subdir(tmp_path: Path, monkeypatch) -> None:
+    """Archived deps nested under tasks/archive/<subdir>/ must still resolve.
+
+    The previous eager load used `recursive=True`, so a lazy resolver that only
+    probed `archive/<name>.md` would regress nested archives.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "archive" / "2026").mkdir(parents=True)
+    (tasks_dir / "foo.md").write_text(DEPENDENT_TASK)
+    (tasks_dir / "archive" / "2026" / "archived-prereq.md").write_text(ARCHIVED_DONE_TASK)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(cli, ["ready", "--state", "backlog", "--json"])
+
+    assert result.exit_code == 0, result.output
+    data = _parse_json(result)
+    ready_names = [t["name"] for t in data["ready_tasks"]]
+    assert "foo" in ready_names, (
+        "Task depending on an archived-done prerequisite in a nested subdir must be "
+        f"ready, got: {ready_names!r}\nFull output:\n{result.output}"
+    )
+
+
+def test_ready_ignores_archived_file_in_excluded_dir(tmp_path: Path, monkeypatch) -> None:
+    """A file under tasks/archive/templates/ must not resolve a dependency.
+
+    `load_tasks(recursive=True)` skips `templates`, `video-scripts` and
+    `agent-setup-interview`, so `gptodo check` reports a dependency that only
+    exists there as missing. The lazy archive index must apply the same filter,
+    or `ready`/`next` would unblock a task that `check` calls broken.
+    """
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "archive" / "templates").mkdir(parents=True)
+    (tasks_dir / "foo.md").write_text(DEPENDENT_TASK)
+    (tasks_dir / "archive" / "templates" / "archived-prereq.md").write_text(ARCHIVED_DONE_TASK)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(cli, ["ready", "--state", "backlog", "--json"])
+
+    assert result.exit_code == 0, result.output
+    data = _parse_json(result)
+    assert data["ready_tasks"] == [], (
+        "A prerequisite that exists only under tasks/archive/templates/ is not a task "
+        f"(load_tasks excludes it), so `foo` must stay blocked; got: {data['ready_tasks']!r}"
+    )
+
+
+def test_next_sim_surfaces_task_blocked_by_unresolved_archived_dep(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A task that only unblocks mid-simulation must still resolve archived deps.
+
+    Regression for the lazy-universe + simulate_sequence interaction: if the
+    task's ``depends`` lists the live (still todo) blocker BEFORE the archived
+    dep, ``is_task_ready`` short-circuits on the live blocker during the
+    initial ready filter and the archived dep is never resolved into the lazy
+    dict. The simulation snapshot must not turn that into a permanently
+    falsely-blocked task once the live blocker is simulated done.
+    """
+    tasks_dir = tmp_path / "tasks"
+    archive_dir = tasks_dir / "archive"
+    archive_dir.mkdir(parents=True)
+
+    (tasks_dir / "a.md").write_text(
+        """\
+---
+state: backlog
+created: 2026-09-26T00:00:00+00:00
+depends: [b, archived-c]
+---
+# Task A (depends on live todo b, then archived done c)
+"""
+    )
+    (tasks_dir / "b.md").write_text(
+        """\
+---
+state: backlog
+created: 2026-09-26T00:00:00+00:00
+---
+# Live task b (ready on its own)
+"""
+    )
+    (archive_dir / "archived-c.md").write_text(ARCHIVED_DONE_TASK)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(cli, ["next", "--limit", "2", "--json"])
+
+    assert result.exit_code == 0, result.output
+    data = _parse_json(result)
+    step_names = [step["task"]["name"] for step in data.get("sequence", [])]
+    assert "a" in step_names, (
+        "Task a must surface in the simulation after its live blocker b is "
+        f"picked; got steps: {step_names!r}\nFull output:\n{result.output}"
+    )
+
+
+def test_archived_duplicate_stem_last_sorted_wins(tmp_path: Path, monkeypatch) -> None:
+    """Duplicate stems across archive subdirs resolve like the eager path did.
+
+    The eager path did ``dep_dict.update({t.name: t ...})`` — the LAST duplicate
+    wins. The lazy index must keep that winner-selection shape (last in sorted
+    order), not first-wins, or a name present in two archive subdirs could
+    resolve to a different file than the eager loader used to pick.
+    """
+    tasks_dir = tmp_path / "tasks"
+    archive_dir = tasks_dir / "archive"
+    (tasks_dir / "archive" / "subdir").mkdir(parents=True)
+
+    (tasks_dir / "foo.md").write_text(DEPENDENT_TASK)
+    (archive_dir / "archived-prereq.md").write_text(ARCHIVED_DONE_TASK)
+    (archive_dir / "subdir" / "archived-prereq.md").write_text(ARCHIVED_ACTIVE_TASK)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(cli, ["ready", "--state", "backlog", "--json"])
+
+    assert result.exit_code == 0, result.output
+    data = _parse_json(result)
+    ready_names = [t["name"] for t in data["ready_tasks"]]
+    assert "foo" not in ready_names, (
+        "The last duplicate (archive/subdir/archived-prereq.md, done) must win, "
+        "matching the eager dep_dict.update() winner-selection; got ready: "
+        f"{ready_names!r}\nFull output:\n{result.output}"
+    )

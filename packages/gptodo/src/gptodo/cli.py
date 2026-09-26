@@ -123,6 +123,7 @@ from gptodo.utils import (
     fetch_linear_issue_state,
     fetch_url_state,
     # Core utilities
+    build_dependency_universe,
     check_links,
     find_repo_root,
     get_blocking_reasons,
@@ -3652,11 +3653,9 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
     # the same name must win, matching `gptodo check`'s dependency_universe (which
     # lists live tasks first). Otherwise a stale archived copy would shadow the live
     # task's state and falsely unblock anything depending on that name.
-    dep_dict: Dict[str, TaskInfo] = {}
-    archive_dir = tasks_dir / "archive"
-    if archive_dir.is_dir():
-        dep_dict.update({t.name: t for t in load_tasks(archive_dir, recursive=True)})
-    dep_dict.update(tasks_dict)
+    # Archived tasks are resolved on demand: parsing the whole archive eagerly
+    # costs ~0.8s on a large task tree, while only a few names are referenced.
+    dep_dict = build_dependency_universe(tasks_dict, tasks_dir)
 
     # Load cache if requested
     issue_cache: Dict[str, Any] | None = None
@@ -3921,11 +3920,9 @@ def next_(output_json, use_cache, pool_filter, exclude_pool, limit, order):
     # the same name must win, matching `gptodo check`'s dependency_universe (which
     # lists live tasks first). Otherwise a stale archived copy would shadow the live
     # task's state and falsely unblock anything depending on that name.
-    dep_dict: Dict[str, TaskInfo] = {}
-    archive_dir = tasks_dir / "archive"
-    if archive_dir.is_dir():
-        dep_dict.update({t.name: t for t in load_tasks(archive_dir, recursive=True)})
-    dep_dict.update(tasks_dict)
+    # Archived tasks are resolved on demand: parsing the whole archive eagerly
+    # costs ~0.8s on a large task tree, while only a few names are referenced.
+    dep_dict = build_dependency_universe(tasks_dict, tasks_dir)
 
     # Load cache if requested
     issue_cache: Dict[str, Any] | None = None
