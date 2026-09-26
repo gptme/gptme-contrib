@@ -152,12 +152,13 @@ def _build_external_signals(result: dict) -> list[ExternalSignal]:
 def _fetch_data(
     start: date,
     end: date,
+    repos: list[str] | None = None,
 ) -> tuple[GitHubActivity, SessionStats]:
     """Fetch GitHub activity and session stats for a date range.
 
     Merges gptme session stats with Claude Code session stats.
     """
-    activity = fetch_activity(start, end, workspace=str(WORKSPACE))
+    activity = fetch_activity(start, end, repos=repos, workspace=str(WORKSPACE))
     if start == end:
         gptme_stats = fetch_session_stats(start)
     else:
@@ -295,7 +296,11 @@ def _load_weekly_summary_dict(weekly_path_base: str) -> dict[str, object] | None
     return None
 
 
-def generate_daily_with_cc(target_date: date, verbose: bool = False) -> DailySummary:
+def generate_daily_with_cc(
+    target_date: date,
+    verbose: bool = False,
+    repos: list[str] | None = None,
+) -> DailySummary:
     """Generate daily summary using Claude Code backend."""
     from .cc_backend import summarize_daily_with_cc
 
@@ -309,7 +314,7 @@ def generate_daily_with_cc(target_date: date, verbose: bool = False) -> DailySum
     # Fetch data once, use for both prompt context and metrics
     if verbose:
         click.echo("Fetching real data sources...")
-    activity, session_stats = _fetch_data(target_date, target_date)
+    activity, session_stats = _fetch_data(target_date, target_date, repos=repos)
     extra_context = _build_extra_context(
         target_date, target_date, activity, session_stats, verbose=verbose
     )
@@ -362,7 +367,11 @@ def generate_daily_with_cc(target_date: date, verbose: bool = False) -> DailySum
     )
 
 
-def generate_weekly_summary_cc(week: str, verbose: bool = False):
+def generate_weekly_summary_cc(
+    week: str,
+    verbose: bool = False,
+    repos: list[str] | None = None,
+):
     """Generate weekly summary using Claude Code backend."""
     from .cc_backend import summarize_weekly_with_cc
     from .schemas import Decision, Metrics, WeeklySummary
@@ -398,7 +407,7 @@ def generate_weekly_summary_cc(week: str, verbose: bool = False):
     # Fetch data once, use for both prompt context and metrics
     if verbose:
         click.echo("Fetching real data sources...")
-    activity, session_stats = _fetch_data(start_date, end_date)
+    activity, session_stats = _fetch_data(start_date, end_date, repos=repos)
     extra_context = _build_extra_context(
         start_date, end_date, activity, session_stats, verbose=verbose
     )
@@ -478,7 +487,11 @@ def extract_single_from_md(content: str, section: str) -> str:
     return ""
 
 
-def generate_monthly_summary_cc(month: str, verbose: bool = False):
+def generate_monthly_summary_cc(
+    month: str,
+    verbose: bool = False,
+    repos: list[str] | None = None,
+):
     """Generate monthly summary using Claude Code backend."""
     from .cc_backend import summarize_monthly_with_cc
     from .schemas import Decision, Metrics
@@ -513,7 +526,7 @@ def generate_monthly_summary_cc(month: str, verbose: bool = False):
     # Fetch data once, use for both prompt context and metrics
     if verbose:
         click.echo("Fetching real data sources...")
-    activity, session_stats = _fetch_data(first_day, last_day)
+    activity, session_stats = _fetch_data(first_day, last_day, repos=repos)
     extra_context = _build_extra_context(
         first_day, last_day, activity, session_stats, verbose=verbose
     )
@@ -689,6 +702,25 @@ def cli(ctx: click.Context, verbose: bool, dry_run: bool) -> None:
     ctx.obj["dry_run"] = dry_run
 
 
+def _repo_option(command):
+    """Shared ``--repo`` option for agent-mode summaries.
+
+    Overrides the repos fetched from GitHub. Defaults to the workspace's own
+    repository (derived from its ``origin`` remote) plus the gptme project
+    repos.
+    """
+    return click.option(
+        "--repo",
+        "repos",
+        multiple=True,
+        metavar="OWNER/NAME",
+        help=(
+            "GitHub repo to summarize (repeatable). Defaults to the workspace's "
+            "origin remote plus the gptme project repos. Agent mode only."
+        ),
+    )(command)
+
+
 @cli.command()
 @click.option(
     "--date",
@@ -708,8 +740,16 @@ def cli(ctx: click.Context, verbose: bool, dry_run: bool) -> None:
     help="GitHub username for human mode (optional)",
 )
 @click.option("--raw", is_flag=True, help="Print raw data without LLM summarization (human mode)")
+@_repo_option
 @click.pass_context
-def daily(ctx: click.Context, date_str: str, mode: str, github_user: str | None, raw: bool) -> None:
+def daily(
+    ctx: click.Context,
+    date_str: str,
+    mode: str,
+    github_user: str | None,
+    raw: bool,
+    repos: tuple[str, ...],
+) -> None:
     """Generate daily summary."""
     verbose = ctx.obj["verbose"]
     dry_run = ctx.obj["dry_run"]
@@ -736,7 +776,7 @@ def daily(ctx: click.Context, date_str: str, mode: str, github_user: str | None,
 
     click.echo(f"Generating daily summary for {target_date} ({len(entries)} entries)...")
 
-    summary = generate_daily_with_cc(target_date, verbose=verbose)
+    summary = generate_daily_with_cc(target_date, verbose=verbose, repos=list(repos) or None)
 
     if dry_run:
         click.echo("\n--- DRY RUN OUTPUT ---")
@@ -769,8 +809,16 @@ def daily(ctx: click.Context, date_str: str, mode: str, github_user: str | None,
     help="GitHub username for human mode (optional)",
 )
 @click.option("--raw", is_flag=True, help="Print raw data without LLM summarization (human mode)")
+@_repo_option
 @click.pass_context
-def weekly(ctx: click.Context, week: str, mode: str, github_user: str | None, raw: bool) -> None:
+def weekly(
+    ctx: click.Context,
+    week: str,
+    mode: str,
+    github_user: str | None,
+    raw: bool,
+    repos: tuple[str, ...],
+) -> None:
     """Generate weekly summary."""
     verbose = ctx.obj["verbose"]
     dry_run = ctx.obj["dry_run"]
@@ -805,7 +853,7 @@ def weekly(ctx: click.Context, week: str, mode: str, github_user: str | None, ra
 
     click.echo(f"Generating weekly summary for {week}...")
 
-    summary = generate_weekly_summary_cc(week, verbose=verbose)
+    summary = generate_weekly_summary_cc(week, verbose=verbose, repos=list(repos) or None)
 
     if dry_run:
         click.echo("\n--- DRY RUN OUTPUT ---")
@@ -838,8 +886,16 @@ def weekly(ctx: click.Context, week: str, mode: str, github_user: str | None, ra
     help="GitHub username for human mode (optional)",
 )
 @click.option("--raw", is_flag=True, help="Print raw data without LLM summarization (human mode)")
+@_repo_option
 @click.pass_context
-def monthly(ctx: click.Context, month: str, mode: str, github_user: str | None, raw: bool) -> None:
+def monthly(
+    ctx: click.Context,
+    month: str,
+    mode: str,
+    github_user: str | None,
+    raw: bool,
+    repos: tuple[str, ...],
+) -> None:
     """Generate monthly summary."""
     verbose = ctx.obj["verbose"]
     dry_run = ctx.obj["dry_run"]
@@ -872,7 +928,7 @@ def monthly(ctx: click.Context, month: str, mode: str, github_user: str | None, 
 
     click.echo(f"Generating monthly summary for {month}...")
 
-    summary = generate_monthly_summary_cc(month, verbose=verbose)
+    summary = generate_monthly_summary_cc(month, verbose=verbose, repos=list(repos) or None)
 
     if dry_run:
         click.echo("\n--- DRY RUN OUTPUT ---")
@@ -894,8 +950,9 @@ def monthly(ctx: click.Context, month: str, mode: str, github_user: str | None, 
     default="yesterday",
     help="Date to process (YYYY-MM-DD, 'today', or 'yesterday')",
 )
+@_repo_option
 @click.pass_context
-def smart(ctx: click.Context, date_str: str) -> None:
+def smart(ctx: click.Context, date_str: str, repos: tuple[str, ...]) -> None:
     """Smart summarization: daily + auto weekly/monthly when due.
 
     Weekly summaries run on Mondays. Monthly summaries run on the 1st.
@@ -903,6 +960,7 @@ def smart(ctx: click.Context, date_str: str) -> None:
     verbose = ctx.obj["verbose"]
     dry_run = ctx.obj["dry_run"]
     target_date = _parse_date_arg(date_str)
+    repo_list = list(repos) or None
 
     results: list[tuple[str, bool | None]] = []
 
@@ -911,7 +969,7 @@ def smart(ctx: click.Context, date_str: str) -> None:
     entries = get_journal_entries_for_date(target_date)
     if entries:
         try:
-            summary = generate_daily_with_cc(target_date, verbose=verbose)
+            summary = generate_daily_with_cc(target_date, verbose=verbose, repos=repo_list)
             if not dry_run:
                 output_path = save_summary(summary)
                 click.echo(f"Daily: Saved to {output_path}")
@@ -931,7 +989,7 @@ def smart(ctx: click.Context, date_str: str) -> None:
         last_week = target_date - timedelta(days=7)
         week = last_week.strftime("%G-W%V")
         try:
-            summary = generate_weekly_summary_cc(week, verbose=verbose)
+            summary = generate_weekly_summary_cc(week, verbose=verbose, repos=repo_list)
             if not dry_run:
                 output_path = save_summary(summary)
                 click.echo(f"Weekly: Saved to {output_path}")
@@ -951,7 +1009,7 @@ def smart(ctx: click.Context, date_str: str) -> None:
         last_month = first_of_month - timedelta(days=1)
         month = last_month.strftime("%Y-%m")
         try:
-            summary = generate_monthly_summary_cc(month, verbose=verbose)
+            summary = generate_monthly_summary_cc(month, verbose=verbose, repos=repo_list)
             if not dry_run:
                 output_path = save_summary(summary)
                 click.echo(f"Monthly: Saved to {output_path}")
@@ -982,12 +1040,20 @@ def smart(ctx: click.Context, date_str: str) -> None:
 @click.option("--from", "from_date", required=True, help="Start date (YYYY-MM-DD)")
 @click.option("--to", "to_date", default=None, help="End date (YYYY-MM-DD, defaults to today)")
 @click.option("--force", is_flag=True, help="Overwrite existing summaries")
+@_repo_option
 @click.pass_context
-def backfill(ctx: click.Context, from_date: str, to_date: str | None, force: bool) -> None:
+def backfill(
+    ctx: click.Context,
+    from_date: str,
+    to_date: str | None,
+    force: bool,
+    repos: tuple[str, ...],
+) -> None:
     """Backfill summaries for a date range."""
     verbose = ctx.obj["verbose"]
     start = date.fromisoformat(from_date)
     end = date.fromisoformat(to_date) if to_date else date.today()
+    repo_list = list(repos) or None
 
     click.echo(f"Backfilling daily summaries from {start} to {end}...")
 
@@ -1006,7 +1072,7 @@ def backfill(ctx: click.Context, from_date: str, to_date: str | None, force: boo
                 skipped += 1
             else:
                 try:
-                    summary = generate_daily_with_cc(current, verbose=verbose)
+                    summary = generate_daily_with_cc(current, verbose=verbose, repos=repo_list)
                     save_summary(summary)
                     generated += 1
                     if verbose:

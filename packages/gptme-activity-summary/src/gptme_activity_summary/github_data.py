@@ -11,11 +11,14 @@ import subprocess
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_REPOS = [
-    "ErikBjare/gptme-bob",
+# Project repositories that every agent contributes to. The agent's *own*
+# repository is derived from its workspace git remote at call time (see
+# `default_repos`) so a forked agent never summarizes someone else's repo.
+PROJECT_REPOS = [
     "gptme/gptme",
     "gptme/gptme-contrib",
 ]
@@ -23,6 +26,54 @@ DEFAULT_REPOS = [
 # Page size used for the detail lists (titles/links fed to the LLM prompt).
 # Counts never derive from these lists when an exact search count is available.
 LIST_LIMIT = 100
+
+
+#: Hosts whose ``owner/name`` this module may hand to the GitHub CLI.
+_GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
+
+
+def _remote_host(url: str) -> str | None:
+    """Return the lowercased host of a git remote URL, or None if it has none.
+
+    Strips userinfo (``git@``) and an optional port, so ``ssh://git@github.com:22/x``
+    and ``git@github.com:x`` both yield ``github.com``.
+    """
+    if url.startswith("git@") and ":" in url:
+        netloc = url.split(":", 1)[0]
+    elif "://" in url:
+        netloc = url.split("://", 1)[1].split("/", 1)[0]
+    else:
+        return None
+    netloc = netloc.rsplit("@", 1)[-1].split(":", 1)[0]
+    return netloc.lower() or None
+
+
+def repo_from_remote_url(url: str) -> str | None:
+    """Extract ``owner/name`` from a GitHub remote URL, or None if unparseable.
+
+    Handles the common spellings: ``git@github.com:owner/name.git``,
+    ``https://github.com/owner/name(.git)`` and ``ssh://git@github.com/...``.
+    Non-GitHub remotes return None: ``owner/name`` is only meaningful to the
+    GitHub CLI, which every caller feeds it to.
+    """
+    url = url.strip()
+    if not url or _remote_host(url) not in _GITHUB_HOSTS:
+        return None
+    if url.startswith("git@") and ":" in url:
+        path = url.split(":", 1)[1]
+    else:
+        after_scheme = url.split("://", 1)[1]
+        if "/" not in after_scheme:
+            return None
+        path = after_scheme.split("/", 1)[1]
+    # Normalise before suffix-stripping: a trailing slash after `.git`
+    # (`.../name.git/`) would otherwise leave `name.git` as the repo name.
+    path = path.strip("/")
+    path = path.removesuffix(".git").strip("/")
+    parts = path.split("/")
+    if len(parts) != 2 or not all(parts):
+        return None
+    return "/".join(parts)
 
 
 @dataclass
@@ -67,7 +118,7 @@ class PRReview:
 
 @dataclass
 class CrossRepoPR:
-    """A PR authored in a repo outside DEFAULT_REPOS."""
+    """A PR authored in a repo outside the summarized repos."""
 
     repo: str
     number: int
@@ -152,6 +203,34 @@ def _run_command(cmd: list[str], timeout: int = 30) -> str | None:
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         logger.debug("Command error: %s: %s", cmd, e)
         return None
+
+
+def detect_workspace_repo(workspace: str | Path | None = None) -> str | None:
+    """Return the ``owner/name`` of ``workspace``'s ``origin`` remote.
+
+    Returns None when the workspace is unknown, has no ``origin`` remote, or
+    the remote is not a parseable ``owner/name`` GitHub URL.
+    """
+    if workspace is None:
+        return None
+    output = _run_command(["git", "-C", str(workspace), "remote", "get-url", "origin"])
+    if output is None:
+        return None
+    return repo_from_remote_url(output)
+
+
+def default_repos(workspace: str | Path | None = None) -> list[str]:
+    """Default repo list: the workspace's own repo first, then the project repos.
+
+    The workspace repo is derived from ``origin`` so each agent summarizes its
+    own repository instead of a hard-coded one (#1705).
+    """
+    workspace_repo = detect_workspace_repo(workspace)
+    if workspace_repo:
+        # A workspace that *is* a project repo (e.g. gptme-contrib) must not be
+        # listed twice.
+        return list(dict.fromkeys([workspace_repo, *PROJECT_REPOS]))
+    return list(PROJECT_REPOS)
 
 
 def _gh_available() -> bool:
@@ -395,7 +474,7 @@ def get_cross_repo_prs(
 ) -> list[CrossRepoPR]:
     """Get PRs authored in repos outside the excluded list."""
     if exclude_repos is None:
-        exclude_repos = DEFAULT_REPOS
+        exclude_repos = list(PROJECT_REPOS)
     output = _run_command(
         [
             "gh",
@@ -716,25 +795,33 @@ def fetch_activity(
     workspace: str | None = None,
 ) -> GitHubActivity:
     """
-    Fetch GitHub activity for a date range (agent mode — uses DEFAULT_REPOS).
+    Fetch GitHub activity for a date range (agent mode).
 
     Args:
         start: Start date (inclusive)
         end: End date (inclusive)
-        repos: List of GitHub repos (owner/name). Defaults to DEFAULT_REPOS.
-        workspace: Path to local git workspace for commit counting.
+        repos: List of GitHub repos (owner/name). Defaults to the workspace's
+            own repo (from ``workspace``) plus the project repos.
+        workspace: Path to local git workspace, used for commit counting and
+            for deriving the default repo list.
 
     Returns:
         GitHubActivity with data from all repos.
     """
     if repos is None:
-        repos = list(DEFAULT_REPOS)
+        repos = default_repos(workspace)
 
     activity = GitHubActivity(start_date=start, end_date=end)
     has_gh = _gh_available()
-    requested_repos = list(repos)
+    # De-duplicate both the names as requested and the names GitHub resolves them
+    # to. A stale remote name that redirects to a project repo (or a repeated
+    # ``--repo``) would otherwise be fetched twice, double-counting its merged
+    # PRs, closed issues and reviews.
+    requested_repos = list(dict.fromkeys(repos))
     if has_gh:
-        repos = [_canonical_repo(repo) for repo in repos]
+        repos = list(dict.fromkeys(_canonical_repo(repo) for repo in requested_repos))
+    else:
+        repos = requested_repos
 
     for repo in repos:
         repo_activity = RepoActivity(repo=repo)
@@ -763,11 +850,28 @@ def fetch_activity(
 
         activity.repos.append(repo_activity)
 
-    # Get commit count from local workspace if available
+    # Get commit count from local workspace if available. Attribute it to the
+    # workspace's own repo — never to a project repo the agent merely happens to
+    # summarize, which is the misattribution this change exists to prevent
+    # (#1705). When the workspace repo cannot be matched, keep the commits under
+    # a "local" entry instead.
     if workspace:
         commit_count = get_commit_count(start, end, workspace)
-        if activity.repos:
-            activity.repos[0].commits = commit_count
+        workspace_repo = detect_workspace_repo(workspace)
+        target = next(
+            (r for r in activity.repos if workspace_repo and r.repo == workspace_repo),
+            None,
+        )
+        if target is None and workspace_repo and has_gh:
+            # The remote name may be stale (GitHub redirects on rename); compare
+            # against the canonical name the list was resolved to. Without ``gh``
+            # we cannot resolve the rename, and guessing by basename could
+            # attribute commits to a *different* repo that happens to share the
+            # name — so the honest fallback is a bare "local" entry.
+            canonical = _canonical_repo(workspace_repo)
+            target = next((r for r in activity.repos if r.repo == canonical), None)
+        if target is not None:
+            target.commits = commit_count
         else:
             activity.repos.append(RepoActivity(repo="local", commits=commit_count))
 
@@ -775,9 +879,9 @@ def fetch_activity(
     if has_gh:
         activity.reviews_received = get_reviews_received(start, end, repos)
         # Exclude both the requested nwo and the resolved nwo. Search does not
-        # follow redirects, so DEFAULT_REPOS may still hold a stale name while
-        # GitHub returns the current one — without this, a renamed default repo
-        # is listed as "cross-repo".
+        # follow redirects, so the default repo list may still hold a stale name
+        # while GitHub returns the current one — without this, a renamed default
+        # repo is listed as "cross-repo".
         exclude_repos = list(dict.fromkeys([*requested_repos, *repos]))
         activity.cross_repo_prs = get_cross_repo_prs(start, end, exclude_repos=exclude_repos)
 

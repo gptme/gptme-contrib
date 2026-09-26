@@ -64,6 +64,36 @@ def test_smart_due_period_failure_runs_all_due_periods(
     assert f"  {successful_period}: OK" in result.output
 
 
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["daily"], None),
+        (["daily", "--repo", "acme/agent-brain"], ["acme/agent-brain"]),
+        (["daily", "--repo", "a/one", "--repo", "b/two"], ["a/one", "b/two"]),
+    ],
+)
+def test_daily_forwards_repo_option(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    expected: list[str] | None,
+) -> None:
+    """`--repo` is accepted, repeatable, and forwarded; absent it stays None."""
+    captured: dict[str, object] = {}
+
+    def fake_daily(*_args: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(cli_module, "get_journal_entries_for_date", lambda _date: ["entry"])
+    monkeypatch.setattr(cli_module, "generate_daily_with_cc", fake_daily)
+    monkeypatch.setattr(cli_module, "save_summary", lambda _summary: "summary.md")
+
+    result = CliRunner().invoke(cli_module.cli, argv)
+
+    assert result.exit_code == 0
+    assert captured["repos"] == expected
+
+
 def test_smart_skipped_and_not_due_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli_module, "get_journal_entries_for_date", lambda _date: [])
 
