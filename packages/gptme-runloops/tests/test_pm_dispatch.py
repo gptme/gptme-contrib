@@ -22,6 +22,7 @@ from gptme_runloops.pm_dispatch import (
     HUMAN_PRIORITY_MENTION,
     MIN_BANDIT_OBSERVATIONS,
     PM_DISPATCH_EXCLUDE_REPOS_ENV,
+    PM_UNIT_PREFIX_ENV,
     SLOW_LANE_TYPES,
     DispatchLedger,
     LaneDispatcher,
@@ -2726,3 +2727,80 @@ class TestLaneDispatcherSlotLogDir:
         cmd = captured_cmds[0]
         assert not any("StandardOutput" in arg for arg in cmd)
         assert not any("StandardError" in arg for arg in cmd)
+
+
+class TestUnitPrefix:
+    """Slot unit prefix is configurable so non-Bob agents get their own units."""
+
+    def _dispatch_units(self, mgr: SlotManager) -> list[str]:
+        units: list[str] = []
+
+        def cb(**kwargs):
+            units.append(kwargs["slot_unit"])
+            return True
+
+        ld = LaneDispatcher(slot_manager=mgr, dispatch_callback=cb)
+        ld.dispatch(
+            [
+                SlotItem("a/b", 1, ["assigned_issue"], ""),
+                SlotItem("a/b", 2, ["pr_update"], ""),
+            ],
+            backend="claude-code",
+        )
+        return units
+
+    @staticmethod
+    def _idle_manager(**kwargs: Any) -> SlotManager:
+        return SlotManager(
+            slot_cap=10,
+            count_running=lambda: 0,
+            count_running_lane=lambda lane: 0,
+            is_busy=lambda unit: False,
+            **kwargs,
+        )
+
+    def test_default_prefix_is_bob_pm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(PM_UNIT_PREFIX_ENV, raising=False)
+        mgr = self._idle_manager()
+        assert mgr.unit_prefix == "bob-pm"
+        assert self._dispatch_units(mgr) == [
+            "bob-pm-fast-slot-a-b-1",
+            "bob-pm-slow-slot-a-b-2",
+        ]
+
+    def test_env_prefix_names_units(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(PM_UNIT_PREFIX_ENV, "alice-pm")
+        assert self._dispatch_units(self._idle_manager()) == [
+            "alice-pm-fast-slot-a-b-1",
+            "alice-pm-slow-slot-a-b-2",
+        ]
+
+    def test_explicit_prefix_overrides_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(PM_UNIT_PREFIX_ENV, "alice-pm")
+        mgr = self._idle_manager(unit_prefix="gordon-pm")
+        assert self._dispatch_units(mgr)[0] == "gordon-pm-fast-slot-a-b-1"
+
+    def test_default_count_probes_use_prefix(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The running-count probes must count the same units the dispatcher
+        launches, or another agent's slots eat this agent's cap."""
+        import subprocess
+
+        patterns: list[str] = []
+
+        def fake_run(cmd, **kwargs):
+            if "list-units" in cmd:
+                patterns.append(cmd[cmd.index("list-units") + 1])
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="", stderr=""
+            )
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+        monkeypatch.setenv(PM_UNIT_PREFIX_ENV, "alice-pm")
+        mgr = SlotManager()
+        assert mgr.running_slots == 0
+        assert mgr.running_lane_slots("fast") == 0
+        assert patterns == ["alice-pm-*-slot-*", "alice-pm-fast-slot-*"]
