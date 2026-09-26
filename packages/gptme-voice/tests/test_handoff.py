@@ -347,6 +347,45 @@ def test_non_default_agent_rejected_without_env(monkeypatch):
         )
 
 
+def test_env_roster_matches_payload_case_insensitively(monkeypatch):
+    """The env roster is lowercased, so a deployment spelling names naturally
+    (``Alpha,Charlie``) must accept payloads that use the same capitalization.
+    Previously the roster was lowercased but payload membership checks were raw,
+    so this plausible configuration silently locked every handoff down."""
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "Alpha,Charlie")
+    payload = build_handoff(
+        from_agent="Alpha",
+        to_agent="Charlie",
+        caller_id="test-caller",
+        reason="routing",
+        secret=SECRET,
+        now=SAMPLE_NOW,
+    )
+    assert payload["from_agent"] == "Alpha"
+    result = validate(payload, secret=SECRET, now=SAMPLE_VALIDATION_NOW)
+    assert result.ok, result.reason
+
+
+def test_env_roster_case_only_difference_is_self_handoff(monkeypatch):
+    """Names differing only by case are the same agent, so the self-handoff
+    guard must compare canonical (lowercased) names."""
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "Alpha,Charlie")
+    with pytest.raises(ValueError, match="must differ"):
+        build_handoff(
+            from_agent="Alpha",
+            to_agent="alpha",
+            caller_id="x",
+            reason="r",
+            secret=SECRET,
+        )
+
+
+def test_handoff_writer_accepts_capitalized_from_agent(tmp_path, monkeypatch):
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "Alpha,Charlie")
+    writer = HandoffWriter(tmp_path, from_agent="Alpha", secret=SECRET)
+    assert writer.from_agent == "Alpha"
+
+
 # ---------- make_state_dirs ----------
 
 
