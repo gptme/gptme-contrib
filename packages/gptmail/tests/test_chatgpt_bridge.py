@@ -523,6 +523,13 @@ class TestExtractBody:
         content = "---\nnot frontmatter"
         assert ChatGPTBridge._extract_body(content) == content
 
+    def test_two_horizontal_rules_without_frontmatter_survive(self) -> None:
+        # Two --- lines with non-mapping content between them is not frontmatter
+        # (``meta_of`` reads the same file as having none), so nothing is
+        # dropped and the body is returned whole.
+        content = "---\nfirst\n---\nsecond"
+        assert ChatGPTBridge._extract_body(content) == content
+
 
 class TestChatGPTBridgeCli:
     """The click wrapper must not swallow falsy-but-meaningful option values."""

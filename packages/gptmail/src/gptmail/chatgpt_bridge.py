@@ -42,7 +42,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.types import Receive, Scope, Send
 
-from gptmail.transport.agent import AgentTransport
+from gptmail.transport.agent import AgentTransport, split_frontmatter
 
 logger = logging.getLogger(__name__)
 
@@ -382,16 +382,13 @@ class ChatGPTBridge:
     def _extract_body(content: str) -> str:
         """Strip a leading YAML frontmatter block and return the markdown body.
 
-        Only the *line-delimited* ``---`` fences count as frontmatter
-        delimiters, so a ``---`` horizontal rule inside the body (or inside a
-        frontmatter string) is left intact.
+        Uses the transport's shared ``split_frontmatter`` rule: a leading
+        ``---`` is frontmatter only when a closing fence exists *and* the block
+        between them is a YAML mapping. So a body that merely starts with a
+        ``---`` horizontal rule — with or without a second one — survives intact,
+        matching how ``meta_of`` reads the same files.
         """
-        lines = content.splitlines()
-        if lines and lines[0].strip() == "---":
-            for i in range(1, len(lines)):
-                if lines[i].strip() == "---":
-                    return "\n".join(lines[i + 1 :]).strip()
-        return content.strip()
+        return split_frontmatter(content)[1].strip()
 
     # ------------------------------------------------------------------
     # Starlette app (SSE endpoint + health)
