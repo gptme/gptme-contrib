@@ -262,7 +262,8 @@ def utilization_bypass_gate(
     2. **API unavailable** (``pace_gap is None``, usually an auth outage): fall back
        to the credential-free local signal. Call ``idle_hours``; if it returns a
        value ``> idle_hours_threshold``, treat as behind pace (a long idle gap is
-       precisely the under-utilisation the bypass exists for — alice#78) and emit
+       precisely the under-utilisation the bypass exists for — see ErikBjare/alice#78)
+       and emit
        the ``[quota-gate]`` fallback message.
     3. **Neither signal usable** (API down *and* idle unknown/within threshold):
        not behind pace, gap reported as ``"unknown"``.
