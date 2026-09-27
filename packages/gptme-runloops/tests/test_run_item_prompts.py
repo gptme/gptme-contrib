@@ -225,7 +225,7 @@ def test_no_bob_remains_with_alice_values() -> None:
         all_numbers=("7",),
         **ALICE_IDENTITY,
     )
-    all_types = SIMPLE_ARMS + ["master_ci_failure"]
+    all_types = SIMPLE_ARMS + ["master_ci_failure", "erik_decision"]
     rendered = render_main_prompt(
         params,
         item_type="pr_update",
@@ -334,7 +334,6 @@ def test_no_unsubstituted_angle_bracket_tokens_in_any_arm() -> None:
             "<record-path>",  # voice_postcall: agent extracts from detail.record=
             "<task-id>",  # erik_decision: literal task id from the playbook
             "<date>",  # erik_decision: today's date for the note heading
-            "<decision_id>",  # erik_decision: decision permalink id
         }
     )
     arms = SIMPLE_ARMS + [

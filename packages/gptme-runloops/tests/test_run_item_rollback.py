@@ -535,11 +535,43 @@ class TestPortedInvestigateArms:
         out = build_investigate(
             ["erik_decision"], self._params("snapshot=state/x.json")
         )
-        assert "### Erik Dashboard Decision" in out
+        # The heading is rendered from operator_name, not hard-coded "Erik".
+        assert "### the operator Dashboard Decision" in out
         assert "snapshot=state/x.json" in out
         # The load-bearing guardrail: never bare `gh pr merge`.
         assert "NEVER bare" in out and "gh pr merge" in out
         assert "self-merge-if-eligible.sh" in out
+
+    def test_erik_decision_arm_renders_agent_and_operator_names(self) -> None:
+        """A non-Bob deployment must get its own names and no Bob dashboard URL."""
+        from gptme_runloops.prompt_templates import (
+            ItemPromptParams,
+            build_investigate,
+        )
+
+        out = build_investigate(
+            ["erik_decision"],
+            ItemPromptParams(
+                repo="o/r",
+                number=1,
+                workspace="/srv/agents/zed",
+                detail="snapshot=state/x.json",
+                agent_name="Zed",
+                operator_name="Ada",
+            ),
+        )
+        assert "### Ada Dashboard Decision" in out
+        # Prose wraps across lines; compare on a whitespace-normalized copy.
+        flat = " ".join(out.split())
+        assert "in Zed's power now that Ada approved" in flat
+        for marker in (
+            "Erik",
+            "Bob",
+            "bob.hassel.bjareho.lt",
+            "{agent_name}",
+            "{operator_name}",
+        ):
+            assert marker not in out, f"erik_decision arm leaked {marker!r}"
 
     @pytest.mark.parametrize("kind", ["voice_postcall", "erik_decision"])
     def test_tokens_are_fully_substituted(self, kind: str) -> None:
