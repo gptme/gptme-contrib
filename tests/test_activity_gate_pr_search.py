@@ -66,6 +66,26 @@ if argv[0] == "api" and any("PullRequestSearch" in a for a in argv):
         sys.exit(0)
     if search_mode == "empty":
         nodes = []
+    elif search_mode == "paged":
+        # Two pages: the fake keys off whether the caller sent an endCursor.
+        paged = any(a.startswith("endCursor=") for a in argv)
+        node = {
+            "number": 7 if paged else 5,
+            "title": "feat: from page2" if paged else "feat: from page1",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "comments": {"nodes": []},
+            "latestReviews": {"nodes": []},
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "headRefOid": ("b" if paged else "a") * 40,
+            "isDraft": False,
+            "statusCheckRollup": {"contexts": {"nodes": []}},
+        }
+        print(json.dumps({"data": {"search": {
+            "nodes": [node],
+            "pageInfo": {"hasNextPage": not paged, "endCursor": "c1"},
+        }}}))
+        sys.exit(0)
     else:
         nodes = [{
             "number": 5,
@@ -87,7 +107,10 @@ if argv[0] == "api" and any("PullRequestSearch" in a for a in argv):
                 {"name": "CI", "status": "COMPLETED", "conclusion": "SUCCESS"},
             ]}},
         }]
-    print(json.dumps({"data": {"search": {"nodes": nodes}}}))
+    print(json.dumps({"data": {"search": {
+        "nodes": nodes,
+        "pageInfo": {"hasNextPage": False, "endCursor": None},
+    }}}))
     sys.exit(0)
 
 if argv[0] == "api":
@@ -182,3 +205,21 @@ def test_non_search_payload_falls_back_to_pr_list() -> None:
         assert counts.get("pr_list", 0) >= 1, "non-search payload must fall back"
         assert cache_file.exists()
         assert json.loads(cache_file.read_text())[0]["title"] == "feat: from fallback"
+
+
+def test_search_follows_pagination_and_merges_pages() -> None:
+    """A repo with more than one page of authored PRs is not truncated at 30."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        counts, cache_file = _run_gate(tmp, state_dir, "paged")
+
+        assert counts.get("search") == 2, counts
+        assert counts.get("pr_list", 0) == 0, "pagination is not a failure"
+        assert cache_file.exists()
+        cached = json.loads(cache_file.read_text())
+        assert [pr["title"] for pr in cached] == [
+            "feat: from page1",
+            "feat: from page2",
+        ]

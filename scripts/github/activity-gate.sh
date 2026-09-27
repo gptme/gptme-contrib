@@ -400,6 +400,13 @@ gh_cache_get_or_fetch() {
 # number,title,updatedAt,comments,latestReviews,statusCheckRollup,mergeable,mergeStateStatus,headRefOid,isDraft`
 # so the downstream jq consumers are unchanged. statusCheckRollup is required by
 # check_ci_failures (only .conclusion/.state are read).
+#
+# Page size stays 30 (matching the replaced `gh pr list` default) rather than
+# asking for 100 in one shot: GitHub's point cost is a function of `first`, so
+# `first: 30` measures 1 point while `first: 100` measures 3. The one-page case
+# is the common one — authored open PR counts sit well under 30 — and pagination
+# only spends additional points on repos that actually exceed a page.
+PR_SEARCH_PAGE_SIZE=30
 PR_SEARCH_GRAPHQL_QUERY='
 fragment pr on PullRequest{number,title,updatedAt,comments(first: 100) {nodes {id,author{login,...on User{id,name}},authorAssociation,body,createdAt,includesCreatedEdit,isMinimized,minimizedReason,reactionGroups{content,users{totalCount}},url,viewerDidAuthor},pageInfo{hasNextPage,endCursor},totalCount},latestReviews(first: 100) {nodes {author{login},authorAssociation,submittedAt,body,state}},mergeable,mergeStateStatus,headRefOid,isDraft,statusCheckRollup{contexts(first:100){nodes{... on CheckRun{name,status,conclusion,startedAt,completedAt,detailsUrl,checkSuite{workflowRun{workflow{name}}}} ... on StatusContext{context,state,description,targetUrl,createdAt}}}}}
 query PullRequestSearch($q: String!, $type: SearchType!, $limit: Int!, $endCursor: String) {
@@ -412,26 +419,47 @@ query PullRequestSearch($q: String!, $type: SearchType!, $limit: Int!, $endCurso
 '
 
 # Emit authored open-PR data for one repo in gh's `--json` shape.
-# Prefers the raw GraphQL search (1 request / 1 point) and falls back to the
-# legacy `gh pr list --author` command only on a hard failure or a non-search
+# Prefers the raw GraphQL search (1 request / 1 point per page) and falls back to
+# the legacy `gh pr list --author` command only on a hard failure or a non-search
 # payload — never on a valid empty result (a repo with no authored PRs is the
 # common case and must stay at 1 point).
+#
+# Follows `pageInfo.hasNextPage` so repos with more than one page of authored
+# PRs are not silently truncated at 30. The one-page case — every repo we track
+# today — issues a single request and never reads the cursor.
 fetch_pr_data_search() {
     local repo=$1
-    local raw mapped
-    if raw=$(gh api graphql \
-            -F q="author:$AUTHOR repo:$repo state:open type:pr" \
-            -F type=ISSUE_ADVANCED -F limit=30 \
-            -f query="$PR_SEARCH_GRAPHQL_QUERY" 2>/dev/null) \
-        && mapped=$(printf '%s' "$raw" | jq -ce '
+    local cursor="" raw page pages="" failed=0
+    while :; do
+        if [ -n "$cursor" ]; then
+            raw=$(gh api graphql \
+                    -F q="author:$AUTHOR repo:$repo state:open type:pr" \
+                    -F type=ISSUE_ADVANCED -F limit="$PR_SEARCH_PAGE_SIZE" \
+                    -F endCursor="$cursor" \
+                    -f query="$PR_SEARCH_GRAPHQL_QUERY" 2>/dev/null) || { failed=1; break; }
+        else
+            raw=$(gh api graphql \
+                    -F q="author:$AUTHOR repo:$repo state:open type:pr" \
+                    -F type=ISSUE_ADVANCED -F limit="$PR_SEARCH_PAGE_SIZE" \
+                    -f query="$PR_SEARCH_GRAPHQL_QUERY" 2>/dev/null) || { failed=1; break; }
+        fi
+        page=$(printf '%s' "$raw" | jq -ce '
             if (.data.search.nodes | type) == "array" then
                 .data.search.nodes
                 | map(select((.isDraft // false) | not)
                       | .comments = ((.comments.nodes) // [])
                       | .latestReviews = ((.latestReviews.nodes) // [])
                       | .statusCheckRollup = ((.statusCheckRollup.contexts.nodes) // []))
-            else empty end' 2>/dev/null); then
-        printf '%s' "$mapped"
+            else empty end' 2>/dev/null) || { failed=1; break; }
+        pages+="$page"$'\n'
+        cursor=$(printf '%s' "$raw" | jq -r '
+            if .data.search.pageInfo.hasNextPage then
+                (.data.search.pageInfo.endCursor // "")
+            else "" end' 2>/dev/null) || cursor=""
+        [ -n "$cursor" ] || break
+    done
+    if [ "$failed" -eq 0 ] && [ -n "$pages" ]; then
+        printf '%s' "$pages" | jq -sc 'add'
         return 0
     fi
     # Fallback: legacy search-backed list (2 requests / 2 points). Propagate a
