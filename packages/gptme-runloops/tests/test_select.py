@@ -84,8 +84,13 @@ def test_select_returns_first_available_binary(tmp_path: Path):
             Candidate(backend="gptme", model="openrouter/m", priority=1),
         ]
     )
-    # mock gptme binary as available but __nonexistent__ not
-    with patch("gptme_runloops.select.shutil.which") as mock_which:
+    # mock gptme binary as available but __nonexistent__ not; pin the
+    # block-registry gate so the result depends only on binary availability,
+    # not on whether gptme_block_registry happens to be installed.
+    with (
+        patch("gptme_runloops.select.shutil.which") as mock_which,
+        patch("gptme_runloops.select._is_block_active", return_value=False),
+    ):
         mock_which.side_effect = lambda b: "/usr/bin/gptme" if b == "gptme" else None
         result = select_backend(config=config, state_dir=tmp_path)
     assert result is not None
