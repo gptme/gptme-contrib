@@ -157,10 +157,16 @@ def _is_block_active(state_dir: Path, backend: str, model: str) -> bool:
         )
         from gptme_block_registry.writers import read_block_until
     except ImportError:
-        # Fail closed when block state exists but cannot be read (broken
-        # registry install): unverified arms must not be selected.
+        # Fail closed when *block-shaped* state exists but cannot be read
+        # (broken registry install): unverified arms must not be selected.
+        # Match the registry's block-file naming — every kind ends in
+        # "-until.txt" — rather than "any file present": a state dir holding
+        # only incidental files (a README, a lock, a temp file) cannot encode
+        # a block, and must not block every candidate.
         # No state dir at all means no blocks can exist — fail open.
-        if state_dir.is_dir() and any(state_dir.iterdir()):
+        if state_dir.is_dir() and any(
+            p.is_file() for p in state_dir.glob("*-until.txt")
+        ):
             return True
         return False
 

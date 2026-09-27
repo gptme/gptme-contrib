@@ -133,10 +133,10 @@ def test_select_skips_blocked_candidate(tmp_path: Path):
 
 
 def test_block_active_fails_closed_when_state_exists(tmp_path: Path):
-    """Missing block-registry package + existing block state = blocked."""
+    """Missing block-registry package + existing block-shaped state = blocked."""
     import sys
 
-    (tmp_path / "some-block.json").write_text("{}")
+    (tmp_path / "gptme-blocked-until.txt").write_text("2026-01-01T00:00:00+00:00")
     sentinel = {
         mod: None
         for mod in (
@@ -149,6 +149,32 @@ def test_block_active_fails_closed_when_state_exists(tmp_path: Path):
     sys.modules.update(sentinel)
     try:
         assert _is_block_active(tmp_path, "gptme", "m") is True
+    finally:
+        for m, v in saved.items():
+            if v is None:
+                del sys.modules[m]
+            else:
+                sys.modules[m] = v
+
+
+def test_block_active_fails_open_when_only_incidental_files(tmp_path: Path):
+    """Missing registry + only incidental files = no block artifact, not blocked."""
+    import sys
+
+    (tmp_path / "README.md").write_text("not a block")
+    (tmp_path / "lock").write_text("")
+    sentinel = {
+        mod: None
+        for mod in (
+            "gptme_block_registry",
+            "gptme_block_registry.contract",
+            "gptme_block_registry.writers",
+        )
+    }
+    saved = {m: sys.modules.get(m) for m in sentinel}
+    sys.modules.update(sentinel)
+    try:
+        assert _is_block_active(tmp_path, "gptme", "m") is False
     finally:
         for m, v in saved.items():
             if v is None:
