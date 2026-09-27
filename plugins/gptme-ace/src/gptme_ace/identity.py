@@ -8,9 +8,13 @@ same workspace root everywhere:
    ``AGENT_WORKSPACE``, or the legacy ``BOB_BRAIN_ROOT`` alias.
 2. An agent repo detected by walking up from this file for a directory that
    contains both ``gptme.toml`` and ``gptme-contrib/``.
-3. ``$HOME/<home-name>`` (e.g. ``/home/bob`` -> ``/home/bob/bob``) when it
-   exists, else ``$HOME``. For Bob this is identical to the previous
-   ``Path.home() / "bob"`` default.
+3. ``$HOME/<home-name>`` (e.g. ``/home/bob`` -> ``/home/bob/bob``). It is
+   returned even when the directory does not exist yet, so insight storage
+   always has a dedicated root instead of landing in the home-directory root
+   (which mixes with dotfiles and can be unwritable on restricted homes). This
+   is the one deliberate divergence from ``gptme_coordination``, which returns
+   ``$HOME`` itself in that case for its ledger writes. For Bob this is
+   identical to the previous ``Path.home() / "bob"`` default.
 
 The agent display name resolves from ``AGENT_NAME``, then ``[agent].name`` in
 the workspace ``gptme.toml``, then the historical default ``"Bob"``. Bob's
@@ -83,8 +87,7 @@ def default_workspace_root(
         return detected
 
     home = Path.home()
-    candidate = home / home.name
-    return candidate if candidate.is_dir() else home
+    return home / home.name
 
 
 def _agent_name_from_config(workspace: Path | str | None) -> str | None:

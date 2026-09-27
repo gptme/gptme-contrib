@@ -104,10 +104,14 @@ def test_default_workspace_root_home_fallback(tmp_path, monkeypatch):
 def test_default_workspace_root_home_fallback_without_workspace_dir(
     tmp_path, monkeypatch
 ):
+    # The dedicated subdirectory is returned even when it does not exist yet, so
+    # insight storage never lands in the home-directory root itself.
     home = tmp_path / "agent"
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    assert default_workspace_root(environ={}, start=tmp_path / "elsewhere") == home
+    assert default_workspace_root(environ={}, start=tmp_path / "elsewhere") == (
+        home / "agent"
+    )
 
 
 # --- agent_name ------------------------------------------------------------
