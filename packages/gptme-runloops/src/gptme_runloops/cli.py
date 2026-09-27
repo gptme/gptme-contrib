@@ -351,7 +351,7 @@ def run_item_cmd(
     # preferring the neutral name cannot resolve an inherited stale value.
     # Presence-based (not truthiness): an explicitly-set AGENT_* value — even
     # empty — must win over a stale BOB_* inherited from the parent env.
-    if not backend:
+    if backend is None:
         neutral = os.environ.get("AGENT_BACKEND")
         backend = neutral if neutral is not None else os.environ.get("BOB_BACKEND", "")
     if not backend:
