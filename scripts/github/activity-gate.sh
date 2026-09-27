@@ -388,6 +388,60 @@ gh_cache_get_or_fetch() {
     fi
 }
 
+# Raw GraphQL search for authored open PRs (task 2.23).
+#
+# `gh pr list --author` takes the search path, and gh resolves the SearchType
+# enum with a per-invocation capability probe — a second POST its own response
+# cache does not serve. Every `--author` list therefore costs 2 requests / 2
+# points regardless of projection (measured: dropping statusCheckRollup is a
+# no-op). Raw GraphQL issues the same search as a single 1-point request.
+#
+# The selection mirrors `gh pr list --json
+# number,title,updatedAt,comments,latestReviews,statusCheckRollup,mergeable,mergeStateStatus,headRefOid,isDraft`
+# so the downstream jq consumers are unchanged. statusCheckRollup is required by
+# check_ci_failures (only .conclusion/.state are read).
+PR_SEARCH_GRAPHQL_QUERY='
+fragment pr on PullRequest{number,title,updatedAt,comments(first: 100) {nodes {id,author{login,...on User{id,name}},authorAssociation,body,createdAt,includesCreatedEdit,isMinimized,minimizedReason,reactionGroups{content,users{totalCount}},url,viewerDidAuthor},pageInfo{hasNextPage,endCursor},totalCount},latestReviews(first: 100) {nodes {author{login},authorAssociation,submittedAt,body,state}},mergeable,mergeStateStatus,headRefOid,isDraft,statusCheckRollup{contexts(first:100){nodes{... on CheckRun{name,status,conclusion,startedAt,completedAt,detailsUrl,checkSuite{workflowRun{workflow{name}}}} ... on StatusContext{context,state,description,targetUrl,createdAt}}}}}
+query PullRequestSearch($q: String!, $type: SearchType!, $limit: Int!, $endCursor: String) {
+  search(query: $q, type: $type, first: $limit, after: $endCursor) {
+    issueCount
+    nodes { ...pr }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+'
+
+# Emit authored open-PR data for one repo in gh's `--json` shape.
+# Prefers the raw GraphQL search (1 request / 1 point) and falls back to the
+# legacy `gh pr list --author` command only on a hard failure or a non-search
+# payload — never on a valid empty result (a repo with no authored PRs is the
+# common case and must stay at 1 point).
+fetch_pr_data_search() {
+    local repo=$1
+    local raw mapped
+    if raw=$(gh api graphql \
+            -F q="author:$AUTHOR repo:$repo state:open type:pr" \
+            -F type=ISSUE_ADVANCED -F limit=30 \
+            -f query="$PR_SEARCH_GRAPHQL_QUERY" 2>/dev/null) \
+        && mapped=$(printf '%s' "$raw" | jq -ce '
+            if (.data.search.nodes | type) == "array" then
+                .data.search.nodes
+                | map(select((.isDraft // false) | not)
+                      | .comments = ((.comments.nodes) // [])
+                      | .latestReviews = ((.latestReviews.nodes) // [])
+                      | .statusCheckRollup = ((.statusCheckRollup.contexts.nodes) // []))
+            else empty end' 2>/dev/null); then
+        printf '%s' "$mapped"
+        return 0
+    fi
+    # Fallback: legacy search-backed list (2 requests / 2 points). Propagate a
+    # failure exit so the cache layer treats it as a failed producer (emits its
+    # `[]` default without caching) instead of caching a transient error.
+    gh pr list --repo "$repo" --author "$AUTHOR" --state open \
+        --json number,title,updatedAt,comments,latestReviews,statusCheckRollup,mergeable,mergeStateStatus,headRefOid,isDraft \
+        --jq '[.[] | select(.isDraft | not)]' 2>/dev/null
+}
+
 # Fetch all PR data once per repo, with all fields needed by every check
 # function. Cache state-tracked checks, but let merge-sensitive callers use a
 # short TTL (GH_CACHE_TTL_LIVE_PR, default 180s) instead of the generic 480s.
@@ -396,10 +450,7 @@ fetch_pr_data_with_ttl() {
     local ttl=$2
     # Filter out draft PRs — they're intentionally deprioritized/not on merge path
     gh_cache_get_or_fetch "pr-${repo}" "$ttl" \
-        "gh pr list --repo '$repo' --author '$AUTHOR' --state open \
-            --json number,title,updatedAt,comments,latestReviews,statusCheckRollup,mergeable,mergeStateStatus,headRefOid,isDraft \
-            --jq '[.[] | select(.isDraft | not)]' \
-            2>/dev/null" \
+        "fetch_pr_data_search '$repo'" \
         "[]"
 }
 
