@@ -171,6 +171,25 @@ def test_domain_context_without_workspace_resolves_repo_from_identity(
     assert "bob (workspace)" not in context
 
 
+def test_domain_context_without_workspace_reads_name_from_detected_repo(
+    tmp_path, monkeypatch
+):
+    """The no-arg path must read ``[agent].name`` from the resolved workspace.
+
+    Regression: resolving the workspace for the repo line while still passing
+    ``None`` to the name resolver told a forked agent it was Bob unless it also
+    exported ``AGENT_NAME``.
+    """
+    import gptme_ace.generator as generator_module
+
+    root = _make_agent_repo(tmp_path / "other-agent")
+    monkeypatch.setattr(generator_module, "_default_workspace_root", lambda: root)
+    context = domain_context()
+    assert "- Agent: YourAgent (autonomous AI assistant)" in context
+    assert "other-agent (workspace)" in context
+    assert "Bob" not in context
+
+
 # --- storage root ----------------------------------------------------------
 
 

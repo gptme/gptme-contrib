@@ -73,10 +73,11 @@ def domain_context(
     unchanged: ``[agent].name = "Bob"`` and the ``bob`` workspace resolve to
     the historical text.
     """
-    resolved_agent = agent_name or _resolve_agent_name(workspace)
-    # Resolve the workspace repo the same way storage does, so a caller that
-    # omits ``workspace`` still gets its own repo name instead of Bob's.
+    # Resolve the workspace repo the same way storage does, then read the agent
+    # name from that same resolved workspace, so a caller that omits
+    # ``workspace`` still gets its own identity instead of Bob's.
     resolved_workspace = Path(workspace) if workspace else _default_workspace_root()
+    resolved_agent = agent_name or _resolve_agent_name(resolved_workspace)
     workspace_repo = resolved_workspace.name
     return f"""
 Operating Context:
