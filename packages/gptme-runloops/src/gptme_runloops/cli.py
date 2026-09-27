@@ -630,6 +630,62 @@ def review_pr(
         sys.exit(1)
 
 
+@main.command("select")
+@click.option(
+    "--profile",
+    default=None,
+    help="Profile name (reserved for future multi-profile support; currently unused)",
+)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to harness-quota.toml (default: ~/.config/gptme/harness-quota.toml)",
+)
+@click.option(
+    "--state-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Block-registry state directory (default: ~/.local/share/gptme/block-registry)",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def select_cmd(
+    profile: str | None,
+    config_path: Path | None,
+    state_dir: Path | None,
+    as_json: bool,
+) -> None:
+    """Select the first viable backend + model from the candidate list.
+
+    Reads harness-quota.toml, filters out binary-unavailable and block-registry-blocked
+    candidates, and prints the first viable {backend, model} pair.
+
+    Exit code 1 when no viable candidate is found.
+    """
+    import json as _json
+
+    from gptme_runloops.select import load_select_config, select_backend
+
+    config = load_select_config(config_path)
+    if not config.candidates:
+        raise click.ClickException(
+            "No candidates configured. "
+            "Create ~/.config/gptme/harness-quota.toml with [[candidates]] entries."
+        )
+
+    result = select_backend(config=config, state_dir=state_dir)
+    if result is None:
+        raise click.ClickException(
+            "No viable backend found (all candidates blocked or unavailable)."
+        )
+
+    if as_json:
+        click.echo(_json.dumps(result.to_dict()))
+    else:
+        click.echo(f"backend={result.backend} model={result.model}")
+
+
 @main.command("run")
 @click.argument("prompt", required=False)
 @click.option(
