@@ -2,6 +2,10 @@
 
 Provides a pluggable interface for different AI backend tools (gptme, Claude Code, etc.)
 so that run loops can work with any backend without modification.
+
+``Executor.execute`` is the run-loop surface (stream output, return an exit code).
+``Executor.run_once`` is the one-shot surface (final message + session id, resume);
+see :mod:`gptme_runloops.utils.run_once` for the per-backend resume mapping.
 """
 
 import logging
@@ -13,6 +17,11 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 from gptme_runloops.utils.execution import ExecutionResult, execute_gptme
+from gptme_runloops.utils.run_once import (
+    RUN_ONCE,
+    ResumeNotSupportedError,
+    RunOnceResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +53,7 @@ class Executor(ABC):
     """
 
     name: str  # e.g. 'gptme', 'claude-code'
+    supports_resume: bool = False  # run_once(resume=...) continues a session
 
     @abstractmethod
     def execute(
@@ -77,6 +87,52 @@ class Executor(ABC):
         """
         ...
 
+    def run_once(
+        self,
+        prompt: str,
+        workspace: Path,
+        timeout: int,
+        *,
+        model: str | None = None,
+        resume: str | None = None,
+        allowed_tools: list[str] | None = None,
+        sandbox: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> RunOnceResult:
+        """Run one prompt, capturing the final message, model and session id.
+
+        Args:
+            prompt: Prompt text.
+            workspace: Working directory.
+            timeout: Maximum execution time in seconds.
+            model: Model override (backend-specific format).
+            resume: ``session_id`` of an earlier result to continue.
+            allowed_tools: Backend-native tool allowlist (claude-code
+                ``--allowedTools`` patterns, gptme ``--tools`` names).
+            sandbox: Sandbox mode where the backend has one (codex).
+            env: Additional environment variables.
+
+        Raises:
+            ResumeNotSupportedError: ``resume`` on a backend that cannot resume.
+            NotImplementedError: the backend has no one-shot support.
+            ValueError: a restriction the backend cannot honour.
+        """
+        if resume and not self.supports_resume:
+            raise ResumeNotSupportedError(f"{self.name}: resume is not supported")
+        fn = RUN_ONCE.get(self.name)
+        if fn is None:
+            raise NotImplementedError(f"{self.name}: run_once is not supported")
+        return fn(
+            prompt,
+            workspace,
+            timeout,
+            model=model,
+            resume=resume,
+            allowed_tools=allowed_tools,
+            sandbox=sandbox,
+            env=env,
+        )
+
     def is_available(self) -> bool:
         """Check if this backend is installed and available.
 
@@ -99,6 +155,7 @@ class GptmeExecutor(Executor):
     """
 
     name = "gptme"
+    supports_resume = True
 
     def execute(
         self,
@@ -137,6 +194,7 @@ class ClaudeCodeExecutor(Executor):
     """
 
     name = "claude-code"
+    supports_resume = True
 
     @property
     def _binary_name(self) -> str:
@@ -292,12 +350,56 @@ class GrokBuildExecutor(Executor):
             return ExecutionResult(exit_code=124, timed_out=True)
 
 
+class CodexExecutor(Executor):
+    """Executor for OpenAI's Codex CLI (``codex exec``).
+
+    Runs in the ``workspace-write`` sandbox (writes confined to the workspace,
+    no network). Codex has no tool allowlist, so ``tools`` is ignored with a
+    warning, like the other non-gptme executors.
+    """
+
+    name = "codex"
+    supports_resume = True
+
+    def execute(
+        self,
+        prompt: str,
+        workspace: Path,
+        timeout: int,
+        *,
+        model: str | None = None,
+        tool_format: str | None = None,
+        tools: str | None = None,
+        env: dict[str, str] | None = None,
+        run_type: str = "run",
+        system_prompt_file: Path | None = None,
+    ) -> ExecutionResult:
+        if tools:
+            logger.warning(
+                "CodexExecutor: 'tools' parameter is not supported by Codex "
+                "and will be ignored."
+            )
+        if tool_format:
+            logger.warning(
+                "CodexExecutor: 'tool_format' parameter is not supported by Codex "
+                "and will be ignored."
+            )
+        system_prompt = _read_system_prompt(system_prompt_file)
+        if system_prompt:
+            prompt = f"{system_prompt}\n\n{prompt}"
+        result = self.run_once(prompt, workspace, timeout, model=model, env=env)
+        if result.result:
+            print(result.result, file=sys.stderr if result.is_error else sys.stdout)
+        return ExecutionResult(exit_code=result.exit_code, timed_out=result.timed_out)
+
+
 # --- Backend registry ---
 
 EXECUTORS: dict[str, type[Executor]] = {
     "gptme": GptmeExecutor,
     "claude-code": ClaudeCodeExecutor,
     "grok-build": GrokBuildExecutor,
+    "codex": CodexExecutor,
 }
 
 

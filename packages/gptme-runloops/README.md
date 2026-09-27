@@ -43,7 +43,20 @@ gptme-runloops email --workspace /path/to/workspace
 
 # Run team coordination
 gptme-runloops team --workspace /path/to/workspace
+
+# One-shot run on any backend: prints one JSON line with the final message,
+# the model used and the backend's session_id
+gptme-runloops run --workspace . --backend claude-code --allowed-tool Read "summarise TODO.md"
+# Continue that session (same backend + model)
+gptme-runloops run --workspace . --backend claude-code --model <model> --resume <session_id> "and now?"
 ```
+
+`run` resume mapping: claude-code `--resume <id>`, codex `codex exec resume <id>`,
+gptme `--name <id>`. Backends without resume (grok-build) fail with a usage error
+instead of starting fresh; a rejected resume id is an error unless
+`--on-resume-failure fresh` explicitly opts into a fresh session (optionally with
+`--fallback-prompt-file` for carried-over context). Tool restriction is backend-native:
+`--allowed-tool` (claude-code `--allowedTools`, gptme `--tools`) or `--sandbox` (codex).
 
 ### Python API
 
@@ -104,6 +117,8 @@ Phase 1 (in progress): CLI runner that produces `ReviewArtifact` JSON locally wi
 - `logging.py`: Structured logging
 - `prompt.py`: Prompt generation
 - `execution.py`: gptme execution wrapper
+- `executor.py`: backend registry (gptme, claude-code, codex, grok-build): `execute()` for run loops, `run_once()` for one-shot/resumable runs
+- `run_once.py`: per-backend one-shot runs (final message, model, session id, resume)
 
 ## Configuration
 
