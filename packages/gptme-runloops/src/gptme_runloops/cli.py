@@ -241,13 +241,15 @@ def monitoring(
 @click.option(
     "--backend",
     default=None,
-    help="Session backend, passed to the runner verbatim (default: $BOB_BACKEND). "
+    help="Session backend, passed to the runner verbatim (default: "
+    "$AGENT_BACKEND, legacy $BOB_BACKEND). "
     "Routing stays in the dispatcher — run-item never re-routes.",
 )
 @click.option(
     "--model",
     default=None,
-    help="Model override (default: $BOB_SELECTED_MODEL; empty = backend default)",
+    help="Model override (default: $AGENT_SELECTED_MODEL, legacy "
+    "$BOB_SELECTED_MODEL; empty = backend default)",
 )
 @click.option(
     "--lane",
@@ -344,10 +346,25 @@ def run_item_cmd(
     )
     if work_file is None:
         raise click.UsageError("--work-file is required (or set $PM_WORK_FILE)")
-    backend = backend or os.environ.get("BOB_BACKEND", "")
+    # The neutral AGENT_* spelling is canonical; BOB_* stays as the working
+    # legacy alias for Bob's launcher. The launcher dual-writes both, so
+    # preferring the neutral name cannot resolve an inherited stale value.
+    backend = (
+        backend or os.environ.get("AGENT_BACKEND") or os.environ.get("BOB_BACKEND", "")
+    )
     if not backend:
-        raise click.UsageError("--backend is required (or set $BOB_BACKEND)")
-    model = model if model is not None else os.environ.get("BOB_SELECTED_MODEL", "")
+        raise click.UsageError(
+            "--backend is required (or set $AGENT_BACKEND; "
+            "$BOB_BACKEND is a legacy alias)"
+        )
+    model = (
+        model
+        if model is not None
+        else (
+            os.environ.get("AGENT_SELECTED_MODEL")
+            or os.environ.get("BOB_SELECTED_MODEL", "")
+        )
+    )
     lane = lane or os.environ.get("PM_LANE", "mixed")
     dispatch_id = dispatch_id or os.environ.get("PM_DISPATCH_ID", "")
     slot_key = slot_key or os.environ.get("PM_SLOT_KEY", "")

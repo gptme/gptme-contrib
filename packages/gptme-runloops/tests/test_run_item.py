@@ -679,6 +679,14 @@ def test_shadow_bandit_enabled_reads_env() -> None:
     assert _shadow_bandit_enabled({"BOB_PM_BANDIT_SHADOW": "0"}) is False
     assert _shadow_bandit_enabled({"BOB_PM_BANDIT_SHADOW": "1"}) is True
     assert _shadow_bandit_enabled({"BOB_PM_BANDIT_SHADOW": "true"}) is True
+    # Neutral AGENT_* spelling is canonical; BOB_* stays a legacy alias.
+    assert _shadow_bandit_enabled({"AGENT_PM_BANDIT_SHADOW": "1"}) is True
+    assert (
+        _shadow_bandit_enabled(
+            {"AGENT_PM_BANDIT_SHADOW": "0", "BOB_PM_BANDIT_SHADOW": "1"}
+        )
+        is False
+    )
 
 
 def test_load_shadow_bandit_none_when_flag_off(tmp_path, monkeypatch) -> None:

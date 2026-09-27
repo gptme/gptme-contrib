@@ -960,19 +960,27 @@ class LaneDispatcher:
             f"--setenv=PM_SLOT_KEY={slot_key}",
             f"--setenv=PM_DISPATCH_ID={unit_name}",
             f"--setenv=PM_WORK_FILE={slot_file}",
+            # Dual-write the neutral AGENT_* spelling alongside the legacy
+            # BOB_* alias. run-item prefers the neutral name, so a slot that
+            # inherited a stale BOB_* value must not be able to shadow the
+            # backend/model assigned here: reading a neutral name while the
+            # spawner writes only the old one resolves the parent's value.
+            f"--setenv=AGENT_BACKEND={backend}",
             f"--setenv=BOB_BACKEND={backend}",
         ]
         if model:
+            cmd.append(f"--setenv=AGENT_SELECTED_MODEL={model}")
             cmd.append(f"--setenv=BOB_SELECTED_MODEL={model}")
         if work_type:
             cmd.append(f"--setenv=PM_WORK_TYPE={work_type}")
         # Transient units inherit nothing. Forward the Stage 1 shadow flag so
         # run-item actually records observations (gptme-contrib#1506 was
         # stripped as dead code because this was never set here).
-        cmd.append(
-            "--setenv=BOB_PM_BANDIT_SHADOW="
-            + os.environ.get("BOB_PM_BANDIT_SHADOW", "0")
+        shadow = os.environ.get("AGENT_PM_BANDIT_SHADOW") or os.environ.get(
+            "BOB_PM_BANDIT_SHADOW", "0"
         )
+        cmd.append(f"--setenv=AGENT_PM_BANDIT_SHADOW={shadow}")
+        cmd.append(f"--setenv=BOB_PM_BANDIT_SHADOW={shadow}")
         # Route stdout+stderr to per-slot log files when slot_log_dir is set.
         # Sequential file appends are much cheaper than journald's mmap
         # random-write pattern on DRAM-less SSDs (~18 GB/day → target <3 GB).

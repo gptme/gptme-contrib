@@ -215,6 +215,7 @@ def test_cli_dry_run_prints_execution_plan(tmp_path) -> None:
 
 def test_cli_requires_backend(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("BOB_BACKEND", raising=False)
+    monkeypatch.delenv("AGENT_BACKEND", raising=False)
     work_file = tmp_path / "slot.jsonl"
     work_file.write_text("{}\n")
     runner = CliRunner()
@@ -224,3 +225,62 @@ def test_cli_requires_backend(tmp_path, monkeypatch) -> None:
     )
     assert result.exit_code != 0
     assert "--backend is required" in result.output
+
+
+def _write_cli_work_file(tmp_path) -> None:
+    (tmp_path / "slot.jsonl").write_text(
+        json.dumps(
+            {
+                "repo": "gptme/gptme-contrib",
+                "number": 1234,
+                "title": "a PR",
+                "types": ["pr_update"],
+                "type": "pr_update",
+                "detail": "review comment",
+                "all_numbers": [1234],
+            }
+        )
+        + "\n"
+    )
+
+
+def _run_item_plan(tmp_path) -> dict:
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main,
+        [
+            "run-item",
+            "--workspace",
+            str(tmp_path),
+            "--work-file",
+            str(tmp_path / "slot.jsonl"),
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # Diagnostics go to stderr; stdout is pure plan JSON.
+    return json.loads(result.output[result.output.index("{") :])
+
+
+def test_cli_reads_neutral_agent_env(tmp_path, monkeypatch) -> None:
+    """The neutral AGENT_* spelling is canonical (#1705)."""
+    _write_cli_work_file(tmp_path)
+    monkeypatch.delenv("BOB_BACKEND", raising=False)
+    monkeypatch.delenv("BOB_SELECTED_MODEL", raising=False)
+    monkeypatch.setenv("AGENT_BACKEND", "codex")
+    monkeypatch.setenv("AGENT_SELECTED_MODEL", "codex-mini")
+    payload = _run_item_plan(tmp_path)
+    assert payload["backend"] == "codex"
+    assert payload["model"] == "codex-mini"
+
+
+def test_cli_legacy_bob_env_still_works(tmp_path, monkeypatch) -> None:
+    """BOB_* stays as a working legacy alias for Bob's launcher (#1705)."""
+    _write_cli_work_file(tmp_path)
+    monkeypatch.delenv("AGENT_BACKEND", raising=False)
+    monkeypatch.delenv("AGENT_SELECTED_MODEL", raising=False)
+    monkeypatch.setenv("BOB_BACKEND", "gptme")
+    monkeypatch.setenv("BOB_SELECTED_MODEL", "gptme-legacy")
+    payload = _run_item_plan(tmp_path)
+    assert payload["backend"] == "gptme"
+    assert payload["model"] == "gptme-legacy"

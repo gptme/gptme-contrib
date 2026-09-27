@@ -2866,14 +2866,21 @@ def _read_monitoring_rules(config: RunItemConfig) -> str:
 def _shadow_bandit_enabled(env: Mapping[str, str] | None = None) -> bool:
     """True when Stage 1 shadow observations are requested.
 
-    Live slots only see this if the launcher forwards ``BOB_PM_BANDIT_SHADOW``
+    Live slots only see this if the launcher forwards ``AGENT_PM_BANDIT_SHADOW``
     via ``systemd-run --setenv``. An orchestrator ``Environment=`` line is
     inert for transient workers unless forwarded — that is how gptme-contrib
     #1506/#1504 landed, accumulated zero observations, and were stripped as
     dead code by #1519.
+
+    The neutral ``AGENT_PM_BANDIT_SHADOW`` is canonical; ``BOB_PM_BANDIT_SHADOW``
+    stays as the working legacy alias. The slot launcher dual-writes both, so
+    preferring the neutral name cannot resolve a stale inherited value.
     """
     source = env if env is not None else os.environ
-    return source.get("BOB_PM_BANDIT_SHADOW", "").strip().lower() in {
+    value = source.get("AGENT_PM_BANDIT_SHADOW") or source.get(
+        "BOB_PM_BANDIT_SHADOW", ""
+    )
+    return value.strip().lower() in {
         "1",
         "true",
         "yes",
@@ -2887,7 +2894,7 @@ def _load_shadow_bandit(config: RunItemConfig) -> PmModelBandit | None:
     try:
         pm_state_dir = Path(config.state_dir) / "pm-dispatch"
         bandit = PmModelBandit(state_dir=str(pm_state_dir))
-        _log("BOB_PM_BANDIT_SHADOW=1: bandit loaded (recording observations only)")
+        _log("AGENT_PM_BANDIT_SHADOW=1: bandit loaded (recording observations only)")
         return bandit
     except Exception as exc:
         _log(f"WARN: failed to load bandit: {exc}")
@@ -2911,7 +2918,7 @@ def _log_shadow_bandit_choice(
             return
         bandit_model = bandit.resolve_model(work_type, available)
         _log(
-            f"BOB_PM_BANDIT_SHADOW: work_type={work_type} "
+            f"AGENT_PM_BANDIT_SHADOW: work_type={work_type} "
             f"actual_model={model or '-'} bandit_model={bandit_model}"
         )
     except Exception as exc:
@@ -2935,20 +2942,20 @@ def _record_shadow_bandit_outcome(
         work_type = classify_item_work_type(list(item_types), repo=repo)
         if item_effect == EFFECT_UNKNOWN:
             _log(
-                "BOB_PM_BANDIT_SHADOW: outcome skipped (unknown effect): "
+                "AGENT_PM_BANDIT_SHADOW: outcome skipped (unknown effect): "
                 f"work_type={work_type}, model={model}"
             )
             return
         if not model:
             _log(
-                "BOB_PM_BANDIT_SHADOW: outcome skipped (no model): "
+                "AGENT_PM_BANDIT_SHADOW: outcome skipped (no model): "
                 f"work_type={work_type}, effect={item_effect}"
             )
             return
         reward = 1.0 if item_effect == EFFECT_OBSERVED else 0.0
         bandit.record_outcome(work_type, model, reward)
         _log(
-            f"BOB_PM_BANDIT_SHADOW: recorded outcome {work_type} -> {model} = {reward}"
+            f"AGENT_PM_BANDIT_SHADOW: recorded outcome {work_type} -> {model} = {reward}"
         )
     except Exception as exc:
         _log(f"WARN: bandit outcome recording failed: {exc}")
@@ -3068,7 +3075,7 @@ def run_work_file(
 
         ambient = _ambient_env(config, backend, model)
         # Stage 1 (shadow mode): load the bandit but do not use it for routing.
-        # Gated by BOB_PM_BANDIT_SHADOW; live only when the slot launcher
+        # Gated by AGENT_PM_BANDIT_SHADOW; live only when the slot launcher
         # forwards that env into the transient unit.
         bandit = _load_shadow_bandit(config)
         if hooks.sysprompt_builder is not None:
