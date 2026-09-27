@@ -1127,9 +1127,12 @@ rows=$(grep -E '{stem}' "{workspace}/state/voice-calls/post-call-events.tsv" | g
 ```
 """
 
+# NOTE: the ``erik_decision`` kind name is a legacy wire value shared with the
+# bash lib; only the *rendered text* is agent-agnostic (agent_name /
+# operator_name). Renaming the kind would break the wire contract.
 _ERIK_DECISION_ARM = """
-### Erik Dashboard Decision (execute the consequence)
-Erik decided YES or NO on a decision-queue item via the dashboard.
+### {operator_name} Dashboard Decision (execute the consequence)
+{operator_name} decided YES or NO on a decision-queue item via the dashboard.
 Decision details: {detail}
 
 Read the full decision record first (the `snapshot=` path in the detail):
@@ -1140,19 +1143,20 @@ cat "{workspace}"/<snapshot path from detail>
 **Enumerated playbook — do these inline (cheap + deterministic):**
 - YES on a `kind=task` item that resolves its wait: flip the task
   `gptodo edit <task-id> --set state todo` and append a
-  `## Erik decision <date>` note (verdict + comment) to the task file.
+  `## {operator_name} decision <date>` note (verdict + comment) to the task file.
 - YES on a `kind=standing` item: retire the ask — remove its entry from
   `config/standing-asks.yaml` (leave a dated comment) and commit scoped.
 - NO with a reason on a `kind=task` item: append the reason as a note to
   the task file; adjust state only if the reason clearly says to
   (e.g. 'cancel' → cancelled).
-- YES on a `kind=issue` item (a GitHub issue asking for an Erik decision):
-  act per the issue's ask if it is in Bob's power now that Erik approved
-  (do the work, comment the outcome on the issue via
-  comment-from-stdin.sh --anti-spam); if the ask needs Erik's own hands
-  (credentials, org settings, account actions), comment that Erik approved
-  via dashboard + what remains, and keep the issue open.
-- NO on a `kind=issue` item: comment Erik's reason on the issue and close
+- YES on a `kind=issue` item (a GitHub issue asking {operator_name} for a
+  decision): act per the issue's ask if it is in {agent_name}'s power now that
+  {operator_name} approved (do the work, comment the outcome on the issue via
+  comment-from-stdin.sh --anti-spam); if the ask needs {operator_name}'s own
+  hands (credentials, org settings, account actions), comment that
+  {operator_name} approved via dashboard + what remains, and keep the issue
+  open.
+- NO on a `kind=issue` item: comment {operator_name}'s reason on the issue and close
   it only when the reason unambiguously ends the ask; otherwise leave it
   open with the reason noted. (Closing the issue is what removes it from
   the decision queue — it self-drops on the next build.)
@@ -1164,7 +1168,7 @@ cat "{workspace}"/<snapshot path from detail>
   python3 {workspace}/scripts/github/self-merge-check.py --json <PR_URL>
   bash {workspace}/scripts/github/self-merge-if-eligible.sh <PR_URL>
   ```
-  If not eligible: comment on the PR that Erik approved via dashboard
+  If not eligible: comment on the PR that {operator_name} approved via dashboard
   (that IS merge authority per lessons/tools/explicit-go-ahead-merge-authority.md,
   quote the decision), then merge only if the remaining gate is one you may
   clear; otherwise leave a comment stating what still blocks.
@@ -1174,13 +1178,14 @@ cat "{workspace}"/<snapshot path from detail>
 - Anything ambiguous: create a todo task file carrying the decision record
   and say so in your summary — do NOT guess.
 
-Erik's comment is the highest-signal text in this item — a NO-with-reason
-is direction, not rejection. Never re-ask him what he already answered.
+{operator_name}'s comment is the highest-signal text in this item — a
+NO-with-reason is direction, not rejection. Never re-ask {operator_name} what
+was already answered.
 
 **REQUIRED before finishing — report the outcome back to the decision:**
-The decision permalink (bob.hassel.bjareho.lt/decisions/decision/<decision_id>)
-shows Erik what happened BECAUSE of his click. Append a structured outcome
-record via the helper (validated + flock'd — NEVER hand-write the jsonl):
+The decision record shows {operator_name} what happened because of that
+decision. Append a structured outcome record via the helper (validated +
+flock'd — NEVER hand-write the jsonl):
 ```bash
 python3 {workspace}/scripts/report-decision-outcome.py \\
   --decision-id DECISION_ID_FROM_DETAIL \\
