@@ -9,11 +9,13 @@ from gptme_runloops.project_monitoring import ProjectMonitoringRun
 from gptme_runloops.team import TeamRun
 from gptme_runloops.utils.executor import (
     ClaudeCodeExecutor,
+    CodexExecutor,
     Executor,
     GptmeExecutor,
     get_executor,
     list_backends,
 )
+from gptme_runloops.utils.run_once import ResumeNotSupportedError, RunOnceResult
 
 # pm_dispatch symbols are re-exported lazily (PEP 562) instead of eagerly. An
 # eager `from gptme_runloops.pm_dispatch import ...` here imports the submodule
@@ -58,6 +60,9 @@ __all__ = [
     "Executor",
     "GptmeExecutor",
     "ClaudeCodeExecutor",
+    "CodexExecutor",
+    "ResumeNotSupportedError",
+    "RunOnceResult",
     "get_executor",
     "list_backends",
     # pm_dispatch

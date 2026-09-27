@@ -630,5 +630,138 @@ def review_pr(
         sys.exit(1)
 
 
+@main.command("run")
+@click.argument("prompt", required=False)
+@click.option(
+    "--prompt-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Read the prompt from a file instead of the argument",
+)
+@click.option(
+    "--workspace",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=Path.cwd(),
+    help="Working directory (default: current directory)",
+)
+@click.option(
+    "--backend",
+    envvar="AGENT_BACKEND",
+    default="gptme",
+    show_default=True,
+    type=click.Choice(list_backends()),
+    help="Execution backend (env: AGENT_BACKEND)",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Model override (backend-specific; default: backend default)",
+)
+@click.option(
+    "--resume",
+    default=None,
+    help="session_id from an earlier `run` result to continue",
+)
+@click.option(
+    "--allowed-tool",
+    "allowed_tools",
+    multiple=True,
+    help="Backend-native tool allowlist entry (repeatable): claude-code "
+    "--allowedTools pattern, gptme --tools name. Rejected on codex.",
+)
+@click.option(
+    "--sandbox",
+    default=None,
+    help="Sandbox mode where the backend has one (codex: read-only, "
+    "workspace-write [default], danger-full-access)",
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=1800,
+    show_default=True,
+    help="Timeout in seconds",
+)
+@click.option(
+    "--on-resume-failure",
+    type=click.Choice(["error", "fresh"]),
+    default="error",
+    show_default=True,
+    help="If the resumed session produced no agent output (backend rejected the "
+    "id: unknown/expired session): report the "
+    "error, or explicitly start a fresh session (result has resumed=false, "
+    "resume_failed=true). Backends that cannot resume at all always error.",
+)
+@click.option(
+    "--fallback-prompt-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Prompt for the fresh session when --on-resume-failure=fresh "
+    "(default: the same prompt). Use it to carry prior context.",
+)
+def run_cmd(
+    prompt: str | None,
+    prompt_file: Path | None,
+    workspace: Path,
+    backend: str,
+    model: str | None,
+    resume: str | None,
+    allowed_tools: tuple[str, ...],
+    sandbox: str | None,
+    timeout: int,
+    on_resume_failure: str,
+    fallback_prompt_file: Path | None,
+):
+    """Run ONE prompt on any backend and print the result as a JSON line.
+
+    Output (stdout, one line): backend, model, session_id, result, exit_code,
+    is_error, resumed, timed_out, cost_usd (and resume_failed on fallback).
+    Pass session_id back via --resume (with the same --backend/--model) to
+    continue the session. Exit code 0 on success, 1 on an error result, 2 on
+    usage errors (e.g. resume on a backend without resume support).
+    """
+    import json as _json
+
+    from gptme_runloops.utils.run_once import ResumeNotSupportedError
+
+    if prompt_file:
+        prompt = prompt_file.read_text()
+    if not prompt:
+        raise click.UsageError("PROMPT or --prompt-file is required")
+    executor = get_executor(backend)
+    tools = list(allowed_tools) or None
+
+    def _once(text: str, resume_id: str | None):
+        return executor.run_once(
+            text,
+            workspace,
+            timeout,
+            model=model,
+            resume=resume_id,
+            allowed_tools=tools,
+            sandbox=sandbox,
+        )
+
+    try:
+        result = _once(prompt, resume)
+    except (ResumeNotSupportedError, ValueError, NotImplementedError) as e:
+        raise click.UsageError(str(e))
+    out = result.to_dict()
+    if resume and not result.agent_output and not result.timed_out:
+        if on_resume_failure == "fresh":
+            fresh_prompt = (
+                fallback_prompt_file.read_text() if fallback_prompt_file else prompt
+            )
+            failure = result.result
+            result = _once(fresh_prompt, None)
+            out = {
+                **result.to_dict(),
+                "resume_failed": True,
+                "resume_error": failure[-500:],
+            }
+    click.echo(_json.dumps(out))
+    sys.exit(1 if out["is_error"] else 0)
+
+
 if __name__ == "__main__":
     main()
