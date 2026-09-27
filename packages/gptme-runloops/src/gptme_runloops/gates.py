@@ -227,7 +227,9 @@ class UtilizationBypassDecision:
     Attributes:
         behind_pace: True → bypass suppressive gates to improve utilisation.
         pace_gap_repr: Human string mirroring the bash ``QUOTA_PACE_GAP`` — the
-            numeric gap (``"0.30"``), ``"unknown (idle 8.94h)"``, or ``"unknown"``.
+            numeric gap (``"0.3"``), ``"unknown (idle 8.94h)"``, or ``"unknown"``.
+            Rendered via ``str(pace_gap)``, byte-identical to the reference's
+            ``print(round(gap, 3))`` (so ``0.30`` renders ``"0.3"``, not ``"0.30"``).
             Used verbatim in the downstream bypass log line.
         source: Which signal decided it — ``"api"``, ``"idle_fallback"``, or
             ``"unknown"``.
