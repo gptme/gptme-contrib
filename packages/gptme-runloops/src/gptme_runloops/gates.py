@@ -277,7 +277,9 @@ def utilization_bypass_gate(
             burn), or ``None`` when the scrape was unavailable.
         idle_hours: Zero-arg callable returning hours since the last productive
             session (or ``None`` if unknown). Called at most once, and only on the
-            API-unavailable path — so the caller pays for it only when needed.
+            API-unavailable path — so the caller pays for it only when needed. A
+            raised exception is tolerated and treated as ``None`` (unknown), so a
+            failed probe can't hard-fail the run loop on the auth-outage path.
         pace_gap_threshold: Gap above which the API signal counts as behind pace.
         idle_hours_threshold: Idle hours above which the fallback counts as behind
             pace.
@@ -292,7 +294,15 @@ def utilization_bypass_gate(
             source="api",
             message=None,
         )
-    hours = idle_hours()
+    try:
+        hours = idle_hours()
+    except Exception:
+        # A failed idle probe must not hard-fail the run loop — this is the
+        # auth-outage path the fallback exists for. The reference bash tolerates
+        # it too: an empty HOURS_IDLE makes ``[ "" -gt 12 ]`` false, so it takes
+        # the else branch (not behind pace, gap "unknown"). Mirror that by
+        # treating an exception as an unknown idle signal.
+        hours = None
     if hours is not None and hours > idle_hours_threshold:
         return UtilizationBypassDecision(
             behind_pace=True,
@@ -300,7 +310,7 @@ def utilization_bypass_gate(
             source="idle_fallback",
             message=(
                 f"[quota-gate] usage scrape unavailable; local fallback: {hours:.2f}h "
-                f"since last productive session (>{idle_hours_threshold:.0f}h) — treating as behind pace"
+                f"since last productive session (>{idle_hours_threshold:g}h) — treating as behind pace"
             ),
         )
     return UtilizationBypassDecision(

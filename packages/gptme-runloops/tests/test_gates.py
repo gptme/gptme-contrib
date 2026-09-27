@@ -379,3 +379,24 @@ class TestUtilizationBypassGate:
 
         d2 = utilization_bypass_gate(0.15, _never_hours, pace_gap_threshold=0.10)
         assert d2.behind_pace is True
+
+    def test_throwing_idle_probe_is_tolerated_as_unknown(self) -> None:
+        # A failed idle probe must not propagate — this is the auth-outage path
+        # the fallback exists for. The reference bash treats an empty HOURS_IDLE
+        # as the else branch (not behind pace, gap "unknown"); mirror that.
+        def boom() -> float | None:
+            raise RuntimeError("idle probe failed")
+
+        d = utilization_bypass_gate(None, boom)
+        assert d.behind_pace is False
+        assert d.source == "unknown"
+        assert d.pace_gap_repr == "unknown"
+        assert d.message is None
+
+    def test_fractional_threshold_not_truncated_in_message(self) -> None:
+        # ':g' keeps a fractional threshold honest: the log must not say ">12h"
+        # while the comparison uses 12.5 (that was the ':.0f' truncation bug).
+        d = utilization_bypass_gate(None, lambda: 13.0, idle_hours_threshold=12.5)
+        assert d.behind_pace is True
+        assert d.message is not None
+        assert "(>12.5h)" in d.message
