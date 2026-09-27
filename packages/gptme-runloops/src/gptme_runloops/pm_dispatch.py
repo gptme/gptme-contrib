@@ -976,8 +976,11 @@ class LaneDispatcher:
         # Transient units inherit nothing. Forward the Stage 1 shadow flag so
         # run-item actually records observations (gptme-contrib#1506 was
         # stripped as dead code because this was never set here).
-        shadow = os.environ.get("AGENT_PM_BANDIT_SHADOW") or os.environ.get(
-            "BOB_PM_BANDIT_SHADOW", "0"
+        neutral_shadow = os.environ.get("AGENT_PM_BANDIT_SHADOW")
+        shadow = (
+            neutral_shadow
+            if neutral_shadow is not None
+            else os.environ.get("BOB_PM_BANDIT_SHADOW", "0")
         )
         cmd.append(f"--setenv=AGENT_PM_BANDIT_SHADOW={shadow}")
         cmd.append(f"--setenv=BOB_PM_BANDIT_SHADOW={shadow}")

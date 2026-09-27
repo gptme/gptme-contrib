@@ -349,22 +349,23 @@ def run_item_cmd(
     # The neutral AGENT_* spelling is canonical; BOB_* stays as the working
     # legacy alias for Bob's launcher. The launcher dual-writes both, so
     # preferring the neutral name cannot resolve an inherited stale value.
-    backend = (
-        backend or os.environ.get("AGENT_BACKEND") or os.environ.get("BOB_BACKEND", "")
-    )
+    # Presence-based (not truthiness): an explicitly-set AGENT_* value — even
+    # empty — must win over a stale BOB_* inherited from the parent env.
+    if not backend:
+        neutral = os.environ.get("AGENT_BACKEND")
+        backend = neutral if neutral is not None else os.environ.get("BOB_BACKEND", "")
     if not backend:
         raise click.UsageError(
             "--backend is required (or set $AGENT_BACKEND; "
             "$BOB_BACKEND is a legacy alias)"
         )
-    model = (
-        model
-        if model is not None
-        else (
-            os.environ.get("AGENT_SELECTED_MODEL")
-            or os.environ.get("BOB_SELECTED_MODEL", "")
+    if model is None:
+        neutral_model = os.environ.get("AGENT_SELECTED_MODEL")
+        model = (
+            neutral_model
+            if neutral_model is not None
+            else os.environ.get("BOB_SELECTED_MODEL", "")
         )
-    )
     lane = lane or os.environ.get("PM_LANE", "mixed")
     dispatch_id = dispatch_id or os.environ.get("PM_DISPATCH_ID", "")
     slot_key = slot_key or os.environ.get("PM_SLOT_KEY", "")

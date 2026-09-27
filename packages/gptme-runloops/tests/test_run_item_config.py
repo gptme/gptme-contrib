@@ -284,3 +284,29 @@ def test_cli_legacy_bob_env_still_works(tmp_path, monkeypatch) -> None:
     payload = _run_item_plan(tmp_path)
     assert payload["backend"] == "gptme"
     assert payload["model"] == "gptme-legacy"
+
+
+def test_cli_explicitly_empty_neutral_env_wins(tmp_path, monkeypatch) -> None:
+    """An explicitly-set AGENT_* value — even empty — is canonical (#1705).
+
+    An empty neutral value must not fall through to a stale BOB_* inherited
+    from the parent env; it resolves to empty (which errors out clearly)
+    instead of silently routing to the legacy backend.
+    """
+    _write_cli_work_file(tmp_path)
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            "run-item",
+            "--workspace",
+            str(tmp_path),
+            "--work-file",
+            str(tmp_path / "slot.jsonl"),
+            "--dry-run",
+        ],
+        env={"AGENT_BACKEND": "", "BOB_BACKEND": "gptme"},
+    )
+    # Empty neutral wins over the stale legacy value: the explicit-empty
+    # backend resolves to empty and the command refuses rather than routing
+    # to the inherited BOB_BACKEND.
+    assert result.exit_code != 0

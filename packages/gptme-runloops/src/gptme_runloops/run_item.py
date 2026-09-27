@@ -2875,11 +2875,13 @@ def _shadow_bandit_enabled(env: Mapping[str, str] | None = None) -> bool:
     The neutral ``AGENT_PM_BANDIT_SHADOW`` is canonical; ``BOB_PM_BANDIT_SHADOW``
     stays as the working legacy alias. The slot launcher dual-writes both, so
     preferring the neutral name cannot resolve a stale inherited value.
+    Presence-based (not truthiness): an explicitly-set AGENT_* value — even
+    empty, meaning disabled — wins over a stale BOB_* inherited from the
+    parent env.
     """
     source = env if env is not None else os.environ
-    value = source.get("AGENT_PM_BANDIT_SHADOW") or source.get(
-        "BOB_PM_BANDIT_SHADOW", ""
-    )
+    neutral = source.get("AGENT_PM_BANDIT_SHADOW")
+    value = neutral if neutral is not None else source.get("BOB_PM_BANDIT_SHADOW", "")
     return value.strip().lower() in {
         "1",
         "true",
