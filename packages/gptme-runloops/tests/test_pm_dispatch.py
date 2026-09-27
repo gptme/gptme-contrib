@@ -2810,13 +2810,22 @@ class TestLaneDispatcherEnvAliases:
         assert "--setenv=AGENT_PM_BANDIT_SHADOW=1" in cmd
         assert "--setenv=BOB_PM_BANDIT_SHADOW=1" in cmd
 
-    def test_model_omitted_when_none(
+    def test_model_unresolved_writes_empty_not_omitted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # --setenv only sets, never clears: omitting the write would let a
+        # stale SELECTED_MODEL from the parent env leak into the slot. An
+        # empty value is written instead, which run-item reads as canonical
+        # "no model" (presence-based precedence).
         cmd = self._captured_cmd(
             tmp_path, monkeypatch, backend="claude-code", model=None
         )
-        assert not any("SELECTED_MODEL" in arg for arg in cmd)
+        assert "--setenv=AGENT_SELECTED_MODEL=" in cmd
+        assert "--setenv=BOB_SELECTED_MODEL=" in cmd
+        assert not any(
+            arg.startswith("--setenv=AGENT_SELECTED_MODEL=") and arg.split("=", 2)[2]
+            for arg in cmd
+        )
 
 
 class TestUnitPrefix:

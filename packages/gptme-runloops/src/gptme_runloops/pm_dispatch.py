@@ -968,9 +968,14 @@ class LaneDispatcher:
             f"--setenv=AGENT_BACKEND={backend}",
             f"--setenv=BOB_BACKEND={backend}",
         ]
-        if model:
-            cmd.append(f"--setenv=AGENT_SELECTED_MODEL={model}")
-            cmd.append(f"--setenv=BOB_SELECTED_MODEL={model}")
+        # Write the model unconditionally (empty string when unresolved): a
+        # transient unit inherits nothing, but --setenv only *sets* — it never
+        # clears. Omitting the write would let a stale AGENT_SELECTED_MODEL or
+        # BOB_SELECTED_MODEL from the parent env leak into the slot and route
+        # it to a model it was not assigned. run-item's presence-based
+        # precedence reads the empty neutral value as canonical "no model".
+        cmd.append(f"--setenv=AGENT_SELECTED_MODEL={model or ''}")
+        cmd.append(f"--setenv=BOB_SELECTED_MODEL={model or ''}")
         if work_type:
             cmd.append(f"--setenv=PM_WORK_TYPE={work_type}")
         # Transient units inherit nothing. Forward the Stage 1 shadow flag so

@@ -310,3 +310,4 @@ def test_cli_explicitly_empty_neutral_env_wins(tmp_path, monkeypatch) -> None:
     # backend resolves to empty and the command refuses rather than routing
     # to the inherited BOB_BACKEND.
     assert result.exit_code != 0
+    assert "--backend is required" in result.output
