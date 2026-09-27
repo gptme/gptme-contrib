@@ -470,7 +470,7 @@ fetch_pr_data_search() {
     # Fallback: legacy search-backed list (2 requests / 2 points). Propagate a
     # failure exit so the cache layer treats it as a failed producer (emits its
     # `[]` default without caching) instead of caching a transient error.
-    gh pr list --repo "$repo" --author "$AUTHOR" --state open \
+    gh pr list --limit 1000 --repo "$repo" --author "$AUTHOR" --state open \
         --json number,title,updatedAt,comments,latestReviews,statusCheckRollup,mergeable,mergeStateStatus,headRefOid,isDraft \
         --jq '[.[] | select(.isDraft | not)]' 2>/dev/null
 }

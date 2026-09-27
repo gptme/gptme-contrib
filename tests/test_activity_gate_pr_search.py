@@ -42,6 +42,8 @@ if not argv:
 
 if argv[0] == "pr" and len(argv) > 1 and argv[1] == "list":
     bump("pr_list")
+    if "--limit" in argv:
+        bump("pr_list_limit")
     print(json.dumps([{
         "number": 5,
         "title": "feat: from fallback",
@@ -178,7 +180,7 @@ def _run_gate(tmp: Path, state_dir: Path, mode: str) -> tuple[dict[str, int], Pa
     )
     counts = {
         name: int((count_dir / name).read_text())
-        for name in ("search", "pr_list")
+        for name in ("search", "pr_list", "pr_list_limit")
         if (count_dir / name).exists()
     }
     return counts, state_dir / "gh-cache" / "pr-testorg-testrepo.json"
@@ -256,6 +258,9 @@ def test_has_next_page_with_null_cursor_falls_back() -> None:
 
         assert counts.get("search") == 1, counts
         assert counts.get("pr_list", 0) >= 1, "unpageable result must fall back"
+        assert (
+            counts.get("pr_list_limit", 0) >= 1
+        ), "fallback must request the full limit, not gh's 30-item default"
         assert cache_file.exists()
         cached = json.loads(cache_file.read_text())
         assert [pr["title"] for pr in cached] == ["feat: from fallback"]
