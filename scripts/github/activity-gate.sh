@@ -452,11 +452,16 @@ fetch_pr_data_search() {
                       | .statusCheckRollup = ((.statusCheckRollup.contexts.nodes) // []))
             else empty end' 2>/dev/null) || { failed=1; break; }
         pages+="$page"$'\n'
-        cursor=$(printf '%s' "$raw" | jq -r '
-            if .data.search.pageInfo.hasNextPage then
-                (.data.search.pageInfo.endCursor // "")
-            else "" end' 2>/dev/null) || cursor=""
-        [ -n "$cursor" ] || break
+        has_next=$(printf '%s' "$raw" | jq -r '.data.search.pageInfo.hasNextPage // false' 2>/dev/null) || has_next="false"
+        cursor=$(printf '%s' "$raw" | jq -r '.data.search.pageInfo.endCursor // ""' 2>/dev/null) || cursor=""
+        if [ "$has_next" != "true" ]; then
+            break
+        fi
+        # hasNextPage with a missing/empty cursor: we cannot continue
+        # pagination safely, but returning the accumulated pages as success
+        # would silently truncate the list. Treat as failure so the caller
+        # falls back to `gh pr list`, which paginates internally.
+        [ -n "$cursor" ] || { failed=1; break; }
     done
     if [ "$failed" -eq 0 ] && [ -n "$pages" ]; then
         printf '%s' "$pages" | jq -sc 'add'

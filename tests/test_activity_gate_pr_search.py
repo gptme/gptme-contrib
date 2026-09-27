@@ -66,6 +66,27 @@ if argv[0] == "api" and any("PullRequestSearch" in a for a in argv):
         sys.exit(0)
     if search_mode == "empty":
         nodes = []
+    elif search_mode == "broken_cursor":
+        # Page 1 claims hasNextPage but provides a null endCursor — the
+        # caller cannot continue pagination and must not treat the partial
+        # page as success.
+        node = {
+            "number": 5,
+            "title": "feat: from page1",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "comments": {"nodes": []},
+            "latestReviews": {"nodes": []},
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "headRefOid": "a" * 40,
+            "isDraft": False,
+            "statusCheckRollup": {"contexts": {"nodes": []}},
+        }
+        print(json.dumps({"data": {"search": {
+            "nodes": [node],
+            "pageInfo": {"hasNextPage": True, "endCursor": None},
+        }}}))
+        sys.exit(0)
     elif search_mode == "paged":
         # Two pages: the fake keys off whether the caller sent an endCursor.
         paged = any(a.startswith("endCursor=") for a in argv)
@@ -223,3 +244,18 @@ def test_search_follows_pagination_and_merges_pages() -> None:
             "feat: from page1",
             "feat: from page2",
         ]
+
+
+def test_has_next_page_with_null_cursor_falls_back() -> None:
+    """hasNextPage=true with a null endCursor must not truncate silently."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        counts, cache_file = _run_gate(tmp, state_dir, "broken_cursor")
+
+        assert counts.get("search") == 1, counts
+        assert counts.get("pr_list", 0) >= 1, "unpageable result must fall back"
+        assert cache_file.exists()
+        cached = json.loads(cache_file.read_text())
+        assert [pr["title"] for pr in cached] == ["feat: from fallback"]
