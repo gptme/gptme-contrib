@@ -35,9 +35,19 @@ from typing import List
 import click
 
 try:
-    from .identity import agent_name as _resolve_agent_name
+    from .identity import (
+        agent_name as _resolve_agent_name,
+    )
+    from .identity import (
+        default_workspace_root as _default_workspace_root,
+    )
 except ImportError:  # pragma: no cover - standalone PEP 723 execution
-    from identity import agent_name as _resolve_agent_name  # type: ignore[no-redef]
+    from identity import (  # type: ignore[no-redef]
+        agent_name as _resolve_agent_name,
+    )
+    from identity import (
+        default_workspace_root as _default_workspace_root,
+    )
 
 _logger = logging.getLogger(__name__)
 
@@ -64,7 +74,10 @@ def domain_context(
     the historical text.
     """
     resolved_agent = agent_name or _resolve_agent_name(workspace)
-    workspace_repo = Path(workspace).name if workspace else "bob"
+    # Resolve the workspace repo the same way storage does, so a caller that
+    # omits ``workspace`` still gets its own repo name instead of Bob's.
+    resolved_workspace = Path(workspace) if workspace else _default_workspace_root()
+    workspace_repo = resolved_workspace.name
     return f"""
 Operating Context:
 - Agent: {resolved_agent} (autonomous AI assistant)

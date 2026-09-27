@@ -153,6 +153,20 @@ def test_domain_context_explicit_agent_name(tmp_path):
     assert "- Agent: Sven (autonomous AI assistant)" in context
 
 
+def test_domain_context_without_workspace_resolves_repo_from_identity(
+    tmp_path, monkeypatch
+):
+    """A no-arg ``domain_context()`` must not fall back to Bob's repo name."""
+    workspace = tmp_path / "sven"
+    workspace.mkdir()
+    monkeypatch.setenv("AGENT_WORKSPACE", str(workspace))
+    monkeypatch.setenv("AGENT_NAME", "Sven")
+    context = domain_context()
+    assert "- Agent: Sven (autonomous AI assistant)" in context
+    assert "sven (workspace)" in context
+    assert "bob (workspace)" not in context
+
+
 # --- storage root ----------------------------------------------------------
 
 
