@@ -17,7 +17,7 @@ identify effective strategies and pitfalls, and generate candidate insights.
 Optimizations:
 - Few-shot examples
 - Lesson awareness (duplicate detection)
-- Domain context (Bob's environment)
+- Domain context (agent environment)
 - Evidence extraction guidance
 - Anti-pattern identification
 - Confidence calibration
@@ -34,6 +34,21 @@ from typing import List
 
 import click
 
+try:
+    from .identity import (
+        agent_name as _resolve_agent_name,
+    )
+    from .identity import (
+        default_workspace_root as _default_workspace_root,
+    )
+except ImportError:  # pragma: no cover - standalone PEP 723 execution
+    from identity import (  # type: ignore[no-redef]
+        agent_name as _resolve_agent_name,
+    )
+    from identity import (
+        default_workspace_root as _default_workspace_root,
+    )
+
 _logger = logging.getLogger(__name__)
 
 try:
@@ -47,13 +62,30 @@ except ImportError:
 
 
 # Optimization 3: Domain Context
-DOMAIN_CONTEXT = """
+def domain_context(
+    workspace: Path | str | None = None,
+    agent_name: str | None = None,
+) -> str:
+    """Build the generator domain context for the current agent/workspace.
+
+    The agent name and workspace repo are resolved instead of baked in, so a
+    forked agent is not told it is Bob (see ``identity``). Bob's deployment is
+    unchanged: ``[agent].name = "Bob"`` and the ``bob`` workspace resolve to
+    the historical text.
+    """
+    # Resolve the workspace repo the same way storage does, then read the agent
+    # name from that same resolved workspace, so a caller that omits
+    # ``workspace`` still gets its own identity instead of Bob's.
+    resolved_workspace = Path(workspace) if workspace else _default_workspace_root()
+    resolved_agent = agent_name or _resolve_agent_name(resolved_workspace)
+    workspace_repo = resolved_workspace.name
+    return f"""
 Operating Context:
-- Agent: Bob (autonomous AI assistant)
+- Agent: {resolved_agent} (autonomous AI assistant)
 - Framework: gptme (CLI agent framework)
 - Primary Activities: Code development, PR reviews, autonomous task execution
 - Key Tools: git, GitHub CLI, shell, Python, tmux
-- Repositories: gptme (main project), gptme-bob (workspace)
+- Repositories: gptme (main project), {workspace_repo} (workspace)
 - Environment: Ubuntu 24.04, SSH access, systemd services
 
 Autonomous Operation:
@@ -62,6 +94,7 @@ Autonomous Operation:
 - Budget: 200k tokens per run (~160k for work)
 - Non-interactive (all actions auto-executed)
 """
+
 
 # Optimization 7: Category Definitions
 CATEGORY_DEFINITIONS = """
@@ -309,13 +342,20 @@ class TrajectoryParser:
 class GeneratorAgent:
     """ACE Generator Agent: analyzes trajectories and generates insights."""
 
-    def __init__(self, api_key: str | None = None, model: str | None = None):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        workspace: Path | str | None = None,
+    ):
         """
         Initialize with Anthropic API.
 
         Args:
             api_key: Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
             model: Anthropic model name (uses gptme config/GPTME_ACE_MODEL if not set)
+            workspace: Workspace root, used to resolve the agent identity in the
+                domain context (auto-detected from the env/home when omitted)
         """
         if anthropic is None:
             raise ImportError(
@@ -323,6 +363,7 @@ class GeneratorAgent:
             )
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model if model else _get_default_anthropic_model()
+        self.workspace = workspace
 
     def analyze_trajectory(
         self,
@@ -356,7 +397,7 @@ Only generate insights that are:
 """
 
         # Comprehensive optimized prompt
-        prompt = f"""{DOMAIN_CONTEXT}
+        prompt = f"""{domain_context(self.workspace)}
 
 {CATEGORY_DEFINITIONS}
 
@@ -554,7 +595,7 @@ def analyze(
         click.echo(f"Loaded {len(existing_lessons)} existing lesson titles")
 
     # Generate insights
-    generator = GeneratorAgent(api_key=api_key)
+    generator = GeneratorAgent(api_key=api_key, workspace=workspace_path)
     insights = generator.analyze_trajectory(chains, parser.session_id, existing_lessons)
 
     click.echo(f"\nGenerated {len(insights)} insights")
