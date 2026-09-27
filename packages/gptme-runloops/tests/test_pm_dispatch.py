@@ -2813,9 +2813,9 @@ class TestLaneDispatcherEnvAliases:
     def test_model_unresolved_writes_empty_not_omitted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # --setenv only sets, never clears: omitting the write would let a
-        # stale SELECTED_MODEL from the parent env leak into the slot. An
-        # empty value is written instead, which run-item reads as canonical
+        # The launcher writes the model unconditionally (empty when unresolved)
+        # so the slot env always carries an explicit canonical value for both
+        # spellings; run-item reads the empty neutral value as canonical
         # "no model" (presence-based precedence).
         cmd = self._captured_cmd(
             tmp_path, monkeypatch, backend="claude-code", model=None

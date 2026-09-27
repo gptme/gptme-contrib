@@ -961,19 +961,19 @@ class LaneDispatcher:
             f"--setenv=PM_DISPATCH_ID={unit_name}",
             f"--setenv=PM_WORK_FILE={slot_file}",
             # Dual-write the neutral AGENT_* spelling alongside the legacy
-            # BOB_* alias. run-item prefers the neutral name, so a slot that
-            # inherited a stale BOB_* value must not be able to shadow the
-            # backend/model assigned here: reading a neutral name while the
-            # spawner writes only the old one resolves the parent's value.
+            # BOB_* alias so both current and legacy readers resolve the
+            # backend/model assigned here. (systemd-run transient units do not
+            # inherit the caller's environment, so this is compatibility and
+            # explicitness, not leak protection.)
             f"--setenv=AGENT_BACKEND={backend}",
             f"--setenv=BOB_BACKEND={backend}",
         ]
-        # Write the model unconditionally (empty string when unresolved): a
-        # transient unit inherits nothing, but --setenv only *sets* — it never
-        # clears. Omitting the write would let a stale AGENT_SELECTED_MODEL or
-        # BOB_SELECTED_MODEL from the parent env leak into the slot and route
-        # it to a model it was not assigned. run-item's presence-based
-        # precedence reads the empty neutral value as canonical "no model".
+        # Write the model unconditionally (empty string when unresolved) so the
+        # slot's environment always carries an explicit canonical value for both
+        # spellings, rather than leaving readers to fall back to ambient config.
+        # (Transient units inherit nothing, so this is not leak protection.)
+        # run-item's presence-based precedence reads the empty neutral value as
+        # canonical "no model".
         cmd.append(f"--setenv=AGENT_SELECTED_MODEL={model or ''}")
         cmd.append(f"--setenv=BOB_SELECTED_MODEL={model or ''}")
         if work_type:
