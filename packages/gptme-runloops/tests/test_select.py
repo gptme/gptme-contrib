@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 from gptme_runloops.cli import main
 from gptme_runloops.select import (
@@ -127,6 +128,16 @@ def test_select_skips_blocked_candidate(tmp_path: Path):
     assert result.backend == "claude-code"
 
 
+def test_load_select_config_rejects_non_integer_priority(tmp_path: Path):
+    """A non-integer priority is reported, not an unhandled traceback."""
+    cfg = tmp_path / "harness-quota.toml"
+    cfg.write_text(
+        '[[candidates]]\nbackend = "gptme"\nmodel = "m"\npriority = "high"\n'
+    )
+    with pytest.raises(ValueError, match="priority must be an integer"):
+        load_select_config(cfg)
+
+
 # ---------------------------------------------------------------------------
 # Unit: _is_block_active — missing registry fails closed when state exists
 # ---------------------------------------------------------------------------
@@ -199,6 +210,36 @@ def test_block_active_fails_open_when_no_state(tmp_path: Path):
     sys.modules.update(sentinel)
     try:
         assert _is_block_active(tmp_path / "nonexistent", "gptme", "m") is False
+    finally:
+        for m, v in saved.items():
+            if v is None:
+                del sys.modules[m]
+            else:
+                sys.modules[m] = v
+
+
+def test_block_active_fails_closed_is_arm_agnostic(tmp_path: Path):
+    """Missing registry: a block for ANY backend blocks every candidate.
+
+    This is deliberate fail-closed behaviour, not backend scoping: with the
+    registry unreadable we cannot know which arm a block file targets, so
+    selection must not proceed on unverified arms.
+    """
+    import sys
+
+    (tmp_path / "claude-code-blocked-until.txt").write_text("2026-01-01T00:00:00+00:00")
+    sentinel = {
+        mod: None
+        for mod in (
+            "gptme_block_registry",
+            "gptme_block_registry.contract",
+            "gptme_block_registry.writers",
+        )
+    }
+    saved = {m: sys.modules.get(m) for m in sentinel}
+    sys.modules.update(sentinel)
+    try:
+        assert _is_block_active(tmp_path, "gptme", "m") is True
     finally:
         for m, v in saved.items():
             if v is None:
@@ -282,6 +323,19 @@ def test_cli_select_no_config_raises(tmp_path: Path):
         main, ["select", "--config", str(tmp_path / "nonexistent.toml")]
     )
     assert result.exit_code != 0
+
+
+def test_cli_select_bad_priority_is_clean_error(tmp_path: Path):
+    """A non-integer priority surfaces as a clean error, not a traceback."""
+    toml = tmp_path / "harness-quota.toml"
+    toml.write_text(
+        '[[candidates]]\nbackend = "gptme"\nmodel = "m"\npriority = "high"\n'
+    )
+    runner = CliRunner()
+    result = runner.invoke(main, ["select", "--config", str(toml)])
+    assert result.exit_code != 0
+    assert "priority must be an integer" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_cli_select_all_blocked_raises(tmp_path: Path):

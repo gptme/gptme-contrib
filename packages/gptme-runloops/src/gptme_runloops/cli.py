@@ -667,7 +667,10 @@ def select_cmd(
 
     from gptme_runloops.select import load_select_config, select_backend
 
-    config = load_select_config(config_path)
+    try:
+        config = load_select_config(config_path)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     if not config.candidates:
         raise click.ClickException(
             "No candidates configured. "

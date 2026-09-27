@@ -126,7 +126,13 @@ def _parse_config(raw: dict) -> SelectConfig:
     for i, entry in enumerate(raw.get("candidates", [])):
         backend = entry.get("backend", "")
         model = entry.get("model", "")
-        priority = int(entry.get("priority", i))
+        raw_priority = entry.get("priority", i)
+        try:
+            priority = int(raw_priority)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"candidate {i}: priority must be an integer, got {raw_priority!r}"
+            ) from exc
         if backend and model:
             candidates.append(
                 Candidate(backend=backend, model=model, priority=priority)
