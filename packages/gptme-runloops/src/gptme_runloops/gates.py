@@ -93,3 +93,121 @@ def state_delta_gate(
         False,
         f"no state changes since last session (noop-only streak: {noop_only_streak}) — skipping",
     )
+
+
+@dataclass(frozen=True)
+class StreakCooldownDecision:
+    """Outcome of the unproductive-streak cooldown gate.
+
+    ``proceed``/``reason`` mirror :class:`GateDecision`. ``toggle_action`` carries
+    the skip-toggle side-effect the caller must apply *after* acting on the
+    decision (the gate is pure and never touches the filesystem):
+
+    * ``"set"`` — arm the toggle (this attempt runs; the next one in the toggle
+      regime should skip). The bash ``touch /tmp/…-noop-skip-toggle``.
+    * ``"clear"`` — disarm the toggle (this attempt skips; the next one should
+      attempt). The bash ``rm -f`` of the same file.
+    * ``None`` — leave the toggle untouched (every branch outside the toggle
+      regime).
+    """
+
+    proceed: bool
+    reason: str
+    toggle_action: str | None = None
+
+
+def streak_cooldown_gate(
+    *,
+    noop_streak: int,
+    scaled_threshold: int,
+    toggle_threshold: int,
+    cooldown_multiplier: int,
+    elapsed_seconds: int | None,
+    quota_behind_pace: bool,
+    toggle_armed: bool,
+    force_session: bool = False,
+) -> StreakCooldownDecision:
+    """Back off after consecutive unproductive sessions (noop or failed).
+
+    Mechanism (identical decision table to the reference ``autonomous-run-cc.sh``
+    ``--- Unproductive streak cooldown ---`` stage), a two-tier progressive backoff:
+
+    1. **Gate inactive** when the session is forced, or the effective streak is
+       below ``toggle_threshold`` — nothing to back off from.
+    2. **Scaled-cooldown regime** (``noop_streak >= scaled_threshold``): enforce a
+       time-based cooldown of ``min(noop_streak * cooldown_multiplier, 12)`` hours
+       since the last session.
+
+       * ``elapsed_seconds is None`` (no last-session timestamp) → proceed; the bash
+         falls through the whole block when it can't read a timestamp.
+       * still inside the cooldown window → **skip**, unless ``quota_behind_pace``
+         bypasses it to keep utilisation catch-up unblocked (checked first, matching
+         the bash order).
+       * cooldown elapsed → proceed.
+    3. **Toggle regime** (``toggle_threshold <= noop_streak < scaled_threshold``):
+       skip every *other* attempt. If the toggle is already armed, **skip** and
+       clear it; otherwise **proceed** and arm it (so the next attempt skips).
+
+    Policy stays with the caller (matching the bash, which resolves these from the
+    weekday/weekend calendar before calling): the two thresholds, the cooldown
+    multiplier, *which* streak counter feeds ``noop_streak`` (the reference uses
+    ``NOOP_STREAK_EFFECTIVE`` — raw ``NOOP_STREAK`` minus auth-outage failures once a
+    dead credential is repaired), the pace-gap threshold behind ``quota_behind_pace``,
+    and reading/writing the toggle file that backs ``toggle_armed``/``toggle_action``.
+
+    Args:
+        noop_streak: Consecutive unproductive sessions (the caller's effective count).
+        scaled_threshold: Streak at/above which the scaled time-cooldown applies
+            (reference: 5 weekday, 3 weekend).
+        toggle_threshold: Streak at/above which the skip-every-other toggle applies
+            (reference: 3 weekday, 2 weekend). Must be ``<= scaled_threshold``.
+        cooldown_multiplier: Multiplies the streak-hours cooldown (reference: 1
+            weekday, 2 weekend).
+        elapsed_seconds: Seconds since the last session, or ``None`` if unknown
+            (no readable timestamp) — treated as "proceed", per the bash fall-through.
+        quota_behind_pace: True when quota is behind pace enough to bypass the
+            cooldown (caller applies its own threshold, e.g. > 0.25).
+        toggle_armed: Whether the skip-toggle is currently set (the file exists).
+        force_session: When True the gate is inactive (manual/forced runs proceed).
+
+    Returns:
+        A :class:`StreakCooldownDecision`.
+    """
+    if force_session or noop_streak < toggle_threshold:
+        return StreakCooldownDecision(
+            True, "gate inactive (streak below toggle threshold)"
+        )
+
+    if noop_streak >= scaled_threshold:
+        cooldown_hours = min(noop_streak * cooldown_multiplier, 12)
+        cooldown_seconds = cooldown_hours * 3600
+        if elapsed_seconds is None:
+            return StreakCooldownDecision(
+                True, "no last-session timestamp — proceeding"
+            )
+        if elapsed_seconds < cooldown_seconds:
+            if quota_behind_pace:
+                return StreakCooldownDecision(
+                    True,
+                    "bypassing: quota behind pace — proceeding to improve utilization",
+                )
+            return StreakCooldownDecision(
+                False,
+                f"{noop_streak} consecutive unproductive sessions, last {elapsed_seconds}s ago "
+                f"— waiting for {cooldown_hours}h cooldown",
+            )
+        return StreakCooldownDecision(True, "cooldown elapsed — proceeding")
+
+    # Toggle regime: toggle_threshold <= noop_streak < scaled_threshold.
+    if toggle_armed:
+        return StreakCooldownDecision(
+            False,
+            f"{noop_streak} consecutive unproductive sessions — skipping (will retry next cycle)",
+            toggle_action="clear",
+        )
+    return StreakCooldownDecision(
+        True,
+        f"{noop_streak} consecutive unproductive sessions — attempting "
+        "(next will skip if still unproductive)",
+        toggle_action="set",
+    )
