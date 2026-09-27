@@ -24,7 +24,7 @@ behaviour-preserving.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 
@@ -321,4 +321,110 @@ def utilization_bypass_gate(
         pace_gap_repr="unknown",
         source="unknown",
         message=None,
+    )
+
+
+@dataclass(frozen=True)
+class Breaker:
+    """One failure circuit breaker (a counter + its cooldown policy).
+
+    A breaker only *engages* once ``count`` reaches ``count_threshold``; below the
+    threshold it never blocks (the failures are still within the allowed budget).
+    ``age_seconds`` is how long since the counter last incremented (the reference
+    caller derives it from the counter file's mtime), and ``cooldown_seconds`` is
+    how long an engaged breaker keeps the loop parked before it may retry.
+
+    The message fields exist so the emitted log lines are byte-identical to the
+    reference ``autonomous-run-cc.sh`` breakers (``[auth-guard]`` uses the noun
+    "auth failures"; ``[fail-guard]`` uses "failures"), keeping logs readable the
+    same way before and after the bash→Python cut-over.
+    """
+
+    label: str
+    count: int
+    age_seconds: float
+    count_threshold: int
+    cooldown_seconds: float
+    failure_noun: str = "failures"
+    expired_note: str = "cooldown expired"
+
+
+@dataclass(frozen=True)
+class CircuitBreakerDecision:
+    """Outcome of :func:`failure_circuit_breaker_gate`.
+
+    ``proceed``/``reason`` are the admission decision (as for :class:`GateDecision`).
+    ``reset_labels`` names the counters the caller should clear — an engaged breaker
+    whose cooldown has *expired*; leaving those counters in place would keep the loop
+    parked forever. ``expired_reasons`` are the matching "cooldown expired — retrying"
+    log lines, in evaluation order, so the caller can emit them verbatim. Both are
+    populated even when the decision is to skip (an earlier breaker can expire-and-reset
+    while a later one is still cooling down — exactly as the bash falls through).
+    """
+
+    proceed: bool
+    reason: str
+    reset_labels: tuple[str, ...] = ()
+    expired_reasons: tuple[str, ...] = ()
+
+
+def failure_circuit_breaker_gate(
+    breakers: Sequence[Breaker],
+    *,
+    force_session: bool = False,
+) -> CircuitBreakerDecision:
+    """Park the loop after too many consecutive failures, per-breaker.
+
+    Mechanism (identical decision table to the reference ``autonomous-run-cc.sh``
+    "Failure circuit breaker" stage, which chains an auth-specific breaker before a
+    generic one):
+
+    1. **Gate inactive** when the session is forced — a manual/forced run always
+       proceeds (mirrors the bash ``FORCE_SESSION`` short-circuit).
+    2. For each breaker **in order**:
+
+       * ``count < count_threshold`` → not engaged; continue to the next breaker.
+       * engaged and ``age_seconds < cooldown_seconds`` → **skip**, reporting the
+         whole-minute remaining cooldown (floored, matching bash integer division).
+         The first engaged-and-cooling breaker wins and stops evaluation.
+       * engaged but cooldown **expired** → record the breaker in ``reset_labels``
+         (the caller clears its counter) and continue to the next breaker.
+    3. If no breaker blocks, **proceed**.
+
+    Policy stays with the caller: the counts and mtimes behind each breaker, the
+    thresholds (3 auth / 5 generic in the reference), the cooldowns (2h / 1h), the
+    *order* of the chain, and the act of clearing an expired counter. This function
+    owns only the decision table.
+
+    Args:
+        breakers: Breakers to evaluate, in chain order (auth before generic in the
+            reference caller).
+        force_session: When True the gate is inactive (forced runs always proceed).
+
+    Returns:
+        A :class:`CircuitBreakerDecision`.
+    """
+    if force_session:
+        return CircuitBreakerDecision(True, "gate inactive (forced session)")
+    reset_labels: list[str] = []
+    expired_reasons: list[str] = []
+    for b in breakers:
+        if b.count < b.count_threshold:
+            continue
+        if b.age_seconds < b.cooldown_seconds:
+            remaining = int((b.cooldown_seconds - b.age_seconds) // 60)
+            return CircuitBreakerDecision(
+                False,
+                f"[{b.label}] {b.count} consecutive {b.failure_noun} "
+                f"— cooling down ({remaining}min remaining)",
+                reset_labels=tuple(reset_labels),
+                expired_reasons=tuple(expired_reasons),
+            )
+        reset_labels.append(b.label)
+        expired_reasons.append(f"[{b.label}] {b.expired_note} — retrying")
+    return CircuitBreakerDecision(
+        True,
+        "no circuit breaker tripped",
+        reset_labels=tuple(reset_labels),
+        expired_reasons=tuple(expired_reasons),
     )
