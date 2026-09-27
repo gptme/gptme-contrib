@@ -157,6 +157,11 @@ def _is_block_active(state_dir: Path, backend: str, model: str) -> bool:
         )
         from gptme_block_registry.writers import read_block_until
     except ImportError:
+        # Fail closed when block state exists but cannot be read (broken
+        # registry install): unverified arms must not be selected.
+        # No state dir at all means no blocks can exist — fail open.
+        if state_dir.is_dir() and any(state_dir.iterdir()):
+            return True
         return False
 
     now = datetime.now(tz=timezone.utc)

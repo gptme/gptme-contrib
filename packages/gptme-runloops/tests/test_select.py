@@ -10,6 +10,7 @@ from gptme_runloops.select import (
     Candidate,
     SelectConfig,
     SelectResult,
+    _is_block_active,
     load_select_config,
     select_backend,
 )
@@ -119,6 +120,60 @@ def test_select_skips_blocked_candidate(tmp_path: Path):
         result = select_backend(config=config, state_dir=tmp_path)
     assert result is not None
     assert result.backend == "claude-code"
+
+
+# ---------------------------------------------------------------------------
+# Unit: _is_block_active — missing registry fails closed when state exists
+# ---------------------------------------------------------------------------
+
+
+def test_block_active_fails_closed_when_state_exists(tmp_path: Path):
+    """Missing block-registry package + existing block state = blocked."""
+    import sys
+
+    (tmp_path / "some-block.json").write_text("{}")
+    sentinel = {
+        mod: None
+        for mod in (
+            "gptme_block_registry",
+            "gptme_block_registry.contract",
+            "gptme_block_registry.writers",
+        )
+    }
+    saved = {m: sys.modules.get(m) for m in sentinel}
+    sys.modules.update(sentinel)
+    try:
+        assert _is_block_active(tmp_path, "gptme", "m") is True
+    finally:
+        for m, v in saved.items():
+            if v is None:
+                del sys.modules[m]
+            else:
+                sys.modules[m] = v
+
+
+def test_block_active_fails_open_when_no_state(tmp_path: Path):
+    """Missing block-registry package + no state dir = no blocks possible."""
+    import sys
+
+    sentinel = {
+        mod: None
+        for mod in (
+            "gptme_block_registry",
+            "gptme_block_registry.contract",
+            "gptme_block_registry.writers",
+        )
+    }
+    saved = {m: sys.modules.get(m) for m in sentinel}
+    sys.modules.update(sentinel)
+    try:
+        assert _is_block_active(tmp_path / "nonexistent", "gptme", "m") is False
+    finally:
+        for m, v in saved.items():
+            if v is None:
+                del sys.modules[m]
+            else:
+                sys.modules[m] = v
 
 
 def test_select_returns_none_when_all_blocked(tmp_path: Path):
