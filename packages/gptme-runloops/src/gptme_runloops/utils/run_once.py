@@ -38,6 +38,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import uuid
 from collections.abc import Callable
@@ -183,6 +184,20 @@ def claude_code_run_once(
 # --- codex ---
 
 
+def codex_default_model() -> str | None:
+    """Model codex uses when none is given (top-level ``model`` in its config)."""
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    try:
+        if sys.version_info >= (3, 11):
+            import tomllib
+        else:  # pragma: no cover
+            import tomli as tomllib
+        model = tomllib.loads((home / "config.toml").read_text()).get("model")
+    except (OSError, ValueError):
+        return None
+    return model if isinstance(model, str) else None
+
+
 def codex_run_once(
     prompt: str,
     workspace: Path,
@@ -228,7 +243,8 @@ def codex_run_once(
     failed = r.returncode != 0 or not text
     return RunOnceResult(
         backend="codex",
-        model=model,  # codex JSONL does not report the model
+        # codex JSONL does not report the model; fall back to its configured default
+        model=model or codex_default_model(),
         session_id=session,
         result=text or err or r.stderr[-2000:],
         exit_code=(r.returncode or 1) if failed else 0,
@@ -248,9 +264,29 @@ def gptme_logs_home() -> Path:
     return Path(data) / "gptme" / "logs"
 
 
-def gptme_visible_text(content: str) -> str:
-    """Strip reasoning blocks and tool-call lines from a gptme assistant message."""
+# gptme tool names whose markdown-format calls (```<tool> ...```) are not prose.
+GPTME_TOOL_BLOCKS = frozenset(
+    "append browser chats choice complete computer elicit form gh ipython lessons "
+    "patch precommit rag read save screenshot shell subagent tmux todo todoread "
+    "todowrite vision".split()
+)
+
+
+def gptme_visible_text(content: str, tools: list[str] | None = None) -> str:
+    """Strip reasoning and tool calls (``tool`` and markdown formats) from a
+    gptme assistant message, leaving the prose shown to a human."""
+    names = GPTME_TOOL_BLOCKS | set(tools or ())
     content = re.sub(r"<think(?:ing)?>.*?</think(?:ing)?>", "", content, flags=re.S)
+
+    def _strip_tool_block(m: re.Match[str]) -> str:
+        return "" if m.group(1) in names else m.group(0)
+
+    content = re.sub(
+        r"^```([\w.-]+)[^\n]*\n.*?^```[ \t]*$",
+        _strip_tool_block,
+        content,
+        flags=re.S | re.M,
+    )
     lines = [ln for ln in content.splitlines() if not re.match(r"^@[\w-]+\(", ln)]
     return "\n".join(lines).strip()
 
@@ -291,7 +327,7 @@ def gptme_run_once(
         meta = msg.get("metadata") or {}
         cost += meta.get("cost") or 0.0
         used_model = meta.get("model") or used_model
-        visible = gptme_visible_text(msg.get("content", ""))
+        visible = gptme_visible_text(msg.get("content", ""), allowed_tools)
         if visible:
             text = visible
     failed = r.returncode != 0 or not text

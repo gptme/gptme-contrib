@@ -381,3 +381,17 @@ def test_cli_backend_from_env(monkeypatch):
         res = CliRunner().invoke(main, ["run", "--workspace", "/tmp", "p"])
     assert res.exit_code == 0, res.output
     assert once.called
+
+
+def test_gptme_visible_text_strips_markdown_tool_blocks():
+    msg = "Here you go.\n```save out.txt\ncontent\n```\n```python\nx = 1\n```\n```complete\n```"
+    assert ro.gptme_visible_text(msg) == "Here you go.\n\n```python\nx = 1\n```"
+    assert ro.gptme_visible_text("```complete\n```") == ""
+
+
+def test_codex_model_falls_back_to_config(tmp_path, monkeypatch):
+    (tmp_path / "config.toml").write_text('model = "gpt-9"\n')
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    with patch.object(ro.subprocess, "run", side_effect=_codex_side_effect(SID, "ok")):
+        r = CodexExecutor().run_once("x", WS, 60)
+    assert r.model == "gpt-9"
