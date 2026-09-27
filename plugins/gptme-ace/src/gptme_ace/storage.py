@@ -43,6 +43,11 @@ from typing import Any, List
 
 import click
 
+try:
+    from .identity import default_workspace_root
+except ImportError:  # pragma: no cover - standalone execution
+    from identity import default_workspace_root  # type: ignore[no-redef]
+
 
 @dataclass
 class InsightMetadata:
@@ -119,7 +124,11 @@ class InsightStorage:
         index_file: JSON index file for fast lookups (insights/index.json).
     """
 
-    def __init__(self, workspace_root: Path = Path.home() / "bob"):
+    def __init__(self, workspace_root: Path | None = None):
+        # Resolve from the agent env vars / workspace instead of assuming Bob
+        # (see ``identity.default_workspace_root``). ``None`` keeps every
+        # existing no-argument caller working while making forks correct.
+        workspace_root = workspace_root or default_workspace_root()
         self.workspace_root = workspace_root
         self.insights_dir = workspace_root / "insights"
         self.raw_dir = self.insights_dir / "raw"
