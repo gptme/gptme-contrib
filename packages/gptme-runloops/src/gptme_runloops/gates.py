@@ -228,8 +228,11 @@ class UtilizationBypassDecision:
         behind_pace: True → bypass suppressive gates to improve utilisation.
         pace_gap_repr: Human string mirroring the bash ``QUOTA_PACE_GAP`` — the
             numeric gap (``"0.3"``), ``"unknown (idle 8.94h)"``, or ``"unknown"``.
-            Rendered via ``str(pace_gap)``, byte-identical to the reference's
-            ``print(round(gap, 3))`` (so ``0.30`` renders ``"0.3"``, not ``"0.30"``).
+            Rendered via ``str(round(pace_gap, 3))``, byte-identical to the
+            reference's ``print(round(gap, 3))`` for any caller (so ``0.30``
+            renders ``"0.3"`` and ``0.123456`` renders ``"0.123"``, not the raw
+            float). The reference already rounds upstream, but rounding here keeps
+            the contract honest regardless of what the caller passes in.
             Used verbatim in the downstream bypass log line.
         source: Which signal decided it — ``"api"``, ``"idle_fallback"``, or
             ``"unknown"``.
@@ -290,7 +293,7 @@ def utilization_bypass_gate(
     if pace_gap is not None:
         return UtilizationBypassDecision(
             behind_pace=pace_gap > pace_gap_threshold,
-            pace_gap_repr=f"{pace_gap}",
+            pace_gap_repr=f"{round(pace_gap, 3)}",
             source="api",
             message=None,
         )

@@ -317,6 +317,13 @@ class TestUtilizationBypassGate:
             behind_pace=True, pace_gap_repr="0.3", source="api", message=None
         )
 
+    def test_pace_gap_repr_rounds_to_reference_three_decimals(self) -> None:
+        # A gap with >3 decimals must render byte-identically to the reference's
+        # print(round(gap, 3)) — not the raw float. Guards the docstring contract.
+        d = utilization_bypass_gate(0.123456, _never_hours)
+        assert d.pace_gap_repr == "0.123"
+        assert d.pace_gap_repr == f"{round(0.123456, 3)}"
+
     def test_api_below_threshold_not_behind_pace(self) -> None:
         d = utilization_bypass_gate(0.10, _never_hours)
         assert d.behind_pace is False
