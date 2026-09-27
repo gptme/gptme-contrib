@@ -18,13 +18,19 @@ import pytest
 from gptme_runloops.gates import (
     GateDecision,
     StreakCooldownDecision,
+    UtilizationBypassDecision,
     state_delta_gate,
     streak_cooldown_gate,
+    utilization_bypass_gate,
 )
 
 
 def _never() -> bool:
     raise AssertionError("changes_detected must not be called on this path")
+
+
+def _never_hours() -> float | None:
+    raise AssertionError("idle_hours must not be called on the API-available path")
 
 
 class TestStateDeltaGate:
@@ -293,3 +299,83 @@ class TestStreakCooldownGate:
         )
         assert d.proceed is exp_proceed
         assert d.toggle_action == exp_toggle
+
+
+class TestUtilizationBypassGate:
+    """Pins the utilisation-bypass block of ``autonomous-run-cc.sh``::
+
+    if [ -n "$QUOTA_PACE_RAW" ]; then                # API available
+        QUOTA_BEHIND_PACE = pace_gap > 0.25
+    else                                             # scrape unavailable
+        if HOURS_IDLE > 12; then QUOTA_BEHIND_PACE=1 # local fallback
+        else QUOTA_BEHIND_PACE=0; gap="unknown"
+    """
+
+    def test_api_above_threshold_is_behind_pace(self) -> None:
+        d = utilization_bypass_gate(0.30, _never_hours)
+        assert d == UtilizationBypassDecision(
+            behind_pace=True, pace_gap_repr="0.3", source="api", message=None
+        )
+
+    def test_api_below_threshold_not_behind_pace(self) -> None:
+        d = utilization_bypass_gate(0.10, _never_hours)
+        assert d.behind_pace is False
+        assert d.source == "api"
+        assert d.message is None
+
+    def test_api_at_threshold_not_behind_pace(self) -> None:
+        # Strict > 0.25: exactly at the threshold does not bypass (matches bash).
+        d = utilization_bypass_gate(0.25, _never_hours)
+        assert d.behind_pace is False
+        assert d.pace_gap_repr == "0.25"
+
+    def test_idle_probe_skipped_when_api_available(self) -> None:
+        # _never_hours raises if called — the API path must not touch the fallback.
+        utilization_bypass_gate(0.5, _never_hours)  # no exception == pass
+
+    def test_fallback_long_idle_is_behind_pace(self) -> None:
+        d = utilization_bypass_gate(None, lambda: 15.0)
+        assert d.behind_pace is True
+        assert d.source == "idle_fallback"
+        assert d.pace_gap_repr == "unknown (idle 15.00h)"
+        assert d.message is not None
+        assert "15.00h since last productive session (>12h)" in d.message
+
+    def test_fallback_short_idle_not_behind_pace(self) -> None:
+        d = utilization_bypass_gate(None, lambda: 3.0)
+        assert d.behind_pace is False
+        assert d.source == "unknown"
+        assert d.pace_gap_repr == "unknown"
+        assert d.message is None
+
+    def test_fallback_at_threshold_not_behind_pace(self) -> None:
+        # Strict > 12: exactly 12h idle does not bypass.
+        d = utilization_bypass_gate(None, lambda: 12.0)
+        assert d.behind_pace is False
+        assert d.source == "unknown"
+
+    def test_fallback_idle_unknown_not_behind_pace(self) -> None:
+        d = utilization_bypass_gate(None, lambda: None)
+        assert d.behind_pace is False
+        assert d.source == "unknown"
+        assert d.pace_gap_repr == "unknown"
+
+    def test_idle_probe_called_at_most_once(self) -> None:
+        calls = {"n": 0}
+
+        def probe() -> float | None:
+            calls["n"] += 1
+            return 20.0
+
+        utilization_bypass_gate(None, probe)
+        assert calls["n"] == 1
+
+    def test_custom_thresholds_honoured_in_decision_and_message(self) -> None:
+        # A caller override flows into both the comparison and the log string.
+        d = utilization_bypass_gate(None, lambda: 7.0, idle_hours_threshold=6.0)
+        assert d.behind_pace is True
+        assert d.message is not None
+        assert "(>6h)" in d.message
+
+        d2 = utilization_bypass_gate(0.15, _never_hours, pace_gap_threshold=0.10)
+        assert d2.behind_pace is True
