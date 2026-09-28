@@ -610,12 +610,24 @@ def test_classify_quota_precedes_model_stream_crash():
     assert reason == FAILURE_REASON_QUOTA
 
 
-def test_classify_model_stream_crash_precedes_429():
-    """A stream IndexError that also contains 429 still classifies as stream crash.
+def test_classify_traceback_line_429_does_not_swallow_stream_crash():
+    """Traceback ``line 429`` is not an HTTP 429; the stream crash still wins."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=63,
+        input_tokens=142_000,
+        has_assistant_turn=True,
+        error_text=(
+            "Traceback (most recent call last):\n"
+            '  File "gptme/llm/llm_openai.py", line 429, in stream\n'
+            "IndexError: list index out of range"
+        ),
+    )
+    assert reason == FAILURE_REASON_MODEL_STREAM_CRASH
 
-    Bare ``429`` is a greedy substring (traceback line numbers, prior retry
-    logs). The crash signature is specific; rate_limit must not swallow it.
-    """
+
+def test_classify_http_429_precedes_model_stream_crash():
+    """A genuine HTTP 429 is still a rate limit even if the parser also crashed."""
     reason = classify_failure_reason(
         exit_code=1,
         duration_seconds=63,
@@ -628,7 +640,19 @@ def test_classify_model_stream_crash_precedes_429():
             "IndexError: list index out of range"
         ),
     )
-    assert reason == FAILURE_REASON_MODEL_STREAM_CRASH
+    assert reason == FAILURE_REASON_RATE_LIMIT
+
+
+def test_in_streaming_mode_indexerror_without_llm_openai_stays_unclassified():
+    """Bare ``in stream`` must not label an unrelated IndexError as a gptme crash."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=63,
+        input_tokens=142_000,
+        has_assistant_turn=True,
+        error_text="IndexError: list index out of range in streaming mode",
+    )
+    assert reason == FAILURE_REASON_NONZERO
 
 
 def test_capture_model_stream_crash_from_harness_stderr(tmp_path: Path):

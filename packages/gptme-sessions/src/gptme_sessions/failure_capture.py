@@ -34,6 +34,35 @@ def _mentions_overload(text: str) -> bool:
     return any(marker in lower for marker in _OVERLOAD_MARKERS)
 
 
+# HTTP/API 429 as a status, not a Python traceback ``line 429``.
+_HTTP_429_RE = re.compile(
+    r"(?:"
+    r"error\s*code\s*[:=]\s*429\b"
+    r"|status(?:\s*code)?\s*[:=]\s*429\b"
+    r"|api_error_status\s*[:=]\s*429\b"
+    r"|http(?:/\d+\.\d+)?\s+429\b"
+    r"|\b429\s+too many requests\b"
+    r"|\berror:\s*429\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _mentions_http_429(error_text: str) -> bool:
+    """True for an HTTP/API 429, not a traceback ``line 429``."""
+    return _HTTP_429_RE.search(error_text) is not None
+
+
+def _mentions_model_stream_crash(lower: str) -> bool:
+    """gptme OpenAI-stream IndexError — not an unrelated list-index crash.
+
+    ``llm_openai`` is the observed production marker (module path in the
+    traceback / harness stderr). A bare ``in stream`` substring also matches
+    "in streaming mode" / "requests in stream" and is not used.
+    """
+    return "list index out of range" in lower and "llm_openai" in lower
+
+
 _ERROR_LINE_RE = re.compile(
     r"(?i)(error|exception|traceback|failed|rate.?limit|weekly.?limit|401|403|429|authentication)"
 )
@@ -271,18 +300,20 @@ def classify_failure_reason(
             or "billing hard limit" in lower
         ):
             return FAILURE_REASON_QUOTA
-        # gptme OpenAI-stream IndexError is a harness/parser crash, not an
-        # account rate limit. Checked after quota (billing still wins) and
-        # before the greedy 429 substring (``"429" in error_text`` also matches
-        # traceback line numbers and prior retry logs). Overload still loses
-        # to a genuine 429 — those are the same capacity/throttling family.
-        if "list index out of range" in lower and ("llm_openai" in lower or "in stream" in lower):
-            return FAILURE_REASON_MODEL_STREAM_CRASH
-        # Explicit rate-limit signals are authoritative: a genuine HTTP 429, an
-        # explicit weekly-limit message, or a structured rate_limit_event is an
-        # account-side limit even when the body also mentions capacity.
-        if "429" in error_text or "weekly limit" in lower or "rate_limit_event" in lower:
+        # Explicit rate-limit signals are authoritative: a genuine HTTP 429
+        # (status-code form, not traceback ``line 429``), an explicit weekly-
+        # limit message, or a structured rate_limit_event. These win over a
+        # stream IndexError in the same blob — a throttled request is still a
+        # rate limit even if the parser also crashed. Overload still loses to
+        # a genuine 429; those are the same capacity/throttling family.
+        if _mentions_http_429(error_text) or "weekly limit" in lower or "rate_limit_event" in lower:
             return FAILURE_REASON_RATE_LIMIT
+        # gptme OpenAI-stream IndexError is a harness/parser crash. Checked
+        # after quota and after a precise HTTP 429 so billing and real 429s
+        # still win, and after the old greedy ``"429" in error_text`` was
+        # replaced so traceback line numbers cannot swallow the crash.
+        if _mentions_model_stream_crash(lower):
+            return FAILURE_REASON_MODEL_STREAM_CRASH
         # Provider-side model capacity / overload (Codex ``server_overloaded``,
         # "Selected model is at capacity. Please try a different model.") is a
         # transient upstream failure — not a rate limit on our account and not a
