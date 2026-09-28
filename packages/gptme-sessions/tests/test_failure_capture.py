@@ -13,7 +13,9 @@ from gptme_sessions.failure_capture import (
     FAILURE_REASON_QUOTA,
     FAILURE_REASON_RATE_LIMIT,
     FAILURE_REASON_TIMEOUT,
+    FAILURE_REASON_UPSTREAM_OVERLOADED,
     _record_has_any_content,
+    _structured_error_signals,
     _trajectory_has_assistant,
     capture_session_failure,
     classify_failure_reason,
@@ -545,3 +547,136 @@ def test_capture_allowed_rate_limit_event_not_rate_limit(tmp_path: Path):
         harness_stderr_path=None,
     )
     assert reason == FAILURE_REASON_NONZERO
+
+
+def test_classify_upstream_overloaded():
+    """Provider model-capacity errors classify distinctly from a generic crash."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=443,
+        input_tokens=3_695_970,
+        has_assistant_turn=False,
+        error_text=(
+            "error: codex_error_info:server_overloaded; "
+            "Selected model is at capacity. Please try a different model."
+        ),
+    )
+    assert reason == FAILURE_REASON_UPSTREAM_OVERLOADED
+
+
+def test_classify_rate_limit_precedes_overload():
+    """A genuine 429 body that also mentions overload stays rate_limit."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=30,
+        input_tokens=100,
+        has_assistant_turn=True,
+        error_text="429 Too Many Requests: server overloaded",
+    )
+    assert reason == FAILURE_REASON_RATE_LIMIT
+
+
+def test_capture_codex_task_complete_overload(tmp_path: Path):
+    """Codex nests the failure under payload.error on an event_msg record.
+
+    Regression: the message body has no error keyword and the machine code lives
+    in payload.error.codex_error_info, so the session previously recorded as
+    nonzero_exit_unclassified with error=None — hiding an arm that was simply
+    at provider capacity.
+    """
+    traj = tmp_path / "rollout.jsonl"
+    records = [
+        {"type": "session_meta", "payload": {"id": "x"}},
+        {"type": "event_msg", "payload": {"type": "task_started"}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "working on it"}],
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "error": {
+                    "message": "Selected model is at capacity. Please try a different model.",
+                    "codex_error_info": "server_overloaded",
+                },
+            },
+        },
+    ]
+    traj.write_text(
+        "".join(json.dumps(rec) + "\n" for rec in records),
+        encoding="utf-8",
+    )
+
+    reason, err = capture_session_failure(
+        exit_code=1,
+        duration_seconds=443,
+        input_tokens=3_695_970,
+        trajectory_path=traj,
+        harness_stderr_path=None,
+    )
+
+    assert reason == FAILURE_REASON_UPSTREAM_OVERLOADED
+    assert err is not None
+    assert "server_overloaded" in err
+    assert "Selected model is at capacity" in err
+
+
+def test_classify_overload_beats_loose_rate_limit_substring():
+    """A capacity body that also says 'rate'/'limit' is not an account rate limit."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=30,
+        input_tokens=100,
+        has_assistant_turn=True,
+        error_text=(
+            "error: codex_error_info:server_overloaded; "
+            "The model is at capacity due to rate limit constraints upstream"
+        ),
+    )
+    assert reason == FAILURE_REASON_UPSTREAM_OVERLOADED
+
+
+def test_structured_error_signals_extracts_codex_payload_error():
+    """Pin the exact signal produced from a Codex payload.error record."""
+    rec = {
+        "type": "event_msg",
+        "payload": {
+            "type": "task_complete",
+            "error": {
+                "message": "Selected model is at capacity. Please try a different model.",
+                "codex_error_info": "server_overloaded",
+            },
+        },
+    }
+    assert _structured_error_signals(rec) == [
+        "error: codex_error_info:server_overloaded; "
+        "Selected model is at capacity. Please try a different model."
+    ]
+
+
+def test_structured_error_signals_keeps_overload_past_truncation():
+    """An overload phrase beyond the stored cut still classifies as overload."""
+    rec = {
+        "type": "event_msg",
+        "payload": {
+            "type": "task_complete",
+            "error": {"message": ("x" * 600) + " model is at capacity"},
+        },
+    }
+    signals = _structured_error_signals(rec)
+    assert any(FAILURE_REASON_UPSTREAM_OVERLOADED in signal for signal in signals)
+    # The marker alone must drive classification when the phrase itself was cut
+    # — including after the extractor's 500-char cut of the joined signal.
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=60,
+        input_tokens=100,
+        has_assistant_turn=True,
+        error_text="; ".join(signals)[:500],
+    )
+    assert reason == FAILURE_REASON_UPSTREAM_OVERLOADED
