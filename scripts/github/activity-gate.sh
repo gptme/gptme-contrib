@@ -388,6 +388,93 @@ gh_cache_get_or_fetch() {
     fi
 }
 
+# Raw GraphQL search for authored open PRs (task 2.23).
+#
+# `gh pr list --author` takes the search path, and gh resolves the SearchType
+# enum with a per-invocation capability probe — a second POST its own response
+# cache does not serve. Every `--author` list therefore costs 2 requests / 2
+# points regardless of projection (measured: dropping statusCheckRollup is a
+# no-op). Raw GraphQL issues the same search as a single 1-point request.
+#
+# The selection mirrors `gh pr list --json
+# number,title,updatedAt,comments,latestReviews,statusCheckRollup,mergeable,mergeStateStatus,headRefOid,isDraft`
+# so the downstream jq consumers are unchanged. statusCheckRollup is required by
+# check_ci_failures (only .conclusion/.state are read).
+#
+# Page size stays 30 (matching the replaced `gh pr list` default) rather than
+# asking for 100 in one shot: GitHub's point cost is a function of `first`, so
+# `first: 30` measures 1 point while `first: 100` measures 3. The one-page case
+# is the common one — authored open PR counts sit well under 30 — and pagination
+# only spends additional points on repos that actually exceed a page.
+PR_SEARCH_PAGE_SIZE=30
+PR_SEARCH_GRAPHQL_QUERY='
+fragment pr on PullRequest{number,title,updatedAt,comments(first: 100) {nodes {id,author{login,...on User{id,name}},authorAssociation,body,createdAt,includesCreatedEdit,isMinimized,minimizedReason,reactionGroups{content,users{totalCount}},url,viewerDidAuthor},pageInfo{hasNextPage,endCursor},totalCount},latestReviews(first: 100) {nodes {author{login},authorAssociation,submittedAt,body,state}},mergeable,mergeStateStatus,headRefOid,isDraft,statusCheckRollup{contexts(first:100){nodes{... on CheckRun{name,status,conclusion,startedAt,completedAt,detailsUrl,checkSuite{workflowRun{workflow{name}}}} ... on StatusContext{context,state,description,targetUrl,createdAt}}}}}
+query PullRequestSearch($q: String!, $type: SearchType!, $limit: Int!, $endCursor: String) {
+  search(query: $q, type: $type, first: $limit, after: $endCursor) {
+    issueCount
+    nodes { ...pr }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+'
+
+# Emit authored open-PR data for one repo in gh's `--json` shape.
+# Prefers the raw GraphQL search (1 request / 1 point per page) and falls back to
+# the legacy `gh pr list --author` command only on a hard failure or a non-search
+# payload — never on a valid empty result (a repo with no authored PRs is the
+# common case and must stay at 1 point).
+#
+# Follows `pageInfo.hasNextPage` so repos with more than one page of authored
+# PRs are not silently truncated at 30. The one-page case — every repo we track
+# today — issues a single request and never reads the cursor.
+fetch_pr_data_search() {
+    local repo=$1
+    local cursor="" raw page pages="" failed=0
+    while :; do
+        if [ -n "$cursor" ]; then
+            raw=$(gh api graphql \
+                    -F q="author:$AUTHOR repo:$repo state:open type:pr" \
+                    -F type=ISSUE_ADVANCED -F limit="$PR_SEARCH_PAGE_SIZE" \
+                    -F endCursor="$cursor" \
+                    -f query="$PR_SEARCH_GRAPHQL_QUERY" 2>/dev/null) || { failed=1; break; }
+        else
+            raw=$(gh api graphql \
+                    -F q="author:$AUTHOR repo:$repo state:open type:pr" \
+                    -F type=ISSUE_ADVANCED -F limit="$PR_SEARCH_PAGE_SIZE" \
+                    -f query="$PR_SEARCH_GRAPHQL_QUERY" 2>/dev/null) || { failed=1; break; }
+        fi
+        page=$(printf '%s' "$raw" | jq -ce '
+            if (.data.search.nodes | type) == "array" then
+                .data.search.nodes
+                | map(select((.isDraft // false) | not)
+                      | .comments = ((.comments.nodes) // [])
+                      | .latestReviews = ((.latestReviews.nodes) // [])
+                      | .statusCheckRollup = ((.statusCheckRollup.contexts.nodes) // []))
+            else empty end' 2>/dev/null) || { failed=1; break; }
+        pages+="$page"$'\n'
+        has_next=$(printf '%s' "$raw" | jq -r '.data.search.pageInfo.hasNextPage // false' 2>/dev/null) || has_next="false"
+        cursor=$(printf '%s' "$raw" | jq -r '.data.search.pageInfo.endCursor // ""' 2>/dev/null) || cursor=""
+        if [ "$has_next" != "true" ]; then
+            break
+        fi
+        # hasNextPage with a missing/empty cursor: we cannot continue
+        # pagination safely, but returning the accumulated pages as success
+        # would silently truncate the list. Treat as failure so the caller
+        # falls back to `gh pr list`, which paginates internally.
+        [ -n "$cursor" ] || { failed=1; break; }
+    done
+    if [ "$failed" -eq 0 ] && [ -n "$pages" ]; then
+        printf '%s' "$pages" | jq -sc 'add'
+        return 0
+    fi
+    # Fallback: legacy search-backed list (2 requests / 2 points). Propagate a
+    # failure exit so the cache layer treats it as a failed producer (emits its
+    # `[]` default without caching) instead of caching a transient error.
+    gh pr list --limit 1000 --repo "$repo" --author "$AUTHOR" --state open \
+        --json number,title,updatedAt,comments,latestReviews,statusCheckRollup,mergeable,mergeStateStatus,headRefOid,isDraft \
+        --jq '[.[] | select(.isDraft | not)]' 2>/dev/null
+}
+
 # Fetch all PR data once per repo, with all fields needed by every check
 # function. Cache state-tracked checks, but let merge-sensitive callers use a
 # short TTL (GH_CACHE_TTL_LIVE_PR, default 180s) instead of the generic 480s.
@@ -396,10 +483,7 @@ fetch_pr_data_with_ttl() {
     local ttl=$2
     # Filter out draft PRs — they're intentionally deprioritized/not on merge path
     gh_cache_get_or_fetch "pr-${repo}" "$ttl" \
-        "gh pr list --repo '$repo' --author '$AUTHOR' --state open \
-            --json number,title,updatedAt,comments,latestReviews,statusCheckRollup,mergeable,mergeStateStatus,headRefOid,isDraft \
-            --jq '[.[] | select(.isDraft | not)]' \
-            2>/dev/null" \
+        "fetch_pr_data_search '$repo'" \
         "[]"
 }
 
