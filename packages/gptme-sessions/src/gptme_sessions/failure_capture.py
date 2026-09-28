@@ -9,6 +9,7 @@ from pathlib import Path
 # Coarse taxonomy for operator-pulse / bandit post-mortems.
 FAILURE_REASON_AUTH = "auth"
 FAILURE_REASON_INVALID_REQUEST = "invalid_request"
+FAILURE_REASON_MODEL_STREAM_CRASH = "model_stream_crash"
 FAILURE_REASON_NONZERO = "nonzero_exit_unclassified"
 FAILURE_REASON_PRE_RESPONSE = "pre_response_api_failure"
 FAILURE_REASON_QUOTA = "quota"
@@ -286,6 +287,8 @@ def classify_failure_reason(
         # genuine 429/weekly-limit body.
         if _mentions_overload(lower):
             return FAILURE_REASON_UPSTREAM_OVERLOADED
+        if "list index out of range" in lower and ("llm_openai" in lower or "in stream" in lower):
+            return FAILURE_REASON_MODEL_STREAM_CRASH
         if "rate" in lower and "limit" in lower:
             return FAILURE_REASON_RATE_LIMIT
         if (
