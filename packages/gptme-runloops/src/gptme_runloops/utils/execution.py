@@ -53,7 +53,7 @@ def execute_gptme(
     workspace: Path,
     timeout: int,
     non_interactive: bool = True,
-    shell_timeout: int = 120,
+    shell_timeout: int | None = None,
     env: dict | None = None,
     run_type: str = "run",
     tools: str | None = None,
@@ -67,7 +67,10 @@ def execute_gptme(
         workspace: Working directory for execution
         timeout: Maximum execution time in seconds
         non_interactive: Run in non-interactive mode
-        shell_timeout: Shell command timeout in seconds
+        shell_timeout: Hard shell timeout in seconds. Defaults to inherited
+            GPTME_SHELL_TIMEOUT, replacing unset/empty or legacy 120 with 600
+            to leave room for the 120-second foreground promotion timeout.
+            Explicit env overrides take precedence over this argument.
         env: Additional environment variables
         run_type: Type of run (for log file naming)
         tools: Tool allowlist string (e.g. "gptodo,save,append")
@@ -121,7 +124,11 @@ def execute_gptme(
 
         # Set up environment
         run_env = os.environ.copy()
-        run_env["GPTME_SHELL_TIMEOUT"] = str(shell_timeout)
+        if shell_timeout is not None:
+            run_env["GPTME_SHELL_TIMEOUT"] = str(shell_timeout)
+        elif run_env.get("GPTME_SHELL_TIMEOUT", "") in ("", "120"):
+            # A hard kill at the foreground timeout races background promotion.
+            run_env["GPTME_SHELL_TIMEOUT"] = "600"
         run_env["GPTME_CHAT_HISTORY"] = "true"
 
         if env:
@@ -141,7 +148,7 @@ def execute_gptme(
             f.write(f"Working directory: {workspace}\n")
             f.write(f"Command: {' '.join(cmd)}\n")
             f.write(f"Timeout: {timeout}s\n")
-            f.write(f"Shell timeout: {shell_timeout}s\n\n")
+            f.write(f"Shell timeout: {run_env['GPTME_SHELL_TIMEOUT']}s\n\n")
             f.write("=== Output ===\n")
 
         trajectory_path: Path | None = None
