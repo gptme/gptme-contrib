@@ -5,6 +5,16 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+  # master pushes test only what the push changed; the full matrix runs nightly
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+# Cancel a PR's older runs when it gets a new push (they're superseded).
+# Pushes to master are grouped by commit, so they never cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Detect which paths changed to skip expensive jobs on unrelated PRs
@@ -35,7 +45,7 @@ jobs:
   discover:
     needs: changes
     # Always run on push to master; on PRs, only when package code changed
-    if: github.event_name == 'push' || needs.changes.outputs.packages == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.packages == 'true'
     runs-on: ubuntu-latest
     outputs:
       packages: ${{ steps.discover.outputs.packages }}
@@ -48,13 +58,26 @@ jobs:
         id: discover
         env:
           BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
         run: |
           # Get all packages from Makefile (single source of truth)
           make ci-list-packages-json > /tmp/all_packages.json
 
+          # Files changed by this PR, or by this push to master. Schedule/dispatch
+          # runs (and pushes we can't diff, e.g. a new branch or a force-push
+          # past the old head) test everything.
+          changed=""
+          full=1
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            # Get files changed in this PR (use env var to avoid shell injection)
             changed=$(git diff --name-only "origin/${BASE_REF}...HEAD")
+            full=0
+          elif [[ "${{ github.event_name }}" == "push" && -n "$BEFORE" && ! "$BEFORE" =~ ^0+$ ]] \
+              && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            changed=$(git diff --name-only "$BEFORE" HEAD)
+            full=0
+          fi
+
+          if [[ "$full" == "0" ]]; then
 
             # If shared config changed, run all packages (can't tell which are affected)
             if echo "$changed" | grep -qE '^(Makefile|pyproject\.toml|uv\.lock|\.github/workflows/test-packages\.yml)'; then
@@ -79,7 +102,6 @@ jobs:
               fi
             fi
           else
-            # On push to master, run all packages
             packages=$(cat /tmp/all_packages.json)
           fi
 
@@ -120,7 +142,7 @@ jobs:
   coverage:
     needs: changes
     # Always run on push to master; on PRs, only when package code changed
-    if: github.event_name == 'push' || needs.changes.outputs.packages == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.packages == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -191,7 +213,7 @@ jobs:
   typecheck:
     needs: changes
     # Always run on push to master; on PRs, only when package code changed
-    if: github.event_name == 'push' || needs.changes.outputs.packages == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.packages == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -216,7 +238,7 @@ jobs:
   install-size:
     needs: changes
     # Always run on push to master; on PRs, only when package code changed
-    if: github.event_name == 'push' || needs.changes.outputs.packages == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.packages == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
