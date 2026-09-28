@@ -593,6 +593,27 @@ def test_list_index_error_without_stream_context_stays_unclassified():
     assert reason == FAILURE_REASON_NONZERO
 
 
+def test_classify_model_stream_crash_precedes_429():
+    """A stream IndexError that also contains 429 still classifies as stream crash.
+
+    Bare ``429`` is a greedy substring (traceback line numbers, prior retry
+    logs). The crash signature is specific; rate_limit must not swallow it.
+    """
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=63,
+        input_tokens=142_000,
+        has_assistant_turn=True,
+        error_text=(
+            "HTTP/1.1 429 Too Many Requests\n"
+            "Traceback (most recent call last):\n"
+            '  File "gptme/llm/llm_openai.py", line 901, in stream\n'
+            "IndexError: list index out of range"
+        ),
+    )
+    assert reason == FAILURE_REASON_MODEL_STREAM_CRASH
+
+
 def test_capture_model_stream_crash_from_harness_stderr(tmp_path: Path):
     """The live f6d3 stderr signature survives the capture path."""
     stderr = tmp_path / "harness.stderr"

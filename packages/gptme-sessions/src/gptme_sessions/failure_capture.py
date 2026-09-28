@@ -271,6 +271,14 @@ def classify_failure_reason(
             or "billing hard limit" in lower
         ):
             return FAILURE_REASON_QUOTA
+        # gptme OpenAI-stream IndexError is a harness/parser crash, not an
+        # account rate limit. The 429 branch below is a greedy substring
+        # (``"429" in error_text``) that also matches traceback line numbers
+        # and prior retry logs, so the crash signature must win when both are
+        # present. Overload still loses to a genuine 429 — those are the same
+        # capacity/throttling family.
+        if "list index out of range" in lower and ("llm_openai" in lower or "in stream" in lower):
+            return FAILURE_REASON_MODEL_STREAM_CRASH
         # Explicit rate-limit signals are authoritative: a genuine HTTP 429, an
         # explicit weekly-limit message, or a structured rate_limit_event is an
         # account-side limit even when the body also mentions capacity.
@@ -287,8 +295,6 @@ def classify_failure_reason(
         # genuine 429/weekly-limit body.
         if _mentions_overload(lower):
             return FAILURE_REASON_UPSTREAM_OVERLOADED
-        if "list index out of range" in lower and ("llm_openai" in lower or "in stream" in lower):
-            return FAILURE_REASON_MODEL_STREAM_CRASH
         if "rate" in lower and "limit" in lower:
             return FAILURE_REASON_RATE_LIMIT
         if (
