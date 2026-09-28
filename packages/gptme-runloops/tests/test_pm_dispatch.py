@@ -2729,6 +2729,105 @@ class TestLaneDispatcherSlotLogDir:
         assert not any("StandardError" in arg for arg in cmd)
 
 
+class TestLaneDispatcherEnvAliases:
+    """Slot launch dual-writes neutral AGENT_* alongside legacy BOB_*.
+
+    ``run-item`` prefers the neutral spelling, so the launcher must write it
+    too — otherwise an inherited ``BOB_*`` value would shadow the backend or
+    model the slot was actually assigned (#1705).
+    """
+
+    def _captured_cmd(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        backend: str,
+        model: str | None,
+    ) -> list[str]:
+        import subprocess
+
+        captured: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            captured.append(cmd)
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="", stderr=""
+            )
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+        mgr = SlotManager(
+            slot_cap=10,
+            count_running=lambda: 0,
+            count_running_lane=lambda lane: 0,
+            is_busy=lambda unit: False,
+        )
+        ld = LaneDispatcher(slot_manager=mgr)
+        item = SlotItem("gptme/gptme", 1, ["notification"], "Test item")
+        script = tmp_path / "slot.sh"
+        script.write_text("#!/bin/bash\necho hello\n")
+        script.chmod(0o755)
+        unit_name = "bob-pm-fast-slot-test"
+        ld._launch_unit(
+            unit_name,
+            unit_name,
+            "gptme-gptme-1",
+            "fast",
+            item,
+            backend,
+            model,
+            str(script),
+        )
+        assert len(captured) == 1
+        return captured[0]
+
+    def test_dual_writes_backend_and_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cmd = self._captured_cmd(
+            tmp_path, monkeypatch, backend="claude-code", model="sonnet"
+        )
+        assert "--setenv=AGENT_BACKEND=claude-code" in cmd
+        assert "--setenv=BOB_BACKEND=claude-code" in cmd
+        assert "--setenv=AGENT_SELECTED_MODEL=sonnet" in cmd
+        assert "--setenv=BOB_SELECTED_MODEL=sonnet" in cmd
+
+    def test_dual_writes_shadow_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("AGENT_PM_BANDIT_SHADOW", raising=False)
+        monkeypatch.delenv("BOB_PM_BANDIT_SHADOW", raising=False)
+        cmd = self._captured_cmd(
+            tmp_path, monkeypatch, backend="claude-code", model=None
+        )
+        assert "--setenv=AGENT_PM_BANDIT_SHADOW=0" in cmd
+        assert "--setenv=BOB_PM_BANDIT_SHADOW=0" in cmd
+
+        monkeypatch.setenv("AGENT_PM_BANDIT_SHADOW", "1")
+        cmd = self._captured_cmd(
+            tmp_path, monkeypatch, backend="claude-code", model=None
+        )
+        assert "--setenv=AGENT_PM_BANDIT_SHADOW=1" in cmd
+        assert "--setenv=BOB_PM_BANDIT_SHADOW=1" in cmd
+
+    def test_model_unresolved_writes_empty_not_omitted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The launcher writes the model unconditionally (empty when unresolved)
+        # so the slot env always carries an explicit canonical value for both
+        # spellings; run-item reads the empty neutral value as canonical
+        # "no model" (presence-based precedence).
+        cmd = self._captured_cmd(
+            tmp_path, monkeypatch, backend="claude-code", model=None
+        )
+        assert "--setenv=AGENT_SELECTED_MODEL=" in cmd
+        assert "--setenv=BOB_SELECTED_MODEL=" in cmd
+        assert not any(
+            arg.startswith("--setenv=AGENT_SELECTED_MODEL=") and arg.split("=", 2)[2]
+            for arg in cmd
+        )
+
+
 class TestUnitPrefix:
     """Slot unit prefix is configurable so non-Bob agents get their own units."""
 

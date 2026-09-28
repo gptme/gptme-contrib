@@ -960,19 +960,35 @@ class LaneDispatcher:
             f"--setenv=PM_SLOT_KEY={slot_key}",
             f"--setenv=PM_DISPATCH_ID={unit_name}",
             f"--setenv=PM_WORK_FILE={slot_file}",
+            # Dual-write the neutral AGENT_* spelling alongside the legacy
+            # BOB_* alias so both current and legacy readers resolve the
+            # backend/model assigned here. (systemd-run transient units do not
+            # inherit the caller's environment, so this is compatibility and
+            # explicitness, not leak protection.)
+            f"--setenv=AGENT_BACKEND={backend}",
             f"--setenv=BOB_BACKEND={backend}",
         ]
-        if model:
-            cmd.append(f"--setenv=BOB_SELECTED_MODEL={model}")
+        # Write the model unconditionally (empty string when unresolved) so the
+        # slot's environment always carries an explicit canonical value for both
+        # spellings, rather than leaving readers to fall back to ambient config.
+        # (Transient units inherit nothing, so this is not leak protection.)
+        # run-item's presence-based precedence reads the empty neutral value as
+        # canonical "no model".
+        cmd.append(f"--setenv=AGENT_SELECTED_MODEL={model or ''}")
+        cmd.append(f"--setenv=BOB_SELECTED_MODEL={model or ''}")
         if work_type:
             cmd.append(f"--setenv=PM_WORK_TYPE={work_type}")
         # Transient units inherit nothing. Forward the Stage 1 shadow flag so
         # run-item actually records observations (gptme-contrib#1506 was
         # stripped as dead code because this was never set here).
-        cmd.append(
-            "--setenv=BOB_PM_BANDIT_SHADOW="
-            + os.environ.get("BOB_PM_BANDIT_SHADOW", "0")
+        neutral_shadow = os.environ.get("AGENT_PM_BANDIT_SHADOW")
+        shadow = (
+            neutral_shadow
+            if neutral_shadow is not None
+            else os.environ.get("BOB_PM_BANDIT_SHADOW", "0")
         )
+        cmd.append(f"--setenv=AGENT_PM_BANDIT_SHADOW={shadow}")
+        cmd.append(f"--setenv=BOB_PM_BANDIT_SHADOW={shadow}")
         # Route stdout+stderr to per-slot log files when slot_log_dir is set.
         # Sequential file appends are much cheaper than journald's mmap
         # random-write pattern on DRAM-less SSDs (~18 GB/day → target <3 GB).
