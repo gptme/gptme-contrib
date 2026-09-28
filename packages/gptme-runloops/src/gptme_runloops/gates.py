@@ -211,3 +211,114 @@ def streak_cooldown_gate(
         "(next will skip if still unproductive)",
         toggle_action="set",
     )
+
+
+@dataclass(frozen=True)
+class UtilizationBypassDecision:
+    """Resolved utilisation-pace signal for the suppressive gates to consume.
+
+    This gate is *upstream* of the others: its ``behind_pace`` is exactly the
+    ``quota_behind_pace`` bool that :func:`state_delta_gate` (and the streak-cooldown
+    gate) take as input. It answers a single question — "is the subscription idle
+    enough that we should bypass suppression to catch up on utilisation?" — from
+    either the quota API or, when that is unavailable, a credential-free local
+    fallback.
+
+    Attributes:
+        behind_pace: True → bypass suppressive gates to improve utilisation.
+        pace_gap_repr: Human string mirroring the bash ``QUOTA_PACE_GAP`` — the
+            numeric gap (``"0.3"``), ``"unknown (idle 8.94h)"``, or ``"unknown"``.
+            Rendered via ``str(round(pace_gap, 3))``, byte-identical to the
+            reference's ``print(round(gap, 3))`` for any caller (so ``0.30``
+            renders ``"0.3"`` and ``0.123456`` renders ``"0.123"``, not the raw
+            float). The reference already rounds upstream, but rounding here keeps
+            the contract honest regardless of what the caller passes in.
+            Used verbatim in the downstream bypass log line.
+        source: Which signal decided it — ``"api"``, ``"idle_fallback"``, or
+            ``"unknown"``.
+        message: The one-off ``[quota-gate]`` fallback log line, emitted only when
+            the local idle fallback fires; ``None`` otherwise.
+    """
+
+    behind_pace: bool
+    pace_gap_repr: str
+    source: str
+    message: str | None
+
+
+def utilization_bypass_gate(
+    pace_gap: float | None,
+    idle_hours: Callable[[], float | None],
+    *,
+    pace_gap_threshold: float = 0.25,
+    idle_hours_threshold: float = 12.0,
+) -> UtilizationBypassDecision:
+    """Resolve whether quota is behind pace enough to bypass suppressive gates.
+
+    Mechanism (identical decision table to the reference ``autonomous-run-cc.sh``
+    utilisation-bypass block):
+
+    1. **API signal available** (``pace_gap is not None``): behind pace iff
+       ``pace_gap > pace_gap_threshold``. ``idle_hours`` is *not* called — the
+       expensive local probe is skipped whenever the API answered, mirroring the
+       bash short-circuit.
+    2. **API unavailable** (``pace_gap is None``, usually an auth outage): fall back
+       to the credential-free local signal. Call ``idle_hours``; if it returns a
+       value ``> idle_hours_threshold``, treat as behind pace (a long idle gap is
+       precisely the under-utilisation the bypass exists for — see ErikBjare/alice#78)
+       and emit
+       the ``[quota-gate]`` fallback message.
+    3. **Neither signal usable** (API down *and* idle unknown/within threshold):
+       not behind pace, gap reported as ``"unknown"``.
+
+    Policy stays with the caller: the actual quota scrape and idle-hours probe, both
+    threshold values, and what the resolved ``behind_pace`` is subsequently used to
+    bypass. The gate owns only the resolution table and the log-string formatting.
+
+    Args:
+        pace_gap: Quota pace gap from the API scrape (fraction behind expected
+            burn), or ``None`` when the scrape was unavailable.
+        idle_hours: Zero-arg callable returning hours since the last productive
+            session (or ``None`` if unknown). Called at most once, and only on the
+            API-unavailable path — so the caller pays for it only when needed. A
+            raised exception is tolerated and treated as ``None`` (unknown), so a
+            failed probe can't hard-fail the run loop on the auth-outage path.
+        pace_gap_threshold: Gap above which the API signal counts as behind pace.
+        idle_hours_threshold: Idle hours above which the fallback counts as behind
+            pace.
+
+    Returns:
+        A :class:`UtilizationBypassDecision`.
+    """
+    if pace_gap is not None:
+        return UtilizationBypassDecision(
+            behind_pace=pace_gap > pace_gap_threshold,
+            pace_gap_repr=f"{round(pace_gap, 3)}",
+            source="api",
+            message=None,
+        )
+    try:
+        hours = idle_hours()
+    except Exception:
+        # A failed idle probe must not hard-fail the run loop — this is the
+        # auth-outage path the fallback exists for. The reference bash tolerates
+        # it too: an empty HOURS_IDLE makes ``[ "" -gt 12 ]`` false, so it takes
+        # the else branch (not behind pace, gap "unknown"). Mirror that by
+        # treating an exception as an unknown idle signal.
+        hours = None
+    if hours is not None and hours > idle_hours_threshold:
+        return UtilizationBypassDecision(
+            behind_pace=True,
+            pace_gap_repr=f"unknown (idle {hours:.2f}h)",
+            source="idle_fallback",
+            message=(
+                f"[quota-gate] usage scrape unavailable; local fallback: {hours:.2f}h "
+                f"since last productive session (>{idle_hours_threshold:g}h) — treating as behind pace"
+            ),
+        )
+    return UtilizationBypassDecision(
+        behind_pace=False,
+        pace_gap_repr="unknown",
+        source="unknown",
+        message=None,
+    )
