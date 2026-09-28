@@ -13,6 +13,7 @@ from gptme_sessions.failure_capture import (
     FAILURE_REASON_QUOTA,
     FAILURE_REASON_RATE_LIMIT,
     FAILURE_REASON_TIMEOUT,
+    FAILURE_REASON_UPSTREAM_OVERLOADED,
     _record_has_any_content,
     _trajectory_has_assistant,
     capture_session_failure,
@@ -545,3 +546,80 @@ def test_capture_allowed_rate_limit_event_not_rate_limit(tmp_path: Path):
         harness_stderr_path=None,
     )
     assert reason == FAILURE_REASON_NONZERO
+
+
+def test_classify_upstream_overloaded():
+    """Provider model-capacity errors classify distinctly from a generic crash."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=443,
+        input_tokens=3_695_970,
+        has_assistant_turn=False,
+        error_text=(
+            "error: codex_error_info:server_overloaded; "
+            "Selected model is at capacity. Please try a different model."
+        ),
+    )
+    assert reason == FAILURE_REASON_UPSTREAM_OVERLOADED
+
+
+def test_classify_rate_limit_precedes_overload():
+    """A genuine 429 body that also mentions overload stays rate_limit."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=30,
+        input_tokens=100,
+        has_assistant_turn=True,
+        error_text="429 Too Many Requests: server overloaded",
+    )
+    assert reason == FAILURE_REASON_RATE_LIMIT
+
+
+def test_capture_codex_task_complete_overload(tmp_path: Path):
+    """Codex nests the failure under payload.error on an event_msg record.
+
+    Regression: the message body has no error keyword and the machine code lives
+    in payload.error.codex_error_info, so the session previously recorded as
+    nonzero_exit_unclassified with error=None — hiding an arm that was simply
+    at provider capacity.
+    """
+    traj = tmp_path / "rollout.jsonl"
+    records = [
+        {"type": "session_meta", "payload": {"id": "x"}},
+        {"type": "event_msg", "payload": {"type": "task_started"}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "working on it"}],
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "error": {
+                    "message": "Selected model is at capacity. Please try a different model.",
+                    "codex_error_info": "server_overloaded",
+                },
+            },
+        },
+    ]
+    traj.write_text(
+        "".join(json.dumps(rec) + "\n" for rec in records),
+        encoding="utf-8",
+    )
+
+    reason, err = capture_session_failure(
+        exit_code=1,
+        duration_seconds=443,
+        input_tokens=3_695_970,
+        trajectory_path=traj,
+        harness_stderr_path=None,
+    )
+
+    assert reason == FAILURE_REASON_UPSTREAM_OVERLOADED
+    assert err is not None
+    assert "server_overloaded" in err
+    assert "Selected model is at capacity" in err

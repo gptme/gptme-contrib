@@ -14,6 +14,7 @@ FAILURE_REASON_PRE_RESPONSE = "pre_response_api_failure"
 FAILURE_REASON_QUOTA = "quota"
 FAILURE_REASON_RATE_LIMIT = "rate_limit"
 FAILURE_REASON_TIMEOUT = "timeout"
+FAILURE_REASON_UPSTREAM_OVERLOADED = "upstream_overloaded"
 
 _ERROR_LINE_RE = re.compile(
     r"(?i)(error|exception|traceback|failed|rate.?limit|weekly.?limit|401|403|429|authentication)"
@@ -140,6 +141,27 @@ def _structured_error_signals(rec: dict) -> list[str]:
     result = rec.get("result")
     if (rec.get("is_error") or rec.get("isError")) and isinstance(result, str) and result.strip():
         signals.append(result.strip()[:500])
+    # Codex rollout records nest structured failures under ``payload.error`` on
+    # ``event_msg`` records (e.g. ``task_complete``): the provider reports
+    # ``{"message": "Selected model is at capacity...", "codex_error_info":
+    # "server_overloaded"}``. Neither field appears at the top level, so without
+    # this the exit records as ``nonzero_exit_unclassified`` with an empty
+    # ``error`` — indistinguishable from an opaque crash. Prefix with ``error:``
+    # so the ``_ERROR_LINE_RE`` indicator matches even when the message body has
+    # no error keyword of its own.
+    payload = rec.get("payload")
+    if isinstance(payload, dict):
+        payload_error = payload.get("error")
+        if isinstance(payload_error, dict):
+            parts: list[str] = []
+            codex_info = payload_error.get("codex_error_info")
+            if isinstance(codex_info, str) and codex_info.strip():
+                parts.append(f"codex_error_info:{codex_info.strip()}")
+            message = payload_error.get("message")
+            if isinstance(message, str) and message.strip():
+                parts.append(message.strip()[:300])
+            if parts:
+                signals.append("error: " + "; ".join(parts))
     return signals
 
 
@@ -225,6 +247,15 @@ def classify_failure_reason(
             return FAILURE_REASON_QUOTA
         if ("rate" in lower and "limit" in lower) or "429" in error_text or "weekly limit" in lower:
             return FAILURE_REASON_RATE_LIMIT
+        # Provider-side model capacity / overload (Codex ``server_overloaded``,
+        # "Selected model is at capacity. Please try a different model.") is a
+        # transient upstream failure — not a rate limit on our account and not a
+        # billing quota. Classify it distinctly so the operator pulse and bandit
+        # can tell "retry later / deprioritize this arm" apart from an opaque
+        # crash. Kept after the rate-limit branch so a genuine 429 body that
+        # mentions overload still classifies as rate_limit.
+        if "server_overloaded" in lower or "at capacity" in lower or "model is overloaded" in lower:
+            return FAILURE_REASON_UPSTREAM_OVERLOADED
         if (
             "authentication" in lower
             or "unauthorized" in lower
