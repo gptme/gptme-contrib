@@ -16,6 +16,23 @@ FAILURE_REASON_RATE_LIMIT = "rate_limit"
 FAILURE_REASON_TIMEOUT = "timeout"
 FAILURE_REASON_UPSTREAM_OVERLOADED = "upstream_overloaded"
 
+# Provider-side model-capacity phrases. Shared by extraction (so a long message
+# cannot hide the indicator past the stored truncation) and classification. The
+# classification marker itself is included so a signal carrying only the marker
+# (message truncated before the phrase) still classifies as overload.
+_OVERLOAD_MARKERS = (
+    "server_overloaded",
+    "at capacity",
+    "model is overloaded",
+    FAILURE_REASON_UPSTREAM_OVERLOADED,
+)
+
+
+def _mentions_overload(text: str) -> bool:
+    lower = text.lower()
+    return any(marker in lower for marker in _OVERLOAD_MARKERS)
+
+
 _ERROR_LINE_RE = re.compile(
     r"(?i)(error|exception|traceback|failed|rate.?limit|weekly.?limit|401|403|429|authentication)"
 )
@@ -159,7 +176,15 @@ def _structured_error_signals(rec: dict) -> list[str]:
                 parts.append(f"codex_error_info:{codex_info.strip()}")
             message = payload_error.get("message")
             if isinstance(message, str) and message.strip():
-                parts.append(message.strip()[:300])
+                msg = message.strip()
+                parts.append(msg[:500])
+                # The stored body is truncated (and the joined signal is later
+                # cut to 500 chars); if an overload indicator appears anywhere in
+                # the full message and no earlier signal already carries it, put
+                # the canonical marker first so it survives the cut and
+                # classification is not lossy.
+                if _mentions_overload(msg) and not _mentions_overload("; ".join(parts)):
+                    parts.insert(0, FAILURE_REASON_UPSTREAM_OVERLOADED)
             if parts:
                 signals.append("error: " + "; ".join(parts))
     return signals
@@ -245,17 +270,24 @@ def classify_failure_reason(
             or "billing hard limit" in lower
         ):
             return FAILURE_REASON_QUOTA
-        if ("rate" in lower and "limit" in lower) or "429" in error_text or "weekly limit" in lower:
+        # Explicit rate-limit signals are authoritative: a genuine HTTP 429, an
+        # explicit weekly-limit message, or a structured rate_limit_event is an
+        # account-side limit even when the body also mentions capacity.
+        if "429" in error_text or "weekly limit" in lower or "rate_limit_event" in lower:
             return FAILURE_REASON_RATE_LIMIT
         # Provider-side model capacity / overload (Codex ``server_overloaded``,
         # "Selected model is at capacity. Please try a different model.") is a
         # transient upstream failure — not a rate limit on our account and not a
         # billing quota. Classify it distinctly so the operator pulse and bandit
         # can tell "retry later / deprioritize this arm" apart from an opaque
-        # crash. Kept after the rate-limit branch so a genuine 429 body that
-        # mentions overload still classifies as rate_limit.
-        if "server_overloaded" in lower or "at capacity" in lower or "model is overloaded" in lower:
+        # crash. Checked before the loose "rate"+"limit" substring heuristic so a
+        # capacity message that happens to contain both words is not misread as
+        # an account rate limit; the explicit branch above still wins for a
+        # genuine 429/weekly-limit body.
+        if _mentions_overload(lower):
             return FAILURE_REASON_UPSTREAM_OVERLOADED
+        if "rate" in lower and "limit" in lower:
+            return FAILURE_REASON_RATE_LIMIT
         if (
             "authentication" in lower
             or "unauthorized" in lower

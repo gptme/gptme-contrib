@@ -15,6 +15,7 @@ from gptme_sessions.failure_capture import (
     FAILURE_REASON_TIMEOUT,
     FAILURE_REASON_UPSTREAM_OVERLOADED,
     _record_has_any_content,
+    _structured_error_signals,
     _trajectory_has_assistant,
     capture_session_failure,
     classify_failure_reason,
@@ -623,3 +624,59 @@ def test_capture_codex_task_complete_overload(tmp_path: Path):
     assert err is not None
     assert "server_overloaded" in err
     assert "Selected model is at capacity" in err
+
+
+def test_classify_overload_beats_loose_rate_limit_substring():
+    """A capacity body that also says 'rate'/'limit' is not an account rate limit."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=30,
+        input_tokens=100,
+        has_assistant_turn=True,
+        error_text=(
+            "error: codex_error_info:server_overloaded; "
+            "The model is at capacity due to rate limit constraints upstream"
+        ),
+    )
+    assert reason == FAILURE_REASON_UPSTREAM_OVERLOADED
+
+
+def test_structured_error_signals_extracts_codex_payload_error():
+    """Pin the exact signal produced from a Codex payload.error record."""
+    rec = {
+        "type": "event_msg",
+        "payload": {
+            "type": "task_complete",
+            "error": {
+                "message": "Selected model is at capacity. Please try a different model.",
+                "codex_error_info": "server_overloaded",
+            },
+        },
+    }
+    assert _structured_error_signals(rec) == [
+        "error: codex_error_info:server_overloaded; "
+        "Selected model is at capacity. Please try a different model."
+    ]
+
+
+def test_structured_error_signals_keeps_overload_past_truncation():
+    """An overload phrase beyond the stored cut still classifies as overload."""
+    rec = {
+        "type": "event_msg",
+        "payload": {
+            "type": "task_complete",
+            "error": {"message": ("x" * 600) + " model is at capacity"},
+        },
+    }
+    signals = _structured_error_signals(rec)
+    assert any(FAILURE_REASON_UPSTREAM_OVERLOADED in signal for signal in signals)
+    # The marker alone must drive classification when the phrase itself was cut
+    # — including after the extractor's 500-char cut of the joined signal.
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=60,
+        input_tokens=100,
+        has_assistant_turn=True,
+        error_text="; ".join(signals)[:500],
+    )
+    assert reason == FAILURE_REASON_UPSTREAM_OVERLOADED
