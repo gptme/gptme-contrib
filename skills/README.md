@@ -124,6 +124,22 @@ Skills extend gptme's lesson system by providing executable components alongside
 
 **Keywords**: `mcp server`, `wisdom search`, `session search`, `rag-mcp-server`, `knowledge base`, `book index`
 
+### 6. journal
+
+**Purpose**: Create append-only journal entries under the day the work happened
+
+**Use cases**:
+- Writing a session entry after midnight
+- Backfilling a delayed entry from session, commit, or tool timestamps
+- Creating an entry without overwriting an existing journal file
+
+**Features**:
+- Work-day dating through `JOURNAL_STARTED` or `JOURNAL_DATE`
+- Agent-specific filenames and entry formats remain pluggable
+- Bundled no-overwrite helper that writes stdin verbatim
+
+**Keywords**: `journal entry`, `backfill journal`, `work day`, `session notes`
+
 ## Using Skills
 
 ### Loading a Skill
