@@ -1,8 +1,10 @@
 """Tests for the executor abstraction."""
 
+import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -106,6 +108,73 @@ def test_gptme_executor_passes_run_type():
 
         call_kwargs = mock.call_args
         assert call_kwargs[1]["run_type"] == "autonomous"
+
+
+@pytest.fixture
+def gptme_child_env(tmp_path, monkeypatch):
+    """Capture what a real child process receives through the gptme route."""
+    binary_dir = tmp_path / "bin"
+    binary_dir.mkdir()
+    binary = binary_dir / "gptme"
+    binary.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os\n"
+        "from pathlib import Path\n"
+        "Path('child-env.json').write_text(json.dumps(dict(os.environ)))\n"
+    )
+    binary.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{binary_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("GPTME_SHELL_AUTO_BACKGROUND", "true")
+    monkeypatch.setenv("GPTME_SHELL_FOREGROUND_TIMEOUT", "120")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    monkeypatch.setattr(execution_mod, "GLOBAL_LOG_DIR", logs)
+    return tmp_path / "child-env.json"
+
+
+@pytest.mark.parametrize(
+    ("inherited", "override", "expected"),
+    [
+        (None, None, "600"),
+        ("", None, "600"),
+        ("120", None, "600"),
+        ("1260", None, "1260"),
+        ("3", None, "3"),
+        ("120", "120", "120"),
+        ("1260", "5", "5"),
+    ],
+)
+def test_gptme_executor_child_shell_timeout(
+    tmp_path, monkeypatch, gptme_child_env, inherited, override, expected
+):
+    """Default leaves time to promote; explicit and longer timeouts survive."""
+    if inherited is None:
+        monkeypatch.delenv("GPTME_SHELL_TIMEOUT", raising=False)
+    else:
+        monkeypatch.setenv("GPTME_SHELL_TIMEOUT", inherited)
+    env = {"GPTME_SHELL_TIMEOUT": override} if override is not None else None
+
+    result = GptmeExecutor().execute("Test", tmp_path, timeout=10, env=env)
+
+    assert result.success
+    child_env = json.loads(gptme_child_env.read_text())
+    assert child_env["GPTME_SHELL_TIMEOUT"] == expected
+    assert child_env["GPTME_SHELL_FOREGROUND_TIMEOUT"] == "120"
+    assert child_env["GPTME_SHELL_AUTO_BACKGROUND"] == "true"
+
+
+@pytest.mark.parametrize(("override", "expected"), [(None, "120"), ("5", "5")])
+def test_execute_gptme_explicit_shell_timeout(
+    tmp_path, monkeypatch, gptme_child_env, override, expected
+):
+    """Explicit arguments win over inherited env, caller env wins over both."""
+    monkeypatch.setenv("GPTME_SHELL_TIMEOUT", "1260")
+    env = {"GPTME_SHELL_TIMEOUT": override} if override is not None else None
+    result = execution_mod.execute_gptme(
+        "Test", tmp_path, timeout=10, shell_timeout=120, env=env
+    )
+    assert result.success
+    assert json.loads(gptme_child_env.read_text())["GPTME_SHELL_TIMEOUT"] == expected
 
 
 def test_execute_gptme_persists_trajectory_and_removes_isolated_logs(
