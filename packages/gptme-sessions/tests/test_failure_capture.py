@@ -8,6 +8,7 @@ from pathlib import Path
 from gptme_sessions.failure_capture import (
     FAILURE_REASON_AUTH,
     FAILURE_REASON_INVALID_REQUEST,
+    FAILURE_REASON_MODEL_STREAM_CRASH,
     FAILURE_REASON_NONZERO,
     FAILURE_REASON_PRE_RESPONSE,
     FAILURE_REASON_QUOTA,
@@ -562,6 +563,119 @@ def test_classify_upstream_overloaded():
         ),
     )
     assert reason == FAILURE_REASON_UPSTREAM_OVERLOADED
+
+
+def test_classify_model_stream_crash():
+    """gptme's OpenAI stream IndexError classifies distinctly from a generic crash."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=63,
+        input_tokens=142_000,
+        has_assistant_turn=True,
+        error_text=(
+            "Traceback (most recent call last):\n"
+            '  File "gptme/llm/llm_openai.py", line 901, in stream\n'
+            "IndexError: list index out of range"
+        ),
+    )
+    assert reason == FAILURE_REASON_MODEL_STREAM_CRASH
+
+
+def test_list_index_error_without_stream_context_stays_unclassified():
+    """An unrelated IndexError must not be mislabeled as a model stream crash."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=63,
+        input_tokens=142_000,
+        has_assistant_turn=True,
+        error_text="IndexError: list index out of range",
+    )
+    assert reason == FAILURE_REASON_NONZERO
+
+
+def test_classify_quota_precedes_model_stream_crash():
+    """Quota exhaustion still wins when the same blob also has a stream IndexError."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=63,
+        input_tokens=142_000,
+        has_assistant_turn=True,
+        error_text=(
+            "Error code: 429 - {'error': {'type': 'insufficient_quota'}}\n"
+            "Traceback (most recent call last):\n"
+            '  File "gptme/llm/llm_openai.py", line 901, in stream\n'
+            "IndexError: list index out of range"
+        ),
+    )
+    assert reason == FAILURE_REASON_QUOTA
+
+
+def test_classify_traceback_line_429_does_not_swallow_stream_crash():
+    """Traceback ``line 429`` is not an HTTP 429; the stream crash still wins."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=63,
+        input_tokens=142_000,
+        has_assistant_turn=True,
+        error_text=(
+            "Traceback (most recent call last):\n"
+            '  File "gptme/llm/llm_openai.py", line 429, in stream\n'
+            "IndexError: list index out of range"
+        ),
+    )
+    assert reason == FAILURE_REASON_MODEL_STREAM_CRASH
+
+
+def test_classify_http_429_precedes_model_stream_crash():
+    """A genuine HTTP 429 is still a rate limit even if the parser also crashed."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=63,
+        input_tokens=142_000,
+        has_assistant_turn=True,
+        error_text=(
+            "HTTP/1.1 429 Too Many Requests\n"
+            "Traceback (most recent call last):\n"
+            '  File "gptme/llm/llm_openai.py", line 901, in stream\n'
+            "IndexError: list index out of range"
+        ),
+    )
+    assert reason == FAILURE_REASON_RATE_LIMIT
+
+
+def test_in_streaming_mode_indexerror_without_llm_openai_stays_unclassified():
+    """Bare ``in stream`` must not label an unrelated IndexError as a gptme crash."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=63,
+        input_tokens=142_000,
+        has_assistant_turn=True,
+        error_text="IndexError: list index out of range in streaming mode",
+    )
+    assert reason == FAILURE_REASON_NONZERO
+
+
+def test_capture_model_stream_crash_from_harness_stderr(tmp_path: Path):
+    """The live f6d3 stderr signature survives the capture path."""
+    stderr = tmp_path / "harness.stderr"
+    stderr.write_text(
+        "ERROR Fatal error occurred\n"
+        "ERROR list index out of range\n"
+        "ERROR at /opt/gptme/gptme/llm/llm_openai.py:1679 in stream\n",
+        encoding="utf-8",
+    )
+
+    reason, detail = capture_session_failure(
+        exit_code=1,
+        duration_seconds=63,
+        input_tokens=142_000,
+        trajectory_path=None,
+        harness_stderr_path=stderr,
+    )
+
+    assert reason == FAILURE_REASON_MODEL_STREAM_CRASH
+    assert detail is not None
+    assert "list index out of range" in detail
 
 
 def test_classify_rate_limit_precedes_overload():
