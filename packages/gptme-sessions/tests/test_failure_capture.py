@@ -593,6 +593,23 @@ def test_list_index_error_without_stream_context_stays_unclassified():
     assert reason == FAILURE_REASON_NONZERO
 
 
+def test_classify_quota_precedes_model_stream_crash():
+    """Quota exhaustion still wins when the same blob also has a stream IndexError."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=63,
+        input_tokens=142_000,
+        has_assistant_turn=True,
+        error_text=(
+            "Error code: 429 - {'error': {'type': 'insufficient_quota'}}\n"
+            "Traceback (most recent call last):\n"
+            '  File "gptme/llm/llm_openai.py", line 901, in stream\n'
+            "IndexError: list index out of range"
+        ),
+    )
+    assert reason == FAILURE_REASON_QUOTA
+
+
 def test_classify_model_stream_crash_precedes_429():
     """A stream IndexError that also contains 429 still classifies as stream crash.
 
