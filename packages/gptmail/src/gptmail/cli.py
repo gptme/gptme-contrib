@@ -109,13 +109,19 @@ def compose(
     """Create new email.
 
     If CONTENT is not provided, opens an editor to compose the message.
+    Pass "-" as CONTENT to read the body from stdin — use this for large
+    bodies (e.g. HTML digests) that would overflow the shell's argv limit
+    (ARG_MAX) if passed as an argument.
     Use --from to specify a custom sender address.
     """
     workspace_dir = get_workspace_dir()
     email = AgentEmail(workspace_dir)
 
+    # Read content from stdin when passed "-" (avoids ARG_MAX for large bodies)
+    if content == "-":
+        content = sys.stdin.read()
     # Get content from editor if not provided
-    if content is None:
+    elif content is None:
         content = edit_content()
 
     message_id = email.compose(to, subject, content, from_address=from_address)
