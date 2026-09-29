@@ -163,6 +163,30 @@ install_allowed_identities() {
     echo -e "${GREEN}✓${NC} Wrote allowed-identities.conf for $email"
 }
 
+# --- Repo allowlist for the global pre-commit/pre-push hooks ---
+# With no allowed-repos.conf, ALLOWED_PATTERNS is empty and the hooks fail
+# closed: every direct commit to master in a shared repo (gptme-superuser
+# standups, agent messages) is refused, inside the automation, so the agent
+# looks healthy while coordination commits pile up uncommitted. Seed the
+# baseline every agent needs; leave an existing file untouched.
+install_allowed_repos() {
+    local conf="$HOME/.config/git/allowed-repos.conf"
+    if [ -f "$conf" ]; then
+        echo -e "${GREEN}✓${NC} Keeping existing allowed-repos.conf"
+        return 0
+    fi
+    {
+        echo "# Repos allowed for direct master commits"
+        echo "# Used by ~/.config/git/hooks/pre-commit and pre-push"
+        echo "# Each pattern is matched against the remote URL"
+        echo "ALLOWED_PATTERNS=("
+        echo "    # gptme-superuser: shared workspace for all agents (standups, messages)"
+        echo '    "gptme/gptme-superuser"'
+        echo ")"
+    } >"$conf"
+    echo -e "${GREEN}✓${NC} Wrote allowed-repos.conf (gptme/gptme-superuser)"
+}
+
 # --- Main installation ---
 echo "Installing dotfiles from $DOTFILES_DIR"
 echo ""
@@ -186,6 +210,9 @@ echo -e "${GREEN}✓${NC} Set core.hooksPath to ~/.config/git/hooks"
 
 # Ensure the hook's identity allowlist covers this agent (no-op for Bob)
 install_allowed_identities
+
+# Ensure direct commits to shared agent repos are permitted
+install_allowed_repos
 
 # Set up template directory for pre-commit (create if needed)
 mkdir -p ~/.git-templates
