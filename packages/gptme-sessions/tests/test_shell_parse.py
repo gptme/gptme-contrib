@@ -39,6 +39,16 @@ class TestBashHeredocWritePaths:
         cmd = 'cat > out.txt <<"EOF"\ncontent\nEOF'
         assert bash_heredoc_write_paths(cmd) == ["out.txt"]
 
+    def test_cat_heredoc_quoted_marker_before_redirect(self):
+        """cat <<\"EOF\" > file — quoted marker with the redirect after it."""
+        cmd = 'cat <<"EOF" > out.txt\ncontent\nEOF'
+        assert bash_heredoc_write_paths(cmd) == ["out.txt"]
+
+    def test_stderr_redirect_is_not_a_heredoc_write(self):
+        """cat 2> err.log <<EOF — stderr redirect is not a stdout file write."""
+        cmd = "cat 2> /tmp/err.log <<EOF\ncontent\nEOF"
+        assert bash_heredoc_write_paths(cmd) == []
+
     def test_cat_indented_heredoc(self):
         """cat > file <<-EOF — dash-indented heredoc."""
         cmd = "cat > /tmp/worktrees/my-feature/result.md <<-EOF\nhello\n\tEOF"

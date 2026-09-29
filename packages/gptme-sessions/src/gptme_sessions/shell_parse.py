@@ -87,6 +87,11 @@ def _ts_file_redirect_path(fr_node: Any) -> str | None:
     has_write_op = any(c.type in (">", ">>") for c in children)
     if not has_write_op:
         return None
+    # A file-descriptor redirect (`2> err.log`) targets stderr, not stdout, so
+    # its path is not a heredoc *write* even when the statement also writes a
+    # heredoc to stdin. Only plain `>`/`>>` count.
+    if any(c.type == "file_descriptor" for c in children):
+        return None
     for c in children:
         if c.type in (
             "word",
