@@ -48,9 +48,45 @@ _HTTP_429_RE = re.compile(
 )
 
 
+_HTTP_402_RE = re.compile(
+    r"(?:"
+    r"error\s*code\s*[:=]\s*402\b"
+    r"|status(?:\s*code)?(?:\s*[:=]\s*|\s+)402\b"
+    r"|http(?:/\d+\.\d+)?\s+402\b"
+    r"|\b402\s+payment required\b"
+    r"|[\"']code[\"']\s*:\s*402\b"
+    r"|[\"']?http_status[\"']?\s*:\s*402\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+_HTTP_400_RE = re.compile(
+    r"(?:"
+    r"error\s*code\s*[:=]\s*400\b"
+    r"|api\s+error\s+400\b"
+    r"|status(?:\s*code)?\s*[:=]\s*400\b"
+    r"|http(?:/\d+\.\d+)?\s+400\b"
+    r"|\b400\s+bad request\b"
+    r"|[\"']?http_status[\"']?\s*:\s*400\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
 def _mentions_http_429(error_text: str) -> bool:
     """True for an HTTP/API 429, not a traceback ``line 429``."""
     return _HTTP_429_RE.search(error_text) is not None
+
+
+def _mentions_http_402(error_text: str) -> bool:
+    """True for an HTTP/API 402 payment failure."""
+    return _HTTP_402_RE.search(error_text) is not None
+
+
+def _mentions_http_400(error_text: str) -> bool:
+    """True for an HTTP/API 400 bad request, not an incidental number."""
+    return _HTTP_400_RE.search(error_text) is not None
 
 
 def _mentions_model_stream_crash(lower: str) -> bool:
@@ -64,7 +100,8 @@ def _mentions_model_stream_crash(lower: str) -> bool:
 
 
 _ERROR_LINE_RE = re.compile(
-    r"(?i)(error|exception|traceback|failed|rate.?limit|weekly.?limit|401|403|429|authentication)"
+    r"(?i)(error|exception|traceback|failed|rate.?limit|weekly.?limit|"
+    r"400|401|402|403|429|authentication|quota|payment required)"
 )
 _ASSISTANT_ROLES = frozenset({"assistant"})
 
@@ -87,12 +124,13 @@ def _read_tail(path: Path, *, max_bytes: int = 16_000, max_lines: int = 40) -> s
 
 
 def _record_is_assistant(rec: dict) -> bool:
-    """Return True for flat (gptme) and nested (Claude Code) assistant records."""
+    """Return True for gptme, Claude Code, Grok, and Copilot assistant records."""
     # Flat format: {"role": "assistant", "content": "..."}
     if rec.get("role") in _ASSISTANT_ROLES:
         return True
     # Both CC and Grok use type=assistant; only CC nests the role in message.
-    return rec.get("type") == "assistant"
+    # Copilot emits ``assistant.message`` with content under ``data``.
+    return rec.get("type") in {"assistant", "assistant.message"}
 
 
 def _record_content_text(rec: dict) -> str:
@@ -101,6 +139,9 @@ def _record_content_text(rec: dict) -> str:
     content = rec.get("content") or rec.get("text") or ""
     if content:
         return str(content)
+    data = rec.get("data") or {}
+    if isinstance(data, dict) and data.get("content"):
+        return str(data["content"])
     msg = rec.get("message") or {}
     if isinstance(msg, str):
         return msg
@@ -119,6 +160,9 @@ def _record_has_any_content(rec: dict) -> bool:
     non-empty — the model already responded even if it only issued tool calls.
     """
     if rec.get("content") or rec.get("text"):
+        return True
+    data = rec.get("data") or {}
+    if isinstance(data, dict) and (data.get("content") or data.get("toolRequests")):
         return True
     msg = rec.get("message") or {}
     if isinstance(msg, str):
@@ -161,6 +205,24 @@ def _structured_error_signals(rec: dict) -> list[str]:
     """
     signals: list[str] = []
     rec_type = rec.get("type")
+    if rec_type == "session.error":
+        data = rec.get("data")
+        if isinstance(data, dict):
+            copilot_parts = []
+            error_type = data.get("errorType")
+            if error_type:
+                copilot_parts.append(f"type={error_type}")
+            status = data.get("statusCode")
+            if status is not None:
+                copilot_parts.append(f"status={status}")
+            code = data.get("errorCode")
+            if code:
+                copilot_parts.append(f"code={code}")
+            message = data.get("message")
+            if message:
+                copilot_parts.append(str(message)[:500])
+            if copilot_parts:
+                signals.append("error: copilot session.error " + "; ".join(copilot_parts))
     if rec_type == "rate_limit_event":
         info = rec.get("rate_limit_info")
         info_dict = info if isinstance(info, dict) else {}
@@ -273,7 +335,7 @@ def classify_failure_reason(
         # Check invalid_request_error BEFORE auth: a 400 bad-request from a
         # provider (e.g. deepseek rejecting tool_calls format) is NOT an auth
         # failure even if the error blob contains lesson names like "Auth Blueprint".
-        if "invalid_request_error" in lower:
+        if "invalid_request_error" in lower or _mentions_http_400(error_text):
             return FAILURE_REASON_INVALID_REQUEST
         # Check quota/spending-limit BEFORE the generic 429/rate-limit and auth
         # checks: an account that ran out of credits (Grok
@@ -292,10 +354,14 @@ def classify_failure_reason(
         # of misclassification this classifier exists to prevent. Only phrases
         # that cannot describe an auth failure belong here.
         if (
-            "spending-limit" in lower
+            _mentions_http_402(error_text)
+            or "spending-limit" in lower
             or "spending_limit" in lower
             or "run out of credits" in lower
             or "insufficient_quota" in lower
+            or "quota_exceeded" in lower
+            or "exceeded your monthly quota" in lower
+            or "usage balance exhausted" in lower
             or "exceeded your current quota" in lower
             or "billing hard limit" in lower
         ):

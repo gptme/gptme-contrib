@@ -138,7 +138,7 @@ def test_post_session_records_grok_string_error(tmp_path: Path):
     assert len(records) == 1
     assert records[0].session_id == "grok-quota-attempt"
     assert records[0].outcome == "failed"
-    assert records[0].failure_reason == FAILURE_REASON_PRE_RESPONSE
+    assert records[0].failure_reason == FAILURE_REASON_QUOTA
     assert records[0].error is not None
     assert error in records[0].error
     assert result.record.error == records[0].error
@@ -178,6 +178,60 @@ def test_trajectory_has_assistant_grok_string_message(tmp_path: Path):
         encoding="utf-8",
     )
     assert _trajectory_has_assistant(traj) is True
+
+
+def test_trajectory_has_assistant_copilot_message(tmp_path: Path):
+    """Copilot stores assistant output under data.content."""
+    traj = tmp_path / "events.jsonl"
+    traj.write_text(
+        json.dumps(
+            {
+                "type": "assistant.message",
+                "data": {
+                    "turnId": "0",
+                    "content": "I completed the task.",
+                    "toolRequests": [],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert _trajectory_has_assistant(traj) is True
+
+
+def test_capture_copilot_quota_event(tmp_path: Path):
+    """Copilot session.error quota events must not look like opaque pre-response exits."""
+    traj = tmp_path / "events.jsonl"
+    records = [
+        {"type": "assistant.turn_start", "data": {"turnId": "0"}},
+        {"type": "assistant.turn_end", "data": {"turnId": "0"}},
+        {
+            "type": "session.error",
+            "data": {
+                "errorType": "quota",
+                "message": "You have exceeded your monthly quota",
+                "statusCode": 402,
+                "errorCode": "quota_exceeded",
+            },
+        },
+    ]
+    traj.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    reason, err = capture_session_failure(
+        exit_code=1,
+        duration_seconds=50,
+        input_tokens=None,
+        trajectory_path=traj,
+        harness_stderr_path=None,
+    )
+
+    assert reason == FAILURE_REASON_QUOTA
+    assert err is not None
+    assert "quota_exceeded" in err
 
 
 def test_trajectory_has_assistant_cc_tool_use_only(tmp_path: Path):
@@ -322,6 +376,40 @@ def test_classify_quota_insufficient_quota():
         ),
     )
     assert result == FAILURE_REASON_QUOTA
+
+
+def test_classify_quota_http_402_insufficient_credits():
+    """HTTP 402 credit exhaustion is deterministic quota failure, not retryable startup loss."""
+    messages = (
+        "Error code: 402 - Insufficient credits. Add more credits.",
+        "API error (status 402 Payment Required): usage balance exhausted",
+        "'previous_errors': [{'code': 402, 'message': 'can only afford 16 tokens'}]",
+        '"http_status": 402',
+    )
+    for message in messages:
+        result = classify_failure_reason(
+            exit_code=1,
+            duration_seconds=41,
+            input_tokens=0,
+            has_assistant_turn=False,
+            error_text=message,
+        )
+        assert result == FAILURE_REASON_QUOTA, message
+
+
+def test_classify_invalid_request_http_400_unsupported_model():
+    """A precise API 400 is a bad request and must never enter first-response retry."""
+    result = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=59,
+        input_tokens=0,
+        has_assistant_turn=False,
+        error_text=(
+            "Codex API error 400: The gpt-5.4 model is not supported when using "
+            "Codex with a ChatGPT account."
+        ),
+    )
+    assert result == FAILURE_REASON_INVALID_REQUEST
 
 
 def test_classify_quota_precedes_rate_limit_marker():
