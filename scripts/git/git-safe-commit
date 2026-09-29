@@ -887,13 +887,18 @@ get_commit_lock_holder_pids() {
 
 resolve_lockfile_display() {
     local lockfile="$1"
+    local resolved=""
 
-    python3 - "$lockfile" <<'PY'
-from pathlib import Path
-import sys
+    # Shell-only resolution: the diagnostic path must not depend on python3
+    # (this script is meant to work on minimal containers too).
+    if command -v readlink >/dev/null 2>&1; then
+        resolved="$(readlink -f "$lockfile" 2>/dev/null || true)"
+    fi
+    if [ -z "$resolved" ] && command -v realpath >/dev/null 2>&1; then
+        resolved="$(realpath "$lockfile" 2>/dev/null || true)"
+    fi
 
-print(Path(sys.argv[1]).resolve())
-PY
+    printf '%s\n' "${resolved:-$lockfile}"
 }
 
 get_commit_lock_lslocks_rows() {
@@ -919,22 +924,26 @@ get_commit_lock_lsof_rows() {
 
 describe_commit_lockfile() {
     local lockfile="$1"
+    local stat_out size inode mtime
 
-    python3 - "$lockfile" <<'PY'
-from datetime import datetime, timezone
-from pathlib import Path
-import sys
+    if [ ! -e "$lockfile" ]; then
+        echo "missing"
+        return 0
+    fi
 
-path = Path(sys.argv[1])
-try:
-    stat = path.stat()
-except FileNotFoundError:
-    print("missing")
-    raise SystemExit(0)
+    # GNU coreutils stat first, then BSD/macOS stat; no python3 dependency.
+    if ! stat_out="$(stat -c '%s %i %Y' "$lockfile" 2>/dev/null)"; then
+        stat_out="$(stat -f '%z %i %m' "$lockfile" 2>/dev/null || true)"
+    fi
+    if [ -z "$stat_out" ]; then
+        echo "exists (stat unavailable)"
+        return 0
+    fi
 
-mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
-print(f"exists size={stat.st_size}B inode={stat.st_ino} mtime={mtime}")
-PY
+    read -r size inode mtime <<< "$stat_out"
+    printf 'exists size=%sB inode=%s mtime=%s\n' \
+        "$size" "$inode" \
+        "$(date -u -d "@$mtime" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '%s' "$mtime")"
 }
 
 emit_commit_lock_diagnostics() {
