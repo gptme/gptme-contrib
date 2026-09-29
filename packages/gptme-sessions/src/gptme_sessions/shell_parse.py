@@ -221,8 +221,14 @@ _HEREDOC_WRITE_RES = (
     re.compile(r"\btee\s+(?:-a\s+)?(['\"]?)([^\s'\"<>|;&-][^\s'\"<>|;&]*)\1\s*<<"),
 )
 
-_COMMIT_CMD_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+commit\b|\bgit-safe-commit\b")
-_PUSH_CMD_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+push\b")
+# Optional git global options before the subcommand. Value-taking options
+# (-C <path>, -c <name>=<val>, --git-dir <dir>, ...) consume their following
+# token; other options are bare flags. Anchoring on the subcommand keeps
+# `git log commit` / `git log --grep push` from matching as commit/push.
+_GIT_VALUE_OPTS_RE = r"(?:-C|-c|--git-dir|--work-tree|--namespace|--exec-path)"
+_GIT_OPTS = rf"(?:\s+{_GIT_VALUE_OPTS_RE}\s+\S+|\s+-{{1,2}}[A-Za-z][\w-]*(?:=\S+)?)*"
+_COMMIT_CMD_RE = re.compile(rf"\bgit{_GIT_OPTS}\s+commit\b|\bgit-safe-commit\b")
+_PUSH_CMD_RE = re.compile(rf"\bgit{_GIT_OPTS}\s+push\b")
 
 
 def _re_heredoc_write_paths(cmd: str) -> list[str]:

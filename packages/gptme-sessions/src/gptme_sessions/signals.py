@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import Any
 
 from .deliverables import build_deliverable_detail, project_deliverable_details
-from .shell_parse import bash_heredoc_write_paths as _bash_heredoc_write_paths
 from .pi import (
     PiSessionFormatError,
     active_pi_records,
@@ -39,6 +38,7 @@ from .pi import (
     reject_nonfinite_json,
     validate_pi_records,
 )
+from .shell_parse import bash_heredoc_write_paths as _shell_parse_heredoc_write_paths
 
 # Regex for git commit lines in shell output (works for both harnesses)
 _COMMIT_RE = re.compile(
@@ -79,11 +79,8 @@ _COMMIT_FAILED_RE = re.compile(
 # Bash heredoc/redirect file writes: `cat > f <<EOF`, `cat >> f << 'EOF'`,
 # `cat <<'EOF' > f`, `tee [-a] f <<EOF`. Only heredoc-fed writes count, so
 # plain redirects of command output (`cmd > log`) are not credited.
-_HEREDOC_WRITE_RES = (
-    re.compile(r"\bcat\s*>>?\s*(['\"]?)([^\s'\"<>|;&]+)\1\s*<<"),
-    re.compile(r"\bcat\s+<<-?\s*['\"]?\w+['\"]?\s*>>?\s*(['\"]?)([^\s'\"<>|;&]+)\1"),
-    re.compile(r"\btee\s+(?:-a\s+)?(['\"]?)([^\s'\"<>|;&-][^\s'\"<>|;&]*)\1\s*<<"),
-)
+# Path extraction (tree-sitter-bash when available, regex otherwise) lives in
+# shell_parse.py; this wrapper only adds the file_writes scratch policy.
 
 
 def _bash_heredoc_write_paths(cmd: str) -> list[str]:
@@ -92,17 +89,16 @@ def _bash_heredoc_write_paths(cmd: str) -> list[str]:
     Excludes /dev/* and /tmp scratch (except /tmp/worktrees/, where real
     feature work happens). Journal paths are returned too; callers route them.
     """
-    paths: list[str] = []
-    for pattern in _HEREDOC_WRITE_RES:
-        for m in pattern.finditer(cmd):
-            path = m.group(2)
-            if path.startswith("/dev/") or path.startswith("/proc/"):
-                continue
-            if path.startswith("/tmp/") and not path.startswith("/tmp/worktrees/"):
-                continue
-            if path not in paths:
-                paths.append(path)
-    return paths
+    found = [
+        path
+        for path in _shell_parse_heredoc_write_paths(cmd)
+        if not path.startswith("/dev/")
+        and not path.startswith("/proc/")
+        and not (path.startswith("/tmp/") and not path.startswith("/tmp/worktrees/"))
+    ]
+    # Deterministic order independent of the extractor (tree-sitter vs regex):
+    # order by first appearance in the command.
+    return sorted(found, key=cmd.find)
 
 
 def _is_push_ref_update(dst: str) -> bool:
@@ -1237,7 +1233,9 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     # Write/Edit alone misses them. Uses tree-sitter-bash when
                     # available for reliable heredoc variant detection.
                     if "/journal/" in cmd:
-                        for jpath in _bash_heredoc_write_paths(cmd):
+                        # Journal paths may sit under /tmp scratch (e.g. tests);
+                        # use the unfiltered extractor and route /journal/ below.
+                        for jpath in _shell_parse_heredoc_write_paths(cmd):
                             if "/journal/" not in jpath:
                                 continue
                             # Resolve common shell date expansions using

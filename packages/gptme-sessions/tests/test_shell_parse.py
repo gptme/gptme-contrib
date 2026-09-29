@@ -6,7 +6,6 @@ from gptme_sessions.shell_parse import (
     has_git_push_command,
 )
 
-
 # ---------------------------------------------------------------------------
 # bash_heredoc_write_paths — heredoc write detection
 # ---------------------------------------------------------------------------
@@ -115,7 +114,7 @@ class TestBashHeredocWritePaths:
 
     def test_multiple_heredocs_in_pipeline(self):
         """Multiple heredoc writes in the same command string."""
-        cmd = "cat > /journal/a.md <<EOF\nhello\nEOF\n" "cat > /journal/b.md <<EOF2\nworld\nEOF2"
+        cmd = "cat > /journal/a.md <<EOF\nhello\nEOF\ncat > /journal/b.md <<EOF2\nworld\nEOF2"
         paths = bash_heredoc_write_paths(cmd)
         assert "/journal/a.md" in paths
         assert "/journal/b.md" in paths
