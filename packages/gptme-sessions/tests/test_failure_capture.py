@@ -412,6 +412,18 @@ def test_classify_invalid_request_http_400_unsupported_model():
     assert result == FAILURE_REASON_INVALID_REQUEST
 
 
+def test_classify_quota_wins_over_http_400_marker():
+    """A 400 status line that also carries a quota marker is billing, not bad request."""
+    result = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=30,
+        input_tokens=0,
+        has_assistant_turn=False,
+        error_text="HTTP/1.1 400 Bad Request: quota_exceeded for this account",
+    )
+    assert result == FAILURE_REASON_QUOTA
+
+
 def test_classify_quota_precedes_rate_limit_marker():
     """429 body that also says 'rate limit' of an account with no credits → quota."""
     result = classify_failure_reason(

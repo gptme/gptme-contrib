@@ -332,12 +332,11 @@ def classify_failure_reason(
         return FAILURE_REASON_TIMEOUT
     if error_text:
         lower = error_text.lower()
-        # Check invalid_request_error BEFORE auth: a 400 bad-request from a
-        # provider (e.g. deepseek rejecting tool_calls format) is NOT an auth
-        # failure even if the error blob contains lesson names like "Auth Blueprint".
-        if "invalid_request_error" in lower or _mentions_http_400(error_text):
-            return FAILURE_REASON_INVALID_REQUEST
-        # Check quota/spending-limit BEFORE the generic 429/rate-limit and auth
+        # Check quota/spending-limit FIRST — before the 400/invalid_request, generic
+        # 429/rate-limit, and auth checks — so a status line like
+        # `HTTP/1.1 400 Bad Request: quota_exceeded` classifies as quota, not a bad
+        # request. Quota markers are unconditionally specific (see below), so this
+        # ordering cannot mask a genuine 400/credential failure.
         # checks: an account that ran out of credits (Grok
         # `personal-team-blocked:spending-limit`, "You have run out of credits",
         # OpenAI `insufficient_quota`) is a billing/quota failure, not a
@@ -366,6 +365,11 @@ def classify_failure_reason(
             or "billing hard limit" in lower
         ):
             return FAILURE_REASON_QUOTA
+        # Check invalid_request_error BEFORE auth: a 400 bad-request from a
+        # provider (e.g. deepseek rejecting tool_calls format) is NOT an auth
+        # failure even if the error blob contains lesson names like "Auth Blueprint".
+        if "invalid_request_error" in lower or _mentions_http_400(error_text):
+            return FAILURE_REASON_INVALID_REQUEST
         # Explicit rate-limit signals are authoritative: a genuine HTTP 429
         # (status-code form, not traceback ``line 429``), an explicit weekly-
         # limit message, or a structured rate_limit_event. These win over a
