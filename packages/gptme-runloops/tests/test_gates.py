@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import pytest
 from gptme_runloops.gates import (
+    Breaker,
+    CircuitBreakerDecision,
     GateDecision,
     StreakCooldownDecision,
     UtilizationBypassDecision,
+    failure_circuit_breaker_gate,
     state_delta_gate,
     streak_cooldown_gate,
     utilization_bypass_gate,
@@ -407,3 +410,103 @@ class TestUtilizationBypassGate:
         assert d.behind_pace is True
         assert d.message is not None
         assert "(>12.5h)" in d.message
+
+
+# Reference breakers from autonomous-run-cc.sh: auth (3 fails -> 2h) then generic
+# (5 fails -> 1h). Helpers build them at a given count/age so the tests read like
+# the incidents they guard against.
+AUTH_COOLDOWN = 7200.0
+GENERIC_COOLDOWN = 3600.0
+
+
+def _auth(count: int, age_seconds: float) -> Breaker:
+    return Breaker(
+        label="auth-guard",
+        count=count,
+        age_seconds=age_seconds,
+        count_threshold=3,
+        cooldown_seconds=AUTH_COOLDOWN,
+        failure_noun="auth failures",
+        expired_note="Auth failure cooldown expired",
+    )
+
+
+def _generic(count: int, age_seconds: float) -> Breaker:
+    return Breaker(
+        label="fail-guard",
+        count=count,
+        age_seconds=age_seconds,
+        count_threshold=5,
+        cooldown_seconds=GENERIC_COOLDOWN,
+        failure_noun="failures",
+        expired_note="Generic failure cooldown expired",
+    )
+
+
+class TestFailureCircuitBreakerGate:
+    def test_inactive_when_forced(self) -> None:
+        # FORCE_SESSION=1 short-circuits the whole breaker block in the bash.
+        d = failure_circuit_breaker_gate(
+            [_auth(9, 60.0), _generic(9, 60.0)], force_session=True
+        )
+        assert d == CircuitBreakerDecision(True, "gate inactive (forced session)")
+
+    def test_proceed_when_all_under_threshold(self) -> None:
+        # count < threshold never engages, regardless of age.
+        d = failure_circuit_breaker_gate([_auth(2, 0.0), _generic(4, 0.0)])
+        assert d.proceed is True
+        assert d.reset_labels == ()
+        assert d.expired_reasons == ()
+
+    def test_auth_breaker_cools_down_first(self) -> None:
+        # Auth engaged and within cooldown -> skip; generic never evaluated.
+        d = failure_circuit_breaker_gate(
+            [_auth(3, 3600.0), _generic(9, 0.0)]  # generic would also block
+        )
+        assert d.proceed is False
+        assert d.reason == (
+            "[auth-guard] 3 consecutive auth failures — cooling down (60min remaining)"
+        )
+
+    def test_generic_breaker_message_and_floored_remaining(self) -> None:
+        # 3600 - 61 = 3539s -> 58.98min -> floored to 58, matching bash integer div.
+        d = failure_circuit_breaker_gate([_auth(0, 0.0), _generic(5, 61.0)])
+        assert d.proceed is False
+        assert d.reason == (
+            "[fail-guard] 5 consecutive failures — cooling down (58min remaining)"
+        )
+
+    def test_expired_breaker_resets_and_falls_through(self) -> None:
+        # Auth engaged but cooldown expired -> reset auth, proceed (generic clear).
+        d = failure_circuit_breaker_gate(
+            [_auth(3, AUTH_COOLDOWN + 1), _generic(0, 0.0)]
+        )
+        assert d.proceed is True
+        assert d.reset_labels == ("auth-guard",)
+        assert d.expired_reasons == (
+            "[auth-guard] Auth failure cooldown expired — retrying",
+        )
+
+    def test_earlier_expiry_still_resets_when_later_breaker_blocks(self) -> None:
+        # Bash falls through: auth expires (rm + echo) THEN generic blocks (exit 0).
+        # Both effects must survive.
+        d = failure_circuit_breaker_gate(
+            [_auth(3, AUTH_COOLDOWN + 1), _generic(5, 0.0)]
+        )
+        assert d.proceed is False
+        assert "[fail-guard] 5 consecutive failures" in d.reason
+        assert d.reset_labels == ("auth-guard",)
+        assert d.expired_reasons == (
+            "[auth-guard] Auth failure cooldown expired — retrying",
+        )
+
+    def test_empty_chain_proceeds(self) -> None:
+        d = failure_circuit_breaker_gate([])
+        assert d.proceed is True
+        assert d.reset_labels == ()
+
+    def test_boundary_age_equal_cooldown_is_expired(self) -> None:
+        # age < cooldown blocks; age == cooldown is NOT < -> expired path (bash uses -lt).
+        d = failure_circuit_breaker_gate([_generic(5, GENERIC_COOLDOWN)])
+        assert d.proceed is True
+        assert d.reset_labels == ("fail-guard",)
