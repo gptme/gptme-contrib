@@ -178,6 +178,8 @@ def _ts_has_git_push(cmd: str) -> bool:
 _HEREDOC_WRITE_RES = (
     # cat >> path << or cat > path <<  (unquoted paths without spaces)
     re.compile(r"\bcat\s*>>?\s*(['\"]?)([^\s'\"<>|;&]+)\1\s*<<"),
+    # cat > "quoted path with spaces" << (double or single quoted paths)
+    re.compile(r'\bcat\s*>>?\s*(["\'])([^"\']*?)\1\s*<<'),
     # cat >> "path with $(date) expansion" << (paths ending with known ext)
     re.compile(r"\bcat\s*>>?\s*(.*?\.(?:md|txt|py|sh|json|yaml|toml))\s+<<"),
     # cat << 'EOF' >> path  (heredoc then redirect)
