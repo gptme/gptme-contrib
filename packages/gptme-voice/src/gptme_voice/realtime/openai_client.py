@@ -12,7 +12,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Sequence
 
 import websockets  # type: ignore
 from gptme.config import get_config, get_project_config
@@ -79,11 +79,63 @@ def _detect_agent_repo() -> str | None:
     return None
 
 
-def _load_project_instructions(workspace: str | None = None) -> str:
+def _detect_agent_name(workspace: str | Path | None = None) -> str | None:
+    """Read the agent's declared name from the workspace's ``gptme.toml``.
+
+    Agents declare their identity under ``[agent] name = "..."``. Returns
+    ``None`` when there is no workspace, no config, or no declared name, so
+    callers can keep their own fallback instead of inventing an identity.
+    Never raises: a malformed or unreadable config must not break a live call.
+    """
+    if not workspace:
+        return None
+    try:
+        project_config = get_project_config(Path(workspace))
+    except Exception as e:
+        logger.warning(f"Failed to read agent name from {workspace}: {e}")
+        return None
+    agent = getattr(project_config, "agent", None)
+    name = getattr(agent, "name", None) if agent is not None else None
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return name.strip()
+
+
+def _without_handoff_tool(tools: list[dict]) -> list[dict]:
+    """Drop the handoff tool when there is no target to hand off to.
+
+    Advertising ``handoff_to_agent`` with an empty (or unservable) roster
+    makes the model offer transfers that then fail. Callers pass the built-in
+    tool list when ``available_agents`` is empty.
+    """
+    return [tool for tool in tools if tool.get("name") != "handoff_to_agent"]
+
+
+def _display_name(name: str) -> str:
+    """Capitalize the first character, preserving the rest of the name.
+
+    ``str.capitalize()`` lowercases every later character, so it mangles
+    multi-word display names: ``"Alice Smith".capitalize() == "Alice smith"``.
+    Workspace-declared names are display names, so only the first character
+    should be normalized.
+    """
+    return name[:1].upper() + name[1:] if name else name
+
+
+def _load_project_instructions(
+    workspace: str | None = None,
+    available_agents: Sequence[str] | None = None,
+) -> str:
     """Load personality/instructions from gptme project config files.
 
     Loads personality-relevant files from the workspace's gptme.toml config,
     prioritizing ABOUT.md and keeping instructions concise for voice mode.
+
+    ``available_agents`` is the deployment's live handoff roster. The HANDOFF
+    section is only emitted when it is non-empty, so the prompt never directs
+    the model to call ``handoff_to_agent`` in a deployment where the tool is
+    absent (no handoff writer) — the model would otherwise announce a transfer
+    and leave the caller hanging on an API error.
     """
     if not workspace:
         return _DEFAULT_INSTRUCTIONS
@@ -180,16 +232,21 @@ def _load_project_instructions(workspace: str | None = None) -> str:
         "farewell delay gives your goodbye time to play before the line drops.\n"
         "- If you have already said goodbye verbally and the caller is still on the "
         "line, that means you forgot to call the tool. Call it now.\n\n"
-        "HANDOFF TO ANOTHER AGENT:\n"
-        "- Use handoff_to_agent ONLY when the caller explicitly asks to speak with "
-        "Alice, Gordon, or Sven, or when the topic is clearly outside your expertise "
-        "and another specific agent is better suited.\n"
-        "- Always say a brief handoff notice before calling the tool "
-        "(e.g. 'I'll transfer you to Alice now — one moment.').\n"
-        "- The full transcript is forwarded automatically. You don't need to summarise "
-        "the conversation unless there's important context not obvious from the transcript.\n"
-        "- Do not use handoff as a way to avoid answering a question.\n\n"
     )
+
+    if available_agents:
+        roster = ", ".join(_display_name(a) for a in sorted(available_agents))
+        preamble += (
+            "HANDOFF TO ANOTHER AGENT:\n"
+            "- Use handoff_to_agent ONLY when the caller explicitly asks to speak with "
+            f"{roster}, or when the topic is clearly outside your expertise "
+            "and another specific agent is better suited.\n"
+            "- Always say a brief handoff notice before calling the tool "
+            "(e.g. 'I'll transfer you to Alice now — one moment.').\n"
+            "- The full transcript is forwarded automatically. You don't need to summarise "
+            "the conversation unless there's important context not obvious from the transcript.\n"
+            "- Do not use handoff as a way to avoid answering a question.\n\n"
+        )
 
     if not parts:
         return preamble  # guards still apply even with no personality files
@@ -477,6 +534,10 @@ class OpenAIRealtimeClient:
             f"Session instructions ({len(instructions)} chars): {instructions[:100]}..."
         )
 
+        handoff_targets = ", ".join(
+            _display_name(a) for a in self.session_config.available_agents
+        )
+
         # Configure session
         session_params: dict = {
             "modalities": ["text", "audio"],
@@ -597,9 +658,7 @@ class OpenAIRealtimeClient:
                     "name": "handoff_to_agent",
                     "description": (
                         "Transfer the caller to another AI agent ("
-                        + ", ".join(
-                            a.capitalize() for a in self.session_config.available_agents
-                        )
+                        + handoff_targets
                         + "). "
                         "Use this when the caller explicitly asks to speak with a different "
                         "agent, or when the topic is clearly outside your expertise and "
@@ -636,6 +695,10 @@ class OpenAIRealtimeClient:
                 },
             ],
         }
+        if not self.session_config.available_agents:
+            # No handoff targets (handoff disabled or unregistered identity):
+            # drop the tool instead of advertising an empty enum.
+            session_params["tools"] = _without_handoff_tool(session_params["tools"])
         if self.session_config.extra_tools:
             session_params["tools"] = list(session_params["tools"]) + list(
                 self.session_config.extra_tools

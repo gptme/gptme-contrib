@@ -9,6 +9,7 @@ from gptme_voice.realtime.openai_client import (
     _MAX_PENDING_AUDIO_CHUNKS,
     OpenAIRealtimeClient,
     SessionConfig,
+    _display_name,
     _load_project_instructions,
 )
 from websockets.datastructures import Headers
@@ -440,6 +441,50 @@ def test_initial_response_is_sent_once_after_session_ready() -> None:
             await client.disconnect()
 
     asyncio.run(_exercise())
+
+
+def test_display_name_preserves_multi_word_names() -> None:
+    """Only the first character is normalized — surnames must survive.
+
+    ``str.capitalize()`` returns "Alice smith" for "Alice Smith", which mangles
+    every workspace-declared display name longer than one word.
+    """
+    assert _display_name("Alice Smith") == "Alice Smith"
+    assert _display_name("alice smith") == "Alice smith"
+    assert _display_name("nova") == "Nova"
+    assert _display_name("Nova") == "Nova"
+    assert _display_name("") == ""
+
+
+def test_load_project_instructions_handoff_section_follows_roster(
+    tmp_path: Path,
+) -> None:
+    """The HANDOFF preamble is emitted only when a roster can be served.
+
+    Regression: the client drops ``handoff_to_agent`` when ``available_agents``
+    is empty, but the static preamble still told the model to call it — the
+    model announced a transfer the API could not perform.
+    """
+    (tmp_path / "gptme.toml").write_text('[prompt]\nfiles = ["ABOUT.md"]\n')
+    (tmp_path / "ABOUT.md").write_text("# ABOUT\nYou are Bob.\n")
+
+    without = _load_project_instructions(str(tmp_path))
+    assert "HANDOFF TO ANOTHER AGENT:" not in without
+    assert "handoff_to_agent" not in without
+
+    empty = _load_project_instructions(str(tmp_path), available_agents=[])
+    assert "HANDOFF TO ANOTHER AGENT:" not in empty
+
+    served = _load_project_instructions(
+        str(tmp_path), available_agents=["alice", "gordon", "sven"]
+    )
+    assert "HANDOFF TO ANOTHER AGENT:" in served
+    assert "Alice, Gordon, Sven" in served
+
+    # A non-default roster is described with its own names, not the defaults.
+    custom = _load_project_instructions(str(tmp_path), available_agents=["dave"])
+    assert "Dave" in custom
+    assert "Gordon" not in custom
 
 
 def test_load_project_instructions_guards_present_without_personality_files(
