@@ -893,7 +893,7 @@ def _write_covers_commit_path(write: object, path: str) -> bool:
     """True if a trajectory write is the same file as a repo-relative commit path.
 
     Extractors record the path as written: absolute
-    (``/home/bob/bob/journal/a.md``) or repo-relative (``journal/a.md``).
+    (``/home/user/repo/journal/a.md``) or repo-relative (``journal/a.md``).
     ``commit_files`` is always repo-relative, so match exact equality *or*
     an absolute path that ends with ``/`` + the commit path.
     """
