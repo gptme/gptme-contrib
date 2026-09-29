@@ -855,6 +855,138 @@ resolve_pre_commit_hook() {
     return 1
 }
 
+# A lock timeout with no diagnostics forces a manual `ps -ef | grep git-safe-commit`
+# hunt while every other session in the shared worktree is also stuck on the same
+# flock. get_commit_lock_holder_pids/lslocks/lsof degrade gracefully when the
+# corresponding tool isn't installed, so this works on a minimal container too.
+get_commit_lock_holder_pids() {
+    local lockfile="$1"
+    local raw pid
+    local -a holder_pids=()
+
+    if ! command -v fuser >/dev/null 2>&1; then
+        return 0
+    fi
+
+    raw="$(fuser "$lockfile" 2>/dev/null || true)"
+    for pid in $raw; do
+        case "$pid" in
+            ''|*[!0-9]*)
+                continue
+                ;;
+        esac
+        if [ "$pid" != "$$" ]; then
+            holder_pids+=("$pid")
+        fi
+    done
+
+    if [ "${#holder_pids[@]}" -gt 0 ]; then
+        printf '%s\n' "${holder_pids[*]}"
+    fi
+}
+
+resolve_lockfile_display() {
+    local lockfile="$1"
+
+    python3 - "$lockfile" <<'PY'
+from pathlib import Path
+import sys
+
+print(Path(sys.argv[1]).resolve())
+PY
+}
+
+get_commit_lock_lslocks_rows() {
+    local lockfile_display="$1"
+
+    if ! command -v lslocks >/dev/null 2>&1; then
+        return 0
+    fi
+
+    lslocks --noheadings --output PID,COMMAND,PATH 2>/dev/null | \
+        awk -v path="$lockfile_display" '$NF == path { print }' || true
+}
+
+get_commit_lock_lsof_rows() {
+    local lockfile="$1"
+
+    if ! command -v lsof >/dev/null 2>&1; then
+        return 0
+    fi
+
+    lsof "$lockfile" 2>/dev/null | tail -n +2 || true
+}
+
+describe_commit_lockfile() {
+    local lockfile="$1"
+
+    python3 - "$lockfile" <<'PY'
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+try:
+    stat = path.stat()
+except FileNotFoundError:
+    print("missing")
+    raise SystemExit(0)
+
+mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+print(f"exists size={stat.st_size}B inode={stat.st_ino} mtime={mtime}")
+PY
+}
+
+emit_commit_lock_diagnostics() {
+    local lockfile="$1"
+    local lockfile_display="$2"
+    local holder_pids
+    local lslocks_rows
+    local lsof_rows
+    local stat_line
+    local -a holder_pid_array=()
+
+    holder_pids="$(get_commit_lock_holder_pids "$lockfile")"
+    if [ -n "$holder_pids" ]; then
+        echo "holder pid(s): $holder_pids" >&2
+        read -r -a holder_pid_array <<< "$holder_pids"
+        ps -fp "${holder_pid_array[@]}" >&2 || true
+        return 0
+    fi
+
+    lslocks_rows="$(get_commit_lock_lslocks_rows "$lockfile_display")"
+    if [ -n "$lslocks_rows" ]; then
+        echo "holder pid(s): none via fuser; lslocks saw:" >&2
+        printf '%s\n' "$lslocks_rows" | sed 's/^/  /' >&2
+        return 0
+    fi
+
+    lsof_rows="$(get_commit_lock_lsof_rows "$lockfile")"
+    if [ -n "$lsof_rows" ]; then
+        echo "holder pid(s): none via fuser; lsof saw:" >&2
+        printf '%s\n' "$lsof_rows" | sed 's/^/  /' >&2
+        return 0
+    fi
+
+    echo "holder pid(s): none detected via fuser, lslocks, or lsof" >&2
+    stat_line="$(describe_commit_lockfile "$lockfile")"
+    echo "lockfile stat: $stat_line" >&2
+    echo "note: a leftover commit.lock file alone should not block flock; this usually means holder lookup missed a live process or another process raced the timeout" >&2
+    echo "hint: inspect with: lslocks | grep 'commit\\.lock' ; lsof \"$lockfile_display\"" >&2
+}
+
+report_commit_lock_timeout() {
+    local lockfile="$1"
+    local lock_timeout="$2"
+    local lockfile_display
+
+    lockfile_display="$(resolve_lockfile_display "$lockfile")"
+
+    echo "error: timed out waiting for commit lock after ${lock_timeout}s: $lockfile_display" >&2
+    emit_commit_lock_diagnostics "$lockfile" "$lockfile_display"
+    echo "hint: retry after the holder exits, or inspect with: ps -ef | grep -E 'git-safe-commit|pre-commit|git commit'" >&2
+}
+
 LOCK_TIMEOUT=${GIT_SAFE_COMMIT_LOCK_TIMEOUT:-60}
 case "$LOCK_TIMEOUT" in
     *[!0-9]*)
@@ -871,7 +1003,7 @@ esac
 
 exec 9>"$LOCKFILE"
 if ! flock --timeout "$LOCK_TIMEOUT" 9; then
-    echo "error: timed out waiting for commit lock" >&2
+    report_commit_lock_timeout "$LOCKFILE" "$LOCK_TIMEOUT"
     exit 1
 fi
 
