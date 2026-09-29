@@ -1407,6 +1407,68 @@ def test_trajectory_cc_prefers_durable_projects_jsonl(tmp_path) -> None:
         ref.unlink(missing_ok=True)
 
 
+def test_trajectory_cc_stale_projects_jsonl_falls_back_to_stream_log(
+    tmp_path,
+) -> None:
+    """A predicted JSONL older than the run is stale; prefer the fresh stream log.
+
+    A reused session id can leave a previous run's projects JSONL on disk. The
+    mtime guard keeps that stale transcript from being recorded as this run's.
+    """
+    sid = f"test-traj-stale-{os.getpid()}"
+    predicted = tmp_path / "projects" / f"{sid}.jsonl"
+    predicted.parent.mkdir()
+    predicted.write_text("y" * 6000)
+    old = 1_700_000_000
+    os.utime(predicted, (old, old))
+    log = tmp_path / "stream.jsonl"
+    log.write_text("x" * 6000)
+    ref = Path("/tmp") / f"cc-session-log-ref-{sid}.txt"
+    ref.write_text(str(log))
+    try:
+        got = resolve_backend_trajectory(
+            "claude-code",
+            sid,
+            predicted=str(predicted),
+            started_epoch=old + 100,
+            copilot_state_dir=tmp_path,
+            codex_sessions_dir=tmp_path,
+            copilot_pre=None,
+            codex_pre=None,
+        )
+        assert got == str(log)
+    finally:
+        ref.unlink(missing_ok=True)
+
+
+def test_trajectory_cc_small_projects_jsonl_falls_back_to_stream_log(
+    tmp_path,
+) -> None:
+    """A predicted JSONL under the size floor is a stub; prefer the stream log."""
+    sid = f"test-traj-tiny-{os.getpid()}"
+    predicted = tmp_path / "projects" / f"{sid}.jsonl"
+    predicted.parent.mkdir()
+    predicted.write_text("y" * 100)
+    log = tmp_path / "stream.jsonl"
+    log.write_text("x" * 6000)
+    ref = Path("/tmp") / f"cc-session-log-ref-{sid}.txt"
+    ref.write_text(str(log))
+    try:
+        got = resolve_backend_trajectory(
+            "claude-code",
+            sid,
+            predicted=str(predicted),
+            started_epoch=0,
+            copilot_state_dir=tmp_path,
+            codex_sessions_dir=tmp_path,
+            copilot_pre=None,
+            codex_pre=None,
+        )
+        assert got == str(log)
+    finally:
+        ref.unlink(missing_ok=True)
+
+
 def test_trajectory_cc_under_floor_keeps_predicted(tmp_path) -> None:
     sid = f"test-traj-small-{os.getpid()}"
     log = tmp_path / "stream.jsonl"
