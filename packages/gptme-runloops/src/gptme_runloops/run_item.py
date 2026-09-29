@@ -1117,7 +1117,23 @@ def resolve_backend_trajectory(
     """
     trajectory = predicted
 
-    if backend == "claude-code" and session_id:
+    # Claude Code: the predicted ~/.claude/projects/<slug>/<session>.jsonl is the
+    # canonical, durable transcript (the runner passes --session-id, so the name
+    # is the proof). The tee'd /tmp stream log is only the fallback for the
+    # nested/no-persistence stub case: preferring it recorded an ephemeral /tmp
+    # path for every runloops PM session, which rots once /tmp is cleaned — the
+    # same order the bash worker already uses (project-monitoring-worker.sh).
+    predicted_path = Path(predicted) if predicted else None
+    cc_predicted_ok = (
+        predicted_path is not None
+        and predicted_path.is_file()
+        and predicted_path.stat().st_size > CC_TRAJECTORY_MIN_BYTES
+    )
+    if backend == "claude-code" and cc_predicted_ok:
+        _log(
+            f"Found monitoring trajectory (JSONL by session id, {predicted_path.stat().st_size}B): {predicted}"  # type: ignore[union-attr]
+        )
+    elif backend == "claude-code" and session_id:
         ref = tmp_dir / f"cc-session-log-ref-{session_id}.txt"
         if ref.is_file():
             stream_log = ref.read_text(encoding="utf-8", errors="replace").strip()

@@ -1381,6 +1381,32 @@ def test_trajectory_cc_stream_log_over_floor(tmp_path) -> None:
         ref.unlink(missing_ok=True)
 
 
+def test_trajectory_cc_prefers_durable_projects_jsonl(tmp_path) -> None:
+    """The canonical projects JSONL wins over the ephemeral /tmp stream log."""
+    sid = f"test-traj-durable-{os.getpid()}"
+    predicted = tmp_path / "projects" / f"{sid}.jsonl"
+    predicted.parent.mkdir()
+    predicted.write_text("y" * 6000)
+    log = tmp_path / "stream.jsonl"
+    log.write_text("x" * 6000)
+    ref = Path("/tmp") / f"cc-session-log-ref-{sid}.txt"
+    ref.write_text(str(log))
+    try:
+        got = resolve_backend_trajectory(
+            "claude-code",
+            sid,
+            predicted=str(predicted),
+            started_epoch=0,
+            copilot_state_dir=tmp_path,
+            codex_sessions_dir=tmp_path,
+            copilot_pre=None,
+            codex_pre=None,
+        )
+        assert got == str(predicted)
+    finally:
+        ref.unlink(missing_ok=True)
+
+
 def test_trajectory_cc_under_floor_keeps_predicted(tmp_path) -> None:
     sid = f"test-traj-small-{os.getpid()}"
     log = tmp_path / "stream.jsonl"
