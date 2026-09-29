@@ -881,6 +881,9 @@ def post_session(
     # Records why an outcome was promoted away from what the primary signal
     # said. None means "no flip" — the signal was taken at face value.
     outcome_flip_reason: str | None = None
+    # Records which missing/unreliable signal made an unknown outcome
+    # unclassifiable. None for every non-unknown outcome.
+    unknown_reason: str | None = None
     if exit_code not in (0, 124):
         outcome = "failed"
     elif traj_productive is not None:
@@ -911,6 +914,7 @@ def post_session(
                 int(100 * (signals.get("session_duration_s", 0) / max(duration_seconds, 1))),
             )
             outcome = "unknown"
+            unknown_reason = "trajectory_unreliable_no_deliverables"
         else:
             outcome = "noop"
     elif start_commit is not None and end_commit is not None:
@@ -924,8 +928,10 @@ def post_session(
             end_commit,
         )
         outcome = "unknown"
+        unknown_reason = "partial_commit_refs"
     else:
         outcome = "unknown"
+        unknown_reason = "no_trajectory_signal"
 
     # Override noop → productive when caller-supplied deliverables exist AND
     # no trajectory was available.  When a trajectory IS available it is
@@ -942,6 +948,7 @@ def post_session(
             f"no_trajectory_caller_deliverables:{outcome}->productive:n={len(caller_deliverables)}"
         )
         outcome = "productive"
+        unknown_reason = None
 
     # --- Compute start_time / end_time from duration ---
     # The timestamp field is set by SessionRecord.__post_init__() at creation time.
@@ -991,6 +998,8 @@ def post_session(
         record_kwargs["reasoning_tokens"] = reasoning_tokens
     if outcome_flip_reason is not None:
         record_kwargs["outcome_flip_reason"] = outcome_flip_reason
+    if unknown_reason is not None:
+        record_kwargs["unknown_reason"] = unknown_reason
     if context_tier is not None:
         record_kwargs["context_tier"] = context_tier
     if ab_group is not None:

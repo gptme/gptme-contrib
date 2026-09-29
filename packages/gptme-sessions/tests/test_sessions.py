@@ -2911,6 +2911,7 @@ def test_post_session_basic(tmp_path: Path):
     assert result.record.model == "opus"
     # No trajectory, no commit comparison → default is unknown (no signal)
     assert result.record.outcome == "unknown"
+    assert result.record.unknown_reason == "no_trajectory_signal"
     assert result.grade is None
     assert result.signals is None
     assert result.token_count is None
@@ -2918,6 +2919,7 @@ def test_post_session_basic(tmp_path: Path):
     records = store.load_all()
     assert len(records) == 1
     assert records[0].session_id == result.record.session_id
+    assert records[0].unknown_reason == "no_trajectory_signal"
 
 
 def test_post_session_outcome_from_exit_code(tmp_path: Path):
@@ -3208,6 +3210,7 @@ def test_post_session_partial_commit_pair_no_crash(tmp_path: Path):
     )
     # No exception; falls through to default → unknown (no signal)
     assert result.record.outcome == "unknown"
+    assert result.record.unknown_reason == "partial_commit_refs"
 
 
 def test_post_session_partial_commit_pair_timeout_is_unknown(tmp_path: Path):
@@ -3220,6 +3223,7 @@ def test_post_session_partial_commit_pair_timeout_is_unknown(tmp_path: Path):
         end_commit="def456",  # start_commit omitted
     )
     assert result.record.outcome == "unknown"
+    assert result.record.unknown_reason == "partial_commit_refs"
 
 
 def test_post_session_explicit_deliverables_merged_with_trajectory(tmp_path: Path):
