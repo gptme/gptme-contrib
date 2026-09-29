@@ -316,7 +316,9 @@ def _verify_account_identity(username: str, console) -> None:
     are present (e.g. a human's personal tokens used by an agent).
     See ErikBjare/bob#479 for the incident that motivated this check.
     """
-    expected = os.getenv("TWITTER_EXPECTED_USERNAME", "TimeToBuildBob")
+    expected = os.getenv("TWITTER_EXPECTED_USERNAME")
+    if expected is None:
+        return  # no expected username configured; identity check skipped
     if username.lower() != expected.lower():
         console.print(
             f"[red]SECURITY: Authenticated as @{username} but expected @{expected}!"

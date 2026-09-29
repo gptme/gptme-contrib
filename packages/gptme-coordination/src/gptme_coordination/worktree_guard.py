@@ -202,7 +202,7 @@ def _get_brain_root() -> Path:
     This matches ``resolve_coordination_db_path`` so the ledger and coordination
     claims live under the same root.
     """
-    for var in ("BOB_WORKSPACE", "AGENT_WORKSPACE", "BOB_BRAIN_ROOT"):
+    for var in ("AGENT_WORKSPACE", "BOB_WORKSPACE", "BOB_BRAIN_ROOT"):
         if workspace := os.environ.get(var):
             path = Path(workspace)
             if path.is_absolute():

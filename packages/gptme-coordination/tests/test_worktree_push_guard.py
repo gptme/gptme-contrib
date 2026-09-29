@@ -275,8 +275,19 @@ def test_brain_root_honors_workspace_env(monkeypatch, tmp_path: Path) -> None:
     workspace = tmp_path / "custom-workspace"
     monkeypatch.setenv("BOB_BRAIN_ROOT", str(tmp_path / "legacy-brain"))
     monkeypatch.setenv("BOB_WORKSPACE", str(workspace))
-    monkeypatch.setenv("AGENT_WORKSPACE", str(tmp_path / "other"))
+    monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
     assert _get_brain_root() == workspace
+
+
+def test_brain_root_agent_workspace_takes_precedence_over_bob(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from gptme_coordination.worktree_guard import _get_brain_root
+
+    agent_workspace = tmp_path / "agent-workspace"
+    monkeypatch.setenv("BOB_WORKSPACE", str(tmp_path / "bob-workspace"))
+    monkeypatch.setenv("AGENT_WORKSPACE", str(agent_workspace))
+    assert _get_brain_root() == agent_workspace
 
 
 def test_push_guard_uses_workspace_db_env(monkeypatch, tmp_path: Path) -> None:

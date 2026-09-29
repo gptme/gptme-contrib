@@ -389,3 +389,37 @@ def test_wait_for_callback_file_rejects_wrong_path(
 
     assert twitter_module._wait_for_callback_file(f, timeout=1) == (None, None)
     assert f.exists()
+
+
+def test_verify_account_identity_skips_check_when_env_unset(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When TWITTER_EXPECTED_USERNAME is unset, the identity check is skipped.
+
+    Before the fix, the default was 'TimeToBuildBob', so any other agent's
+    authenticated account would trip the guard and call sys.exit(1).
+    """
+    monkeypatch.delenv("TWITTER_EXPECTED_USERNAME", raising=False)
+    console = SimpleNamespace(print=lambda *a, **k: None)
+    # Must not raise SystemExit
+    twitter_module._verify_account_identity("SomeOtherAgent", console)
+
+
+def test_verify_account_identity_still_enforces_when_env_set(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When TWITTER_EXPECTED_USERNAME is set, a mismatch still aborts."""
+    monkeypatch.setenv("TWITTER_EXPECTED_USERNAME", "gptmeorg")
+    console = SimpleNamespace(print=lambda *a, **k: None)
+    with pytest.raises(SystemExit):
+        twitter_module._verify_account_identity("SomeOtherAccount", console)
+
+
+def test_verify_account_identity_passes_on_match(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A matching username (case-insensitive) does not abort."""
+    monkeypatch.setenv("TWITTER_EXPECTED_USERNAME", "gptmeorg")
+    console = SimpleNamespace(print=lambda *a, **k: None)
+    twitter_module._verify_account_identity("gptmeorg", console)
+    twitter_module._verify_account_identity("GPTMEORG", console)
