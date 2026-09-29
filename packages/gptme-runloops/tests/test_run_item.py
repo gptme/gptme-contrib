@@ -1478,11 +1478,43 @@ def test_trajectory_cc_same_second_projects_jsonl_falls_back_to_stream_log(
         ref.unlink(missing_ok=True)
 
 
-def test_trajectory_cc_snapshot_missing_accepts_same_second_write(
+def test_trajectory_cc_snapshot_missing_fresh_write_accepted(
     tmp_path,
 ) -> None:
-    """A JSONL created during the run is this run even if mtime == started_epoch."""
+    """A JSONL created during the run (fresh) is this run's durable file."""
     sid = f"test-traj-snap-new-{os.getpid()}"
+    predicted = tmp_path / "projects" / f"{sid}.jsonl"
+    predicted.parent.mkdir()
+    now = 1_800_000_000
+    predicted.write_text("y" * 6000)
+    os.utime(predicted, (now + 5, now + 5))
+    log = tmp_path / "stream.jsonl"
+    log.write_text("x" * 6000)
+    ref = Path("/tmp") / f"cc-session-log-ref-{sid}.txt"
+    ref.write_text(str(log))
+    try:
+        got = resolve_backend_trajectory(
+            "claude-code",
+            sid,
+            predicted=str(predicted),
+            started_epoch=now,
+            copilot_state_dir=tmp_path,
+            codex_sessions_dir=tmp_path,
+            copilot_pre=None,
+            codex_pre=None,
+            cc_predicted_pre=None,
+            cc_snapshotted=True,
+        )
+        assert got == str(predicted)
+    finally:
+        ref.unlink(missing_ok=True)
+
+
+def test_trajectory_cc_snapshot_missing_same_second_rejects_leftover(
+    tmp_path,
+) -> None:
+    """No baseline and mtime == started_epoch: prefer the stream log, not a leftover."""
+    sid = f"test-traj-snap-same-{os.getpid()}"
     predicted = tmp_path / "projects" / f"{sid}.jsonl"
     predicted.parent.mkdir()
     now = 1_800_000_000
@@ -1503,6 +1535,42 @@ def test_trajectory_cc_snapshot_missing_accepts_same_second_write(
             copilot_pre=None,
             codex_pre=None,
             cc_predicted_pre=None,
+            cc_snapshotted=True,
+        )
+        assert got == str(log)
+    finally:
+        ref.unlink(missing_ok=True)
+
+
+def test_trajectory_cc_snapshot_mutated_same_second_accepted(
+    tmp_path,
+) -> None:
+    """A baseline present then mutated is this run's file, even in the start second."""
+    sid = f"test-traj-snap-mut-{os.getpid()}"
+    predicted = tmp_path / "projects" / f"{sid}.jsonl"
+    predicted.parent.mkdir()
+    now = 1_800_000_000
+    predicted.write_text("y" * 6000)
+    os.utime(predicted, (now, now))
+    pre = snapshot_cc_predicted(str(predicted))
+    # The run appends to the pre-existing file; mtime stays in the start second.
+    predicted.write_text("y" * 7000)
+    os.utime(predicted, (now, now))
+    log = tmp_path / "stream.jsonl"
+    log.write_text("x" * 6000)
+    ref = Path("/tmp") / f"cc-session-log-ref-{sid}.txt"
+    ref.write_text(str(log))
+    try:
+        got = resolve_backend_trajectory(
+            "claude-code",
+            sid,
+            predicted=str(predicted),
+            started_epoch=now,
+            copilot_state_dir=tmp_path,
+            codex_sessions_dir=tmp_path,
+            copilot_pre=None,
+            codex_pre=None,
+            cc_predicted_pre=pre,
             cc_snapshotted=True,
         )
         assert got == str(predicted)

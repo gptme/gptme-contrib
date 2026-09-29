@@ -1118,18 +1118,21 @@ def _cc_predicted_written_this_run(
     """True when the predicted JSONL is this run's durable transcript.
 
     A pre-run snapshot (the copilot-style approach) distinguishes a leftover
-    file from a same-second write: unchanged ``(mtime_ns, size)`` is stale;
-    missing-before or mutated-during is this run. Without a snapshot, fall
-    back to ``mtime > started_epoch`` so a same-second leftover is not
-    recorded as this run.
+    file from a same-second write. With a baseline present, an unchanged
+    ``(mtime_ns, size)`` is stale while a mutation is this run's write — even
+    when it lands in the start second, since a legitimate session may finish
+    fast. Without a baseline the file surfaced after the snapshot, so require
+    it to be newer than the run start: an older leftover that appeared in the
+    window must not be recorded as this run's transcript. Without a snapshot
+    at all, fall back to ``mtime > started_epoch``.
     """
     st = path.stat()
     if st.st_size <= CC_TRAJECTORY_MIN_BYTES:
         return False
     if cc_snapshotted:
-        return (
-            cc_predicted_pre is None or (st.st_mtime_ns, st.st_size) != cc_predicted_pre
-        )
+        if cc_predicted_pre is None:
+            return int(st.st_mtime) > started_epoch
+        return (st.st_mtime_ns, st.st_size) != cc_predicted_pre
     return int(st.st_mtime) > started_epoch
 
 
