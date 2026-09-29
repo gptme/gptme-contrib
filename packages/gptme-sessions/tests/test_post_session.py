@@ -1230,6 +1230,7 @@ def test_post_session_unreliable_trajectory_no_caller_deliverables_records_unkno
         )
 
     assert result.record.outcome == "unknown"
+    assert result.record.unknown_reason == "trajectory_unreliable_no_deliverables"
     assert result.record.deliverables == []
 
 

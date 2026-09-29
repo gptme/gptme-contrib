@@ -538,6 +538,10 @@ class SessionRecord:
     # yet populated (pre-dates this field or trajectory absent).
     subagent_summary: dict[str, Any] | None = None
 
+    # Why outcome is unknown. Populated by post_session() whenever no reliable
+    # productivity signal exists; None for classified outcomes and old records.
+    unknown_reason: str | None = None
+
     # Preserve fields written by older schema versions so load→mutate→rewrite
     # round-trips don't silently drop data (e.g. ``inferred_category``,
     # ``recommended_confidence``, ``notes``).
