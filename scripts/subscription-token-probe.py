@@ -57,10 +57,20 @@ _REQUEST_TIMEOUT = 75  # seconds
 
 
 def _default_slots() -> list[str]:
-    """Return slots from env var or default to bob/alice/erik."""
+    """Return slots from env var or discover from credentials directory."""
     raw = os.environ.get("GPTME_SUBSCRIPTION_SLOTS", "")
     parsed = [s.strip() for s in raw.split(",") if s.strip()]
-    return parsed or ["bob", "alice", "erik"]
+    if parsed:
+        return parsed
+    prefix = ".credentials.json."
+    try:
+        return sorted(
+            f.name[len(prefix) :]
+            for f in CREDS_DIR.iterdir()
+            if f.name.startswith(prefix) and f.is_file()
+        )
+    except OSError:
+        return []
 
 
 def _active_slot() -> str | None:
