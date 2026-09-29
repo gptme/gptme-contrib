@@ -531,7 +531,18 @@ def estimate_session_cost(
     cache_create_rate = CACHE_CREATION_MULTIPLIER.get(provider or "", 1.0)
 
     if harness in _INPUT_INCLUDES_CACHE_READ:
-        inp = max(0, inp - cache_read)
+        # Skip the subtraction only when the record unambiguously uses the
+        # gptme-style breakdown, where input EXCLUDES cache reads
+        # (token_count == input + output + cache_read); subtracting there would
+        # undercount. Codex-style records (token_count == input + output) and
+        # records with no token_count are handled normally.
+        # Evidence: all 252 codex ledger rows with cache reads have
+        # token_count == input + output (checked 2026-09-29).
+        gptme_style_breakdown = (
+            token_count is not None and token_count == inp + out + cache_read
+        )
+        if not gptme_style_breakdown:
+            inp = max(0, inp - cache_read)
 
     cost_usd = (
         inp * input_price

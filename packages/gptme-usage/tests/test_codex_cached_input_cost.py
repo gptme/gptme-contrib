@@ -53,3 +53,22 @@ def test_codex_unknown_cache_provider_bills_cached_at_input_rate_once() -> None:
         config=_config("codex", "gpt-6-astra"),
     )
     assert cost == pytest.approx(5.0)
+
+
+def test_codex_gptme_style_breakdown_not_undercounted() -> None:
+    # Guard against a codex record that uses the gptme-style breakdown
+    # (token_count == input + output + cache_read, input DOES NOT include the
+    # cache reads). Subtracting cache_read there would undercount; the fix must
+    # leave such a record alone and price it as recorded.
+    cost = estimate_session_cost(
+        "codex",
+        "gpt-5.6-sol",
+        input_tokens=1_000_000,
+        cache_read_tokens=800_000,
+        output_tokens=10_000,
+        token_count=1_810_000,
+        config=_config("codex", "gpt-5.6-sol"),
+    )
+    assert cost == pytest.approx(
+        (1_000_000 * 5.0 + 10_000 * 30.0 + 800_000 * 2.5) / 1e6
+    )
