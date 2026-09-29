@@ -163,6 +163,42 @@ install_allowed_identities() {
     echo -e "${GREEN}✓${NC} Wrote allowed-identities.conf for $email"
 }
 
+# --- Direct-master-commit allowlist for the global pre-commit/pre-push hooks ---
+# Both hooks source ~/.config/git/allowed-repos.conf and, on a repo whose remote
+# matches none of ALLOWED_PATTERNS (and which is not an auto-detected agent
+# workspace), fail closed — refusing the commit/push. The agent's own workspace
+# is auto-allowed via its gptme.toml [agent] section, but the SHARED coordination
+# repo (gptme-superuser: standups, cross-agent messages, task updates) is not a
+# workspace and is not covered by any built-in default. So without this file a
+# fresh fork silently blocks every standup/message commit — and because that
+# failure happens *inside* the standup/message automation, the agent looks
+# healthy while its coordination commits pile up staged-but-uncommitted.
+# Mirror install_allowed_identities: seed the shared repo, never clobber a
+# curated file.
+install_allowed_repos() {
+    local conf="$HOME/.config/git/allowed-repos.conf"
+
+    if [ -f "$conf" ]; then
+        echo -e "${GREEN}✓${NC} Keeping existing allowed-repos.conf"
+        return 0
+    fi
+
+    {
+        echo "# Repositories where direct master/main commits and pushes are allowed."
+        echo "# Sourced by ~/.config/git/hooks/{pre-commit,pre-push}, which fail closed"
+        echo "# (refuse the commit/push) on any repo matching none of these patterns and"
+        echo "# not auto-detected as an agent workspace. Patterns are substring-matched"
+        echo "# against the full remote URL. Your own workspace is auto-allowed via its"
+        echo "# gptme.toml [agent] section, so it does not need listing here."
+        echo "ALLOWED_PATTERNS=("
+        echo "    # Shared cross-agent coordination repo (standups, messages, task updates)."
+        echo "    # Direct master writes are required — a missing standup is a failure signal."
+        printf '    %q\n' "gptme/gptme-superuser"
+        echo ")"
+    } >"$conf"
+    echo -e "${GREEN}✓${NC} Wrote allowed-repos.conf (seeded gptme/gptme-superuser)"
+}
+
 # --- Main installation ---
 echo "Installing dotfiles from $DOTFILES_DIR"
 echo ""
@@ -187,6 +223,9 @@ echo -e "${GREEN}✓${NC} Set core.hooksPath to ~/.config/git/hooks"
 # Ensure the hook's identity allowlist covers this agent (no-op for Bob)
 install_allowed_identities
 
+# Ensure the shared coordination repo is on the direct-master allowlist
+install_allowed_repos
+
 # Set up template directory for pre-commit (create if needed)
 mkdir -p ~/.git-templates
 git config --global init.templateDir ~/.git-templates
@@ -201,6 +240,6 @@ echo "  - pre-push: Worktree tracking validation"
 echo "  - post-checkout: Branch base warning on checkout"
 echo "  - prepare-commit-msg: Git-Session-Id trailer when GIT_COMMITTER_SESSION_ID is set"
 echo ""
-echo "Customize .config/git/allowed-repos.conf to list repos where direct"
-echo "master commits/pushes are permitted, and .config/git/allowed-identities.conf"
-echo "to allow more commit identities than the default."
+echo "Seeded allowed-repos.conf (gptme/gptme-superuser) and allowed-identities.conf"
+echo "under \$HOME/.config/git/. Add more repos where direct master commits/pushes"
+echo "are permitted, or more commit identities, by editing those files."
