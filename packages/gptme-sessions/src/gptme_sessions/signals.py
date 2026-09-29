@@ -43,6 +43,70 @@ _COMMIT_RE = re.compile(
     r"([0-9a-f]{7,12})\]\s+(.+?)(?:\n|$)"
 )
 
+# Commands that create commits. Used to gate the formatting-independent commit
+# fallback below: when a commit command's output was truncated (e.g. piped
+# through `| tail -3`), the "[branch hash] msg" line is gone and _COMMIT_RE
+# matches nothing, even though the commit landed.
+_COMMIT_CMD_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+commit\b|\bgit-safe-commit\b")
+
+# Push ref-update line: "   e294aad05f..52fad08fbe  master -> master".
+# Fetch lines look the same but target a remote-tracking ref (origin/master);
+# those are excluded by the caller.
+_PUSH_REF_RE = re.compile(
+    r"(?m)^\s*[+*]?\s*([0-9a-f]{7,40})\.\.\.?([0-9a-f]{7,40})\s+(\S+)\s+->\s+(\S+)"
+)
+
+# Other evidence that a commit command's commit landed, for when the
+# "[branch hash] msg" line was truncated away: git commit's diffstat and
+# create/delete-mode lines, git-safe-push-master's success line, and the
+# output of pushing a new branch. Only consulted for commit commands.
+_COMMIT_PUSH_EVIDENCE_RE = re.compile(
+    r"Fast-forward pushed \d+ commit|\* \[new branch\]|remote: Create a pull request for"
+)
+# Diffstat-shaped evidence is also printed by `git diff --stat`, `git show`,
+# and `git log --stat`, so it only counts when the command runs none of those.
+_COMMIT_STAT_RE = re.compile(r"\b\d+ files? changed\b|(?m:^\s*(?:create|delete) mode \d{6} )")
+_DIFFSTAT_CMD_RE = re.compile(r"--stat\b|\bgit(?:\s+-C\s+\S+)?\s+(?:show|log|diff)\b")
+# The commit command reported that it did not (or may not have) committed.
+_COMMIT_FAILED_RE = re.compile(
+    r"COMMIT OUTCOME UNCONFIRMED|nothing to commit|no changes added to commit"
+    r"|pre-commit checks failed|hook failed|Aborting commit"
+)
+
+# Bash heredoc/redirect file writes: `cat > f <<EOF`, `cat >> f << 'EOF'`,
+# `cat <<'EOF' > f`, `tee [-a] f <<EOF`. Only heredoc-fed writes count, so
+# plain redirects of command output (`cmd > log`) are not credited.
+_HEREDOC_WRITE_RES = (
+    re.compile(r"\bcat\s*>>?\s*(['\"]?)([^\s'\"<>|;&]+)\1\s*<<"),
+    re.compile(r"\bcat\s+<<-?\s*['\"]?\w+['\"]?\s*>>?\s*(['\"]?)([^\s'\"<>|;&]+)\1"),
+    re.compile(r"\btee\s+(?:-a\s+)?(['\"]?)([^\s'\"<>|;&-][^\s'\"<>|;&]*)\1\s*<<"),
+)
+
+
+def _bash_heredoc_write_paths(cmd: str) -> list[str]:
+    """Return non-scratch file paths written via heredoc in a Bash command.
+
+    Excludes /dev/* and /tmp scratch (except /tmp/worktrees/, where real
+    feature work happens). Journal paths are returned too; callers route them.
+    """
+    paths: list[str] = []
+    for pattern in _HEREDOC_WRITE_RES:
+        for m in pattern.finditer(cmd):
+            path = m.group(2)
+            if path.startswith("/dev/") or path.startswith("/proc/"):
+                continue
+            if path.startswith("/tmp/") and not path.startswith("/tmp/worktrees/"):
+                continue
+            if path not in paths:
+                paths.append(path)
+    return paths
+
+
+def _is_push_ref_update(dst: str) -> bool:
+    """True for a push ref-update target, False for a fetch remote-tracking ref."""
+    return not dst.startswith(("origin/", "upstream/", "refs/remotes/"))
+
+
 # Tools that write files in Claude Code
 # Note: gptme has a "patch" tool but Claude Code does not — no "Patch" here
 _CC_WRITE_TOOLS = {"Write", "Edit", "NotebookEdit"}
@@ -912,6 +976,9 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     _ci_failure_found: bool = False  # True when a --log-failed check returned non-empty output
     _pr_merge_pending: set[str] = set()  # tool_use_ids awaiting pr merge result
     _all_direct_commit_hashes: set[str] = set()  # session-wide dedup for git commits
+    # tool_use_id of a commit command awaiting its result -> whether diffstat
+    # lines in that result can be trusted as commit evidence
+    _commit_cmd_pending: dict[str, bool] = {}
     # Map PR number → "owner/repo" for post-session gh pr view lookups.
     # Populated from (a) gh pr create URL output and (b) `--repo` flags on gh pr merge
     # commands. Used by _resolve_merge_shas to fetch server-side merge-commit SHAs
@@ -1002,6 +1069,26 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     cmd = item.get("input", {}).get("command", "")
                     if _GH_INTERACTION_RE.search(cmd):
                         gh_interactions += 1
+
+                    # Commit commands: remember them so a truncated result (output
+                    # piped through tail, etc.) can still be credited below.
+                    if tool_id and _COMMIT_CMD_RE.search(cmd):
+                        _commit_cmd_pending[tool_id] = not _DIFFSTAT_CMD_RE.search(cmd)
+
+                    # Heredoc file writes (`cat > f <<EOF`, `tee f <<EOF`) are
+                    # file writes just like the Write tool; count them the same.
+                    # Journal heredocs are handled by the journal parser below.
+                    for hpath in _bash_heredoc_write_paths(cmd):
+                        if "/journal/" in "/" + hpath:  # also relative journal/...
+                            continue
+                        file_writes.append(hpath)
+                        _record_deliverable_detail(
+                            detail_by_value,
+                            value=hpath,
+                            kind="file",
+                            provenance_class="tool_authored",
+                            evidence={"source": "trajectory", "tool_name": "Bash", "heredoc": True},
+                        )
 
                     # Fine-grained gh interaction signal tracking.
                     # Populated alongside the aggregate gh_interactions count.
@@ -1161,7 +1248,9 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     # (e.g., git commit output, then git show/log in a later call).
                     # Using a session-level set prevents double-counting when the same
                     # hash appears in two separate Bash tool results.
+                    _direct_commit_matched = False
                     for commit_match in _COMMIT_RE.finditer(result_str):
+                        _direct_commit_matched = True
                         commit_hash = commit_match.group(1)
                         if commit_hash in _all_direct_commit_hashes:
                             continue  # already seen in an earlier tool result
@@ -1176,6 +1265,48 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                             provenance_class="session_committed",
                             evidence={"source": "trajectory", "tool_name": "Bash"},
                         )
+
+                    # Formatting-independent fallback: a commit command whose
+                    # "[branch hash] msg" line was cut off (e.g. `| tail -3`).
+                    # Credit one commit when the same result shows the commit's
+                    # diffstat or a push ref-update. Gated on the command so
+                    # fetch/log/show output alone never counts.
+                    if tool_use_id in _commit_cmd_pending:
+                        stat_trusted = _commit_cmd_pending.pop(tool_use_id)
+                        if not _direct_commit_matched and not _COMMIT_FAILED_RE.search(result_str):
+                            push_hash = None
+                            for push_match in _PUSH_REF_RE.finditer(result_str):
+                                if _is_push_ref_update(push_match.group(4)):
+                                    push_hash = push_match.group(2)
+                            if (
+                                push_hash is not None
+                                or _COMMIT_PUSH_EVIDENCE_RE.search(result_str)
+                                or (stat_trusted and _COMMIT_STAT_RE.search(result_str))
+                            ):
+                                fallback_hash = push_hash or f"unknown-{tool_use_id}"
+                                already = any(
+                                    h.startswith(fallback_hash) or fallback_hash.startswith(h)
+                                    for h in _all_direct_commit_hashes
+                                )
+                                if not already:
+                                    commit_value = (
+                                        f"(commit output truncated) ({push_hash})"
+                                        if push_hash
+                                        else f"(commit output truncated) [{tool_use_id[-8:]}]"
+                                    )
+                                    git_commits.append(commit_value)
+                                    _all_direct_commit_hashes.add(fallback_hash)
+                                    _record_deliverable_detail(
+                                        detail_by_value,
+                                        value=commit_value,
+                                        kind="commit",
+                                        provenance_class="session_committed",
+                                        evidence={
+                                            "source": "trajectory",
+                                            "tool_name": "Bash",
+                                            "truncated_output": True,
+                                        },
+                                    )
 
                     # Background bash tasks: when CC runs a command in background mode,
                     # the tool result only contains a pointer to an output file like:
