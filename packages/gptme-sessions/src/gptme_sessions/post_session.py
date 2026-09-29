@@ -481,6 +481,8 @@ def post_session(
         are unchanged. The default (empty) keeps grading unchanged. The count
         of reclassified commits is recorded in
         ``record.grade_reasons["productivity"]``.
+        Grading only: ``result.signals`` stays the original trajectory
+        signals. Reclassification does not rewrite extractor output.
     harness_session_id:
         Harness-native session id used by the ``match-lessons`` hook to name its
         per-session events file (for Claude Code, the transcript UUID). Used to

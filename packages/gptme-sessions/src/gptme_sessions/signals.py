@@ -889,6 +889,18 @@ def bookkeeping_commit_files(
     return files
 
 
+def _write_covers_commit_path(write: object, path: str) -> bool:
+    """True if a trajectory write is the same file as a repo-relative commit path.
+
+    Extractors record the path as written: absolute
+    (``/home/bob/bob/journal/a.md``) or repo-relative (``journal/a.md``).
+    ``commit_files`` is always repo-relative, so match exact equality *or*
+    an absolute path that ends with ``/`` + the commit path.
+    """
+    w = str(write)
+    return w == path or w.endswith("/" + path)
+
+
 def reclassify_bookkeeping_commits(
     signals: Mapping[str, Any],
     commit_files: Mapping[str, Sequence[str]] | None,
@@ -901,8 +913,8 @@ def reclassify_bookkeeping_commits(
     commit as one effective unit. For each ``git_commits`` entry whose files
     (from ``commit_files``, SHA -> repo-relative paths) all sit under a
     bookkeeping prefix, drop it from ``git_commits`` and add its files to
-    ``file_writes`` (skipping files the trajectory already wrote, matched by
-    path suffix since trajectories usually record absolute paths).
+    ``file_writes`` (skipping files the trajectory already wrote; see
+    ``_write_covers_commit_path``).
 
     Commits without file info are left alone. Returns ``(signals_copy, n)``
     where ``n`` is the number of reclassified commits; with no prefixes, no
@@ -928,7 +940,7 @@ def reclassify_bookkeeping_commits(
         return adjusted, 0
     writes = list(signals.get("file_writes") or [])
     for path in moved_files:
-        if not any(w == path or str(w).endswith("/" + path) for w in writes):
+        if not any(_write_covers_commit_path(w, path) for w in writes):
             writes.append(path)
     adjusted["git_commits"] = kept
     adjusted["file_writes"] = writes

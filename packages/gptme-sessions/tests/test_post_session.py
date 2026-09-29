@@ -1742,6 +1742,24 @@ def test_bookkeeping_files_already_written_are_not_double_counted(tmp_path: Path
     assert result.grade == 0.4
 
 
+def test_bookkeeping_relative_writes_are_not_double_counted(tmp_path: Path):
+    """Repo-relative trajectory writes match git relative paths by equality."""
+    sha = "abc1234567890abcdef1234567890abcdef12345"
+    signals = _committed_signals(
+        f"docs(journal): x ({sha[:7]})",
+        writes=["journal/a.md", "tasks/b.md"],
+    )
+
+    result = _run_with_signals(
+        tmp_path,
+        signals,
+        commit_files={sha: ["journal/a.md", "tasks/b.md"]},
+        bookkeeping_path_prefixes=_BK_PREFIXES,
+    )
+
+    assert result.grade == 0.4
+
+
 def test_trailer_owned_bookkeeping_commit_is_a_file_write(tmp_path: Path):
     """#1765 trailer re-grade path: journal-only trailer commits add writes, not commits."""
     journal_sha = "abc1234567890abcdef1234567890abcdef12345"
@@ -1813,3 +1831,15 @@ def test_reclassify_helper_contract():
     assert adjusted["git_commits"] == ["no sha here"]
     assert adjusted["file_writes"] == ["tasks/a.md"]
     assert signals["git_commits"] == ["x (abc1234)", "no sha here"]  # input untouched
+
+    already = {"git_commits": ["x (abc1234)"], "file_writes": ["tasks/a.md"]}
+    adjusted, n = reclassify_bookkeeping_commits(already, files, _BK_PREFIXES)
+    assert n == 1
+    assert adjusted["file_writes"] == ["tasks/a.md"]
+    abs_already = {
+        "git_commits": ["x (abc1234)"],
+        "file_writes": ["/home/bob/bob/tasks/a.md"],
+    }
+    adjusted, n = reclassify_bookkeeping_commits(abs_already, files, _BK_PREFIXES)
+    assert n == 1
+    assert adjusted["file_writes"] == ["/home/bob/bob/tasks/a.md"]
