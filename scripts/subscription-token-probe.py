@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -48,6 +49,12 @@ from gptme_subscription.auth import check_credential_file, probe_credential
 
 CREDS_DIR = Path.home() / ".claude"
 
+# Slot files are ``.credentials.json.<name>``. Discovery must not treat
+# empty remainders (``.credentials.json.``) or junk copies (``.backup``,
+# ``.tmp``, ``alice.bak``) as live slots.
+_SLOT_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+_JUNK_SLOT_NAMES = frozenset({"backup", "bak", "tmp", "temp", "orig", "old", "swp"})
+
 # Minimal payload for count_tokens — costs effectively $0, not inference
 _COUNT_TOKENS_BODY = (
     b'{"model": "claude-sonnet-4-5", "messages": [{"role": "user", "content": "x"}]}'
@@ -56,18 +63,30 @@ _API_URL = "https://api.anthropic.com/v1/messages/count_tokens"
 _REQUEST_TIMEOUT = 75  # seconds
 
 
+def _discovered_slot_name(filename: str) -> str | None:
+    """Return the slot name encoded in a credentials filename, or None."""
+    prefix = ".credentials.json."
+    if not filename.startswith(prefix):
+        return None
+    name = filename[len(prefix) :]
+    if not name or not _SLOT_NAME_RE.fullmatch(name):
+        return None
+    if name.lower() in _JUNK_SLOT_NAMES:
+        return None
+    return name
+
+
 def _default_slots() -> list[str]:
     """Return slots from env var or discover from credentials directory."""
     raw = os.environ.get("GPTME_SUBSCRIPTION_SLOTS", "")
     parsed = [s.strip() for s in raw.split(",") if s.strip()]
     if parsed:
         return parsed
-    prefix = ".credentials.json."
     try:
         return sorted(
-            f.name[len(prefix) :]
+            name
             for f in CREDS_DIR.iterdir()
-            if f.name.startswith(prefix) and f.is_file()
+            if f.is_file() and (name := _discovered_slot_name(f.name))
         )
     except OSError:
         return []

@@ -41,9 +41,9 @@ def test_workspace_from_env_unset_returns_none():
     assert workspace_from_env({}) is None
 
 
-def test_workspace_from_env_prefers_legacy_bob_var():
+def test_workspace_from_env_prefers_neutral_agent_var():
     env = {"BOB_WORKSPACE": "/home/bob/bob", "AGENT_WORKSPACE": "/home/other/other"}
-    assert workspace_from_env(env) == Path("/home/bob/bob")
+    assert workspace_from_env(env) == Path("/home/other/other")
 
 
 def test_workspace_from_env_accepts_neutral_and_brain_root():

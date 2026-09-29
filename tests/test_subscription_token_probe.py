@@ -47,6 +47,21 @@ def test_default_slots_discovers_from_credentials_dir(
     assert mod._default_slots() == ["alice", "bob"]
 
 
+def test_default_slots_skips_empty_and_junk_names(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("GPTME_SUBSCRIPTION_SLOTS", raising=False)
+    (tmp_path / ".credentials.json.alice").write_text("{}")
+    (tmp_path / ".credentials.json.").write_text("{}")
+    (tmp_path / ".credentials.json.backup").write_text("{}")
+    (tmp_path / ".credentials.json.tmp").write_text("{}")
+    (tmp_path / ".credentials.json.alice.bak").write_text("{}")
+    (tmp_path / ".credentials.json._hidden").write_text("{}")
+
+    mod = _load_probe_module(tmp_path)
+    assert mod._default_slots() == ["alice"]
+
+
 def test_default_slots_returns_empty_when_no_creds_and_no_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

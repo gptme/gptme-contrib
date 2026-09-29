@@ -15,6 +15,10 @@ sqlite3.register_adapter(datetime.date, lambda d: d.isoformat())
 
 DEFAULT_DB_PATH = "state/coordination/coord.db"
 
+# Canonical workspace root first, then Bob-legacy aliases. Keep in lockstep
+# with worktree_guard._get_brain_root and gptme_ace.identity.WORKSPACE_ENV_VARS.
+WORKSPACE_ENV_VARS = ("AGENT_WORKSPACE", "BOB_WORKSPACE", "BOB_BRAIN_ROOT")
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS leases (
     path TEXT PRIMARY KEY,
@@ -97,15 +101,15 @@ def resolve_coordination_db_path(
     Priority order:
     1. ``COORDINATION_DB`` environment variable
     2. Explicit ``repo_root`` from the caller
-    3. Workspace env vars: ``BOB_WORKSPACE``, ``AGENT_WORKSPACE``,
-       ``BOB_BRAIN_ROOT`` (legacy alias)
+    3. Workspace env vars: ``AGENT_WORKSPACE``, ``BOB_WORKSPACE``
+       (legacy alias), ``BOB_BRAIN_ROOT`` (legacy alias)
     4. Git root discovered from ``cwd`` (or the current directory)
     5. ``cwd``-relative fallback outside a git repo
 
     The workspace env var check (3) sits before the git-root discovery so that
     scripts running from inside a submodule (e.g. ``gptme-contrib/``) do not
     inadvertently write state into the submodule directory instead of the brain
-    repo. Any agent that sets ``BOB_WORKSPACE``, ``AGENT_WORKSPACE``, or the
+    repo. Any agent that sets ``AGENT_WORKSPACE``, ``BOB_WORKSPACE``, or the
     legacy ``BOB_BRAIN_ROOT`` alias gets the correct DB path regardless of its
     working directory.
 
@@ -125,7 +129,7 @@ def resolve_coordination_db_path(
     # running with CWD inside a submodule (e.g. gptme-contrib) would otherwise
     # resolve the git root to the submodule root and write state there.
     # Only accept absolute paths to guard against relative or tilde values.
-    for var in ("BOB_WORKSPACE", "AGENT_WORKSPACE", "BOB_BRAIN_ROOT"):
+    for var in WORKSPACE_ENV_VARS:
         if workspace := environment.get(var):
             p = Path(workspace)
             if p.is_absolute():
