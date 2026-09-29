@@ -1098,6 +1098,44 @@ def snapshot_codex_rollouts(sessions_dir: Path) -> set[str] | None:
     return {str(p) for p in sessions_dir.rglob("rollout-*.jsonl")}
 
 
+def snapshot_cc_predicted(predicted: str) -> tuple[int, int] | None:
+    """Pre-dispatch ``(mtime_ns, size)`` of the predicted CC JSONL, or None if missing."""
+    if not predicted:
+        return None
+    path = Path(predicted)
+    if not path.is_file():
+        return None
+    st = path.stat()
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _cc_predicted_written_this_run(
+    path: Path,
+    started_epoch: int,
+    cc_predicted_pre: tuple[int, int] | None,
+    cc_snapshotted: bool,
+) -> bool:
+    """True when the predicted JSONL is this run's durable transcript.
+
+    A pre-run snapshot (the copilot-style approach) distinguishes a leftover
+    file from a same-second write. With a baseline present, an unchanged
+    ``(mtime_ns, size)`` is stale while a mutation is this run's write — even
+    when it lands in the start second, since a legitimate session may finish
+    fast. Without a baseline the file surfaced after the snapshot, so require
+    it to be newer than the run start: an older leftover that appeared in the
+    window must not be recorded as this run's transcript. Without a snapshot
+    at all, fall back to ``mtime > started_epoch``.
+    """
+    st = path.stat()
+    if st.st_size <= CC_TRAJECTORY_MIN_BYTES:
+        return False
+    if cc_snapshotted:
+        if cc_predicted_pre is None:
+            return int(st.st_mtime) > started_epoch
+        return (st.st_mtime_ns, st.st_size) != cc_predicted_pre
+    return int(st.st_mtime) > started_epoch
+
+
 def resolve_backend_trajectory(
     backend: str,
     session_id: str,
@@ -1109,6 +1147,8 @@ def resolve_backend_trajectory(
     copilot_pre: set[str] | None,
     codex_pre: set[str] | None,
     tmp_dir: Path = Path("/tmp"),
+    cc_predicted_pre: tuple[int, int] | None = None,
+    cc_snapshotted: bool = False,
 ) -> str:
     """Resolve the session's real trajectory after the runner returns.
 
@@ -1117,7 +1157,33 @@ def resolve_backend_trajectory(
     """
     trajectory = predicted
 
-    if backend == "claude-code" and session_id:
+    # Claude Code: the predicted ~/.claude/projects/<slug>/<session>.jsonl is the
+    # canonical, durable transcript (the runner passes --session-id, so the name
+    # is the proof). The tee'd /tmp stream log is only the fallback for the
+    # nested/no-persistence stub case: preferring it recorded an ephemeral /tmp
+    # path for every runloops PM session, which rots once /tmp is cleaned — the
+    # same order the bash worker already uses (project-monitoring-worker.sh).
+    #
+    # Session ids are uuid5(slug, run_salt) with run_salt=int(time.time()), so a
+    # leftover JSONL from a same-second retry can sit on disk. execute_plan
+    # snapshots (mtime_ns, size) before the runner; an unchanged file is stale
+    # even when its mtime is in this run's start second, while a file created
+    # or mutated during the run is this run — including a legitimate session
+    # that finishes in the same second. Callers that skip the snapshot fall
+    # back to mtime > started_epoch (safe direction: stream log, not leftover).
+    predicted_path = Path(predicted) if predicted else None
+    cc_predicted_ok = (
+        predicted_path is not None
+        and predicted_path.is_file()
+        and _cc_predicted_written_this_run(
+            predicted_path, started_epoch, cc_predicted_pre, cc_snapshotted
+        )
+    )
+    if backend == "claude-code" and cc_predicted_ok:
+        _log(
+            f"Found monitoring trajectory (JSONL by session id, {predicted_path.stat().st_size}B): {predicted}"  # type: ignore[union-attr]
+        )
+    elif backend == "claude-code" and session_id:
         ref = tmp_dir / f"cc-session-log-ref-{session_id}.txt"
         if ref.is_file():
             stream_log = ref.read_text(encoding="utf-8", errors="replace").strip()
@@ -1712,10 +1778,15 @@ def execute_plan(
 
     copilot_pre = None
     codex_pre = None
+    cc_predicted_pre = None
+    cc_snapshotted = False
     if plan.backend == "copilot-cli":
         copilot_pre = snapshot_copilot_dirs(config.resolved_copilot_state_dir)
     elif plan.backend == "codex":
         codex_pre = snapshot_codex_rollouts(config.resolved_codex_sessions_dir)
+    elif plan.backend == "claude-code":
+        cc_predicted_pre = snapshot_cc_predicted(plan.trajectory_path)
+        cc_snapshotted = True
 
     pr_before_json = ""
     if PR_OBSERVE_TYPES & set(item.types):
@@ -1797,6 +1868,8 @@ def execute_plan(
             codex_sessions_dir=config.resolved_codex_sessions_dir,
             copilot_pre=copilot_pre,
             codex_pre=codex_pre,
+            cc_predicted_pre=cc_predicted_pre,
+            cc_snapshotted=cc_snapshotted,
         )
     else:
         # NOTE(parity): the rate-limit branch deletes the CC stream log +

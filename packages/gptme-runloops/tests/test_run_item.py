@@ -73,6 +73,7 @@ from gptme_runloops.run_item import (
     rollback_failed_delivery,
     run_post_session,
     run_work_file,
+    snapshot_cc_predicted,
     snapshot_codex_rollouts,
     snapshot_copilot_dirs,
     timeout_tier,
@@ -1370,6 +1371,261 @@ def test_trajectory_cc_stream_log_over_floor(tmp_path) -> None:
             "claude-code",
             sid,
             predicted="/predicted/stub.jsonl",
+            started_epoch=0,
+            copilot_state_dir=tmp_path,
+            codex_sessions_dir=tmp_path,
+            copilot_pre=None,
+            codex_pre=None,
+        )
+        assert got == str(log)
+    finally:
+        ref.unlink(missing_ok=True)
+
+
+def test_trajectory_cc_prefers_durable_projects_jsonl(tmp_path) -> None:
+    """The canonical projects JSONL wins over the ephemeral /tmp stream log."""
+    sid = f"test-traj-durable-{os.getpid()}"
+    predicted = tmp_path / "projects" / f"{sid}.jsonl"
+    predicted.parent.mkdir()
+    predicted.write_text("y" * 6000)
+    log = tmp_path / "stream.jsonl"
+    log.write_text("x" * 6000)
+    ref = Path("/tmp") / f"cc-session-log-ref-{sid}.txt"
+    ref.write_text(str(log))
+    try:
+        got = resolve_backend_trajectory(
+            "claude-code",
+            sid,
+            predicted=str(predicted),
+            started_epoch=0,
+            copilot_state_dir=tmp_path,
+            codex_sessions_dir=tmp_path,
+            copilot_pre=None,
+            codex_pre=None,
+        )
+        assert got == str(predicted)
+    finally:
+        ref.unlink(missing_ok=True)
+
+
+def test_trajectory_cc_stale_projects_jsonl_falls_back_to_stream_log(
+    tmp_path,
+) -> None:
+    """A predicted JSONL older than the run is stale; prefer the fresh stream log.
+
+    A reused session id can leave a previous run's projects JSONL on disk. The
+    mtime guard keeps that stale transcript from being recorded as this run's.
+    """
+    sid = f"test-traj-stale-{os.getpid()}"
+    predicted = tmp_path / "projects" / f"{sid}.jsonl"
+    predicted.parent.mkdir()
+    predicted.write_text("y" * 6000)
+    old = 1_700_000_000
+    os.utime(predicted, (old, old))
+    log = tmp_path / "stream.jsonl"
+    log.write_text("x" * 6000)
+    ref = Path("/tmp") / f"cc-session-log-ref-{sid}.txt"
+    ref.write_text(str(log))
+    try:
+        got = resolve_backend_trajectory(
+            "claude-code",
+            sid,
+            predicted=str(predicted),
+            started_epoch=old + 100,
+            copilot_state_dir=tmp_path,
+            codex_sessions_dir=tmp_path,
+            copilot_pre=None,
+            codex_pre=None,
+        )
+        assert got == str(log)
+    finally:
+        ref.unlink(missing_ok=True)
+
+
+def test_trajectory_cc_same_second_projects_jsonl_falls_back_to_stream_log(
+    tmp_path,
+) -> None:
+    """A predicted JSONL with mtime == started_epoch is a same-second leftover.
+
+    run_salt is int(time.time()), so a retry in the same second reuses the
+    session id. The previous run's JSONL can have mtime == this run's start
+    second; the strict `>` guard falls back to the stream log rather than
+    recording the leftover as this run's trajectory.
+    """
+    sid = f"test-traj-same-sec-{os.getpid()}"
+    predicted = tmp_path / "projects" / f"{sid}.jsonl"
+    predicted.parent.mkdir()
+    predicted.write_text("y" * 6000)
+    now = 1_800_000_000
+    os.utime(predicted, (now, now))
+    log = tmp_path / "stream.jsonl"
+    log.write_text("x" * 6000)
+    ref = Path("/tmp") / f"cc-session-log-ref-{sid}.txt"
+    ref.write_text(str(log))
+    try:
+        got = resolve_backend_trajectory(
+            "claude-code",
+            sid,
+            predicted=str(predicted),
+            started_epoch=now,
+            copilot_state_dir=tmp_path,
+            codex_sessions_dir=tmp_path,
+            copilot_pre=None,
+            codex_pre=None,
+        )
+        assert got == str(log)
+    finally:
+        ref.unlink(missing_ok=True)
+
+
+def test_trajectory_cc_snapshot_missing_fresh_write_accepted(
+    tmp_path,
+) -> None:
+    """A JSONL created during the run (fresh) is this run's durable file."""
+    sid = f"test-traj-snap-new-{os.getpid()}"
+    predicted = tmp_path / "projects" / f"{sid}.jsonl"
+    predicted.parent.mkdir()
+    now = 1_800_000_000
+    predicted.write_text("y" * 6000)
+    os.utime(predicted, (now + 5, now + 5))
+    log = tmp_path / "stream.jsonl"
+    log.write_text("x" * 6000)
+    ref = Path("/tmp") / f"cc-session-log-ref-{sid}.txt"
+    ref.write_text(str(log))
+    try:
+        got = resolve_backend_trajectory(
+            "claude-code",
+            sid,
+            predicted=str(predicted),
+            started_epoch=now,
+            copilot_state_dir=tmp_path,
+            codex_sessions_dir=tmp_path,
+            copilot_pre=None,
+            codex_pre=None,
+            cc_predicted_pre=None,
+            cc_snapshotted=True,
+        )
+        assert got == str(predicted)
+    finally:
+        ref.unlink(missing_ok=True)
+
+
+def test_trajectory_cc_snapshot_missing_same_second_rejects_leftover(
+    tmp_path,
+) -> None:
+    """No baseline and mtime == started_epoch: prefer the stream log, not a leftover."""
+    sid = f"test-traj-snap-same-{os.getpid()}"
+    predicted = tmp_path / "projects" / f"{sid}.jsonl"
+    predicted.parent.mkdir()
+    now = 1_800_000_000
+    predicted.write_text("y" * 6000)
+    os.utime(predicted, (now, now))
+    log = tmp_path / "stream.jsonl"
+    log.write_text("x" * 6000)
+    ref = Path("/tmp") / f"cc-session-log-ref-{sid}.txt"
+    ref.write_text(str(log))
+    try:
+        got = resolve_backend_trajectory(
+            "claude-code",
+            sid,
+            predicted=str(predicted),
+            started_epoch=now,
+            copilot_state_dir=tmp_path,
+            codex_sessions_dir=tmp_path,
+            copilot_pre=None,
+            codex_pre=None,
+            cc_predicted_pre=None,
+            cc_snapshotted=True,
+        )
+        assert got == str(log)
+    finally:
+        ref.unlink(missing_ok=True)
+
+
+def test_trajectory_cc_snapshot_mutated_same_second_accepted(
+    tmp_path,
+) -> None:
+    """A baseline present then mutated is this run's file, even in the start second."""
+    sid = f"test-traj-snap-mut-{os.getpid()}"
+    predicted = tmp_path / "projects" / f"{sid}.jsonl"
+    predicted.parent.mkdir()
+    now = 1_800_000_000
+    predicted.write_text("y" * 6000)
+    os.utime(predicted, (now, now))
+    pre = snapshot_cc_predicted(str(predicted))
+    # The run appends to the pre-existing file; mtime stays in the start second.
+    predicted.write_text("y" * 7000)
+    os.utime(predicted, (now, now))
+    log = tmp_path / "stream.jsonl"
+    log.write_text("x" * 6000)
+    ref = Path("/tmp") / f"cc-session-log-ref-{sid}.txt"
+    ref.write_text(str(log))
+    try:
+        got = resolve_backend_trajectory(
+            "claude-code",
+            sid,
+            predicted=str(predicted),
+            started_epoch=now,
+            copilot_state_dir=tmp_path,
+            codex_sessions_dir=tmp_path,
+            copilot_pre=None,
+            codex_pre=None,
+            cc_predicted_pre=pre,
+            cc_snapshotted=True,
+        )
+        assert got == str(predicted)
+    finally:
+        ref.unlink(missing_ok=True)
+
+
+def test_trajectory_cc_snapshot_unchanged_rejects_leftover(
+    tmp_path,
+) -> None:
+    """An unchanged pre-run JSONL is leftover even with a fresh-looking mtime."""
+    sid = f"test-traj-snap-left-{os.getpid()}"
+    predicted = tmp_path / "projects" / f"{sid}.jsonl"
+    predicted.parent.mkdir()
+    predicted.write_text("y" * 6000)
+    pre = snapshot_cc_predicted(str(predicted))
+    log = tmp_path / "stream.jsonl"
+    log.write_text("x" * 6000)
+    ref = Path("/tmp") / f"cc-session-log-ref-{sid}.txt"
+    ref.write_text(str(log))
+    try:
+        got = resolve_backend_trajectory(
+            "claude-code",
+            sid,
+            predicted=str(predicted),
+            started_epoch=0,
+            copilot_state_dir=tmp_path,
+            codex_sessions_dir=tmp_path,
+            copilot_pre=None,
+            codex_pre=None,
+            cc_predicted_pre=pre,
+            cc_snapshotted=True,
+        )
+        assert got == str(log)
+    finally:
+        ref.unlink(missing_ok=True)
+
+
+def test_trajectory_cc_small_projects_jsonl_falls_back_to_stream_log(
+    tmp_path,
+) -> None:
+    """A predicted JSONL under the size floor is a stub; prefer the stream log."""
+    sid = f"test-traj-tiny-{os.getpid()}"
+    predicted = tmp_path / "projects" / f"{sid}.jsonl"
+    predicted.parent.mkdir()
+    predicted.write_text("y" * 100)
+    log = tmp_path / "stream.jsonl"
+    log.write_text("x" * 6000)
+    ref = Path("/tmp") / f"cc-session-log-ref-{sid}.txt"
+    ref.write_text(str(log))
+    try:
+        got = resolve_backend_trajectory(
+            "claude-code",
+            sid,
+            predicted=str(predicted),
             started_epoch=0,
             copilot_state_dir=tmp_path,
             codex_sessions_dir=tmp_path,
