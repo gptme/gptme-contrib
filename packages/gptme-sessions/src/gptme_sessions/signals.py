@@ -22,8 +22,10 @@ import json
 import os
 import re
 import subprocess
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from .deliverables import build_deliverable_detail, project_deliverable_details
 from .pi import (
@@ -849,6 +851,100 @@ def grade_signals(signals: dict, *, category: str | None = None) -> float:
         reward += 0.03
 
     return max(0.0, min(1.0, reward))
+
+
+def _commit_entry_sha(entry: str) -> str | None:
+    """Return the SHA from a ``"message (abc1234)"`` commit entry, or ``None``."""
+    entry = entry.strip()
+    if not entry.endswith(")") or "(" not in entry:
+        return None
+    candidate = entry[entry.rfind("(") + 1 : -1].strip().lower()
+    if 7 <= len(candidate) <= 40 and all(c in "0123456789abcdef" for c in candidate):
+        return candidate
+    return None
+
+
+def bookkeeping_commit_files(
+    sha: str,
+    commit_files: Mapping[str, Sequence[str]] | None,
+    bookkeeping_path_prefixes: Sequence[str],
+) -> list[str] | None:
+    """Return a commit's files when every one is under a bookkeeping prefix.
+
+    ``sha`` may be abbreviated; it matches ``commit_files`` keys by prefix.
+    Returns ``None`` (the commit keeps counting as a commit) when prefixes or
+    file info are missing, the SHA is unknown or ambiguous, the commit touched
+    no files, or any file falls outside the bookkeeping prefixes.
+    """
+    prefixes = tuple(p for p in bookkeeping_path_prefixes if p)
+    if not prefixes or not commit_files or not sha:
+        return None
+    needle = sha.strip().lower()
+    matches = [files for key, files in commit_files.items() if key.lower().startswith(needle)]
+    if len(matches) != 1:
+        return None
+    files = [str(f) for f in matches[0] if str(f).strip()]
+    if not files or not all(f.startswith(prefixes) for f in files):
+        return None
+    return files
+
+
+def _write_covers_commit_path(write: object, path: str) -> bool:
+    """True if a trajectory write is the same file as a repo-relative commit path.
+
+    Extractors record the path as written: absolute
+    (``/home/user/repo/journal/a.md``) or repo-relative (``journal/a.md``).
+    ``commit_files`` is always repo-relative, so match exact equality *or*
+    an absolute path that ends with ``/`` + the commit path.
+    """
+    w = str(write)
+    return w == path or w.endswith("/" + path)
+
+
+def reclassify_bookkeeping_commits(
+    signals: Mapping[str, Any],
+    commit_files: Mapping[str, Sequence[str]] | None,
+    bookkeeping_path_prefixes: Sequence[str],
+) -> tuple[dict[str, Any], int]:
+    """Count bookkeeping-only commits as file writes instead of commits.
+
+    A commit that touched only journal entries or task files is not the same
+    deliverable as a code change, but :func:`grade_signals` counts every
+    commit as one effective unit. For each ``git_commits`` entry whose files
+    (from ``commit_files``, SHA -> repo-relative paths) all sit under a
+    bookkeeping prefix, drop it from ``git_commits`` and add its files to
+    ``file_writes`` (skipping files the trajectory already wrote; see
+    ``_write_covers_commit_path``).
+
+    Commits without file info are left alone. Returns ``(signals_copy, n)``
+    where ``n`` is the number of reclassified commits; with no prefixes, no
+    file info, or ``n == 0`` the returned dict equals the input.
+    """
+    adjusted = dict(signals)
+    if not bookkeeping_path_prefixes or not commit_files:
+        return adjusted, 0
+    kept: list[Any] = []
+    moved_files: list[str] = []
+    reclassified = 0
+    for entry in signals.get("git_commits") or []:
+        sha = _commit_entry_sha(str(entry))
+        files = (
+            bookkeeping_commit_files(sha, commit_files, bookkeeping_path_prefixes) if sha else None
+        )
+        if files is None:
+            kept.append(entry)
+            continue
+        reclassified += 1
+        moved_files.extend(files)
+    if not reclassified:
+        return adjusted, 0
+    writes = list(signals.get("file_writes") or [])
+    for path in moved_files:
+        if not any(_write_covers_commit_path(w, path) for w in writes):
+            writes.append(path)
+    adjusted["git_commits"] = kept
+    adjusted["file_writes"] = writes
+    return adjusted, reclassified
 
 
 def is_productive(signals: dict) -> bool:

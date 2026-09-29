@@ -1582,3 +1582,264 @@ def test_post_session_trailer_regrade_never_lowers_grade(tmp_path: Path):
 
     assert result.grade == 0.9
     assert result.record.outcome == "productive"
+
+
+# --- Bookkeeping-only commits grade as file writes ---------------------------
+
+_BK_PREFIXES = ("journal/", "tasks/")
+
+
+def _committed_signals(*entries: str, writes: list[str] | None = None) -> dict:
+    """Trajectory that saw commits (``"msg (sha)"`` entries) and file writes."""
+    from gptme_sessions.signals import grade_signals
+
+    signals = {
+        **_noop_shaped_signals(),
+        "productive": True,
+        "git_commits": list(entries),
+        "deliverables": list(entries),
+        "file_writes": list(writes or []),
+    }
+    signals["grade"] = round(grade_signals(signals, category="code"), 4)
+    return signals
+
+
+def _run_with_signals(tmp_path: Path, signals: dict, **kwargs) -> PostSessionResult:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+    with patch.object(_post_session_mod, "extract_from_path", return_value=signals):
+        return post_session(
+            store=store,
+            harness="claude-code",
+            model="claude-sonnet-5-5",
+            session_id="21e9",
+            duration_seconds=1500,
+            trajectory_path=fake_traj,
+            **kwargs,
+        )
+
+
+def test_bookkeeping_commit_regrades_as_file_write(tmp_path: Path):
+    """A journal-only commit is a file write for grading, not a commit (judge pilot)."""
+    sha = "abc1234567890abcdef1234567890abcdef12345"
+    signals = _committed_signals(f"docs(journal): restraint ({sha[:7]})")
+    assert signals["grade"] == 0.6
+
+    result = _run_with_signals(
+        tmp_path,
+        signals,
+        commit_files={sha: ["journal/2026-09-29/autonomous-session-21e9.md"]},
+        bookkeeping_path_prefixes=_BK_PREFIXES,
+    )
+
+    assert result.grade == 0.4  # one write, no commits
+    assert result.record.trajectory_grade == 0.4
+    assert result.record.grade_reasons["productivity"] == "bookkeeping_commits_as_writes:n=1"
+    # Grading only: the deliverable and the outcome are untouched.
+    assert result.record.deliverables == [f"docs(journal): restraint ({sha[:7]})"]
+    assert result.record.outcome == "productive"
+
+
+def test_mixed_commit_stays_a_commit(tmp_path: Path):
+    """A commit touching code plus a journal is a real deliverable."""
+    sha = "abc1234567890abcdef1234567890abcdef12345"
+    signals = _committed_signals(f"fix: thing ({sha[:7]})")
+
+    result = _run_with_signals(
+        tmp_path,
+        signals,
+        commit_files={sha: ["scripts/x.py", "journal/2026-09-29/x.md"]},
+        bookkeeping_path_prefixes=_BK_PREFIXES,
+    )
+
+    assert result.grade == signals["grade"] == 0.6
+    assert "productivity" not in result.record.grade_reasons
+
+
+def test_commit_without_file_info_is_unchanged(tmp_path: Path):
+    """Commits in other repos/worktrees (unknown SHA, no files) keep counting."""
+    known = "abc1234567890abcdef1234567890abcdef12345"
+    unknown = "fedcba9876543210fedcba9876543210fedcba98"
+    signals = _committed_signals(
+        f"docs(journal): note ({known[:7]})",
+        f"feat: other repo ({unknown[:7]})",
+    )
+    assert signals["grade"] == 0.7
+
+    result = _run_with_signals(
+        tmp_path,
+        signals,
+        commit_files={known: ["journal/2026-09-29/x.md"], "0" * 40: []},
+        bookkeeping_path_prefixes=_BK_PREFIXES,
+    )
+
+    # Only the known journal-only commit is reclassified: 1 commit left -> 0.6.
+    assert result.grade == 0.6
+    assert result.record.grade_reasons["productivity"] == "bookkeeping_commits_as_writes:n=1"
+
+
+def test_empty_file_list_is_not_bookkeeping(tmp_path: Path):
+    """A commit with no listed files (e.g. a merge) is not vacuously bookkeeping."""
+    sha = "abc1234567890abcdef1234567890abcdef12345"
+    signals = _committed_signals(f"merge ({sha[:7]})")
+
+    result = _run_with_signals(
+        tmp_path,
+        signals,
+        commit_files={sha: []},
+        bookkeeping_path_prefixes=_BK_PREFIXES,
+    )
+
+    assert result.grade == 0.6
+
+
+def test_default_prefixes_are_byte_identical(tmp_path: Path):
+    """Without prefixes, file info changes nothing (other agents unaffected)."""
+    sha = "abc1234567890abcdef1234567890abcdef12345"
+    signals = _committed_signals(f"docs(journal): restraint ({sha[:7]})")
+
+    baseline = _run_with_signals(tmp_path / "a", signals)
+    with_files = _run_with_signals(
+        tmp_path / "b",
+        signals,
+        commit_files={sha: ["journal/2026-09-29/x.md"]},
+    )
+
+    assert baseline.grade == with_files.grade == 0.6
+    a = baseline.record.to_dict()
+    b = with_files.record.to_dict()
+    for volatile in (
+        "timestamp",
+        "start_time",
+        "end_time",
+        "trajectory_path",
+        "trajectory_revision",
+        "project",
+    ):
+        a.pop(volatile, None)
+        b.pop(volatile, None)
+    assert a == b
+
+
+def test_bookkeeping_files_already_written_are_not_double_counted(tmp_path: Path):
+    """Trajectory absolute-path writes and git relative paths are the same file."""
+    sha = "abc1234567890abcdef1234567890abcdef12345"
+    signals = _committed_signals(
+        f"docs(journal): x ({sha[:7]})",
+        writes=["/home/bob/bob/journal/a.md", "/home/bob/bob/tasks/b.md"],
+    )
+
+    result = _run_with_signals(
+        tmp_path,
+        signals,
+        commit_files={sha: ["journal/a.md", "tasks/b.md"]},
+        bookkeeping_path_prefixes=_BK_PREFIXES,
+    )
+
+    # Still 2 unique writes (< 3), so 0.40, not the 0.55 tier.
+    assert result.grade == 0.4
+
+
+def test_bookkeeping_relative_writes_are_not_double_counted(tmp_path: Path):
+    """Repo-relative trajectory writes match git relative paths by equality."""
+    sha = "abc1234567890abcdef1234567890abcdef12345"
+    signals = _committed_signals(
+        f"docs(journal): x ({sha[:7]})",
+        writes=["journal/a.md", "tasks/b.md"],
+    )
+
+    result = _run_with_signals(
+        tmp_path,
+        signals,
+        commit_files={sha: ["journal/a.md", "tasks/b.md"]},
+        bookkeeping_path_prefixes=_BK_PREFIXES,
+    )
+
+    assert result.grade == 0.4
+
+
+def test_trailer_owned_bookkeeping_commit_is_a_file_write(tmp_path: Path):
+    """#1765 trailer re-grade path: journal-only trailer commits add writes, not commits."""
+    journal_sha = "abc1234567890abcdef1234567890abcdef12345"
+    code_sha = "0123456789abcdef0123456789abcdef01234567"
+
+    journal_only = _run_with_signals(
+        tmp_path / "a",
+        _noop_shaped_signals(),
+        deliverables=[journal_sha],
+        commit_trailers={journal_sha: ["21e9"]},
+        commit_files={journal_sha: ["journal/2026-09-29/x.md"]},
+        bookkeeping_path_prefixes=_BK_PREFIXES,
+    )
+    # 0.25 floor -> 0.40 (one write), not 0.60 (one commit).
+    assert journal_only.grade == 0.4
+    assert journal_only.record.deliverables == [journal_sha]
+    assert journal_only.record.outcome == "productive"
+    assert journal_only.record.grade_reasons["productivity"] == (
+        "bookkeeping_commits_as_writes:n=1"
+    )
+
+    with_code = _run_with_signals(
+        tmp_path / "b",
+        _noop_shaped_signals(),
+        deliverables=[journal_sha, code_sha],
+        commit_trailers={journal_sha: ["21e9"], code_sha: ["21e9"]},
+        commit_files={
+            journal_sha: ["journal/2026-09-29/x.md"],
+            code_sha: ["scripts/x.py", "tests/test_x.py"],
+        },
+        bookkeeping_path_prefixes=_BK_PREFIXES,
+    )
+    assert with_code.grade == 0.6  # the code commit still counts
+    assert with_code.record.grade_reasons["productivity"] == "bookkeeping_commits_as_writes:n=1"
+
+
+def test_trailer_owned_without_prefixes_matches_1765(tmp_path: Path):
+    """Default prefixes: the trailer path grades exactly as before."""
+    sha = "abc1234567890abcdef1234567890abcdef12345"
+    result = _run_with_signals(
+        tmp_path,
+        _noop_shaped_signals(),
+        deliverables=[sha],
+        commit_trailers={sha: ["21e9"]},
+        commit_files={sha: ["journal/2026-09-29/x.md"]},
+    )
+    assert result.grade == 0.6
+    assert "productivity" not in result.record.grade_reasons
+
+
+def test_reclassify_helper_contract():
+    from gptme_sessions.signals import bookkeeping_commit_files, reclassify_bookkeeping_commits
+
+    files = {
+        "abc1234567890abcdef1234567890abcdef12345": ["tasks/a.md"],
+        "abc1239999999999999999999999999999999999": ["journal/b.md"],
+    }
+    # 6 shared hex chars would be ambiguous, but entries need >= 7.
+    assert bookkeeping_commit_files("abc1234", files, _BK_PREFIXES) == ["tasks/a.md"]
+    assert bookkeeping_commit_files("abc123", files, _BK_PREFIXES) is None  # ambiguous
+    assert bookkeeping_commit_files("abc1234", files, ()) is None
+    assert bookkeeping_commit_files("abc1234", files, ("journal/",)) is None
+
+    signals = {"git_commits": ["x (abc1234)", "no sha here"], "file_writes": []}
+    same, n = reclassify_bookkeeping_commits(signals, files, ())
+    assert n == 0 and same == signals and same is not signals
+    adjusted, n = reclassify_bookkeeping_commits(signals, files, _BK_PREFIXES)
+    assert n == 1
+    assert adjusted["git_commits"] == ["no sha here"]
+    assert adjusted["file_writes"] == ["tasks/a.md"]
+    assert signals["git_commits"] == ["x (abc1234)", "no sha here"]  # input untouched
+
+    already = {"git_commits": ["x (abc1234)"], "file_writes": ["tasks/a.md"]}
+    adjusted, n = reclassify_bookkeeping_commits(already, files, _BK_PREFIXES)
+    assert n == 1
+    assert adjusted["file_writes"] == ["tasks/a.md"]
+    abs_already = {
+        "git_commits": ["x (abc1234)"],
+        "file_writes": ["/home/bob/bob/tasks/a.md"],
+    }
+    adjusted, n = reclassify_bookkeeping_commits(abs_already, files, _BK_PREFIXES)
+    assert n == 1
+    assert adjusted["file_writes"] == ["/home/bob/bob/tasks/a.md"]
