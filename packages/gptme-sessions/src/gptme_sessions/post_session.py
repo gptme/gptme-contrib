@@ -46,7 +46,7 @@ from .record import (
     normalize_reasoning_effort,
     trajectory_revision_for,
 )
-from .signals import extract_from_path
+from .signals import extract_from_path, grade_signals
 from .smell import compute_smell_score
 from .store import SessionStore
 
@@ -684,6 +684,11 @@ def post_session(
     traj_deliverables = signals.get("deliverables", []) if signals else []
     traj_deliverable_details = signals.get("deliverable_details", []) if signals else []
     extra_deliverable_details: list[dict[str, Any]] = []
+    # Caller SHAs whose Git-Session-Id trailer proves this session made them
+    # but which the trajectory extractor did not see (e.g. commit output piped
+    # through ``| tail``). Git ownership is ground truth, so these count toward
+    # the grade and the outcome, not just the deliverables list.
+    trailer_owned_missed: list[str] = []
 
     if not deliverables:
         # No caller deliverables: use trajectory exclusively.
@@ -719,6 +724,7 @@ def post_session(
                         trailer_owned_shas.append(d)
                     else:
                         dropped_shas.append(d)
+                trailer_owned_missed.extend(trailer_owned_shas)
                 passthrough_non_sha = [d for d in caller_deliverables if not looks_like_sha(d)]
                 if dropped_shas:
                     logger.warning(
@@ -770,6 +776,7 @@ def post_session(
                         )
                         if verdict == "session_trailer_owned":
                             kept_caller.append(item)
+                            trailer_owned_missed.append(item)
                             extra_deliverable_details.extend(
                                 _build_caller_deliverable_details(
                                     [item],
@@ -805,9 +812,24 @@ def post_session(
         else:
             # Trajectory ran but found no deliverables.
             if traj_productive is False and trajectory_reliable:
-                # Trajectory explicitly says this was noop — caller SHAs are
-                # from concurrent sessions.
-                if caller_deliverables:
+                # Trajectory explicitly says this was noop. Untagged caller SHAs
+                # are treated as concurrent-session commits, but a SHA whose
+                # Git-Session-Id trailer matches this session is owned no
+                # matter what the extractor saw.
+                for item in caller_deliverables:
+                    if looks_like_sha(item) and (
+                        classify_commit_ownership(
+                            item,
+                            session_id=session_id,
+                            trailer_ids=_trailer_ids_for(item, commit_trailers),
+                        )
+                        == "session_trailer_owned"
+                    ):
+                        trailer_owned_missed.append(item)
+                caller_deliverables_unowned = [
+                    d for d in caller_deliverables if d not in trailer_owned_missed
+                ]
+                if caller_deliverables_unowned:
                     _traj_tool_calls = (signals or {}).get("tool_calls") or {}
                     if _traj_tool_calls:
                         # Extractor recognized the format (non-empty tool_calls) but
@@ -823,15 +845,20 @@ def post_session(
                             "recurrence suggests a signal-extraction gap.",
                             len(_traj_tool_calls),
                             ", ".join(sorted(_traj_tool_calls)[:5]),
-                            len(caller_deliverables),
+                            len(caller_deliverables_unowned),
                         )
                     else:
                         logger.warning(
                             "Dropping %d git-range commit(s): trajectory determined "
                             "noop with no deliverables (SHAs from concurrent session)",
-                            len(caller_deliverables),
+                            len(caller_deliverables_unowned),
                         )
-                deliverables = []
+                deliverables = list(trailer_owned_missed)
+                extra_deliverable_details = _build_caller_deliverable_details(
+                    trailer_owned_missed,
+                    provenance_class="session_trailer_owned",
+                    evidence={"source": "caller", "validation": "git_session_id_trailer"},
+                )
             else:
                 # Either the trajectory didn't rule out work, or it is
                 # unreliable (covers far less wall-clock than the session ran,
@@ -868,6 +895,25 @@ def post_session(
         extra_details=extra_deliverable_details,
     )
 
+    # Re-grade with git-proven commits the extractor missed. Commits only add
+    # effective work units, so this can raise the grade but never lower it.
+    trailer_owned_missed = list(dict.fromkeys(trailer_owned_missed))
+    if trailer_owned_missed and signals is not None and grade is not None:
+        adjusted = dict(signals)
+        adjusted["git_commits"] = list(signals.get("git_commits") or []) + [
+            f"(trailer-owned) ({sha[:7]})" for sha in trailer_owned_missed
+        ]
+        regraded = round(grade_signals(adjusted, category=signals.get("inferred_category")), 4)
+        if regraded > grade:
+            logger.info(
+                "Re-graded %.4f -> %.4f with %d trailer-owned commit(s) the "
+                "trajectory extractor missed",
+                grade,
+                regraded,
+                len(trailer_owned_missed),
+            )
+            grade = regraded
+
     # --- Determine outcome ---
     # Priority order (highest → lowest):
     # 1. Non-zero exit (except 124) → failed
@@ -889,6 +935,10 @@ def post_session(
     elif traj_productive is not None:
         if traj_productive:
             outcome = "productive"
+        elif trailer_owned_missed:
+            # The extractor saw no work, but git proves this session committed.
+            outcome = "productive"
+            outcome_flip_reason = f"trailer_owned_commits:n={len(trailer_owned_missed)}"
         elif not trajectory_reliable and caller_deliverables:
             # Trajectory says noop but is unreliable and the caller observed
             # real git-range commits. Trust the commits.

@@ -1485,3 +1485,100 @@ def test_post_session_smell_score_zero_for_clean_journal(tmp_path: Path):
     # Persists through store reload — 0.0 is stored, not collapsed to None.
     records = SessionStore(sessions_dir=tmp_path).load_all()
     assert records[0].smell_score == 0.0
+
+
+def _noop_shaped_signals(duration_s: int = 1500) -> dict:
+    """Trajectory that ran tools but whose extractor saw no commits (piped output)."""
+    return {
+        "session_duration_s": duration_s,
+        "productive": False,
+        "grade": 0.25,
+        "inferred_category": "code",
+        "deliverables": [],
+        "deliverable_details": [],
+        "git_commits": [],
+        "file_writes": [],
+        "error_count": 0,
+        "retry_count": 0,
+        "tool_calls": {"Bash": 40, "Read": 12},
+    }
+
+
+def test_post_session_noop_trajectory_keeps_trailer_owned_commit_and_regrades(tmp_path: Path):
+    """Git ownership beats an extractor miss: `git-safe-commit ... | tail` (session 21e9)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+    own_sha = "abc1234567890abcdef1234567890abcdef1234"
+    foreign_sha = "deadbeef01234567012345670123456701234567"
+    untagged_sha = "0123456789abcdef0123456789abcdef01234567"
+
+    with patch.object(_post_session_mod, "extract_from_path", return_value=_noop_shaped_signals()):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="claude-sonnet-5-5",
+            session_id="21e9",
+            duration_seconds=1500,
+            trajectory_path=fake_traj,
+            deliverables=[own_sha, foreign_sha, untagged_sha],
+            commit_trailers={own_sha: ["21e9"], foreign_sha: ["b097"]},
+        )
+
+    assert result.record.deliverables == [own_sha]
+    assert result.record.deliverable_details[0]["provenance_class"] == "session_trailer_owned"
+    assert result.record.outcome == "productive"
+    assert result.record.outcome_flip_reason == "trailer_owned_commits:n=1"
+    assert result.grade is not None and result.grade > 0.25
+
+
+def test_post_session_noop_trajectory_without_trailers_is_unchanged(tmp_path: Path):
+    """No trailer evidence: caller SHAs stay concurrent-session commits (noop, same grade)."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+    sha = "abc1234567890abcdef1234567890abcdef1234"
+
+    with patch.object(_post_session_mod, "extract_from_path", return_value=_noop_shaped_signals()):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="claude-sonnet-5-5",
+            session_id="21e9",
+            duration_seconds=1500,
+            trajectory_path=fake_traj,
+            deliverables=[sha],
+        )
+
+    assert result.record.deliverables == []
+    assert result.record.outcome == "noop"
+    assert result.grade == 0.25
+
+
+def test_post_session_trailer_regrade_never_lowers_grade(tmp_path: Path):
+    """A trajectory that already saw the commit keeps its grade; missed extras only add."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+    seen_sha = "abc1234567890abcdef1234567890abcdef1234"
+    signals = {
+        **_noop_shaped_signals(),
+        "productive": True,
+        "grade": 0.9,
+        "git_commits": [f"feat: thing ({seen_sha[:7]})"],
+        "deliverables": [f"feat: thing ({seen_sha[:7]})"],
+    }
+    with patch.object(_post_session_mod, "extract_from_path", return_value=signals):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="claude-sonnet-5-5",
+            session_id="21e9",
+            duration_seconds=1500,
+            trajectory_path=fake_traj,
+            deliverables=[seen_sha],
+            commit_trailers={seen_sha: ["21e9"]},
+        )
+
+    assert result.grade == 0.9
+    assert result.record.outcome == "productive"
