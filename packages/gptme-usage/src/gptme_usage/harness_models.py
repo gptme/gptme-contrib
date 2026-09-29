@@ -455,6 +455,15 @@ _CACHE_PRICING_PROVIDER: dict[tuple[str, str], str] = {
     # kimi-k2.6: no cache pricing exposed on OpenRouter
 }
 
+# Harnesses whose recorded ``input_tokens`` already INCLUDE cache reads.
+# Codex maps OpenAI usage directly (input_tokens + cached_input_tokens, where
+# the cached count is a subset of input), so token_count == input + output.
+# gptme records exclude cache reads (token_count == input + output + cache_read).
+# Without this, codex cached input was billed twice: once at full price inside
+# input_tokens and again at the cache-read rate (2026-09-29: a gpt-5.6-sol run
+# recorded $18.02 vs $6.88 actual-rate estimate).
+_INPUT_INCLUDES_CACHE_READ: frozenset[str] = frozenset({"codex"})
+
 
 def estimate_session_cost(
     harness: str,
@@ -520,6 +529,28 @@ def estimate_session_cost(
     provider = _CACHE_PRICING_PROVIDER.get(key)
     cache_read_rate = CACHE_READ_MULTIPLIER.get(provider or "", 1.0)
     cache_create_rate = CACHE_CREATION_MULTIPLIER.get(provider or "", 1.0)
+
+    if harness in _INPUT_INCLUDES_CACHE_READ:
+        # Codex records map OpenAI usage directly: ``input_tokens`` already
+        # include cache reads, so the total is input + output and cache reads
+        # must be moved out of ``inp`` before pricing. A record carrying the
+        # gptme-style breakdown (input EXCLUDES cache reads, total is
+        # input + output + cache_read) must not be adjusted, or it undercounts.
+        #
+        # The two breakdowns differ by exactly ``cache_read``, so classify by
+        # whether the recorded total sits within that distance of the gptme
+        # total. A total far from both (e.g. an inconsistent field) falls back
+        # to the harness invariant; ``token_count`` is optional and absent in
+        # some records, which also falls back to the invariant.
+        # Evidence: all 252 codex ledger rows with cache reads have
+        # token_count == input + output (checked 2026-09-29).
+        gptme_style_breakdown = (
+            token_count is not None
+            and cache_read > 0
+            and abs(token_count - (inp + out + cache_read)) < cache_read
+        )
+        if not gptme_style_breakdown:
+            inp = max(0, inp - cache_read)
 
     cost_usd = (
         inp * input_price

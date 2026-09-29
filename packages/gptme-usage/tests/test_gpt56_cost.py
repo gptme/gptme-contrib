@@ -47,6 +47,9 @@ def test_observed_breakdown_discounts_only_cache_reads(
 ) -> None:
     # $4 input + $20 output + $4 cache creation + $2 cache reads.
     # An inconsistent total must not override the observed breakdown.
+    # codex input_tokens already include the 1M cache reads, so its uncached
+    # input is 0 and the full-price $4 must not be charged again.
+    expected = 26.0 if harness == "codex" else 30.0
     assert estimate_session_cost(
         harness,
         model,
@@ -56,7 +59,7 @@ def test_observed_breakdown_discounts_only_cache_reads(
         cache_read_tokens=1_000_000,
         token_count=99_000_000,
         config=config,
-    ) == pytest.approx(30.0)
+    ) == pytest.approx(expected)
 
 
 def test_provider_route_uses_same_cost(
