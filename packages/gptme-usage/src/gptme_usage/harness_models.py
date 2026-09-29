@@ -631,39 +631,67 @@ GPTME_QUOTA_SOURCE: dict[str, str] = {}
 GPTME_MODEL_ROUTES: dict[str, str] = {}
 
 
-# --- Claude Code version aliases ---
-# Short aliases (opus/sonnet/haiku) map to the currently-shipping version.
-# Bump these when Anthropic releases a new model so the bandit tracks per-version
-# performance instead of flattening all versions into one arm.
-# See: ErikBjare/bob#612
-CC_MODEL_VERSIONS: dict[str, str] = {
-    # Short alias → currently-shipping CC version. Bump these when Anthropic
-    # ships a new model. Historical gotcha (2026-04-17, ErikBjare/bob#614):
-    # don't couple the bump to a blanket migrate-cc-versioned-arms.py
-    # with weight=1.0 — that copies OLD-version data into the NEW-version
-    # arm, contaminating posteriors. Prefer letting the new arm accumulate
-    # signal organically from new sessions (trajectory detection handles
-    # attribution correctly). The 573 pre-existing "opus" posteriors that
-    # got mis-seeded into opus-4-7 via the migration were relabeled back to
-    # opus-4-6 (the actual historical majority) and opus-4-7 restarted from
-    # priors.
-    "opus": "opus-4-8",
-    # Opus 5.5 succession arm (2026-09-22). Distinct from the "opus" alias
-    # (still maps to opus-4-8). $4/$20 per MTok (20% under Opus 5 $5/$25).
-    # CC rejects short "opus-5-5" (unrecognized_model, probed 2026-09-22) —
-    # harness dispatches as "claude-opus-5-5". Parallel window vs
-    # claude-code:opus; warm-started from opus-5 posterior (n0=8, E[p]=0.646).
-    "opus-5-5": "opus-5-5",
-    "claude-opus-5-5": "opus-5-5",
+# --- Claude Code model identity (explicit versions only) ---
+# Anthropic's CLI aliases (opus/sonnet/haiku/fable) FLOAT: they silently move to
+# the newest model. Probed 2026-09-29 (`claude -p --model X`, modelUsage keys):
+# opus -> claude-opus-5-5, sonnet -> claude-sonnet-5-5, fable -> claude-fable-5-1,
+# haiku -> claude-haiku-4-5-20251001 — while this table still believed
+# opus-4-8 / sonnet-4-6 / fable-5. Sessions dispatched with a bare alias ran
+# unvalidated models and were keyed/credited to the wrong arm.
+#
+# Rules:
+#   1. Never pass a floating alias to `claude --model`; dispatch the exact id
+#      from ``cc_dispatch_model_id`` instead.
+#   2. Never key a bandit arm by a floating alias; ``resolve_cc_version`` maps
+#      any name to an explicit versioned suffix.
+#   3. ``CC_ALIAS_PINS`` is the ONE human-edited place where an alias concept
+#      ("the validated Opus") maps to a version. It says what the alias MEANS
+#      for us, not what Anthropic currently resolves it to. Bump a pin only
+#      after that model's succession window has validated it. An alias-drift
+#      probe (agent-side) alerts when Anthropic moves an alias.
+#
+# Historical gotcha (2026-04-17, ErikBjare/bob#614): don't couple a pin bump to
+# a blanket arm migration — let the new arm accumulate its own evidence.
+
+#: Versioned arm suffix -> exact model id accepted by ``claude --model``.
+#: CC rejects most short forms (``opus-5-5``, ``fable-5-1`` -> unrecognized_model),
+#: so dispatch always uses the full id.
+CC_MODEL_IDS: dict[str, str] = {
+    "opus-4-6": "claude-opus-4-6",
+    "opus-4-7": "claude-opus-4-7",
+    "opus-4-8": "claude-opus-4-8",
+    "opus-5": "claude-opus-5",
+    "opus-5-5": "claude-opus-5-5",
+    "sonnet-4-5": "claude-sonnet-4-5",
+    "sonnet-4-6": "claude-sonnet-4-6",
+    "sonnet-5": "claude-sonnet-5",
+    "sonnet-5-5": "claude-sonnet-5-5",
+    "haiku-4-5": "claude-haiku-4-5-20251001",
+    "fable-5": "claude-fable-5",
+    "fable-5-1": "claude-fable-5-1",
+}
+
+#: Floating CLI alias -> the VALIDATED versioned suffix it means for us.
+#: Human-edited pins; see rule 3 above. (2026-09-29: opus-5-5 and sonnet-5-5 are
+#: in succession windows and not yet validated; fable-5 is retired in favour of
+#: fable-5-1.)
+CC_ALIAS_PINS: dict[str, str] = {
+    "opus": "opus-5",
     "sonnet": "sonnet-4-6",
     "haiku": "haiku-4-5",
-    # Fable 5 — Mythos-class frontier model, released 2026-06-09. ~10x Opus
-    # cost, free on subscription through June 22. Added as low-n exploration
-    # arm; not wired into routing until/unless cost-economics change.
-    "fable": "fable-5",
-    "fable-5": "fable-5",
-    "claude-fable-5": "fable-5",
+    "fable": "fable-5-1",
 }
+
+#: CLI aliases that float with Anthropic's latest release.
+FLOATING_CC_ALIASES: frozenset[str] = frozenset(CC_ALIAS_PINS)
+
+#: Back-compat view: every accepted short name -> versioned suffix.
+CC_MODEL_VERSIONS: dict[str, str] = {
+    **{version: version for version in CC_MODEL_IDS},
+    **CC_ALIAS_PINS,
+}
+
+_CC_FAMILY_VERSION_RE = re.compile(r"^(opus|sonnet|haiku|fable)-\d[\d.-]*$")
 
 
 def openrouter_models(config: HarnessQuotaConfig | None = None) -> list[str]:
@@ -749,17 +777,19 @@ def resolve_copilot_version(model: str) -> str:
 
 
 def resolve_cc_version(model: str) -> str:
-    """Resolve a Claude Code model name to its versioned arm suffix.
+    """Resolve a Claude Code model name to its explicit versioned arm suffix.
 
-    Handles short aliases, the ``claude-`` prefix, and concrete dated model
-    IDs (``claude-opus-4-7-20251014``). Idempotent for already-versioned inputs.
+    Handles floating aliases (via ``CC_ALIAS_PINS``), the ``claude-`` prefix,
+    dotted versions (``claude-opus-4.6``) and concrete dated model IDs
+    (``claude-opus-4-7-20251014``). Idempotent for already-versioned inputs.
     Unknown inputs pass through unchanged.
 
     Examples:
-        resolve_cc_version("opus")                      -> "opus-4-8"
+        resolve_cc_version("opus")                      -> "opus-5"  (pinned)
         resolve_cc_version("opus-4-7")                  -> "opus-4-7"
         resolve_cc_version("claude-opus-4-7")           -> "opus-4-7"
         resolve_cc_version("claude-opus-4-7-20251014")  -> "opus-4-7"
+        resolve_cc_version("claude-opus-4.6")           -> "opus-4-6"
     """
 
     m = model.lower().strip()
@@ -767,6 +797,42 @@ def resolve_cc_version(model: str) -> str:
         m = m[len("claude-") :]
     # Strip trailing YYYYMMDD date suffix from concrete model IDs
     m = re.sub(r"-\d{8}$", "", m)
-    if m in CC_MODEL_VERSIONS.values():
-        return m
-    return CC_MODEL_VERSIONS.get(m, m)
+    if _CC_FAMILY_VERSION_RE.match(m):
+        # Dotted form (copilot-style "opus-4.6") -> dashed arm form.
+        return m.replace(".", "-")
+    return CC_ALIAS_PINS.get(m, m)
+
+
+def cc_dispatch_model_id(model: str) -> str:
+    """Return the exact, non-floating model id to pass to ``claude --model``.
+
+    Any accepted name (floating alias, short versioned arm suffix, full id,
+    dated id) maps to an explicit versioned id, so a dispatch can never run
+    whatever Anthropic's alias currently points at. Unregistered but
+    explicitly-versioned Claude names (``opus-5-7``) map to ``claude-<version>``;
+    non-Claude names pass through unchanged.
+
+    Examples:
+        cc_dispatch_model_id("opus")        -> "claude-opus-5"  (pinned)
+        cc_dispatch_model_id("opus-5-5")    -> "claude-opus-5-5"
+        cc_dispatch_model_id("haiku")       -> "claude-haiku-4-5-20251001"
+        cc_dispatch_model_id("claude-opus-4-7-20251014") -> "claude-opus-4-7-20251014"
+    """
+    raw = model.strip()
+    version = resolve_cc_version(raw)
+    if version in CC_MODEL_IDS:
+        # Preserve an explicit dated snapshot the caller asked for.
+        if re.search(r"-\d{8}$", raw) and raw.lower().startswith("claude-"):
+            return raw.lower()
+        return CC_MODEL_IDS[version]
+    if _CC_FAMILY_VERSION_RE.match(version):
+        return f"claude-{version}"
+    return raw
+
+
+def is_floating_cc_alias(model: str) -> bool:
+    """True when ``model`` is a CLI alias that floats with Anthropic's latest."""
+    m = model.lower().strip()
+    if m.startswith("claude-"):
+        m = m[len("claude-") :]
+    return m in FLOATING_CC_ALIASES

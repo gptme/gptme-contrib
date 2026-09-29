@@ -8,17 +8,23 @@ from pathlib import Path
 import pytest
 from gptme_usage.config import merge_with_module_defaults
 from gptme_usage.harness_models import (
+    CC_ALIAS_PINS,
+    CC_MODEL_IDS,
+    CC_MODEL_VERSIONS,
     CLAUDE_AGENT_SDK_CREDIT_CHANGE_PAUSED,
     DEFAULT_OUTPUT_TOKEN_SHARE,
+    FLOATING_CC_ALIASES,
     GPTME_MODEL_ROUTES,
     GPTME_QUOTA_SOURCE,
     HARNESS_PRICE_USD_PER_1M,
     TOKENS_PER_SECOND,
     HarnessQuotaConfig,
     blended_token_price,
+    cc_dispatch_model_id,
     estimate_session_cost,
     estimate_tokens_from_duration,
     gptme_openrouter_context,
+    is_floating_cc_alias,
     is_post_agent_sdk_credit_change,
     load_quota_config,
     local_models,
@@ -408,17 +414,25 @@ def test_merge_with_module_defaults_does_not_mutate_input() -> None:
 @pytest.mark.parametrize(
     "input_model,expected",
     [
-        # Short aliases
-        ("opus", "opus-4-8"),
+        # Floating aliases resolve to their validated pin, never "latest"
+        ("opus", "opus-5"),
         ("sonnet", "sonnet-4-6"),
         ("haiku", "haiku-4-5"),
-        # Fable aliases
-        ("fable", "fable-5"),
+        ("fable", "fable-5-1"),
+        # Explicit Fable versions stay distinct
         ("fable-5", "fable-5"),
         ("claude-fable-5", "fable-5"),
+        ("claude-fable-5-1", "fable-5-1"),
         # claude- prefix stripped
-        ("claude-opus", "opus-4-8"),
+        ("claude-opus", "opus-5"),
         ("claude-sonnet", "sonnet-4-6"),
+        # Successors are distinct explicit versions, never collapsed
+        ("claude-opus-5-5", "opus-5-5"),
+        ("claude-sonnet-5-5", "sonnet-5-5"),
+        ("claude-sonnet-4-5", "sonnet-4-5"),
+        # Dotted (copilot-style) and dated ids
+        ("claude-opus-4.6", "opus-4-6"),
+        ("claude-haiku-4-5-20251001", "haiku-4-5"),
         # Concrete versioned IDs from the docstring
         ("claude-opus-4-7-20251014", "opus-4-7"),
         ("claude-opus-4-7", "opus-4-7"),
@@ -673,17 +687,17 @@ def test_estimate_session_cost_fable_token_count_path(fable_toml_path: Path) -> 
     # 1M tokens, cache_read rate for anthropic = 0.1x, fable input = $15/1M
     # expected = 1_000_000 * 15.0 * 0.1 / 1_000_000 = $1.50
     cost = estimate_session_cost(
-        "claude-code", "fable", token_count=1_000_000, config=cfg
+        "claude-code", "fable-5", token_count=1_000_000, config=cfg
     )
     assert cost is not None, "fable-5 token_count path should return a cost estimate"
     assert abs(cost - 1.5) < 0.001, f"expected ~$1.50, got {cost}"
 
 
 def test_estimate_session_cost_fable_alias_resolves(fable_toml_path: Path) -> None:
-    """resolve_cc_version('fable') -> 'fable-5' -> pricing key ('claude-code', 'fable-5')."""
+    """'fable-5' and 'claude-fable-5' share one pricing key ('claude-code', 'fable-5')."""
     cfg = load_quota_config(fable_toml_path)
     cost_alias = estimate_session_cost(
-        "claude-code", "fable", cache_read_tokens=1_000_000, config=cfg
+        "claude-code", "claude-fable-5", cache_read_tokens=1_000_000, config=cfg
     )
     cost_versioned = estimate_session_cost(
         "claude-code", "fable-5", cache_read_tokens=1_000_000, config=cfg
@@ -691,7 +705,7 @@ def test_estimate_session_cost_fable_alias_resolves(fable_toml_path: Path) -> No
     assert cost_alias is not None and cost_versioned is not None
     assert (
         abs(cost_alias - cost_versioned) < 0.000001
-    ), f"'fable' and 'fable-5' should resolve to the same cost; got {cost_alias} vs {cost_versioned}"
+    ), f"'claude-fable-5' and 'fable-5' should resolve to the same cost; got {cost_alias} vs {cost_versioned}"
 
 
 # Skeleton tests to restore when CLAUDE_AGENT_SDK_CREDIT_CHANGE_PAUSED is set back to False.
@@ -708,3 +722,52 @@ def test_estimate_session_cost_fable_alias_resolves(fable_toml_path: Path) -> No
 # def test_is_post_agent_sdk_credit_change_after_cutover() -> None:
 #     after = datetime(2026, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
 #     assert is_post_agent_sdk_credit_change(after)
+
+
+# ---------------------------------------------------------------------------
+# Explicit Claude Code model identity (no floating aliases)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "input_model,expected",
+    [
+        ("opus", "claude-opus-5"),
+        ("sonnet", "claude-sonnet-4-6"),
+        ("haiku", "claude-haiku-4-5-20251001"),
+        ("fable", "claude-fable-5-1"),
+        ("opus-5-5", "claude-opus-5-5"),
+        ("sonnet-5-5", "claude-sonnet-5-5"),
+        ("fable-5-1", "claude-fable-5-1"),
+        ("haiku-4-5", "claude-haiku-4-5-20251001"),
+        ("claude-opus-5", "claude-opus-5"),
+        ("claude-opus-4-7-20251014", "claude-opus-4-7-20251014"),
+        ("opus-5-7", "claude-opus-5-7"),  # unregistered but explicit
+        ("gpt-5.4", "gpt-5.4"),  # non-Claude passes through
+    ],
+)
+def test_cc_dispatch_model_id(input_model: str, expected: str) -> None:
+    assert cc_dispatch_model_id(input_model) == expected
+
+
+def test_no_floating_alias_is_ever_dispatched_or_keyed() -> None:
+    """Every accepted name dispatches an explicit id and keys a versioned arm."""
+    names = set(CC_MODEL_VERSIONS) | set(CC_MODEL_IDS.values())
+    for name in names:
+        assert not is_floating_cc_alias(cc_dispatch_model_id(name)), name
+        assert not is_floating_cc_alias(resolve_cc_version(name)), name
+        assert resolve_cc_version(name) in CC_MODEL_IDS, name
+
+
+def test_alias_pins_target_registered_versions() -> None:
+    for alias, version in CC_ALIAS_PINS.items():
+        assert alias in FLOATING_CC_ALIASES
+        assert version in CC_MODEL_IDS, f"{alias} pinned to unregistered {version}"
+
+
+def test_dispatch_and_arm_key_agree() -> None:
+    """The id we dispatch resolves back to the arm the selector keyed."""
+    for name in set(CC_MODEL_VERSIONS):
+        assert resolve_cc_version(cc_dispatch_model_id(name)) == resolve_cc_version(
+            name
+        ), name
