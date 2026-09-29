@@ -531,15 +531,23 @@ def estimate_session_cost(
     cache_create_rate = CACHE_CREATION_MULTIPLIER.get(provider or "", 1.0)
 
     if harness in _INPUT_INCLUDES_CACHE_READ:
-        # Skip the subtraction only when the record unambiguously uses the
-        # gptme-style breakdown, where input EXCLUDES cache reads
-        # (token_count == input + output + cache_read); subtracting there would
-        # undercount. Codex-style records (token_count == input + output) and
-        # records with no token_count are handled normally.
+        # Codex records map OpenAI usage directly: ``input_tokens`` already
+        # include cache reads, so the total is input + output and cache reads
+        # must be moved out of ``inp`` before pricing. A record carrying the
+        # gptme-style breakdown (input EXCLUDES cache reads, total is
+        # input + output + cache_read) must not be adjusted, or it undercounts.
+        #
+        # The two breakdowns differ by exactly ``cache_read``, so classify by
+        # whether the recorded total sits within that distance of the gptme
+        # total. A total far from both (e.g. an inconsistent field) falls back
+        # to the harness invariant; ``token_count`` is optional and absent in
+        # some records, which also falls back to the invariant.
         # Evidence: all 252 codex ledger rows with cache reads have
         # token_count == input + output (checked 2026-09-29).
         gptme_style_breakdown = (
-            token_count is not None and token_count == inp + out + cache_read
+            token_count is not None
+            and cache_read > 0
+            and abs(token_count - (inp + out + cache_read)) < cache_read
         )
         if not gptme_style_breakdown:
             inp = max(0, inp - cache_read)

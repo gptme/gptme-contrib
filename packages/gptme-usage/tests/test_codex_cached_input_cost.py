@@ -44,6 +44,8 @@ def test_gptme_input_excludes_cache_reads_unchanged() -> None:
 def test_codex_unknown_cache_provider_bills_cached_at_input_rate_once() -> None:
     # gpt-6-astra has no verified cache multiplier: cached input is charged at
     # the full input rate exactly once (no double count, no invented discount).
+    # Non-vacuous: without the input-includes-cache adjustment the same inputs
+    # bill 1_000_000*5 + 800_000*5 = $9.0; the $5.0 here requires the fix.
     cost = estimate_session_cost(
         "codex",
         "gpt-6-astra",
@@ -67,6 +69,24 @@ def test_codex_gptme_style_breakdown_not_undercounted() -> None:
         cache_read_tokens=800_000,
         output_tokens=10_000,
         token_count=1_810_000,
+        config=_config("codex", "gpt-5.6-sol"),
+    )
+    assert cost == pytest.approx(
+        (1_000_000 * 5.0 + 10_000 * 30.0 + 800_000 * 2.5) / 1e6
+    )
+
+
+def test_codex_gptme_style_with_slightly_off_total_not_undercounted() -> None:
+    # The gptme-style total can be off by a few tokens from rounding; it is
+    # still within ``cache_read`` of the gptme total, so the record must not be
+    # reclassified as codex-style and undercounted.
+    cost = estimate_session_cost(
+        "codex",
+        "gpt-5.6-sol",
+        input_tokens=1_000_000,
+        cache_read_tokens=800_000,
+        output_tokens=10_000,
+        token_count=1_810_010,
         config=_config("codex", "gpt-5.6-sol"),
     )
     assert cost == pytest.approx(
