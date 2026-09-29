@@ -385,6 +385,8 @@ def test_classify_quota_http_402_insufficient_credits():
         "API error (status 402 Payment Required): usage balance exhausted",
         "'previous_errors': [{'code': 402, 'message': 'can only afford 16 tokens'}]",
         '"http_status": 402',
+        "API error status: 402",
+        "copilot session.error type=other; status=402",
     )
     for message in messages:
         result = classify_failure_reason(
@@ -395,6 +397,23 @@ def test_classify_quota_http_402_insufficient_credits():
             error_text=message,
         )
         assert result == FAILURE_REASON_QUOTA, message
+
+
+def test_classify_bare_status_402_is_not_quota():
+    """Whitespace-only ``status 402`` is not an HTTP status line.
+
+    Guards the 402 matcher from the extra ``status 402`` alternative that
+    classified incidental prose as quota. Delimited forms and the explicit
+    ``402 Payment Required`` phrase stay quota (see the sibling test).
+    """
+    result = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=41,
+        input_tokens=0,
+        has_assistant_turn=True,
+        error_text="status 402 of the account is fine",
+    )
+    assert result != FAILURE_REASON_QUOTA
 
 
 def test_classify_invalid_request_http_400_unsupported_model():

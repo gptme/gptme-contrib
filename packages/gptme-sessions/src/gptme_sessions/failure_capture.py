@@ -48,10 +48,14 @@ _HTTP_429_RE = re.compile(
 )
 
 
+# HTTP/API 402 as a status. Require a delimiter (`status: 402`, `status=402`)
+# so incidental prose like ``status 402 of the account`` cannot classify as
+# quota. Grok's production line ``status 402 Payment Required`` is covered by
+# the phrase alternative, not the whitespace-only status form.
 _HTTP_402_RE = re.compile(
     r"(?:"
     r"error\s*code\s*[:=]\s*402\b"
-    r"|status(?:\s*code)?(?:\s*[:=]\s*|\s+)402\b"
+    r"|status(?:\s*code)?\s*[:=]\s*402\b"
     r"|http(?:/\d+\.\d+)?\s+402\b"
     r"|\b402\s+payment required\b"
     r"|[\"']code[\"']\s*:\s*402\b"
