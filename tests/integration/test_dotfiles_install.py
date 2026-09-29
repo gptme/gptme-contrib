@@ -4,7 +4,10 @@
 Covers the forked-agent path: install.sh must write
 ``~/.config/git/allowed-identities.conf`` from the installing agent's git
 identity, otherwise the global pre-commit hook refuses every commit
-(gptme/gptme-contrib#1705, item 1).
+(gptme/gptme-contrib#1705, item 1). It must also seed
+``~/.config/git/allowed-repos.conf`` with the shared coordination repo
+(gptme/gptme-superuser), otherwise the hooks fail closed and silently block
+every standup/message commit on a fresh fork.
 
 Run with: pytest tests/integration/test_dotfiles_install.py -v
 """
@@ -167,6 +170,47 @@ def test_repo_local_identity_is_never_used_for_the_conf(fake_home, tmp_path):
         f"{conf.read_text() if conf.exists() else ''}"
     )
     assert "not set" in result.stdout
+
+
+def test_writes_allowed_repos_conf_with_shared_coordination_repo(fake_home):
+    """A fresh fork must be able to commit standups/messages to gptme-superuser.
+
+    gptme-superuser is not an agent workspace (no gptme.toml [agent]), so it is
+    not auto-allowed by the hooks. Without a seeded allowed-repos.conf the hooks
+    fail closed and silently block every coordination commit.
+    """
+    env = _set_identity(fake_home, "agent@example.com")
+    result = _run_install(env)
+    assert result.returncode == 0, result.stderr
+
+    conf = fake_home / ".config" / "git" / "allowed-repos.conf"
+    assert conf.exists(), result.stdout
+
+    # It must actually source into ALLOWED_PATTERNS containing the shared repo,
+    # not merely mention it in a comment.
+    source_env = _clean_git_env()
+    source_env["HOME"] = str(fake_home)
+    sourced = subprocess.run(
+        ["bash", "-c", f'source "{conf}"; printf "%s\\n" "${{ALLOWED_PATTERNS[@]}}"'],
+        env=source_env,
+        capture_output=True,
+        text=True,
+    )
+    assert sourced.returncode == 0, sourced.stderr
+    assert "gptme/gptme-superuser" in sourced.stdout.splitlines()
+
+
+def test_existing_allowed_repos_conf_is_not_overwritten(fake_home):
+    """A hand-curated repo allowlist must survive a re-run."""
+    env = _set_identity(fake_home, "agent@example.com")
+    conf = fake_home / ".config" / "git" / "allowed-repos.conf"
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    conf.write_text('ALLOWED_PATTERNS=(\n    "curated/repo"\n)\n')
+
+    result = _run_install(env)
+    assert result.returncode == 0, result.stderr
+    assert "curated/repo" in conf.read_text()
+    assert "gptme-superuser" not in conf.read_text()
 
 
 if __name__ == "__main__":
