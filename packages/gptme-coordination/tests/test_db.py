@@ -119,8 +119,8 @@ class TestResolveCoordinationDbPath:
             # relative path is ignored — falls back to git root or cwd
             assert result == Path(tmp) / "state/coordination/coord.db"
 
-    def test_bob_workspace_priority_over_agent_workspace(self):
-        """BOB_WORKSPACE takes priority over AGENT_WORKSPACE."""
+    def test_agent_workspace_priority_over_bob_workspace(self):
+        """AGENT_WORKSPACE takes priority over the BOB_WORKSPACE legacy alias."""
         with tempfile.TemporaryDirectory() as tmp:
             bob_dir = Path(tmp) / "bob"
             agent_dir = Path(tmp) / "agent"
@@ -128,7 +128,7 @@ class TestResolveCoordinationDbPath:
             agent_dir.mkdir()
             env = {"BOB_WORKSPACE": str(bob_dir), "AGENT_WORKSPACE": str(agent_dir)}
             result = resolve_coordination_db_path(cwd=tmp, env=env)
-            assert result == bob_dir / "state/coordination/coord.db"
+            assert result == agent_dir / "state/coordination/coord.db"
 
     def test_coordination_db_beats_workspace_vars(self):
         """COORDINATION_DB still wins even when BOB_WORKSPACE is set."""
@@ -167,6 +167,7 @@ class TestCoordinationDB:
                 ["git", "init"], cwd=submodule, capture_output=True, check=True
             )
             monkeypatch.chdir(submodule)
+            monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
             monkeypatch.setenv("BOB_WORKSPACE", str(brain_dir))
 
             db = CoordinationDB()

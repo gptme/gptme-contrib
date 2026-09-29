@@ -4,8 +4,8 @@ gptme-ace ships as a generic plugin, so no module should assume the agent is
 Bob. Workspace resolution mirrors ``gptme_coordination`` so a fork resolves the
 same workspace root everywhere:
 
-1. Workspace env vars (absolute paths only): ``BOB_WORKSPACE``,
-   ``AGENT_WORKSPACE``, or the legacy ``BOB_BRAIN_ROOT`` alias.
+1. Workspace env vars (absolute paths only): ``AGENT_WORKSPACE``,
+   ``BOB_WORKSPACE`` (legacy alias), or the legacy ``BOB_BRAIN_ROOT`` alias.
 2. An agent repo detected by walking up from this file for a directory that
    contains both ``gptme.toml`` and ``gptme-contrib/``.
 3. ``$HOME/<home-name>`` (e.g. ``/home/bob`` -> ``/home/bob/bob``). It is
@@ -29,9 +29,9 @@ from pathlib import Path
 from typing import Mapping
 
 #: Env vars checked for the workspace root, in precedence order. Matches
-#: ``gptme_coordination`` (legacy ``BOB_WORKSPACE`` first, neutral
-#: ``AGENT_WORKSPACE`` next, then the legacy ``BOB_BRAIN_ROOT`` alias).
-WORKSPACE_ENV_VARS = ("BOB_WORKSPACE", "AGENT_WORKSPACE", "BOB_BRAIN_ROOT")
+#: ``gptme_coordination`` (neutral ``AGENT_WORKSPACE`` first, legacy
+#: ``BOB_WORKSPACE`` next, then the legacy ``BOB_BRAIN_ROOT`` alias).
+WORKSPACE_ENV_VARS = ("AGENT_WORKSPACE", "BOB_WORKSPACE", "BOB_BRAIN_ROOT")
 
 #: Historical agent name used when nothing else is configured.
 DEFAULT_AGENT_NAME = "Bob"
