@@ -1124,18 +1124,21 @@ def resolve_backend_trajectory(
     # path for every runloops PM session, which rots once /tmp is cleaned — the
     # same order the bash worker already uses (project-monitoring-worker.sh).
     #
-    # The mtime guard mirrors the copilot branch below: a session id is a
-    # deterministic uuid5(slug, run_salt), so a same-second re-run (or any
-    # re-dispatch that reuses the salt) reuses the id and can find a *previous*
-    # run's JSONL already on disk. Without the guard we would record that stale
-    # transcript as this run's trajectory and the grader/judge/blame would read
-    # the wrong session. A file this run wrote has mtime >= started_epoch.
+    # The mtime guard is stricter than the copilot branch's `>=`: a session id
+    # is a deterministic uuid5(slug, run_salt), and run_salt is int(time.time()),
+    # so a same-second re-run (or a re-dispatch that reuses the salt) reuses the
+    # id and can find a *previous* run's JSONL already on disk. `>=` would accept
+    # that leftover when its mtime lands in this run's start second. Treat
+    # mtime == started_epoch as stale and fall through to the stream log — that
+    # is this run's tee'd transcript, not a previous session. A file this run
+    # wrote after the start second has mtime > started_epoch; a real CC session
+    # writes the JSONL over many seconds, so the durable path still wins.
     predicted_path = Path(predicted) if predicted else None
     cc_predicted_ok = (
         predicted_path is not None
         and predicted_path.is_file()
         and predicted_path.stat().st_size > CC_TRAJECTORY_MIN_BYTES
-        and int(predicted_path.stat().st_mtime) >= started_epoch
+        and int(predicted_path.stat().st_mtime) > started_epoch
     )
     if backend == "claude-code" and cc_predicted_ok:
         _log(

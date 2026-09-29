@@ -1441,6 +1441,42 @@ def test_trajectory_cc_stale_projects_jsonl_falls_back_to_stream_log(
         ref.unlink(missing_ok=True)
 
 
+def test_trajectory_cc_same_second_projects_jsonl_falls_back_to_stream_log(
+    tmp_path,
+) -> None:
+    """A predicted JSONL with mtime == started_epoch is a same-second leftover.
+
+    run_salt is int(time.time()), so a retry in the same second reuses the
+    session id. The previous run's JSONL can have mtime == this run's start
+    second; the strict `>` guard falls back to the stream log rather than
+    recording the leftover as this run's trajectory.
+    """
+    sid = f"test-traj-same-sec-{os.getpid()}"
+    predicted = tmp_path / "projects" / f"{sid}.jsonl"
+    predicted.parent.mkdir()
+    predicted.write_text("y" * 6000)
+    now = 1_800_000_000
+    os.utime(predicted, (now, now))
+    log = tmp_path / "stream.jsonl"
+    log.write_text("x" * 6000)
+    ref = Path("/tmp") / f"cc-session-log-ref-{sid}.txt"
+    ref.write_text(str(log))
+    try:
+        got = resolve_backend_trajectory(
+            "claude-code",
+            sid,
+            predicted=str(predicted),
+            started_epoch=now,
+            copilot_state_dir=tmp_path,
+            codex_sessions_dir=tmp_path,
+            copilot_pre=None,
+            codex_pre=None,
+        )
+        assert got == str(log)
+    finally:
+        ref.unlink(missing_ok=True)
+
+
 def test_trajectory_cc_small_projects_jsonl_falls_back_to_stream_log(
     tmp_path,
 ) -> None:
