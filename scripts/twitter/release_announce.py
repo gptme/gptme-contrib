@@ -198,12 +198,23 @@ def extract_features(body: str, limit: int = 5) -> list[str]:
     return feats[:limit]
 
 
+# Human-readable product names; falls back to the repo name.
+PRODUCT_NAMES = {
+    "gptme": "gptme",
+    "activitywatch": "ActivityWatch",
+    "aw-android": "ActivityWatch for Android",
+}
+
+
+def product_name(repo: str) -> str:
+    name = repo.split("/")[-1]
+    return PRODUCT_NAMES.get(name.lower(), name)
+
+
 def compose_announcement(tag: str, body: str, repo: str) -> str:
     version = tag.lstrip("v")
     feats = extract_features(body)
-    header = f"gptme v{version} is out 🎉"
-    if repo.split("/")[-1] != "gptme":
-        header = f"{repo.split('/')[-1]} v{version} is out 🎉"
+    header = f"{product_name(repo)} v{version} is out 🎉"
     if not feats:
         return f"{header}\n\nRelease notes in the reply."
     lines = [header, ""]
@@ -216,7 +227,7 @@ def compose_announcement(tag: str, body: str, repo: str) -> str:
 
 
 def compose_quote(tag: str, repo: str) -> str:
-    repo_name = repo.split("/")[-1]
+    repo_name = product_name(repo)
     return (
         f"{repo_name} {tag} is out — release notes below. "
         "Built with gptme, reviewed by agents, shipped by CI."

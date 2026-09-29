@@ -969,3 +969,11 @@ def test_naive_published_at_skips_safely(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(sys, "argv", ["release_announce.py"])
     assert ra.main() == 0
     assert posted == [], "naive publishedAt should skip, not crash or announce"
+
+
+def test_product_names_for_org_repos():
+    assert ra.product_name("ActivityWatch/aw-android") == "ActivityWatch for Android"
+    assert ra.product_name("ActivityWatch/activitywatch") == "ActivityWatch"
+    assert ra.product_name("owner/widget") == "widget"
+    text = ra.compose_announcement("v0.14.2", "", "ActivityWatch/aw-android")
+    assert text.startswith("ActivityWatch for Android v0.14.2 is out")
