@@ -46,7 +46,7 @@ from .record import (
     normalize_reasoning_effort,
     trajectory_revision_for,
 )
-from .signals import extract_from_path, grade_signals
+from .signals import extract_from_path, grade_signals, reclassify_bookkeeping_commits
 from .smell import compute_smell_score
 from .store import SessionStore
 
@@ -356,6 +356,8 @@ def post_session(
     commit_trailers: Mapping[str, Sequence[str]] | None = None,
     reasoning_profile: str | None = None,
     reasoning_effort: str | None = None,
+    commit_files: Mapping[str, Sequence[str]] | None = None,
+    bookkeeping_path_prefixes: Sequence[str] = (),
 ) -> PostSessionResult:
     """Record a completed agent session and extract trajectory signals.
 
@@ -466,6 +468,19 @@ def post_session(
         Used to distinguish session-trailer-owned SHAs from untagged/ambiguous
         shared-range commits when a bound trajectory has file edits but no
         commit SHA. Missing entries are treated as untagged (ambiguous).
+    commit_files:
+        Optional map of caller commit SHA -> repo-relative paths it touched.
+        Only used together with ``bookkeeping_path_prefixes``.
+    bookkeeping_path_prefixes:
+        Repo-relative path prefixes (e.g. ``("journal/", "tasks/")``) whose
+        changes are bookkeeping, not deliverables. For grading, a commit whose
+        known files (from ``commit_files``) all fall under these prefixes
+        counts as file writes instead of a git commit. This applies to
+        trajectory-detected commits (matched by SHA prefix) and to
+        trailer-owned commits the extractor missed. Commits without file info
+        are unchanged. The default (empty) keeps grading unchanged. The count
+        of reclassified commits is recorded in
+        ``record.grade_reasons["productivity"]``.
     harness_session_id:
         Harness-native session id used by the ``match-lessons`` hook to name its
         per-session events file (for Claude Code, the transcript UUID). Used to
@@ -895,15 +910,41 @@ def post_session(
         extra_details=extra_deliverable_details,
     )
 
+    # Bookkeeping-only commits (journal entries, task-file edits) grade as file
+    # writes, not commits. No-op unless the caller passes prefixes + file info.
+    grading_signals = signals
+    bookkeeping_reclassified = 0
+    if signals is not None and grade is not None:
+        grading_signals, bookkeeping_reclassified = reclassify_bookkeeping_commits(
+            signals, commit_files, bookkeeping_path_prefixes
+        )
+        if bookkeeping_reclassified:
+            regraded = round(
+                grade_signals(grading_signals, category=signals.get("inferred_category")), 4
+            )
+            logger.info(
+                "Re-graded %.4f -> %.4f: %d bookkeeping-only commit(s) counted as file writes",
+                grade,
+                regraded,
+                bookkeeping_reclassified,
+            )
+            grade = regraded
+
     # Re-grade with git-proven commits the extractor missed. Commits only add
     # effective work units, so this can raise the grade but never lower it.
     trailer_owned_missed = list(dict.fromkeys(trailer_owned_missed))
-    if trailer_owned_missed and signals is not None and grade is not None:
-        adjusted = dict(signals)
-        adjusted["git_commits"] = list(signals.get("git_commits") or []) + [
-            f"(trailer-owned) ({sha[:7]})" for sha in trailer_owned_missed
+    if trailer_owned_missed and grading_signals is not None and grade is not None:
+        with_trailer = dict(grading_signals)
+        with_trailer["git_commits"] = list(grading_signals.get("git_commits") or []) + [
+            f"(trailer-owned) ({sha[:12]})" for sha in trailer_owned_missed
         ]
-        regraded = round(grade_signals(adjusted, category=signals.get("inferred_category")), 4)
+        adjusted, trailer_bookkeeping = reclassify_bookkeeping_commits(
+            with_trailer, commit_files, bookkeeping_path_prefixes
+        )
+        bookkeeping_reclassified += trailer_bookkeeping
+        regraded = round(
+            grade_signals(adjusted, category=grading_signals.get("inferred_category")), 4
+        )
         if regraded > grade:
             logger.info(
                 "Re-graded %.4f -> %.4f with %d trailer-owned commit(s) the "
@@ -1229,6 +1270,10 @@ def post_session(
             cost_usd = estimated
     if grade is not None:
         record.set_productivity_grade(grade)
+        if bookkeeping_reclassified:
+            record.grade_reasons["productivity"] = (
+                f"bookkeeping_commits_as_writes:n={bookkeeping_reclassified}"
+            )
         # NOTE: Weighted multi-dim combine (productivity × alignment × harm)
         # is handled by compute-harm-signal.py after harm grades are computed.
         # At post_session time only productivity is available, so there is

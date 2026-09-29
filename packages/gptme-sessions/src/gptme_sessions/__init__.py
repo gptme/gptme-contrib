@@ -45,8 +45,10 @@ from .signals import (
     extract_usage_codex,
     extract_usage_gptme,
     extract_usage_pi,
+    bookkeeping_commit_files,
     grade_signals,
     is_productive,
+    reclassify_bookkeeping_commits,
 )
 from .subagent_summary import (
     classify_agent,
@@ -140,8 +142,10 @@ __all__ = [
     "extract_signals_codex",
     "extract_signals_copilot",
     "extract_signals_pi",
+    "bookkeeping_commit_files",
     "grade_signals",
     "is_productive",
+    "reclassify_bookkeeping_commits",
     "discover_gptme_sessions",
     "discover_cc_sessions",
     "find_cc_session_file",
