@@ -455,6 +455,15 @@ _CACHE_PRICING_PROVIDER: dict[tuple[str, str], str] = {
     # kimi-k2.6: no cache pricing exposed on OpenRouter
 }
 
+# Harnesses whose recorded ``input_tokens`` already INCLUDE cache reads.
+# Codex maps OpenAI usage directly (input_tokens + cached_input_tokens, where
+# the cached count is a subset of input), so token_count == input + output.
+# gptme records exclude cache reads (token_count == input + output + cache_read).
+# Without this, codex cached input was billed twice: once at full price inside
+# input_tokens and again at the cache-read rate (2026-09-29: a gpt-5.6-sol run
+# recorded $18.02 vs $6.88 actual-rate estimate).
+_INPUT_INCLUDES_CACHE_READ: frozenset[str] = frozenset({"codex"})
+
 
 def estimate_session_cost(
     harness: str,
@@ -520,6 +529,9 @@ def estimate_session_cost(
     provider = _CACHE_PRICING_PROVIDER.get(key)
     cache_read_rate = CACHE_READ_MULTIPLIER.get(provider or "", 1.0)
     cache_create_rate = CACHE_CREATION_MULTIPLIER.get(provider or "", 1.0)
+
+    if harness in _INPUT_INCLUDES_CACHE_READ:
+        inp = max(0, inp - cache_read)
 
     cost_usd = (
         inp * input_price
