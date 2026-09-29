@@ -96,6 +96,23 @@ class TestBashHeredocWritePaths:
         cmd = "cat > /home/bob/bob/journal/2026-09-29/notes.md <<EOF\nhello\nEOF"
         assert bash_heredoc_write_paths(cmd) == ["/home/bob/bob/journal/2026-09-29/notes.md"]
 
+    def test_variable_expansion_in_path_preserved(self):
+        """${VAR} in a heredoc path is preserved so the caller can glob it.
+
+        Regression: the tree-sitter concatenation handler used to keep only
+        word/raw_string/command_substitution children, dropping ``expansion``
+        (``${VAR}``) and mangling "/journal/${DATE}/x.md" into "/journal//x.md".
+        The caller keys its glob branch on a literal "${", so the mangled path
+        was silently dropped.
+        """
+        cmd = "cat > /journal/${DATE}/session.md <<EOF\nhello\nEOF"
+        assert bash_heredoc_write_paths(cmd) == ["/journal/${DATE}/session.md"]
+
+    def test_bare_variable_expansion_path_preserved(self):
+        """A path that is exactly ${FILE} (no concatenation) is preserved."""
+        cmd = "cat > ${FILE} <<EOF\nhello\nEOF"
+        assert bash_heredoc_write_paths(cmd) == ["${FILE}"]
+
     def test_multiple_heredocs_in_pipeline(self):
         """Multiple heredoc writes in the same command string."""
         cmd = "cat > /journal/a.md <<EOF\nhello\nEOF\n" "cat > /journal/b.md <<EOF2\nworld\nEOF2"
@@ -152,6 +169,21 @@ class TestHasGitCommitCommand:
     def test_git_log_not_commit(self):
         assert has_git_commit_command("git log --oneline -5") is False
 
+    def test_commit_as_operand_not_detected(self):
+        """`commit` as a path/grep operand is not a commit invocation.
+
+        Regression: the tree-sitter path scanned all word args for "commit",
+        so `git log commit` / `git log --grep commit` matched. The regex
+        fallback anchored on the subcommand and did not.
+        """
+        assert has_git_commit_command("git log commit") is False
+        assert has_git_commit_command("git log --grep commit") is False
+        assert has_git_commit_command("git show commit") is False
+
+    def test_git_c_value_option_commit(self):
+        """`git -c key=val commit` is a commit (value-taking option before it)."""
+        assert has_git_commit_command("git -c user.name=x commit -m 'm'") is True
+
     def test_git_diff_not_commit(self):
         assert has_git_commit_command("git diff --stat HEAD~1") is False
 
@@ -185,6 +217,14 @@ class TestHasGitPushCommand:
 
     def test_git_pull_not_push(self):
         assert has_git_push_command("git pull --rebase") is False
+
+    def test_push_as_operand_not_detected(self):
+        """`push` as a grep/operand word is not a push invocation."""
+        assert has_git_push_command("git log --grep push") is False
+
+    def test_git_c_value_option_push(self):
+        """`git -c key=val push` is a push."""
+        assert has_git_push_command("git -c user.name=x push origin main") is True
 
     def test_empty(self):
         assert has_git_push_command("") is False

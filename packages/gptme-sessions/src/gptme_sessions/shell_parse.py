@@ -65,13 +65,17 @@ def _ts_path_text(node: Any) -> str | None:
         return None
     # Concatenation: e.g. /journal/$(date +%Y-%m-%d)/session.md is represented
     # as concatenation of word("/journal/") + command_substitution + word("/session.md").
-    # Reconstruct by joining child text; preserve $(…) literally for date expansion.
+    # Reconstruct by joining child text; preserve $(…) and ${VAR} literally so the
+    # caller can resolve date expansions or glob parameter expansions. Dropping a
+    # ${VAR} child would mangle the path (e.g. "/journal/${DATE}/x.md" ->
+    # "/journal//x.md"), and the mangled string no longer matches the caller's
+    # "${" glob branch, silently losing the journal write.
     if node_type == "concatenation":
         parts: list[str] = []
         for child in node.children:
             if child.type in ("word", "raw_string"):
                 parts.append(child.text.decode(errors="replace").strip("'\""))
-            elif child.type == "command_substitution":
+            elif child.type in ("command_substitution", "expansion", "variable_expansion"):
                 parts.append(child.text.decode(errors="replace"))
         return "".join(parts) if parts else None
     return str(node.text.decode(errors="replace").strip("'\""))
@@ -84,7 +88,15 @@ def _ts_file_redirect_path(fr_node: Any) -> str | None:
     if not has_write_op:
         return None
     for c in children:
-        if c.type in ("word", "raw_string", "string", "concatenation"):
+        if c.type in (
+            "word",
+            "raw_string",
+            "string",
+            "concatenation",
+            "command_substitution",
+            "expansion",
+            "variable_expansion",
+        ):
             return _ts_path_text(c)
     return None
 
@@ -129,6 +141,32 @@ def _ts_heredoc_write_paths(cmd: str) -> list[str]:
     return paths
 
 
+# git global options that consume the following token as their value.
+_GIT_VALUE_OPTS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"})
+
+
+def _ts_git_subcommand(cmd_node: Any) -> str | None:
+    """Return git's subcommand — the first positional (non-option) argument.
+
+    Anchoring on the subcommand avoids false positives that a bare
+    ``"commit" in args`` check produces: ``git log commit`` or
+    ``git log --grep commit`` contain the word ``commit`` but are not commit
+    invocations. This mirrors the regex fallback's ``git [-C path] commit``
+    anchoring while also tolerating value-taking options such as
+    ``git -c user.name=x commit``.
+    """
+    words = [str(c.text.decode()) for c in cmd_node.children if c.type == "word"]
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if word.startswith("-"):
+            # Skip the option, and its value too for value-taking options.
+            i += 2 if word in _GIT_VALUE_OPTS else 1
+            continue
+        return word
+    return None
+
+
 def _ts_has_git_commit(cmd: str) -> bool:
     """Tree-sitter: True when cmd contains a git commit or git-safe-commit."""
     tree = _PARSER.parse(cmd.encode())
@@ -141,10 +179,8 @@ def _ts_has_git_commit(cmd: str) -> bool:
         name = name_nodes[0].text.decode()
         if name == "git-safe-commit":
             return True
-        if name == "git":
-            args = [c.text.decode() for c in cmd_node.children if c.type == "word"]
-            if "commit" in args:
-                return True
+        if name == "git" and _ts_git_subcommand(cmd_node) == "commit":
+            return True
     return False
 
 
@@ -158,10 +194,8 @@ def _ts_has_git_push(cmd: str) -> bool:
         if not name_nodes:
             continue
         name = name_nodes[0].text.decode()
-        if name == "git":
-            args = [c.text.decode() for c in cmd_node.children if c.type == "word"]
-            if "push" in args:
-                return True
+        if name == "git" and _ts_git_subcommand(cmd_node) == "push":
+            return True
     return False
 
 
