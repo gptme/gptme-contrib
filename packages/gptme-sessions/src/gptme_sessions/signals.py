@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from .deliverables import build_deliverable_detail, project_deliverable_details
+from .shell_parse import bash_heredoc_write_paths as _bash_heredoc_write_paths
 from .pi import (
     PiSessionFormatError,
     active_pi_records,
@@ -1230,17 +1231,13 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                             if num_m:
                                 _pr_merge_num_by_tool_id[tool_id] = int(num_m.group(1))
 
-                    # Parse Bash commands for journal writes via cat heredoc redirects.
-                    # Many CC sessions write journals via heredoc (cat > path << EOF)
-                    # rather than the Write tool, so Write/Edit alone misses them.
-                    # Note: tee redirects are not currently handled (intentional scope limit).
+                    # Parse Bash commands for journal writes via cat/tee heredoc
+                    # redirects. Many CC sessions write journals via heredoc
+                    # (cat > path << EOF) rather than the Write tool, so
+                    # Write/Edit alone misses them. Uses tree-sitter-bash when
+                    # available for reliable heredoc variant detection.
                     if "/journal/" in cmd:
-                        for m in re.finditer(
-                            r"cat\s*>>?\s*(.*?\.md)(?:\s+<<|\s*$)",
-                            cmd,
-                            re.MULTILINE,
-                        ):
-                            jpath = m.group(1).strip()
+                        for jpath in _bash_heredoc_write_paths(cmd):
                             if "/journal/" not in jpath:
                                 continue
                             # Resolve common shell date expansions using

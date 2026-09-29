@@ -35,13 +35,21 @@ Issues = "https://github.com/gptme/gptme-contrib/issues"
 cost = [
     "gptme-usage>=0.1.0",
 ]
+shell-parse = [
+    "tree-sitter>=0.21",
+    "tree-sitter-bash>=0.21",
+]
 dev = [
     "mypy>=1.0.0",
     "pytest>=7.0",
     "types-PyYAML>=6.0",
+    "tree-sitter>=0.21",
+    "tree-sitter-bash>=0.21",
 ]
 test = [
     "pytest>=7.0",
+    "tree-sitter>=0.21",
+    "tree-sitter-bash>=0.21",
 ]
 
 [project.scripts]
