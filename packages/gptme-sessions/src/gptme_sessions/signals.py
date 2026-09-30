@@ -1877,8 +1877,9 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
     1. **~/.claude/projects/*.jsonl** (durable, per-turn API responses):
        Each ``type="assistant"`` record is a complete API response where
        ``message.usage`` carries the per-turn token counts.  Claude Code
-       writes the same response once per streamed content block, so records
-       are de-duplicated by ``message.id`` before summing — otherwise
+       writes the same response once per streamed content block, so consecutive
+       records sharing a ``message.id`` are de-duplicated before summing —
+       otherwise
        multi-block responses (tool calls + text) multiply their usage.
 
     2. **--stream-json log** (streaming events):
@@ -1904,12 +1905,14 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
     context_peak_tokens: int | None = None
     result_usage: dict | None = None
     stop_reason: str | None = None
-    # CC emits one assistant record per streamed content block; each carries the
-    # full response's usage. De-duplicate by (message id, usage signature) so a
-    # response split into N blocks is counted once, not N times — while a record
-    # that reuses an id with *different* usage (retry/resume edge cases) is still
-    # summed rather than silently dropped.
-    seen_usage_keys: set[tuple[str, int, int, int, int]] = set()
+    # CC emits one assistant record per streamed content block; the copies of a
+    # single response are written as *consecutive* assistant records sharing the
+    # same message id and byte-identical usage (verified: 0/356 duplicate groups
+    # are non-consecutive; none vary in usage). De-duplicate only such
+    # consecutive (message id, usage) repeats, so a genuinely distinct response
+    # later in the session — even one that reuses an id, or a retry/resumed turn
+    # with identical counters — is never dropped.
+    prev_usage_key: tuple[str, int, int, int, int] | None = None
 
     for record in msgs:
         rec_type = record.get("type")
@@ -1930,9 +1933,11 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
                     turn_cache_create,
                     turn_cache_read,
                 )
-                if dedup_key in seen_usage_keys:
+                if dedup_key == prev_usage_key:
                     continue
-                seen_usage_keys.add(dedup_key)
+                prev_usage_key = dedup_key
+            else:
+                prev_usage_key = None
             turn_context = turn_input + turn_cache_create + turn_cache_read
 
             per_turn_input += turn_input

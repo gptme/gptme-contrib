@@ -1725,6 +1725,29 @@ def test_extract_usage_cc_same_id_different_usage_is_summed():
     assert usage["input_tokens"] == 20  # 10 * 2
 
 
+def test_extract_usage_cc_nonconsecutive_same_id_is_summed():
+    """Only *consecutive* repeats of one response are de-duplicated.
+
+    The copies of a single response are written back-to-back; a distinct
+    response that later reuses the same id (with identical counters) sits
+    between other turns and must still be counted.
+    """
+
+    def rec(message_id: str, out: int) -> dict:
+        r = _make_cc_assistant_usage(10, out)
+        r["message"]["id"] = message_id
+        return r
+
+    msgs = [
+        rec("msg_1", 50),  # response 1
+        rec("msg_2", 20),  # distinct response in between
+        rec("msg_1", 50),  # same id + usage, but not consecutive -> counted
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["output_tokens"] == 120  # 50 + 20 + 50
+    assert usage["input_tokens"] == 30  # 10 * 3
+
+
 def test_extract_usage_cc_no_id_records_not_deduped():
     """Records lacking a message id keep prior summing behaviour."""
     msgs = [
