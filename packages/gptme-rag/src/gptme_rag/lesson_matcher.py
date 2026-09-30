@@ -39,7 +39,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Any
 
 import regex
@@ -1353,7 +1353,7 @@ def _bm25_score(query_terms: list[str], doc_terms: list[str], index: dict[str, A
     return score
 
 
-def _bm25_min_z(n_nonzero: int) -> float:
+def _bm25_min_z(n_nonzero: int, ceiling: float = BM25_MIN_Z) -> float:
     """Adaptive minimum z-score gate.
 
     When very few lessons overlap the query (``n_nonzero < 3``) the query is
@@ -1364,7 +1364,7 @@ def _bm25_min_z(n_nonzero: int) -> float:
     if n_nonzero < 3:
         return -math.inf
     max_attainable = (n_nonzero - 1) / math.sqrt(n_nonzero)
-    return min(BM25_MIN_Z, BM25_STANDOUT_FRACTION * max_attainable)
+    return min(ceiling, BM25_STANDOUT_FRACTION * max_attainable)
 
 
 def _bm25_zscores(scores: list[float]) -> list[float]:
@@ -1409,6 +1409,8 @@ def score_lessons(
     max_results: int = 5,
     *,
     use_bm25: bool = True,
+    skill_bm25_min_z: float | None = None,
+    skill_bm25_exempt_paths: Collection[str] = (),
 ) -> list[dict[str, Any]]:
     """Match *lessons* against *prompt* and return the top ``max_results`` hits.
 
@@ -1435,6 +1437,10 @@ def score_lessons(
         prompt: The query text (not pre-lowercased; handled internally).
         max_results: Maximum number of results to return.
         use_bm25: Enable BM25 semantic scoring (True by default).
+        skill_bm25_min_z: Optional adaptive z-score ceiling for skills only.
+            Keyword and descriptor matches are unaffected.
+        skill_bm25_exempt_paths: Paths that retain the ordinary lesson gate.
+            Policy classification belongs to the caller, not this library.
 
     Returns:
         List of matched lesson dicts, sorted descending by score, capped at
@@ -1457,6 +1463,10 @@ def score_lessons(
         bm_n_nonzero = sum(1 for s in bm_scores if s > 0)
         bm_min_z = _bm25_min_z(bm_n_nonzero)
 
+    skill_bm_min_z = (
+        _bm25_min_z(bm_n_nonzero, skill_bm25_min_z) if skill_bm25_min_z is not None else bm_min_z
+    )
+    exempt_paths = set(skill_bm25_exempt_paths)
     results: list[dict[str, Any]] = []
 
     for i, lesson in enumerate(lessons):
@@ -1508,7 +1518,12 @@ def score_lessons(
             passes_raw_gate = bm_raw >= BM25_MIN_RAW or (corpus_below_floor and bm_raw > 0)
             # With two overlaps, only the positive-z standout should contribute;
             # flooring the weaker negative-z hit would over-credit noise.
-            passes_z_gate = bm_z >= bm_min_z and not (bm_n_nonzero == 2 and bm_z <= 0)
+            gate = (
+                skill_bm_min_z
+                if lesson.get("is_skill") and lesson.get("path") not in exempt_paths
+                else bm_min_z
+            )
+            passes_z_gate = bm_z >= gate and not (bm_n_nonzero == 2 and bm_z <= 0)
             if passes_z_gate and passes_raw_gate:
                 # Use z-score as the contribution so ranking is preserved.
                 # Edge case: one nonzero score has a degenerate z-score of 0,
