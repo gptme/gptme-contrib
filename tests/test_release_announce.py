@@ -1047,6 +1047,24 @@ def test_discord_permanent_4xx_skips_channel_and_continues(tmp_path, monkeypatch
     assert "discord_111_pending_at" not in rec2
 
 
+def test_discord_all_channels_permanently_rejected_reports_failure(
+    tmp_path, monkeypatch
+):
+    """Every channel permanently rejected must still surface a non-zero exit."""
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(ra, "_post_discord", lambda c, t: (False, None, 403))
+    rel = {"tagName": "v1.2.3", "body": NOTES, "url": "https://example/rel"}
+    # First run: both channels rejected -> exit 1, both ledgered as skipped.
+    assert ra._main(_ns(), rel) == 1
+    rec = ra.load_state()["gptme/gptme#v1.2.3"]
+    assert rec["discord_111_skip_reason"] == "HTTP 403"
+    assert rec["discord_222_skip_reason"] == "HTTP 403"
+    assert "discord_111_pending_at" not in rec
+    assert "discord_222_pending_at" not in rec
+    # Second run: the ledgered steps are skipped, so it no longer fails.
+    assert ra._main(_ns(), rel) == 0
+
+
 def test_discord_failure_does_not_block_x_steps(tmp_path, monkeypatch):
     """A Discord failure must not suppress the X announcement (P1 #1779)."""
     monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "state.json")

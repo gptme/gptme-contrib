@@ -363,6 +363,11 @@ def _discord_step(
             )
             record[f"{step.removesuffix('_id')}_skip_reason"] = f"HTTP {code}"
             _finish_post(state, record, step, None)
+            # Surface the permanent rejection this run so the timer/operator is
+            # alerted even when every channel is rejected. Later runs skip the
+            # now-ledgered step and return success, so this is a one-shot signal,
+            # not a stalling loop.
+            ok = False
             continue
         if not posted:
             # Transient or ambiguous (timeout after send?) — keep the marker so a
