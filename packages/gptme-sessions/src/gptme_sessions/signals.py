@@ -1876,8 +1876,10 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
 
     1. **~/.claude/projects/*.jsonl** (durable, per-turn API responses):
        Each ``type="assistant"`` record is a complete API response where
-       ``message.usage`` carries the per-turn token counts.  Summing across
-       turns gives true session totals.
+       ``message.usage`` carries the per-turn token counts.  Claude Code
+       writes the same response once per streamed content block, so records
+       are de-duplicated by ``message.id`` before summing — otherwise
+       multi-block responses (tool calls + text) multiply their usage.
 
     2. **--stream-json log** (streaming events):
        ``type="assistant"`` records are intermediate streaming events where
@@ -1902,12 +1904,21 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
     context_peak_tokens: int | None = None
     result_usage: dict | None = None
     stop_reason: str | None = None
+    # CC emits one assistant record per streamed content block; each carries the
+    # full response's usage. De-duplicate by message id so a response split into
+    # N blocks is counted once, not N times.
+    seen_message_ids: set[str] = set()
 
     for record in msgs:
         rec_type = record.get("type")
 
         if rec_type == "assistant":
             msg = record.get("message", {})
+            message_id = msg.get("id")
+            if isinstance(message_id, str) and message_id:
+                if message_id in seen_message_ids:
+                    continue
+                seen_message_ids.add(message_id)
             usage = msg.get("usage") or {}
             turn_input = _as_int(usage.get("input_tokens")) or 0
             turn_output = _as_int(usage.get("output_tokens")) or 0
