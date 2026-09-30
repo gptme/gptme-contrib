@@ -77,6 +77,54 @@ def test_final_completion_clears_earlier_error_flag():
     assert not results[-1].is_error
 
 
+def test_empty_completed_envelope_still_accepts_later_output():
+    # Grok emits an empty ``completed`` envelope (e.g. Monitor calls) whose real
+    # output arrives afterwards as ``in_progress``; that must not be finalized.
+    messages = _normalize_grok(
+        [
+            call("monitor", "watch.sh"),
+            update("monitor", "", type="Monitor"),
+            update("monitor", "DONE: artifact written", "in_progress"),
+        ]
+    )
+    results = [m for m in messages if m.role == "tool_result"]
+    assert len(results) == 1
+    assert results[-1].content == "DONE: artifact written"
+
+
+def test_task_poll_restore_is_not_finalized_by_later_growth():
+    messages = _normalize_grok(
+        [
+            call("build", "cargo build"),
+            update(
+                "build",
+                "Command moved to background",
+                type="BackgroundTaskStarted",
+                task_id="bg",
+            ),
+            update("build", "first snapshot", "in_progress"),
+            {
+                "type": "tool_call",
+                "toolCallId": "poll",
+                "toolName": "get_command_or_subagent_output",
+                "rawInput": {"task_id": "bg"},
+            },
+            {
+                "type": "tool_call_update",
+                "toolCallId": "poll",
+                "status": "completed",
+                "rawOutput": {
+                    "type": "TaskOutput",
+                    "Result": {"task_id": "bg", "output": "short poll snapshot"},
+                },
+            },
+            update("build", "first snapshot plus more output", "in_progress"),
+        ]
+    )
+    by_id = {m.tool_call_id: m for m in messages if m.role == "tool_result"}
+    assert by_id["build"].content == "first snapshot plus more output"
+
+
 def test_growing_background_output_keeps_latest_largest_snapshot():
     # Real Grok background output streams as growing, cumulative in_progress
     # snapshots; the first is partial, so later larger snapshots must enrich it.

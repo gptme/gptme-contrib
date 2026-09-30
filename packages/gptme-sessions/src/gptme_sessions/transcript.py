@@ -687,7 +687,11 @@ def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
                     ts,
                     is_error,
                     first_background_output or is_final,
-                    is_final,
+                    # Only a completion that actually carries output finalizes
+                    # the result. Grok also emits empty ``completed`` envelopes
+                    # (e.g. Monitor calls) whose real output arrives afterwards
+                    # as ``in_progress``; those must stay enrichable.
+                    is_final and bool(text),
                 )
                 if first_background_output:
                     background_pending.discard(call_id)
@@ -701,7 +705,11 @@ def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
                     if original_id:
                         task_text, failed = _grok_output(item)
                         if task_text:
-                            put_result(original_id, task_text, ts, failed, True, True)
+                            # A poll restores authoritative output but is not
+                            # a terminal state: later, longer in_progress
+                            # snapshots for the original call may still enrich
+                            # it, so do not finalize here.
+                            put_result(original_id, task_text, ts, failed, True)
     return normalized
 
 
