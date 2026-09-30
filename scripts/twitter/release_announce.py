@@ -339,6 +339,14 @@ def _discord_step(
     others (nor the X steps that follow), so a single misconfigured or briefly
     unreachable channel cannot starve the rest of the announcement.
     """
+    if not os.environ.get("DISCORD_TOKEN", ""):
+        # A missing token is a deterministic configuration error: no HTTP
+        # request is made, so there is no ambiguous remote side effect to guard
+        # against. Fail without recording a pending marker (which would wedge
+        # the channel until --force, risking duplicate X posts); the timer still
+        # sees a non-zero exit and can retry once the token is configured.
+        print("DISCORD_TOKEN not set; cannot post to Discord", file=sys.stderr)
+        return False
     ok = True
     for channel in args.discord_channel:
         step = f"discord_{channel}_id"
