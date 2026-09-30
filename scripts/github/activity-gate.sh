@@ -408,7 +408,7 @@ gh_cache_get_or_fetch() {
 # only spends additional points on repos that actually exceed a page.
 PR_SEARCH_PAGE_SIZE=30
 PR_SEARCH_GRAPHQL_QUERY='
-fragment pr on PullRequest{number,title,updatedAt,comments(first: 100) {nodes {id,author{login,...on User{id,name}},authorAssociation,body,createdAt,includesCreatedEdit,isMinimized,minimizedReason,reactionGroups{content,users{totalCount}},url,viewerDidAuthor},pageInfo{hasNextPage,endCursor},totalCount},latestReviews(first: 100) {nodes {author{login},authorAssociation,submittedAt,body,state}},mergeable,mergeStateStatus,headRefOid,isDraft,statusCheckRollup{contexts(first:100){nodes{... on CheckRun{name,status,conclusion,startedAt,completedAt,detailsUrl,checkSuite{workflowRun{workflow{name}}}} ... on StatusContext{context,state,description,targetUrl,createdAt}}}}}
+fragment pr on PullRequest{number,title,updatedAt,comments(first: 100) {nodes {id,author{__typename,login,...on User{id,name}},authorAssociation,body,createdAt,includesCreatedEdit,isMinimized,minimizedReason,reactionGroups{content,users{totalCount}},url,viewerDidAuthor},pageInfo{hasNextPage,endCursor},totalCount},latestReviews(first: 100) {nodes {author{__typename,login},authorAssociation,submittedAt,body,state}},mergeable,mergeStateStatus,headRefOid,isDraft,statusCheckRollup{contexts(first:100){nodes{... on CheckRun{name,status,conclusion,startedAt,completedAt,detailsUrl,checkSuite{workflowRun{workflow{name}}}} ... on StatusContext{context,state,description,targetUrl,createdAt}}}}}
 query PullRequestSearch($q: String!, $type: SearchType!, $limit: Int!, $endCursor: String) {
   search(query: $q, type: $type, first: $limit, after: $endCursor) {
     issueCount
@@ -750,31 +750,43 @@ has_actionable_update() {
 #   human_changes_requested — a human's latest review state is CHANGES_REQUESTED
 #                             (blocking merge; highest priority)
 #   human_activity          — the most recent comment/review actor is human
-# Bot detection is heuristic on login shape because gh's comments/latestReviews
-# author objects carry only .login (no is_bot / __typename): GitHub Apps appear
-# WITHOUT the "[bot]" suffix here (e.g. "greptile-apps"), so we also match
-# -bot/-apps suffixes and well-known CI/review bots. Failure directions are
-# safe: an unknown bot misread as human costs at most one bounded overflow
-# slot on valid work; a human whose login matches a bot pattern just keeps
-# today's (non-prioritized) behavior.
+# Bot detection prefers the GraphQL author `__typename` ("Bot" vs "User"),
+# which is authoritative: GitHub App actors can carry a login with no "[bot]"
+# suffix (e.g. "greptile-apps", "cloudflare-workers-and-pages") and would
+# otherwise be misread as human — gptme-cloud#1065/#1067 were dispatched as
+# human_activity priority off a Cloudflare Pages deploy comment alone. The
+# login-shape regex stays as a fallback for REST-shaped / cached payloads that
+# lack `__typename`: -bot/-apps suffixes plus well-known CI/review bots.
+# Failure directions are safe: an unknown bot misread as human costs at most
+# one bounded overflow slot on valid work; a human whose login matches a bot
+# pattern just keeps today's (non-prioritized) behavior.
 # Args: <pr_data_json>. Echoes "tok" / "tok; tok" or nothing.
 pr_human_priority_tokens() {
     local pr_data=$1
     echo "$pr_data" | jq -r --arg author "$AUTHOR" '
         def is_bot_login:
             test("(\\[bot\\]$)|(-bot$)|(-apps$)|(^github-actions$)|(^dependabot)|(^renovate)|(^codecov)|(^coderabbitai$)|(^copilot)"; "i");
-        def is_human_login:
-            . != null and . != "" and (ascii_downcase != ($author | ascii_downcase)) and (is_bot_login | not);
+        # An actor is human when it is not the AUTHOR and neither the GraphQL
+        # __typename nor the login shape marks it as a bot. GitHub App actors
+        # fetched over GraphQL can carry a login with no "[bot]" suffix (e.g.
+        # "cloudflare-workers-and-pages"), so __typename == "Bot" is the
+        # reliable signal; the login regex stays as a fallback for REST-shaped
+        # data / cached payloads that lack __typename.
+        def is_human_actor:
+            (.login != null and .login != "" and ((.login | ascii_downcase) != ($author | ascii_downcase)))
+            and ((.bot // false) | not)
+            and (((.login // "") | is_bot_login) | not);
         ([
-            (.comments[-1] | select(. != null) | {login: .author.login, time: .createdAt}),
-            ((.latestReviews // []) | sort_by(.submittedAt) | last | select(. != null) | {login: .author.login, time: .submittedAt})
-         ] | sort_by(.time) | last | .login // "") as $last_actor
+            (.comments[-1] | select(. != null) | {login: .author.login, bot: ((.author.__typename // "") == "Bot"), time: .createdAt}),
+            ((.latestReviews // []) | sort_by(.submittedAt) | last | select(. != null) | {login: .author.login, bot: ((.author.__typename // "") == "Bot"), time: .submittedAt})
+         ] | sort_by(.time) | last // {login: "", bot: false}) as $last_actor
         | ([ (.latestReviews // [])[]
              | select(.state == "CHANGES_REQUESTED")
-             | select(.author.login | is_human_login)
+             | {login: .author.login, bot: ((.author.__typename // "") == "Bot")}
+             | select(is_human_actor)
            ] | length > 0) as $human_changes_requested
         | [ (if $human_changes_requested then "human_changes_requested" else empty end),
-            (if ($last_actor | is_human_login) then "human_activity" else empty end) ]
+            (if ($last_actor | is_human_actor) then "human_activity" else empty end) ]
         | join("; ")
     ' 2>/dev/null || true
 }
@@ -2014,7 +2026,7 @@ _fetch_review_thread_nodes() {
         cursor_args=()
         [ -n "$after" ] && cursor_args=(-F "after=$after")
         raw=$(gh api graphql \
-            -f query='query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{isResolved comments(first:1){nodes{author{login}}}}}}}}' \
+            -f query='query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{isResolved comments(first:1){nodes{author{__typename,login}}}}}}}}' \
             -F owner="$owner" -F name="$name" -F number="$number" \
             "${cursor_args[@]}" 2>/dev/null) || return 1
         nodes=$(printf '%s\n%s' "$nodes" "$raw" | jq -s '.[0] + (.[1].data.repository.pullRequest.reviewThreads.nodes // [])') || return 1
@@ -2042,12 +2054,17 @@ pr_has_unresolved_human_thread() {
     result=$(printf '%s' "$nodes" | jq -r --arg author "$author" '
             def is_bot_login:
                 test("(\\[bot\\]$)|(-bot$)|(-apps$)|(^github-actions$)|(^dependabot)|(^renovate)|(^codecov)|(^coderabbitai$)|(^copilot)|(^greptile)"; "i");
-            def is_human_login:
-                . != null and . != "" and (ascii_downcase != ($author | ascii_downcase)) and (is_bot_login | not);
+            # Same bot test as pr_human_priority_tokens: prefer the GraphQL
+            # __typename, fall back to login shape for payloads without it.
+            def is_human_actor:
+                (.login != null and .login != "" and ((.login | ascii_downcase) != ($author | ascii_downcase)))
+                and ((.bot // false) | not)
+                and (((.login // "") | is_bot_login) | not);
             [ .[]?
               | select(.isResolved == false)
-              | (.comments.nodes[0].author.login // "")
-              | select(is_human_login) ] | first // empty
+              | (.comments.nodes[0].author // {} | {login: (.login // ""), bot: ((.__typename // "") == "Bot")})
+              | select(is_human_actor)
+              | .login ] | first // empty
         ' 2>/dev/null) || return 1
     [ -n "$result" ] || return 1
     printf '%s\n' "$result"

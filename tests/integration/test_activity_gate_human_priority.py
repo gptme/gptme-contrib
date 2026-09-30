@@ -71,6 +71,43 @@ if argv[0] == "pr" and len(argv) > 1 and argv[1] == "list":
                 "body": "looks close, one question",
             },
         ]
+    elif scenario == "bot_typename_last":
+        # A GitHub App actor whose login carries no "[bot]" suffix. GraphQL
+        # exposes it as __typename == "Bot" (e.g. the Cloudflare Pages deploy
+        # bot, login "cloudflare-workers-and-pages"); the login-shape regex
+        # alone would misread it as human (gptme-cloud#1065/#1067).
+        comments = [
+            {
+                "author": {
+                    "login": "cloudflare-workers-and-pages",
+                    "__typename": "Bot",
+                },
+                "createdAt": "2026-07-11T13:00:00Z",
+                "body": "deploy successful",
+            },
+        ]
+    elif scenario == "bot_typename_cr":
+        # A Bot actor requesting changes must not read as human_changes_requested.
+        latest_reviews = [
+            {
+                "author": {
+                    "login": "cloudflare-workers-and-pages",
+                    "__typename": "Bot",
+                },
+                "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-07-11T13:00:00Z",
+                "body": "",
+            },
+        ]
+    elif scenario == "human_typename":
+        # A genuine User with an explicit __typename still counts as human.
+        comments = [
+            {
+                "author": {"login": "ErikBjare", "__typename": "User"},
+                "createdAt": "2026-07-11T13:00:00Z",
+                "body": "one question",
+            },
+        ]
     pr = [{
         "number": 42,
         "title": "Test PR",
@@ -175,3 +212,38 @@ def test_plain_human_comment_emits_activity_token_only() -> None:
         detail = items[0]["detail"]
         assert "human_activity" in detail, detail
         assert "human_changes_requested" not in detail, detail
+
+
+def test_bot_typename_comment_emits_no_priority_tokens() -> None:
+    """A GraphQL Bot actor with no "[bot]" login suffix is not human.
+
+    Regression: the Cloudflare Pages deploy bot (login
+    "cloudflare-workers-and-pages", no suffix) was classified as human, so
+    every gptme-cloud PR carrying a deploy comment was dispatched as
+    human_activity priority (gptme-cloud#1065, #1067).
+    """
+    with tempfile.TemporaryDirectory() as tmp_str:
+        items = _run_gate(Path(tmp_str), "bot_typename_last")
+        assert len(items) == 1, items
+        detail = items[0]["detail"]
+        assert "human_activity" not in detail, detail
+        assert "human_changes_requested" not in detail, detail
+
+
+def test_bot_typename_review_emits_no_priority_tokens() -> None:
+    """A Bot's CHANGES_REQUESTED review is not a human changes-request."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        items = _run_gate(Path(tmp_str), "bot_typename_cr")
+        assert len(items) == 1, items
+        detail = items[0]["detail"]
+        assert "human_changes_requested" not in detail, detail
+        assert "human_activity" not in detail, detail
+
+
+def test_user_typename_still_emits_activity_token() -> None:
+    """An explicit `__typename == "User"` actor is still human activity."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        items = _run_gate(Path(tmp_str), "human_typename")
+        assert len(items) == 1, items
+        detail = items[0]["detail"]
+        assert "human_activity" in detail, detail
