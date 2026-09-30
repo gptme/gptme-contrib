@@ -1090,6 +1090,17 @@ def test_post_discord_requires_token(monkeypatch):
     assert ra._post_discord("1", "hi") == (False, None, None)
 
 
+def test_post_discord_protocol_error_is_transient(monkeypatch):
+    """Low-level http.client errors must be a clean transient failure, not a crash."""
+    monkeypatch.setenv("DISCORD_TOKEN", "test-token")
+
+    def boom(req, timeout=None):
+        raise ra.http.client.BadStatusLine("")
+
+    monkeypatch.setattr(ra.urllib.request, "urlopen", boom)
+    assert ra._post_discord("1", "hi") == (False, None, None)
+
+
 def test_discord_missing_token_alerts_without_wedging_channel(tmp_path, monkeypatch):
     """A missing DISCORD_TOKEN must leave no pending marker (P1 #1779).
 

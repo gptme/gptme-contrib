@@ -37,6 +37,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -324,7 +325,9 @@ def _post_discord(channel: str, text: str) -> tuple[bool, str | None, int | None
             f"discord POST failed ({exc.code}): {exc.read()[:300]!r}", file=sys.stderr
         )
         return False, None, exc.code
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
+        # OSError covers URLError/timeouts; HTTPException covers low-level
+        # protocol errors (BadStatusLine, IncompleteRead) that are not OSError.
         print(f"discord POST failed: {exc}", file=sys.stderr)
         return False, None, None
     return True, str(data.get("id")) if data.get("id") else None, None
