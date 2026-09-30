@@ -1961,7 +1961,17 @@ BACKEND_RATE_LIMIT_MARKERS: tuple[str, ...] = (
 #: ``Error code: 404 - No endpoints found for deepseek/deepseek-v4.1-flash``;
 #: without this marker the row carried ``infra_failure: null`` and burned the
 #: retry budget as an ordinary failure instead of re-arming for free.
-BACKEND_MODEL_UNAVAIL_MARKERS: tuple[str, ...] = ("model_unavailable",)
+#:
+#: Deliberately NOT the bare class name: classification is raw substring
+#: matching over the trajectory tail, and a bare ``model_unavailable`` can
+#: appear in ordinary prose (user/tool text). That false positive would grant
+#: a free re-arm to a deterministic genuine failure, retrying forever. Both
+#: markers are the structured forms gptme itself writes (content prefix and
+#: JSON-escaped metadata field).
+BACKEND_MODEL_UNAVAIL_MARKERS: tuple[str, ...] = (
+    "error: model_unavailable",
+    '"error_class\\": \\"model_unavailable\\"',
+)
 
 
 def _classify_backend_error_text(text: str, backend: str) -> str | None:

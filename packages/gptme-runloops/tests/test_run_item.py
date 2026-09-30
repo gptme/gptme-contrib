@@ -3220,6 +3220,26 @@ class TestClassifyBackendErrorText:
         )
         assert _classify_backend_error_text(text, "gptme") == "gptme_model_unavailable"
 
+    def test_model_unavailable_metadata_only_form_detected(self) -> None:
+        # Metadata-only terminal event: the class name appears only in the
+        # JSON-escaped metadata field, not the content prefix. The classifier
+        # sees the raw JSONL line, so the inner quotes carry backslashes.
+        text = (
+            '{"role": "system", "content": "error: 503 upstream", '
+            '"metadata": {"error": true, \\"error_class\\": \\"model_unavailable\\", '
+            '"exit_code": 77}}'
+        )
+        assert _classify_backend_error_text(text, "gptme") == "gptme_model_unavailable"
+
+    def test_model_unavailable_bare_class_name_not_matched(self) -> None:
+        # A genuinely failed task whose ordinary text mentions the class name
+        # must NOT get a free re-arm — bare substring matching is too loose.
+        text = (
+            "assistant: The model_unavailable endpoint you asked about is "
+            "deprecated. Task failed: config invalid."
+        )
+        assert _classify_backend_error_text(text, "gptme") is None
+
     def test_gptme_auth_error_class_detected(self) -> None:
         # gptme's structured auth class (exit 76) — provider text says
         # "Error code: 401", which the "status 401" marker does not match.
