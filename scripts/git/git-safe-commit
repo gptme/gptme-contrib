@@ -924,7 +924,7 @@ get_commit_lock_lsof_rows() {
 
 describe_commit_lockfile() {
     local lockfile="$1"
-    local stat_out size inode mtime
+    local stat_out size inode mtime mtime_iso
 
     if [ ! -e "$lockfile" ]; then
         echo "missing"
@@ -941,9 +941,11 @@ describe_commit_lockfile() {
     fi
 
     read -r size inode mtime <<< "$stat_out"
-    printf 'exists size=%sB inode=%s mtime=%s\n' \
-        "$size" "$inode" \
-        "$(date -u -d "@$mtime" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '%s' "$mtime")"
+    # GNU date uses -d "@epoch"; BSD/macOS date uses -r epoch.
+    if ! mtime_iso="$(date -u -d "@$mtime" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"; then
+        mtime_iso="$(date -u -r "$mtime" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '%s' "$mtime")"
+    fi
+    printf 'exists size=%sB inode=%s mtime=%s\n' "$size" "$inode" "$mtime_iso"
 }
 
 emit_commit_lock_diagnostics() {
