@@ -49,6 +49,10 @@ class NormalizedMessage:
         Structured input arguments to the tool call, if available.
     tool_result : str | None
         Text content of the tool result (tool_result role only).
+    tool_call_id : str | None
+        Harness call identifier linking a tool invocation and its result.
+    is_reasoning : bool
+        True for reasoning deltas, separate from user-facing assistant text.
     is_error : bool
         True when this message represents a tool error / failed tool result.
     """
@@ -60,6 +64,8 @@ class NormalizedMessage:
     tool_input: dict | None = None
     tool_result: str | None = None
     is_error: bool = False
+    tool_call_id: str | None = None
+    is_reasoning: bool = False
 
     def to_dict(self) -> dict:
         """Serialize to JSON-compatible dict (omits ``None`` and ``False`` values)."""
@@ -524,33 +530,98 @@ def _normalize_pi(msgs: list[dict]) -> list[NormalizedMessage]:
     return normalized
 
 
-def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
-    """Normalize Grok Build streaming-json NDJSON messages.
+def _grok_output(raw: dict) -> tuple[str, bool]:
+    """Read inline or polled background output, including nested exit status."""
+    output = raw.get("output_for_prompt") or raw.get("output") or ""
+    exit_code = raw.get("exit_code")
+    is_error = isinstance(exit_code, int) and exit_code != 0
+    result = raw.get("Result")
+    results = result if isinstance(result, list) else [result]
+    parts = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        text, failed = _grok_output(item)
+        if text:
+            parts.append(text)
+        is_error |= failed
+    return str(output or "\n".join(parts)), is_error
 
-    Grok format uses typed records (--output-format streaming-json):
-    - ``available_commands``: tool catalog at session start (skipped)
-    - ``thought``: agent reasoning delta (``data`` or legacy ``content``) → assistant turn
-    - ``tool_call``: agent tool invocation (``toolName``, ``rawInput``, ``toolCallId``)
-    - ``tool_call_update``: completed result in ``content[].content.text`` or ``rawOutput``
-    - ``text``: assistant response text delta (``data`` or legacy ``content``)
-    - ``error``: harness/API failure → system error message
-    - ``usage``/``end``: token accounting (skipped)
+
+def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
+    """Normalize Grok deltas and consolidate updates by toolCallId.
+
+    Results retain their first update position; later snapshots enrich that
+    result. Completed inline output replaces progress, even when shorter.
+    Background output can arrive after the completed BackgroundTaskStarted
+    envelope or through a later TaskOutput poll.
     """
     normalized: list[NormalizedMessage] = []
-    call_id_to_input: dict[str, dict] = {}
+    results: dict[str, NormalizedMessage] = {}
+    background: dict[str, str] = {}
+    background_calls: set[str] = set()
+    background_pending: set[str] = set()
+    finalized: set[str] = set()
+    delta_type: str | None = None
+
+    def put_result(
+        call_id: str,
+        text: str,
+        ts: str | None,
+        is_error: bool,
+        authoritative: bool,
+        final: bool = False,
+    ) -> None:
+        previous = results.get(call_id) if call_id else None
+        if previous is None:
+            previous = NormalizedMessage(
+                role="tool_result",
+                content=text,
+                timestamp=ts,
+                tool_result=text,
+                tool_call_id=call_id or None,
+                is_error=is_error,
+            )
+            normalized.append(previous)
+            if call_id:
+                results[call_id] = previous
+        else:
+            if authoritative:
+                previous.content = text
+                previous.tool_result = text
+            elif call_id not in finalized and len(text) > len(previous.content):
+                # A late progress snapshot may enrich a non-final result, but it
+                # must never overwrite output already finalized by a completion.
+                previous.content = text
+                previous.tool_result = text
+            # An authoritative snapshot supersedes every prior flag; a
+            # non-authoritative progress snapshot may only add an error.
+            previous.is_error = is_error if authoritative else (previous.is_error or is_error)
+        if final and call_id:
+            finalized.add(call_id)
 
     for record in msgs:
         rec_type = record.get("type", "")
         ts = _ts_str(_parse_timestamp(record.get("timestamp", "")))
-
         if rec_type in ("thought", "text"):
-            content = record.get("data") or record.get("content", "") or ""
+            content = record.get("data") or record.get("content") or ""
             if content:
-                normalized.append(
-                    NormalizedMessage(role="assistant", content=content, timestamp=ts)
-                )
+                if delta_type == rec_type:
+                    normalized[-1].content += str(content)
+                else:
+                    normalized.append(
+                        NormalizedMessage(
+                            role="assistant",
+                            content=str(content),
+                            timestamp=ts,
+                            is_reasoning=rec_type == "thought",
+                        )
+                    )
+                delta_type = rec_type
+            continue
+        delta_type = None
 
-        elif rec_type == "error":
+        if rec_type == "error":
             message = record.get("message") or record.get("data") or record.get("content")
             if message:
                 normalized.append(
@@ -561,13 +632,9 @@ def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
                         is_error=True,
                     )
                 )
-
         elif rec_type == "tool_call":
             tool_name = record.get("toolName", "")
             raw_input = record.get("rawInput") or {}
-            call_id = record.get("toolCallId", "")
-            if call_id:
-                call_id_to_input[call_id] = raw_input
             if tool_name:
                 normalized.append(
                     NormalizedMessage(
@@ -576,35 +643,73 @@ def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
                         timestamp=ts,
                         tool_name=tool_name,
                         tool_input=raw_input if isinstance(raw_input, dict) else {},
+                        tool_call_id=record.get("toolCallId") or None,
                     )
                 )
-
         elif rec_type == "tool_call_update":
-            if record.get("status") != "completed":
+            status = record.get("status")
+            if status not in ("completed", "in_progress"):
                 continue
-            raw_output = record.get("rawOutput") or {}
-            if not isinstance(raw_output, dict):
-                raw_output = {}
-            exit_code = raw_output.get("exit_code")
-            is_error = isinstance(exit_code, int) and exit_code != 0
-            parts: list[str] = []
+            call_id = record.get("toolCallId") or ""
+            raw = record.get("rawOutput") or {}
+            if not isinstance(raw, dict):
+                raw = {}
+            output, is_error = _grok_output(raw)
+            parts = []
             for block in record.get("content") or []:
                 inner = block.get("content") if isinstance(block, dict) else None
                 if isinstance(inner, dict) and inner.get("text"):
                     parts.append(str(inner["text"]))
-            output_text = "\n".join(parts) or (
-                raw_output.get("output_for_prompt", "") or raw_output.get("output", "") or ""
-            )
-            normalized.append(
-                NormalizedMessage(
-                    role="tool_result",
-                    content=str(output_text),
-                    timestamp=ts,
-                    tool_result=str(output_text),
-                    is_error=is_error,
+            text = "\n".join(parts) or output
+            if raw.get("type") == "BackgroundTaskStarted":
+                task_id = raw.get("task_id")
+                if task_id and call_id:
+                    background[str(task_id)] = call_id
+                    background_calls.add(call_id)
+                    background_pending.add(call_id)
+            if text or status == "completed":
+                # Background output streams as a series of growing, cumulative
+                # ``in_progress`` snapshots (empirically ~38.7k growing vs 770
+                # shrinking transitions across the corpus; background calls never
+                # emit a ``completed`` update). ``first_background_output`` is the
+                # *first* partial snapshot, not the final output, so it must stay
+                # non-final: later, longer snapshots legitimately enrich it. Only
+                # an explicit completion (or a TaskOutput restore) is final.
+                first_background_output = (
+                    bool(text)
+                    and call_id in background_pending
+                    and raw.get("type") != "BackgroundTaskStarted"
                 )
-            )
-
+                is_final = status == "completed" and call_id not in background_calls
+                put_result(
+                    call_id,
+                    text,
+                    ts,
+                    is_error,
+                    first_background_output or is_final,
+                    # Only a completion that actually carries output finalizes
+                    # the result. Grok also emits empty ``completed`` envelopes
+                    # (e.g. Monitor calls) whose real output arrives afterwards
+                    # as ``in_progress``; those must stay enrichable.
+                    is_final and bool(text),
+                )
+                if first_background_output:
+                    background_pending.discard(call_id)
+            if raw.get("type") == "TaskOutput":
+                result = raw.get("Result")
+                items = result if isinstance(result, list) else [result]
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    original_id = background.get(str(item.get("task_id", "")))
+                    if original_id:
+                        task_text, failed = _grok_output(item)
+                        if task_text:
+                            # A poll restores authoritative output but is not
+                            # a terminal state: later, longer in_progress
+                            # snapshots for the original call may still enrich
+                            # it, so do not finalize here.
+                            put_result(original_id, task_text, ts, failed, True)
     return normalized
 
 
