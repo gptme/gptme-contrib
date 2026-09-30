@@ -17,6 +17,7 @@ State file schema (one record per ``"<repo>#<tag>"`` key):
   ``link_reply_id``         id of the release-URL reply
   ``bob_quote_id``          id of Bob's quote-tweet, or None when skipped
   ``bob_quote_skip_reason`` why the quote was skipped (only when skipped)
+  ``discord_<channel>_id``  id of the Discord message posted to that channel
   ``announced_at``          ISO timestamp; presence means "do not re-announce"
   ``*_pending_at``          in-flight marker; blocks blind retry until cleared
 
@@ -30,6 +31,7 @@ Usage:
     release_announce.py --tag v0.33.0         # announce a specific tag
     release_announce.py --dry-run             # print tweets, post nothing
     release_announce.py --skip-quote          # org tweet only
+    release_announce.py --skip-x --discord-channel 123   # Discord only (needs DISCORD_TOKEN)
 """
 
 from __future__ import annotations
@@ -41,6 +43,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -283,6 +287,59 @@ def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None
     return True, ids[-1], out
 
 
+DISCORD_API = "https://discord.com/api/v10"
+MAX_DISCORD = 2000
+
+
+def _post_discord(channel: str, text: str) -> tuple[bool, str | None]:
+    """POST one message as the bot in DISCORD_TOKEN; return success and message id."""
+    token = os.environ.get("DISCORD_TOKEN", "")
+    if not token:
+        print("DISCORD_TOKEN not set; cannot post to Discord", file=sys.stderr)
+        return False, None
+    req = urllib.request.Request(
+        f"{DISCORD_API}/channels/{channel}/messages",
+        data=json.dumps({"content": text, "allowed_mentions": {"parse": []}}).encode(),
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "DiscordBot (https://github.com/gptme/gptme-contrib, 1.0)",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as exc:
+        print(
+            f"discord POST failed ({exc.code}): {exc.read()[:300]!r}", file=sys.stderr
+        )
+        return False, None
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"discord POST failed: {exc}", file=sys.stderr)
+        return False, None
+    return True, str(data.get("id")) if data.get("id") else None
+
+
+def _discord_step(
+    args: argparse.Namespace, state: dict, key: str, record: dict, text: str
+) -> bool:
+    """Post to each --discord-channel once; False means stop and exit non-zero."""
+    for channel in args.discord_channel:
+        step = f"discord_{channel}_id"
+        if step in record:
+            continue
+        if not _begin_post(state, key, record, step):
+            return False
+        posted, msg_id = _post_discord(channel, text[:MAX_DISCORD])
+        if not posted:
+            # A 4xx means Discord rejected it, but we cannot tell that from a
+            # timeout after send, so keep the marker: --force resets it.
+            return False
+        _finish_post(state, record, step, msg_id)
+        print(f"{key}: discord channel {channel} message={msg_id}")
+    return True
+
+
 def _pending_key(step: str) -> str:
     return f"{step.removesuffix('_id')}_pending_at"
 
@@ -328,6 +385,12 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
     state = load_state()
     key = f"{args.repo}#{tag}"
     record = state.get(key, {}) if not args.force else {}
+    if args.discord_channel and not args.dry_run:
+        text = f"{compose_announcement(tag, rel.get('body', ''), args.repo)}\n\n{rel['url']}"
+        if not _discord_step(args, state, key, record, text):
+            return 1
+    if args.skip_x:
+        return 0
     # "org_tweet_id" in record with value None = posted but ID unknown; quote is
     # not recoverable without the ID, so treat this as a complete (degraded) state.
     _org_id_unknown = "org_tweet_id" in record and record["org_tweet_id"] is None
@@ -433,6 +496,19 @@ def main() -> int:
     ap.add_argument("--tag", default=None, help="announce this tag (default: latest)")
     ap.add_argument("--org-account", default="gptmeorg")
     ap.add_argument("--skip-quote", action="store_true")
+    ap.add_argument(
+        "--discord-channel",
+        action="append",
+        default=[],
+        metavar="CHANNEL_ID",
+        help="also post the announcement to this Discord channel (repeatable; "
+        "needs DISCORD_TOKEN); each channel is ledgered and posted once",
+    )
+    ap.add_argument(
+        "--skip-x",
+        action="store_true",
+        help="skip the X/Twitter steps (Discord-only run or backfill)",
+    )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument(
         "--max-age-days",

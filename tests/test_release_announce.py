@@ -977,3 +977,51 @@ def test_product_names_for_org_repos():
     assert ra.product_name("owner/widget") == "widget"
     text = ra.compose_announcement("v0.14.2", "", "ActivityWatch/aw-android")
     assert text.startswith("ActivityWatch for Android v0.14.2 is out")
+
+
+def _ns(**kw):
+    import argparse
+
+    base = dict(
+        repo="gptme/gptme",
+        discord_channel=["111", "222"],
+        skip_x=True,
+        dry_run=False,
+        force=False,
+        skip_quote=False,
+        org_account="gptmeorg",
+    )
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_discord_posts_each_channel_once_and_ledgers(tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "state.json")
+    sent = []
+
+    def fake_post(channel, text):
+        sent.append(channel)
+        return True, f"msg-{channel}"
+
+    monkeypatch.setattr(ra, "_post_discord", fake_post)
+    rel = {"tagName": "v1.2.3", "body": NOTES, "url": "https://example/rel"}
+    assert ra._main(_ns(), rel) == 0
+    assert ra._main(_ns(), rel) == 0  # second run: ledger blocks re-post
+    assert sent == ["111", "222"]
+    rec = ra.load_state()["gptme/gptme#v1.2.3"]
+    assert rec["discord_111_id"] == "msg-111"
+    assert "announced_at" not in rec  # skip_x: X ledger untouched
+
+
+def test_discord_failure_leaves_pending_marker(tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(ra, "_post_discord", lambda c, t: (False, None))
+    rel = {"tagName": "v1.2.3", "body": NOTES, "url": "https://example/rel"}
+    assert ra._main(_ns(), rel) == 1
+    assert "discord_111_pending_at" in ra.load_state()["gptme/gptme#v1.2.3"]
+    assert ra._main(_ns(), rel) == 1  # refuses blind retry
+
+
+def test_post_discord_requires_token(monkeypatch):
+    monkeypatch.delenv("DISCORD_TOKEN", raising=False)
+    assert ra._post_discord("1", "hi") == (False, None)
