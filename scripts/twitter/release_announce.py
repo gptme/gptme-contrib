@@ -291,12 +291,22 @@ DISCORD_API = "https://discord.com/api/v10"
 MAX_DISCORD = 2000
 
 
-def _post_discord(channel: str, text: str) -> tuple[bool, str | None]:
-    """POST one message as the bot in DISCORD_TOKEN; return success and message id."""
+# 4xx codes that are permanent rejections: no message was created, and
+# retrying will fail identically forever. 429 (rate limit) and 5xx are
+# transient and keep the pending marker.
+_PERMANENT_DISCORD_CODES = {400, 401, 403, 404, 405}
+
+
+def _post_discord(channel: str, text: str) -> tuple[bool, str | None, int | None]:
+    """POST one message as the bot in DISCORD_TOKEN.
+
+    Return (success, message id, HTTP status code). The code is None for
+    non-HTTP failures (missing token, timeout, OSError) and on success.
+    """
     token = os.environ.get("DISCORD_TOKEN", "")
     if not token:
         print("DISCORD_TOKEN not set; cannot post to Discord", file=sys.stderr)
-        return False, None
+        return False, None, None
     req = urllib.request.Request(
         f"{DISCORD_API}/channels/{channel}/messages",
         data=json.dumps({"content": text, "allowed_mentions": {"parse": []}}).encode(),
@@ -313,11 +323,11 @@ def _post_discord(channel: str, text: str) -> tuple[bool, str | None]:
         print(
             f"discord POST failed ({exc.code}): {exc.read()[:300]!r}", file=sys.stderr
         )
-        return False, None
+        return False, None, exc.code
     except (OSError, json.JSONDecodeError) as exc:
         print(f"discord POST failed: {exc}", file=sys.stderr)
-        return False, None
-    return True, str(data.get("id")) if data.get("id") else None
+        return False, None, None
+    return True, str(data.get("id")) if data.get("id") else None, None
 
 
 def _discord_step(
@@ -330,10 +340,24 @@ def _discord_step(
             continue
         if not _begin_post(state, key, record, step):
             return False
-        posted, msg_id = _post_discord(channel, text[:MAX_DISCORD])
+        posted, msg_id, code = _post_discord(channel, text[:MAX_DISCORD])
+        if not posted and code in _PERMANENT_DISCORD_CODES:
+            # Permanent rejection (e.g. missing bot access): no message was
+            # created and retrying fails identically forever. Record the skip
+            # so the pending marker clears and the rest of the pipeline
+            # (X steps) still runs — a misconfigured channel must not stall
+            # every future announcement for this tag.
+            print(
+                f"{key}: discord channel {channel} permanently rejected "
+                f"(HTTP {code}); skipping",
+                file=sys.stderr,
+            )
+            record[f"{step.removesuffix('_id')}_skip_reason"] = f"HTTP {code}"
+            _finish_post(state, record, step, None)
+            continue
         if not posted:
-            # A 4xx means Discord rejected it, but we cannot tell that from a
-            # timeout after send, so keep the marker: --force resets it.
+            # Transient or ambiguous (timeout after send?) — keep the marker:
+            # --force resets it.
             return False
         _finish_post(state, record, step, msg_id)
         print(f"{key}: discord channel {channel} message={msg_id}")

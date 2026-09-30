@@ -1001,7 +1001,7 @@ def test_discord_posts_each_channel_once_and_ledgers(tmp_path, monkeypatch):
 
     def fake_post(channel, text):
         sent.append(channel)
-        return True, f"msg-{channel}"
+        return True, f"msg-{channel}", None
 
     monkeypatch.setattr(ra, "_post_discord", fake_post)
     rel = {"tagName": "v1.2.3", "body": NOTES, "url": "https://example/rel"}
@@ -1015,13 +1015,38 @@ def test_discord_posts_each_channel_once_and_ledgers(tmp_path, monkeypatch):
 
 def test_discord_failure_leaves_pending_marker(tmp_path, monkeypatch):
     monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "state.json")
-    monkeypatch.setattr(ra, "_post_discord", lambda c, t: (False, None))
+    monkeypatch.setattr(ra, "_post_discord", lambda c, t: (False, None, None))
     rel = {"tagName": "v1.2.3", "body": NOTES, "url": "https://example/rel"}
     assert ra._main(_ns(), rel) == 1
     assert "discord_111_pending_at" in ra.load_state()["gptme/gptme#v1.2.3"]
     assert ra._main(_ns(), rel) == 1  # refuses blind retry
 
 
+def test_discord_permanent_4xx_skips_channel_and_continues(tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "state.json")
+    codes = {"111": 403, "222": 500}
+
+    def fake_post(channel, text):
+        code = codes[channel]
+        if code == 403:
+            return False, None, code
+        return False, None, code  # both fail; only 403 is permanent
+
+    monkeypatch.setattr(ra, "_post_discord", fake_post)
+    rel = {"tagName": "v1.2.3", "body": NOTES, "url": "https://example/rel"}
+    assert ra._main(_ns(), rel) == 1  # 222 is transient: overall failure
+    rec = ra.load_state()["gptme/gptme#v1.2.3"]
+    assert rec["discord_111_id"] is None  # 403: marker cleared, step skipped
+    assert "discord_111_pending_at" not in rec
+    assert rec["discord_111_skip_reason"] == "HTTP 403"
+    assert "discord_222_pending_at" in rec  # 500: pending marker kept
+
+    # A later run skips 111 (ledgered) and still fails on 222, not on 111.
+    assert ra._main(_ns(), rel) == 1
+    rec2 = ra.load_state()["gptme/gptme#v1.2.3"]
+    assert "discord_111_pending_at" not in rec2
+
+
 def test_post_discord_requires_token(monkeypatch):
     monkeypatch.delenv("DISCORD_TOKEN", raising=False)
-    assert ra._post_discord("1", "hi") == (False, None)
+    assert ra._post_discord("1", "hi") == (False, None, None)
