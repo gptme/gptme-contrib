@@ -503,6 +503,17 @@ class TestChatGPTBridge:
         assert bridge._auth_ok(_make_request({"authorization": "Bearer sécret"})) is True
         assert bridge._auth_ok(_make_request({"authorization": "Bearer wrong"})) is False
 
+        # A token containing a character *outside* latin-1 (emoji, CJK) also
+        # authenticates: the header side re-encodes the latin-1-decoded bytes
+        # back to the exact UTF-8 bytes the client sent, so the comparison
+        # holds for every token, not only latin-1-representable ones.
+        for token in ("🔒", "秘密トークン"):
+            emoji_bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=token)
+            assert (
+                emoji_bridge._auth_ok(_make_request({"authorization": f"Bearer {token}"})) is True
+            )
+            assert emoji_bridge._auth_ok(_make_request({"authorization": "Bearer wrong"})) is False
+
     def test_non_ascii_bearer_is_401_not_crash(self, tmp_msgs: Path) -> None:
         """compare_digest(str, str) raises TypeError on non-ASCII; bytes must not.
 
@@ -785,6 +796,25 @@ class TestOutboxConfinement:
         assert bridge._surfaced["recent"] == {"msg-1"}
         # the idle entries were reclaimed
         assert len(bridge._locks) < _MAX_TRACKED_SESSIONS
+
+    def test_cap_holds_when_every_session_has_a_live_ledger(self, tmp_msgs: Path) -> None:
+        """The cap is a hard memory bound, not only an idle-session sweep.
+
+        A session that received a reply keeps a non-empty ledger (it gates
+        re-delivery), so the zero-cost pass-1 sweep cannot reclaim it. If every
+        tracked session is in that state, the maps would otherwise grow without
+        limit; the second pass must still evict idle sessions to honour the cap.
+        """
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs)
+        for i in range(_MAX_TRACKED_SESSIONS):
+            key = f"replied-{i}"
+            bridge._locks[key] = threading.Lock()
+            bridge._surfaced[key] = {"msg-1"}
+
+        with bridge._session_lock("fresh"):
+            assert "fresh" in bridge._locks
+
+        assert len(bridge._locks) <= _MAX_TRACKED_SESSIONS
 
 
 class TestFailClosedBind:

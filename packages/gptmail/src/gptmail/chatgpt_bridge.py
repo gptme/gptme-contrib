@@ -168,26 +168,40 @@ class ChatGPTBridge:
     def _evict_idle_sessions(self) -> None:
         """Keep the per-session maps bounded on a long-lived server.
 
-        Caller must hold ``self._locks_guard``. Only sessions with no in-flight
-        caller, an unheld lock, and no live surfaced ids are evicted: dropping a
-        lock that is in use would reopen the check-and-add race the lock exists
-        for, and a non-empty ledger still gates re-delivery. ``locked()`` is
-        kept alongside ``_in_flight`` so a lock handed out by a test (or any
-        holder not registered through ``_session_lock``) is still respected.
+        Caller must hold ``self._locks_guard``. Eviction never reclaims a lock
+        with an in-flight caller or a held lock: dropping one would reopen the
+        check-and-add race the lock exists for. ``locked()`` is kept alongside
+        ``_in_flight`` so a lock handed out by a test (or any holder not
+        registered through ``_session_lock``) is still respected.
+
+        The cap is a *hard* memory bound, so eviction runs in two passes: first
+        reaping sessions with no live surfaced ids (zero behavioral cost), then
+        — only if the cap is still exceeded — the oldest sessions that merely
+        have a non-empty ledger. Dropping a ledger can re-offer its messages
+        once, the same at-most-once relaxation a server restart already causes;
+        that is preferable to unbounded growth once every tracked session has
+        received a reply. Ledgers are normally empty long before this: both
+        ``bob_status`` and ``bob_replies`` prune them against the live outbox.
         """
         if len(self._locks) < _MAX_TRACKED_SESSIONS:
             return
-        for session_id in list(self._locks):
-            if len(self._locks) < _MAX_TRACKED_SESSIONS:
-                break
-            if (
-                self._in_flight.get(session_id)
-                or self._locks[session_id].locked()
-                or self._surfaced.get(session_id)
-            ):
-                continue
-            del self._locks[session_id]
-            self._surfaced.pop(session_id, None)
+
+        def _reap(allow_nonempty_ledger: bool) -> None:
+            for session_id in list(self._locks):
+                if len(self._locks) < _MAX_TRACKED_SESSIONS:
+                    return
+                if self._in_flight.get(session_id) or self._locks[session_id].locked():
+                    continue
+                if not allow_nonempty_ledger and self._surfaced.get(session_id):
+                    continue
+                del self._locks[session_id]
+                self._surfaced.pop(session_id, None)
+
+        # Pass 1: sessions with no live ledger, at zero behavioral cost.
+        _reap(allow_nonempty_ledger=False)
+        # Pass 2: the cap is a hard bound; drop the oldest idle ledgers rather
+        # than grow without limit.
+        _reap(allow_nonempty_ledger=True)
 
     def _auth_ok_headers(self, headers: Headers) -> bool:
         if not self._token:
