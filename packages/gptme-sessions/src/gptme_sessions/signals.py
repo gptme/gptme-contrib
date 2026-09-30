@@ -1905,25 +1905,34 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
     result_usage: dict | None = None
     stop_reason: str | None = None
     # CC emits one assistant record per streamed content block; each carries the
-    # full response's usage. De-duplicate by message id so a response split into
-    # N blocks is counted once, not N times.
-    seen_message_ids: set[str] = set()
+    # full response's usage. De-duplicate by (message id, usage signature) so a
+    # response split into N blocks is counted once, not N times — while a record
+    # that reuses an id with *different* usage (retry/resume edge cases) is still
+    # summed rather than silently dropped.
+    seen_usage_keys: set[tuple[str, int, int, int, int]] = set()
 
     for record in msgs:
         rec_type = record.get("type")
 
         if rec_type == "assistant":
             msg = record.get("message", {})
-            message_id = msg.get("id")
-            if isinstance(message_id, str) and message_id:
-                if message_id in seen_message_ids:
-                    continue
-                seen_message_ids.add(message_id)
             usage = msg.get("usage") or {}
             turn_input = _as_int(usage.get("input_tokens")) or 0
             turn_output = _as_int(usage.get("output_tokens")) or 0
             turn_cache_create = _as_int(usage.get("cache_creation_input_tokens")) or 0
             turn_cache_read = _as_int(usage.get("cache_read_input_tokens")) or 0
+            message_id = msg.get("id")
+            if isinstance(message_id, str) and message_id:
+                dedup_key = (
+                    message_id,
+                    turn_input,
+                    turn_output,
+                    turn_cache_create,
+                    turn_cache_read,
+                )
+                if dedup_key in seen_usage_keys:
+                    continue
+                seen_usage_keys.add(dedup_key)
             turn_context = turn_input + turn_cache_create + turn_cache_read
 
             per_turn_input += turn_input

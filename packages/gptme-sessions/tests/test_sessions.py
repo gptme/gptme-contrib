@@ -1703,6 +1703,28 @@ def test_extract_usage_cc_dedupes_duplicate_message_ids():
     assert usage["input_tokens"] == 20  # 10 * 2 unique responses
 
 
+def test_extract_usage_cc_same_id_different_usage_is_summed():
+    """A reused id with a *different* usage payload is not treated as a dup.
+
+    De-duplication is keyed on (message id, usage counters), so genuinely
+    distinct responses that happen to share an id are summed, not dropped.
+    """
+
+    def rec(message_id: str, out: int) -> dict:
+        r = _make_cc_assistant_usage(10, out)
+        r["message"]["id"] = message_id
+        return r
+
+    msgs = [
+        rec("msg_1", 50),  # response 1, first block
+        rec("msg_1", 50),  # duplicated block of response 1 (identical usage)
+        rec("msg_1", 20),  # same id, different usage -> counted
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["output_tokens"] == 70  # 50 + 20, identical dup skipped
+    assert usage["input_tokens"] == 20  # 10 * 2
+
+
 def test_extract_usage_cc_no_id_records_not_deduped():
     """Records lacking a message id keep prior summing behaviour."""
     msgs = [
