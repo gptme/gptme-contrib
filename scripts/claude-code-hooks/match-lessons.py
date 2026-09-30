@@ -53,6 +53,7 @@ State directories (Thompson sampling, predictions, trajectories) are stored
 under workspace/state/ and created automatically on first use.
 """
 
+import hashlib
 import json
 import math
 import os
@@ -72,6 +73,13 @@ MAX_PRETOOL_LESSONS = 3
 MAX_PROMPT_LESSONS = 5
 # Maximum predicted lessons to inject per event (on top of keyword matches)
 MAX_PREDICTED_LESSONS = 2
+# Opt-in A/B test for reducing advisory skill injection. Unset keeps the exact
+# pre-experiment behavior. Accepted values: random/1/true, control, treatment.
+INJECTION_DIAL_ENV = "LESSON_INJECTION_DIAL_EXPERIMENT"
+INJECTION_DIAL_EXPERIMENT = "skill-injection-dial-v1"
+TREATMENT_PROMPT_SKILL_CAP = 2
+TREATMENT_PRETOOL_SKILL_CAP = 1
+TREATMENT_SKILL_BM25_MIN_Z = 5.0
 # Minimum lift for a prediction to be injected (from model, but also enforced here)
 MIN_PREDICTION_LIFT = 2.0
 # Minimum TS posterior mean for predicted lessons (deprioritize known-noise lessons)
@@ -155,6 +163,56 @@ _DESCRIPTOR_STOPWORDS = {
     "your",
 }
 _DESCRIPTOR_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_/-]*")
+
+
+def resolve_injection_dial(
+    session_id: str, value: str | None = None
+) -> dict[str, object]:
+    """Resolve the opt-in skill-injection experiment for one session.
+
+    Random assignment is deterministic by session ID, so every hook invocation
+    in a Claude Code session uses the same arm. Unset/disabled and invalid
+    values fail closed to the historical control behavior.
+    """
+    raw = (
+        (os.environ.get(INJECTION_DIAL_ENV, "") if value is None else value)
+        .strip()
+        .lower()
+    )
+    disabled = {"", "0", "false", "off", "disabled"}
+    random_values = {"1", "true", "on", "random"}
+
+    if raw in disabled:
+        enabled = False
+        arm = "control"
+        assignment = "disabled"
+    elif raw in {"control", "treatment"}:
+        enabled = True
+        arm = raw
+        assignment = "forced"
+    elif raw in random_values and session_id and session_id != "unknown":
+        enabled = True
+        digest = hashlib.sha256(
+            f"{INJECTION_DIAL_EXPERIMENT}:{session_id}".encode()
+        ).digest()
+        arm = "treatment" if digest[0] & 1 else "control"
+        assignment = "random"
+    else:
+        enabled = False
+        arm = "control"
+        assignment = "invalid" if raw not in random_values else "missing_session_id"
+
+    treatment = enabled and arm == "treatment"
+    return {
+        "schema_version": 1,
+        "experiment": INJECTION_DIAL_EXPERIMENT,
+        "enabled": enabled,
+        "arm": arm,
+        "assignment": assignment,
+        "prompt_skill_cap": TREATMENT_PROMPT_SKILL_CAP if treatment else None,
+        "pretool_skill_cap": TREATMENT_PRETOOL_SKILL_CAP if treatment else None,
+        "skill_bm25_min_z": TREATMENT_SKILL_BM25_MIN_Z if treatment else None,
+    }
 
 
 # --- Workspace discovery (all state paths derived from here) ---
@@ -1110,7 +1168,7 @@ def _bm25_score(query_terms: list[str], doc_terms: list[str], index: dict) -> fl
     return score
 
 
-def _bm25_min_z(n_nonzero: int) -> float:
+def _bm25_min_z(n_nonzero: int, ceiling: float = _BM25_MIN_Z) -> float:
     """Minimum z-score a lesson must reach to count as a semantic match.
 
     When only one or two lessons overlap the query at all, the query is highly
@@ -1121,7 +1179,7 @@ def _bm25_min_z(n_nonzero: int) -> float:
     if n_nonzero < 3:
         return -math.inf
     max_attainable = (n_nonzero - 1) / math.sqrt(n_nonzero)
-    return min(_BM25_MIN_Z, _BM25_STANDOUT_FRACTION * max_attainable)
+    return min(ceiling, _BM25_STANDOUT_FRACTION * max_attainable)
 
 
 def _bm25_zscores(scores: list[float]) -> list[float]:
@@ -1148,6 +1206,7 @@ def score_lessons(
     prompt: str,
     max_results: int = 5,
     bm25_index: "dict | None" = None,
+    skill_bm25_min_z: "float | None" = None,
 ) -> list[dict]:
     """Match lessons against prompt text. Returns scored results.
 
@@ -1165,6 +1224,7 @@ def score_lessons(
     bm_scores: list[float] = []
     bm_zs: list[float] = []
     bm_min_z = math.inf
+    skill_bm_min_z = math.inf
     bm_n_nonzero = 0
     if bm25_index is not None and query_terms:
         bm_scores = [
@@ -1174,6 +1234,10 @@ def score_lessons(
         bm_zs = _bm25_zscores(bm_scores)
         bm_n_nonzero = sum(1 for s in bm_scores if s > 0)
         bm_min_z = _bm25_min_z(bm_n_nonzero)
+        skill_bm_min_z = _bm25_min_z(
+            bm_n_nonzero,
+            skill_bm25_min_z if skill_bm25_min_z is not None else _BM25_MIN_Z,
+        )
 
     for i, lesson in enumerate(lessons):
         score = 0.0
@@ -1228,7 +1292,14 @@ def score_lessons(
             # In that case z-score alone gates admission.
             small_corpus = bm_n_nonzero < 3
             corpus_below_floor = max(bm_scores) < _BM25_MIN_RAW
-            if bm_z >= bm_min_z and (
+            lesson_bm_min_z = (
+                skill_bm_min_z
+                if skill_bm25_min_z is not None
+                and lesson.get("is_skill")
+                and _classify_lesson(lesson.get("path", ""))[0] != "exempt"
+                else bm_min_z
+            )
+            if bm_z >= lesson_bm_min_z and (
                 bm_score >= _BM25_MIN_RAW
                 or ((small_corpus or corpus_below_floor) and bm_score > 0)
             ):
@@ -1266,6 +1337,38 @@ def score_lessons(
 
     results.sort(key=lambda x: -x["score"])
     return results[:max_results]
+
+
+def apply_skill_cap(
+    matches: list[dict], predicted: list[dict], cap: int | None
+) -> tuple[list[dict], list[dict]]:
+    """Cap advisory skills across matched and predicted pools.
+
+    Ordinary lessons and policy-manifest ``exempt`` entries never consume the
+    cap and are never removed by this experiment. Matches keep priority over
+    co-occurrence predictions, matching the hook's existing output order.
+    """
+    if cap is None:
+        return matches, predicted
+
+    remaining = max(cap, 0)
+
+    def _filter(items: list[dict]) -> list[dict]:
+        nonlocal remaining
+        kept: list[dict] = []
+        for item in items:
+            is_advisory_skill = (
+                item.get("is_skill")
+                and _classify_lesson(item.get("path", ""))[0] != "exempt"
+            )
+            if not is_advisory_skill:
+                kept.append(item)
+            elif remaining > 0:
+                kept.append(item)
+                remaining -= 1
+        return kept
+
+    return _filter(matches), _filter(predicted)
 
 
 # --- Holdout filtering (A/B testing) ---
@@ -1565,6 +1668,44 @@ def save_session_state(session_id: str, state: dict) -> None:
         tmp = sf.with_suffix(".tmp")
         tmp.write_text(json.dumps(state))
         tmp.replace(sf)  # atomic on POSIX; avoids partial reads under concurrent hooks
+    except Exception:
+        pass
+
+
+def log_injection_dial_assignment(
+    session_id: str, dial: dict[str, object], workspace: Path
+) -> None:
+    """Append one durable arm-assignment record per enabled session.
+
+    The session-keyed record is the join surface for context-spend and outcome
+    analyses. A /tmp marker prevents every PreToolUse invocation from emitting
+    the same assignment again. Logging is best-effort and never blocks a hook.
+    """
+    if not dial.get("enabled"):
+        return
+
+    try:
+        marker = _state_file(session_id).with_suffix(".injection-dial")
+        with marker.open("x", encoding="utf-8") as f:
+            f.write(str(dial.get("arm", "control")))
+
+        raw_log_dir = os.environ.get("LESSON_INJECTION_DIAL_LOG_DIR", "").strip()
+        log_dir = (
+            Path(raw_log_dir)
+            if raw_log_dir
+            else workspace / "state" / "lesson-injection-dial"
+        )
+        log_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": time.time(),
+            "session_id": session_id,
+            "harness": "claude-code",
+            **dial,
+        }
+        with open(
+            log_dir / f"{time.strftime('%Y-%m-%d')}.jsonl", "a", encoding="utf-8"
+        ) as f:
+            f.write(json.dumps(record, sort_keys=True) + "\n")
     except Exception:
         pass
 
@@ -2046,6 +2187,8 @@ def main():
 
     # --- Scan and match lessons ---
     workspace = get_workspace()
+    injection_dial = resolve_injection_dial(session_id)
+    log_injection_dial_assignment(session_id, injection_dial, workspace)
     lesson_dirs = load_lesson_dirs(workspace)
     lessons = scan_lessons(lesson_dirs)
     lessons = filter_by_harness(lessons, detect_harness())
@@ -2058,8 +2201,17 @@ def main():
         emit_empty(event_type)
         sys.exit(0)
 
+    skill_bm25_min_z = injection_dial.get("skill_bm25_min_z")
     raw_matches = score_lessons(
-        lessons, match_text, max_results=max_results, bm25_index=bm25_index
+        lessons,
+        match_text,
+        max_results=max_results,
+        bm25_index=bm25_index,
+        skill_bm25_min_z=(
+            float(skill_bm25_min_z)
+            if isinstance(skill_bm25_min_z, int | float)
+            else None
+        ),
     )
     if not raw_matches:
         emit_empty(event_type)
@@ -2074,6 +2226,15 @@ def main():
     ]
     predicted = get_predicted_lessons(
         matched_paths, already_injected, lessons, MAX_PREDICTED_LESSONS
+    )
+
+    skill_cap = injection_dial.get(
+        "prompt_skill_cap" if event_type == "UserPromptSubmit" else "pretool_skill_cap"
+    )
+    raw_matches, predicted = apply_skill_cap(
+        raw_matches,
+        predicted,
+        int(skill_cap) if isinstance(skill_cap, int) else None,
     )
 
     # --- Holdout filtering (A/B testing via HOLDOUT_LESSONS env var) ---

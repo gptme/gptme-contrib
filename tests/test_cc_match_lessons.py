@@ -2,6 +2,7 @@
 
 import builtins
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -188,6 +189,89 @@ def test_score_lessons_respects_max(hook, tmp_path):
     assert len(results) <= 3
 
 
+def test_injection_dial_is_opt_in_and_control_is_unchanged(hook):
+    dial = hook.resolve_injection_dial("session-a", "")
+
+    assert dial["enabled"] is False
+    assert dial["arm"] == "control"
+    assert dial["assignment"] == "disabled"
+    assert dial["prompt_skill_cap"] is None
+    assert dial["pretool_skill_cap"] is None
+    assert dial["skill_bm25_min_z"] is None
+
+
+def test_injection_dial_random_assignment_is_stable_per_session(hook):
+    first = hook.resolve_injection_dial("session-a", "random")
+    second = hook.resolve_injection_dial("session-a", "1")
+
+    assert first == second
+    assert first["enabled"] is True
+    assert first["assignment"] == "random"
+    assert first["arm"] in {"control", "treatment"}
+
+
+@pytest.mark.parametrize("arm", ["control", "treatment"])
+def test_injection_dial_supports_forced_arms(hook, arm):
+    dial = hook.resolve_injection_dial("session-a", arm)
+
+    assert dial["enabled"] is True
+    assert dial["arm"] == arm
+    assert dial["assignment"] == "forced"
+
+
+def test_skill_cap_preserves_lessons_and_exempt_skills(hook, monkeypatch):
+    monkeypatch.setattr(
+        hook,
+        "_classify_lesson",
+        lambda path: ("exempt" if path == "guard" else "unknown", 1),
+    )
+    matches = [
+        {"path": "lesson", "is_skill": False},
+        {"path": "skill-a", "is_skill": True},
+        {"path": "guard", "is_skill": True},
+        {"path": "skill-b", "is_skill": True},
+    ]
+    predicted = [{"path": "skill-c", "is_skill": True}]
+
+    kept_matches, kept_predicted = hook.apply_skill_cap(matches, predicted, cap=1)
+
+    assert [item["path"] for item in kept_matches] == ["lesson", "skill-a", "guard"]
+    assert kept_predicted == []
+
+
+def test_treatment_bm25_threshold_only_tightens_skills(hook, monkeypatch):
+    lessons = []
+    for index in range(100):
+        is_skill = index < 2
+        lessons.append(
+            {
+                "path": f"{'skill' if is_skill else 'lesson'}-{index}",
+                "title": f"Candidate {index}",
+                "keywords": [],
+                "patterns": [],
+                "skill_name": None,
+                "is_skill": is_skill,
+            }
+        )
+    monkeypatch.setattr(hook, "_bm25_score", lambda *_: 100.0)
+    monkeypatch.setattr(hook, "_bm25_zscores", lambda scores: [4.5] * len(scores))
+    monkeypatch.setattr(hook, "_classify_lesson", lambda path: ("unknown", 1))
+    bm25_index = {"corpus": [[str(index)] for index in range(len(lessons))]}
+
+    result = hook.score_lessons(
+        lessons,
+        "query",
+        max_results=len(lessons),
+        bm25_index=bm25_index,
+        skill_bm25_min_z=5.0,
+    )
+
+    paths = [item["path"] for item in result]
+    assert "skill-0" not in paths
+    assert "skill-1" not in paths
+    assert "lesson-2" in paths
+
+
 # --- session state ---
 
 
@@ -205,6 +289,23 @@ def test_session_state_empty_for_new_session(hook, tmp_path, monkeypatch):
     monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "state")
     state = hook.load_session_state("brand-new-session")
     assert state == {"injected": [], "last_pretool": 0}
+
+
+def test_injection_dial_assignment_logs_once_per_session(hook, tmp_path, monkeypatch):
+    monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "hook-state")
+    monkeypatch.setenv("LESSON_INJECTION_DIAL_LOG_DIR", str(tmp_path / "ledger"))
+    dial = hook.resolve_injection_dial("session-a", "treatment")
+
+    hook.log_injection_dial_assignment("session-a", dial, tmp_path)
+    hook.log_injection_dial_assignment("session-a", dial, tmp_path)
+
+    records: list[dict] = []
+    for path in (tmp_path / "ledger").glob("*.jsonl"):
+        records.extend(json.loads(line) for line in path.read_text().splitlines())
+    assert len(records) == 1
+    assert records[0]["session_id"] == "session-a"
+    assert records[0]["experiment"] == "skill-injection-dial-v1"
+    assert records[0]["arm"] == "treatment"
 
 
 # --- find_workspace ---
