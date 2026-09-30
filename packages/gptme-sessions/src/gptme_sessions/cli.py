@@ -86,6 +86,8 @@ _USAGE_FIELD_MAP: dict[str, str] = {
     "session_total_bytes": "session_total_bytes",
     "reasoning_effort": "reasoning_effort",
     "reasoning_tokens": "reasoning_tokens",
+    "served_model": "served_model",
+    "served_models": "served_models",
 }
 
 # Fields whose absence should trigger ``sync --signals`` re-extraction.

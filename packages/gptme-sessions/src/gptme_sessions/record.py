@@ -542,6 +542,15 @@ class SessionRecord:
     # productivity signal exists; None for classified outcomes and old records.
     unknown_reason: str | None = None
 
+    # Model the provider reported SERVING (its response ``model`` field), as
+    # the trajectory recorded it: gptme ``metadata.served_model``, Claude Code
+    # assistant ``message.model``, Pi ``responseModel``. ``model`` stays the
+    # requested model. ``served_models`` lists the distinct values only when a
+    # session saw more than one. ``None`` = not reported (e.g. Codex rollouts
+    # record only the configured model).
+    served_model: str | None = None
+    served_models: list[str] | None = None
+
     # Preserve fields written by older schema versions so load→mutate→rewrite
     # round-trips don't silently drop data (e.g. ``inferred_category``,
     # ``recommended_confidence``, ``notes``).
