@@ -3139,6 +3139,7 @@ def test_server_general_display_name_does_not_change_handoff_identity(
 ) -> None:
     monkeypatch.delenv("GPTME_VOICE_AGENT_NAME", raising=False)
     monkeypatch.setenv("GPTME_AGENT_NAME", "Alice Smith")
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "bob,alice,gordon,sven")
     monkeypatch.setenv("GPTME_VOICE_HANDOFF_DIR", str(tmp_path))
     monkeypatch.setenv("GPTME_VOICE_HANDOFF_SECRET", "test-secret")
 
@@ -3228,6 +3229,9 @@ def test_server_handoff_identity_derived_from_workspace_config(
             "GPTME_VOICE_HANDOFF_SECRET": "test-secret",
         },
     )
+    # The roster is deployment config (GPTME_VOICE_AGENTS); lib default is empty
+    # (lockdown), so a test that exercises the served path must configure it.
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "bob,alice,gordon,sven")
     workspace = _write_agent_config(tmp_path, "Alice")
 
     server = VoiceServer(workspace=str(workspace))
@@ -3327,6 +3331,8 @@ def test_server_prompt_describes_handoff_only_when_served(
             "GPTME_VOICE_HANDOFF_SECRET": "test-secret",
         },
     )
+    # Roster is deployment config; without it the library locks handoffs down.
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "bob,alice,gordon,sven")
     workspace = _write_agent_config(tmp_path, "Alice", with_personality=True)
 
     served = VoiceServer(workspace=str(workspace))
