@@ -474,9 +474,10 @@ class GptmeToolBridge:
 
         async def _send() -> None:
             try:
-                async with asyncio.timeout(_CUE_CALLBACK_TIMEOUT_SECONDS):
-                    await callback()
-            except TimeoutError:
+                await asyncio.wait_for(
+                    callback(), timeout=_CUE_CALLBACK_TIMEOUT_SECONDS
+                )
+            except asyncio.TimeoutError:
                 logger.warning("Timed out sending subagent %s cue", cue_name)
             except Exception:
                 logger.exception("Failed to send subagent %s cue", cue_name)
