@@ -34,7 +34,7 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
 from ..body import body_adapter_from_env, body_tool_schemas
-from ..handoff import VALID_AGENTS, HandoffWriter
+from ..handoff import HandoffWriter, get_valid_agents
 from ..rag import VoiceRag, rag_instruction_preamble, rag_tool_schema
 from ..vision import VisionSessionBridge, vision_tool_schema
 from .audio import AudioConverter
@@ -871,9 +871,9 @@ class VoiceServer:
         handoff_agents_env = _get_config_env("GPTME_VOICE_HANDOFF_AGENTS")
         # Comma-separated list of agents the running server can hand off to.
         # Defaults to the protocol's registered agents minus this server's own
-        # identity, so registering an agent in ``handoff.VALID_AGENTS`` extends
-        # every deployment's roster from one place instead of two.
-        _default_agents = sorted(VALID_AGENTS - {handoff_agent_name})
+        # identity, so registering an agent in :func:`handoff.get_valid_agents`
+        # extends every deployment's roster from one place instead of two.
+        _default_agents = sorted(get_valid_agents() - {handoff_agent_name})
         self._available_agents: list[str] = (
             [a.strip() for a in handoff_agents_env.split(",") if a.strip()]
             if handoff_agents_env
@@ -896,16 +896,16 @@ class VoiceServer:
                     "configured — handoff disabled. Set GPTME_VOICE_HANDOFF_SECRET "
                     "to a strong random value; never fall back to a known default."
                 )
-            elif handoff_agent_name not in VALID_AGENTS:
+            elif handoff_agent_name not in get_valid_agents():
                 # A forked agent that is not yet a protocol participant must not
                 # crash the call server at startup (HandoffWriter rejects
                 # unknown identities) nor silently sign as another agent.
                 logger.error(
                     "Handoff identity %r is not a registered protocol agent (%s) — "
                     "handoff disabled. Set GPTME_VOICE_AGENT_NAME to a registered "
-                    "agent, or register this agent in gptme_voice.handoff.VALID_AGENTS.",
+                    "agent, or register this agent in gptme_voice.handoff.get_valid_agents().",
                     handoff_agent_name,
-                    ", ".join(sorted(VALID_AGENTS)),
+                    ", ".join(sorted(get_valid_agents())),
                 )
             else:
                 self._handoff_writer = HandoffWriter(
