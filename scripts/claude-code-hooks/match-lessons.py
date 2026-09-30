@@ -1347,6 +1347,10 @@ def apply_skill_cap(
     Ordinary lessons and policy-manifest ``exempt`` entries never consume the
     cap and are never removed by this experiment. Matches keep priority over
     co-occurrence predictions, matching the hook's existing output order.
+
+    Call this AFTER ``_apply_lesson_dropout_multi``: a skill that dropout later
+    withholds must not consume cap budget, or the event can end up injecting
+    fewer skills than the cap allows (the withheld item's slot is not refilled).
     """
     if cap is None:
         return matches, predicted
@@ -1648,6 +1652,19 @@ def _state_file(session_id: str) -> Path:
     return STATE_DIR / f"{safe_id}.json"
 
 
+def _dial_marker_file(session_id: str) -> Path:
+    """Marker path for the once-per-session injection-dial ledger record.
+
+    Keyed on a hash of the RAW session id, not on ``_state_file``'s sanitized
+    name. Sanitization is lossy (``a/b`` and ``a_b`` collide), so a shared
+    marker path would let one session suppress another's ledger record and
+    break the arm-join for that session.
+    """
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+    return STATE_DIR / f"{digest}.injection-dial"
+
+
 def load_session_state(session_id: str) -> dict:
     """Load session state (injected lessons, last pretool time)."""
     try:
@@ -1684,7 +1701,7 @@ def log_injection_dial_assignment(
     if not dial.get("enabled"):
         return
 
-    marker = _state_file(session_id).with_suffix(".injection-dial")
+    marker = _dial_marker_file(session_id)
     try:
         with marker.open("x", encoding="utf-8") as f:
             f.write(str(dial.get("arm", "control")))
@@ -2249,6 +2266,14 @@ def main():
     matches = filter_held_out_lessons(matches, holdout_lessons)
     predicted = filter_held_out_lessons(predicted, holdout_lessons)
 
+    # --- Randomized dropout for causal LOO (mirrors gptme/lessons/auto_include.py) ---
+    # Run dropout BEFORE the skill cap: a skill that dropout withholds must not
+    # consume cap budget, otherwise the event can inject fewer skills than the
+    # cap allows (the withheld skill's slot is never refilled).
+    matches, predicted = _apply_lesson_dropout_multi(
+        matches, predicted, session_id, workspace
+    )
+
     skill_cap = injection_dial.get(
         "prompt_skill_cap" if event_type == "UserPromptSubmit" else "pretool_skill_cap"
     )
@@ -2256,11 +2281,6 @@ def main():
         matches,
         predicted,
         int(skill_cap) if isinstance(skill_cap, int) else None,
-    )
-
-    # --- Randomized dropout for causal LOO (mirrors gptme/lessons/auto_include.py) ---
-    matches, predicted = _apply_lesson_dropout_multi(
-        matches, predicted, session_id, workspace
     )
 
     # --- Log structured lesson events for efficacy measurement (Phase 1a) ---
