@@ -1047,6 +1047,21 @@ def test_discord_permanent_4xx_skips_channel_and_continues(tmp_path, monkeypatch
     assert "discord_111_pending_at" not in rec2
 
 
+def test_discord_failure_does_not_block_x_steps(tmp_path, monkeypatch):
+    """A Discord failure must not suppress the X announcement (P1 #1779)."""
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(ra, "_post_discord", lambda c, t: (False, None, None))
+    monkeypatch.setattr(ra, "_post", lambda *a, **kw: (True, "tweet-1", ""))
+    rel = {"tagName": "v1.2.3", "body": NOTES, "url": "https://example/rel"}
+    rc = ra._main(_ns(skip_x=False, skip_quote=True), rel)
+    assert rc == 1  # Discord failed: exit code still reports the failure
+    rec = ra.load_state()["gptme/gptme#v1.2.3"]
+    assert rec.get("org_tweet_id") == "tweet-1"  # X still posted
+    # Both channels were attempted despite the first failing (no starvation).
+    assert "discord_111_pending_at" in rec
+    assert "discord_222_pending_at" in rec
+
+
 def test_post_discord_requires_token(monkeypatch):
     monkeypatch.delenv("DISCORD_TOKEN", raising=False)
     assert ra._post_discord("1", "hi") == (False, None, None)

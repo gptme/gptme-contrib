@@ -333,13 +333,22 @@ def _post_discord(channel: str, text: str) -> tuple[bool, str | None, int | None
 def _discord_step(
     args: argparse.Namespace, state: dict, key: str, record: dict, text: str
 ) -> bool:
-    """Post to each --discord-channel once; False means stop and exit non-zero."""
+    """Post to each --discord-channel once; False means at least one channel failed.
+
+    Channels are independent: a failure on one is recorded but does not stop the
+    others (nor the X steps that follow), so a single misconfigured or briefly
+    unreachable channel cannot starve the rest of the announcement.
+    """
+    ok = True
     for channel in args.discord_channel:
         step = f"discord_{channel}_id"
         if step in record:
             continue
         if not _begin_post(state, key, record, step):
-            return False
+            # A pending marker from a previous run: retrying this channel is not
+            # safe (the message may already exist). Skip it and keep the others.
+            ok = False
+            continue
         posted, msg_id, code = _post_discord(channel, text[:MAX_DISCORD])
         if not posted and code in _PERMANENT_DISCORD_CODES:
             # Permanent rejection (e.g. missing bot access): no message was
@@ -356,12 +365,13 @@ def _discord_step(
             _finish_post(state, record, step, None)
             continue
         if not posted:
-            # Transient or ambiguous (timeout after send?) — keep the marker:
-            # --force resets it.
-            return False
+            # Transient or ambiguous (timeout after send?) — keep the marker so a
+            # later run refuses blind retry, but do not starve other channels.
+            ok = False
+            continue
         _finish_post(state, record, step, msg_id)
         print(f"{key}: discord channel {channel} message={msg_id}")
-    return True
+    return ok
 
 
 def _pending_key(step: str) -> str:
@@ -409,12 +419,16 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
     state = load_state()
     key = f"{args.repo}#{tag}"
     record = state.get(key, {}) if not args.force else {}
+    discord_ok = True
     if args.discord_channel and not args.dry_run:
         text = f"{compose_announcement(tag, rel.get('body', ''), args.repo)}\n\n{rel['url']}"
         if not _discord_step(args, state, key, record, text):
-            return 1
+            # Discord is an independent channel: a failure here must not
+            # suppress the X announcement. Record it so the exit code still
+            # reports the failure for the timer, but keep going to the X steps.
+            discord_ok = False
     if args.skip_x:
-        return 0
+        return 0 if discord_ok else 1
     # "org_tweet_id" in record with value None = posted but ID unknown; quote is
     # not recoverable without the ID, so treat this as a complete (degraded) state.
     _org_id_unknown = "org_tweet_id" in record and record["org_tweet_id"] is None
@@ -427,7 +441,7 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
             record.pop(_pending_key("bob_quote_id"))
             save_state(state)
         print(f"{key}: already announced ({record.get('org_tweet_id')})")
-        return 0
+        return 0 if discord_ok else 1
 
     announcement = compose_announcement(tag, rel.get("body", ""), args.repo)
     link_reply = rel["url"]
@@ -466,7 +480,7 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
         )
         record["announced_at"] = datetime.now(timezone.utc).isoformat()
         save_state(state)
-        return 0
+        return 0 if discord_ok else 1
 
     link_reply_id = record.get("link_reply_id")
     if "link_reply_id" not in record:
@@ -511,7 +525,7 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
     if quote_id is None and record.get("bob_quote_skip_reason"):
         quote_note = "skipped"
     print(f"announced {key}: org={org_id} quote={quote_note}")
-    return 0
+    return 0 if discord_ok else 1
 
 
 def main() -> int:
