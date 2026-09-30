@@ -1748,6 +1748,27 @@ def test_extract_usage_cc_nonconsecutive_same_id_is_summed():
     assert usage["input_tokens"] == 30  # 10 * 3
 
 
+def test_extract_usage_cc_duplicate_block_metadata_still_updates():
+    """A skipped duplicate block does not multiply usage, but its per-turn
+    metadata (model, stop_reason) is still applied."""
+
+    def rec(message_id: str, model: str, stop_reason: str) -> dict:
+        r = _make_cc_assistant_usage(10, 50, model=model)
+        r["message"]["id"] = message_id
+        r["message"]["stop_reason"] = stop_reason
+        return r
+
+    msgs = [
+        rec("msg_1", "claude-sonnet-4-6", "tool_use"),
+        rec("msg_1", "claude-opus-4-6", "end_turn"),
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["output_tokens"] == 50  # duplicate not summed
+    assert usage["input_tokens"] == 10
+    assert usage["model"] == "claude-opus-4-6"
+    assert usage["stop_reason"] == "end_turn"
+
+
 def test_extract_usage_cc_no_id_records_not_deduped():
     """Records lacking a message id keep prior summing behaviour."""
     msgs = [

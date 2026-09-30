@@ -1924,7 +1924,14 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
             turn_output = _as_int(usage.get("output_tokens")) or 0
             turn_cache_create = _as_int(usage.get("cache_creation_input_tokens")) or 0
             turn_cache_read = _as_int(usage.get("cache_read_input_tokens")) or 0
+            turn_context = turn_input + turn_cache_create + turn_cache_read
+
+            # A duplicate content block of the same response must not multiply
+            # the token totals, but per-turn metadata (model, stop_reason,
+            # context) is still accumulated so a differing field on a later
+            # block is not silently lost.
             message_id = msg.get("id")
+            is_duplicate = False
             if isinstance(message_id, str) and message_id:
                 dedup_key = (
                     message_id,
@@ -1933,17 +1940,16 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
                     turn_cache_create,
                     turn_cache_read,
                 )
-                if dedup_key == prev_usage_key:
-                    continue
+                is_duplicate = dedup_key == prev_usage_key
                 prev_usage_key = dedup_key
             else:
                 prev_usage_key = None
-            turn_context = turn_input + turn_cache_create + turn_cache_read
 
-            per_turn_input += turn_input
-            per_turn_output += turn_output
-            per_turn_cache_creation += turn_cache_create
-            per_turn_cache_read += turn_cache_read
+            if not is_duplicate:
+                per_turn_input += turn_input
+                per_turn_output += turn_output
+                per_turn_cache_creation += turn_cache_create
+                per_turn_cache_read += turn_cache_read
             if usage and sys_prompt_tokens is None:
                 sys_prompt_tokens = turn_context
             if usage:
