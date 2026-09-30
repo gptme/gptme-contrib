@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
-    import pyaudio  # type: ignore
+    import pyaudio
 
     PYAUDIO_AVAILABLE = True
 except ImportError:
@@ -25,7 +25,7 @@ except ImportError:
     print("Warning: pyaudio not available. Install with: pip install pyaudio")
 
 import click
-import websockets  # type: ignore
+import websockets
 
 
 class LocalVoiceTest:
