@@ -63,6 +63,41 @@ def test_completed_output_replaces_longer_progress_snapshot():
     assert messages[-1].is_error
 
 
+def test_final_completion_clears_earlier_error_flag():
+    messages = _normalize_grok(
+        [
+            call("test", "pytest"),
+            update("test", "1 failed", "in_progress", exit_code=1),
+            update("test", "0 failed", exit_code=0),
+        ]
+    )
+    results = [m for m in messages if m.role == "tool_result"]
+    assert len(results) == 1
+    assert results[-1].content == "0 failed"
+    assert not results[-1].is_error
+
+
+def test_growing_background_output_keeps_latest_largest_snapshot():
+    # Real Grok background output streams as growing, cumulative in_progress
+    # snapshots; the first is partial, so later larger snapshots must enrich it.
+    messages = _normalize_grok(
+        [
+            call("build", "cargo build"),
+            update(
+                "build",
+                "Command moved to background",
+                type="BackgroundTaskStarted",
+                task_id="bg",
+            ),
+            update("build", "Compiling...", "in_progress"),
+            update("build", "Compiling...DONE", "in_progress"),
+        ]
+    )
+    results = [m for m in messages if m.role == "tool_result"]
+    assert len(results) == 1
+    assert results[-1].content == "Compiling...DONE"
+
+
 def test_late_progress_after_completion_does_not_clobber_final_result():
     messages = _normalize_grok(
         [

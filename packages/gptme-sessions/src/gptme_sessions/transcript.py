@@ -594,7 +594,9 @@ def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
                 # must never overwrite output already finalized by a completion.
                 previous.content = text
                 previous.tool_result = text
-            previous.is_error |= is_error
+            # An authoritative snapshot supersedes every prior flag; a
+            # non-authoritative progress snapshot may only add an error.
+            previous.is_error = is_error if authoritative else (previous.is_error or is_error)
         if final and call_id:
             finalized.add(call_id)
 
@@ -666,6 +668,13 @@ def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
                     background_calls.add(call_id)
                     background_pending.add(call_id)
             if text or status == "completed":
+                # Background output streams as a series of growing, cumulative
+                # ``in_progress`` snapshots (empirically ~38.7k growing vs 770
+                # shrinking transitions across the corpus; background calls never
+                # emit a ``completed`` update). ``first_background_output`` is the
+                # *first* partial snapshot, not the final output, so it must stay
+                # non-final: later, longer snapshots legitimately enrich it. Only
+                # an explicit completion (or a TaskOutput restore) is final.
                 first_background_output = (
                     bool(text)
                     and call_id in background_pending
