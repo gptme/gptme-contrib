@@ -308,6 +308,30 @@ def test_injection_dial_assignment_logs_once_per_session(hook, tmp_path, monkeyp
     assert records[0]["arm"] == "treatment"
 
 
+def test_injection_dial_log_retries_after_append_failure(hook, tmp_path, monkeypatch):
+    """A failed ledger append must not poison the once-per-session marker."""
+    monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "hook-state")
+    # A regular file where the ledger directory should be makes mkdir fail.
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory")
+    monkeypatch.setenv("LESSON_INJECTION_DIAL_LOG_DIR", str(blocked / "ledger"))
+    dial = hook.resolve_injection_dial("session-b", "treatment")
+
+    hook.log_injection_dial_assignment("session-b", dial, tmp_path)
+    marker = tmp_path / "hook-state" / "session-b.injection-dial"
+    assert not marker.exists(), "marker must be cleared so the write is retried"
+
+    good = tmp_path / "ledger"
+    monkeypatch.setenv("LESSON_INJECTION_DIAL_LOG_DIR", str(good))
+    hook.log_injection_dial_assignment("session-b", dial, tmp_path)
+
+    records: list[dict] = []
+    for path in good.glob("*.jsonl"):
+        records.extend(json.loads(line) for line in path.read_text().splitlines())
+    assert len(records) == 1
+    assert records[0]["session_id"] == "session-b"
+
+
 # --- find_workspace ---
 
 

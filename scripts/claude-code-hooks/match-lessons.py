@@ -1684,11 +1684,16 @@ def log_injection_dial_assignment(
     if not dial.get("enabled"):
         return
 
+    marker = _state_file(session_id).with_suffix(".injection-dial")
     try:
-        marker = _state_file(session_id).with_suffix(".injection-dial")
         with marker.open("x", encoding="utf-8") as f:
             f.write(str(dial.get("arm", "control")))
+    except FileExistsError:
+        return
+    except Exception:
+        return
 
+    try:
         raw_log_dir = os.environ.get("LESSON_INJECTION_DIAL_LOG_DIR", "").strip()
         log_dir = (
             Path(raw_log_dir)
@@ -1707,7 +1712,12 @@ def log_injection_dial_assignment(
         ) as f:
             f.write(json.dumps(record, sort_keys=True) + "\n")
     except Exception:
-        pass
+        # Do not poison the once-per-session marker on a failed append: remove it
+        # so the next hook invocation retries the durable ledger write.
+        try:
+            marker.unlink()
+        except OSError:
+            pass
 
 
 def get_already_injected(
@@ -2228,18 +2238,25 @@ def main():
         matched_paths, already_injected, lessons, MAX_PREDICTED_LESSONS
     )
 
+    # Drop matches that can never render (already injected this session) before
+    # the skill cap consumes budget, and filter holdouts first too. The cap is a
+    # limit on *newly injected* skills; letting an already-injected or held-out
+    # skill spend `remaining` would suppress a skill that could still render.
+    matches = [m for m in raw_matches if m["path"] not in already_injected]
+    predicted = [p for p in predicted if p["path"] not in already_injected]
+
+    # --- Holdout filtering (A/B testing via HOLDOUT_LESSONS env var) ---
+    matches = filter_held_out_lessons(matches, holdout_lessons)
+    predicted = filter_held_out_lessons(predicted, holdout_lessons)
+
     skill_cap = injection_dial.get(
         "prompt_skill_cap" if event_type == "UserPromptSubmit" else "pretool_skill_cap"
     )
-    raw_matches, predicted = apply_skill_cap(
-        raw_matches,
+    matches, predicted = apply_skill_cap(
+        matches,
         predicted,
         int(skill_cap) if isinstance(skill_cap, int) else None,
     )
-
-    # --- Holdout filtering (A/B testing via HOLDOUT_LESSONS env var) ---
-    matches = filter_held_out_lessons(raw_matches, holdout_lessons)
-    predicted = filter_held_out_lessons(predicted, holdout_lessons)
 
     # --- Randomized dropout for causal LOO (mirrors gptme/lessons/auto_include.py) ---
     matches, predicted = _apply_lesson_dropout_multi(

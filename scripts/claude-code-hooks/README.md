@@ -120,7 +120,10 @@ The control arm uses the existing limits and BM25 gate. The treatment arm caps
 advisory skills at 2 for `UserPromptSubmit` and 1 for `PreToolUse`, including
 co-occurrence predictions, and raises the skill-only BM25 z-score ceiling from
 4.0 to 5.0. Ordinary lessons and policy-manifest `exempt` entries bypass both
-treatment changes, so hard guardrails are not experiment subjects.
+treatment changes, so hard guardrails are not experiment subjects. The manifest
+only indexes `lessons/` paths, so a skill stored as `skills/<name>/SKILL.md`
+cannot currently be listed as `exempt`; a skill that must never be capped should
+be expressed as a regular `lessons/` entry.
 
 Each enabled session appends one record to
 `state/lesson-injection-dial/YYYY-MM-DD.jsonl` (override the directory with
