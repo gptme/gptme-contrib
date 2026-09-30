@@ -3246,6 +3246,11 @@ class TestClassifyBackendErrorText:
         text = "error: auth_error\nError code: 401 - invalid credentials"
         assert _classify_backend_error_text(text, "gptme") == "gptme_auth"
 
+    def test_auth_error_bare_class_name_not_matched(self) -> None:
+        # Bare 'auth_error' in ordinary prose must not classify as infra.
+        text = "assistant: The auth_error you saw earlier is unrelated; task failed."
+        assert _classify_backend_error_text(text, "gptme") is None
+
     def test_quota_takes_priority_over_auth(self) -> None:
         # A 402 with "unauthorized" in the body → quota wins.
         text = "status 402 Payment Required: unauthorized quota exceeded"

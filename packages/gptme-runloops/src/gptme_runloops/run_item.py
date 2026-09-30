@@ -1942,7 +1942,11 @@ BACKEND_AUTH_MARKERS: tuple[str, ...] = (
     "invalid_api_key",
     "authentication failed",
     "unauthenticated",
-    "auth_error",
+    # gptme's structured auth class: match the content prefix gptme writes
+    # ("error: auth_error"), NOT the bare class name — same reasoning as
+    # BACKEND_MODEL_UNAVAIL_MARKERS (bare names can appear in ordinary prose
+    # and would grant a free re-arm to a genuine failure).
+    "error: auth_error",
 )
 
 #: Substrings indicating a rate-limit rejection (HTTP 429 / too many requests).
