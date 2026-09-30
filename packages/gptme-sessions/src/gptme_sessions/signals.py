@@ -1871,8 +1871,11 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
 
     1. **~/.claude/projects/*.jsonl** (durable, per-turn API responses):
        Each ``type="assistant"`` record is a complete API response where
-       ``message.usage`` carries the per-turn token counts.  Summing across
-       turns gives true session totals.
+       ``message.usage`` carries the per-turn token counts.  Claude Code
+       writes the same response once per streamed content block, so consecutive
+       records sharing a ``message.id`` are de-duplicated before summing —
+       otherwise
+       multi-block responses (tool calls + text) multiply their usage.
 
     2. **--stream-json log** (streaming events):
        ``type="assistant"`` records are intermediate streaming events where
@@ -1897,6 +1900,14 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
     context_peak_tokens: int | None = None
     result_usage: dict | None = None
     stop_reason: str | None = None
+    # CC emits one assistant record per streamed content block; the copies of a
+    # single response are written as *consecutive* assistant records sharing the
+    # same message id and byte-identical usage (verified: 0/356 duplicate groups
+    # are non-consecutive; none vary in usage). De-duplicate only such
+    # consecutive (message id, usage) repeats, so a genuinely distinct response
+    # later in the session — even one that reuses an id, or a retry/resumed turn
+    # with identical counters — is never dropped.
+    prev_usage_key: tuple[str, int, int, int, int] | None = None
 
     for record in msgs:
         rec_type = record.get("type")
@@ -1910,10 +1921,30 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
             turn_cache_read = _as_int(usage.get("cache_read_input_tokens")) or 0
             turn_context = turn_input + turn_cache_create + turn_cache_read
 
-            per_turn_input += turn_input
-            per_turn_output += turn_output
-            per_turn_cache_creation += turn_cache_create
-            per_turn_cache_read += turn_cache_read
+            # A duplicate content block of the same response must not multiply
+            # the token totals, but per-turn metadata (model, stop_reason,
+            # context) is still accumulated so a differing field on a later
+            # block is not silently lost.
+            message_id = msg.get("id")
+            is_duplicate = False
+            if isinstance(message_id, str) and message_id:
+                dedup_key = (
+                    message_id,
+                    turn_input,
+                    turn_output,
+                    turn_cache_create,
+                    turn_cache_read,
+                )
+                is_duplicate = dedup_key == prev_usage_key
+                prev_usage_key = dedup_key
+            else:
+                prev_usage_key = None
+
+            if not is_duplicate:
+                per_turn_input += turn_input
+                per_turn_output += turn_output
+                per_turn_cache_creation += turn_cache_create
+                per_turn_cache_read += turn_cache_read
             if usage and sys_prompt_tokens is None:
                 sys_prompt_tokens = turn_context
             if usage:

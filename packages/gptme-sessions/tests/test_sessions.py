@@ -1679,6 +1679,107 @@ def test_extract_usage_cc_basic():
     assert usage["context_peak_tokens"] == 510
 
 
+def test_extract_usage_cc_dedupes_duplicate_message_ids():
+    """The same API response written once per content block is counted once.
+
+    Claude Code emits one ``type="assistant"`` record per streamed content
+    block, each carrying the full response's usage. Summing every copy
+    multiplies token counts (and cost) by the block count.
+    """
+
+    def rec(message_id: str, out: int, cache_read: int) -> dict:
+        r = _make_cc_assistant_usage(10, out, cache_read=cache_read)
+        r["message"]["id"] = message_id
+        return r
+
+    msgs = [
+        rec("msg_1", 50, 0),  # first block of response 1
+        rec("msg_1", 50, 0),  # duplicated block of the same response
+        rec("msg_2", 20, 500),  # a distinct response, kept once
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["output_tokens"] == 70  # 50 + 20, not 120
+    assert usage["cache_read_tokens"] == 500
+    assert usage["input_tokens"] == 20  # 10 * 2 unique responses
+
+
+def test_extract_usage_cc_same_id_different_usage_is_summed():
+    """A reused id with a *different* usage payload is not treated as a dup.
+
+    De-duplication is keyed on (message id, usage counters), so genuinely
+    distinct responses that happen to share an id are summed, not dropped.
+    """
+
+    def rec(message_id: str, out: int) -> dict:
+        r = _make_cc_assistant_usage(10, out)
+        r["message"]["id"] = message_id
+        return r
+
+    msgs = [
+        rec("msg_1", 50),  # response 1, first block
+        rec("msg_1", 50),  # duplicated block of response 1 (identical usage)
+        rec("msg_1", 20),  # same id, different usage -> counted
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["output_tokens"] == 70  # 50 + 20, identical dup skipped
+    assert usage["input_tokens"] == 20  # 10 * 2
+
+
+def test_extract_usage_cc_nonconsecutive_same_id_is_summed():
+    """Only *consecutive* repeats of one response are de-duplicated.
+
+    The copies of a single response are written back-to-back; a distinct
+    response that later reuses the same id (with identical counters) sits
+    between other turns and must still be counted.
+    """
+
+    def rec(message_id: str, out: int) -> dict:
+        r = _make_cc_assistant_usage(10, out)
+        r["message"]["id"] = message_id
+        return r
+
+    msgs = [
+        rec("msg_1", 50),  # response 1
+        rec("msg_2", 20),  # distinct response in between
+        rec("msg_1", 50),  # same id + usage, but not consecutive -> counted
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["output_tokens"] == 120  # 50 + 20 + 50
+    assert usage["input_tokens"] == 30  # 10 * 3
+
+
+def test_extract_usage_cc_duplicate_block_metadata_still_updates():
+    """A skipped duplicate block does not multiply usage, but its per-turn
+    metadata (model, stop_reason) is still applied."""
+
+    def rec(message_id: str, model: str, stop_reason: str) -> dict:
+        r = _make_cc_assistant_usage(10, 50, model=model)
+        r["message"]["id"] = message_id
+        r["message"]["stop_reason"] = stop_reason
+        return r
+
+    msgs = [
+        rec("msg_1", "claude-sonnet-4-6", "tool_use"),
+        rec("msg_1", "claude-opus-4-6", "end_turn"),
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["output_tokens"] == 50  # duplicate not summed
+    assert usage["input_tokens"] == 10
+    assert usage["model"] == "claude-opus-4-6"
+    assert usage["stop_reason"] == "end_turn"
+
+
+def test_extract_usage_cc_no_id_records_not_deduped():
+    """Records lacking a message id keep prior summing behaviour."""
+    msgs = [
+        _make_cc_assistant_usage(10, 5),
+        _make_cc_assistant_usage(10, 5),
+    ]
+    usage = extract_usage_cc(msgs)
+    assert usage["input_tokens"] == 20
+    assert usage["output_tokens"] == 10
+
+
 def test_extract_usage_cc_empty():
     """Empty trajectory (no assistant turns) returns empty dict."""
     usage = extract_usage_cc([])
@@ -4613,7 +4714,7 @@ def test_extract_signals_codex_ignores_embedded_script_completed_json():
                 "type": "custom_tool_call_output",
                 "call_id": "call_exec_embedded_wrapper",
                 "output": (
-                    "command ok\nScript completed\n" '{"exit_code":1,"output":"application data"}'
+                    'command ok\nScript completed\n{"exit_code":1,"output":"application data"}'
                 ),
             },
         },
