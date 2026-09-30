@@ -47,6 +47,18 @@ from gptmail.transport.agent import AgentTransport, split_frontmatter
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Send-path instructions (read-only bridge; no write tool until ChatGPT Pro
+# lifts the MCP write-tool restriction).  GitHub issues are the interim path:
+# Bob's project-monitoring loop polls ErikBjare/bob and picks them up.
+# ---------------------------------------------------------------------------
+_GITHUB_SEND_INSTRUCTIONS = (
+    "To send a message to Bob, open a GitHub issue at "
+    "https://github.com/ErikBjare/bob — mention @TimeToBuildBob in the title "
+    "or body. Bob's monitoring loop picks up new issues and will reply here "
+    "once your message is processed."
+)
+
+# ---------------------------------------------------------------------------
 # Surface ledger: which message IDs have already been returned per session.
 # In-memory only; restarting the server will re-surface.  For production
 # durability, swap this for a tiny SQLite table or append-only JSONL file.
@@ -207,7 +219,12 @@ class ChatGPTBridge:
     def _register_tools(self) -> None:
         @self.mcp.tool()
         def bob_status(session_id: str) -> str:
-            """Return Bob's status for this chat session.
+            """Return Bob's status and send-path instructions for this chat session.
+
+            Returns a JSON object with inbox/outbox counts, unread-reply flag,
+            and ``send_instructions`` explaining how to send messages to Bob
+            (GitHub issues — the interim path until ChatGPT Pro supports MCP
+            write tools).
 
             Args:
                 session_id: The OpenAI session ID (from _meta["openai/session"]).
@@ -239,6 +256,7 @@ class ChatGPTBridge:
                 "surfaced": len(outbox_ids & surfaced),
                 "pending_replies": pending,
                 "has_unread": pending > 0,
+                "send_instructions": _GITHUB_SEND_INSTRUCTIONS,
             }
             return json.dumps(status, indent=2)
 

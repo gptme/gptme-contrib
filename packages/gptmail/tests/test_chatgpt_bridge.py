@@ -126,7 +126,7 @@ class TestChatGPTBridge:
 
     @pytest.mark.anyio
     async def test_bob_status_empty(self, bridge: ChatGPTBridge, session_id: str) -> None:
-        """Status on an empty mailbox reports zero counts."""
+        """Status on an empty mailbox reports zero counts and send instructions."""
         result = await bridge.mcp.call_tool("bob_status", {"session_id": session_id})
         data = self._parse_result(result)
         assert data["mailbox"] == _session_to_mailbox(session_id)
@@ -134,6 +134,7 @@ class TestChatGPTBridge:
         assert data["outbox"] == 0
         assert data["pending_replies"] == 0
         assert data["has_unread"] is False
+        assert "github.com/ErikBjare/bob" in data["send_instructions"]
 
     @pytest.mark.anyio
     async def test_bob_replies_empty(self, bridge: ChatGPTBridge, session_id: str) -> None:
