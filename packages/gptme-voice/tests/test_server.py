@@ -1092,6 +1092,7 @@ def test_twilio_websocket_does_not_grant_rag_tools_from_spoofed_from_number(
     workspace_search must require the call-scoped grant minted by signed
     /incoming — not the client-supplied from_number — same as body tools.
     """
+    pytest.importorskip("gptme_rag")
     monkeypatch.setenv("GPTME_VOICE_RAG", "1")
     monkeypatch.delenv("GPTME_VOICE_BODY_URL", raising=False)
     import gptme_voice.realtime.server as server_mod
@@ -1173,6 +1174,7 @@ def test_twilio_spoof_cannot_steal_rag_capable_prewarm(
     workspace_search to the model — the claiming tool_bridge would compute
     rag_for_ws from granted_from (None here), so the tool would be advertised
     with nothing behind it."""
+    pytest.importorskip("gptme_rag")
     monkeypatch.setenv("GPTME_VOICE_RAG", "1")
     monkeypatch.delenv("GPTME_VOICE_BODY_URL", raising=False)
     import gptme_voice.realtime.server as server_mod
@@ -3139,6 +3141,7 @@ def test_server_general_display_name_does_not_change_handoff_identity(
 ) -> None:
     monkeypatch.delenv("GPTME_VOICE_AGENT_NAME", raising=False)
     monkeypatch.setenv("GPTME_AGENT_NAME", "Alice Smith")
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "bob,alice,gordon,sven")
     monkeypatch.setenv("GPTME_VOICE_HANDOFF_DIR", str(tmp_path))
     monkeypatch.setenv("GPTME_VOICE_HANDOFF_SECRET", "test-secret")
 
@@ -3228,6 +3231,9 @@ def test_server_handoff_identity_derived_from_workspace_config(
             "GPTME_VOICE_HANDOFF_SECRET": "test-secret",
         },
     )
+    # The roster is deployment config (GPTME_VOICE_AGENTS); lib default is empty
+    # (lockdown), so a test that exercises the served path must configure it.
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "bob,alice,gordon,sven")
     workspace = _write_agent_config(tmp_path, "Alice")
 
     server = VoiceServer(workspace=str(workspace))
@@ -3327,6 +3333,8 @@ def test_server_prompt_describes_handoff_only_when_served(
             "GPTME_VOICE_HANDOFF_SECRET": "test-secret",
         },
     )
+    # Roster is deployment config; without it the library locks handoffs down.
+    monkeypatch.setenv("GPTME_VOICE_AGENTS", "bob,alice,gordon,sven")
     workspace = _write_agent_config(tmp_path, "Alice", with_personality=True)
 
     served = VoiceServer(workspace=str(workspace))
