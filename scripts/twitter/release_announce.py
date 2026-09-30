@@ -17,6 +17,7 @@ State file schema (one record per ``"<repo>#<tag>"`` key):
   ``link_reply_id``         id of the release-URL reply
   ``bob_quote_id``          id of Bob's quote-tweet, or None when skipped
   ``bob_quote_skip_reason`` why the quote was skipped (only when skipped)
+  ``discord_<channel>_id``  id of the Discord message posted to that channel
   ``announced_at``          ISO timestamp; presence means "do not re-announce"
   ``*_pending_at``          in-flight marker; blocks blind retry until cleared
 
@@ -30,17 +31,21 @@ Usage:
     release_announce.py --tag v0.33.0         # announce a specific tag
     release_announce.py --dry-run             # print tweets, post nothing
     release_announce.py --skip-quote          # org tweet only
+    release_announce.py --skip-x --discord-channel 123   # Discord only (needs DISCORD_TOKEN)
 """
 
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -283,6 +288,108 @@ def _post(args: list[str], account: str | None = None) -> tuple[bool, str | None
     return True, ids[-1], out
 
 
+DISCORD_API = "https://discord.com/api/v10"
+MAX_DISCORD = 2000
+
+
+# 4xx codes that are permanent rejections: no message was created, and
+# retrying will fail identically forever. 429 (rate limit) and 5xx are
+# transient and keep the pending marker.
+_PERMANENT_DISCORD_CODES = {400, 401, 403, 404, 405}
+
+
+def _post_discord(channel: str, text: str) -> tuple[bool, str | None, int | None]:
+    """POST one message as the bot in DISCORD_TOKEN.
+
+    Return (success, message id, HTTP status code). The code is None for
+    non-HTTP failures (missing token, timeout, OSError) and on success.
+    """
+    token = os.environ.get("DISCORD_TOKEN", "")
+    if not token:
+        print("DISCORD_TOKEN not set; cannot post to Discord", file=sys.stderr)
+        return False, None, None
+    req = urllib.request.Request(
+        f"{DISCORD_API}/channels/{channel}/messages",
+        data=json.dumps({"content": text, "allowed_mentions": {"parse": []}}).encode(),
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "DiscordBot (https://github.com/gptme/gptme-contrib, 1.0)",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as exc:
+        print(
+            f"discord POST failed ({exc.code}): {exc.read()[:300]!r}", file=sys.stderr
+        )
+        return False, None, exc.code
+    except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
+        # OSError covers URLError/timeouts; HTTPException covers low-level
+        # protocol errors (BadStatusLine, IncompleteRead) that are not OSError.
+        print(f"discord POST failed: {exc}", file=sys.stderr)
+        return False, None, None
+    return True, str(data.get("id")) if data.get("id") else None, None
+
+
+def _discord_step(
+    args: argparse.Namespace, state: dict, key: str, record: dict, text: str
+) -> bool:
+    """Post to each --discord-channel once; False means at least one channel failed.
+
+    Channels are independent: a failure on one is recorded but does not stop the
+    others (nor the X steps that follow), so a single misconfigured or briefly
+    unreachable channel cannot starve the rest of the announcement.
+    """
+    if not os.environ.get("DISCORD_TOKEN", ""):
+        # A missing token is a deterministic configuration error: no HTTP
+        # request is made, so there is no ambiguous remote side effect to guard
+        # against. Fail without recording a pending marker (which would wedge
+        # the channel until --force, risking duplicate X posts); the timer still
+        # sees a non-zero exit and can retry once the token is configured.
+        print("DISCORD_TOKEN not set; cannot post to Discord", file=sys.stderr)
+        return False
+    ok = True
+    for channel in args.discord_channel:
+        step = f"discord_{channel}_id"
+        if step in record:
+            continue
+        if not _begin_post(state, key, record, step):
+            # A pending marker from a previous run: retrying this channel is not
+            # safe (the message may already exist). Skip it and keep the others.
+            ok = False
+            continue
+        posted, msg_id, code = _post_discord(channel, text[:MAX_DISCORD])
+        if not posted and code in _PERMANENT_DISCORD_CODES:
+            # Permanent rejection (e.g. missing bot access): no message was
+            # created and retrying fails identically forever. Record the skip
+            # so the pending marker clears and the rest of the pipeline
+            # (X steps) still runs — a misconfigured channel must not stall
+            # every future announcement for this tag.
+            print(
+                f"{key}: discord channel {channel} permanently rejected "
+                f"(HTTP {code}); skipping",
+                file=sys.stderr,
+            )
+            record[f"{step.removesuffix('_id')}_skip_reason"] = f"HTTP {code}"
+            _finish_post(state, record, step, None)
+            # Surface the permanent rejection this run so the timer/operator is
+            # alerted even when every channel is rejected. Later runs skip the
+            # now-ledgered step and return success, so this is a one-shot signal,
+            # not a stalling loop.
+            ok = False
+            continue
+        if not posted:
+            # Transient or ambiguous (timeout after send?) — keep the marker so a
+            # later run refuses blind retry, but do not starve other channels.
+            ok = False
+            continue
+        _finish_post(state, record, step, msg_id)
+        print(f"{key}: discord channel {channel} message={msg_id}")
+    return ok
+
+
 def _pending_key(step: str) -> str:
     return f"{step.removesuffix('_id')}_pending_at"
 
@@ -328,6 +435,16 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
     state = load_state()
     key = f"{args.repo}#{tag}"
     record = state.get(key, {}) if not args.force else {}
+    discord_ok = True
+    if args.discord_channel and not args.dry_run:
+        text = f"{compose_announcement(tag, rel.get('body', ''), args.repo)}\n\n{rel['url']}"
+        if not _discord_step(args, state, key, record, text):
+            # Discord is an independent channel: a failure here must not
+            # suppress the X announcement. Record it so the exit code still
+            # reports the failure for the timer, but keep going to the X steps.
+            discord_ok = False
+    if args.skip_x:
+        return 0 if discord_ok else 1
     # "org_tweet_id" in record with value None = posted but ID unknown; quote is
     # not recoverable without the ID, so treat this as a complete (degraded) state.
     _org_id_unknown = "org_tweet_id" in record and record["org_tweet_id"] is None
@@ -340,7 +457,7 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
             record.pop(_pending_key("bob_quote_id"))
             save_state(state)
         print(f"{key}: already announced ({record.get('org_tweet_id')})")
-        return 0
+        return 0 if discord_ok else 1
 
     announcement = compose_announcement(tag, rel.get("body", ""), args.repo)
     link_reply = rel["url"]
@@ -379,7 +496,7 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
         )
         record["announced_at"] = datetime.now(timezone.utc).isoformat()
         save_state(state)
-        return 0
+        return 0 if discord_ok else 1
 
     link_reply_id = record.get("link_reply_id")
     if "link_reply_id" not in record:
@@ -424,7 +541,7 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
     if quote_id is None and record.get("bob_quote_skip_reason"):
         quote_note = "skipped"
     print(f"announced {key}: org={org_id} quote={quote_note}")
-    return 0
+    return 0 if discord_ok else 1
 
 
 def main() -> int:
@@ -433,6 +550,19 @@ def main() -> int:
     ap.add_argument("--tag", default=None, help="announce this tag (default: latest)")
     ap.add_argument("--org-account", default="gptmeorg")
     ap.add_argument("--skip-quote", action="store_true")
+    ap.add_argument(
+        "--discord-channel",
+        action="append",
+        default=[],
+        metavar="CHANNEL_ID",
+        help="also post the announcement to this Discord channel (repeatable; "
+        "needs DISCORD_TOKEN); each channel is ledgered and posted once",
+    )
+    ap.add_argument(
+        "--skip-x",
+        action="store_true",
+        help="skip the X/Twitter steps (Discord-only run or backfill)",
+    )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument(
         "--max-age-days",

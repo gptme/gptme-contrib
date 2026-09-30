@@ -977,3 +977,150 @@ def test_product_names_for_org_repos():
     assert ra.product_name("owner/widget") == "widget"
     text = ra.compose_announcement("v0.14.2", "", "ActivityWatch/aw-android")
     assert text.startswith("ActivityWatch for Android v0.14.2 is out")
+
+
+def _ns(**kw):
+    import argparse
+
+    base = dict(
+        repo="gptme/gptme",
+        discord_channel=["111", "222"],
+        skip_x=True,
+        dry_run=False,
+        force=False,
+        skip_quote=False,
+        org_account="gptmeorg",
+    )
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_discord_posts_each_channel_once_and_ledgers(tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setenv("DISCORD_TOKEN", "test-token")
+    sent = []
+
+    def fake_post(channel, text):
+        sent.append(channel)
+        return True, f"msg-{channel}", None
+
+    monkeypatch.setattr(ra, "_post_discord", fake_post)
+    rel = {"tagName": "v1.2.3", "body": NOTES, "url": "https://example/rel"}
+    assert ra._main(_ns(), rel) == 0
+    assert ra._main(_ns(), rel) == 0  # second run: ledger blocks re-post
+    assert sent == ["111", "222"]
+    rec = ra.load_state()["gptme/gptme#v1.2.3"]
+    assert rec["discord_111_id"] == "msg-111"
+    assert "announced_at" not in rec  # skip_x: X ledger untouched
+
+
+def test_discord_failure_leaves_pending_marker(tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setenv("DISCORD_TOKEN", "test-token")
+    monkeypatch.setattr(ra, "_post_discord", lambda c, t: (False, None, None))
+    rel = {"tagName": "v1.2.3", "body": NOTES, "url": "https://example/rel"}
+    assert ra._main(_ns(), rel) == 1
+    assert "discord_111_pending_at" in ra.load_state()["gptme/gptme#v1.2.3"]
+    assert ra._main(_ns(), rel) == 1  # refuses blind retry
+
+
+def test_discord_permanent_4xx_skips_channel_and_continues(tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setenv("DISCORD_TOKEN", "test-token")
+    codes = {"111": 403, "222": 500}
+
+    def fake_post(channel, text):
+        code = codes[channel]
+        if code == 403:
+            return False, None, code
+        return False, None, code  # both fail; only 403 is permanent
+
+    monkeypatch.setattr(ra, "_post_discord", fake_post)
+    rel = {"tagName": "v1.2.3", "body": NOTES, "url": "https://example/rel"}
+    assert ra._main(_ns(), rel) == 1  # 222 is transient: overall failure
+    rec = ra.load_state()["gptme/gptme#v1.2.3"]
+    assert rec["discord_111_id"] is None  # 403: marker cleared, step skipped
+    assert "discord_111_pending_at" not in rec
+    assert rec["discord_111_skip_reason"] == "HTTP 403"
+    assert "discord_222_pending_at" in rec  # 500: pending marker kept
+
+    # A later run skips 111 (ledgered) and still fails on 222, not on 111.
+    assert ra._main(_ns(), rel) == 1
+    rec2 = ra.load_state()["gptme/gptme#v1.2.3"]
+    assert "discord_111_pending_at" not in rec2
+
+
+def test_discord_all_channels_permanently_rejected_reports_failure(
+    tmp_path, monkeypatch
+):
+    """Every channel permanently rejected must still surface a non-zero exit."""
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setenv("DISCORD_TOKEN", "test-token")
+    monkeypatch.setattr(ra, "_post_discord", lambda c, t: (False, None, 403))
+    rel = {"tagName": "v1.2.3", "body": NOTES, "url": "https://example/rel"}
+    # First run: both channels rejected -> exit 1, both ledgered as skipped.
+    assert ra._main(_ns(), rel) == 1
+    rec = ra.load_state()["gptme/gptme#v1.2.3"]
+    assert rec["discord_111_skip_reason"] == "HTTP 403"
+    assert rec["discord_222_skip_reason"] == "HTTP 403"
+    assert "discord_111_pending_at" not in rec
+    assert "discord_222_pending_at" not in rec
+    # Second run: the ledgered steps are skipped, so it no longer fails.
+    assert ra._main(_ns(), rel) == 0
+
+
+def test_discord_failure_does_not_block_x_steps(tmp_path, monkeypatch):
+    """A Discord failure must not suppress the X announcement (P1 #1779)."""
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setenv("DISCORD_TOKEN", "test-token")
+    monkeypatch.setattr(ra, "_post_discord", lambda c, t: (False, None, None))
+    monkeypatch.setattr(ra, "_post", lambda *a, **kw: (True, "tweet-1", ""))
+    rel = {"tagName": "v1.2.3", "body": NOTES, "url": "https://example/rel"}
+    rc = ra._main(_ns(skip_x=False, skip_quote=True), rel)
+    assert rc == 1  # Discord failed: exit code still reports the failure
+    rec = ra.load_state()["gptme/gptme#v1.2.3"]
+    assert rec.get("org_tweet_id") == "tweet-1"  # X still posted
+    # Both channels were attempted despite the first failing (no starvation).
+    assert "discord_111_pending_at" in rec
+    assert "discord_222_pending_at" in rec
+
+
+def test_post_discord_requires_token(monkeypatch):
+    monkeypatch.delenv("DISCORD_TOKEN", raising=False)
+    assert ra._post_discord("1", "hi") == (False, None, None)
+
+
+def test_post_discord_protocol_error_is_transient(monkeypatch):
+    """Low-level http.client errors must be a clean transient failure, not a crash."""
+    monkeypatch.setenv("DISCORD_TOKEN", "test-token")
+
+    def boom(req, timeout=None):
+        raise ra.http.client.BadStatusLine("")
+
+    monkeypatch.setattr(ra.urllib.request, "urlopen", boom)
+    assert ra._post_discord("1", "hi") == (False, None, None)
+
+
+def test_discord_missing_token_alerts_without_wedging_channel(tmp_path, monkeypatch):
+    """A missing DISCORD_TOKEN must leave no pending marker (P1 #1779).
+
+    No HTTP request is made, so there is no ambiguous side effect to guard.
+    The run fails (alerting the operator) but a later run after the token is
+    configured must be able to post the same channel normally.
+    """
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.delenv("DISCORD_TOKEN", raising=False)
+    rel = {"tagName": "v1.2.3", "body": NOTES, "url": "https://example/rel"}
+    assert ra._main(_ns(), rel) == 1
+    rec = ra.load_state().get("gptme/gptme#v1.2.3", {})
+    assert "discord_111_pending_at" not in rec
+    assert "discord_222_pending_at" not in rec
+    assert "discord_111_id" not in rec
+
+    # Configure the token; the same channels now post normally (no stale marker).
+    monkeypatch.setenv("DISCORD_TOKEN", "test-token")
+    monkeypatch.setattr(ra, "_post_discord", lambda c, t: (True, f"msg-{c}", None))
+    assert ra._main(_ns(), rel) == 0
+    rec = ra.load_state()["gptme/gptme#v1.2.3"]
+    assert rec["discord_111_id"] == "msg-111"
+    assert rec["discord_222_id"] == "msg-222"
