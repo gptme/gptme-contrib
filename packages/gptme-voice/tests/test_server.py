@@ -1092,6 +1092,7 @@ def test_twilio_websocket_does_not_grant_rag_tools_from_spoofed_from_number(
     workspace_search must require the call-scoped grant minted by signed
     /incoming — not the client-supplied from_number — same as body tools.
     """
+    pytest.importorskip("gptme_rag")
     monkeypatch.setenv("GPTME_VOICE_RAG", "1")
     monkeypatch.delenv("GPTME_VOICE_BODY_URL", raising=False)
     import gptme_voice.realtime.server as server_mod
@@ -1173,6 +1174,7 @@ def test_twilio_spoof_cannot_steal_rag_capable_prewarm(
     workspace_search to the model — the claiming tool_bridge would compute
     rag_for_ws from granted_from (None here), so the tool would be advertised
     with nothing behind it."""
+    pytest.importorskip("gptme_rag")
     monkeypatch.setenv("GPTME_VOICE_RAG", "1")
     monkeypatch.delenv("GPTME_VOICE_BODY_URL", raising=False)
     import gptme_voice.realtime.server as server_mod

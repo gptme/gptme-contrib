@@ -72,6 +72,7 @@ async def test_call_query_shape_returns_recent_answer_under_budget(
     tmp_path: Path,
 ) -> None:
     """Exact standup query: recent snippet in, stale snippet out, <8s."""
+    pytest.importorskip("gptme_rag")
     now = time.time()
     today = datetime.fromtimestamp(now, tz=timezone.utc).date().isoformat()
     # Stale file lives in TODAY's directory but with an old mtime so the
@@ -180,6 +181,7 @@ async def test_backend_is_recency_when_lexical_has_no_matches(
     results fall back to the recency-ordered corpus — the backend field must say
     'recency', not claim a lexical ranking that never happened.
     """
+    pytest.importorskip("gptme_rag")
     now = time.time()
     today = datetime.fromtimestamp(now, tz=timezone.utc).date()
     _write_journal(
@@ -308,6 +310,7 @@ async def test_handle_function_call_without_rag_fails_cleanly() -> None:
 def test_session_config_advertises_workspace_search_when_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    pytest.importorskip("gptme_rag")
     monkeypatch.setenv("GPTME_VOICE_RAG", "1")
     monkeypatch.delenv("GPTME_VOICE_BODY_URL", raising=False)
     from gptme_voice.realtime.server import VoiceServer
@@ -355,6 +358,7 @@ def test_rag_for_websocket_loopback_allowed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Loopback WebSocket clients get RAG access."""
+    pytest.importorskip("gptme_rag")
     monkeypatch.setenv("GPTME_VOICE_RAG", "1")
     monkeypatch.delenv("GPTME_VOICE_BODY_URL", raising=False)
     monkeypatch.delenv("TWILIO_CALLER_ALLOWLIST", raising=False)
@@ -392,6 +396,7 @@ def test_rag_for_websocket_twilio_allowlist(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Twilio callers on TWILIO_CALLER_ALLOWLIST get RAG; others are denied."""
+    pytest.importorskip("gptme_rag")
     monkeypatch.setenv("GPTME_VOICE_RAG", "1")
     monkeypatch.delenv("GPTME_VOICE_BODY_URL", raising=False)
     monkeypatch.setenv("TWILIO_CALLER_ALLOWLIST", "+46765784797")
@@ -445,6 +450,7 @@ async def test_recency_bucket_sort_not_applied_for_today_query(
     sort would push morning work off the top-N page.  For a 'today' query the
     plain newest-first order should be returned without any sub-hour re-sorting.
     """
+    pytest.importorskip("gptme_rag")
     now = time.time()
     today = datetime.fromtimestamp(now, tz=timezone.utc).date()
 
