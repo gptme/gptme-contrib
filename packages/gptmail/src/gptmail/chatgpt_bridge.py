@@ -261,12 +261,16 @@ class ChatGPTBridge:
             return json.dumps(status, indent=2)
 
         @self.mcp.tool()
-        def bob_replies(session_id: str, limit: int = 5) -> str:
+        def bob_replies(session_id: str, limit: int = 5, resurface: bool = False) -> str:
             """Return unread Bob replies for this chat session.
 
             Args:
                 session_id: The OpenAI session ID (from _meta["openai/session"]).
                 limit: Maximum number of replies to return (default 5).
+                resurface: Re-list already-surfaced replies too. Recovery path
+                    for a client that completed a poll but lost the response
+                    before reading it — the ledger cannot observe delivery,
+                    so this is the only way to re-obtain such a reply.
             """
             mailbox = _session_to_mailbox(session_id)
             transport = self._transport(mailbox)
@@ -320,7 +324,7 @@ class ChatGPTBridge:
                         # delivered again).
                         if len(replies) >= limit:
                             break
-                        if msg_id in surfaced:
+                        if msg_id in surfaced and not resurface:
                             continue
                         path = transport.outbox / msg_id
                         # confinement: msg_id is a filename from a directory
@@ -373,8 +377,11 @@ class ChatGPTBridge:
                 # failure partway through the call cannot consume replies that
                 # were collected but never returned. Delivery to the client
                 # happens after this function returns and is not observable
-                # here; the outbox on disk remains the source of truth, so a
-                # response dropped in that window is recoverable.
+                # here, so the handoff is at-most-once within a server
+                # lifetime: a response dropped between this commit and the
+                # client reading it is not re-offered on later polls. The
+                # outbox on disk remains the source of truth; a client that
+                # loses a response recovers with resurface=True.
                 if not replies:
                     return json.dumps(
                         {"replies": [], "note": "No new replies from Bob."},

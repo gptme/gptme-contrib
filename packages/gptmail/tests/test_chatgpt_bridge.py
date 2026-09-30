@@ -188,6 +188,43 @@ class TestChatGPTBridge:
         assert d2["replies"] == []
 
     @pytest.mark.anyio
+    async def test_bob_replies_resurface_recovers_dropped_response(
+        self,
+        bridge: ChatGPTBridge,
+        session_id: str,
+        bob_transport: AgentTransport,
+    ) -> None:
+        """A response lost between ledger commit and client read is recoverable.
+
+        Delivery to the client is not observable inside the tool, so the
+        ledger handoff is at-most-once within a server lifetime. resurface=True
+        is the recovery path: it re-lists outbox messages regardless of the
+        ledger (the files are never deleted, so they are always available).
+        """
+        bob_transport.send(to="chatgpt", subject="Hello", content="Bob says hi")
+
+        # First call surfaces (and commits) the reply, but suppose the client
+        # never reads the response.
+        r1 = await bridge.mcp.call_tool("bob_replies", {"session_id": session_id, "limit": 5})
+        assert len(self._parse_result(r1)["replies"]) == 1
+
+        # Normal poll: nothing re-offered.
+        r2 = await bridge.mcp.call_tool("bob_replies", {"session_id": session_id, "limit": 5})
+        assert self._parse_result(r2)["replies"] == []
+
+        # Recovery: resurface re-offers the same reply, and does not disturb
+        # the ledger (the subsequent normal poll stays empty).
+        r3 = await bridge.mcp.call_tool(
+            "bob_replies", {"session_id": session_id, "limit": 5, "resurface": True}
+        )
+        d3 = self._parse_result(r3)
+        assert len(d3["replies"]) == 1
+        assert d3["replies"][0]["subject"] == "Hello"
+
+        r4 = await bridge.mcp.call_tool("bob_replies", {"session_id": session_id, "limit": 5})
+        assert self._parse_result(r4)["replies"] == []
+
+    @pytest.mark.anyio
     async def test_failed_call_consumes_nothing(
         self,
         bridge: ChatGPTBridge,
