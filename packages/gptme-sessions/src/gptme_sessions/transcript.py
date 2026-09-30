@@ -258,13 +258,39 @@ def _normalize_cc(msgs: list[dict]) -> list[NormalizedMessage]:
     return normalized
 
 
+def _codex_output_text(output: object) -> tuple[str, bool]:
+    """Unwrap exec JSON chunks without dropping plain-text tool results."""
+    lines: list[str] = []
+    is_error = False
+    for line in str(output).splitlines():
+        try:
+            chunk = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            lines.append(line)
+            continue
+        if not isinstance(chunk, dict):
+            lines.append(line)
+            continue
+        inner = chunk.get("value")
+        if not isinstance(inner, dict):
+            inner = chunk
+        if "output" not in inner:
+            lines.append(line)
+            continue
+        lines.append(str(inner["output"]))
+        exit_code = inner.get("exit_code")
+        is_error |= isinstance(exit_code, int) and exit_code != 0
+    return "\n".join(lines), is_error
+
+
 def _normalize_codex(msgs: list[dict]) -> list[NormalizedMessage]:
     """Normalize Codex CLI .jsonl messages.
 
     Codex format uses typed records:
     - ``response_item`` with payload.type == ``"message"``: assistant/user text
-    - ``response_item`` with payload.type == ``"function_call"``: tool call
-    - ``response_item`` with payload.type == ``"function_call_output"``: tool result
+    - ``response_item`` with payload.type in function/custom_tool_call: tool call
+    - ``response_item`` with payload.type in function/custom_tool_call_output: tool result
+    Developer messages map to system instructions, never assistant actions.
     """
     normalized: list[NormalizedMessage] = []
 
@@ -287,16 +313,23 @@ def _normalize_codex(msgs: list[dict]) -> list[NormalizedMessage]:
                     content = "\n".join(p for p in text_parts if p).strip()
                 else:
                     content = str(content_raw) if content_raw else ""
-                if role not in ("user", "assistant", "system"):
+                if role == "developer":
+                    role = "system"
+                elif role not in ("user", "assistant", "system"):
                     role = "assistant"
                 normalized.append(NormalizedMessage(role=role, content=content, timestamp=ts))
 
-            elif payload_type == "function_call":
+            elif payload_type in ("function_call", "custom_tool_call"):
                 tool_name = payload.get("name", "")
-                args = payload.get("arguments", "")
+                args = (
+                    payload.get("input", "")
+                    if payload_type == "custom_tool_call"
+                    else payload.get("arguments", "")
+                )
                 if isinstance(args, str):
                     try:
-                        tool_input: dict = json.loads(args)
+                        decoded = json.loads(args)
+                        tool_input: dict = decoded if isinstance(decoded, dict) else {"raw": args}
                     except (json.JSONDecodeError, ValueError):
                         tool_input = {"raw": args}
                 else:
@@ -311,14 +344,15 @@ def _normalize_codex(msgs: list[dict]) -> list[NormalizedMessage]:
                     )
                 )
 
-            elif payload_type == "function_call_output":
-                output = payload.get("output") or ""
+            elif payload_type in ("function_call_output", "custom_tool_call_output"):
+                output, is_error = _codex_output_text(payload.get("output") or "")
                 normalized.append(
                     NormalizedMessage(
                         role="tool_result",
-                        content=str(output),
+                        content=output,
                         timestamp=ts,
-                        tool_result=str(output),
+                        tool_result=output,
+                        is_error=is_error,
                     )
                 )
 
@@ -495,10 +529,10 @@ def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
 
     Grok format uses typed records (--output-format streaming-json):
     - ``available_commands``: tool catalog at session start (skipped)
-    - ``thought``: agent reasoning delta (``content`` field) → assistant turn
+    - ``thought``: agent reasoning delta (``data`` or legacy ``content``) → assistant turn
     - ``tool_call``: agent tool invocation (``toolName``, ``rawInput``, ``toolCallId``)
-    - ``tool_call_update``: execution result (``status == "completed"`` carries ``rawOutput``)
-    - ``text``: assistant response text delta (``content`` field)
+    - ``tool_call_update``: completed result in ``content[].content.text`` or ``rawOutput``
+    - ``text``: assistant response text delta (``data`` or legacy ``content``)
     - ``usage``/``end``: token accounting (skipped)
     """
     normalized: list[NormalizedMessage] = []
@@ -509,7 +543,7 @@ def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
         ts = _ts_str(_parse_timestamp(record.get("timestamp", "")))
 
         if rec_type in ("thought", "text"):
-            content = record.get("content", "") or ""
+            content = record.get("data") or record.get("content", "") or ""
             if content:
                 normalized.append(
                     NormalizedMessage(role="assistant", content=content, timestamp=ts)
@@ -537,10 +571,15 @@ def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
                 continue
             raw_output = record.get("rawOutput") or {}
             if not isinstance(raw_output, dict):
-                continue
+                raw_output = {}
             exit_code = raw_output.get("exit_code")
             is_error = isinstance(exit_code, int) and exit_code != 0
-            output_text = (
+            parts: list[str] = []
+            for block in record.get("content") or []:
+                inner = block.get("content") if isinstance(block, dict) else None
+                if isinstance(inner, dict) and inner.get("text"):
+                    parts.append(str(inner["text"]))
+            output_text = "\n".join(parts) or (
                 raw_output.get("output_for_prompt", "") or raw_output.get("output", "") or ""
             )
             normalized.append(
