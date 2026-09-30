@@ -870,6 +870,9 @@ get_commit_lock_holder_pids() {
 
     raw="$(fuser "$lockfile" 2>/dev/null || true)"
     for pid in $raw; do
+        # Some fuser builds/variants append an access letter to the PID
+        # (e.g. "1234c"); strip a trailing non-digit run so we still match.
+        pid="${pid%%[!0-9]*}"
         case "$pid" in
             ''|*[!0-9]*)
                 continue
