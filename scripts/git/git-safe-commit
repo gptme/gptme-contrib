@@ -778,6 +778,37 @@ _gsc_stage_gitlink_path() {
     return 1
 }
 
+auto_format_python_pathspecs() {
+    local python_files=() f repo_root changed
+
+    for f in "${PATHSPECS[@]}"; do
+        case "$f" in
+            *.py) python_files+=("$f") ;;
+        esac
+    done
+
+    [ "${#python_files[@]}" -eq 0 ] && return 0
+    command -v prek >/dev/null 2>&1 || return 0
+
+    repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || return 0
+
+    # Run the pinned `ruff-format` pre-commit hook directly rather than a bare
+    # `uv run ruff format`: an ambiently-resolved ruff version can reformat
+    # unrelated pre-existing lines differently than the pinned hook, so a
+    # separately-versioned auto-format step causes the very
+    # format-then-reformat CI mismatch it's meant to prevent.
+    echo "Auto-formatting ${#python_files[@]} Python file(s) with the pinned ruff-format hook..." >&2
+    if ! (cd "$repo_root" && prek run ruff-format --files "${python_files[@]}" >/dev/null 2>&1); then
+        : # ruff-format's own exit code reflects "made changes", not failure; fall through to the diff check
+    fi
+
+    changed="$(git diff --name-only -- "${python_files[@]}" 2>/dev/null || true)"
+    if [ -n "$changed" ]; then
+        git add -- "${python_files[@]}"
+        echo "✓ Auto-staged ruff-format changes for: $(printf '%s ' "$changed")" >&2
+    fi
+}
+
 stage_explicit_pathspecs() {
     if [ "${#PATHSPECS[@]}" -eq 0 ]; then
         return 0
@@ -953,6 +984,8 @@ fi
 check_index_corruption
 
 stage_explicit_pathspecs || exit $?
+
+auto_format_python_pathspecs
 
 MANUAL_PRECOMMIT_RAN=0
 if [ "$NO_VERIFY" -ne 1 ]; then
