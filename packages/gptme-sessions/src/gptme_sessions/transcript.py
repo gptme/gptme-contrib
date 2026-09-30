@@ -533,6 +533,7 @@ def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
     - ``tool_call``: agent tool invocation (``toolName``, ``rawInput``, ``toolCallId``)
     - ``tool_call_update``: completed result in ``content[].content.text`` or ``rawOutput``
     - ``text``: assistant response text delta (``data`` or legacy ``content``)
+    - ``error``: harness/API failure → system error message
     - ``usage``/``end``: token accounting (skipped)
     """
     normalized: list[NormalizedMessage] = []
@@ -547,6 +548,18 @@ def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
             if content:
                 normalized.append(
                     NormalizedMessage(role="assistant", content=content, timestamp=ts)
+                )
+
+        elif rec_type == "error":
+            message = record.get("message") or record.get("data") or record.get("content")
+            if message:
+                normalized.append(
+                    NormalizedMessage(
+                        role="system",
+                        content=str(message),
+                        timestamp=ts,
+                        is_error=True,
+                    )
                 )
 
         elif rec_type == "tool_call":

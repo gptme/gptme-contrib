@@ -104,3 +104,19 @@ def test_grok_content_preferred_over_raw_output_and_error_retained():
     )
     assert messages[0].tool_result == "1 failed"
     assert messages[0].is_error is True
+
+
+def test_grok_top_level_error_is_preserved():
+    messages = _normalize_grok(
+        [
+            {
+                "type": "error",
+                "message": "API error (status 402): usage balance exhausted",
+            }
+        ]
+    )
+
+    assert len(messages) == 1
+    assert messages[0].role == "system"
+    assert messages[0].content == "API error (status 402): usage balance exhausted"
+    assert messages[0].is_error is True
