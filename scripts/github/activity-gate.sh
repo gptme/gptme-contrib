@@ -2047,7 +2047,13 @@ pr_has_unresolved_human_thread() {
     local name=${repo#*/}
     local author="${AUTHOR:-$BOT_USERNAME}"
     local nodes result
-    nodes=$(gh_cache_get_or_fetch "review-threads-${repo}-${number}-${head_sha}" \
+    # Cache schema version: bump when the thread payload shape changes so
+    # entries written by an older query are not parsed under the new schema.
+    # v2 adds `author.__typename` to the review-thread query — without the
+    # bump a payload cached before the change (up to the 1800s TTL) would lack
+    # it, silently degrading a Cloudflare-style App bot back to "human" and
+    # suppressing merge_ready. A fresh key misses the stale entries instead.
+    nodes=$(gh_cache_get_or_fetch "review-threads-v2-${repo}-${number}-${head_sha}" \
         "$GH_CACHE_TTL_REVIEW_THREADS" \
         "_fetch_review_thread_nodes '$owner' '$name' '$number'") || return 1
     # gh's --jq has no --arg; run jq itself so AUTHOR can be bound safely.
