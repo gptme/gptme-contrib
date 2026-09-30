@@ -3209,6 +3209,23 @@ class TestClassifyBackendErrorText:
         text = "API error (status 429 Too Many Requests)"
         assert _classify_backend_error_text(text, "gptme") == "gptme_rate_limit"
 
+    def test_model_unavailable_404_detected(self) -> None:
+        # gptme exits 77 (EXIT_MODEL_UNAVAIL) and writes this terminal error
+        # event to conversation.jsonl (content + metadata forms both present).
+        text = (
+            '{"role": "system", "content": "error: model_unavailable\\n'
+            'Error code: 404 - No endpoints found for deepseek/deepseek-v4.1-flash", '
+            '"metadata": {"error": true, "error_class": "model_unavailable", '
+            '"exit_code": 77}}'
+        )
+        assert _classify_backend_error_text(text, "gptme") == "gptme_model_unavailable"
+
+    def test_gptme_auth_error_class_detected(self) -> None:
+        # gptme's structured auth class (exit 76) — provider text says
+        # "Error code: 401", which the "status 401" marker does not match.
+        text = "error: auth_error\nError code: 401 - invalid credentials"
+        assert _classify_backend_error_text(text, "gptme") == "gptme_auth"
+
     def test_quota_takes_priority_over_auth(self) -> None:
         # A 402 with "unauthorized" in the body → quota wins.
         text = "status 402 Payment Required: unauthorized quota exceeded"
@@ -3299,6 +3316,20 @@ class TestInspectGptmeFailure:
         ref.write_text(str(traj))
         result = _inspect_gptme_failure(_make_plan_stub(session_id), tmp_dir=tmp_path)
         assert result is None
+
+    def test_returns_model_unavailable_on_exit77_trajectory(self, tmp_path) -> None:
+        session_id = "gptme-session-333"
+        traj = tmp_path / "gptme-session.jsonl"
+        traj.write_text(
+            '{"role": "system", "content": "error: model_unavailable\\n'
+            'Error code: 404 - No endpoints found for deepseek/deepseek-v4.1-flash", '
+            '"metadata": {"error": true, "error_class": "model_unavailable", '
+            '"exit_code": 77}}\n'
+        )
+        ref = tmp_path / f"gptme-traj-{session_id}.path"
+        ref.write_text(str(traj))
+        result = _inspect_gptme_failure(_make_plan_stub(session_id), tmp_dir=tmp_path)
+        assert result == "gptme_model_unavailable"
 
 
 def _make_plan_stub(session_id: str) -> ItemPlan:

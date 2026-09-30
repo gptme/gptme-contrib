@@ -1930,6 +1930,11 @@ BACKEND_QUOTA_MARKERS: tuple[str, ...] = (
 )
 
 #: Substrings indicating an authentication failure (HTTP 401 / bad key).
+#: ``auth_error`` is gptme's own terminal-error class name (exit 76,
+#: ``EXIT_AUTH_ERROR``), written to ``conversation.jsonl`` as
+#: ``error: auth_error`` by ``gptme.cli.main._write_terminal_error_to_log``.
+#: The provider text uses ``Error code: 401`` rather than ``status 401``, so
+#: the structured class name is the reliable signal on the gptme path.
 BACKEND_AUTH_MARKERS: tuple[str, ...] = (
     "status 401",
     "Unauthorized",
@@ -1937,6 +1942,7 @@ BACKEND_AUTH_MARKERS: tuple[str, ...] = (
     "invalid_api_key",
     "authentication failed",
     "unauthenticated",
+    "auth_error",
 )
 
 #: Substrings indicating a rate-limit rejection (HTTP 429 / too many requests).
@@ -1949,12 +1955,20 @@ BACKEND_RATE_LIMIT_MARKERS: tuple[str, ...] = (
     "too many requests",
 )
 
+#: Substrings indicating the model/service was unreachable (HTTP 404/503).
+#: gptme exits 77 (``EXIT_MODEL_UNAVAIL``) and records ``error: model_unavailable``
+#: in the trajectory. Observed 2026-09-30: a PM slot died at 68s on
+#: ``Error code: 404 - No endpoints found for deepseek/deepseek-v4.1-flash``;
+#: without this marker the row carried ``infra_failure: null`` and burned the
+#: retry budget as an ordinary failure instead of re-arming for free.
+BACKEND_MODEL_UNAVAIL_MARKERS: tuple[str, ...] = ("model_unavailable",)
+
 
 def _classify_backend_error_text(text: str, backend: str) -> str | None:
     """Classify an infra error from free-form backend log / trajectory text.
 
-    Returns ``"<backend>_quota"``, ``"<backend>_auth"``, or
-    ``"<backend>_rate_limit"`` when a known infrastructure error is found;
+    Returns ``"<backend>_quota"``, ``"<backend>_auth"``, ``"<backend>_rate_limit"``,
+    or ``"<backend>_model_unavailable"`` when a known infrastructure error is found;
     ``None`` when the text carries no recognisable infra signal.
 
     ``backend`` is the raw backend name (``"grok-build"``, ``"gptme"``);
@@ -1970,6 +1984,8 @@ def _classify_backend_error_text(text: str, backend: str) -> str | None:
         return f"{backend_slug}_auth"
     if any(m.lower() in lower for m in BACKEND_RATE_LIMIT_MARKERS):
         return f"{backend_slug}_rate_limit"
+    if any(m.lower() in lower for m in BACKEND_MODEL_UNAVAIL_MARKERS):
+        return f"{backend_slug}_model_unavailable"
     return None
 
 
