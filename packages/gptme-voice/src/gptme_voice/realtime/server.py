@@ -899,6 +899,16 @@ class VoiceServer:
                     "configured — handoff disabled. Set GPTME_VOICE_HANDOFF_SECRET "
                     "to a strong random value; never fall back to a known default."
                 )
+            elif not _valid_agents:
+                # Handoff is configured but the deployment roster is empty:
+                # every identity fails the membership check below, so the
+                # feature would silently no-op. Make that loud instead.
+                logger.error(
+                    "GPTME_VOICE_HANDOFF_DIR is configured but the agent roster "
+                    "is empty (GPTME_VOICE_AGENTS unset or blank) — handoff "
+                    "disabled. Set GPTME_VOICE_AGENTS to the registered "
+                    "protocol agents to enable handoff."
+                )
             elif handoff_agent_name not in _valid_agents:
                 # A forked agent that is not yet a protocol participant must not
                 # crash the call server at startup (HandoffWriter rejects
