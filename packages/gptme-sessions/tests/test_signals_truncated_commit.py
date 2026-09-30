@@ -142,11 +142,13 @@ def test_heredoc_write_variants_and_exclusions():
         "some_cmd > out.log\n"
     )
     signals = extract_signals_cc(_bash("t1", cmd, ""))
+    # Ordered by first appearance in the command (deterministic across the
+    # tree-sitter and regex extractors).
     assert signals["file_writes"] == [
         "src/a.py",
-        "/tmp/worktrees/repo/d.py",
         "docs/b.md",
         "notes/c.txt",
+        "/tmp/worktrees/repo/d.py",
     ]
 
 
