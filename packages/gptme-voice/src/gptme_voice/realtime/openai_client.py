@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Sequence
 
-import websockets  # type: ignore
+import websockets
 from gptme.config import get_config, get_project_config
 
 from .latency import VoiceLatencyTrace
@@ -371,7 +371,7 @@ class OpenAIRealtimeClient:
                     def on_user_transcript(  # noqa: F811
                         text: str, item_id: str | None = None, _cb: Any = _cb1
                     ) -> None:
-                        return _cb(text)  # propagate coroutine for async callbacks
+                        return _cb(text)  # type: ignore[no-any-return]  # propagate coroutine for async callbacks
 
             except (ValueError, TypeError):
                 # Cannot introspect (e.g. built-in / C-extension callable).
@@ -436,7 +436,7 @@ class OpenAIRealtimeClient:
         self.on_speech_started = on_speech_started
         self.latency_trace = latency_trace
 
-        self._ws: websockets.WebSocketClientProtocol | None = None
+        self._ws: websockets.ClientConnection | None = None
         self._receive_task: asyncio.Task | None = None
         self._responding = False  # True while AI is generating a response
 

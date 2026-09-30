@@ -1519,7 +1519,9 @@ class VoiceServer:
                     else now
                 )
         existing_remote = existing.get("remote_party")
-        existing_paths = existing.get("archive_record_paths") or []
+        existing_paths = existing.get("archive_record_paths")
+        if not isinstance(existing_paths, list):
+            existing_paths = []
         merged_paths = self._dedupe_record_paths(
             [
                 Path(str(item))
@@ -2458,13 +2460,13 @@ class VoiceServer:
     def _get_local_caller_id(self, websocket) -> str:
         caller_id = websocket.query_params.get("caller_id")
         if caller_id:
-            return caller_id
+            return str(caller_id)
         return "local"
 
     def _get_local_handoff_id(self, websocket) -> str | None:
         handoff_id = websocket.query_params.get("handoff_id")
         if handoff_id:
-            return handoff_id
+            return str(handoff_id)
         return None
 
     async def health_check(self, request: Request) -> PlainTextResponse:
@@ -2484,8 +2486,8 @@ class VoiceServer:
         Twilio will then open a Media Stream WebSocket to /twilio.
         """
         form_params = dict(await request.form())
-        from_number = (form_params.get("From", "") or "").strip()
-        incoming_call_sid = (
+        from_number = str(form_params.get("From", "") or "").strip()
+        incoming_call_sid = str(
             form_params.get("CallSid", "") or form_params.get("call_sid", "") or ""
         ).strip()
 

@@ -474,9 +474,12 @@ class GptmeToolBridge:
 
         async def _send() -> None:
             try:
-                async with asyncio.timeout(_CUE_CALLBACK_TIMEOUT_SECONDS):
-                    await callback()
-            except TimeoutError:
+                # ``asyncio.wait_for`` (3.10+) rather than ``asyncio.timeout``
+                # (3.11+): the package declares ``requires-python >=3.10`` and
+                # the CI matrix runs 3.10, where ``asyncio.timeout`` does not
+                # exist and every cue would silently fail to send.
+                await asyncio.wait_for(callback(), _CUE_CALLBACK_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
                 logger.warning("Timed out sending subagent %s cue", cue_name)
             except Exception:
                 logger.exception("Failed to send subagent %s cue", cue_name)
@@ -740,7 +743,7 @@ class GptmeToolBridge:
                     + f"\n... (truncated, {len(output)} total chars)"
                 )
 
-            if on_completed:
+            if on_completed and process.returncode is not None:
                 on_completed(process.returncode, time.monotonic())
 
             if process.returncode in _TIMEOUT_RETURNCODES:
@@ -940,7 +943,7 @@ class GptmeToolBridge:
                 }
             # Fire the teardown in the background so the model still gets a
             # synchronous function-call response and can finish speaking.
-            asyncio.create_task(self.on_hangup(reason))
+            asyncio.ensure_future(self.on_hangup(reason))
             return {
                 "status": "hanging_up",
                 "message": "Ending the call shortly.",

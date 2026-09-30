@@ -240,7 +240,7 @@ class MavsdkAdapter:
                     return
                 await self._cancel_telemetry_tasks()
                 await self._release_system()
-                from mavsdk import System  # type: ignore[import-not-found]
+                from mavsdk import System
 
                 system = System()
                 logger.info("MavsdkAdapter connecting to %s", self.system_address)

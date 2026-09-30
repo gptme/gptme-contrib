@@ -252,7 +252,9 @@ def create_outbound_call(
     """
     if client_cls is None:
         try:
-            from twilio.rest import Client as client_cls
+            from twilio.rest import Client as _TwilioClient
+
+            client_cls = _TwilioClient
         except ImportError as exc:
             raise RuntimeError(
                 "twilio dependency not installed. Install gptme-voice with its dependencies."
@@ -286,4 +288,4 @@ def create_outbound_call(
             logger.warning(
                 "Failed to persist missed-call context for %s", call.sid, exc_info=True
             )
-    return call.sid
+    return str(call.sid)
