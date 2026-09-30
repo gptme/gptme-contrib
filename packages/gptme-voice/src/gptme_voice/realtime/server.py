@@ -869,11 +869,14 @@ class VoiceServer:
         )
         handoff_secret_env = _get_config_env("GPTME_VOICE_HANDOFF_SECRET")
         handoff_agents_env = _get_config_env("GPTME_VOICE_HANDOFF_AGENTS")
+        # Roster of protocol participants, resolved per process so
+        # ``GPTME_VOICE_AGENTS`` overrides extend/limit every deployment from
+        # one place instead of two.
+        _valid_agents = get_valid_agents()
         # Comma-separated list of agents the running server can hand off to.
         # Defaults to the protocol's registered agents minus this server's own
-        # identity, so registering an agent in :func:`handoff.get_valid_agents`
-        # extends every deployment's roster from one place instead of two.
-        _default_agents = sorted(get_valid_agents() - {handoff_agent_name})
+        # identity.
+        _default_agents = sorted(_valid_agents - {handoff_agent_name})
         self._available_agents: list[str] = (
             [a.strip() for a in handoff_agents_env.split(",") if a.strip()]
             if handoff_agents_env
@@ -896,16 +899,26 @@ class VoiceServer:
                     "configured — handoff disabled. Set GPTME_VOICE_HANDOFF_SECRET "
                     "to a strong random value; never fall back to a known default."
                 )
-            elif handoff_agent_name not in get_valid_agents():
+            elif not _valid_agents:
+                # Handoff is configured but the deployment roster is empty:
+                # every identity fails the membership check below, so the
+                # feature would silently no-op. Make that loud instead.
+                logger.error(
+                    "GPTME_VOICE_HANDOFF_DIR is configured but the agent roster "
+                    "is empty (GPTME_VOICE_AGENTS unset or blank) — handoff "
+                    "disabled. Set GPTME_VOICE_AGENTS to the registered "
+                    "protocol agents to enable handoff."
+                )
+            elif handoff_agent_name not in _valid_agents:
                 # A forked agent that is not yet a protocol participant must not
                 # crash the call server at startup (HandoffWriter rejects
                 # unknown identities) nor silently sign as another agent.
                 logger.error(
                     "Handoff identity %r is not a registered protocol agent (%s) — "
                     "handoff disabled. Set GPTME_VOICE_AGENT_NAME to a registered "
-                    "agent, or register this agent in gptme_voice.handoff.get_valid_agents().",
+                    "agent, or register this agent via the GPTME_VOICE_AGENTS env var.",
                     handoff_agent_name,
-                    ", ".join(sorted(get_valid_agents())),
+                    ", ".join(sorted(_valid_agents)),
                 )
             else:
                 self._handoff_writer = HandoffWriter(
