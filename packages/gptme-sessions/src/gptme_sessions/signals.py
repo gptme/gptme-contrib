@@ -1663,6 +1663,28 @@ def _summarize_message_bytes(
     )
 
 
+def _served_model_fields(served: list[str]) -> dict[str, object]:
+    """Usage keys for the model(s) the provider reported serving.
+
+    ``served_model`` is the last reported value (same last-seen rule as
+    ``model``); ``served_models`` lists the distinct values, only when a
+    session saw more than one (a mid-session fallback or reroute).
+    """
+    if not served:
+        return {}
+    fields: dict[str, object] = {"served_model": served[-1]}
+    distinct = sorted(set(served))
+    if len(distinct) > 1:
+        fields["served_models"] = distinct
+    return fields
+
+
+def _served_model_value(value: object) -> str | None:
+    if isinstance(value, str) and value and value != "<synthetic>":
+        return value
+    return None
+
+
 def extract_usage_gptme(msgs: list[dict]) -> dict:
     """Extract cumulative token usage from a gptme conversation.jsonl trajectory.
 
@@ -1686,6 +1708,7 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
     reasoning_efforts: list[str] = []
     reasoning_tokens = 0
     reasoning_seen = False
+    served_models: list[str] = []
 
     # --- Byte-level metrics (model-independent; ErikBjare/bob#738) ---
     sys_prompt_bytes: int | None = None
@@ -1743,6 +1766,11 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
         m = metadata.get("model") or msg.get("model")
         if m:
             model = m
+        # Provider-reported model (gptme metadata.served_model); ``model`` is
+        # the requested one.
+        _sm = _served_model_value(metadata.get("served_model"))
+        if _sm is not None:
+            served_models.append(_sm)
 
         # Support both nested format (usage sub-dict) and legacy flat format
         # Select source dict once per message to avoid per-field falsy fallback issues
@@ -1803,6 +1831,7 @@ def extract_usage_gptme(msgs: list[dict]) -> dict:
         result["reasoning_effort"] = _dominant_effort
     if reasoning_seen:
         result["reasoning_tokens"] = reasoning_tokens
+    result.update(_served_model_fields(served_models))
     return result
 
 
@@ -1900,6 +1929,7 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
     context_peak_tokens: int | None = None
     result_usage: dict | None = None
     stop_reason: str | None = None
+    served_models: list[str] = []
     # CC emits one assistant record per streamed content block; the copies of a
     # single response are written as *consecutive* assistant records sharing the
     # same message id and byte-identical usage (verified: 0/356 duplicate groups
@@ -1955,6 +1985,11 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
                 )
             if msg.get("model"):
                 model = msg["model"]
+            # CC's assistant message.model is the Anthropic API response's
+            # model, i.e. what was served (``<synthetic>`` entries are local).
+            _sm = _served_model_value(msg.get("model"))
+            if _sm is not None:
+                served_models.append(_sm)
             # Track final stop reason — updated on every assistant turn so the
             # last assistant message's reason is the session's terminal signal.
             _sr = msg.get("stop_reason")
@@ -2018,6 +2053,7 @@ def extract_usage_cc(msgs: list[dict]) -> dict:
         result["reasoning_effort"] = cc_effort
     if cc_thinking is not None:
         result["reasoning_tokens"] = cc_thinking
+    result.update(_served_model_fields(served_models))
     return result
 
 
@@ -2994,6 +3030,7 @@ def extract_usage_pi(msgs: list[dict]) -> dict:
     active_records = active_pi_records(msgs)
     provider: str | None = None
     model: str | None = None
+    served_models: list[str] = []
     stop_reason: str | None = None
     input_tokens = 0
     output_tokens = 0
@@ -3032,6 +3069,12 @@ def extract_usage_pi(msgs: list[dict]) -> dict:
             provider = raw_provider
         if isinstance(raw_model, str) and raw_model:
             model = raw_model
+        # Pi stamps ``responseModel`` only when the response's model differs
+        # from the requested id, and only on Chat Completions providers; its
+        # absence is "not reported", not "verified equal".
+        _sm = _served_model_value(message.get("responseModel"))
+        if _sm is not None:
+            served_models.append(_sm)
         reason = message.get("stopReason")
         if reason is not None:
             if reason not in _PI_STOP_REASONS:
@@ -3119,6 +3162,7 @@ def extract_usage_pi(msgs: list[dict]) -> dict:
         result["model"] = model
     if stop_reason is not None:
         result["stop_reason"] = stop_reason
+    result.update(_served_model_fields(served_models))
     if reasoning_tokens:
         result["reasoning_tokens"] = reasoning_tokens
     if sys_prompt_tokens is not None:
@@ -3555,9 +3599,15 @@ def extract_from_path(jsonl_path: Path) -> dict:
     fmt = detect_format(msgs)
     if fmt == "claude_code":
         signals = extract_signals_cc(msgs)
-        usage_parts = [extract_usage_cc(part) for part in [parent_msgs, *subagent_msgs]]
+        parent_usage = extract_usage_cc(parent_msgs)
+        usage_parts = [parent_usage, *(extract_usage_cc(part) for part in subagent_msgs)]
         usage_parts = [part for part in usage_parts if part]
         usage = _combine_cc_usage(usage_parts)
+        # Served identity is the parent's alone: subagents legitimately run
+        # other models (e.g. a Haiku explorer under an Opus session).
+        for _key in ("served_model", "served_models"):
+            if parent_usage.get(_key) is not None:
+                usage[_key] = parent_usage[_key]
     elif fmt == "pi":
         signals = extract_signals_pi(msgs)
         usage = extract_usage_pi(msgs)

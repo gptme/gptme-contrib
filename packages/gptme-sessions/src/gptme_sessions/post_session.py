@@ -297,6 +297,8 @@ class PostSessionResult:
                                caller or the trajectory.
         reasoning_profile:     Semantic reasoning profile requested by the caller.
         reasoning_tokens:      Summed thinking/reasoning output tokens, when exposed.
+        served_model:          Model the provider reported serving, when the
+                               trajectory recorded it (``model`` is the requested one).
     """
 
     record: SessionRecord
@@ -321,6 +323,7 @@ class PostSessionResult:
     reasoning_effort: str | None = None
     reasoning_profile: str | None = None
     reasoning_tokens: int | None = None
+    served_model: str | None = None
 
 
 def post_session(
@@ -550,6 +553,8 @@ def post_session(
     provider: str | None = None
     stop_reason: str | None = None
     cost_usd: float | None = None
+    served_model: str | None = None
+    served_models: list[str] | None = None
     token_count: int | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -603,6 +608,12 @@ def post_session(
                 _cost = usage.get("cost")
                 if isinstance(_provider, str) and _provider:
                     provider = _provider
+                _served = usage.get("served_model")
+                if isinstance(_served, str) and _served:
+                    served_model = _served
+                _served_all = usage.get("served_models")
+                if isinstance(_served_all, list) and len(_served_all) > 1:
+                    served_models = [str(m) for m in _served_all]
                 if isinstance(_stop_reason, str) and _stop_reason:
                     stop_reason = _stop_reason
                 if not isinstance(_cost, bool) and isinstance(_cost, (int, float)):
@@ -1077,6 +1088,10 @@ def post_session(
     }
     if provider is not None:
         record_kwargs["provider"] = provider
+    if served_model is not None:
+        record_kwargs["served_model"] = served_model
+    if served_models is not None:
+        record_kwargs["served_models"] = served_models
     if stop_reason is not None:
         record_kwargs["stop_reason"] = stop_reason
     if cost_usd is not None:
@@ -1311,6 +1326,7 @@ def post_session(
         provider=provider,
         stop_reason=stop_reason,
         cost_usd=cost_usd,
+        served_model=served_model,
         reasoning_effort=reasoning_effort,
         reasoning_profile=reasoning_profile,
         reasoning_tokens=reasoning_tokens,
