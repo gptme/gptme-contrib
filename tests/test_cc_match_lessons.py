@@ -2,6 +2,7 @@
 
 import builtins
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -188,6 +189,89 @@ def test_score_lessons_respects_max(hook, tmp_path):
     assert len(results) <= 3
 
 
+def test_injection_dial_is_opt_in_and_control_is_unchanged(hook):
+    dial = hook.resolve_injection_dial("session-a", "")
+
+    assert dial["enabled"] is False
+    assert dial["arm"] == "control"
+    assert dial["assignment"] == "disabled"
+    assert dial["prompt_skill_cap"] is None
+    assert dial["pretool_skill_cap"] is None
+    assert dial["skill_bm25_min_z"] is None
+
+
+def test_injection_dial_random_assignment_is_stable_per_session(hook):
+    first = hook.resolve_injection_dial("session-a", "random")
+    second = hook.resolve_injection_dial("session-a", "1")
+
+    assert first == second
+    assert first["enabled"] is True
+    assert first["assignment"] == "random"
+    assert first["arm"] in {"control", "treatment"}
+
+
+@pytest.mark.parametrize("arm", ["control", "treatment"])
+def test_injection_dial_supports_forced_arms(hook, arm):
+    dial = hook.resolve_injection_dial("session-a", arm)
+
+    assert dial["enabled"] is True
+    assert dial["arm"] == arm
+    assert dial["assignment"] == "forced"
+
+
+def test_skill_cap_preserves_lessons_and_exempt_skills(hook, monkeypatch):
+    monkeypatch.setattr(
+        hook,
+        "_classify_lesson",
+        lambda path: ("exempt" if path == "guard" else "unknown", 1),
+    )
+    matches = [
+        {"path": "lesson", "is_skill": False},
+        {"path": "skill-a", "is_skill": True},
+        {"path": "guard", "is_skill": True},
+        {"path": "skill-b", "is_skill": True},
+    ]
+    predicted = [{"path": "skill-c", "is_skill": True}]
+
+    kept_matches, kept_predicted = hook.apply_skill_cap(matches, predicted, cap=1)
+
+    assert [item["path"] for item in kept_matches] == ["lesson", "skill-a", "guard"]
+    assert kept_predicted == []
+
+
+def test_treatment_bm25_threshold_only_tightens_skills(hook, monkeypatch):
+    lessons = []
+    for index in range(100):
+        is_skill = index < 2
+        lessons.append(
+            {
+                "path": f"{'skill' if is_skill else 'lesson'}-{index}",
+                "title": f"Candidate {index}",
+                "keywords": [],
+                "patterns": [],
+                "skill_name": None,
+                "is_skill": is_skill,
+            }
+        )
+    monkeypatch.setattr(hook, "_bm25_score", lambda *_: 100.0)
+    monkeypatch.setattr(hook, "_bm25_zscores", lambda scores: [4.5] * len(scores))
+    monkeypatch.setattr(hook, "_classify_lesson", lambda path: ("unknown", 1))
+    bm25_index = {"corpus": [[str(index)] for index in range(len(lessons))]}
+
+    result = hook.score_lessons(
+        lessons,
+        "query",
+        max_results=len(lessons),
+        bm25_index=bm25_index,
+        skill_bm25_min_z=5.0,
+    )
+
+    paths = [item["path"] for item in result]
+    assert "skill-0" not in paths
+    assert "skill-1" not in paths
+    assert "lesson-2" in paths
+
+
 # --- session state ---
 
 
@@ -205,6 +289,136 @@ def test_session_state_empty_for_new_session(hook, tmp_path, monkeypatch):
     monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "state")
     state = hook.load_session_state("brand-new-session")
     assert state == {"injected": [], "last_pretool": 0}
+
+
+def test_injection_dial_assignment_logs_once_per_session(hook, tmp_path, monkeypatch):
+    monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "hook-state")
+    monkeypatch.setenv("LESSON_INJECTION_DIAL_LOG_DIR", str(tmp_path / "ledger"))
+    dial = hook.resolve_injection_dial("session-a", "treatment")
+
+    hook.log_injection_dial_assignment("session-a", dial, tmp_path)
+    hook.log_injection_dial_assignment("session-a", dial, tmp_path)
+
+    records: list[dict] = []
+    for path in (tmp_path / "ledger").glob("*.jsonl"):
+        records.extend(json.loads(line) for line in path.read_text().splitlines())
+    assert len(records) == 1
+    assert records[0]["session_id"] == "session-a"
+    assert records[0]["experiment"] == "skill-injection-dial-v1"
+    assert records[0]["arm"] == "treatment"
+
+
+def test_injection_dial_log_retries_after_append_failure(hook, tmp_path, monkeypatch):
+    """A failed ledger append must not poison the once-per-session marker."""
+    monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "hook-state")
+    # A regular file where the ledger directory should be makes mkdir fail.
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory")
+    monkeypatch.setenv("LESSON_INJECTION_DIAL_LOG_DIR", str(blocked / "ledger"))
+    dial = hook.resolve_injection_dial("session-b", "treatment")
+
+    hook.log_injection_dial_assignment("session-b", dial, tmp_path)
+    marker = hook._dial_marker_file("session-b")
+    assert not marker.exists(), "marker must be cleared so the write is retried"
+
+    good = tmp_path / "ledger"
+    monkeypatch.setenv("LESSON_INJECTION_DIAL_LOG_DIR", str(good))
+    hook.log_injection_dial_assignment("session-b", dial, tmp_path)
+
+    records: list[dict] = []
+    for path in good.glob("*.jsonl"):
+        records.extend(json.loads(line) for line in path.read_text().splitlines())
+    assert len(records) == 1
+    assert records[0]["session_id"] == "session-b"
+
+
+def test_injection_dial_marker_is_keyed_on_raw_session_id(hook, tmp_path, monkeypatch):
+    """Lossy-sanitized ids ('a/b' vs 'a_b') must not share a marker.
+
+    ``_state_file`` sanitizes with a lossy regex, so the old marker path let one
+    session suppress another's ledger record and break that session's arm join.
+    """
+    monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "hook-state")
+    monkeypatch.setenv("LESSON_INJECTION_DIAL_LOG_DIR", str(tmp_path / "ledger"))
+    dial = hook.resolve_injection_dial("session-a", "treatment")
+
+    # The hazard: the sanitized session-state paths are identical.
+    assert hook._state_file("a/b") == hook._state_file("a_b")
+    assert hook._dial_marker_file("a/b") != hook._dial_marker_file("a_b")
+
+    hook.log_injection_dial_assignment("a/b", dial, tmp_path)
+    hook.log_injection_dial_assignment("a_b", dial, tmp_path)
+
+    records: list[dict] = []
+    for path in (tmp_path / "ledger").glob("*.jsonl"):
+        records.extend(json.loads(line) for line in path.read_text().splitlines())
+    assert {record["session_id"] for record in records} == {"a/b", "a_b"}
+
+
+def test_main_applies_skill_cap_after_dropout(hook, tmp_path, monkeypatch):
+    """A skill withheld by dropout must not consume the treatment cap budget.
+
+    Pre-fix ordering capped first (keeping ``skill-a``), then dropout withheld
+    it, leaving zero skills injected even though ``skill-b``/``skill-c`` could
+    still render. Post-fix, dropout runs first and the cap slot is refilled.
+    """
+    import io
+
+    monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setenv("LESSON_INJECTION_DIAL_EXPERIMENT", "treatment")
+    monkeypatch.setattr(hook, "get_workspace", lambda: tmp_path)
+
+    lessons = [
+        {"path": "skill-a", "title": "A", "is_skill": True},
+        {"path": "skill-b", "title": "B", "is_skill": True},
+    ]
+    monkeypatch.setattr(hook, "load_lesson_dirs", lambda ws: [tmp_path])
+    monkeypatch.setattr(hook, "scan_lessons", lambda dirs: lessons)
+    monkeypatch.setattr(hook, "detect_harness", lambda: "claude-code")
+    monkeypatch.setattr(hook, "detect_session_category", lambda: None)
+    monkeypatch.setattr(hook, "filter_by_harness", lambda items, harness: items)
+    monkeypatch.setattr(hook, "filter_by_session_category", lambda items, cat: items)
+    monkeypatch.setattr(hook, "_build_bm25_index", lambda items: None)
+    monkeypatch.setattr(hook, "get_already_injected", lambda sid, tp=None: set())
+    monkeypatch.setattr(hook, "score_lessons", lambda *a, **k: list(lessons))
+    monkeypatch.setattr(
+        hook,
+        "get_predicted_lessons",
+        lambda *a, **k: [{"path": "skill-c", "title": "C", "is_skill": True}],
+    )
+    monkeypatch.setattr(hook, "filter_held_out_lessons", lambda items, holdout: items)
+
+    def fake_dropout(matches, predicted, sid, ws):
+        # Simulate class-aware dropout withholding skill-a this invocation.
+        return [m for m in matches if m["path"] != "skill-a"], predicted
+
+    monkeypatch.setattr(hook, "_apply_lesson_dropout_multi", fake_dropout)
+    monkeypatch.setattr(hook, "_log_lesson_events", lambda *a, **k: None)
+    monkeypatch.setattr(hook, "extract_tool_sequence", lambda tp: [])
+    monkeypatch.setattr(hook, "log_trajectory_match", lambda *a, **k: None)
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_format(matches, already, predicted, event_type):
+        captured["matches"] = [m["path"] for m in matches]
+        captured["predicted"] = [p["path"] for p in predicted]
+        return "ctx"
+
+    monkeypatch.setattr(hook, "format_lessons", fake_format)
+
+    hook_input = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "order-test",
+        "tool_name": "Bash",
+        "tool_input": {"command": "ls"},
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(hook_input)))
+
+    with pytest.raises(SystemExit):
+        hook.main()
+
+    assert captured["matches"] == ["skill-b"], captured
+    assert captured["predicted"] == [], captured
 
 
 # --- find_workspace ---
