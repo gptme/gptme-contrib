@@ -63,6 +63,21 @@ def test_completed_output_replaces_longer_progress_snapshot():
     assert messages[-1].is_error
 
 
+def test_late_progress_after_completion_does_not_clobber_final_result():
+    messages = _normalize_grok(
+        [
+            call("test", "pytest"),
+            update("test", "collecting many tests...", "in_progress"),
+            update("test", "1 failed", exit_code=1),
+            update("test", "still running... very long stale progress", "in_progress"),
+        ]
+    )
+    results = [m for m in messages if m.role == "tool_result"]
+    assert len(results) == 1
+    assert results[-1].content == "1 failed"
+    assert results[-1].is_error
+
+
 def test_task_poll_restores_original_command_result_even_when_shorter():
     messages = _normalize_grok(
         [

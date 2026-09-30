@@ -561,10 +561,16 @@ def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
     background: dict[str, str] = {}
     background_calls: set[str] = set()
     background_pending: set[str] = set()
+    finalized: set[str] = set()
     delta_type: str | None = None
 
     def put_result(
-        call_id: str, text: str, ts: str | None, is_error: bool, authoritative: bool
+        call_id: str,
+        text: str,
+        ts: str | None,
+        is_error: bool,
+        authoritative: bool,
+        final: bool = False,
     ) -> None:
         previous = results.get(call_id) if call_id else None
         if previous is None:
@@ -580,10 +586,17 @@ def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
             if call_id:
                 results[call_id] = previous
         else:
-            if authoritative or len(text) > len(previous.content):
+            if authoritative:
+                previous.content = text
+                previous.tool_result = text
+            elif call_id not in finalized and len(text) > len(previous.content):
+                # A late progress snapshot may enrich a non-final result, but it
+                # must never overwrite output already finalized by a completion.
                 previous.content = text
                 previous.tool_result = text
             previous.is_error |= is_error
+        if final and call_id:
+            finalized.add(call_id)
 
     for record in msgs:
         rec_type = record.get("type", "")
@@ -658,13 +671,14 @@ def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
                     and call_id in background_pending
                     and raw.get("type") != "BackgroundTaskStarted"
                 )
+                is_final = status == "completed" and call_id not in background_calls
                 put_result(
                     call_id,
                     text,
                     ts,
                     is_error,
-                    first_background_output
-                    or (status == "completed" and call_id not in background_calls),
+                    first_background_output or is_final,
+                    is_final,
                 )
                 if first_background_output:
                     background_pending.discard(call_id)
@@ -678,7 +692,7 @@ def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
                     if original_id:
                         task_text, failed = _grok_output(item)
                         if task_text:
-                            put_result(original_id, task_text, ts, failed, True)
+                            put_result(original_id, task_text, ts, failed, True, True)
     return normalized
 
 
