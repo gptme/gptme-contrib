@@ -3222,11 +3222,11 @@ class TestClassifyBackendErrorText:
 
     def test_model_unavailable_metadata_only_form_detected(self) -> None:
         # Metadata-only terminal event: the class name appears only in the
-        # JSON-escaped metadata field, not the content prefix. The classifier
-        # sees the raw JSONL line, so the inner quotes carry backslashes.
+        # metadata field, not the content prefix. Built via json.dumps shape:
+        # inner metadata quotes are NOT escaped in the raw JSONL line.
         text = (
             '{"role": "system", "content": "error: 503 upstream", '
-            '"metadata": {"error": true, \\"error_class\\": \\"model_unavailable\\", '
+            '"metadata": {"error": true, "error_class": "model_unavailable", '
             '"exit_code": 77}}'
         )
         assert _classify_backend_error_text(text, "gptme") == "gptme_model_unavailable"

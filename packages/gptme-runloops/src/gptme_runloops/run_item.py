@@ -1967,10 +1967,12 @@ BACKEND_RATE_LIMIT_MARKERS: tuple[str, ...] = (
 #: appear in ordinary prose (user/tool text). That false positive would grant
 #: a free re-arm to a deterministic genuine failure, retrying forever. Both
 #: markers are the structured forms gptme itself writes (content prefix and
-#: JSON-escaped metadata field).
+#: the metadata field as it appears in the raw JSONL line — json.dumps only
+#: escapes quotes inside string *values*, so ``"error_class": "..."`` is
+#: stored plain).
 BACKEND_MODEL_UNAVAIL_MARKERS: tuple[str, ...] = (
     "error: model_unavailable",
-    '"error_class\\": \\"model_unavailable\\"',
+    '"error_class": "model_unavailable"',
 )
 
 
