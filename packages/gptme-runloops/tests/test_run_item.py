@@ -1741,6 +1741,31 @@ def test_trajectory_gptme_ignores_missing_sentinel_target(tmp_path) -> None:
     assert got == ""
 
 
+def test_trajectory_gptme_durable_fallback_when_sentinel_missing(tmp_path) -> None:
+    """When the /tmp sentinel is gone, search the durable gptme-runs dir."""
+    log_root = tmp_path / "gptme-runs"
+    session_dir = log_root / "gptme-logs-session-456"
+    session_subdir = session_dir / "run-default-20260930-session-456"
+    session_subdir.mkdir(parents=True)
+    trajectory = session_subdir / "conversation.jsonl"
+    trajectory.write_text('{"role": "assistant"}\n')
+
+    got = resolve_backend_trajectory(
+        "gptme",
+        "session-456",
+        predicted="",
+        started_epoch=0,
+        copilot_state_dir=tmp_path,
+        codex_sessions_dir=tmp_path,
+        copilot_pre=None,
+        codex_pre=None,
+        tmp_dir=tmp_path,  # no sentinel file here
+        gptme_log_root=log_root,
+    )
+
+    assert got == str(trajectory)
+
+
 def test_trajectory_codex_snapshot_diff_newest_wins(tmp_path) -> None:
     sessions = tmp_path / "codex-sessions" / "2026" / "07" / "11"
     sessions.mkdir(parents=True)

@@ -388,6 +388,7 @@ class RunItemConfig:
     cc_credentials_path: Path | None = None
     copilot_state_dir: Path | None = None
     codex_sessions_dir: Path | None = None
+    gptme_log_root: Path | None = None
 
     # Ambient-harness env tagging (project-monitoring.sh:417-422). Empty =
     # set nothing; the brain config sets "BOB_AMBIENT_HARNESS".
@@ -443,6 +444,13 @@ class RunItemConfig:
     @property
     def resolved_codex_sessions_dir(self) -> Path:
         return Path(self.codex_sessions_dir or (Path.home() / ".codex" / "sessions"))
+
+    @property
+    def resolved_gptme_log_root(self) -> Path:
+        return Path(
+            self.gptme_log_root
+            or (Path.home() / "data" / "trajectories" / "gptme-runs")
+        )
 
     def lifecycle_config(self) -> LifecycleConfig:
         return LifecycleConfig(
@@ -1147,6 +1155,7 @@ def resolve_backend_trajectory(
     copilot_pre: set[str] | None,
     codex_pre: set[str] | None,
     tmp_dir: Path = Path("/tmp"),
+    gptme_log_root: Path | None = None,
     cc_predicted_pre: tuple[int, int] | None = None,
     cc_snapshotted: bool = False,
 ) -> str:
@@ -1209,6 +1218,24 @@ def resolve_backend_trajectory(
                     "Found monitoring trajectory "
                     f"(gptme, {trajectory_path.stat().st_size}B): {trajectory}"
                 )
+        # Fallback: sentinel missing (ephemeral /tmp cleaned, noop exit).
+        # Search the durable gptme-runs directory for this session's
+        # conversation.jsonl — the dir name is deterministic even though
+        # the session-name subdir inside it is not.
+        if not trajectory and gptme_log_root is not None:
+            session_dir = gptme_log_root / f"gptme-logs-{session_id}"
+            if session_dir.is_dir():
+                candidates = sorted(
+                    session_dir.glob("*/conversation.jsonl"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                if candidates:
+                    trajectory = str(candidates[0])
+                    _log(
+                        "Found monitoring trajectory (gptme durable fallback, "
+                        f"{candidates[0].stat().st_size}B): {trajectory}"
+                    )
 
     if backend == "grok-build" and not trajectory and session_id:
         ref = tmp_dir / f"grok-build-session-log-ref-{session_id}.txt"
@@ -1868,6 +1895,7 @@ def execute_plan(
             codex_sessions_dir=config.resolved_codex_sessions_dir,
             copilot_pre=copilot_pre,
             codex_pre=codex_pre,
+            gptme_log_root=config.resolved_gptme_log_root,
             cc_predicted_pre=cc_predicted_pre,
             cc_snapshotted=cc_snapshotted,
         )
