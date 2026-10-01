@@ -555,7 +555,7 @@ def _grok_output(raw: dict) -> tuple[str, bool]:
             for key, variant in raw.items()
             if key != "Result" and isinstance(variant, dict)
             for value in variant.values()
-            if isinstance(value, str) and value
+            if isinstance(value, str)
         ]
         if len(candidates) == 1:
             output = candidates[0]

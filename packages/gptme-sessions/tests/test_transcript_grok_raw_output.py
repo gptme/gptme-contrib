@@ -29,6 +29,11 @@ def test_todo_write_fixture_preserves_summary_and_call_pairing():
     [
         ({"OtherVariant": {"message": "saved", "count": 1}}, "saved"),
         ({"OtherVariant": {"message": "saved", "detail": "more"}}, ""),
+        ({"OtherVariant": {"message": "saved", "detail": ""}}, ""),
+        (
+            {"FileContent": {"content": "", "content_concise": "", "absolute_path": "/file"}},
+            "",
+        ),
         ({"First": {"message": "one"}, "Second": {"message": "two"}}, ""),
         ({"OtherVariant": {"message": "", "count": 1}}, ""),
         ({"OtherVariant": {"state": {"id": "metadata"}}}, ""),
