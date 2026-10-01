@@ -152,7 +152,7 @@ header h1 {
   {% if task.state == 'waiting' and task.waiting_for %}<p class="task-callout">⏳ <strong>Waiting for:</strong> {{ task.waiting_for }}</p>{% endif %}
   {% if task.depends %}
   <p class="depends-list">Depends on:
-    {% for dep in task.depends %}<a href="{{ root_prefix }}tasks/{{ dep }}.html">{{ dep }}</a>{% if not loop.last %}, {% endif %}{% endfor %}
+    {% for dep in task.depends %}{% if dependency_links.get(dep) %}<a href="{{ dependency_links[dep] }}">{{ dep }}</a>{% else %}<span>{{ dep }}</span>{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
   </p>
   {% endif %}
 </header>

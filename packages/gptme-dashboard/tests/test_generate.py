@@ -3862,6 +3862,35 @@ def test_task_detail_shows_created_and_depends(workspace: Path, tmp_path: Path):
     assert "Depends on" in page
 
 
+@pytest.mark.parametrize("github_url", ["https://github.com/example/agent", ""])
+def test_task_dependency_links_only_target_existing_pages(
+    workspace: Path, tmp_path: Path, github_url: str
+):
+    """Archived and missing dependencies must not invent static detail pages."""
+    tasks = workspace / "tasks"
+    tasks.mkdir()
+    (tasks / "consumer.md").write_text(
+        "---\nstate: active\ndepends: [live, archived, missing]\n---\n# Consumer\n"
+    )
+    (tasks / "live.md").write_text("---\nstate: done\n---\n# Live\n")
+    archive = tasks / "archive"
+    archive.mkdir()
+    (archive / "archived.md").write_text("---\nstate: done\n---\n# Archived\n")
+    output = tmp_path / "site"
+    with patch("gptme_dashboard.generate.detect_github_url", return_value=github_url):
+        generate(workspace, output)
+    page = (output / "tasks/consumer.html").read_text()
+    assert 'href="../tasks/live.html"' in page
+    assert (output / "tasks/live.html").is_file()
+    assert 'href="../tasks/archived.html"' not in page
+    assert 'href="../tasks/missing.html"' not in page
+    assert "archived" in page and "missing" in page
+    if github_url:
+        assert f'href="{github_url}/blob/HEAD/tasks/archive/archived.md"' in page
+    else:
+        assert ">archived</a>" not in page
+
+
 def test_task_detail_shows_waiting_since(workspace: Path, tmp_path: Path):
     """Task detail page shows waiting_since when task is in waiting state."""
     tasks_dir = workspace / "tasks"
