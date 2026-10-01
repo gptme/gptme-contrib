@@ -531,7 +531,7 @@ def _normalize_pi(msgs: list[dict]) -> list[NormalizedMessage]:
 
 
 def _grok_output(raw: dict) -> tuple[str, bool]:
-    """Read inline or polled background output, including nested exit status."""
+    """Read inline, polled, or variant output, including nested exit status."""
     output = raw.get("output_for_prompt") or raw.get("output") or ""
     exit_code = raw.get("exit_code")
     is_error = isinstance(exit_code, int) and exit_code != 0
@@ -545,7 +545,21 @@ def _grok_output(raw: dict) -> tuple[str, bool]:
         if text:
             parts.append(text)
         is_error |= failed
-    return str(output or "\n".join(parts)), is_error
+    output = output or "\n".join(parts)
+    if not output:
+        # Variant payloads such as TodosUpdated carry a summary next to
+        # structured state. Only use a single direct string field; descending
+        # into state or choosing among several strings would invent output.
+        candidates = [
+            value
+            for key, variant in raw.items()
+            if key != "Result" and isinstance(variant, dict)
+            for value in variant.values()
+            if isinstance(value, str) and value
+        ]
+        if len(candidates) == 1:
+            output = candidates[0]
+    return str(output), is_error
 
 
 def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
