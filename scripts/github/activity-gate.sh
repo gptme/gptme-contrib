@@ -2250,11 +2250,12 @@ check_merge_ready() {
     done
 }
 
-# Returns exit 0 (true) when the issue/PR for a mention notification is already
+# Returns exit 0 (true) when the notification's subject issue/PR is already
 # closed/merged. GitHub's issues API covers both issues and PRs (merged PRs
-# have .state == "closed"). Fails open (return 1) on API error so we never
-# accidentally suppress a live mention.
-mention_subject_is_closed() {
+# have .state == "closed"). Used for the `mention` and `author` reasons.
+# Fails open (return 1) on API error so we never accidentally suppress a live
+# thread.
+notification_subject_is_closed() {
     local repo="$1" number="$2"
     local state
     state=$(gh api "repos/${repo}/issues/${number}" --jq '.state' 2>/dev/null) || return 1
@@ -2365,14 +2366,18 @@ def notification_priority:
                     printf '%s#%s' "$repo" "$number" > "$map_file"
                     continue
                 fi
-                # Drop-only staleness filter for reason=mention: if the subject
-                # issue/PR is already closed/merged, PM has nothing actionable —
-                # a dispatch produces a NOOP session and may prompt a spurious
-                # comment on a closed thread. Persist the updated_at so the item
-                # is not retried until the thread is updated again.
-                if [ "$_notif_reason" = "mention" ] \
+                # Drop-only staleness filter for reason=mention/author: if the
+                # subject issue/PR is already closed/merged, PM has nothing
+                # actionable — a dispatch produces a NOOP session and may prompt
+                # a spurious comment on a closed thread. An `author` notification
+                # is bumped by the merge/close event itself, so a merged PR of
+                # Bob's re-emitted on every sweep (gptme/gptme#3894 re-dispatched
+                # NOOP sessions after Erik merged it) unless the subject state is
+                # consulted. Persist the updated_at so the item is not retried
+                # until the thread is updated again.
+                if { [ "$_notif_reason" = "mention" ] || [ "$_notif_reason" = "author" ]; } \
                         && [ "$number" -gt 0 ] 2>/dev/null \
-                        && mention_subject_is_closed "$repo" "$number"; then
+                        && notification_subject_is_closed "$repo" "$number"; then
                     printf '%s' "$notif_updated" > "$state_file"
                     [ "$number" -gt 0 ] 2>/dev/null && printf '%s#%s' "$repo" "$number" > "$map_file"
                     continue
@@ -2415,12 +2420,13 @@ def notification_priority:
             elif [ -z "$prior" ] || [ "$prior" \< "$notif_updated" ]; then
                 printf '%s' "$notif_updated" > "$state_file"
                 [ "$number" -gt 0 ] 2>/dev/null && printf '%s#%s' "$repo" "$number" > "$map_file"
-                # Mirror the jsonl branch's drop-only staleness filter: a mention
-                # on a closed/merged thread has nothing actionable — suppress it
-                # without counting it as new (state already persisted above).
-                if [ "$notif_reason" = "mention" ] \
+                # Mirror the jsonl branch's drop-only staleness filter: a
+                # mention/author notification on a closed/merged thread has
+                # nothing actionable — suppress it without counting it as new
+                # (state already persisted above).
+                if { [ "$notif_reason" = "mention" ] || [ "$notif_reason" = "author" ]; } \
                         && [ "$number" -gt 0 ] 2>/dev/null \
-                        && mention_subject_is_closed "$repo" "$number"; then
+                        && notification_subject_is_closed "$repo" "$number"; then
                     continue
                 fi
                 new_count=$((new_count + 1))
