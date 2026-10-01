@@ -103,9 +103,13 @@ def _mentions_model_stream_crash(lower: str) -> bool:
     return "list index out of range" in lower and "llm_openai" in lower
 
 
+# HTTP status codes must stand alone: a bare ``402`` alternation matched the
+# numeric substring of trailing usage metadata (``"costUsdTicks": 402322000``)
+# and, because the last match wins, shadowed the real ``402 Payment Required``
+# error line — recording an infra death as ``nonzero_exit_unclassified``.
 _ERROR_LINE_RE = re.compile(
     r"(?i)(error|exception|traceback|failed|rate.?limit|weekly.?limit|"
-    r"400|401|402|403|429|authentication|quota|payment required)"
+    r"\b(?:400|401|402|403|429)\b|authentication|quota|payment required)"
 )
 _ASSISTANT_ROLES = frozenset({"assistant"})
 

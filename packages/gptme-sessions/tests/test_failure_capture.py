@@ -15,6 +15,7 @@ from gptme_sessions.failure_capture import (
     FAILURE_REASON_RATE_LIMIT,
     FAILURE_REASON_TIMEOUT,
     FAILURE_REASON_UPSTREAM_OVERLOADED,
+    _extract_trajectory_error_line,
     _record_has_any_content,
     _structured_error_signals,
     _trajectory_has_assistant,
@@ -913,3 +914,49 @@ def test_structured_error_signals_keeps_overload_past_truncation():
         error_text="; ".join(signals)[:500],
     )
     assert reason == FAILURE_REASON_UPSTREAM_OVERLOADED
+
+
+def test_error_line_prefers_http_status_over_numeric_substring(tmp_path: Path):
+    """A trailing numeric field containing "402" must not mask the real error.
+
+    Grok trajectories end with usage metadata (``"costUsdTicks": 402322000``).
+    The bare ``402`` alternation matched it and "last match wins" shadowed the
+    earlier ``402 Payment Required`` line, so an infrastructure death
+    classified as ``nonzero_exit_unclassified`` instead of quota — the judge
+    then scored the pre-work death as a low but numeric reward.
+    """
+    traj = tmp_path / "grok.jsonl"
+    traj.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": (
+                    "HTTP/1.1 402 Payment Required): " "Grok Build usage balance exhausted"
+                ),
+            }
+        )
+        + "\n"
+        + json.dumps({"type": "assistant", "message": '{"costUsdTicks": 402322000}'})
+        + "\n",
+        encoding="utf-8",
+    )
+    err = _extract_trajectory_error_line(traj)
+    assert err is not None and "402 Payment Required" in err
+    assert (
+        classify_failure_reason(
+            exit_code=1,
+            duration_seconds=60,
+            input_tokens=0,
+            has_assistant_turn=True,
+            error_text=err,
+        )
+        == FAILURE_REASON_QUOTA
+    )
+
+
+def test_error_line_regex_requires_status_code_boundaries():
+    from gptme_sessions.failure_capture import _ERROR_LINE_RE
+
+    # Numeric substrings of larger fields are not HTTP status codes.
+    assert _ERROR_LINE_RE.search('"costUsdTicks": 402322000') is None
+    assert _ERROR_LINE_RE.search('"http_status": 402') is not None
