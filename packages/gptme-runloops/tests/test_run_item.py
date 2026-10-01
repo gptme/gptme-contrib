@@ -1749,12 +1749,14 @@ def test_trajectory_gptme_durable_fallback_when_sentinel_missing(tmp_path) -> No
     session_subdir.mkdir(parents=True)
     trajectory = session_subdir / "conversation.jsonl"
     trajectory.write_text('{"role": "assistant"}\n')
+    started_epoch = 2_000_000_000
+    os.utime(trajectory, (started_epoch + 1, started_epoch + 1))
 
     got = resolve_backend_trajectory(
         "gptme",
         "session-456",
         predicted="",
-        started_epoch=0,
+        started_epoch=started_epoch,
         copilot_state_dir=tmp_path,
         codex_sessions_dir=tmp_path,
         copilot_pre=None,
@@ -1764,6 +1766,74 @@ def test_trajectory_gptme_durable_fallback_when_sentinel_missing(tmp_path) -> No
     )
 
     assert got == str(trajectory)
+
+
+def test_trajectory_gptme_durable_fallback_rejects_stale_same_session(
+    tmp_path,
+) -> None:
+    """A leftover conversation.jsonl from an earlier run must not be adopted.
+
+    The session id can repeat across runs (uuid5 with a second-resolution
+    salt), so the fallback must only accept files written after this run
+    started — otherwise it records a stale trajectory, the exact
+    misattribution this fallback exists to avoid.
+    """
+    log_root = tmp_path / "gptme-runs"
+    session_dir = log_root / "gptme-logs-session-789"
+    stale_subdir = session_dir / "run-default-20260930-prior-session-789"
+    stale_subdir.mkdir(parents=True)
+    stale = stale_subdir / "conversation.jsonl"
+    stale.write_text('{"role": "assistant", "from": "prior run"}\n')
+    os.utime(stale, (1000, 1000))  # long before started_epoch
+
+    got = resolve_backend_trajectory(
+        "gptme",
+        "session-789",
+        predicted="",
+        started_epoch=2_000_000_000,
+        copilot_state_dir=tmp_path,
+        codex_sessions_dir=tmp_path,
+        copilot_pre=None,
+        codex_pre=None,
+        tmp_dir=tmp_path,  # no sentinel file here
+        gptme_log_root=log_root,
+    )
+
+    assert got == ""
+
+
+def test_trajectory_gptme_durable_fallback_prefers_this_run_over_stale(
+    tmp_path,
+) -> None:
+    """With both a stale and a current-run file, the current one wins."""
+    log_root = tmp_path / "gptme-runs"
+    session_dir = log_root / "gptme-logs-session-790"
+    stale_subdir = session_dir / "run-default-20260930-prior-session-790"
+    fresh_subdir = session_dir / "run-default-20261001-session-790"
+    stale_subdir.mkdir(parents=True)
+    fresh_subdir.mkdir(parents=True)
+    stale = stale_subdir / "conversation.jsonl"
+    stale.write_text('{"role": "assistant", "from": "prior run"}\n')
+    fresh = fresh_subdir / "conversation.jsonl"
+    fresh.write_text('{"role": "assistant", "from": "this run"}\n')
+    started_epoch = 2_000_000_000
+    os.utime(stale, (1000, 1000))
+    os.utime(fresh, (started_epoch + 5, started_epoch + 5))
+
+    got = resolve_backend_trajectory(
+        "gptme",
+        "session-790",
+        predicted="",
+        started_epoch=started_epoch,
+        copilot_state_dir=tmp_path,
+        codex_sessions_dir=tmp_path,
+        copilot_pre=None,
+        codex_pre=None,
+        tmp_dir=tmp_path,  # no sentinel file here
+        gptme_log_root=log_root,
+    )
+
+    assert got == str(fresh)
 
 
 def test_trajectory_codex_snapshot_diff_newest_wins(tmp_path) -> None:

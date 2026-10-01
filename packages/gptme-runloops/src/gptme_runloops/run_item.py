@@ -1225,8 +1225,20 @@ def resolve_backend_trajectory(
         if not trajectory and gptme_log_root is not None:
             session_dir = gptme_log_root / f"gptme-logs-{session_id}"
             if session_dir.is_dir():
+                # Only accept files written during this run. The session id is
+                # uuid5(slug, run_salt=int(time.time())), so a retry in the same
+                # second reuses the directory and a prior run's
+                # conversation.jsonl can still be sitting in it — picking the
+                # newest unconditionally would record a stale trajectory as
+                # this run's. mtime > started_epoch mirrors the CC no-snapshot
+                # guard: a same-second legit write is missed (safe direction:
+                # null, not a misattributed leftover).
                 candidates = sorted(
-                    session_dir.glob("*/conversation.jsonl"),
+                    (
+                        p
+                        for p in session_dir.glob("*/conversation.jsonl")
+                        if int(p.stat().st_mtime) > started_epoch
+                    ),
                     key=lambda p: p.stat().st_mtime,
                     reverse=True,
                 )
