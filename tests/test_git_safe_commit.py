@@ -2615,6 +2615,134 @@ def test_dir_pathspec_stages_submodule_when_reachable(tmp_path: Path):
     ), f"gitlink should be bumped to {new_sha[:12]}, got {committed_sha[:12]}"
 
 
+def test_dir_pathspec_refuses_unreachable_gitlink_removed_from_index(tmp_path: Path):
+    """A gitlink still in HEAD but dropped from the index (`git rm --cached`)
+    is still detected by the directory scan and refused when the worktree HEAD
+    is unreachable.
+
+    The tracked scan in _gsc_find_gitlinks_under is index-only, but removing a
+    path from the index makes `git ls-files --others` treat it as untracked, so
+    the nested-repo scan still catches it. Without this the plain `git add`
+    would re-add it at the (possibly unpublished) worktree HEAD, bypassing the
+    reachability guard.
+    """
+    super_dir, sub_path, _sha = _superproject_with_submodule(tmp_path)
+
+    (super_dir / "vendor" / "new.txt").write_text("regular file")
+
+    # Advance submodule worktree to a commit origin does not have
+    (sub_path / "new.txt").write_text("feature work")
+    subprocess.run(
+        ["git", "add", "new.txt"], cwd=sub_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "feature"],
+        cwd=sub_path,
+        check=True,
+        capture_output=True,
+    )
+    wt_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=sub_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    # Drop the gitlink from the index while it remains in HEAD
+    subprocess.run(
+        ["git", "rm", "--cached", "vendor/sub"],
+        cwd=super_dir,
+        check=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "vendor", "-m", "vendor changes", "--no-verify"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, (
+        "git-safe-commit vendor must refuse an unreachable gitlink even when "
+        "it was removed from the index but is still in HEAD"
+    )
+    # The unpublished worktree HEAD must not have been recorded
+    staged = subprocess.run(
+        ["git", "ls-files", "-s", "--", "vendor/sub"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert wt_head not in staged, "unreachable SHA leaked into the index"
+    log = subprocess.run(
+        ["git", "log", "--oneline", "-1"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "vendor changes" not in log, "no commit should have been created"
+
+
+def test_dir_pathspec_stages_reachable_gitlink_removed_from_index(tmp_path: Path):
+    """A gitlink dropped from the index (`git rm --cached`) whose worktree HEAD
+    is reachable is re-staged at that SHA — the path-missing-from-index branch
+    of _gsc_stage_gitlink_path."""
+    super_dir, sub_path, _sha = _superproject_with_submodule(tmp_path)
+
+    # Advance the submodule and push so its HEAD is on origin/master
+    (sub_path / "v2.txt").write_text("v2")
+    subprocess.run(
+        ["git", "add", "v2.txt"], cwd=sub_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "v2"], cwd=sub_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "push", "origin", "HEAD:master"],
+        cwd=sub_path,
+        check=True,
+        capture_output=True,
+    )
+    new_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=sub_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    subprocess.run(
+        ["git", "rm", "--cached", "vendor/sub"],
+        cwd=super_dir,
+        check=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "vendor", "-m", "restore vendor/sub", "--no-verify"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"should re-stage a reachable gitlink missing from the index\n"
+        f"stderr: {result.stderr}"
+    )
+    committed_sha = subprocess.run(
+        ["git", "ls-tree", "HEAD", "vendor/sub"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()[2]
+    assert (
+        committed_sha == new_sha
+    ), f"gitlink should be restored at {new_sha[:12]}, got {committed_sha[:12]}"
+
+
 def test_dir_pathspec_refuses_ignored_untracked_nested_repo(tmp_path: Path):
     """Directory pathspec must detect an ignored untracked nested repo whose
     worktree HEAD is *unreachable* from its origin/master.
