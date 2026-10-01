@@ -77,6 +77,7 @@ _PATH_FIELDS = {
     "cc_credentials_path",
     "copilot_state_dir",
     "codex_sessions_dir",
+    "gptme_log_root",
 }
 
 # Env vars that override config fields (bash `${VAR:-default}` parity).
