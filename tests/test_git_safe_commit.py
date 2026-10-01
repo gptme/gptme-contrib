@@ -2232,8 +2232,9 @@ def test_autoformat_abort_restores_original_index(
     )
 
 
+@pytest.mark.parametrize("absolute_path", [False, True])
 def test_autoformat_runs_from_repository_root(
-    git_repo: Path, autoformat_env: dict[str, str]
+    git_repo: Path, autoformat_env: dict[str, str], absolute_path: bool
 ):
     nested = git_repo / "src"
     nested.mkdir()
@@ -2241,7 +2242,12 @@ def test_autoformat_runs_from_repository_root(
     foo.write_text("x = 1\n")
     autoformat_env["GIT_SAFE_COMMIT_AUTO_FORMAT"] = "1"
     result = subprocess.run(
-        [str(SAFE_COMMIT), foo.name, "-m", "test: subdirectory formatting"],
+        [
+            str(SAFE_COMMIT),
+            str(foo) if absolute_path else foo.name,
+            "-m",
+            "test: subdirectory formatting",
+        ],
         cwd=nested,
         env=autoformat_env,
         capture_output=True,
