@@ -2069,6 +2069,16 @@ def generate(
         page_path.parent.mkdir(parents=True, exist_ok=True)
         page_path.write_text(item_html)
 
+    # Dependency IDs are not necessarily generated pages: archived tasks are
+    # omitted by the scanner. Prefer emitted pages, then existing source files.
+    dependency_urls = {task["id"]: task["page_url"] for task in data["tasks"]}
+    dependency_sources: dict[str, str] = {}
+    if gh_repo_url:
+        for path in sorted((workspace / "tasks").rglob("*.md")):
+            dependency_sources.setdefault(
+                path.stem, github_blob_url(gh_repo_url, path.relative_to(workspace).as_posix())
+            )
+
     # Generate per-task detail pages
     task_template = env.get_template("task.html")
     for task in data["tasks"]:
@@ -2078,6 +2088,14 @@ def generate(
         task_html = task_template.render(
             workspace_name=data["workspace_name"],
             task=task,
+            dependency_links={
+                dep: (
+                    root_prefix + dependency_urls[dep]
+                    if dep in dependency_urls
+                    else dependency_sources.get(dep, "")
+                )
+                for dep in task["depends"]
+            },
             body_html=render_body_html(
                 task["body"],
                 source_path=task.get("path", ""),
