@@ -752,6 +752,204 @@ auto_format_python_pathspecs() {
         (cd "$repo_root" && prek run ruff-format --files "${python_files[@]}")
 }
 
+_gsc_submodule_git() {
+    # Parent GIT_INDEX_FILE / GIT_DIR would make `git -C sub` operate on the
+    # parent repo. Always strip them for submodule queries.
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+        git -C "$1" "${@:2}"
+}
+
+_gsc_is_gitlink() {
+    # True only when $path is *itself* a gitlink. A directory pathspec
+    # (`.` or `vendor`) lists its descendants under `git ls-files -s`, so we
+    # must match the exact path rather than the first line — otherwise any
+    # directory containing a submodule (or the repo root, whose `.git` always
+    # exists) is misclassified and the whole pathspec is routed through the
+    # single-gitlink staging path instead of the nested scan.
+    local path="$1" entry mode toplevel
+    entry="$(git ls-files -s -- "$path" 2>/dev/null | awk -F'\t' -v p="$path" '$2 == p { print $1; exit }')"
+    mode="${entry%% *}"
+    if [ "$mode" = "160000" ]; then
+        return 0
+    fi
+    entry="$(git ls-tree HEAD -- "$path" 2>/dev/null | awk -F'\t' -v p="$path" '$2 == p { print $1; exit }')"
+    mode="${entry%% *}"
+    if [ "$mode" = "160000" ]; then
+        return 0
+    fi
+    # Untracked nested repo / newly-added submodule: not in the index or
+    # HEAD yet, but `git add` would still record its worktree HEAD as a
+    # gitlink (160000) — route it through the guarded staging path too.
+    # Never the superproject root: `.git` always exists there, and the root
+    # is a directory pathspec, not a nested repo.
+    [ -d "$path" ] || return 1
+    [ -e "$path/.git" ] || return 1
+    toplevel="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    [ "$(cd "$path" 2>/dev/null && pwd -P)" != "$toplevel" ]
+}
+
+# Emit the path of every gitlink nested *inside* a pathspec (not the
+# pathspec itself).  Called for non-gitlink directory pathspecs so we can
+# route each submodule through _gsc_stage_gitlink_path before the
+# directory-level `git add` descends and records the wrong worktree HEAD.
+#
+# Two classes detected:
+#   tracked   — mode-160000 entries already in the index
+#   untracked — nested repos (.git present) not yet indexed; `git add`
+#               would record their worktree HEAD as a gitlink
+#
+# Deduplicates via a local associative array so each path is emitted once.
+_gsc_find_gitlinks_under() {
+    local ps="$1"
+    local line path mode nested
+    local -A seen=()
+
+    # Tracked gitlinks in the index (GIT_INDEX_FILE set to snapshot by caller).
+    while IFS= read -r -d '' line; do
+        [ -z "$line" ] && continue
+        mode="${line%% *}"
+        if [ "$mode" = "160000" ]; then
+            path="${line##*$'\t'}"
+            if [ -z "${seen[$path]:-}" ]; then
+                seen["$path"]=1
+                printf '%s\n' "$path"
+            fi
+        fi
+    done < <(git ls-files -sz -- "$ps" 2>/dev/null)
+
+    # Untracked nested repos: ls-files --others --directory lists untracked
+    # directories with a trailing '/'; probe each for a .git entry.
+    #
+    # Scan twice: once with --exclude-standard (the common case) and once
+    # without it.  Without --exclude-standard, gitignore'd content counts as
+    # untracked, so an ignored nested repo (e.g. a submodule path listed in
+    # .gitignore, or a nested repo under an ignored directory) is still
+    # detected — otherwise `git add <dir>` would descend into it and record
+    # its worktree HEAD as a gitlink, invisible to the guard.
+    while IFS= read -r -d '' path; do
+        path="${path%/}"
+        [ -z "$path" ] && continue
+        # A pathspec that is itself an untracked nested repo is handled by
+        # _gsc_is_gitlink directly; never emit the pathspec as one of its own
+        # nested gitlinks.
+        [ "$path" = "$ps" ] && continue
+        if [ -e "$path/.git" ]; then
+            if [ -z "${seen[$path]:-}" ]; then
+                seen["$path"]=1
+                printf '%s\n' "$path"
+            fi
+        elif [ -d "$path" ]; then
+            # --directory collapses an untracked directory to a single
+            # trailing-slash entry, so a repo nested *deeper* inside it
+            # (e.g. `vendor/newdir/sub`) is never listed by the scan above —
+            # `git add vendor` would then descend into it and record that
+            # repo's worktree HEAD as a gitlink.  Re-list the subtree without
+            # --directory: git emits nested repos at any depth with a trailing
+            # '/'.  Scoped to the untracked directory, so cost is bounded to
+            # directories actually under the pathspec.
+            while IFS= read -r -d '' nested; do
+                nested="${nested%/}"
+                [ -z "$nested" ] && continue
+                [ "$nested" = "$ps" ] && continue
+                if [ -e "$nested/.git" ] && [ -z "${seen[$nested]:-}" ]; then
+                    seen["$nested"]=1
+                    printf '%s\n' "$nested"
+                fi
+            done < <(
+                git ls-files -z --others --exclude-standard -- "$path" 2>/dev/null
+                git ls-files -z --others -- "$path" 2>/dev/null
+            )
+        fi
+    done < <(
+        git ls-files -z --others --directory --exclude-standard -- "$ps" 2>/dev/null
+        git ls-files -z --others --directory -- "$ps" 2>/dev/null
+    )
+}
+
+_gsc_stage_gitlink_path() {
+    # Never `git add` a gitlink: that records the submodule *worktree* HEAD,
+    # which in a shared checkout is often a sibling's feature branch (e.g. a
+    # concurrent session mid-way through unrelated submodule work).
+    local path="$1"
+    local head_sha wt_head default_ref idx_sha
+
+    head_sha="$(git ls-tree HEAD -- "$path" 2>/dev/null | awk '{ print $3; exit }')"
+
+    wt_head="$(_gsc_submodule_git "$path" rev-parse HEAD 2>/dev/null || true)"
+    if [ -z "$wt_head" ]; then
+        echo "error: '$path' is a gitlink but submodule HEAD is unreadable" >&2
+        return 1
+    fi
+    if [ "$wt_head" = "$head_sha" ]; then
+        # Already committed at this SHA — but if the path is missing from the
+        # index (e.g. after `git rm --cached`), stage it or the commit fails.
+        if git ls-files -s -- "$path" 2>/dev/null | grep -q .; then
+            return 0
+        fi
+        if ! git update-index --add --cacheinfo 160000 "$wt_head" "$path"; then
+            echo "error: failed to re-stage gitlink '$path' at HEAD SHA ${wt_head:0:12} (git update-index failed)" >&2
+            return 1
+        fi
+        echo "gitlink '$path' re-staged at HEAD SHA ${wt_head:0:12} (was missing from index)" >&2
+        return 0
+    fi
+
+    # A staged gitlink entry already present in the index must be respected.
+    # If it differs from HEAD it was set deliberately (e.g. via
+    # `git update-index --cacheinfo`, which this script's own error message
+    # recommends for pointing at an intended public SHA). Overwriting it with
+    # the worktree HEAD would silently clobber the intended pointer — and
+    # because `git commit <pathspec>` re-stages from the worktree, that wrong
+    # SHA is also what would actually be committed. So: no-op when the index
+    # already matches the worktree; otherwise refuse rather than guess whether
+    # the worktree should advance the staged value. Only advance from the
+    # worktree when the index is clean at HEAD (or the path is absent).
+    idx_sha="$(git ls-files -s -- "$path" 2>/dev/null | awk '{ print $2; exit }')"
+    if [ -n "$idx_sha" ] && [ "$idx_sha" != "$head_sha" ]; then
+        if [ "$idx_sha" = "$wt_head" ]; then
+            return 0
+        fi
+        echo "error: gitlink '$path' has a staged SHA ${idx_sha:0:12} that differs from HEAD ${head_sha:0:12} and the submodule worktree ${wt_head:0:12}" >&2
+        echo "   Refusing to clobber the staged pointer. Either commit it directly (git commit $path)," >&2
+        echo "   or unstage it (git rm --cached $path) and stage the intended public SHA." >&2
+        return 1
+    fi
+
+    default_ref="$(_gsc_submodule_git "$path" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+    if [ -z "$default_ref" ]; then
+        if _gsc_submodule_git "$path" rev-parse --verify origin/master >/dev/null 2>&1; then
+            default_ref="origin/master"
+        elif _gsc_submodule_git "$path" rev-parse --verify origin/main >/dev/null 2>&1; then
+            default_ref="origin/main"
+        fi
+    fi
+    if [ -n "$default_ref" ] && \
+        _gsc_submodule_git "$path" merge-base --is-ancestor "$wt_head" "$default_ref" 2>/dev/null; then
+        if ! git update-index --add --cacheinfo 160000 "$wt_head" "$path"; then
+            echo "error: failed to stage gitlink '$path' from worktree HEAD ${wt_head:0:12} (git update-index failed)" >&2
+            return 1
+        fi
+        echo "gitlink '$path' staged from worktree HEAD ${wt_head:0:12} (on $default_ref)" >&2
+        return 0
+    fi
+
+    if [ -z "$default_ref" ]; then
+        # No origin remote at all: reachability is unverifiable. Refusing is
+        # deliberate — a remote-less nested repo's worktree HEAD could be a
+        # sibling's in-progress branch just as easily as a remote-backed one,
+        # and there is no public SHA to fall back to. Callers who really mean
+        # to record this SHA can stage it explicitly with
+        # `git update-index --cacheinfo 160000 <sha> $path`.
+        echo "error: refusing to git-add gitlink '$path' from worktree HEAD ${wt_head:0:12} (submodule has no origin remote; reachability cannot be verified)" >&2
+    else
+        echo "error: refusing to git-add gitlink '$path' from worktree HEAD ${wt_head:0:12} (not reachable from $default_ref)" >&2
+    fi
+    echo "   A sibling likely has this submodule on a feature branch. Stage the intended public SHA:" >&2
+    echo "     git update-index --cacheinfo 160000 <origin/master-sha> $path" >&2
+    echo "   Do not checkout the submodule — that clobbers concurrent work." >&2
+    return 1
+}
+
 stage_explicit_pathspecs() {
     if [ "${#PATHSPECS[@]}" -eq 0 ]; then
         return 0
@@ -824,11 +1022,40 @@ stage_explicit_pathspecs() {
     # Format inside the same index transaction, before the first add. Abort
     # tracking then retains the original index entries, including deliberate
     # staged content; no later re-stage overwrites GSC_ABORT_BEFORE.
+    #
+    # Gitlinks are staged separately: `git add` on a gitlink path records the
+    # submodule's current *worktree* HEAD, not the intended committed SHA, so
+    # they're routed through _gsc_stage_gitlink_path instead of a plain add.
+    #
+    # For directory pathspecs (e.g. `vendor` or `.`), `git add` would also
+    # descend into any nested submodule and record the worktree HEAD — even
+    # when the direct path is not itself a gitlink.  Pre-scan each non-gitlink
+    # pathspec for gitlinks nested beneath it; route those through the guarded
+    # staging path and exclude them from the `git add` via :(exclude).
+    local -a add_paths=() gitlink_paths=() exclude_gitlink_args=()
+    local sub
+    for path in "${PATHSPECS[@]}"; do
+        if _gsc_is_gitlink "$path"; then
+            gitlink_paths+=("$path")
+        else
+            while IFS= read -r sub; do
+                [ -z "$sub" ] && continue
+                gitlink_paths+=("$sub")
+                exclude_gitlink_args+=(":(exclude)$sub")
+            done < <(_gsc_find_gitlinks_under "$path")
+            add_paths+=("$path")
+        fi
+    done
     if auto_format_python_pathspecs; then
-        git add -- "${PATHSPECS[@]}" || git_add_exit=$?
+        if [ "${#add_paths[@]}" -gt 0 ]; then
+            git add -- "${add_paths[@]}" "${exclude_gitlink_args[@]}" || git_add_exit=$?
+        fi
     else
         git_add_exit=$?
     fi
+    for path in "${gitlink_paths[@]}"; do
+        _gsc_stage_gitlink_path "$path" || git_add_exit=$?
+    done
     gsc_load_ls_files_map entries_after
     if [ -n "$old_gif" ]; then
         GIT_INDEX_FILE="$old_gif"
