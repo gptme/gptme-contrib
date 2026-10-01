@@ -2325,3 +2325,734 @@ def test_autoformat_holds_index_lock_during_hook(
         ).stdout
         == ""
     )
+
+
+# ---------------------------------------------------------------------------
+# Submodule / gitlink regression tests  (issue #1776 + #1772)
+# ---------------------------------------------------------------------------
+
+
+def _make_sub_repo(path: Path, commit_msg: str = "init sub") -> str:
+    """Create a bare-minimum git repo at *path* and return its HEAD SHA."""
+    path.mkdir(parents=True, exist_ok=True)
+    for cmd in (
+        ["git", "init", "-b", "master"],
+        ["git", "config", "user.email", "test@test.com"],
+        ["git", "config", "user.name", "Test"],
+        ["git", "config", "core.hooksPath", "/dev/null"],
+        # Allow pushes to the checked-out branch (this repo acts as a fake remote)
+        ["git", "config", "receive.denyCurrentBranch", "ignore"],
+    ):
+        subprocess.run(cmd, cwd=path, check=True, capture_output=True)
+    (path / "file.txt").write_text("sub content")
+    subprocess.run(
+        ["git", "add", "file.txt"], cwd=path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", commit_msg],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _superproject_with_submodule(tmp_path: Path) -> tuple[Path, Path, str]:
+    """
+    Return (superproject, submodule_path, sub_head_sha).
+
+    Layout:
+        tmp_path/super/          — superproject
+        tmp_path/super/vendor/sub — submodule tracked in superproject's HEAD
+    The submodule is registered at its initial HEAD SHA.
+    """
+    sub_dir = tmp_path / "sub_origin"
+    sub_sha = _make_sub_repo(sub_dir)
+
+    super_dir = tmp_path / "super"
+    super_dir.mkdir()
+    for cmd in (
+        ["git", "init", "-b", "master"],
+        ["git", "config", "user.email", "test@test.com"],
+        ["git", "config", "user.name", "Test"],
+        ["git", "config", "core.hooksPath", "/dev/null"],
+    ):
+        subprocess.run(cmd, cwd=super_dir, check=True, capture_output=True)
+
+    (super_dir / "README.md").write_text("root")
+    subprocess.run(
+        ["git", "add", "README.md"], cwd=super_dir, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=super_dir, check=True, capture_output=True
+    )
+
+    # Add vendor/sub as a gitlink via update-index (avoids .gitmodules overhead)
+    vendor_dir = super_dir / "vendor"
+    vendor_dir.mkdir()
+    (vendor_dir / "readme.txt").write_text("vendor readme")
+    subprocess.run(
+        ["git", "add", "vendor/readme.txt"],
+        cwd=super_dir,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "update-index", "--add", "--cacheinfo", f"160000,{sub_sha},vendor/sub"],
+        cwd=super_dir,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "add vendor/sub gitlink"],
+        cwd=super_dir,
+        check=True,
+        capture_output=True,
+    )
+
+    # Clone the sub_origin into vendor/sub so submodule queries work
+    sub_path = vendor_dir / "sub"
+    subprocess.run(
+        ["git", "clone", str(sub_dir), str(sub_path)],
+        check=True,
+        capture_output=True,
+    )
+    # Disable global hooks in the cloned sub so test pushes aren't blocked
+    subprocess.run(
+        ["git", "config", "core.hooksPath", "/dev/null"],
+        cwd=sub_path,
+        check=True,
+        capture_output=True,
+    )
+    # Ensure the submodule worktree HEAD matches the committed SHA
+    subprocess.run(
+        ["git", "checkout", sub_sha], cwd=sub_path, check=True, capture_output=True
+    )
+
+    return super_dir, sub_path, sub_sha
+
+
+def test_direct_gitlink_refuses_unreachable_worktree_head(tmp_path: Path):
+    """Direct gitlink pathspec vendor/sub is refused when worktree HEAD is
+    not reachable from origin/master (regression for #1772)."""
+    super_dir, sub_path, _sha = _superproject_with_submodule(tmp_path)
+
+    # Advance submodule worktree to a new commit that origin doesn't have
+    (sub_path / "new.txt").write_text("feature work")
+    subprocess.run(
+        ["git", "add", "new.txt"], cwd=sub_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "feature"],
+        cwd=sub_path,
+        check=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "vendor/sub", "-m", "bump sub", "--no-verify"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, "should refuse staging unreachable submodule SHA"
+    assert "refusing" in result.stderr.lower() or "error" in result.stderr.lower()
+
+
+def test_dir_pathspec_refuses_unreachable_submodule(tmp_path: Path):
+    """Directory pathspec `vendor` containing a gitlink is refused when the
+    submodule worktree HEAD is not reachable from origin/master (gap in #1772)."""
+    super_dir, sub_path, _sha = _superproject_with_submodule(tmp_path)
+
+    # Add a normal file so vendor/ has something to commit besides the gitlink
+    (super_dir / "vendor" / "new.txt").write_text("regular file")
+
+    # Advance submodule worktree to a new commit not on origin
+    (sub_path / "new.txt").write_text("feature work")
+    subprocess.run(
+        ["git", "add", "new.txt"], cwd=sub_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "feature"],
+        cwd=sub_path,
+        check=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "vendor", "-m", "vendor changes", "--no-verify"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, (
+        "git-safe-commit vendor should refuse when vendor/sub worktree is on "
+        "an unreachable feature branch (issue #1776)"
+    )
+    assert "refusing" in result.stderr.lower() or "error" in result.stderr.lower()
+
+
+def test_dot_pathspec_refuses_unreachable_submodule(tmp_path: Path):
+    """`.` pathspec refuses when any submodule worktree HEAD is unreachable
+    from origin/master (dot-pathspec variant of #1776)."""
+    super_dir, sub_path, _sha = _superproject_with_submodule(tmp_path)
+
+    (super_dir / "top.txt").write_text("top-level change")
+
+    # Advance submodule worktree
+    (sub_path / "new.txt").write_text("feature work")
+    subprocess.run(
+        ["git", "add", "new.txt"], cwd=sub_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "feature"],
+        cwd=sub_path,
+        check=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), ".", "-m", "all changes", "--no-verify"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, (
+        "git-safe-commit . should refuse when a nested submodule worktree is "
+        "on an unreachable feature branch"
+    )
+    assert "refusing" in result.stderr.lower() or "error" in result.stderr.lower()
+
+
+def test_dir_pathspec_allows_submodule_at_head_sha(tmp_path: Path):
+    """Directory pathspec is allowed when submodule worktree HEAD matches
+    the committed SHA (no-op gitlink case — should commit the other files)."""
+    super_dir, sub_path, _sha = _superproject_with_submodule(tmp_path)
+
+    # Add a regular file to commit alongside the (unchanged) gitlink
+    new_file = super_dir / "vendor" / "new.txt"
+    new_file.write_text("regular file")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "vendor", "-m", "add vendor/new.txt", "--no-verify"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"should allow dir pathspec when submodule is at HEAD SHA\n"
+        f"stderr: {result.stderr}"
+    )
+    log = subprocess.run(
+        ["git", "log", "--oneline", "-1"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "add vendor/new.txt" in log.stdout
+
+
+def test_dir_pathspec_stages_submodule_when_reachable(tmp_path: Path):
+    """Directory pathspec advances the gitlink when the worktree HEAD is
+    reachable from origin/master (legitimate submodule bump via directory)."""
+    super_dir, sub_path, _sha = _superproject_with_submodule(tmp_path)
+
+    # Add a commit to the submodule and push it so it's on origin/master
+    (sub_path / "v2.txt").write_text("v2")
+    subprocess.run(
+        ["git", "add", "v2.txt"], cwd=sub_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "v2"],
+        cwd=sub_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "push", "origin", "HEAD:master"],
+        cwd=sub_path,
+        check=True,
+        capture_output=True,
+    )
+
+    new_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=sub_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "vendor", "-m", "bump vendor/sub to v2", "--no-verify"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"should allow dir pathspec when submodule worktree is on origin/master\n"
+        f"stderr: {result.stderr}"
+    )
+
+    # Verify the committed gitlink SHA is the new one
+    committed_sha = subprocess.run(
+        ["git", "ls-tree", "HEAD", "vendor/sub"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()[2]
+    assert (
+        committed_sha == new_sha
+    ), f"gitlink should be bumped to {new_sha[:12]}, got {committed_sha[:12]}"
+
+
+def test_dir_pathspec_refuses_unreachable_gitlink_removed_from_index(tmp_path: Path):
+    """A gitlink still in HEAD but dropped from the index (`git rm --cached`)
+    is still detected by the directory scan and refused when the worktree HEAD
+    is unreachable.
+
+    The tracked scan in _gsc_find_gitlinks_under is index-only, but removing a
+    path from the index makes `git ls-files --others` treat it as untracked, so
+    the nested-repo scan still catches it. Without this the plain `git add`
+    would re-add it at the (possibly unpublished) worktree HEAD, bypassing the
+    reachability guard.
+    """
+    super_dir, sub_path, _sha = _superproject_with_submodule(tmp_path)
+
+    (super_dir / "vendor" / "new.txt").write_text("regular file")
+
+    # Advance submodule worktree to a commit origin does not have
+    (sub_path / "new.txt").write_text("feature work")
+    subprocess.run(
+        ["git", "add", "new.txt"], cwd=sub_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "feature"],
+        cwd=sub_path,
+        check=True,
+        capture_output=True,
+    )
+    wt_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=sub_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    # Drop the gitlink from the index while it remains in HEAD
+    subprocess.run(
+        ["git", "rm", "--cached", "vendor/sub"],
+        cwd=super_dir,
+        check=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "vendor", "-m", "vendor changes", "--no-verify"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, (
+        "git-safe-commit vendor must refuse an unreachable gitlink even when "
+        "it was removed from the index but is still in HEAD"
+    )
+    # The unpublished worktree HEAD must not have been recorded
+    staged = subprocess.run(
+        ["git", "ls-files", "-s", "--", "vendor/sub"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert wt_head not in staged, "unreachable SHA leaked into the index"
+    log = subprocess.run(
+        ["git", "log", "--oneline", "-1"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "vendor changes" not in log, "no commit should have been created"
+
+
+def test_dir_pathspec_stages_reachable_gitlink_removed_from_index(tmp_path: Path):
+    """A gitlink dropped from the index (`git rm --cached`) whose worktree HEAD
+    is reachable is re-staged at that SHA — the path-missing-from-index branch
+    of _gsc_stage_gitlink_path."""
+    super_dir, sub_path, _sha = _superproject_with_submodule(tmp_path)
+
+    # Advance the submodule and push so its HEAD is on origin/master
+    (sub_path / "v2.txt").write_text("v2")
+    subprocess.run(
+        ["git", "add", "v2.txt"], cwd=sub_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "v2"], cwd=sub_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "push", "origin", "HEAD:master"],
+        cwd=sub_path,
+        check=True,
+        capture_output=True,
+    )
+    new_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=sub_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    subprocess.run(
+        ["git", "rm", "--cached", "vendor/sub"],
+        cwd=super_dir,
+        check=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "vendor", "-m", "restore vendor/sub", "--no-verify"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"should re-stage a reachable gitlink missing from the index\n"
+        f"stderr: {result.stderr}"
+    )
+    committed_sha = subprocess.run(
+        ["git", "ls-tree", "HEAD", "vendor/sub"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()[2]
+    assert (
+        committed_sha == new_sha
+    ), f"gitlink should be restored at {new_sha[:12]}, got {committed_sha[:12]}"
+
+
+def test_dir_pathspec_refuses_ignored_untracked_nested_repo(tmp_path: Path):
+    """Directory pathspec must detect an ignored untracked nested repo whose
+    worktree HEAD is *unreachable* from its origin/master.
+
+    `git ls-files --others --exclude-standard` hides gitignore'd paths, so a
+    nested repo whose path is ignored would be invisible to the directory
+    scan and `git add <dir>` could record its worktree HEAD as a gitlink
+    (P1 in the #1772 review of the directory-pathspec scan).  The nested repo
+    here has a *real* origin remote seeded on master, then is advanced to an
+    unpushed feature commit — so the refusal must come from the reachability
+    check, not merely from a missing remote (the previous version of this
+    test created the nested repo with no remote, so it passed for the wrong
+    reason)."""
+    super_dir, _sub_path, _sha = _superproject_with_submodule(tmp_path)
+
+    # A real origin remote for the nested repo, so reachability is checkable.
+    nested_origin = tmp_path / "sub2_origin"
+    _make_sub_repo(nested_origin, commit_msg="nested init")
+
+    nested = super_dir / "vendor" / "sub2"
+    subprocess.run(
+        ["git", "clone", str(nested_origin), str(nested)],
+        check=True,
+        capture_output=True,
+    )
+    for cmd in (
+        ["git", "config", "user.email", "test@test.com"],
+        ["git", "config", "user.name", "Test"],
+        # Bypass the global identity-guard hooks, as other tests do
+        ["git", "config", "core.hooksPath", "/dev/null"],
+    ):
+        subprocess.run(cmd, cwd=nested, check=True, capture_output=True)
+
+    # Unpushed feature commit → not reachable from origin/master
+    (nested / "feature.txt").write_text("nested feature")
+    subprocess.run(
+        ["git", "add", "feature.txt"], cwd=nested, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "nested feature"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+
+    (super_dir / "vendor" / ".gitignore").write_text("sub2\n")
+    (super_dir / "vendor" / "new.txt").write_text("regular file")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "vendor", "-m", "vendor changes", "--no-verify"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, (
+        "git-safe-commit vendor should refuse when an ignored untracked "
+        "nested repo has an unreachable worktree HEAD"
+    )
+    assert "not reachable" in result.stderr.lower(), (
+        "refusal must be the reachability guard, not a missing-remote error; "
+        f"got: {result.stderr!r}"
+    )
+    # The nested repo must not have been recorded as a gitlink
+    ls = subprocess.run(
+        ["git", "ls-files", "-s", "--", "vendor/sub2"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert "160000" not in ls.stdout, "ignored nested repo was staged as a gitlink"
+
+
+def test_dir_pathspec_refuses_repo_nested_under_untracked_dir(tmp_path: Path):
+    """A directory pathspec must detect a nested repo that lives *inside* an
+    as-yet-untracked intermediate directory (`vendor/newdir/sub2`).
+
+    `git ls-files --others --directory` collapses the untracked `newdir` to a
+    single trailing-slash entry, so the deeper repo is never probed and
+    `git add vendor` records its worktree HEAD as a gitlink — the exact leak
+    #1776 describes.  The nested repo has a real origin remote and is advanced
+    to an unpushed feature commit, so the refusal must come from the
+    reachability guard, not from a missing remote."""
+    super_dir, _sub_path, _sha = _superproject_with_submodule(tmp_path)
+
+    nested_origin = tmp_path / "sub3_origin"
+    _make_sub_repo(nested_origin, commit_msg="nested init")
+
+    newdir = super_dir / "vendor" / "newdir"
+    newdir.mkdir()
+    nested = newdir / "sub2"
+    subprocess.run(
+        ["git", "clone", str(nested_origin), str(nested)],
+        check=True,
+        capture_output=True,
+    )
+    for cmd in (
+        ["git", "config", "user.email", "test@test.com"],
+        ["git", "config", "user.name", "Test"],
+        ["git", "config", "core.hooksPath", "/dev/null"],
+    ):
+        subprocess.run(cmd, cwd=nested, check=True, capture_output=True)
+
+    # Unpushed feature commit → not reachable from origin/master
+    (nested / "feature.txt").write_text("nested feature")
+    subprocess.run(
+        ["git", "add", "feature.txt"], cwd=nested, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "nested feature"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (newdir / "plain.txt").write_text("regular file")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "vendor", "-m", "vendor changes", "--no-verify"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, (
+        "git-safe-commit vendor should refuse when a repo nested under an "
+        "untracked directory has an unreachable worktree HEAD"
+    )
+    assert "not reachable" in result.stderr.lower(), (
+        "refusal must be the reachability guard, not a missing-remote error; "
+        f"got: {result.stderr!r}"
+    )
+    ls = subprocess.run(
+        ["git", "ls-files", "-s", "--", "vendor/newdir/sub2"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert (
+        "160000" not in ls.stdout
+    ), "nested repo under untracked dir was staged as a gitlink"
+
+
+def test_untracked_dir_pathspec_refuses_repo_nested_inside_it(tmp_path: Path):
+    """A pathspec that *is* an untracked intermediate directory must still be
+    scanned for repos nested inside it.
+
+    With `git-safe-commit vendor/newdir` where `vendor/newdir` is untracked and
+    `vendor/newdir/sub2` is a repo, `git ls-files --others --directory` collapses
+    the whole untracked subtree to the single entry `vendor/newdir/` — which is
+    the pathspec itself. The pre-fix scan skipped that entry (`[ "$path" = "$ps" ]`
+    -> continue) before the subtree re-list, so the nested repo was never probed
+    and `git add vendor/newdir` recorded its worktree HEAD as a gitlink, bypassing
+    the reachability guard. The nested repo has a real origin remote and an
+    unpushed feature commit, so the refusal must come from the reachability guard
+    rather than a missing-remote error."""
+    super_dir, _sub_path, _sha = _superproject_with_submodule(tmp_path)
+
+    nested_origin = tmp_path / "sub4_origin"
+    _make_sub_repo(nested_origin, commit_msg="nested init")
+
+    newdir = super_dir / "vendor" / "newdir"
+    newdir.mkdir()
+    nested = newdir / "sub2"
+    subprocess.run(
+        ["git", "clone", str(nested_origin), str(nested)],
+        check=True,
+        capture_output=True,
+    )
+    for cmd in (
+        ["git", "config", "user.email", "test@test.com"],
+        ["git", "config", "user.name", "Test"],
+        ["git", "config", "core.hooksPath", "/dev/null"],
+    ):
+        subprocess.run(cmd, cwd=nested, check=True, capture_output=True)
+
+    # Unpushed feature commit → not reachable from origin/master
+    (nested / "feature.txt").write_text("nested feature")
+    subprocess.run(
+        ["git", "add", "feature.txt"], cwd=nested, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "nested feature"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    # A regular file too, so the pathspec is a non-empty directory and not a gitlink.
+    (newdir / "plain.txt").write_text("regular file")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "vendor/newdir", "-m", "newdir changes", "--no-verify"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, (
+        "git-safe-commit vendor/newdir should refuse when a repo nested inside "
+        "the untracked pathspec has an unreachable worktree HEAD"
+    )
+    assert "not reachable" in result.stderr.lower(), (
+        "refusal must be the reachability guard, not a missing-remote error; "
+        f"got: {result.stderr!r}"
+    )
+    ls = subprocess.run(
+        ["git", "ls-files", "-s", "--", "vendor/newdir/sub2"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert (
+        "160000" not in ls.stdout
+    ), "repo nested inside the untracked pathspec was staged as a gitlink"
+
+
+def test_new_gitlink_without_remote_refused_with_specific_message(tmp_path: Path):
+    """A nested repo with no origin remote cannot have reachability verified.
+
+    Refusing is deliberate (see `_gsc_stage_gitlink_path`): a remote-less
+    nested repo's worktree HEAD could be a sibling's in-progress branch just
+    as easily as a remote-backed one, and there is no public SHA to fall back
+    to.  The error must say so specifically rather than reuse the
+    "not reachable from origin/master" wording, so callers understand the
+    remedy (`git update-index --cacheinfo 160000 <sha> <path>`)."""
+    super_dir, _sub_path, _sha = _superproject_with_submodule(tmp_path)
+
+    nested = super_dir / "vendor" / "sub2"
+    nested.mkdir(parents=True)
+    for cmd in (
+        ["git", "init"],
+        ["git", "config", "user.email", "test@test.com"],
+        ["git", "config", "user.name", "Test"],
+        ["git", "config", "core.hooksPath", "/dev/null"],
+    ):
+        subprocess.run(cmd, cwd=nested, check=True, capture_output=True)
+    (nested / "f.txt").write_text("nested work")
+    subprocess.run(["git", "add", "f.txt"], cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "nested work"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    (super_dir / "vendor" / "new.txt").write_text("regular file")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "vendor", "-m", "vendor changes", "--no-verify"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, "remote-less nested repo should be refused"
+    assert "no origin remote" in result.stderr.lower(), (
+        "refusal should call out the missing remote explicitly; "
+        f"got: {result.stderr!r}"
+    )
+    ls = subprocess.run(
+        ["git", "ls-files", "-s", "--", "vendor/sub2"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert "160000" not in ls.stdout, "remote-less nested repo was staged as a gitlink"
+
+
+def test_dot_pathspec_stages_when_submodule_reachable(tmp_path: Path):
+    """`. ` must be treated as a directory pathspec, not a gitlink.
+
+    Regression: `_gsc_is_gitlink "."` matched on the first `ls-files -s`
+    entry and/or the root's own `.git`, so `git-safe-commit .` was routed
+    through the single-gitlink staging path and refused *any* repo that
+    contained a submodule — even a reachable one."""
+    super_dir, sub_path, _sha = _superproject_with_submodule(tmp_path)
+
+    # Advance the submodule and push so its worktree HEAD is reachable
+    (sub_path / "v2.txt").write_text("v2")
+    subprocess.run(
+        ["git", "add", "v2.txt"], cwd=sub_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "v2"], cwd=sub_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "push", "origin", "HEAD:master"],
+        cwd=sub_path,
+        check=True,
+        capture_output=True,
+    )
+    new_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=sub_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), ".", "-m", "bump via dot", "--no-verify"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"`.` pathspec must not refuse a repo with a reachable submodule\n"
+        f"stderr: {result.stderr}"
+    )
+    committed_sha = subprocess.run(
+        ["git", "ls-tree", "HEAD", "vendor/sub"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()[2]
+    assert (
+        committed_sha == new_sha
+    ), f"`.` should bump the gitlink to {new_sha[:12]}, got {committed_sha[:12]}"
