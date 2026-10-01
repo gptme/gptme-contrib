@@ -2883,6 +2883,78 @@ def test_dir_pathspec_refuses_repo_nested_under_untracked_dir(tmp_path: Path):
     ), "nested repo under untracked dir was staged as a gitlink"
 
 
+def test_untracked_dir_pathspec_refuses_repo_nested_inside_it(tmp_path: Path):
+    """A pathspec that *is* an untracked intermediate directory must still be
+    scanned for repos nested inside it.
+
+    With `git-safe-commit vendor/newdir` where `vendor/newdir` is untracked and
+    `vendor/newdir/sub2` is a repo, `git ls-files --others --directory` collapses
+    the whole untracked subtree to the single entry `vendor/newdir/` — which is
+    the pathspec itself. The pre-fix scan skipped that entry (`[ "$path" = "$ps" ]`
+    -> continue) before the subtree re-list, so the nested repo was never probed
+    and `git add vendor/newdir` recorded its worktree HEAD as a gitlink, bypassing
+    the reachability guard. The nested repo has a real origin remote and an
+    unpushed feature commit, so the refusal must come from the reachability guard
+    rather than a missing-remote error."""
+    super_dir, _sub_path, _sha = _superproject_with_submodule(tmp_path)
+
+    nested_origin = tmp_path / "sub4_origin"
+    _make_sub_repo(nested_origin, commit_msg="nested init")
+
+    newdir = super_dir / "vendor" / "newdir"
+    newdir.mkdir()
+    nested = newdir / "sub2"
+    subprocess.run(
+        ["git", "clone", str(nested_origin), str(nested)],
+        check=True,
+        capture_output=True,
+    )
+    for cmd in (
+        ["git", "config", "user.email", "test@test.com"],
+        ["git", "config", "user.name", "Test"],
+        ["git", "config", "core.hooksPath", "/dev/null"],
+    ):
+        subprocess.run(cmd, cwd=nested, check=True, capture_output=True)
+
+    # Unpushed feature commit → not reachable from origin/master
+    (nested / "feature.txt").write_text("nested feature")
+    subprocess.run(
+        ["git", "add", "feature.txt"], cwd=nested, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "nested feature"],
+        cwd=nested,
+        check=True,
+        capture_output=True,
+    )
+    # A regular file too, so the pathspec is a non-empty directory and not a gitlink.
+    (newdir / "plain.txt").write_text("regular file")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "vendor/newdir", "-m", "newdir changes", "--no-verify"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, (
+        "git-safe-commit vendor/newdir should refuse when a repo nested inside "
+        "the untracked pathspec has an unreachable worktree HEAD"
+    )
+    assert "not reachable" in result.stderr.lower(), (
+        "refusal must be the reachability guard, not a missing-remote error; "
+        f"got: {result.stderr!r}"
+    )
+    ls = subprocess.run(
+        ["git", "ls-files", "-s", "--", "vendor/newdir/sub2"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert (
+        "160000" not in ls.stdout
+    ), "repo nested inside the untracked pathspec was staged as a gitlink"
+
+
 def test_new_gitlink_without_remote_refused_with_specific_message(tmp_path: Path):
     """A nested repo with no origin remote cannot have reachability verified.
 

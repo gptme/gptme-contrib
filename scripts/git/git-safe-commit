@@ -831,9 +831,12 @@ _gsc_find_gitlinks_under() {
         [ -z "$path" ] && continue
         # A pathspec that is itself an untracked nested repo is handled by
         # _gsc_is_gitlink directly; never emit the pathspec as one of its own
-        # nested gitlinks.
-        [ "$path" = "$ps" ] && continue
-        if [ -e "$path/.git" ]; then
+        # nested gitlinks. Do NOT `continue` on the pathspec here: when it is
+        # a plain untracked *directory*, `--directory` collapsed its whole
+        # subtree to this single entry, and the re-list below is the only
+        # thing that finds a repo nested inside it (otherwise `git add <ps>`
+        # descends into that repo and records its worktree HEAD unguarded).
+        if [ -e "$path/.git" ] && [ "$path" != "$ps" ]; then
             if [ -z "${seen[$path]:-}" ]; then
                 seen["$path"]=1
                 printf '%s\n' "$path"
