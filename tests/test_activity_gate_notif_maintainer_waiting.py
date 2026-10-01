@@ -45,6 +45,9 @@ waiting_body = os.environ.get("TEST_WAITING_BODY")
 head_sha = os.environ.get(
     "TEST_HEAD_SHA", "a65ead926a4080f6a17de9af384a6a87774f5761"
 )
+# State served for the subject issue/PR (`repos/<repo>/issues/<n>`). "closed"
+# models a merged/closed PR whose author-notification must not emit.
+subject_state = os.environ.get("TEST_SUBJECT_STATE", "open")
 # Human activity after the bot's waiting comment reopens the handoff.
 human_after_waiting = os.environ.get("TEST_HUMAN_AFTER_WAITING", "0")
 bot_after_waiting = os.environ.get("TEST_BOT_AFTER_WAITING", "0")
@@ -167,6 +170,10 @@ if argv[0] == "api":
             page = comments[:100]
             print(apply_jq(page, jq_expr) if jq_expr else json.dumps(page))
         sys.exit(0)
+    if endpoint.endswith(f"/issues/{notif_number}"):
+        # Subject-state lookup used by the closed/merged staleness filter.
+        print(apply_jq({"state": subject_state}, jq_expr))
+        sys.exit(0)
     if "/pulls/" in endpoint and endpoint.endswith(str(notif_number)):
         pr = {"head": {"sha": head_sha}}
         print(apply_jq(pr, jq_expr))
@@ -196,6 +203,7 @@ def _run_gate(
     reason: str = "author",
     subject_type: str = "PullRequest",
     waiting: str = "1",
+    subject_state: str = "open",
     human_after_waiting: str = "0",
     bot_after_waiting: str = "0",
     human_review_after_waiting: str = "0",
@@ -217,6 +225,7 @@ def _run_gate(
     env["TEST_NOTIF_REASON"] = reason
     env["TEST_SUBJECT_TYPE"] = subject_type
     env["TEST_WAITING_COMMENT"] = waiting
+    env["TEST_SUBJECT_STATE"] = subject_state
     if waiting_body is not None:
         env["TEST_WAITING_BODY"] = waiting_body
     if head_sha is not None:
@@ -509,6 +518,40 @@ def test_author_identity_handoff_reopens_on_human_comment() -> None:
             comment_author="TimeToLearnAlice",
             human_after_waiting="1",
         )
+        assert result.returncode in (0, 1), result.stderr
+        emitted = _emitted_notifications(result.stdout)
+        assert len(emitted) == 1, result.stdout
+        assert emitted[0]["detail"] == "author"
+
+
+def test_author_pr_notification_suppressed_when_subject_merged() -> None:
+    """A merged/closed PR must not emit an `author` notification.
+
+    The merge/close event itself bumps the notification's updated_at, so an
+    already-merged PR of the agent's re-emitted on every sweep and dispatched
+    NOOP sessions (gptme/gptme#3894: 15+ arc sessions after Erik merged it).
+    With no waiting comment present this previously slipped past the
+    maintainer-waiting filter and emitted.
+    """
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(tmp, state_dir, waiting="0", subject_state="closed")
+        assert result.returncode in (0, 1), result.stderr
+        assert _emitted_notifications(result.stdout) == [], result.stdout
+        state_file = state_dir / f"notif-{NOTIF_ID}.state"
+        assert state_file.exists()
+        assert state_file.read_text().strip() == "2026-08-26T17:15:04Z"
+
+
+def test_author_pr_notification_still_emits_when_subject_open() -> None:
+    """The closed-subject filter must not suppress a live PR's author bump."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(tmp, state_dir, waiting="0", subject_state="open")
         assert result.returncode in (0, 1), result.stderr
         emitted = _emitted_notifications(result.stdout)
         assert len(emitted) == 1, result.stdout
