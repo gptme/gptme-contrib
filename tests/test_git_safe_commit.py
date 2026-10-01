@@ -2097,3 +2097,225 @@ def test_abort_unstages_newly_staged_file_on_fresh_repo(tmp_path: Path):
     assert "could not snapshot" not in result.stderr
     assert "new-file.md" not in _staged_paths(repo)
     assert new_file.exists() and new_file.read_text() == "content"
+
+
+@pytest.fixture
+def autoformat_env(git_repo: Path) -> dict[str, str]:
+    """A pinned hook double that rewrites once, then passes on retry."""
+    fake_bin = git_repo / ".git" / "fake-bin"
+    fake_bin.mkdir()
+    fake_prek = fake_bin / "prek"
+    fake_prek.write_text(
+        textwrap.dedent(
+            """\
+            #!/bin/sh
+            [ "$1 $2 $3" = "run ruff-format --files" ] || exit 90
+            shift 3
+            changed=0
+            for f in "$@"; do
+                if ! grep -q '# formatted' "$f"; then
+                    printf '# formatted\\n' >> "$f"
+                    changed=1
+                fi
+            done
+            exit "$changed"
+            """
+        )
+    )
+    fake_prek.chmod(0o755)
+    env = os.environ.copy()
+    env.pop("GIT_SAFE_COMMIT_AUTO_FORMAT", None)
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    return env
+
+
+@pytest.mark.parametrize(
+    "opt_in,no_verify", [(False, False), (True, False), (True, True)]
+)
+def test_autoformat_requires_opt_in_and_hooks_enabled(
+    git_repo: Path, autoformat_env: dict[str, str], opt_in: bool, no_verify: bool
+):
+    foo = git_repo / "foo.py"
+    foo.write_text("x = 1\n")
+    (git_repo / "unrelated.py").write_text("leave = 1\n")
+    if opt_in:
+        autoformat_env["GIT_SAFE_COMMIT_AUTO_FORMAT"] = "1"
+    args = [str(SAFE_COMMIT), "foo.py", "-m", "test: opt-in formatter"]
+    if no_verify:
+        args.append("--no-verify")
+    result = subprocess.run(
+        args, cwd=git_repo, env=autoformat_env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    committed = subprocess.run(
+        ["git", "show", "HEAD:foo.py"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    expected = "x = 1\n# formatted\n" if opt_in and not no_verify else "x = 1\n"
+    assert committed == foo.read_text() == expected
+    assert (git_repo / "unrelated.py").read_text() == "leave = 1\n"
+    assert (
+        subprocess.run(
+            ["git", "diff", "--name-only"],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        == ""
+    )
+
+
+@pytest.mark.parametrize("pre_staged", [False, True])
+def test_autoformat_abort_restores_original_index(
+    git_repo: Path, autoformat_env: dict[str, str], pre_staged: bool
+):
+    foo = git_repo / "foo.py"
+    if pre_staged:
+        foo.write_text("staged = 1\n")
+        subprocess.run(["git", "add", "foo.py"], cwd=git_repo, check=True)
+    original = subprocess.run(
+        ["git", "ls-files", "--stage"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    head_before = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    foo.write_text("worktree = 2\n")
+    hooks = git_repo / ".git" / "hooks"
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\necho abort-after-formatting >&2\nexit 1\n")
+    hook.chmod(0o755)
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(hooks)], cwd=git_repo, check=True
+    )
+    autoformat_env["GIT_SAFE_COMMIT_AUTO_FORMAT"] = "1"
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "foo.py", "-m", "test: abort after formatting"],
+        cwd=git_repo,
+        env=autoformat_env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "abort-after-formatting" in result.stderr
+    assert foo.read_text() == "worktree = 2\n# formatted\n"
+    assert (
+        subprocess.run(
+            ["git", "ls-files", "--stage"],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        == original
+    )
+    assert (
+        subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        == head_before
+    )
+
+
+def test_autoformat_runs_from_repository_root(
+    git_repo: Path, autoformat_env: dict[str, str]
+):
+    nested = git_repo / "src"
+    nested.mkdir()
+    foo = nested / "file with spaces.py"
+    foo.write_text("x = 1\n")
+    autoformat_env["GIT_SAFE_COMMIT_AUTO_FORMAT"] = "1"
+    result = subprocess.run(
+        [str(SAFE_COMMIT), foo.name, "-m", "test: subdirectory formatting"],
+        cwd=nested,
+        env=autoformat_env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (
+        subprocess.run(
+            ["git", "show", "HEAD:src/file with spaces.py"],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        == "x = 1\n# formatted\n"
+    )
+
+
+def test_autoformat_failure_aborts_before_staging(
+    git_repo: Path, autoformat_env: dict[str, str]
+):
+    fake_prek = git_repo / ".git" / "fake-bin" / "prek"
+    fake_prek.write_text("#!/bin/sh\nexit 2\n")
+    foo = git_repo / "foo.py"
+    foo.write_text("x = 1\n")
+    autoformat_env["GIT_SAFE_COMMIT_AUTO_FORMAT"] = "1"
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "foo.py", "-m", "test: formatter failure"],
+        cwd=git_repo,
+        env=autoformat_env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert (
+        subprocess.run(
+            ["git", "ls-files", "--", "foo.py"],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        == ""
+    )
+    assert foo.read_text() == "x = 1\n"
+
+
+def test_autoformat_holds_index_lock_during_hook(
+    git_repo: Path, autoformat_env: dict[str, str]
+):
+    fake_prek = git_repo / ".git" / "fake-bin" / "prek"
+    fake_prek.write_text(
+        "#!/bin/sh\n"
+        "env -u GIT_INDEX_FILE git add -- sibling.txt 2> .git/lock-error && exit 90\n"
+        "grep -q index.lock .git/lock-error || exit 91\n"
+    )
+    (git_repo / "foo.py").write_text("x = 1\n")
+    (git_repo / "sibling.txt").write_text("sibling\n")
+    autoformat_env["GIT_SAFE_COMMIT_AUTO_FORMAT"] = "1"
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "foo.py", "-m", "test: formatter holds lock"],
+        cwd=git_repo,
+        env=autoformat_env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (
+        subprocess.run(
+            ["git", "ls-files", "--", "sibling.txt"],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        == ""
+    )
