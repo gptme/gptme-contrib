@@ -960,3 +960,9 @@ def test_error_line_regex_requires_status_code_boundaries():
     # Numeric substrings of larger fields are not HTTP status codes.
     assert _ERROR_LINE_RE.search('"costUsdTicks": 402322000') is None
     assert _ERROR_LINE_RE.search('"http_status": 402') is not None
+    # Decimal/comma-separated numeric fields are not status codes either
+    # (\b does not treat '.' or ',' as word characters).
+    assert _ERROR_LINE_RE.search("status: 402") is not None
+    assert _ERROR_LINE_RE.search('"costUsd": 402.5') is None
+    assert _ERROR_LINE_RE.search('"rate": 429,500') is None
+    assert _ERROR_LINE_RE.search("HTTP/1.1 402 Payment Required") is not None

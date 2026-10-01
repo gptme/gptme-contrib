@@ -109,7 +109,7 @@ def _mentions_model_stream_crash(lower: str) -> bool:
 # error line — recording an infra death as ``nonzero_exit_unclassified``.
 _ERROR_LINE_RE = re.compile(
     r"(?i)(error|exception|traceback|failed|rate.?limit|weekly.?limit|"
-    r"\b(?:400|401|402|403|429)\b|authentication|quota|payment required)"
+    r"(?<![\d.,])(?:400|401|402|403|429)(?![\d.,])|authentication|quota|payment required)"
 )
 _ASSISTANT_ROLES = frozenset({"assistant"})
 
