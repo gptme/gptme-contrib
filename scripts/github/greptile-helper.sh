@@ -209,15 +209,27 @@ _pr_reviews_json() {
     # One page covers the review histories this helper operates on and keeps the
     # request eligible for the gh wrapper's ETag cache.  `--paginate` bypasses
     # that cache and was costing roughly 150 core REST calls/hour at wide fanout.
+    # Reviews come back oldest-first, so a full page may have dropped the newest
+    # ones: only then fall back to the full traversal.  A failed read is returned
+    # as '[]' but not cached, so a later call in this process can retry.
     trap - EXIT
     if [ -f "$_PR_REVIEWS_CACHE_FILE" ]; then
         cat "$_PR_REVIEWS_CACHE_FILE"
         return
     fi
-    if ! gh api "repos/$REPO/pulls/$PR_NUMBER/reviews?per_page=100" \
-        > "$_PR_REVIEWS_CACHE_FILE" 2>/dev/null; then
-        echo '[]' > "$_PR_REVIEWS_CACHE_FILE"
+    local page
+    if ! page=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews?per_page=100" 2>/dev/null); then
+        echo '[]'
+        return
     fi
+    if [ "$(jq 'length' <<<"$page" 2>/dev/null)" = "100" ]; then
+        if ! page=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate 2>/dev/null \
+            | jq -s 'add // []' 2>/dev/null); then
+            echo '[]'
+            return
+        fi
+    fi
+    printf '%s\n' "$page" > "$_PR_REVIEWS_CACHE_FILE"
     cat "$_PR_REVIEWS_CACHE_FILE"
 }
 

@@ -1787,6 +1787,22 @@ def test_review_reads_use_one_cacheable_request(tmp_path: Path):
     assert review_calls == [["api", "repos/gptme/gptme/pulls/123/reviews?per_page=100"]]
 
 
+def test_full_review_page_falls_back_to_pagination(tmp_path: Path):
+    """A full page may hide the newest reviews, so it is re-read with --paginate."""
+    calls = tmp_path / "calls.jsonl"
+    env = {"GH_CALLS": str(calls), "GREPTILE_HELPER_CACHE_DIR": str(tmp_path / "c")}
+    fixture = _sha_mismatch_fixture()
+    fixture["raw_reviews"] = [
+        _make_greptile_review("OLDSHA", _iso_ago(minutes=30)) for _ in range(100)
+    ]
+    status = _run_helper("status", fixture, extra_env=env)
+    assert status.stdout.strip() == "needs-re-review", f"stderr: {status.stderr}"
+    assert _rest_review_calls(_calls(calls)) == [
+        ["api", "repos/gptme/gptme/pulls/123/reviews?per_page=100"],
+        ["api", "repos/gptme/gptme/pulls/123/reviews", "--paginate"],
+    ]
+
+
 def test_commit_info_uses_graphql_not_paginated_rest(tmp_path: Path):
     """Head SHA + commit dates come from one GraphQL query, not core REST."""
     calls = tmp_path / "calls.jsonl"
