@@ -756,6 +756,7 @@ _gsc_submodule_git() {
     # Parent GIT_INDEX_FILE / GIT_DIR would make `git -C sub` operate on the
     # parent repo. Always strip them for submodule queries.
     env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+        -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
         git -C "$1" "${@:2}"
 }
 
@@ -936,7 +937,13 @@ _gsc_stage_gitlink_path() {
         return 0
     fi
 
-    if [ -z "$default_ref" ]; then
+    if [ -z "$default_ref" ] && _gsc_submodule_git "$path" remote get-url origin >/dev/null 2>&1; then
+        # origin exists but its default branch is unknown: no origin/HEAD and
+        # neither origin/master nor origin/main. Still refuse (fail closed),
+        # but say what is actually missing.
+        echo "error: refusing to git-add gitlink '$path' from worktree HEAD ${wt_head:0:12} (cannot resolve origin's default branch: no origin/HEAD, origin/master or origin/main)" >&2
+        echo "   Set it with: git -C $path remote set-head origin --auto" >&2
+    elif [ -z "$default_ref" ]; then
         # No origin remote at all: reachability is unverifiable. Refusing is
         # deliberate — a remote-less nested repo's worktree HEAD could be a
         # sibling's in-progress branch just as easily as a remote-backed one,
