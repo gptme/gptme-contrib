@@ -505,10 +505,17 @@ If you see "## Retrieved Context" in system messages, that's retrieved
 information relevant to the current query.
 """
 
+
+def _init() -> ToolSpec:
+    """ToolSpec.init hook: gptme requires init() to return a ToolSpec."""
+    register_hooks()
+    return plugin
+
+
 # Plugin specification
 plugin = ToolSpec(
     name="gptme_retrieval",
     desc="Automatic context retrieval using qmd or other backends",
     instructions=_instructions,
-    init=register_hooks,
+    init=_init,
 )
