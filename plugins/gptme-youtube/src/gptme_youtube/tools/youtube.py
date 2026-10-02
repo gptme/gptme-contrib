@@ -42,8 +42,13 @@ def get_transcript(video_id: str) -> str:
         return "Error: youtube_transcript_api is not installed."
     video_id = _extract_video_id(video_id)
     try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
-        return " ".join([entry["text"] for entry in transcript])
+        if hasattr(YouTubeTranscriptApi, "get_transcript"):
+            # youtube-transcript-api 0.x: classmethod returning a list of dicts
+            entries = YouTubeTranscriptApi.get_transcript(video_id)
+        else:
+            # 1.x removed get_transcript; fetch() is an instance method
+            entries = YouTubeTranscriptApi().fetch(video_id).to_raw_data()
+        return " ".join([entry["text"] for entry in entries])
     except Exception as e:
         logger.error(f"Error fetching transcript: {e}")
         return f"Error fetching transcript: {e}"
