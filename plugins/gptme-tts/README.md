@@ -48,6 +48,7 @@ gptme checks for a server on `localhost:8765` at startup and enables speech if i
 | `--list-voices` | — | List voices for the backend and exit |
 | `--list-backends` | — | List backends whose dependencies are installed and exit |
 | `--host` / `--port` | `127.0.0.1` / `8765` | Bind address. The gptme plugin always connects to `localhost:8765`, so keep the default port. |
+| `--cors-origin` | — | Allowed browser origins, comma separated; also settable with `TTS_CORS_ORIGIN`. |
 | `-v`, `--verbose` | — | Debug logging |
 
 Backend notes:
@@ -57,6 +58,21 @@ Backend notes:
 - **Chatterbox**: uses a hosted Gradio space (`ResembleAI/Chatterbox` by default, override with `GRADIO_SRC`); needs `HF_TOKEN`. Slower, so consider raising `GPTME_TTS_TIMEOUT`.
 
 The server exposes `GET /tts?text=…&voice=…&speed=…` (returns WAV), `/health`, `/voices` and `/backends`.
+
+### Browser web UI
+
+Allow the exact origin where you load the web UI (scheme, hostname and port),
+for example:
+
+```sh
+./tts_server.py --cors-origin 'https://chat.gptme.org,http://localhost:5701'
+# equivalent:
+TTS_CORS_ORIGIN='https://chat.gptme.org,http://localhost:5701' ./tts_server.py
+```
+
+No browser origins are allowed by default. `--cors-origin '*'` allows any
+origin. Browser local-network permissions still apply when accessing a local
+server from a hosted web UI.
 
 ## OpenRouter backend (no local server)
 

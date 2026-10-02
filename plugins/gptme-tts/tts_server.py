@@ -43,6 +43,7 @@ import click
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
+from starlette.middleware.cors import CORSMiddleware
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -353,6 +354,16 @@ async def text_to_speech(
 @click.option("--list-voices", is_flag=True, help="List available voices and exit")
 @click.option("--list-backends", is_flag=True, help="List available backends and exit")
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
+@click.option(
+    "--cors-origin",
+    envvar="TTS_CORS_ORIGIN",
+    default=None,
+    help=(
+        "CORS origin(s) to allow, comma separated (or TTS_CORS_ORIGIN). "
+        "For the hosted web UI, use https://chat.gptme.org. "
+        "Use '*' to allow all origins."
+    ),
+)
 def main(
     port: int,
     host: str,
@@ -363,6 +374,7 @@ def main(
     list_voices: bool,
     list_backends: bool,
     verbose: bool,
+    cors_origin: str | None = None,
 ):
     """Run the multi-backend TTS server."""
     global backend_name, current_backend
@@ -455,7 +467,13 @@ def main(
         log.info(f"Model: {os.getenv('TTS_MODEL', 'KittenML/kitten-tts-micro-0.8')}")
     if voice_dir:
         log.info(f"Voice directory: {voice_dir}")
-    uvicorn.run(app, host=host, port=port)
+    server_app = app
+    origins = [
+        origin.strip() for origin in (cors_origin or "").split(",") if origin.strip()
+    ]
+    if origins:
+        server_app = CORSMiddleware(app, allow_origins=origins, allow_methods=["GET"])
+    uvicorn.run(server_app, host=host, port=port)
 
 
 if __name__ == "__main__":
