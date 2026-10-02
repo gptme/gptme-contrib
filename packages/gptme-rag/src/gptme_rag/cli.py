@@ -489,6 +489,12 @@ def index(
 )
 @click.option("--max-tokens", default=4000, help="Maximum tokens in context window")
 @click.option(
+    "--min-relevance",
+    type=click.FloatRange(0.0, 1.0),
+    default=None,
+    help="Drop results with relevance (1 - distance) below this threshold",
+)
+@click.option(
     "--format",
     type=click.Choice(["summary", "full"]),
     default="summary",
@@ -541,6 +547,7 @@ def search(
     n_results: int,
     persist_dir: Path,
     max_tokens: int,
+    min_relevance: float | None,
     score: bool,
     format: str,
     expand: str,
@@ -637,6 +644,13 @@ def search(
                             documents, distances, _ = indexer.search(
                                 query, n_results=n_results, paths=search_paths, path_filters=filter
                             )
+
+                        if min_relevance is not None and distances:
+                            keep = [i for i, d in enumerate(distances) if 1 - d >= min_relevance]
+                            documents = [documents[i] for i in keep]
+                            distances = [distances[i] for i in keep]
+                            if explanations:
+                                explanations = [explanations[i] for i in keep]
 
                         # Assemble context window (must be inside try/except to catch errors in json mode)
                         if documents:
