@@ -112,3 +112,58 @@ def test_recurring_done_keeps_fields(tmp_path: Path, monkeypatch) -> None:
     # Recur logic resets to waiting and keeps next_action.
     assert meta["state"] == "waiting"
     assert meta["next_action"] == "Do the recurring thing"
+
+
+WAITING_WITH_CUMULATIVE_HISTORY = """\
+---
+state: waiting
+created: 2026-06-01T00:00:00+00:00
+waiting_for: some-dependency
+waiting_since: 2026-06-10
+first_waiting_since: 2026-05-01
+waiting_spell_count: 3
+---
+# Waiting Task
+"""
+
+OPEN_WITH_CUMULATIVE_HISTORY = """\
+---
+state: active
+created: 2026-06-01T00:00:00+00:00
+first_waiting_since: 2026-05-01
+waiting_spell_count: 3
+---
+# Open Task
+"""
+
+
+def test_done_strips_cumulative_waiting_history(tmp_path: Path, monkeypatch) -> None:
+    """first_waiting_since/waiting_spell_count are cleared on terminal states."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(WAITING_WITH_CUMULATIVE_HISTORY)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "state", "done"])
+    assert result.exit_code == 0, result.output
+
+    meta = _meta(tasks_dir, "my-task")
+    assert meta["state"] == "done"
+    assert "first_waiting_since" not in meta
+    assert "waiting_spell_count" not in meta
+
+
+def test_cumulative_waiting_fields_accept_set_none(tmp_path: Path, monkeypatch) -> None:
+    """Both fields are registered, so `--set <field> none` clears them by hand."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(OPEN_WITH_CUMULATIVE_HISTORY)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "first_waiting_since", "none"])
+    assert result.exit_code == 0, result.output
+    assert "first_waiting_since" not in _meta(tasks_dir, "my-task")
+
+    result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "waiting_spell_count", "none"])
+    assert result.exit_code == 0, result.output
+    assert "waiting_spell_count" not in _meta(tasks_dir, "my-task")

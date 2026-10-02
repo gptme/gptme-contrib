@@ -2604,6 +2604,11 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         # Optional fields with arbitrary string values
         "next_action": {"type": "string"},
         "waiting_for": {"type": "string"},
+        # Cumulative waiting history. Exposed so terminal tasks can be cleaned
+        # by hand with `--set <field> none`; the terminal transition below also
+        # strips them automatically (TASKS.md schema).
+        "first_waiting_since": {"type": "date"},
+        "waiting_spell_count": {"type": "string"},
         "recur": {"type": "string"},  # Recurrence interval (7d, 24h, weekly, monthly)
         "parent": {"type": "string"},  # Parent task ID (for subtasks)
         "success_criterion": {"type": "string"},  # Verifiable "done" gate
@@ -3125,7 +3130,17 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
             post.metadata.get("state") == "done" and not _recur_is_valid
         )
         if _should_strip_stale_fields:
-            for _stale_field in ("next_action", "waiting_for", "waiting_since", "wait"):
+            for _stale_field in (
+                "next_action",
+                "waiting_for",
+                "waiting_since",
+                "wait",
+                # Cumulative waiting history is cleared on terminal states only
+                # (TASKS.md schema): it exists to answer "how long was this
+                # really stuck?" and is meaningless once the task is closed.
+                "first_waiting_since",
+                "waiting_spell_count",
+            ):
                 post.metadata.pop(_stale_field, None)
 
         # Auto-set completed timestamp when transitioning to a terminal state, and
