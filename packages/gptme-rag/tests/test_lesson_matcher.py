@@ -2063,3 +2063,42 @@ class TestScoreSkillDescriptorMinOverlap:
         prompt = "you are bob starting an autonomous work session in the gptme workspace"
         score, _ = _score_skill_descriptor(skill, prompt.lower())
         assert score == 0.0
+
+
+@pytest.mark.parametrize(
+    "is_skill,exempt,expected", [(True, False, False), (False, False, True), (True, True, True)]
+)
+def test_skill_only_bm25_dial(monkeypatch, is_skill, exempt, expected):
+    """A raised skill gate leaves ordinary lessons and caller exemptions intact."""
+    lessons = [
+        {
+            "path": "target",
+            "title": "",
+            "description": "",
+            "keywords": [],
+            "patterns": [],
+            "is_skill": is_skill,
+        }
+    ]
+    lessons += [
+        {"path": str(i), "title": "", "description": "", "keywords": [], "patterns": []}
+        for i in range(30)
+    ]
+    monkeypatch.setattr(
+        lesson_matcher_mod, "_build_bm25_index", lambda _: {"corpus": list(range(31))}
+    )
+    monkeypatch.setattr(lesson_matcher_mod, "_bm25_score", lambda query, doc, index: 100.0)
+    monkeypatch.setattr(lesson_matcher_mod, "_bm25_zscores", lambda _: [4.1] + [0.0] * 30)
+    baseline = score_lessons(lessons, "needle")
+    assert [r["path"] for r in baseline] == ["target"]
+    treated = score_lessons(
+        lessons,
+        "needle",
+        skill_bm25_min_z=5.0,
+        skill_bm25_exempt_paths={"target"} if exempt else (),
+    )
+    assert bool(treated) is expected
+    if expected:
+        assert treated == baseline
+    lessons[0]["keywords"] = ["needle"]
+    assert score_lessons(lessons, "needle", skill_bm25_min_z=5.0)[0]["path"] == "target"
