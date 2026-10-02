@@ -7,9 +7,14 @@ the minimal audit trail that would have surfaced the gptme-contrib#1175
 unauthorized self-merge incident at response time.
 
 Phase 1 (this module): ledger + receipt emission.
-Phase 2 (this module): scope-check gate — aborts out-of-scope actions when
-    violation_action is 'block', or emits a warning when 'warn' (default).
+Phase 2 (this module): scope-check gate — emits a warning ('warn', default)
+    or yields StopPropagation ('block') when an out-of-scope action is detected.
     Configure via ``~/.config/gptme/scope.yaml`` or GPTME_SCOPE_MANIFEST.
+
+    Note: 'block' mode yields StopPropagation, which stops lower-priority hooks
+    but does NOT prevent tool execution in current gptme (no pre-execute abort
+    path exists in tools/base.py). Use 'warn' for auditing; true execution
+    blocking requires a gptme-side abort mechanism.
 """
 
 from __future__ import annotations

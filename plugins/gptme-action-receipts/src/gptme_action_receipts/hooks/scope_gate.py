@@ -288,7 +288,13 @@ def _is_authorized(repo: str, allowed: list[str]) -> bool:
 
 
 def violation_action(cfg: dict[str, Any] | None = None) -> str:
-    """Return the configured violation action ('warn' or 'block')."""
+    """Return the configured violation action ('warn' or 'block').
+
+    'warn'  — log a warning; tool execution proceeds (default).
+    'block' — yield StopPropagation, stopping lower-priority hooks.
+              Does NOT prevent tool execution in current gptme; use 'warn'
+              for auditing until a gptme-side abort path exists.
+    """
     if cfg is None:
         cfg = _load_scope_config()
     return str(cfg.get("violation_action", "warn"))
