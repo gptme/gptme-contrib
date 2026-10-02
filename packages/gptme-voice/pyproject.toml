@@ -33,6 +33,7 @@ body = [
 gptme-voice-server = "gptme_voice.realtime.server:main"
 gptme-voice-client = "gptme_voice.realtime.client:main"
 gptme-voice-call = "gptme_voice.realtime.call:main"
+gptme-voice-probe = "gptme_voice.realtime.probe:main"
 
 [build-system]
 requires = ["hatchling"]

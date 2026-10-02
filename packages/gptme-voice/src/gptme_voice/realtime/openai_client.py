@@ -36,7 +36,7 @@ _PERSONALITY_FILES = ["ABOUT.md", "README.md"]
 # Max chars for instructions (realtime API has limits)
 _MAX_INSTRUCTIONS_LEN = 4096
 
-# Max audio chunks to buffer before session.created arrives. Twilio sends
+# Max audio chunks to buffer before the session is ready. Twilio sends
 # media frames every 20ms (50/sec), so 500 chunks ≈ 10s of audio — more
 # than enough for any realistic session-handshake delay while still capping
 # memory growth if the provider never confirms the session.
@@ -316,6 +316,15 @@ class OpenAIRealtimeClient:
     """
 
     WS_URL = "wss://api.openai.com/v1/realtime"
+    # Provider events that confirm our session.update was applied. OpenAI
+    # emits session.created on connect with its *default* config (no persona,
+    # default voice, no tools), so only session.updated proves the configured
+    # session is live. Audio flush and the greeting wait for it.
+    _SESSION_READY_EVENTS: frozenset[str] = frozenset({"session.updated"})
+    # When True, a rejected session.update (an ``error`` whose ``param`` is a
+    # ``session.*`` field, or any error before the session is ready) tears the
+    # provider connection down instead of letting an unconfigured model answer.
+    _FAIL_CLOSED_ON_SESSION_ERROR: bool = True
 
     def __init__(
         self,
@@ -332,6 +341,7 @@ class OpenAIRealtimeClient:
         on_speech_started: Callable[[], None] | None = None,
         hold_initial_response: bool = False,
         latency_trace: VoiceLatencyTrace | None = None,
+        on_session_failed: Callable[[str], Any] | None = None,
     ):
         self.api_key = api_key or _get_openai_api_key()
         if not self.api_key:
@@ -435,21 +445,35 @@ class OpenAIRealtimeClient:
         self.on_function_call = on_function_call
         self.on_speech_started = on_speech_started
         self.latency_trace = latency_trace
+        # Invoked once (with a short reason) when the provider rejects the
+        # session configuration. Transports use it to hang up instead of
+        # leaving the caller with a silent or unconfigured session.
+        self.on_session_failed = on_session_failed
+        self.session_error: str | None = None
+        self._session_failure_notified = False
 
         self._ws: websockets.ClientConnection | None = None
         self._receive_task: asyncio.Task | None = None
         self._responding = False  # True while AI is generating a response
 
-        # Audio arriving before `session.created` would be forwarded to a session
-        # that does not exist yet, causing silent calls (observed on cold starts
-        # and cold reconnects). Buffer early audio and flush on session ready.
-        # Cap buffer size so a never-arriving session.created cannot leak memory.
+        # Audio arriving before the session is ready would be forwarded to a
+        # session that is not configured yet, causing silent calls (observed on
+        # cold starts and cold reconnects). Buffer early audio and flush on
+        # session ready. Cap buffer size so a never-arriving ready event cannot
+        # leak memory.
         self._session_ready: asyncio.Event | None = None
+        # Set once the session is either ready or has failed, so waiters can
+        # stop early on a rejected session.update instead of timing out.
+        self._session_settled: asyncio.Event | None = None
+        # Track whether non-silent audio has been appended since the last
+        # provider-side commit, so teardown only commits real pending speech
+        # (avoids input_audio_buffer_commit_empty errors on hangup).
+        self._input_audio_buffer_dirty = False
         self._pending_audio: list[bytes] = []
         self._pending_audio_dropped = 0
         self._event_notice: asyncio.Event | None = None
         self._initial_response_sent = False
-        # When True, the initial response is held back even after session.created.
+        # When True, the initial response is held back even after session ready.
         # Set this on pre-warmed sessions; call activate_session() once the
         # call-side WebSocket is ready to receive audio.
         self._hold_initial_response = hold_initial_response
@@ -498,11 +522,234 @@ class OpenAIRealtimeClient:
 
         return fallback_model
 
+    def _build_tools(self) -> list[dict]:
+        """Function tools advertised to the realtime model (shared by providers)."""
+        handoff_targets = ", ".join(
+            _display_name(a) for a in self.session_config.available_agents
+        )
+        tools: list[dict] = [
+            {
+                "type": "function",
+                "name": "subagent",
+                "description": (
+                    "Dispatch a task to a gptme subagent running in the workspace. "
+                    "Use it only for one small, focused workspace lookup or action: "
+                    "check one task, inspect one file, run one quick command, or verify "
+                    "one recent fact. Do not use it for broad investigations, full "
+                    "reviews, or post-call analysis. Say at most one brief "
+                    "acknowledgement before calling it, then wait for the real "
+                    "subagent result instead of answering early. Never narrate "
+                    "or promise a lookup without actually emitting the tool "
+                    "call. Describe one concrete request in natural language."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": "Natural language description of the task for the subagent",
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["fast", "smart"],
+                            "description": (
+                                "Response urgency. 'fast' (default) uses a smaller model for speed — "
+                                "prefer this for most live-call lookups. 'smart' uses a "
+                                "larger model when accuracy matters more than latency. "
+                                "Both are for small, focused lookups only — never for broad "
+                                "investigations."
+                            ),
+                        },
+                    },
+                    "required": ["task"],
+                },
+            },
+            {
+                "type": "function",
+                "name": "subagent_status",
+                "description": (
+                    "Check which subagent tasks are still running. Use this when "
+                    "the caller asks what the subagent is doing, or before deciding "
+                    "to cancel. Returns each pending task's id, a short preview of "
+                    "the task, the mode, and elapsed seconds."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "type": "function",
+                "name": "subagent_cancel",
+                "description": (
+                    "Cancel a running subagent task. Use this when the caller "
+                    "explicitly asks to stop or cancel the subagent, or when the "
+                    "dispatched task no longer matches what the caller wants. "
+                    "Pass task_id to cancel a specific task, or omit task_id to "
+                    "cancel every pending subagent task."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "string",
+                            "description": (
+                                "Task id to cancel (as returned by subagent or "
+                                "subagent_status). Omit task_id to cancel every "
+                                "pending subagent task."
+                            ),
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "name": "hangup",
+                "description": (
+                    "End the current voice call. This is the ONLY way the call ends — "
+                    "saying goodbye verbally does not hang up. Call this tool whenever "
+                    "the caller has said goodbye or explicitly asked to end the call. "
+                    "Do not ask for confirmation; the caller's goodbye is the "
+                    "confirmation. Do not announce 'I'll end the call now' without "
+                    "calling the tool in the same turn. Say a brief farewell first if "
+                    "you like — the call drops a few seconds after the tool fires so "
+                    "your goodbye still reaches the caller. Do not use this tool to "
+                    "interrupt ongoing work or avoid a question."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reason": {
+                            "type": "string",
+                            "description": (
+                                "Short free-form reason for hanging up "
+                                "(e.g. 'caller said goodbye'). Optional."
+                            ),
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "name": "handoff_to_agent",
+                "description": (
+                    "Transfer the caller to another AI agent ("
+                    + handoff_targets
+                    + "). "
+                    "Use this when the caller explicitly asks to speak with a different "
+                    "agent, or when the topic is clearly outside your expertise and "
+                    "another agent is better suited. Say a brief handoff notice first "
+                    "(e.g. 'I'll transfer you to Alice now'). The transfer includes the "
+                    "full conversation transcript so the receiving agent has context."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "to_agent": {
+                            "type": "string",
+                            "enum": self.session_config.available_agents,
+                            "description": "The agent to transfer the caller to.",
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": (
+                                "Short reason for the transfer "
+                                "(e.g. 'caller asked to speak with Alice'). Required."
+                            ),
+                        },
+                        "context_summary": {
+                            "type": "string",
+                            "description": (
+                                "Optional brief summary of the conversation for the "
+                                "receiving agent (max 500 chars). Use this to highlight "
+                                "key context not obvious from the transcript."
+                            ),
+                        },
+                    },
+                    "required": ["to_agent", "reason"],
+                },
+            },
+        ]
+        if not self.session_config.available_agents:
+            # No handoff targets (handoff disabled or unregistered identity):
+            # drop the tool instead of advertising an empty enum.
+            tools = _without_handoff_tool(tools)
+        if self.session_config.extra_tools:
+            tools = tools + list(self.session_config.extra_tools)
+        return tools
+
+    @staticmethod
+    def _audio_format_config(audio_format: str, *, sample_rate: int) -> dict[str, Any]:
+        """Translate local format names into GA Realtime audio format objects.
+
+        The GA API replaced the beta string formats (``pcm16``, ``g711_ulaw``,
+        ``g711_alaw``) with typed objects. PCM must declare its rate (the API
+        only accepts 24kHz); the G.711 variants are implicitly 8kHz.
+        """
+        if audio_format == "pcm16":
+            return {"type": "audio/pcm", "rate": sample_rate}
+        if audio_format == "g711_ulaw":
+            return {"type": "audio/pcmu"}
+        if audio_format == "g711_alaw":
+            return {"type": "audio/pcma"}
+        return {"type": audio_format}
+
+    def _build_session_params(self, instructions: str, tools: list[dict]) -> dict:
+        """Build the ``session`` object for ``session.update``.
+
+        OpenAI's GA Realtime API rejects the legacy beta shape outright
+        (``missing_required_parameter: session.type``), and a rejected
+        ``session.update`` leaves the call running with no persona, tools, or
+        transcription. Subclasses for providers that still speak the beta shape
+        (xAI) override this.
+        """
+        cfg = self.session_config
+        audio_input: dict[str, Any] = {
+            "format": self._audio_format_config(
+                cfg.input_format, sample_rate=cfg.input_sample_rate
+            ),
+            "turn_detection": {
+                "type": cfg.turn_detection,
+                "threshold": cfg.vad_threshold,
+                "silence_duration_ms": cfg.vad_silence_duration_ms,
+                "prefix_padding_ms": cfg.vad_prefix_padding_ms,
+            },
+        }
+        transcription = self._get_transcription_config()
+        if transcription is not None:
+            audio_input["transcription"] = transcription
+        audio_output: dict[str, Any] = {
+            "format": self._audio_format_config(
+                cfg.output_format, sample_rate=cfg.output_sample_rate
+            ),
+            "voice": cfg.voice,
+        }
+        if cfg.output_speed is not None:
+            audio_output["speed"] = cfg.output_speed
+
+        session_params: dict[str, Any] = {
+            "type": "realtime",
+            # GA accepts exactly one of ["audio"] / ["text"]; audio responses
+            # still stream their transcript via output_audio_transcript events.
+            "output_modalities": ["audio"],
+            "instructions": instructions,
+            "audio": {"input": audio_input, "output": audio_output},
+            "tools": tools,
+        }
+        reasoning = self._get_reasoning_config()
+        if reasoning is not None:
+            session_params["reasoning"] = reasoning
+        return session_params
+
     async def connect(self) -> None:
         """Connect to OpenAI Realtime API."""
         # Initialize session-ready gate inside the event loop that will drive
         # this connection. Allows the client to be re-connected after disconnect.
         self._session_ready = asyncio.Event()
+        self._session_settled = asyncio.Event()
+        self.session_error = None
+        self._session_failure_notified = False
+        self._input_audio_buffer_dirty = False
         self._pending_audio = []
         self._pending_audio_dropped = 0
         self._event_notice = asyncio.Event()
@@ -534,183 +781,7 @@ class OpenAIRealtimeClient:
             f"Session instructions ({len(instructions)} chars): {instructions[:100]}..."
         )
 
-        handoff_targets = ", ".join(
-            _display_name(a) for a in self.session_config.available_agents
-        )
-
-        # Configure session
-        session_params: dict = {
-            "modalities": ["text", "audio"],
-            "instructions": instructions,
-            "voice": self.session_config.voice,
-            "input_audio_format": self.session_config.input_format,
-            "output_audio_format": self.session_config.output_format,
-            "turn_detection": {
-                "type": self.session_config.turn_detection,
-                "threshold": self.session_config.vad_threshold,
-                "silence_duration_ms": self.session_config.vad_silence_duration_ms,
-                "prefix_padding_ms": self.session_config.vad_prefix_padding_ms,
-            },
-            "tools": [
-                {
-                    "type": "function",
-                    "name": "subagent",
-                    "description": (
-                        "Dispatch a task to a gptme subagent running in the workspace. "
-                        "Use it only for one small, focused workspace lookup or action: "
-                        "check one task, inspect one file, run one quick command, or verify "
-                        "one recent fact. Do not use it for broad investigations, full "
-                        "reviews, or post-call analysis. Say at most one brief "
-                        "acknowledgement before calling it, then wait for the real "
-                        "subagent result instead of answering early. Never narrate "
-                        "or promise a lookup without actually emitting the tool "
-                        "call. Describe one concrete request in natural language."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "task": {
-                                "type": "string",
-                                "description": "Natural language description of the task for the subagent",
-                            },
-                            "mode": {
-                                "type": "string",
-                                "enum": ["fast", "smart"],
-                                "description": (
-                                    "Response urgency. 'fast' (default) uses a smaller model for speed — "
-                                    "prefer this for most live-call lookups. 'smart' uses a "
-                                    "larger model when accuracy matters more than latency. "
-                                    "Both are for small, focused lookups only — never for broad "
-                                    "investigations."
-                                ),
-                            },
-                        },
-                        "required": ["task"],
-                    },
-                },
-                {
-                    "type": "function",
-                    "name": "subagent_status",
-                    "description": (
-                        "Check which subagent tasks are still running. Use this when "
-                        "the caller asks what the subagent is doing, or before deciding "
-                        "to cancel. Returns each pending task's id, a short preview of "
-                        "the task, the mode, and elapsed seconds."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {},
-                    },
-                },
-                {
-                    "type": "function",
-                    "name": "subagent_cancel",
-                    "description": (
-                        "Cancel a running subagent task. Use this when the caller "
-                        "explicitly asks to stop or cancel the subagent, or when the "
-                        "dispatched task no longer matches what the caller wants. "
-                        "Pass task_id to cancel a specific task, or omit task_id to "
-                        "cancel every pending subagent task."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "task_id": {
-                                "type": "string",
-                                "description": (
-                                    "Task id to cancel (as returned by subagent or "
-                                    "subagent_status). Omit task_id to cancel every "
-                                    "pending subagent task."
-                                ),
-                            },
-                        },
-                    },
-                },
-                {
-                    "type": "function",
-                    "name": "hangup",
-                    "description": (
-                        "End the current voice call. This is the ONLY way the call ends — "
-                        "saying goodbye verbally does not hang up. Call this tool whenever "
-                        "the caller has said goodbye or explicitly asked to end the call. "
-                        "Do not ask for confirmation; the caller's goodbye is the "
-                        "confirmation. Do not announce 'I'll end the call now' without "
-                        "calling the tool in the same turn. Say a brief farewell first if "
-                        "you like — the call drops a few seconds after the tool fires so "
-                        "your goodbye still reaches the caller. Do not use this tool to "
-                        "interrupt ongoing work or avoid a question."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "reason": {
-                                "type": "string",
-                                "description": (
-                                    "Short free-form reason for hanging up "
-                                    "(e.g. 'caller said goodbye'). Optional."
-                                ),
-                            },
-                        },
-                    },
-                },
-                {
-                    "type": "function",
-                    "name": "handoff_to_agent",
-                    "description": (
-                        "Transfer the caller to another AI agent ("
-                        + handoff_targets
-                        + "). "
-                        "Use this when the caller explicitly asks to speak with a different "
-                        "agent, or when the topic is clearly outside your expertise and "
-                        "another agent is better suited. Say a brief handoff notice first "
-                        "(e.g. 'I'll transfer you to Alice now'). The transfer includes the "
-                        "full conversation transcript so the receiving agent has context."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "to_agent": {
-                                "type": "string",
-                                "enum": self.session_config.available_agents,
-                                "description": "The agent to transfer the caller to.",
-                            },
-                            "reason": {
-                                "type": "string",
-                                "description": (
-                                    "Short reason for the transfer "
-                                    "(e.g. 'caller asked to speak with Alice'). Required."
-                                ),
-                            },
-                            "context_summary": {
-                                "type": "string",
-                                "description": (
-                                    "Optional brief summary of the conversation for the "
-                                    "receiving agent (max 500 chars). Use this to highlight "
-                                    "key context not obvious from the transcript."
-                                ),
-                            },
-                        },
-                        "required": ["to_agent", "reason"],
-                    },
-                },
-            ],
-        }
-        if not self.session_config.available_agents:
-            # No handoff targets (handoff disabled or unregistered identity):
-            # drop the tool instead of advertising an empty enum.
-            session_params["tools"] = _without_handoff_tool(session_params["tools"])
-        if self.session_config.extra_tools:
-            session_params["tools"] = list(session_params["tools"]) + list(
-                self.session_config.extra_tools
-            )
-        if self.session_config.output_speed is not None:
-            session_params["output"] = {"speed": self.session_config.output_speed}
-        reasoning = self._get_reasoning_config()
-        if reasoning is not None:
-            session_params["reasoning"] = reasoning
-        transcription = self._get_transcription_config()
-        if transcription is not None:
-            session_params["input_audio_transcription"] = transcription
+        session_params = self._build_session_params(instructions, self._build_tools())
         await self._send_event("session.update", {"session": session_params})
 
         # Start receiving messages
@@ -725,15 +796,7 @@ class OpenAIRealtimeClient:
         a headless client can drive a full turn — including tool calls — without
         a microphone.
         """
-        if self._session_ready is None:
-            raise RuntimeError("Not connected to OpenAI Realtime API")
-        try:
-            await asyncio.wait_for(
-                self._session_ready.wait(),
-                timeout=_SESSION_READY_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError as exc:
-            raise RuntimeError("Realtime session was not ready in time") from exc
+        await self.wait_until_ready()
 
         logger.info("Sending text message: %s...", text[:100])
         await self._send_event(
@@ -747,6 +810,26 @@ class OpenAIRealtimeClient:
             },
         )
         await self._send_event("response.create", {})
+
+    async def wait_until_ready(self, timeout: float | None = None) -> None:
+        """Wait until the provider has applied our session configuration.
+
+        Raises ``RuntimeError`` if the session is not ready within ``timeout``
+        seconds (default ``_SESSION_READY_TIMEOUT_SECONDS``), or as soon as the
+        provider rejects the ``session.update``.
+        """
+        if self._session_settled is None:
+            raise RuntimeError("Not connected to OpenAI Realtime API")
+        if timeout is None:
+            timeout = _SESSION_READY_TIMEOUT_SECONDS
+        try:
+            await asyncio.wait_for(self._session_settled.wait(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("Realtime session was not ready in time") from exc
+        if self.session_error is not None:
+            raise RuntimeError(
+                f"Realtime session configuration was rejected: {self.session_error}"
+            )
 
     async def inject_message(self, text: str) -> None:
         """Inject a message into the conversation and trigger a response.
@@ -807,6 +890,7 @@ class OpenAIRealtimeClient:
             commit_audio
             and self._session_ready is not None
             and self._session_ready.is_set()
+            and self._input_audio_buffer_dirty
         ):
             with contextlib.suppress(Exception):
                 await self.commit_audio()
@@ -882,6 +966,11 @@ class OpenAIRealtimeClient:
         if self.latency_trace is not None:
             self.latency_trace.observe_send_audio()
 
+        if self.session_error is not None:
+            # The provider rejected our configuration; never feed caller audio
+            # to an unconfigured session (and don't grow the pre-ready buffer).
+            return
+
         if self._session_ready is None or not self._session_ready.is_set():
             # Session not confirmed yet — buffer the chunk, bounded so a
             # never-arriving ready signal cannot leak memory.
@@ -899,14 +988,41 @@ class OpenAIRealtimeClient:
 
         audio_b64 = base64.b64encode(pcm_data).decode("utf-8")
         await self._send_event("input_audio_buffer.append", {"audio": audio_b64})
+        self._mark_input_audio_dirty(pcm_data)
+
+    def _is_silent_audio(self, audio: bytes) -> bool:
+        """Best-effort digital-silence check for the configured input format."""
+        if not audio:
+            return True
+        fmt = self.session_config.input_format
+        if fmt == "pcm16":
+            return not any(audio)
+        if fmt == "g711_ulaw":
+            # 0xFF / 0x7F are μ-law +0 / -0.
+            return not audio.strip(b"\xff\x7f")
+        if fmt == "g711_alaw":
+            # 0xD5 / 0x55 are A-law +0 / -0.
+            return not audio.strip(b"\xd5\x55")
+        return False
+
+    def _mark_input_audio_dirty(self, audio: bytes) -> None:
+        """Only treat non-silent audio as pending speech for teardown commits."""
+        if not self._is_silent_audio(audio):
+            self._input_audio_buffer_dirty = True
 
     async def _mark_session_ready(self, event_type: str) -> None:
         """Mark the provider session ready and flush any buffered audio once."""
-        if self._session_ready is None or self._session_ready.is_set():
+        if (
+            self._session_ready is None
+            or self._session_ready.is_set()
+            or self.session_error is not None
+        ):
             return
 
         logger.info("%s received — marking session ready", event_type)
         self._session_ready.set()
+        if self._session_settled is not None:
+            self._session_settled.set()
         await self._flush_pending_audio()
         await self._send_initial_response_if_needed()
 
@@ -938,8 +1054,65 @@ class OpenAIRealtimeClient:
         client so the greeting fires once the call-side WebSocket is ready.
         """
         self._hold_initial_response = False
+        if self.session_error is not None:
+            # A pre-warmed session can fail before it is claimed; the claimer
+            # attaches on_session_failed afterwards, so notify it now.
+            await self._notify_session_failed()
+            return
         if self._session_ready is not None and self._session_ready.is_set():
             await self._send_initial_response_if_needed()
+
+    def _is_session_config_error(self, error: dict) -> bool:
+        """Whether an ``error`` event means our session config was rejected."""
+        if not self._FAIL_CLOSED_ON_SESSION_ERROR:
+            return False
+        param = error.get("param") or ""
+        if isinstance(param, str) and (
+            param == "session" or param.startswith("session.")
+        ):
+            return True
+        # Nothing but session.update is sent before the session is ready
+        # (audio is buffered, the greeting waits), so any error before then
+        # means the configuration did not apply.
+        return self._session_ready is None or not self._session_ready.is_set()
+
+    async def _fail_session(self, error: dict) -> None:
+        """Refuse to run a session whose configuration the provider rejected."""
+        if self.session_error is not None:
+            logger.error("API error after session failure: %s", error)
+            return
+        reason = error.get("message") or error.get("code") or str(error)
+        self.session_error = str(reason)
+        logger.error(
+            "session.update rejected — refusing to run unconfigured session "
+            "(model=%s): %s",
+            self.session_config.model,
+            error,
+        )
+        if self._session_ready is not None:
+            self._session_ready.clear()
+        self._pending_audio = []
+        self._pending_audio_dropped = 0
+        if self._session_settled is not None:
+            self._session_settled.set()
+        await self._notify_session_failed()
+        if self._ws is not None:
+            with contextlib.suppress(Exception):
+                await self._ws.close()
+
+    async def _notify_session_failed(self) -> None:
+        """Invoke ``on_session_failed`` once, if a failure has been recorded."""
+        if (
+            self.session_error is None
+            or self.on_session_failed is None
+            or self._session_failure_notified
+        ):
+            return
+        self._session_failure_notified = True
+        try:
+            await self._call_callback(self.on_session_failed, self.session_error)
+        except Exception:
+            logger.exception("on_session_failed callback raised")
 
     async def _flush_pending_audio(self) -> None:
         """Send any audio that was buffered before the session was ready."""
@@ -954,6 +1127,7 @@ class OpenAIRealtimeClient:
         for pcm_data in chunks:
             audio_b64 = base64.b64encode(pcm_data).decode("utf-8")
             await self._send_event("input_audio_buffer.append", {"audio": audio_b64})
+            self._mark_input_audio_dirty(pcm_data)
         if self._pending_audio_dropped:
             logger.warning(
                 "Dropped %d pre-session audio chunk(s) before flush",
@@ -1048,14 +1222,17 @@ class OpenAIRealtimeClient:
                 await self._call_callback(self.on_speech_started)
         elif event_type == "input_audio_buffer.speech_stopped":
             logger.debug("Speech ended")
+        elif event_type == "input_audio_buffer.committed":
+            self._input_audio_buffer_dirty = False
 
         # Session events
-        elif event_type == "session.created":
-            logger.info("Session created")
-            await self._mark_session_ready(event_type)
-        elif event_type == "session.updated":
-            logger.info("Session configured")
-            await self._mark_session_ready(event_type)
+        elif event_type in ("session.created", "session.updated"):
+            logger.info(
+                "Session %s",
+                "created" if event_type == "session.created" else "configured",
+            )
+            if event_type in self._SESSION_READY_EVENTS:
+                await self._mark_session_ready(event_type)
 
         # Response lifecycle — mute mic while responding
         elif event_type == "response.created":
@@ -1097,7 +1274,13 @@ class OpenAIRealtimeClient:
 
         # Errors
         elif event_type == "error":
-            logger.error(f"API error: {event.get('error', {})}")
+            error = event.get("error") or {}
+            if not isinstance(error, dict):
+                error = {"message": str(error)}
+            if self._is_session_config_error(error):
+                await self._fail_session(error)
+            else:
+                logger.error(f"API error: {error}")
 
     async def _call_callback(self, callback: Callable, *args) -> Any:
         """Call a callback, handling both sync and async functions."""
