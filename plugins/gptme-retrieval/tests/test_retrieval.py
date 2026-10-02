@@ -377,3 +377,13 @@ def test_turn_pre_hook_disabled():
     with patch("gptme_retrieval.get_retrieval_config", return_value=config):
         messages = list(turn_pre_hook(manager))
     assert messages == []
+
+
+def test_plugin_init_returns_toolspec():
+    """gptme skips a tool whose init() does not return a ToolSpec."""
+    from gptme_retrieval import plugin
+
+    with patch("gptme_retrieval.register_hooks") as mock_register:
+        assert plugin.init is not None
+        assert plugin.init() is plugin
+        mock_register.assert_called_once()
