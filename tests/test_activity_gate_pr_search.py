@@ -183,7 +183,7 @@ def _run_gate(tmp: Path, state_dir: Path, mode: str) -> tuple[dict[str, int], Pa
         for name in ("search", "pr_list", "pr_list_limit")
         if (count_dir / name).exists()
     }
-    return counts, state_dir / "gh-cache" / "pr-testorg-testrepo.json"
+    return counts, state_dir / "gh-cache" / "pr-v2-testorg-testrepo.json"
 
 
 def test_valid_search_payload_uses_raw_path_and_skips_fallback() -> None:

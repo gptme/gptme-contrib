@@ -35,20 +35,27 @@ if not argv:
 if argv[0] == "repo" and len(argv) > 1 and argv[1] == "list":
     sys.exit(0)
 
-if argv[0] == "pr" and len(argv) > 1 and argv[1] == "list":
+
+def select_scenario():
+    # Return (comments, latest_reviews) for the active scenario.
+    #
+    # Shaped like the GraphQL payload: each actor carries an explicit
+    # __typename ("Bot" / "User"). The REST fallback below strips it, so a
+    # regression that silently falls back to `gh pr list` is caught by the
+    # bot-typename cases rather than masked by fabricated __typename fields.
     comments = []
     latest_reviews = []
     if scenario == "human_cr":
         # Bot review first, then a human CHANGES_REQUESTED (the #3178 shape).
         latest_reviews = [
             {
-                "author": {"login": "greptile-apps"},
+                "author": {"login": "greptile-apps", "__typename": "Bot"},
                 "state": "COMMENTED",
                 "submittedAt": "2026-07-11T12:00:00Z",
                 "body": "",
             },
             {
-                "author": {"login": "ErikBjare"},
+                "author": {"login": "ErikBjare", "__typename": "User"},
                 "state": "CHANGES_REQUESTED",
                 "submittedAt": "2026-07-11T13:26:04Z",
                 "body": "please fix",
@@ -57,7 +64,7 @@ if argv[0] == "pr" and len(argv) > 1 and argv[1] == "list":
     elif scenario == "bot_last":
         latest_reviews = [
             {
-                "author": {"login": "greptile-apps"},
+                "author": {"login": "greptile-apps", "__typename": "Bot"},
                 "state": "COMMENTED",
                 "submittedAt": "2026-07-11T13:00:00Z",
                 "body": "bot feedback",
@@ -66,17 +73,71 @@ if argv[0] == "pr" and len(argv) > 1 and argv[1] == "list":
     elif scenario == "human_comment":
         comments = [
             {
-                "author": {"login": "ErikBjare"},
+                "author": {"login": "ErikBjare", "__typename": "User"},
                 "createdAt": "2026-07-11T13:00:00Z",
                 "body": "looks close, one question",
             },
         ]
+    elif scenario == "bot_typename_last":
+        # A GitHub App actor whose login carries no "[bot]" suffix. GraphQL
+        # exposes it as __typename == "Bot" (e.g. the Cloudflare Pages deploy
+        # bot, login "cloudflare-workers-and-pages"); the login-shape regex
+        # alone would misread it as human (gptme-cloud#1065/#1067).
+        comments = [
+            {
+                "author": {
+                    "login": "cloudflare-workers-and-pages",
+                    "__typename": "Bot",
+                },
+                "createdAt": "2026-07-11T13:00:00Z",
+                "body": "deploy successful",
+            },
+        ]
+    elif scenario == "bot_typename_cr":
+        # A Bot actor requesting changes must not read as human_changes_requested.
+        latest_reviews = [
+            {
+                "author": {
+                    "login": "cloudflare-workers-and-pages",
+                    "__typename": "Bot",
+                },
+                "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-07-11T13:00:00Z",
+                "body": "",
+            },
+        ]
+    elif scenario == "human_typename":
+        # A genuine User with an explicit __typename still counts as human.
+        comments = [
+            {
+                "author": {"login": "ErikBjare", "__typename": "User"},
+                "createdAt": "2026-07-11T13:00:00Z",
+                "body": "one question",
+            },
+        ]
+    return comments, latest_reviews
+
+
+def strip_typename(obj):
+    # Drop __typename, leaving the REST-shaped payload `gh pr list` emits.
+    if isinstance(obj, dict):
+        return {k: strip_typename(v) for k, v in obj.items() if k != "__typename"}
+    if isinstance(obj, list):
+        return [strip_typename(v) for v in obj]
+    return obj
+
+
+if argv[0] == "pr" and len(argv) > 1 and argv[1] == "list":
+    # The REST fallback path. Real `gh pr list --json` never emits __typename,
+    # so this fixture must not either — otherwise the bot-typename cases would
+    # pass even if the GraphQL path were never exercised.
+    comments, latest_reviews = select_scenario()
     pr = [{
         "number": 42,
         "title": "Test PR",
         "updatedAt": "2026-07-11T13:30:00Z",
-        "comments": comments,
-        "latestReviews": latest_reviews,
+        "comments": strip_typename(comments),
+        "latestReviews": strip_typename(latest_reviews),
         "statusCheckRollup": None,
         "mergeable": "MERGEABLE",
         "mergeStateStatus": "CLEAN",
@@ -92,6 +153,36 @@ if argv[0] == "issue" and len(argv) > 1 and argv[1] == "list":
 
 if argv[0] == "run" and len(argv) > 1 and argv[1] == "list":
     print("[]")
+    sys.exit(0)
+
+if argv[0] == "api" and len(argv) > 1 and argv[1] == "graphql":
+    # The review-thread probe for merge_ready.
+    if any("reviewThreads" in a for a in argv):
+        print(json.dumps({"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": [],
+        }}}}}))
+        sys.exit(0)
+    # The PR-search path the gate prefers. Emit GraphQL shape with author
+    # __typename so the changed predicate is genuinely exercised.
+    comments, latest_reviews = select_scenario()
+    pr = {
+        "number": 42,
+        "title": "Test PR",
+        "updatedAt": "2026-07-11T13:30:00Z",
+        "comments": {"nodes": comments, "pageInfo": {"hasNextPage": False}},
+        "latestReviews": {"nodes": latest_reviews},
+        "statusCheckRollup": {"contexts": {"nodes": []}},
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "CLEAN",
+        "headRefOid": "deadbeef1234",
+        "isDraft": False,
+    }
+    print(json.dumps({"data": {"search": {
+        "issueCount": 1,
+        "nodes": [pr],
+        "pageInfo": {"hasNextPage": False, "endCursor": None},
+    }}}))
     sys.exit(0)
 
 if argv[0] == "api":
@@ -175,3 +266,38 @@ def test_plain_human_comment_emits_activity_token_only() -> None:
         detail = items[0]["detail"]
         assert "human_activity" in detail, detail
         assert "human_changes_requested" not in detail, detail
+
+
+def test_bot_typename_comment_emits_no_priority_tokens() -> None:
+    """A GraphQL Bot actor with no "[bot]" login suffix is not human.
+
+    Regression: the Cloudflare Pages deploy bot (login
+    "cloudflare-workers-and-pages", no suffix) was classified as human, so
+    every gptme-cloud PR carrying a deploy comment was dispatched as
+    human_activity priority (gptme-cloud#1065, #1067).
+    """
+    with tempfile.TemporaryDirectory() as tmp_str:
+        items = _run_gate(Path(tmp_str), "bot_typename_last")
+        assert len(items) == 1, items
+        detail = items[0]["detail"]
+        assert "human_activity" not in detail, detail
+        assert "human_changes_requested" not in detail, detail
+
+
+def test_bot_typename_review_emits_no_priority_tokens() -> None:
+    """A Bot's CHANGES_REQUESTED review is not a human changes-request."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        items = _run_gate(Path(tmp_str), "bot_typename_cr")
+        assert len(items) == 1, items
+        detail = items[0]["detail"]
+        assert "human_changes_requested" not in detail, detail
+        assert "human_activity" not in detail, detail
+
+
+def test_user_typename_still_emits_activity_token() -> None:
+    """An explicit `__typename == "User"` actor is still human activity."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        items = _run_gate(Path(tmp_str), "human_typename")
+        assert len(items) == 1, items
+        detail = items[0]["detail"]
+        assert "human_activity" in detail, detail

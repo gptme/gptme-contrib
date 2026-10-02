@@ -104,7 +104,7 @@ def test_failed_pr_fetch_does_not_seed_cache() -> None:
         tmp = Path(tmp_str)
         state_dir = tmp / "state"
         state_dir.mkdir()
-        cache_file = state_dir / "gh-cache" / "pr-testorg-testrepo.json"
+        cache_file = state_dir / "gh-cache" / "pr-v2-testorg-testrepo.json"
 
         first, first_count = _run_gate(tmp, state_dir, fail_pr_list=True)
         assert first.returncode in (0, 1), first.stderr
