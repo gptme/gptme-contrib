@@ -404,12 +404,20 @@ def build_full_ledger_entry(
                 type_set.update(normalized_types)
                 if number is not None:
                     item_refs.append(f"{repo}#{number}")
+                # Carry the item detail (e.g. the notification reason token and
+                # any "; actor_class=..." suffix) into the ledger so the
+                # event-value report can segment dispatches by reason and actor
+                # class. Bounded so a CI-receipt detail cannot bloat the row.
+                detail = item.get("detail")
+                if detail is not None and not isinstance(detail, str):
+                    detail = str(detail)
                 items.append(
                     {
                         "repo": repo,
                         "number": number,
                         "types": normalized_types,
                         "title": item.get("title"),
+                        "detail": detail[:300] if detail else None,
                     }
                 )
 
