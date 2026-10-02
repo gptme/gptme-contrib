@@ -33,6 +33,7 @@ Example:
 """
 
 import email.charset
+import hashlib
 import inspect
 import logging
 import os
@@ -64,6 +65,9 @@ from gptmail.communication_utils.state.locks import FileLock, LockError
 from gptmail.communication_utils.state.tracking import ConversationTracker, MessageState
 
 logger = logging.getLogger(__name__)
+
+# Covers a full send under the lock: up to 60s rate-limit wait + 30s msmtp timeout.
+SEND_LOCK_TIMEOUT = 120.0
 
 # Use quoted-printable instead of base64 for UTF-8 email parts.
 # Base64-encoded multipart emails are more likely to trigger spam filters.
@@ -862,12 +866,47 @@ class AgentEmail:
 
         return message_id
 
-    def send(self, message_id: str) -> None:
+    def send(self, message_id: str, force: bool = False) -> None:
         """Send email (move from drafts to sent and deliver).
+
+        Holds a per-target file lock across the duplicate re-check, the msmtp
+        delivery, and the move to sent/. Replies lock on their In-Reply-To, so
+        concurrent sessions sending the same draft -- or two different replies
+        to the same inbox message -- deliver at most once: the second sender
+        waits, then sees the draft already sent or the original already
+        completed.
 
         Args:
             message_id: ID of message to send
+            force: Send a reply even if the original is already marked
+                replied/no-reply-needed. Never re-sends an already-sent draft.
         """
+        filename = self._format_filename(message_id)
+        draft_path = self.email_dir / "drafts" / filename
+        sent_path = self.email_dir / "sent" / filename
+        if not draft_path.exists() and not sent_path.exists():
+            raise ValueError(f"Draft not found: {message_id}")
+
+        in_reply_to = ""
+        if draft_path.exists():
+            headers, _ = self._markdown_to_email(draft_path.read_text())
+            in_reply_to = headers.get("In-Reply-To", "").strip()
+        lock_key = f"reply:{in_reply_to.strip('<>')}" if in_reply_to else f"draft:{filename}"
+        digest = hashlib.sha256(lock_key.encode()).hexdigest()[:16]
+        lock_path = self.email_dir / ".send-locks" / f"{digest}.lock"
+
+        with FileLock(lock_path, timeout=SEND_LOCK_TIMEOUT):
+            if sent_path.exists():
+                raise ValueError(f"Already sent: {message_id}")
+            if in_reply_to and not force and self._is_completed(in_reply_to):
+                raise ValueError(
+                    f"Original message {in_reply_to} is already replied to or marked "
+                    "no-reply-needed; refusing duplicate reply (use force to override)"
+                )
+            self._send_unlocked(message_id)
+
+    def _send_unlocked(self, message_id: str) -> None:
+        """Deliver a draft and archive it; callers must hold the send lock."""
         filename = self._format_filename(message_id)
         draft_path = self.email_dir / "drafts" / filename
         sent_path = self.email_dir / "sent" / filename

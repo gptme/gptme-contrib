@@ -52,6 +52,7 @@ from gptmail.communication_utils.state.tracking import (
     ConversationTracker,
     MessageState,
 )
+from gptmail.communication_utils.state.locks import FileLock
 from gptmail.transport.agent import _FM_DELIM, AgentTransport, Deliver, meta_of
 
 
@@ -303,6 +304,40 @@ def _transport(*, deliver: Deliver | None = None, mailbox: str = "default") -> A
         mailbox=_normalize_mailbox(mailbox),
         deliver=deliver,
     )
+
+
+# Same recipient + subject within this window counts as a duplicate send.
+OUTBOX_DEDUP_TTL = 60 * 60
+# Covers check -> SSH delivery -> stamp under the lock.
+SEND_LOCK_TIMEOUT = 120.0
+
+
+def _send_lock(transport: AgentTransport, key: str) -> FileLock:
+    """Per-key lock held across the duplicate check and the send.
+
+    The check alone runs before delivery lands, so concurrent sessions could
+    each pass it; holding the lock until the outbox file / replied stamp is
+    written makes the second session see the first one's send.
+    """
+    digest = hashlib.sha256(key.encode()).hexdigest()[:16]
+    return FileLock(transport.outbox / ".send-locks" / f"{digest}.lock", timeout=SEND_LOCK_TIMEOUT)
+
+
+def _recent_outbox_duplicate(transport: AgentTransport, to: str, subject: str) -> str | None:
+    """Return a delivered outbox message to ``to`` with ``subject`` sent within the TTL."""
+    cutoff = time.time() - OUTBOX_DEDUP_TTL
+    for path in transport.outbox.glob("*.md"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                continue
+        except OSError:
+            continue
+        meta = meta_of(path)
+        if not meta or meta.get("delivered") is False:
+            continue
+        if str(meta.get("to", "")).lower() == to and meta.get("subject") == subject:
+            return path.name
+    return None
 
 
 def _delivery_failed(message_id: str, *, mailbox: str = "default") -> bool:
@@ -742,8 +777,19 @@ def agent() -> None:
     is_flag=True,
     help="Mark the message as informational; the recipient owes no reply.",
 )
-def send(to: str, subject: str, content: str | None, mailbox: str, no_reply: bool) -> None:
-    """Send a message to another agent."""
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Send even if the same subject went to this agent within the last hour.",
+)
+def send(
+    to: str, subject: str, content: str | None, mailbox: str, no_reply: bool, force: bool
+) -> None:
+    """Send a message to another agent.
+
+    Skips (exit 0) when a message with the same subject was already delivered to
+    the same agent within the last hour, unless --force.
+    """
     body = content if content is not None else sys.stdin.read()
     agents = _load_agents()
     if to.lower() == _self_name():
@@ -754,7 +800,17 @@ def send(to: str, subject: str, content: str | None, mailbox: str, no_reply: boo
         sys.exit(1)
     mailbox = _normalize_mailbox(mailbox)
     transport = _transport(deliver=_ssh_deliver(agents, mailbox=mailbox), mailbox=mailbox)
-    message_id = transport.send(to, subject, body, reply_expected=not no_reply)
+    recipient = to.lower()
+    with _send_lock(transport, f"send:{recipient}|{subject}"):
+        duplicate = None if force else _recent_outbox_duplicate(transport, recipient, subject)
+        if duplicate:
+            click.echo(
+                f"Skipping: '{subject}' was already sent to {recipient} within the last "
+                f"{OUTBOX_DEDUP_TTL // 60} min ({duplicate}). Use --force to send anyway.",
+                err=True,
+            )
+            return
+        message_id = transport.send(to, subject, body, reply_expected=not no_reply)
     _track_sent(transport, message_id, reply_to=None)
     if _delivery_failed(message_id, mailbox=mailbox):
         click.echo(
@@ -871,41 +927,44 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
         click.echo(f"Error: message not found: {message_id}", err=True)
         sys.exit(1)
     mailbox_name, msg_path = resolved
-    original = meta_of(msg_path)
-    if original is None:
-        click.echo(f"Error: message not found: {message_id}", err=True)
-        sys.exit(1)
-    # Idempotency guard: skip if a prior session already stamped replied:true.
-    # Protects against cascade reprocessing sending duplicate replies.
-    if original.get("replied"):
-        click.echo(
-            f"Skipping {message_id}: already replied (idempotency guard).",
-            err=True,
-        )
-        return
-    recipient = str(original.get("from", "")).lower()
-    if not recipient:
-        click.echo(f"Error: cannot determine sender of {message_id}", err=True)
-        sys.exit(1)
-    subject = str(original.get("subject", ""))
-    if not subject.lower().startswith("re:"):
-        subject = f"Re: {subject}"
     body = content if content is not None else sys.stdin.read()
     agents = _load_agents()
     transport = _transport(
         deliver=_ssh_deliver(agents, mailbox=mailbox_name),
         mailbox=mailbox_name,
     )
-    reply_id = transport.send(recipient, subject, body, reply_to=message_id)
-    if _delivery_failed(reply_id, mailbox=mailbox_name):
-        click.echo(
-            f"Delivery to {recipient} FAILED — saved to outbox (delivered: false). "
-            "It was NOT received.",
-            err=True,
-        )
-        sys.exit(1)
-    _track_sent(transport, reply_id, reply_to=message_id)
-    _mark_replied(msg_path)
+    # Hold the lock from the replied re-check until replied:true is stamped, so
+    # a concurrent session replying to the same message sees the stamp.
+    with _send_lock(transport, f"reply:{msg_path.name}"):
+        original = meta_of(msg_path)
+        if original is None:
+            click.echo(f"Error: message not found: {message_id}", err=True)
+            sys.exit(1)
+        # Idempotency guard: skip if a prior session already stamped replied:true.
+        # Protects against cascade reprocessing sending duplicate replies.
+        if original.get("replied"):
+            click.echo(
+                f"Skipping {message_id}: already replied (idempotency guard).",
+                err=True,
+            )
+            return
+        recipient = str(original.get("from", "")).lower()
+        if not recipient:
+            click.echo(f"Error: cannot determine sender of {message_id}", err=True)
+            sys.exit(1)
+        subject = str(original.get("subject", ""))
+        if not subject.lower().startswith("re:"):
+            subject = f"Re: {subject}"
+        reply_id = transport.send(recipient, subject, body, reply_to=message_id)
+        if _delivery_failed(reply_id, mailbox=mailbox_name):
+            click.echo(
+                f"Delivery to {recipient} FAILED — saved to outbox (delivered: false). "
+                "It was NOT received.",
+                err=True,
+            )
+            sys.exit(1)
+        _track_sent(transport, reply_id, reply_to=message_id)
+        _mark_replied(msg_path)
     click.echo(f"Replied to {recipient}: {subject}")
 
 

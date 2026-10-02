@@ -132,11 +132,16 @@ def compose(
 
 @cli.command()
 @click.argument("message_id")
-def send(message_id: str) -> None:
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Send a reply even if the original is already marked replied/no-reply-needed.",
+)
+def send(message_id: str, force: bool) -> None:
     """Send draft email."""
     workspace_dir = get_workspace_dir()
     email = AgentEmail(workspace_dir)
-    email.send(message_id)
+    email.send(message_id, force=force)
 
 
 @cli.command(name="list")

@@ -1311,3 +1311,77 @@ def test_watch_no_ssh_agents_exits_nonzero(tmp_path: Path, monkeypatch: pytest.M
     result = CliRunner().invoke(agent, ["watch", "--to", "erik"])
     assert result.exit_code != 0
     assert "No SSH-reachable agents" in result.output
+
+
+# --- send-site duplicate guard -------------------------------------------------
+
+
+def _peer_inbox_count(workspace: Path) -> int:
+    return len(list((workspace / "bob" / "messages" / "inbox").glob("*.md")))
+
+
+def test_send_same_subject_to_same_agent_within_ttl_is_skipped(workspace: Path) -> None:
+    first = CliRunner().invoke(agent, ["send", "bob", "Status", "one"])
+    assert first.exit_code == 0, first.output
+    second = CliRunner().invoke(agent, ["send", "bob", "Status", "reworded"])
+    assert second.exit_code == 0, second.output
+    assert "Skipping" in second.output
+    assert _peer_inbox_count(workspace) == 1
+
+
+def test_send_force_bypasses_outbox_dedup(workspace: Path) -> None:
+    CliRunner().invoke(agent, ["send", "bob", "Status", "one"])
+    result = CliRunner().invoke(agent, ["send", "bob", "Status", "two", "--force"])
+    assert result.exit_code == 0, result.output
+    assert _peer_inbox_count(workspace) == 2
+
+
+def test_send_different_subject_is_not_a_duplicate(workspace: Path) -> None:
+    CliRunner().invoke(agent, ["send", "bob", "Status", "one"])
+    CliRunner().invoke(agent, ["send", "bob", "Other", "two"])
+    assert _peer_inbox_count(workspace) == 2
+
+
+def test_send_dedup_ignores_expired_and_failed_messages(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    CliRunner().invoke(agent, ["send", "bob", "Status", "one"])
+    out = _only_outbox_msg(workspace)
+    old = datetime.now(timezone.utc).timestamp() - agent_cli.OUTBOX_DEDUP_TTL - 60
+    os.utime(out, (old, old))
+    CliRunner().invoke(agent, ["send", "bob", "Status", "two"])
+    assert _peer_inbox_count(workspace) == 2
+
+    # A failed delivery must not block the retry.
+    local_deliver = agent_cli._ssh_deliver
+
+    def _failing_deliver(_agents, *, mailbox="default"):
+        return lambda _path, _recipient: False
+
+    monkeypatch.setattr(agent_cli, "_ssh_deliver", _failing_deliver)
+    failed = CliRunner().invoke(agent, ["send", "bob", "Retry", "x"])
+    assert failed.exit_code == 1, failed.output
+    monkeypatch.setattr(agent_cli, "_ssh_deliver", local_deliver)
+    retry = CliRunner().invoke(agent, ["send", "bob", "Retry", "x"])
+    assert retry.exit_code == 0, retry.output
+    assert "Skipping" not in retry.output
+    assert _peer_inbox_count(workspace) == 3
+
+
+def test_reply_rechecks_replied_under_lock(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sibling that stamps replied:true before we take the lock wins; we skip."""
+    name = _seed_inbox(workspace)
+    msg_path = workspace / "messages" / "inbox" / name
+    real_lock = agent_cli._send_lock
+
+    def lock_after_sibling_replied(transport, key):
+        agent_cli._mark_replied(msg_path)  # sibling finished while we waited
+        return real_lock(transport, key)
+
+    monkeypatch.setattr(agent_cli, "_send_lock", lock_after_sibling_replied)
+    result = CliRunner().invoke(agent, ["reply", name, "late answer"])
+    assert result.exit_code == 0, result.output
+    assert "already replied" in result.output
+    assert _peer_inbox_count(workspace) == 0
