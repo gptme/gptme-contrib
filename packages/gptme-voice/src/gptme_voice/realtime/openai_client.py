@@ -912,8 +912,12 @@ class OpenAIRealtimeClient:
                 pass
 
         if self._ws:
-            await self._ws.close()
-            self._ws = None
+            # The socket may already be closed (e.g. _fail_session closed it after
+            # a rejected session.update). A second close must not raise out of
+            # call teardown and skip transcript persistence / post-call work.
+            ws, self._ws = self._ws, None
+            with contextlib.suppress(websockets.ConnectionClosed):
+                await ws.close()
 
     async def _drain_incoming_events(
         self, *, timeout_seconds: float, idle_timeout_seconds: float

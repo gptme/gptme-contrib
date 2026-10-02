@@ -1507,6 +1507,31 @@ def test_rejected_session_update_fails_closed(caplog) -> None:
     asyncio.run(_exercise())
 
 
+class _StrictCloseWebSocket(_QueuedWebSocket):
+    """A socket whose second close() raises, like some websockets versions."""
+
+    async def close(self) -> None:
+        if self.closed:
+            raise websockets.ConnectionClosed(None, None)
+        await super().close()
+
+
+def test_disconnect_after_rejected_session_does_not_raise() -> None:
+    """Teardown after a fail-closed session must not raise on the double close,
+    or the server's finally block skips transcript persistence / post-call work."""
+
+    async def _exercise() -> None:
+        fake_ws = _StrictCloseWebSocket()
+        client = await _connect_with(fake_ws)
+        await client._handle_event(_REJECTED_SESSION_UPDATE)
+        assert fake_ws.closed is True
+
+        await client.disconnect(commit_audio=True, stop_audio_output=True)
+        assert client._ws is None
+
+    asyncio.run(_exercise())
+
+
 def test_send_text_message_fails_fast_when_session_update_rejected() -> None:
     """Waiters must not sit out the full ready timeout on a rejected session."""
 
