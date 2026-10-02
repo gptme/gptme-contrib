@@ -106,7 +106,7 @@ elif endpoint.endswith(f"/issues/{pr_number}/comments"):
     data = fixture.get("raw_comments", [])
 elif endpoint.endswith(f"/pulls/{pr_number}/commits"):
     data = fixture.get("raw_commits", [])
-elif endpoint.endswith(f"/pulls/{pr_number}/reviews"):
+elif endpoint.split("?", 1)[0].endswith(f"/pulls/{pr_number}/reviews"):
     data = fixture.get("raw_reviews", [])
 elif endpoint.endswith(f"/pulls/{pr_number}"):
     data = fixture.get(
@@ -1771,6 +1771,20 @@ def _rest_commit_calls(calls: list[list[str]]) -> list[list[str]]:
 
 def _graphql_calls(calls: list[list[str]]) -> list[list[str]]:
     return [c for c in calls if c[:2] == ["api", "graphql"]]
+
+
+def _rest_review_calls(calls: list[list[str]]) -> list[list[str]]:
+    return [c for c in calls if any("/pulls/123/reviews" in argument for argument in c)]
+
+
+def test_review_reads_use_one_cacheable_request(tmp_path: Path):
+    """Formal reviews share one ETag-eligible request per helper process."""
+    calls = tmp_path / "calls.jsonl"
+    env = {"GH_CALLS": str(calls), "GREPTILE_HELPER_CACHE_DIR": str(tmp_path / "c")}
+    status = _run_helper("status", _sha_mismatch_fixture(), extra_env=env)
+    assert status.stdout.strip() == "needs-re-review", f"stderr: {status.stderr}"
+    review_calls = _rest_review_calls(_calls(calls))
+    assert review_calls == [["api", "repos/gptme/gptme/pulls/123/reviews?per_page=100"]]
 
 
 def test_commit_info_uses_graphql_not_paginated_rest(tmp_path: Path):

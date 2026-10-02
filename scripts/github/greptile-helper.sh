@@ -173,9 +173,10 @@ PY
 _REVIEW_CACHE_FILE="${TMPDIR:-/tmp}/greptile-review-cache-$$.json"
 _ISSUE_COMMENTS_CACHE_FILE="${TMPDIR:-/tmp}/greptile-issue-comments-$$.json"
 _ISSUE_COMMENTS_ERROR_FILE="${TMPDIR:-/tmp}/greptile-issue-comments-error-$$"
+_PR_REVIEWS_CACHE_FILE="${TMPDIR:-/tmp}/greptile-pr-reviews-$$.json"
 _ACTIVITY_CACHE_FILE="${TMPDIR:-/tmp}/greptile-activity-$$.json"
 _COMMIT_INFO_LIVE_FILE="${TMPDIR:-/tmp}/greptile-commit-info-$$.json"
-trap 'rm -f "$_REVIEW_CACHE_FILE" "$_ISSUE_COMMENTS_CACHE_FILE" "$_ISSUE_COMMENTS_ERROR_FILE" "$_ACTIVITY_CACHE_FILE" "$_COMMIT_INFO_LIVE_FILE"' EXIT
+trap 'rm -f "$_REVIEW_CACHE_FILE" "$_ISSUE_COMMENTS_CACHE_FILE" "$_ISSUE_COMMENTS_ERROR_FILE" "$_PR_REVIEWS_CACHE_FILE" "$_ACTIVITY_CACHE_FILE" "$_COMMIT_INFO_LIVE_FILE"' EXIT
 
 # Shared hash for per-PR state files (lock + trigger timestamp).
 # Used across trigger and _our_trigger_status to coordinate without the GitHub API.
@@ -202,6 +203,22 @@ _issue_comments_json() {
         : > "$_ISSUE_COMMENTS_ERROR_FILE"
     fi
     cat "$_ISSUE_COMMENTS_CACHE_FILE"
+}
+
+_pr_reviews_json() {
+    # One page covers the review histories this helper operates on and keeps the
+    # request eligible for the gh wrapper's ETag cache.  `--paginate` bypasses
+    # that cache and was costing roughly 150 core REST calls/hour at wide fanout.
+    trap - EXIT
+    if [ -f "$_PR_REVIEWS_CACHE_FILE" ]; then
+        cat "$_PR_REVIEWS_CACHE_FILE"
+        return
+    fi
+    if ! gh api "repos/$REPO/pulls/$PR_NUMBER/reviews?per_page=100" \
+        > "$_PR_REVIEWS_CACHE_FILE" 2>/dev/null; then
+        echo '[]' > "$_PR_REVIEWS_CACHE_FILE"
+    fi
+    cat "$_PR_REVIEWS_CACHE_FILE"
 }
 
 # --- Helper: PR head SHA + committer dates of every PR commit ---
@@ -307,8 +324,8 @@ _greptile_activity_times() {
     fi
     {
         _issue_comments_json | jq -c '[.[][] | select(.user.login | test("greptile"; "i")) | .created_at]'
-        gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate 2>/dev/null \
-            | jq -cs '[.[][] | select((.user.login // "") | test("greptile"; "i")) | .submitted_at]' 2>/dev/null
+        _pr_reviews_json \
+            | jq -c '[.[] | select((.user.login // "") | test("greptile"; "i")) | .submitted_at]' 2>/dev/null
     } | jq -cs 'add // [] | map(select(. != null))' > "$_ACTIVITY_CACHE_FILE" 2>/dev/null \
         || echo '[]' > "$_ACTIVITY_CACHE_FILE"
     cat "$_ACTIVITY_CACHE_FILE"
@@ -481,8 +498,8 @@ _greptile_summary_reviewed_sha() {
 # heuristic so behaviour is unchanged for that case.
 _needs_re_review() {
     local reviewed_sha head_sha info reviewed_at new_commits
-    reviewed_sha=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate 2>/dev/null \
-        | jq -rs '[.[][]
+    reviewed_sha=$(_pr_reviews_json \
+        | jq -r '[.[]
               | select((.user.login // "") | test("greptile"; "i"))
               | select((.commit_id // "") != "")]
             | sort_by(.submitted_at) | last | (.commit_id // "")' 2>/dev/null) || reviewed_sha=""
