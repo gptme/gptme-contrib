@@ -107,6 +107,18 @@ def test_quiet_mutations_preserve_reconciliation_evidence():
     assert signals["prs_submitted"] == ["PR (output swallowed)"]
 
 
+def test_pr_create_failure_text_is_not_credited_as_swallowed_output():
+    signals = extract_signals_cc(
+        _bash(
+            "pr123456",
+            "gh pr create --draft --title WIP",
+            "PR creation failed: already exists",
+        )
+    )
+    assert signals["prs_submitted"] == []
+    assert not any(detail["kind"] == "pull_request" for detail in signals["deliverable_details"])
+
+
 def test_git_safe_push_line_alone_counts_for_commit_command():
     cmd = 'git-safe-commit --scope-only a.md -m "x" 2>&1 | tail -1; git-safe-push-master | tail -1'
     signals = extract_signals_cc(

@@ -1606,7 +1606,13 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                                     },
                                 },
                             )
-                        elif not _MUTATION_FAILED_RE.search(result_str):
+                        # No URL is still useful evidence when the command
+                        # intentionally swallowed stdout.  Do not promote
+                        # arbitrary non-empty output: gh and wrappers can
+                        # report a semantic failure while the shell result is
+                        # marked non-error (for example, "PR creation failed:
+                        # already exists").
+                        elif not result_str.strip():
                             pr_value = f"(PR creation output swallowed) [{tool_use_id[-8:]}]"
                             prs_submitted.append("PR (output swallowed)")
                             mutation_deliverables.append(pr_value)
