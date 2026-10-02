@@ -44,6 +44,23 @@ def test_different_message_not_duplicate():
     assert not tool_pushover._is_recent_duplicate("Test", "Different message")
 
 
+def test_different_user_key_not_duplicate():
+    """Dedup is scoped per recipient — different user keys must not cross-suppress."""
+    tool_pushover._mark_sent("Alert", "Down", user_key="user_a")
+    # Same title/message but different recipient — must NOT be suppressed
+    assert not tool_pushover._is_recent_duplicate("Alert", "Down", user_key="user_b")
+    # Same recipient — must BE suppressed
+    assert tool_pushover._is_recent_duplicate("Alert", "Down", user_key="user_a")
+
+
+def test_mark_sent_atomic_concurrent(tmp_dedup_dir):
+    """Second _mark_sent on existing marker updates mtime instead of raising."""
+    tool_pushover._mark_sent("X", "Y")
+    # Simulate a concurrent caller: marker already exists
+    tool_pushover._mark_sent("X", "Y")  # Must not raise FileExistsError
+    assert tool_pushover._is_recent_duplicate("X", "Y")
+
+
 @patch("tool_pushover.requests.post")
 def test_execute_deduplicates_repeat_call(mock_post, tmp_dedup_dir):
     mock_post.return_value = MagicMock(status_code=200)

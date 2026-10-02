@@ -18,20 +18,32 @@ def has_pushover_conf():
     return PUSHOVER_USER_KEY and PUSHOVER_API_TOKEN
 
 
-def _dedup_key(title: str, message: str) -> str:
-    return hashlib.sha256(f"{title}|{message}".encode()).hexdigest()[:16]
+def _dedup_key(title: str, message: str, user_key: str = "") -> str:
+    # Include user_key so different recipients are never cross-suppressed.
+    return hashlib.sha256(f"{title}|{message}|{user_key}".encode()).hexdigest()[:16]
 
 
-def _is_recent_duplicate(title: str, message: str) -> bool:
-    marker = PUSHOVER_DEDUP_DIR / f"{_dedup_key(title, message)}.txt"
+def _is_recent_duplicate(title: str, message: str, user_key: str = "") -> bool:
+    marker = PUSHOVER_DEDUP_DIR / f"{_dedup_key(title, message, user_key)}.txt"
     if not marker.exists():
         return False
     return time.time() - marker.stat().st_mtime < PUSHOVER_DEDUP_TTL
 
 
-def _mark_sent(title: str, message: str) -> None:
+def _mark_sent(title: str, message: str, user_key: str = "") -> None:
+    """Atomically create the dedup marker using O_CREAT|O_EXCL.
+
+    Prevents concurrent sessions from both writing the marker independently
+    while both believing they own the send slot.
+    """
     PUSHOVER_DEDUP_DIR.mkdir(parents=True, exist_ok=True)
-    (PUSHOVER_DEDUP_DIR / f"{_dedup_key(title, message)}.txt").touch()
+    marker = PUSHOVER_DEDUP_DIR / f"{_dedup_key(title, message, user_key)}.txt"
+    try:
+        fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        os.close(fd)
+    except FileExistsError:
+        # Concurrent session beat us to the marker — update mtime to reset TTL.
+        marker.touch()
 
 
 def execute(
@@ -49,8 +61,9 @@ def execute(
         return Message("system", "Tool call failed. Missing parameters!")
 
     force = kwargs.get("force", "false").lower() == "true" if kwargs else False
+    user_key = PUSHOVER_USER_KEY or ""
 
-    if not force and _is_recent_duplicate(title, message):
+    if not force and _is_recent_duplicate(title, message, user_key):
         return Message(
             "system",
             "Notification already sent within the last 30 minutes (dedup). "
@@ -68,7 +81,7 @@ def execute(
         response = requests.post(url, data=payload, timeout=30)
 
         if response.status_code == 200:
-            _mark_sent(title, message)
+            _mark_sent(title, message, user_key)
             return Message("system", "Notification sent successfully")
         else:
             return Message("system", "The notification couldn't be sent")
