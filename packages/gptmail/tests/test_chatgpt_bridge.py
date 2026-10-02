@@ -91,8 +91,15 @@ def tmp_msgs(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def bridge(tmp_msgs: Path) -> ChatGPTBridge:
-    """Bridge instance with no auth."""
-    return ChatGPTBridge(messages_dir=tmp_msgs, token=None)
+    """Bridge instance configured for the Bob deployment, with no auth."""
+    return ChatGPTBridge(
+        messages_dir=tmp_msgs,
+        agent_name="bob",
+        send_instructions=(
+            "To send a message to Bob, open a GitHub issue at https://github.com/ErikBjare/bob"
+        ),
+        token=None,
+    )
 
 
 @pytest.fixture
@@ -430,7 +437,7 @@ class TestChatGPTBridge:
     ) -> None:
         """An explicit empty token overrides CHATGPT_BRIDGE_TOKEN."""
         monkeypatch.setenv("CHATGPT_BRIDGE_TOKEN", "from-env")
-        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token="")
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob", token="")
         assert bridge._auth_ok(_make_request({})) is True
 
     def test_env_token_used_when_token_omitted(
@@ -438,18 +445,18 @@ class TestChatGPTBridge:
     ) -> None:
         """Omitting the token falls back to the environment."""
         monkeypatch.setenv("CHATGPT_BRIDGE_TOKEN", "from-env")
-        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=None)
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob", token=None)
         assert bridge._auth_ok(_make_request({})) is False
         assert bridge._auth_ok(_make_request({"authorization": "Bearer from-env"})) is True
 
     def test_blank_token_is_rejected(self, tmp_msgs: Path) -> None:
         """A whitespace-only token is a config error, not 'auth disabled'."""
         with pytest.raises(ValueError):
-            ChatGPTBridge(messages_dir=tmp_msgs, token="   \n")
+            ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob", token="   \n")
 
     def test_token_whitespace_is_normalized(self, tmp_msgs: Path) -> None:
         """A token with a trailing newline (env var) still authenticates."""
-        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=" sekret\n")
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob", token=" sekret\n")
         assert bridge._auth_ok(_make_request({"authorization": "Bearer sekret"})) is True
         assert bridge._auth_ok(_make_request({"authorization": "Bearer wrong"})) is False
 
@@ -479,12 +486,12 @@ class TestChatGPTBridge:
 
     def test_auth_disabled_without_token(self, tmp_msgs: Path) -> None:
         """Auth is disabled when no token is set."""
-        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=None)
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob", token=None)
         assert bridge._auth_ok(_make_request({})) is True
 
     def test_auth_required_when_token_set(self, tmp_msgs: Path) -> None:
         """A configured token gates every request."""
-        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token="s3cret")
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob", token="s3cret")
         assert bridge._auth_ok(_make_request({})) is False
         assert bridge._auth_ok(_make_request({"authorization": "s3cret"})) is False
         assert bridge._auth_ok(_make_request({"authorization": "Bearer nope"})) is False
@@ -499,7 +506,7 @@ class TestChatGPTBridge:
         valid non-ASCII credential would 401 forever. ``_make_request`` builds
         the header through Starlette, so this exercises the real decode path.
         """
-        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token="sécret")
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob", token="sécret")
         assert bridge._auth_ok(_make_request({"authorization": "Bearer sécret"})) is True
         assert bridge._auth_ok(_make_request({"authorization": "Bearer wrong"})) is False
 
@@ -508,7 +515,7 @@ class TestChatGPTBridge:
         # back to the exact UTF-8 bytes the client sent, so the comparison
         # holds for every token, not only latin-1-representable ones.
         for token in ("🔒", "秘密トークン"):
-            emoji_bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=token)
+            emoji_bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob", token=token)
             assert (
                 emoji_bridge._auth_ok(_make_request({"authorization": f"Bearer {token}"})) is True
             )
@@ -520,13 +527,13 @@ class TestChatGPTBridge:
         Starlette decodes headers as latin-1, so `Bearer <0xFF>` is reachable
         input. The auth boundary must return False, not 500.
         """
-        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token="s3cret")
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob", token="s3cret")
         assert bridge._auth_ok(_make_request({"authorization": "Bearer \xff"})) is False
 
     @pytest.mark.anyio
     async def test_messages_endpoint_requires_token(self, tmp_msgs: Path) -> None:
         """The POST /messages/ endpoint rejects unauthenticated requests."""
-        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token="s3cret")
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob", token="s3cret")
 
         status, _ = await _call_asgi(bridge._handle_messages, headers={})
         assert status == 401
@@ -542,7 +549,7 @@ class TestChatGPTBridge:
     @pytest.mark.anyio
     async def test_messages_endpoint_auth_disabled_without_token(self, tmp_msgs: Path) -> None:
         """Without a configured token the POST endpoint delegates without auth."""
-        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=None)
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob", token=None)
         status, body = await _call_asgi(bridge._handle_messages, headers={})
         assert status == 400
         assert b"session_id is required" in body
@@ -748,7 +755,7 @@ class TestOutboxConfinement:
 
     def test_idle_sessions_are_evicted(self, tmp_msgs: Path) -> None:
         """The per-session maps stay bounded on a long-lived server."""
-        bridge = ChatGPTBridge(messages_dir=tmp_msgs)
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob")
         for i in range(_MAX_TRACKED_SESSIONS):
             bridge._locks[f"idle-{i}"] = threading.Lock()
 
@@ -767,7 +774,7 @@ class TestOutboxConfinement:
         create a fresh one for the same session — two threads in the critical
         section, which is the duplicate-delivery race the lock exists to stop.
         """
-        bridge = ChatGPTBridge(messages_dir=tmp_msgs)
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob")
         bridge._locks["about-to-acquire"] = threading.Lock()
         bridge._in_flight["about-to-acquire"] = 1
         for i in range(_MAX_TRACKED_SESSIONS):
@@ -781,7 +788,7 @@ class TestOutboxConfinement:
 
     def test_held_lock_and_live_ledger_are_not_evicted(self, tmp_msgs: Path) -> None:
         """Eviction must not steal an in-flight lock or a live ledger."""
-        bridge = ChatGPTBridge(messages_dir=tmp_msgs)
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob")
         held = threading.Lock()
         held.acquire()
         bridge._locks["busy"] = held
@@ -805,7 +812,7 @@ class TestOutboxConfinement:
         tracked session is in that state, the maps would otherwise grow without
         limit; the second pass must still evict idle sessions to honour the cap.
         """
-        bridge = ChatGPTBridge(messages_dir=tmp_msgs)
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob")
         for i in range(_MAX_TRACKED_SESSIONS):
             key = f"replied-{i}"
             bridge._locks[key] = threading.Lock()
@@ -821,7 +828,7 @@ class TestFailClosedBind:
     """Refusing to bind a public interface with auth disabled (P1 fail-open)."""
 
     def test_public_bind_without_token_refuses(self, tmp_msgs: Path) -> None:
-        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=None)
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob", token=None)
         assert not bridge._bind_allowed("0.0.0.0")
         # "" is what uvicorn binds as all-interfaces, so it must fail closed too
         assert not bridge._bind_allowed("")
@@ -829,13 +836,13 @@ class TestFailClosedBind:
             bridge.run(host="0.0.0.0", port=8080)
 
     def test_loopback_without_token_is_allowed(self, tmp_msgs: Path) -> None:
-        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=None)
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob", token=None)
         assert bridge._is_loopback("127.0.0.1")
         assert bridge._is_loopback("localhost")
         assert bridge._bind_allowed("127.0.0.1")
 
     def test_public_bind_with_token_is_allowed(self, tmp_msgs: Path) -> None:
-        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token="s3cret")
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob", token="s3cret")
         # exercise the same gate run() consults, without opening a socket:
         # this fails if the gate is inverted or refuses any host with a token
         assert bridge._bind_allowed("0.0.0.0")
@@ -876,3 +883,34 @@ class TestBridgeLazyImport:
         with pytest.raises(click.ClickException) as excinfo:
             cli_mod._load_chatgpt_bridge_main()
         assert "bridge extra" in str(excinfo.value)
+
+
+class TestDeploymentConfig:
+    """Agent identity is deployment configuration, not baked into the library."""
+
+    @pytest.mark.anyio
+    async def test_default_tool_names_are_agent_neutral(self, tmp_msgs: Path) -> None:
+        """An unconfigured bridge exposes neutral tool names."""
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=None)
+        tools = await bridge.mcp.list_tools()
+        assert {t.name for t in tools} == {"agent_status", "agent_replies"}
+
+    @pytest.mark.anyio
+    async def test_configured_agent_name_sets_tool_names(
+        self, tmp_msgs: Path, session_id: str
+    ) -> None:
+        """agent_name derives the MCP tool names (Bob's deployment passes 'bob')."""
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, agent_name="bob", token=None)
+        tools = await bridge.mcp.list_tools()
+        assert {t.name for t in tools} == {"bob_status", "bob_replies"}
+
+    @pytest.mark.anyio
+    async def test_default_send_instructions_are_neutral(
+        self, tmp_msgs: Path, session_id: str
+    ) -> None:
+        """The library default names no agent and no repository."""
+        bridge = ChatGPTBridge(messages_dir=tmp_msgs, token=None)
+        result = await bridge.mcp.call_tool("agent_status", {"session_id": session_id})
+        data = json.loads(result[0][0].text)
+        assert data["send_instructions"]
+        assert "github.com" not in data["send_instructions"]

@@ -125,16 +125,24 @@ def _load_chatgpt_bridge_main():
 @click.option("--host", default=None, help="Host to bind (default: 127.0.0.1)")
 @click.option("--port", type=int, default=None, help="Port to bind (default: 8080)")
 @click.option("--messages-dir", default=None, help="Path to gptmail messages directory")
+@click.option("--agent-name", default=None, help="Agent identity used for MCP tool names")
+@click.option(
+    "--send-instructions",
+    default=None,
+    help="Instructions returned to the client describing the send path",
+)
 @click.option("--token", default=None, help="Bearer token for auth")
 @click.option("--verbose", is_flag=True, help="Enable debug logging")
 def chatgpt_bridge(
     host: str | None,
     port: int | None,
     messages_dir: str | None,
+    agent_name: str | None,
+    send_instructions: str | None,
     token: str | None,
     verbose: bool,
 ) -> None:
-    """Run the ChatGPT ↔ Bob MCP bridge server."""
+    """Run the ChatGPT ↔ agent MCP bridge server."""
     argv: list[str] = []
     # `is not None`, not truthiness: port 0 (bind an ephemeral port) and an
     # explicit empty --host/--token are meaningful values, and swallowing them
@@ -145,6 +153,10 @@ def chatgpt_bridge(
         argv.extend(["--port", str(port)])
     if messages_dir is not None:
         argv.extend(["--messages-dir", messages_dir])
+    if agent_name is not None:
+        argv.extend(["--agent-name", agent_name])
+    if send_instructions is not None:
+        argv.extend(["--send-instructions", send_instructions])
     if token is not None:
         argv.extend(["--token", token])
     if verbose:

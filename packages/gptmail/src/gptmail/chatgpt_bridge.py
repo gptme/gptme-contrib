@@ -1,8 +1,8 @@
-"""ChatGPT ↔ Bob bridge — remote MCP server over HTTP/SSE.
+"""ChatGPT ↔ agent bridge — remote MCP server over HTTP/SSE.
 
 Maps each ChatGPT chat (identified by ``_meta["openai/session"]``) to a gptmail
-mailbox ``cgpt-<hash>``. Exposes read-only tools so ChatGPT can pull Bob's
-replies from the filesystem outbox.
+mailbox ``cgpt-<hash>``. Exposes read-only tools so ChatGPT can pull the
+agent's replies from the filesystem outbox.
 
 Usage::
 
@@ -48,14 +48,14 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Send-path instructions (read-only bridge; no write tool until ChatGPT Pro
-# lifts the MCP write-tool restriction).  GitHub issues are the interim path:
-# Bob's project-monitoring loop polls ErikBjare/bob and picks them up.
+# lifts the MCP write-tool restriction).  Deployments supply their own
+# instructions (e.g. an issue tracker the agent's loop polls) through the
+# ``send_instructions`` argument / CLI flag; the default is a neutral
+# placeholder so the library hard-codes no agent identity.
 # ---------------------------------------------------------------------------
-_GITHUB_SEND_INSTRUCTIONS = (
-    "To send a message to Bob, open a GitHub issue at "
-    "https://github.com/ErikBjare/bob — mention @TimeToBuildBob in the title "
-    "or body. Bob's monitoring loop picks up new issues and will reply here "
-    "once your message is processed."
+_DEFAULT_SEND_INSTRUCTIONS = (
+    "This bridge is read-only. To send a message, use the delivery path "
+    "configured for this deployment."
 )
 
 # ---------------------------------------------------------------------------
@@ -89,10 +89,20 @@ class ChatGPTBridge:
         messages_dir: str | Path,
         self_name: str = "chatgpt",
         *,
+        agent_name: str = "agent",
+        send_instructions: str | None = None,
         token: str | None = None,
     ) -> None:
         self._messages_dir = Path(messages_dir)
         self._self_name = self_name.lower()
+        # Agent identity is deployment configuration: the library names no
+        # agent and hard-codes no repository. ``agent_name`` derives the MCP
+        # tool names (``<agent_name>_status`` / ``<agent_name>_replies``) so
+        # one library serves any agent; the caller supplies the identity.
+        self._agent_name = agent_name.lower()
+        self._send_instructions = (
+            send_instructions if send_instructions is not None else _DEFAULT_SEND_INSTRUCTIONS
+        )
         # `is not None`, not truthiness: an explicit empty --token means
         # "disable auth" and must override a token in the environment.
         self._token = token if token is not None else os.environ.get("CHATGPT_BRIDGE_TOKEN")
@@ -126,7 +136,7 @@ class ChatGPTBridge:
         self._in_flight: dict[str, int] = {}
 
         # FastMCP server — tools registered below
-        self.mcp = FastMCP("bob-chatgpt-bridge")
+        self.mcp = FastMCP(f"{self._agent_name}-chatgpt-bridge")
         self._register_tools()
 
         # SSE transport wrapping the FastMCP server
@@ -181,7 +191,7 @@ class ChatGPTBridge:
         once, the same at-most-once relaxation a server restart already causes;
         that is preferable to unbounded growth once every tracked session has
         received a reply. Ledgers are normally empty long before this: both
-        ``bob_status`` and ``bob_replies`` prune them against the live outbox.
+        the status and replies tools prune them against the live outbox.
         """
         if len(self._locks) < _MAX_TRACKED_SESSIONS:
             return
@@ -231,14 +241,16 @@ class ChatGPTBridge:
     # Tool implementations
     # ------------------------------------------------------------------
     def _register_tools(self) -> None:
-        @self.mcp.tool()
-        def bob_status(session_id: str) -> str:
-            """Return Bob's status and send-path instructions for this chat session.
+        status_tool = f"{self._agent_name}_status"
+        replies_tool = f"{self._agent_name}_replies"
+
+        @self.mcp.tool(name=status_tool)
+        def status(session_id: str) -> str:
+            """Return the agent's status and send-path instructions for this chat session.
 
             Returns a JSON object with inbox/outbox counts, unread-reply flag,
-            and ``send_instructions`` explaining how to send messages to Bob
-            (GitHub issues — the interim path until ChatGPT Pro supports MCP
-            write tools).
+            and ``send_instructions`` explaining how to send messages to the
+            agent (the deployment's configured delivery path).
 
             Args:
                 session_id: The OpenAI session ID (from _meta["openai/session"]).
@@ -270,13 +282,13 @@ class ChatGPTBridge:
                 "surfaced": len(outbox_ids & surfaced),
                 "pending_replies": pending,
                 "has_unread": pending > 0,
-                "send_instructions": _GITHUB_SEND_INSTRUCTIONS,
+                "send_instructions": self._send_instructions,
             }
             return json.dumps(status, indent=2)
 
-        @self.mcp.tool()
-        def bob_replies(session_id: str, limit: int = 5, resurface: bool = False) -> str:
-            """Return unread Bob replies for this chat session.
+        @self.mcp.tool(name=replies_tool)
+        def replies(session_id: str, limit: int = 5, resurface: bool = False) -> str:
+            """Return unread replies from the agent for this chat session.
 
             Args:
                 session_id: The OpenAI session ID (from _meta["openai/session"]).
@@ -298,12 +310,13 @@ class ChatGPTBridge:
             # deliver it twice.
             with self._session_lock(session_id):
                 surfaced = self._surfaced[session_id]
-                # Read outbox (messages FROM Bob TO chatgpt). transport.read()
-                # is inbox-only, so we read the file directly. Materialize the
-                # listing so the ledger can be pruned against the whole outbox
-                # before the loop (a session that only ever polls bob_replies
-                # never runs bob_status' flush, and a stale id both misleads
-                # nothing and keeps the session un-evictable).
+                # Read outbox (messages FROM the agent TO chatgpt).
+                # transport.read() is inbox-only, so we read the file directly.
+                # Materialize the listing so the ledger can be pruned against
+                # the whole outbox before the loop (a session that only ever
+                # polls the replies tool never runs the status tool's flush,
+                # and a stale id both misleads nothing and keeps the session
+                # un-evictable).
                 entries = list(transport.list_inbox("outbox"))
                 surfaced.intersection_update(mid for mid, _s, _t in entries)
 
@@ -326,7 +339,7 @@ class ChatGPTBridge:
                             transport.outbox,
                         )
                         return json.dumps(
-                            {"replies": [], "note": "No new replies from Bob."},
+                            {"replies": [], "note": "No new replies from the agent."},
                             indent=2,
                         )
                 try:
@@ -398,7 +411,7 @@ class ChatGPTBridge:
                 # loses a response recovers with resurface=True.
                 if not replies:
                     return json.dumps(
-                        {"replies": [], "note": "No new replies from Bob."},
+                        {"replies": [], "note": "No new replies from the agent."},
                         indent=2,
                     )
 
@@ -467,7 +480,7 @@ class ChatGPTBridge:
             return Response()
 
         async def health(request: Request) -> JSONResponse:
-            return JSONResponse({"status": "ok", "bridge": "bob-chatgpt-bridge"})
+            return JSONResponse({"status": "ok", "bridge": f"{self._agent_name}-chatgpt-bridge"})
 
         return Starlette(
             debug=False,
@@ -510,13 +523,13 @@ class ChatGPTBridge:
         import uvicorn
 
         app = self._create_app()
-        logger.info("Starting bob-chatgpt-bridge on %s:%d", host, port)
+        logger.info("Starting %s-chatgpt-bridge on %s:%d", self._agent_name, host, port)
         uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 def main(argv: list[str] | None = None) -> None:
     """CLI entrypoint."""
-    parser = argparse.ArgumentParser(description="ChatGPT ↔ Bob MCP bridge")
+    parser = argparse.ArgumentParser(description="ChatGPT ↔ agent MCP bridge")
     parser.add_argument(
         "--host",
         default=os.environ.get("CHATGPT_BRIDGE_HOST", "127.0.0.1"),
@@ -535,6 +548,16 @@ def main(argv: list[str] | None = None) -> None:
         "--messages-dir",
         default=os.environ.get("CHATGPT_BRIDGE_MESSAGES_DIR"),
         help="Path to gptmail messages directory (default: auto-detect from git)",
+    )
+    parser.add_argument(
+        "--agent-name",
+        default=os.environ.get("CHATGPT_BRIDGE_AGENT_NAME", "agent"),
+        help="Agent identity used for MCP tool names (default: agent)",
+    )
+    parser.add_argument(
+        "--send-instructions",
+        default=os.environ.get("CHATGPT_BRIDGE_SEND_INSTRUCTIONS"),
+        help="Instructions returned to the client describing the send path",
     )
     parser.add_argument(
         "--token",
@@ -576,6 +599,8 @@ def main(argv: list[str] | None = None) -> None:
     try:
         bridge = ChatGPTBridge(
             messages_dir=messages_dir,
+            agent_name=args.agent_name,
+            send_instructions=args.send_instructions,
             token=args.token,
         )
     except ValueError as exc:
