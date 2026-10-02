@@ -32,6 +32,11 @@ import sys
 fixture = json.loads(Path(os.environ["GH_FIXTURE"]).read_text())
 argv = sys.argv[1:]
 
+# Optional call log (one JSON argv per line) for budget/caching assertions.
+if os.environ.get("GH_CALLS"):
+    with open(os.environ["GH_CALLS"], "a") as fh:
+        fh.write(json.dumps(argv) + "\n")
+
 if argv[:2] == ["pr", "comment"]:
     Path(os.environ["GH_LOG"]).write_text(json.dumps(argv))
     raise SystemExit(0)
@@ -70,6 +75,24 @@ if "body" in fields and endpoint.endswith(f"/issues/{pr_number}/comments"):
     if fixture.get("trigger_api_error"):
         raise SystemExit(1)  # Simulate API failure (e.g. rate-limit or network error)
     Path(os.environ["GH_LOG"]).write_text(json.dumps({"body": fields["body"]}))
+    raise SystemExit(0)
+
+# GraphQL: PR head SHA + commit dates (greptile-helper's _fetch_pr_commit_info).
+# Derived from the same raw_pr / raw_commits fixtures the REST routes serve, so
+# every existing test exercises the GraphQL path whenever raw_pr carries a head.
+if endpoint == "graphql":
+    if fixture.get("graphql_error"):
+        raise SystemExit(1)
+    head = (fixture.get("raw_pr") or {}).get("head", {}).get("sha")
+    nodes = [
+        {"commit": {"committedDate": c["commit"]["committer"]["date"]}}
+        for c in fixture.get("raw_commits", [])
+    ]
+    print(json.dumps({"data": {"repository": {"pullRequest": {
+        "headRefOid": head,
+        "commits": {"pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": nodes},
+    }}}}))
     raise SystemExit(0)
 
 # Route to fixture data
@@ -1717,3 +1740,120 @@ def test_fallback_records_the_timestamp_before_posting():
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert "triggering initial review" in result.stdout
     assert ts_content, "_TRIGGER_TS_FILE should have been written by the fallback"
+
+
+# --- PR commit-info fetch: GraphQL + short-TTL cross-process cache ---
+
+
+def _sha_mismatch_fixture() -> dict:
+    reviewed_at = _iso_ago(minutes=30)
+    return {
+        "pr_number": 123,
+        "raw_comments": [
+            _make_greptile_comment(4, reviewed_at=reviewed_at, updated_at=reviewed_at),
+        ],
+        "raw_reviews": [_make_greptile_review("OLDSHA", reviewed_at)],
+        "raw_pr": {"head": {"sha": "NEWSHA"}, "created_at": _iso_ago(minutes=120)},
+        "raw_commits": [_make_commit(_iso_ago(minutes=90))],
+        "bot_reaction_count": 1,
+    }
+
+
+def _calls(path: Path) -> list[list[str]]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+
+def _rest_commit_calls(calls: list[list[str]]) -> list[list[str]]:
+    return [c for c in calls if any(a.endswith("/pulls/123/commits") for a in c)]
+
+
+def _graphql_calls(calls: list[list[str]]) -> list[list[str]]:
+    return [c for c in calls if c[:2] == ["api", "graphql"]]
+
+
+def test_commit_info_uses_graphql_not_paginated_rest(tmp_path: Path):
+    """Head SHA + commit dates come from one GraphQL query, not core REST."""
+    calls = tmp_path / "calls.jsonl"
+    env = {"GH_CALLS": str(calls), "GREPTILE_HELPER_CACHE_DIR": str(tmp_path / "c")}
+    status = _run_helper("status", _sha_mismatch_fixture(), extra_env=env)
+    assert status.stdout.strip() == "needs-re-review", f"stderr: {status.stderr}"
+    logged = _calls(calls)
+    assert _rest_commit_calls(logged) == []
+    assert not [c for c in logged if c[:2] == ["api", "repos/gptme/gptme/pulls/123"]]
+    # One live read for the cached view, one confirming read for the mismatch —
+    # memoized, so never more than that per process.
+    assert 1 <= len(_graphql_calls(logged)) <= 2
+
+
+def test_commit_info_falls_back_to_rest_when_graphql_fails(tmp_path: Path):
+    """GraphQL failure must not change the decision: fall back to REST."""
+    fixture = {**_sha_mismatch_fixture(), "graphql_error": True}
+    calls = tmp_path / "calls.jsonl"
+    env = {"GH_CALLS": str(calls), "GREPTILE_HELPER_CACHE_DIR": str(tmp_path / "c")}
+    status = _run_helper("status", fixture, extra_env=env)
+    assert status.stdout.strip() == "needs-re-review", f"stderr: {status.stderr}"
+    assert _rest_commit_calls(_calls(calls)), "expected REST fallback"
+    # Failed GraphQL reads are not what gets shared, but the REST result is.
+    assert list((tmp_path / "c").glob("pr-commits-*.json"))
+
+
+def test_commit_info_cache_is_shared_across_processes(tmp_path: Path):
+    """A second helper run within the TTL reuses the first run's fetch."""
+    reviewed_at = _iso_ago(minutes=30)
+    fixture = {
+        "pr_number": 123,
+        "raw_comments": [
+            _make_greptile_comment(5, reviewed_at=reviewed_at, updated_at=reviewed_at),
+        ],
+        "raw_reviews": [_make_greptile_review("HEADSHA", reviewed_at)],
+        "raw_pr": {"head": {"sha": "HEADSHA"}, "created_at": _iso_ago(minutes=120)},
+        "raw_commits": [_make_commit(_iso_ago(minutes=60))],
+        "bot_reaction_count": 1,
+    }
+    calls = tmp_path / "calls.jsonl"
+    env = {"GH_CALLS": str(calls), "GREPTILE_HELPER_CACHE_DIR": str(tmp_path / "c")}
+    first = _run_helper("status", fixture, extra_env=env)
+    assert first.stdout.strip() == "already-reviewed", f"stderr: {first.stderr}"
+    assert len(_graphql_calls(_calls(calls))) == 1
+    calls.unlink()
+    second = _run_helper("status", fixture, extra_env=env)
+    assert second.stdout.strip() == "already-reviewed", f"stderr: {second.stderr}"
+    assert _graphql_calls(_calls(calls)) == [], "second run should hit the cache"
+
+    # TTL=0 disables sharing.
+    calls.unlink(missing_ok=True)
+    third = _run_helper(
+        "status", fixture, extra_env={**env, "GREPTILE_COMMITS_CACHE_TTL": "0"}
+    )
+    assert third.stdout.strip() == "already-reviewed"
+    assert len(_graphql_calls(_calls(calls))) == 1
+
+
+def test_stale_cached_head_mismatch_is_confirmed_live(tmp_path: Path):
+    """A cached head older than Greptile's reviewed commit must not cause a
+    spurious re-review: a mismatch is re-checked against a live read."""
+    reviewed_at = _iso_ago(minutes=2)
+    fixture = {
+        "pr_number": 123,
+        "raw_comments": [
+            _make_greptile_comment(5, reviewed_at=reviewed_at, updated_at=reviewed_at),
+        ],
+        # Greptile already reviewed the NEW head ...
+        "raw_reviews": [_make_greptile_review("NEWSHA", reviewed_at)],
+        "raw_pr": {"head": {"sha": "NEWSHA"}, "created_at": _iso_ago(minutes=120)},
+        "raw_commits": [_make_commit(_iso_ago(minutes=5))],
+        "bot_reaction_count": 1,
+    }
+    # ... but a sibling process cached the pre-push head moments ago.
+    cache_dir = tmp_path / "c"
+    cache_dir.mkdir()
+    (cache_dir / f"pr-commits-{_pr_hash('gptme/gptme', 123)}.json").write_text(
+        json.dumps({"head_sha": "OLDSHA", "dates": [_iso_ago(minutes=60)]})
+    )
+    calls = tmp_path / "calls.jsonl"
+    env = {"GH_CALLS": str(calls), "GREPTILE_HELPER_CACHE_DIR": str(cache_dir)}
+    status = _run_helper("status", fixture, extra_env=env)
+    assert status.stdout.strip() == "already-reviewed", f"stderr: {status.stderr}"
+    assert len(_graphql_calls(_calls(calls))) == 1

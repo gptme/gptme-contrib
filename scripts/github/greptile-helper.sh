@@ -127,8 +127,10 @@ _no_new_commit_since_our_last_trigger() {
     if [ -n "$review_cutoff" ]; then
         cycle_filter="| select(.created_at > \"$review_cutoff\")"
     fi
-    head_date=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/commits" 2>/dev/null \
-        | jq -rs '[.[][] | .commit.committer.date] | sort | last // ""' 2>/dev/null) || head_date=""
+    # A stale cached commit list can only make head_date OLDER, i.e. suppress —
+    # the safe direction — so the shared short-TTL cache is fine here.
+    head_date=$(_pr_commit_info \
+        | jq -r '.dates | sort | last // ""' 2>/dev/null) || head_date=""
     last_trigger_date=$(_issue_comments_json \
         | jq -r "[.[][] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\"))) $cycle_filter | .created_at] | sort | last // \"\"" 2>/dev/null) || last_trigger_date=""
     [ -z "$last_trigger_date" ] && return 1   # no in-cycle trigger → allow (nothing to gate against)
@@ -172,7 +174,8 @@ _REVIEW_CACHE_FILE="${TMPDIR:-/tmp}/greptile-review-cache-$$.json"
 _ISSUE_COMMENTS_CACHE_FILE="${TMPDIR:-/tmp}/greptile-issue-comments-$$.json"
 _ISSUE_COMMENTS_ERROR_FILE="${TMPDIR:-/tmp}/greptile-issue-comments-error-$$"
 _ACTIVITY_CACHE_FILE="${TMPDIR:-/tmp}/greptile-activity-$$.json"
-trap 'rm -f "$_REVIEW_CACHE_FILE" "$_ISSUE_COMMENTS_CACHE_FILE" "$_ISSUE_COMMENTS_ERROR_FILE" "$_ACTIVITY_CACHE_FILE"' EXIT
+_COMMIT_INFO_LIVE_FILE="${TMPDIR:-/tmp}/greptile-commit-info-$$.json"
+trap 'rm -f "$_REVIEW_CACHE_FILE" "$_ISSUE_COMMENTS_CACHE_FILE" "$_ISSUE_COMMENTS_ERROR_FILE" "$_ACTIVITY_CACHE_FILE" "$_COMMIT_INFO_LIVE_FILE"' EXIT
 
 # Shared hash for per-PR state files (lock + trigger timestamp).
 # Used across trigger and _our_trigger_status to coordinate without the GitHub API.
@@ -199,6 +202,97 @@ _issue_comments_json() {
         : > "$_ISSUE_COMMENTS_ERROR_FILE"
     fi
     cat "$_ISSUE_COMMENTS_CACHE_FILE"
+}
+
+# --- Helper: PR head SHA + committer dates of every PR commit ---
+# Prints {"head_sha": str, "dates": [iso8601, ...]} ("" / [] on API failure).
+#
+# Rate-limit budget: this used to be a paginated REST `pulls/N/commits` traversal
+# (twice per run) plus a REST `pulls/N` head read. At wide fanout that was one of
+# the largest consumers of the shared 5000/h core REST budget (~250-450 calls/h
+# fleet-wide, none of them conditional). Now:
+#   1. One GraphQL query returns the head SHA and all commit dates (GraphQL has a
+#      separate, mostly idle budget). REST pagination is only the fallback.
+#   2. Results are shared across helper processes for GREPTILE_COMMITS_CACHE_TTL
+#      seconds (default 120; 0 disables), since PM/status/trigger callers query the
+#      same PR several times within seconds. The cache lives next to the other
+#      per-PR state files in TMPDIR (override: GREPTILE_HELPER_CACHE_DIR).
+#
+# Pass "fresh" to bypass the cross-process cache. A live read is memoized for the
+# rest of this process, so "fresh" costs at most one extra query per run. Callers
+# must only trust cached data in the direction where staleness suppresses a
+# trigger; see _needs_re_review.
+GREPTILE_COMMITS_CACHE_TTL="${GREPTILE_COMMITS_CACHE_TTL:-120}"
+_COMMIT_INFO_CACHE_DIR="${GREPTILE_HELPER_CACHE_DIR:-${TMPDIR:-/tmp}/greptile-helper-cache}"
+_COMMIT_INFO_CACHE_FILE="$_COMMIT_INFO_CACHE_DIR/pr-commits-${_PR_HASH}.json"
+_file_age_seconds() {
+    local mtime
+    mtime=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null) || return 1
+    echo $(( $(date +%s) - mtime ))
+}
+_fetch_pr_commit_info() {
+    local owner="${REPO%%/*}" name="${REPO#*/}" out head
+    # shellcheck disable=SC2016  # $vars are GraphQL variables, not shell
+    out=$(gh api graphql --paginate \
+        -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      headRefOid
+      commits(first: 100, after: $endCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { commit { committedDate } }
+      }
+    }
+  }
+}' -f owner="$owner" -f name="$name" -F number="$PR_NUMBER" 2>/dev/null \
+        | jq -cs '{head_sha: ([.[].data.repository.pullRequest.headRefOid // empty] | first // ""),
+                   dates: [.[].data.repository.pullRequest.commits.nodes[]?.commit.committedDate]}' \
+        2>/dev/null) || out=""
+    if [ -n "$out" ] && [ -n "$(printf '%s' "$out" | jq -r '.head_sha' 2>/dev/null)" ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    # Fallback: REST (same data, but paginated and billed to the core budget).
+    head=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha // ""' 2>/dev/null) || head=""
+    out=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/commits" 2>/dev/null \
+        | jq -cs --arg head "$head" '{head_sha: $head, dates: [.[][] | .commit.committer.date]}' \
+        2>/dev/null) || out=""
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    return 1
+}
+_pr_commit_info() {
+    trap - EXIT
+    local mode="${1:-}" age info tmp
+    if [ -f "$_COMMIT_INFO_LIVE_FILE" ]; then
+        cat "$_COMMIT_INFO_LIVE_FILE"
+        return
+    fi
+    if [ "$mode" != "fresh" ] && [ "$GREPTILE_COMMITS_CACHE_TTL" -gt 0 ] 2>/dev/null \
+        && [ -s "$_COMMIT_INFO_CACHE_FILE" ]; then
+        age=$(_file_age_seconds "$_COMMIT_INFO_CACHE_FILE") || age=""
+        if [ -n "$age" ] && [ "$age" -ge 0 ] && [ "$age" -lt "$GREPTILE_COMMITS_CACHE_TTL" ]; then
+            cat "$_COMMIT_INFO_CACHE_FILE"
+            return
+        fi
+    fi
+    if info=$(_fetch_pr_commit_info); then
+        printf '%s\n' "$info" > "$_COMMIT_INFO_LIVE_FILE"
+        # Share with sibling helper processes; failures here are non-fatal.
+        if [ "$GREPTILE_COMMITS_CACHE_TTL" -gt 0 ] 2>/dev/null \
+            && mkdir -p "$_COMMIT_INFO_CACHE_DIR" 2>/dev/null \
+            && tmp=$(mktemp "$_COMMIT_INFO_CACHE_DIR/.pr-commits.XXXXXX" 2>/dev/null); then
+            printf '%s\n' "$info" > "$tmp" && mv -f "$tmp" "$_COMMIT_INFO_CACHE_FILE" 2>/dev/null \
+                || rm -f "$tmp"
+        fi
+        printf '%s\n' "$info"
+    else
+        # Failures are neither memoized nor shared: callers fail open/closed exactly
+        # as they did when the raw REST call failed (empty head / no dates).
+        echo '{"head_sha": "", "dates": []}'
+    fi
 }
 
 _greptile_activity_times() {
@@ -408,7 +502,15 @@ _needs_re_review() {
     fi
 
     if [ -n "$reviewed_sha" ]; then
-        head_sha=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha // ""' 2>/dev/null) || head_sha=""
+        head_sha=$(_pr_commit_info | jq -r '.head_sha // ""' 2>/dev/null) || head_sha=""
+        if [ -n "$head_sha" ] && [ "$reviewed_sha" != "$head_sha" ]; then
+            # The cached head may be up to GREPTILE_COMMITS_CACHE_TTL old. A stale
+            # head can only wrongly say "re-review needed" here (e.g. Greptile just
+            # reviewed a head pushed after we cached), so confirm a mismatch with a
+            # live read before acting on it. Matches stay cached: a stale match only
+            # delays a legitimate re-trigger by one TTL (the safe direction).
+            head_sha=$(_pr_commit_info fresh | jq -r '.head_sha // ""' 2>/dev/null) || head_sha=""
+        fi
         if [ -n "$head_sha" ]; then
             if [ "$reviewed_sha" = "$head_sha" ]; then
                 return 1  # Formal PR review is on the current head — no re-review needed.
@@ -459,8 +561,8 @@ _needs_re_review() {
     if [ -z "$reviewed_at" ]; then
         return 1
     fi
-    new_commits=$(gh api "repos/$REPO/pulls/$PR_NUMBER/commits" --paginate \
-        2>/dev/null | jq -s "[.[][] | select(.commit.committer.date > \"$reviewed_at\")] | length" \
+    new_commits=$(_pr_commit_info \
+        | jq "[.dates[] | select(. > \"$reviewed_at\")] | length" \
         2>/dev/null) || new_commits="0"
     [ "${new_commits:-0}" -gt 0 ]
 }
