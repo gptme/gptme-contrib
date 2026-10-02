@@ -401,13 +401,14 @@ def _resolve_protocol_identity(workspace: str | None, configured: str | None) ->
     indistinguishable from the name alone, so that heuristic would let any
     fork silently sign handoffs as the registered ``alice`` — exactly the
     impersonation this function exists to prevent. A deployment that declares
-    nothing keeps the legacy ``"bob"`` default.
+    nothing gets the generic ``"agent"`` identity; it cannot sign handoffs
+    unless the deployment explicitly registers that identity.
     """
     if configured:
         return configured.lower()
     declared = _detect_agent_name(workspace)
     if not declared:
-        return "bob"
+        return "agent"
     return declared.lower()
 
 
@@ -418,8 +419,8 @@ def _build_fresh_call_greeting_instructions(
         _lookup_caller_identity(from_number, workspace) if from_number else None
     )
     # Callers that pass no explicit identity get the workspace's declared agent
-    # name; "bob" stays only as the legacy generic-install fallback.
-    resolved_name = agent_name or _detect_agent_name(workspace) or "bob"
+    # name; undeclared installations use a neutral identity.
+    resolved_name = agent_name or _detect_agent_name(workspace) or "agent"
     self_identity = f"You are {_display_name(resolved_name)}. "
     if caller_identity:
         spoken_name = caller_identity.preferred_spoken_name
@@ -856,7 +857,7 @@ class VoiceServer:
             _get_config_env("GPTME_VOICE_AGENT_NAME")
             or _get_config_env("AGENT_NAME")
             or _detect_agent_name(self.workspace)
-            or "bob"
+            or "agent"
         )
         self.resume_window_seconds = int(
             _get_config_env("GPTME_VOICE_RESUME_WINDOW_SECONDS")
