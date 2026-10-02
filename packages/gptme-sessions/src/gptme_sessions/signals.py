@@ -51,6 +51,13 @@ _COMMIT_RE = re.compile(
 # through `| tail -3`), the "[branch hash] msg" line is gone and _COMMIT_RE
 # matches nothing, even though the commit landed.
 _COMMIT_CMD_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+commit\b|\bgit-safe-commit\b")
+_COMMIT_SUBJECT_RE = re.compile(r"""-m\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""")
+_COMMIT_HEREDOC_SUBJECT_RE = re.compile(
+    r"""-m\s+"\$\(cat\s+<<-?\s*'?(\w+)'?\s*\n(.*?)\n\1\b""", re.S
+)
+_GIT_REPO_RE = re.compile(r"""\bgit\s+-C\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([^\s;&|]+))""")
+_GIT_PUSH_CMD_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+push\b")
+_QUIET_PUSH_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+push\b[^;&|\n]*(?:\s-q\b|--quiet\b)")
 
 # Push ref-update line: "   e294aad05f..52fad08fbe  master -> master".
 # Fetch lines look the same but target a remote-tracking ref (origin/master);
@@ -74,6 +81,10 @@ _DIFFSTAT_CMD_RE = re.compile(r"--stat\b|\bgit(?:\s+-C\s+\S+)?\s+(?:show|log|dif
 _COMMIT_FAILED_RE = re.compile(
     r"COMMIT OUTCOME UNCONFIRMED|nothing to commit|no changes added to commit"
     r"|pre-commit checks failed|hook failed|Aborting commit"
+)
+_MUTATION_FAILED_RE = re.compile(
+    r"(?i)\brejected\b|fatal:|error:|permission denied|could not read from remote|"
+    r"failed to (?:push|create)|timed out"
 )
 
 # Bash heredoc/redirect file writes: `cat > f <<EOF`, `cat >> f << 'EOF'`,
@@ -104,6 +115,48 @@ def _bash_heredoc_write_paths(cmd: str) -> list[str]:
 def _is_push_ref_update(dst: str) -> bool:
     """True for a push ref-update target, False for a fetch remote-tracking ref."""
     return not dst.startswith(("origin/", "upstream/", "refs/remotes/"))
+
+
+def _command_flag_value(cmd: str, flag: str) -> str | None:
+    match = re.search(
+        rf"""(?:^|\s){re.escape(flag)}(?:=|\s+)(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([^\s;|&]+))""",
+        cmd,
+    )
+    if not match:
+        return None
+    value = next((group for group in match.groups() if group is not None), None)
+    return value.replace('\\"', '"') if value else None
+
+
+def _commit_subject(cmd: str) -> str | None:
+    match = _COMMIT_HEREDOC_SUBJECT_RE.search(cmd)
+    if match:
+        return match.group(2).strip().splitlines()[0].strip() or None
+    match = _COMMIT_SUBJECT_RE.search(cmd)
+    if not match:
+        return None
+    value = match.group(1) if match.group(1) is not None else match.group(2)
+    return value.replace('\\"', '"').splitlines()[0].strip() or None
+
+
+def _command_repo(cmd: str, cwd: str | None) -> str | None:
+    match = _GIT_REPO_RE.search(cmd)
+    if not match:
+        return cwd
+    return next((group for group in match.groups() if group is not None), cwd)
+
+
+def _cc_session_cwd(msgs: list[dict]) -> str | None:
+    for record in msgs:
+        cwd = record.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            return cwd
+        snapshot = (record.get("attachment") or {}).get("snapshot")
+        if isinstance(snapshot, dict):
+            cwd = snapshot.get("workingDirectory")
+            if isinstance(cwd, str) and cwd:
+                return cwd
+    return None
 
 
 # Tools that write files in Claude Code
@@ -1034,11 +1087,13 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     Git commits: detected from Bash tool output content via regex.
     GitHub interactions: detected from Bash tool input commands (gh pr review, etc.).
     """
+    session_cwd = _cc_session_cwd(msgs)
     tool_calls: dict[str, int] = {}
     error_count = 0
     warning_phrase_count = 0  # soft error signal: "error", "failed", etc. in output
     gh_interactions = 0  # count of productive GitHub CLI commands (reviews, comments)
     git_commits: list[str] = []
+    mutation_deliverables: list[str] = []
     file_writes: list[str] = []
     journal_paths: list[str] = []
     retry_candidates: list[str] = []
@@ -1060,7 +1115,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     reviews_submitted: int = 0  # count of gh pr review commands (code review)
     comments_posted: int = 0  # count of gh pr/issue comment + api comment posts
     issues_created: int = 0  # count of gh issue create commands
-    _pr_create_pending: set[str] = set()  # tool_use_ids awaiting pr create result
+    _pr_create_pending: dict[str, dict[str, object]] = {}
     _issue_close_pending: set[str] = set()  # tool_use_ids awaiting issue close result
     # CI fix tracking: detect sessions that investigated CI failures and then pushed fixes.
     # Credited when: (1) gh run view --log-failed returns non-empty output (real failures),
@@ -1069,9 +1124,9 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     _ci_failure_found: bool = False  # True when a --log-failed check returned non-empty output
     _pr_merge_pending: set[str] = set()  # tool_use_ids awaiting pr merge result
     _all_direct_commit_hashes: set[str] = set()  # session-wide dedup for git commits
-    # tool_use_id of a commit command awaiting its result -> whether diffstat
-    # lines in that result can be trusted as commit evidence
-    _commit_cmd_pending: dict[str, bool] = {}
+    # Tool mutation command evidence retained until the matching result.
+    _commit_cmd_pending: dict[str, dict[str, object]] = {}
+    _quiet_push_pending: dict[str, dict[str, object]] = {}
     # Map PR number → "owner/repo" for post-session gh pr view lookups.
     # Populated from (a) gh pr create URL output and (b) `--repo` flags on gh pr merge
     # commands. Used by _resolve_merge_shas to fetch server-side merge-commit SHAs
@@ -1159,14 +1214,31 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                 elif tool == "Bash":
                     # Detect GitHub CLI interactions (PR reviews, issue comments, etc.)
                     # These represent productive work but don't produce commits/writes.
-                    cmd = item.get("input", {}).get("command", "")
+                    bash_input = item.get("input", {})
+                    cmd = bash_input.get("command", "")
+                    command_cwd = bash_input.get("cwd") or bash_input.get("workdir") or session_cwd
                     if _GH_INTERACTION_RE.search(cmd):
                         gh_interactions += 1
 
                     # Commit commands: remember them so a truncated result (output
                     # piped through tail, etc.) can still be credited below.
                     if tool_id and _COMMIT_CMD_RE.search(cmd):
-                        _commit_cmd_pending[tool_id] = not _DIFFSTAT_CMD_RE.search(cmd)
+                        _commit_cmd_pending[tool_id] = {
+                            "stat_trusted": not _DIFFSTAT_CMD_RE.search(cmd),
+                            "subject": _commit_subject(cmd),
+                            "cwd": command_cwd,
+                            "repo": _command_repo(cmd, command_cwd),
+                            "quiet_push": bool(_QUIET_PUSH_RE.search(cmd)),
+                        }
+                    if tool_id and _GIT_PUSH_CMD_RE.search(cmd) and _QUIET_PUSH_RE.search(cmd):
+                        # Skip if the same command has a commit: the commit path already
+                        # records this push via quiet_push=True evidence, avoiding double-count.
+                        if not _COMMIT_CMD_RE.search(cmd):
+                            _quiet_push_pending[tool_id] = {
+                                "cwd": command_cwd,
+                                "repo": _command_repo(cmd, command_cwd),
+                                "quiet": True,
+                            }
 
                     # Heredoc file writes (`cat > f <<EOF`, `tee f <<EOF`) are
                     # file writes just like the Write tool; count them the same.
@@ -1197,7 +1269,14 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     # it's a higher-value signal tracked separately as prs_submitted.
                     if _PR_CREATE_CMD_RE.search(cmd):
                         if tool_id:  # guard against empty tool_id
-                            _pr_create_pending.add(tool_id)
+                            _pr_create_pending[tool_id] = {
+                                "cwd": command_cwd,
+                                "repo": _command_flag_value(cmd, "--repo")
+                                or _command_flag_value(cmd, "-R"),
+                                "head": _command_flag_value(cmd, "--head"),
+                                "title": _command_flag_value(cmd, "--title")
+                                or _command_flag_value(cmd, "-t"),
+                            }
 
                     # Track issue close commands for output-side confirmation.
                     # Only count confirmed closes (not failed/permission-denied).
@@ -1363,7 +1442,8 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     # diffstat or a push ref-update. Gated on the command so
                     # fetch/log/show output alone never counts.
                     if tool_use_id in _commit_cmd_pending:
-                        stat_trusted = _commit_cmd_pending.pop(tool_use_id)
+                        commit_evidence = _commit_cmd_pending.pop(tool_use_id)
+                        stat_trusted = bool(commit_evidence.pop("stat_trusted", False))
                         if not _direct_commit_matched and not _COMMIT_FAILED_RE.search(result_str):
                             push_hash = None
                             for push_match in _PUSH_REF_RE.finditer(result_str):
@@ -1373,6 +1453,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                                 push_hash is not None
                                 or _COMMIT_PUSH_EVIDENCE_RE.search(result_str)
                                 or (stat_trusted and _COMMIT_STAT_RE.search(result_str))
+                                or commit_evidence.get("quiet_push")
                             ):
                                 fallback_hash = push_hash or f"unknown-{tool_use_id}"
                                 already = any(
@@ -1396,8 +1477,35 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                                             "source": "trajectory",
                                             "tool_name": "Bash",
                                             "truncated_output": True,
+                                            **{
+                                                key: value
+                                                for key, value in commit_evidence.items()
+                                                if value is not None
+                                            },
                                         },
                                     )
+
+                    if tool_use_id in _quiet_push_pending:
+                        push_evidence = _quiet_push_pending.pop(tool_use_id)
+                        if not _MUTATION_FAILED_RE.search(result_str):
+                            push_value = f"(quiet push) [{tool_use_id[-8:]}]"
+                            mutation_deliverables.append(push_value)
+                            _record_deliverable_detail(
+                                detail_by_value,
+                                value=push_value,
+                                kind="push",
+                                provenance_class="session_committed",
+                                evidence={
+                                    "source": "trajectory",
+                                    "tool_name": "Bash",
+                                    "output_swallowed": not bool(result_str.strip()),
+                                    **{
+                                        key: value
+                                        for key, value in push_evidence.items()
+                                        if value is not None
+                                    },
+                                },
+                            )
 
                     # Background bash tasks: when CC runs a command in background mode,
                     # the tool result only contains a pointer to an output file like:
@@ -1475,7 +1583,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     # gh pr create detection: successful output contains a PR URL.
                     # Only check when this tool_use_id was flagged as a pr create command.
                     if tool_use_id in _pr_create_pending:
-                        _pr_create_pending.discard(tool_use_id)
+                        pr_evidence = _pr_create_pending.pop(tool_use_id)
                         # Extract PR number AND owner/repo from the URL; the
                         # owner/repo mapping is used later to look up the server-
                         # side merge-commit SHA after `gh pr merge`.
@@ -1485,6 +1593,51 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                             pr_num_str = repo_match.group(2)
                             prs_submitted.append(f"PR #{pr_num_str}")
                             pr_context[int(pr_num_str)] = owner_repo
+                            pr_value = repo_match.group(0)
+                            mutation_deliverables.append(pr_value)
+                            _record_deliverable_detail(
+                                detail_by_value,
+                                value=pr_value,
+                                kind="pull_request",
+                                provenance_class="session_committed",
+                                evidence={
+                                    "source": "trajectory",
+                                    "tool_name": "Bash",
+                                    "action": "gh_pr_create",
+                                    **{
+                                        key: value
+                                        for key, value in pr_evidence.items()
+                                        if value is not None
+                                    },
+                                },
+                            )
+                        # No URL is still useful evidence when the command
+                        # intentionally swallowed stdout.  Do not promote
+                        # arbitrary non-empty output: gh and wrappers can
+                        # report a semantic failure while the shell result is
+                        # marked non-error (for example, "PR creation failed:
+                        # already exists").
+                        elif not result_str.strip():
+                            pr_value = f"(PR creation output swallowed) [{tool_use_id[-8:]}]"
+                            prs_submitted.append("PR (output swallowed)")
+                            mutation_deliverables.append(pr_value)
+                            _record_deliverable_detail(
+                                detail_by_value,
+                                value=pr_value,
+                                kind="pull_request",
+                                provenance_class="session_committed",
+                                evidence={
+                                    "source": "trajectory",
+                                    "tool_name": "Bash",
+                                    "action": "gh_pr_create",
+                                    "output_swallowed": True,
+                                    **{
+                                        key: value
+                                        for key, value in pr_evidence.items()
+                                        if value is not None
+                                    },
+                                },
+                            )
 
                     # gh issue close confirmation: count only when result is not an error.
                     # is_error=True is already handled above (continue), so reaching here
@@ -1549,7 +1702,9 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
     # git_commits now includes any resolved merge SHAs from the loop above, so
     # they flow into deliverables here without extra bookkeeping.
     deliverables = list(
-        dict.fromkeys(git_commits + [f"merge {m}" for m in pr_merges] + file_writes)
+        dict.fromkeys(
+            git_commits + [f"merge {m}" for m in pr_merges] + mutation_deliverables + file_writes
+        )
     )
     deliverable_details = _ordered_deliverable_details(deliverables, detail_by_value)
 
