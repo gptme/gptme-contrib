@@ -59,10 +59,13 @@ test-packages:  ## Run tests for all packages
 	if [ -n "$$failed" ]; then exit 1; fi
 
 test-changed-packages:  ## Run tests only for packages changed since BASE (default: origin/master)
-	@CHANGED=$$(git diff --name-only "$(BASE)"...HEAD 2>/dev/null \
-		| grep '^packages/' | cut -d/ -f1-2 | sort -u \
+	@ALL=$$(git diff --name-only "$(BASE)"...HEAD 2>/dev/null); \
+	CHANGED=$$(echo "$$ALL" | grep '^packages/' | cut -d/ -f1-2 | sort -u \
 		| while IFS= read -r p; do [ -f "$$p/Makefile" ] && echo "$$p"; done); \
-	if [ -z "$$CHANGED" ]; then \
+	if echo "$$ALL" | grep -qE '^(Makefile|pyproject\.toml|uv\.lock|\.github/workflows/test-packages\.yml)'; then \
+		echo "Shared workspace config changed vs $(BASE) — running all packages"; \
+		$(MAKE) test-packages; \
+	elif [ -z "$$CHANGED" ]; then \
 		echo "No changed packages detected vs $(BASE) — running all packages"; \
 		$(MAKE) test-packages; \
 	else \
