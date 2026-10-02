@@ -22,7 +22,7 @@ def get_documented_packages(readme_path):
     """Extract package names from README markdown table."""
     content = readme_path.read_text()
 
-    packages = set()
+    packages: set[str] = set()
 
     # Match markdown table links like [package-name](./packages/package-name/)
     pattern1 = r"\[([^\]]+)\]\(\.?/?packages/([^/]+)/?\)"
