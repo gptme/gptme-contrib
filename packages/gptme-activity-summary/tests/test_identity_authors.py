@@ -41,6 +41,21 @@ def test_reviews_received_uses_deployment_author(monkeypatch, configured, explic
     assert cmd[cmd.index("--author") + 1] == expected
 
 
+def test_reviews_null_review_author_does_not_raise():
+    payload = [
+        {
+            "number": 8,
+            "title": "Another change",
+            "url": "https://example.test/pr/8",
+            "author": {"login": "NewAgent"},
+            "reviews": [{"author": None}, {"author": {"login": "ErikBjare"}}],
+        }
+    ]
+    with patch("gptme_activity_summary.github_data._run_command", return_value=json.dumps(payload)):
+        reviews = get_reviews_received(date(2026, 10, 1), date(2026, 10, 2), ["NewAgent/brain"])
+    assert [r.reviewer for r in reviews] == ["ErikBjare"]
+
+
 @pytest.mark.parametrize("pr_author", [{"login": "NewAgent"}, None])
 def test_reviews_preserve_operator_and_exclude_actual_pr_author(pr_author):
     payload = [

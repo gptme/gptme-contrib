@@ -460,7 +460,7 @@ def get_reviews_received(
             for pr in prs:
                 pr_author = (pr.get("author") or {}).get("login", "")
                 for review in pr.get("reviews", []):
-                    reviewer = review.get("author", {}).get("login", "")
+                    reviewer = (review.get("author") or {}).get("login", "")
                     if reviewer and reviewer not in (pr_author, "bot"):
                         reviews.append(
                             PRReview(
