@@ -127,3 +127,124 @@ def test_xai_client_ignores_openai_reasoning_config() -> None:
         assert "reasoning" not in session_update["session"]
 
     asyncio.run(_exercise())
+
+
+def test_xai_session_update_keeps_legacy_flat_shape() -> None:
+    """xAI is production on the flat (beta-style) shape — it must not change
+    when the OpenAI client moves to the GA session shape."""
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = XAIRealtimeClient(
+                api_key="test-key",
+                session_config=SessionConfig(
+                    instructions="You are Bob.",
+                    output_speed=1.1,
+                    available_agents=[],
+                ),
+            )
+            await client.connect()
+            await client.disconnect()
+
+        session = fake_ws.sent[0]["session"]
+        assert {k: v for k, v in session.items() if k != "tools"} == {
+            "modalities": ["text", "audio"],
+            "instructions": "You are Bob.",
+            "voice": "rex",
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+            "turn_detection": {
+                "type": "server_vad",
+                "threshold": 0.55,
+                "silence_duration_ms": 500,
+                "prefix_padding_ms": 150,
+            },
+            "output": {"speed": 1.1},
+        }
+        assert [t["name"] for t in session["tools"]] == [
+            "subagent",
+            "subagent_status",
+            "subagent_cancel",
+            "hangup",
+        ]
+
+    asyncio.run(_exercise())
+
+
+def test_xai_g711_passthrough_keeps_legacy_format_strings() -> None:
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = XAIRealtimeClient(
+                api_key="test-key",
+                session_config=SessionConfig(g711_passthrough=True),
+            )
+            await client.connect()
+            await client.disconnect()
+
+        session = fake_ws.sent[0]["session"]
+        assert session["input_audio_format"] == "g711_ulaw"
+        assert session["output_audio_format"] == "g711_ulaw"
+        assert "audio" not in session
+        assert "type" not in session
+
+    asyncio.run(_exercise())
+
+
+def test_xai_still_treats_session_created_as_ready() -> None:
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = XAIRealtimeClient(api_key="test-key")
+            await client.connect()
+            await client._handle_event({"type": "session.created"})
+            assert client._session_ready is not None
+            assert client._session_ready.is_set()
+            await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
+def test_xai_error_keeps_historical_log_only_behaviour() -> None:
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+
+        async def _fake_connect(*_args, **_kwargs):
+            return fake_ws
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+            )
+            client = XAIRealtimeClient(api_key="test-key")
+            await client.connect()
+            await client._handle_event(
+                {"type": "error", "error": {"message": "x", "param": "session.foo"}}
+            )
+            assert client.session_error is None
+            assert fake_ws.closed is False
+            await client.disconnect()
+
+    asyncio.run(_exercise())

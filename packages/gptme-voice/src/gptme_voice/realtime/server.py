@@ -24,6 +24,7 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Awaitable, Callable
 
 import click
 import uvicorn
@@ -111,6 +112,17 @@ def _websocket_has_vision(websocket) -> bool:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _hangup_on_session_failure(
+    hangup: Callable[[str | None], Awaitable[None]],
+) -> Callable[[str], Awaitable[None]]:
+    """Adapt a transport hangup callback into a realtime ``on_session_failed``."""
+
+    async def _on_session_failed(reason: str) -> None:
+        await hangup(f"realtime session.update rejected: {reason}")
+
+    return _on_session_failed
 
 
 @dataclass
@@ -2885,6 +2897,11 @@ class VoiceServer:
                         rag=rag_for_ws,
                     )
                     realtime_client.on_function_call = tool_bridge.handle_function_call
+                    # A rejected session.update must end the call instead of leaving
+                    # the caller with an unconfigured (or silent) provider session.
+                    realtime_client.on_session_failed = _hangup_on_session_failure(
+                        _twilio_hangup
+                    )
 
                     if prewarm_client is not None:
                         await realtime_client.activate_session()
@@ -3182,6 +3199,11 @@ class VoiceServer:
                 rag=rag_for_ws,
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
+            # A rejected session.update must end the call instead of leaving
+            # the caller with an unconfigured (or silent) provider session.
+            realtime_client.on_session_failed = _hangup_on_session_failure(
+                _local_hangup
+            )
 
             await realtime_client.connect()
 
@@ -3305,6 +3327,11 @@ class VoiceServer:
                 rag=rag_for_ws,
             )
             realtime_client.on_function_call = tool_bridge.handle_function_call
+            # A rejected session.update must end the call instead of leaving
+            # the caller with an unconfigured (or silent) provider session.
+            realtime_client.on_session_failed = _hangup_on_session_failure(
+                _browser_hangup
+            )
 
             await realtime_client.connect()
             await websocket.send_text(

@@ -824,21 +824,19 @@ def test_hangup_tool_advertised_in_openai_session_config() -> None:
     """Ensure the hangup tool is present in the OpenAI session tools list
     so the model can actually discover and call it.
     """
-    import inspect
+    from gptme_voice.realtime.openai_client import OpenAIRealtimeClient
 
-    from gptme_voice.realtime import openai_client
-
-    source = inspect.getsource(openai_client.OpenAIRealtimeClient.connect)
+    client = OpenAIRealtimeClient(api_key="test-key")
+    tools = client._build_session_params("test", client._build_tools())["tools"]
+    names = {tool["name"] for tool in tools}
+    assert "hangup" in names, "hangup tool must be advertised in session.update"
+    assert "subagent" in names, "subagent tool must also still be advertised"
     assert (
-        '"name": "hangup"' in source
-    ), "hangup tool must be declared in OpenAIRealtimeClient.connect() tools list"
-    assert '"name": "subagent"' in source, "subagent tool must also still be declared"
+        "subagent_status" in names
+    ), "subagent_status tool must be advertised so the model can check pending tasks"
     assert (
-        '"name": "subagent_status"' in source
-    ), "subagent_status tool must be declared so the model can check pending tasks"
-    assert (
-        '"name": "subagent_cancel"' in source
-    ), "subagent_cancel tool must be declared so the model can cancel pending tasks"
+        "subagent_cancel" in names
+    ), "subagent_cancel tool must be advertised so the model can cancel pending tasks"
 
 
 def test_subagent_status_empty_when_no_tasks() -> None:

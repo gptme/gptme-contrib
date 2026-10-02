@@ -10,6 +10,7 @@ See: https://docs.x.ai/developers/model-capabilities/audio/voice-agent
 
 import dataclasses
 import logging
+from typing import Any
 
 from gptme.config import get_config
 
@@ -95,6 +96,45 @@ class XAIRealtimeClient(OpenAIRealtimeClient):
         """xAI's voice agent API does not expose OpenAI-style reasoning controls."""
         return None
 
-    # xAI does not emit session.created; it emits session.updated instead.
-    # The base class already handles session.updated via _mark_session_ready,
-    # so no override is needed here.
+    # Keep accepting both session.created and session.updated as the ready
+    # signal so xAI's handshake is unchanged (the OpenAI base class gates
+    # readiness on session.updated only). Note: as of 2026-10 xAI does emit
+    # session.created (with its default voice) before session.updated.
+    _SESSION_READY_EVENTS = frozenset({"session.created", "session.updated"})
+    # xAI error semantics for session.update are not documented to the same
+    # degree as OpenAI's; keep the historical behaviour (log, don't tear down)
+    # until verified against the live API.
+    _FAIL_CLOSED_ON_SESSION_ERROR = False
+
+    def _build_session_params(self, instructions: str, tools: list[dict]) -> dict:
+        """xAI still speaks the flat, beta-style session shape.
+
+        The OpenAI base class sends the GA shape (``type: "realtime"`` with
+        nested ``audio.input`` / ``audio.output``). xAI's voice agent API is
+        documented and proven in production with the flat shape below, so keep
+        its wire format byte-for-byte unchanged.
+        """
+        cfg = self.session_config
+        session_params: dict[str, Any] = {
+            "modalities": ["text", "audio"],
+            "instructions": instructions,
+            "voice": cfg.voice,
+            "input_audio_format": cfg.input_format,
+            "output_audio_format": cfg.output_format,
+            "turn_detection": {
+                "type": cfg.turn_detection,
+                "threshold": cfg.vad_threshold,
+                "silence_duration_ms": cfg.vad_silence_duration_ms,
+                "prefix_padding_ms": cfg.vad_prefix_padding_ms,
+            },
+            "tools": tools,
+        }
+        if cfg.output_speed is not None:
+            session_params["output"] = {"speed": cfg.output_speed}
+        reasoning = self._get_reasoning_config()
+        if reasoning is not None:
+            session_params["reasoning"] = reasoning
+        transcription = self._get_transcription_config()
+        if transcription is not None:
+            session_params["input_audio_transcription"] = transcription
+        return session_params

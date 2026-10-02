@@ -97,6 +97,7 @@ def test_connect_exposes_subagent_tool_as_focused_lookup_only() -> None:
         description = tool["description"]
 
         assert session_update["type"] == "session.update"
+        assert session_update["session"]["type"] == "realtime"
         assert tool["name"] == "subagent"
         assert "small, focused workspace lookup or action" in description
         assert "broad investigations" in description
@@ -129,7 +130,10 @@ def test_connect_omits_output_key_when_speed_not_configured() -> None:
 
         session_update = fake_ws.sent[0]
         assert session_update["type"] == "session.update"
+        assert session_update["session"]["type"] == "realtime"
+        assert session_update["session"]["output_modalities"] == ["audio"]
         assert "output" not in session_update["session"]
+        assert "speed" not in session_update["session"]["audio"]["output"]
         assert "reasoning" not in session_update["session"]
 
     asyncio.run(_exercise())
@@ -163,6 +167,7 @@ def test_connect_uses_current_openai_headers_and_reasoning_effort() -> None:
         assert captured_headers == {"Authorization": "Bearer test-key"}
         assert "OpenAI-Beta" not in captured_headers
         assert session_update["session"]["reasoning"] == {"effort": "low"}
+        assert session_update["session"]["audio"]["output"]["voice"] == "echo"
 
     asyncio.run(_exercise())
 
@@ -260,7 +265,9 @@ def test_connect_includes_output_speed_when_configured() -> None:
 
         session_update = fake_ws.sent[0]
         assert session_update["type"] == "session.update"
-        assert session_update["session"]["output"] == {"speed": 1.15}
+        # GA nests speed under audio.output; a top-level "output" key is beta-only.
+        assert "output" not in session_update["session"]
+        assert session_update["session"]["audio"]["output"]["speed"] == 1.15
         assert fake_ws.closed is True
 
     asyncio.run(_exercise())
@@ -315,11 +322,11 @@ def test_load_project_instructions_blocks_fake_live_lookup_narration(
     )
 
 
-def test_send_audio_buffers_until_session_created() -> None:
-    """Audio arriving before session.created must be buffered, not forwarded.
+def test_send_audio_buffers_until_session_ready() -> None:
+    """Audio arriving before session.updated must be buffered, not forwarded.
 
     Regression for silent-call-on-startup: Twilio media frames can arrive
-    before the provider confirms the session with ``session.created``. Sending
+    before the provider confirms the session with ``session.updated``. Sending
     audio before then is a no-op on the provider side — the caller hears
     silence because Grok has not started listening.
     """
@@ -342,7 +349,7 @@ def test_send_audio_buffers_until_session_created() -> None:
             assert fake_ws.sent[0]["type"] == "session.update"
             baseline = len(fake_ws.sent)
 
-            # Audio before session.created must be buffered, not sent.
+            # Audio before session.updated must be buffered, not sent.
             await client.send_audio(b"\x01\x02\x03")
             await client.send_audio(b"\x04\x05\x06")
             assert len(fake_ws.sent) == baseline
@@ -350,7 +357,7 @@ def test_send_audio_buffers_until_session_created() -> None:
 
             # Simulate provider confirming the session — the flush should
             # replay buffered chunks in order.
-            await client._handle_event({"type": "session.created"})
+            await client._handle_event({"type": "session.updated"})
 
             assert client._session_ready is not None
             assert client._session_ready.is_set()
@@ -377,7 +384,7 @@ def test_send_audio_buffers_until_session_created() -> None:
 
 
 def test_send_audio_buffer_is_bounded() -> None:
-    """Buffer must be capped so a never-arriving session.created cannot leak memory."""
+    """Buffer must be capped so a never-arriving ready event cannot leak memory."""
 
     async def _exercise() -> None:
         fake_ws = _FakeWebSocket()
@@ -423,7 +430,10 @@ def test_initial_response_is_sent_once_after_session_ready() -> None:
             )
             await client.connect()
 
+            # session.created carries OpenAI's *default* config — not ready yet.
             await client._handle_event({"type": "session.created"})
+            assert not any(e.get("type") == "response.create" for e in fake_ws.sent)
+            await client._handle_event({"type": "session.updated"})
             await client._handle_event({"type": "session.updated"})
 
             response_creates = [
@@ -569,7 +579,7 @@ def test_function_call_subagent_dispatch_does_not_auto_create_response() -> None
                 on_function_call=_on_function_call,
             )
             await client.connect()
-            await client._handle_event({"type": "session.created"})
+            await client._handle_event({"type": "session.updated"})
 
             baseline = len(fake_ws.sent)
             await client._handle_event(
@@ -637,7 +647,7 @@ def test_function_call_subagent_status_still_auto_creates_response() -> None:
                 on_function_call=_on_function_call,
             )
             await client.connect()
-            await client._handle_event({"type": "session.created"})
+            await client._handle_event({"type": "session.updated"})
 
             baseline = len(fake_ws.sent)
             await client._handle_event(
@@ -709,7 +719,8 @@ def test_disconnect_drains_late_transcript_events_without_sending_late_audio() -
                 on_audio=audio_chunks.append,
             )
             await client.connect()
-            await client._handle_event({"type": "session.created"})
+            await client._handle_event({"type": "session.updated"})
+            await client.send_audio(b"\x01\x02\x03")
 
             async def _emit_late_events() -> None:
                 await asyncio.sleep(0.01)
@@ -789,7 +800,7 @@ def test_hold_initial_response_suppresses_greeting() -> None:
             client._hold_initial_response = True
             await client.connect()
 
-            await client._handle_event({"type": "session.created"})
+            await client._handle_event({"type": "session.updated"})
             assert client._session_ready is not None
             assert client._session_ready.is_set()
 
@@ -825,7 +836,7 @@ def test_activate_session_releases_held_greeting() -> None:
             )
             client._hold_initial_response = True
             await client.connect()
-            await client._handle_event({"type": "session.created"})
+            await client._handle_event({"type": "session.updated"})
 
             # Session is ready but greeting is still held
             assert client._session_ready is not None
@@ -848,10 +859,11 @@ def test_activate_session_releases_held_greeting() -> None:
 
 
 def test_activate_session_before_session_ready_sends_greeting_on_ready() -> None:
-    """activate_session() before session.created must still send greeting once ready.
+    """activate_session() before session ready must still send greeting once ready.
 
-    Race: Twilio's "start" event can arrive before xAI confirms the session on
-    a cold connection.  The greeting must fire only after session.created/updated.
+    Race: Twilio's "start" event can arrive before the provider confirms the
+    session on a cold connection.  The greeting must fire only after
+    session.updated.
     """
 
     async def _exercise() -> None:
@@ -873,7 +885,7 @@ def test_activate_session_before_session_ready_sends_greeting_on_ready() -> None
             client._hold_initial_response = True
             await client.connect()
 
-            # Activate before session.created arrives
+            # Activate before session.updated arrives
             await client.activate_session()
 
             # Still no response.create — session not ready yet
@@ -883,7 +895,7 @@ def test_activate_session_before_session_ready_sends_greeting_on_ready() -> None
             assert response_creates == []
 
             # Now session arrives
-            await client._handle_event({"type": "session.created"})
+            await client._handle_event({"type": "session.updated"})
 
             response_creates = [
                 e for e in fake_ws.sent if e.get("type") == "response.create"
@@ -938,8 +950,10 @@ def test_connect_emits_g711_ulaw_audio_format_when_passthrough_enabled() -> None
         session_update = fake_ws.sent[0]
         assert session_update["type"] == "session.update"
         session = session_update["session"]
-        assert session["input_audio_format"] == "g711_ulaw"
-        assert session["output_audio_format"] == "g711_ulaw"
+        assert session["audio"]["input"]["format"] == {"type": "audio/pcmu"}
+        assert session["audio"]["output"]["format"] == {"type": "audio/pcmu"}
+        assert "input_audio_format" not in session
+        assert "output_audio_format" not in session
 
 
 # ── on_user_transcript backward-compat ─────────────────────────────────────
@@ -1301,7 +1315,7 @@ def test_send_text_message_delivers_verbatim_user_turn() -> None:
             assert not send_task.done()
             assert fake_ws.sent[baseline:] == []
 
-            await client._handle_event({"type": "session.created"})
+            await client._handle_event({"type": "session.updated"})
             await send_task
 
             events = fake_ws.sent[baseline:]
@@ -1351,5 +1365,341 @@ def test_send_text_message_times_out_if_session_never_becomes_ready() -> None:
 
             assert fake_ws.sent[baseline:] == []
             await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
+# ── GA session shape + fail-closed session.update ──────────────────────────
+
+
+async def _connect_with(ws, **client_kwargs) -> OpenAIRealtimeClient:
+    async def _fake_connect(*_args, **_kwargs):
+        return ws
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "gptme_voice.realtime.openai_client.websockets.connect", _fake_connect
+        )
+        client = OpenAIRealtimeClient(api_key="test-key", **client_kwargs)
+        await client.connect()
+    return client
+
+
+def test_connect_sends_ga_session_shape() -> None:
+    """OpenAI's GA API rejects the beta shape (missing session.type)."""
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+        client = await _connect_with(
+            fake_ws,
+            session_config=SessionConfig(instructions="You are Bob.", voice="cedar"),
+        )
+        await client.disconnect()
+
+        session = fake_ws.sent[0]["session"]
+        assert session["type"] == "realtime"
+        assert session["output_modalities"] == ["audio"]
+        assert session["instructions"] == "You are Bob."
+        assert session["audio"] == {
+            "input": {
+                "format": {"type": "audio/pcm", "rate": 24000},
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.7,
+                    "silence_duration_ms": 500,
+                    "prefix_padding_ms": 300,
+                },
+                "transcription": {"model": "whisper-1"},
+            },
+            "output": {
+                "format": {"type": "audio/pcm", "rate": 24000},
+                "voice": "cedar",
+            },
+        }
+        for legacy_key in (
+            "modalities",
+            "voice",
+            "input_audio_format",
+            "output_audio_format",
+            "turn_detection",
+            "input_audio_transcription",
+            "output",
+        ):
+            assert legacy_key not in session, legacy_key
+
+    asyncio.run(_exercise())
+
+
+def test_session_created_alone_does_not_mark_openai_session_ready() -> None:
+    """session.created carries default config; audio/greeting must wait."""
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+        client = await _connect_with(
+            fake_ws,
+            session_config=SessionConfig(initial_response_instructions="Say hi."),
+        )
+        await client.send_audio(b"\x01\x02")
+        await client._handle_event({"type": "session.created"})
+
+        assert client._session_ready is not None
+        assert not client._session_ready.is_set()
+        assert [e["type"] for e in fake_ws.sent] == ["session.update"]
+
+        await client._handle_event({"type": "session.updated"})
+        assert client._session_ready.is_set()
+        assert [e["type"] for e in fake_ws.sent] == [
+            "session.update",
+            "input_audio_buffer.append",
+            "response.create",
+        ]
+        await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
+_REJECTED_SESSION_UPDATE = {
+    "type": "error",
+    "error": {
+        "type": "invalid_request_error",
+        "code": "missing_required_parameter",
+        "message": "Missing required parameter: 'session.type'.",
+        "param": "session.type",
+    },
+}
+
+
+def test_rejected_session_update_fails_closed(caplog) -> None:
+    """A rejected session.update must never yield a live unconfigured call."""
+
+    async def _exercise() -> None:
+        fake_ws = _QueuedWebSocket()
+        failures: list[str] = []
+        client = await _connect_with(
+            fake_ws,
+            session_config=SessionConfig(initial_response_instructions="Say hi."),
+            on_session_failed=failures.append,
+        )
+        await client.send_audio(b"\x01\x02")
+        await client._handle_event({"type": "session.created"})
+        with caplog.at_level("ERROR"):
+            await client._handle_event(_REJECTED_SESSION_UPDATE)
+        # A late session.updated (should never happen) must not revive it.
+        await client._handle_event({"type": "session.updated"})
+        await client.send_audio(b"\x03\x04")
+
+        assert client.session_error == "Missing required parameter: 'session.type'."
+        assert failures == ["Missing required parameter: 'session.type'."]
+        assert client._session_ready is not None
+        assert not client._session_ready.is_set()
+        assert client._pending_audio == []
+        # No audio flush, no greeting — only the original session.update.
+        assert [e["type"] for e in fake_ws.sent] == ["session.update"]
+        assert fake_ws.closed is True
+        assert "refusing to run unconfigured session" in caplog.text
+
+        with pytest.raises(RuntimeError, match="configuration was rejected"):
+            await client.send_text_message("hello?")
+
+        await client.disconnect(commit_audio=True)
+        assert [e["type"] for e in fake_ws.sent] == ["session.update"]
+
+    asyncio.run(_exercise())
+
+
+class _StrictCloseWebSocket(_QueuedWebSocket):
+    """A socket whose second close() raises, like some websockets versions."""
+
+    async def close(self) -> None:
+        if self.closed:
+            raise websockets.ConnectionClosed(None, None)
+        await super().close()
+
+
+def test_disconnect_after_rejected_session_does_not_raise() -> None:
+    """Teardown after a fail-closed session must not raise on the double close,
+    or the server's finally block skips transcript persistence / post-call work."""
+
+    async def _exercise() -> None:
+        fake_ws = _StrictCloseWebSocket()
+        client = await _connect_with(fake_ws)
+        await client._handle_event(_REJECTED_SESSION_UPDATE)
+        assert fake_ws.closed is True
+
+        await client.disconnect(commit_audio=True, stop_audio_output=True)
+        assert client._ws is None
+
+    asyncio.run(_exercise())
+
+
+def test_send_text_message_fails_fast_when_session_update_rejected() -> None:
+    """Waiters must not sit out the full ready timeout on a rejected session."""
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+        client = await _connect_with(fake_ws)
+        send_task = asyncio.create_task(client.send_text_message("hello?"))
+        await asyncio.sleep(0)
+        assert not send_task.done()
+
+        await client._handle_event(_REJECTED_SESSION_UPDATE)
+        with pytest.raises(RuntimeError, match="configuration was rejected"):
+            await asyncio.wait_for(send_task, timeout=1.0)
+        await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
+def test_error_before_session_ready_fails_closed_even_without_session_param() -> None:
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+        client = await _connect_with(fake_ws)
+        await client._handle_event(
+            {"type": "error", "error": {"message": "Invalid value: 'rex'."}}
+        )
+        assert client.session_error == "Invalid value: 'rex'."
+        await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
+def test_runtime_error_after_ready_does_not_tear_down_session() -> None:
+    """Ordinary in-call errors (e.g. empty commit) keep the call alive."""
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+        failures: list[str] = []
+        client = await _connect_with(fake_ws, on_session_failed=failures.append)
+        await client._handle_event({"type": "session.updated"})
+        await client._handle_event(
+            {
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "input_audio_buffer_commit_empty",
+                    "message": "buffer too small",
+                    "param": None,
+                },
+            }
+        )
+        assert client.session_error is None
+        assert failures == []
+        assert client._session_ready is not None
+        assert client._session_ready.is_set()
+        assert fake_ws.closed is False
+        await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
+def test_activate_session_notifies_failure_on_prewarmed_rejected_session() -> None:
+    """A pre-warm can fail before it is claimed; activation must surface it."""
+
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+        client = await _connect_with(
+            fake_ws,
+            session_config=SessionConfig(initial_response_instructions="Say hi."),
+            hold_initial_response=True,
+        )
+        await client._handle_event(_REJECTED_SESSION_UPDATE)
+
+        failures: list[str] = []
+        client.on_session_failed = failures.append
+        await client.activate_session()
+        await client.activate_session()
+
+        assert failures == ["Missing required parameter: 'session.type'."]
+        assert not any(e.get("type") == "response.create" for e in fake_ws.sent)
+        await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
+def test_wait_until_ready_returns_once_session_updated() -> None:
+    async def _exercise() -> None:
+        fake_ws = _FakeWebSocket()
+        client = await _connect_with(fake_ws)
+        waiter = asyncio.create_task(client.wait_until_ready(timeout=1.0))
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        await client._handle_event({"type": "session.updated"})
+        await waiter
+        await client.disconnect()
+
+    asyncio.run(_exercise())
+
+
+def _commits(ws) -> list[dict]:
+    return [e for e in ws.sent if e.get("type") == "input_audio_buffer.commit"]
+
+
+def test_disconnect_skips_commit_when_input_audio_already_committed() -> None:
+    """Teardown must not emit an empty commit after server VAD already committed."""
+
+    async def _exercise() -> None:
+        fake_ws = _QueuedWebSocket()
+        client = await _connect_with(fake_ws)
+        await client._handle_event({"type": "session.updated"})
+        await client.send_audio(b"\x01\x02\x03")
+        await client._handle_event({"type": "input_audio_buffer.committed"})
+        await client.disconnect(commit_audio=True, stop_audio_output=True)
+
+        assert _commits(fake_ws) == []
+        assert fake_ws.closed is True
+
+    asyncio.run(_exercise())
+
+
+@pytest.mark.parametrize(
+    ("g711", "silence"),
+    [(False, b"\x00" * 32), (True, b"\xff\x7f" * 80)],
+    ids=["pcm16", "g711_ulaw"],
+)
+def test_disconnect_skips_commit_for_silence_only_audio(
+    g711: bool, silence: bytes
+) -> None:
+    """Silence-only input should not count as pending speech at teardown."""
+
+    async def _exercise() -> None:
+        fake_ws = _QueuedWebSocket()
+        client = await _connect_with(
+            fake_ws, session_config=SessionConfig(g711_passthrough=g711)
+        )
+        await client._handle_event({"type": "session.updated"})
+        await client.send_audio(silence)
+        await client.disconnect(commit_audio=True, stop_audio_output=True)
+
+        assert _commits(fake_ws) == []
+
+    asyncio.run(_exercise())
+
+
+def test_disconnect_commits_pending_non_silent_audio() -> None:
+    async def _exercise() -> None:
+        fake_ws = _QueuedWebSocket()
+        client = await _connect_with(fake_ws)
+        # Buffered before ready, flushed on ready — still counts as pending.
+        await client.send_audio(b"\x00\x01")
+        await client._handle_event({"type": "session.updated"})
+        await client.disconnect(commit_audio=True, stop_audio_output=True)
+
+        assert len(_commits(fake_ws)) == 1
+
+    asyncio.run(_exercise())
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    ["response.output_audio.delta", "response.audio.delta"],
+)
+def test_audio_delta_handled_for_ga_and_beta_event_names(event_type: str) -> None:
+    async def _exercise() -> None:
+        received: list[bytes] = []
+        client = OpenAIRealtimeClient(api_key="test-key", on_audio=received.append)
+        await client._handle_event(
+            {"type": event_type, "delta": base64.b64encode(b"\x01\x02").decode()}
+        )
+        assert received == [b"\x01\x02"]
 
     asyncio.run(_exercise())
