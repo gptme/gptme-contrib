@@ -37,6 +37,22 @@ def test_get_transcript_success():
         mock_api.get_transcript.assert_called_once_with("test_id")
 
 
+def test_get_transcript_api_v1():
+    """youtube-transcript-api 1.x has no get_transcript; use instance fetch()."""
+
+    class FakeApiV1:
+        def fetch(self, video_id):
+            assert video_id == "test_id"
+            fetched = MagicMock()
+            fetched.to_raw_data.return_value = [{"text": "Hello"}, {"text": "v1"}]
+            return fetched
+
+    with patch("gptme_youtube.tools.youtube.YouTubeTranscriptApi", FakeApiV1):
+        from gptme_youtube.tools.youtube import get_transcript
+
+        assert get_transcript("test_id") == "Hello v1"
+
+
 def test_get_transcript_error():
     """Test get_transcript when API raises an exception."""
     mock_api = MagicMock()
