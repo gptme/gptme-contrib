@@ -195,6 +195,43 @@ portable_hash() {
     fi
 }
 
+# --- Issue/PR comment reads: one canonical, cacheable request shape ---
+# Every comment read in this script goes through these helpers so the request
+# argv is identical (`gh api repos/R/issues/N/comments?per_page=100 --paginate`)
+# — the same shape PM's own handoff probes use. Bob's gh wrapper replays a
+# paginated comments list when a cheap conditional GET of issues/N 304s, but
+# it keys the replay on the full argv: three different `--jq` filters per PR
+# meant three cache entries and three full refetches whenever the PR moved, and
+# `--slurp` reads bypassed the replay cache entirely (measured 2026-10-02: ~200
+# of ~360 core REST calls per PM gate run were these reads). Filters now run
+# locally on the flattened list instead of via `gh --jq`.
+#
+# Echoes one flat JSON array of comments (oldest first). `flatten` accepts both
+# gh's concatenated per-page arrays and an already-slurped array of pages.
+# Returns non-zero when the API call or parse fails.
+fetch_issue_comments_json() {
+    local repo=$1 number=$2 raw
+    raw=$(gh api "repos/${repo}/issues/${number}/comments?per_page=100" --paginate 2>/dev/null) \
+        || return 1
+    printf '%s' "$raw" | jq -cs 'flatten' 2>/dev/null
+}
+
+# Echoes one flat JSON array of submitted PR reviews. A single page
+# (per_page=100) is a plain conditional GET the wrapper can answer with a 304;
+# only a full first page pays for the paginated walk.
+fetch_pr_reviews_json() {
+    local repo=$1 number=$2 raw count
+    raw=$(gh api "repos/${repo}/pulls/${number}/reviews?per_page=100" 2>/dev/null) || return 1
+    raw=$(printf '%s' "$raw" | jq -cs 'flatten' 2>/dev/null) || return 1
+    count=$(printf '%s' "$raw" | jq 'length' 2>/dev/null) || return 1
+    if [ "${count:-0}" -ge 100 ]; then
+        raw=$(gh api "repos/${repo}/pulls/${number}/reviews?per_page=100" --paginate 2>/dev/null) \
+            || return 1
+        raw=$(printf '%s' "$raw" | jq -cs 'flatten' 2>/dev/null) || return 1
+    fi
+    printf '%s' "$raw"
+}
+
 # Emit a work item in the configured format.
 # Args: type repo number title detail
 emit_item() {
@@ -1028,8 +1065,8 @@ check_assigned_issues() {
         # surfacing until it's actually answered, instead of going permanently
         # silent the moment the gate first emits (or silently seeding on first
         # sight when someone else already holds the ball). See alice#55.
-        last_actor=$(gh api "repos/$repo/issues/$issue_number/comments" \
-            --paginate --jq 'last.user.login // empty' 2>/dev/null | tail -1 || true)
+        last_actor=$(fetch_issue_comments_json "$repo" "$issue_number" \
+            | jq -r 'last.user.login // empty' 2>/dev/null || true)
         [ -z "$last_actor" ] && last_actor=$(gh api "repos/$repo/issues/$issue_number" \
             --jq '.user.login' 2>/dev/null || true)
 
@@ -1245,9 +1282,9 @@ check_merge_conflicts() {
 ai_review_verdict() {
     local repo=$1 pr_number=$2 head_sha=$3
     local marker
-    marker=$(gh api "repos/${repo}/issues/${pr_number}/comments" --paginate \
-        --jq '[.[] | .body // "" | capture("<!-- bob-ai-review (?<j>\\{[^>]*\\}) -->").j] | last // empty' \
-        2>/dev/null | tail -1)
+    marker=$(fetch_issue_comments_json "$repo" "$pr_number" \
+        | jq -r '[.[] | .body // "" | capture("<!-- bob-ai-review (?<j>\\{[^>]*\\}) -->").j] | last // empty' \
+        2>/dev/null || true)
     [ -z "$marker" ] && { echo "none"; return 0; }
 
     local reviewed_sha score findings
@@ -1384,15 +1421,14 @@ check_greptile_scores() {
             # Greptile's bot username contains "greptile" (case-insensitive).
             # Look for "Score: N/5" pattern, anchored to avoid matching prose/flowcharts.
             #
-            # Note: --paginate with --jq applies the filter per-page, so if multiple
-            # pages each contain Greptile comments, we'd get multiple lines of output.
-            # We take only the last line (tail -1) to get the most recent score.
+            # The filter runs over the flattened all-pages list, so `last` is the
+            # most recent Greptile comment overall.
             fetched_at="$now"
-            greptile_score=$(gh api "repos/${repo}/issues/${pr_number}/comments" \
-                --paginate --jq '
+            greptile_score=$(fetch_issue_comments_json "$repo" "$pr_number" \
+                | jq -r '
                     [.[] | select(.user.login | test("greptile"; "i"))] | last |
                     .body // "" | capture("Score: (?<n>[0-9])/5") | .n // empty
-                ' 2>/dev/null | tail -1 || true)
+                ' 2>/dev/null || true)
         fi
 
         # No Greptile review or no score found — Greptile may be dark on this
@@ -1939,17 +1975,12 @@ latest_comment_is_bot_waiting() {
     local author="${AUTHOR:-$bot}"
 
     # Fetch every page before finding the latest handoff. GitHub returns issue
-    # comments oldest-first; ``--slurp`` wraps pages in an outer array. Reviews
-    # are a separate API surface, so include them explicitly.
+    # comments oldest-first; both helpers return one flat array. Reviews are a
+    # separate API surface, so include them explicitly.
     local comments_json reviews_json
-    comments_json=$(gh api --paginate --slurp \
-        -H "Accept: application/vnd.github+json" \
-        -H "X-GitHub-Api-Version: 2022-11-28" \
-        "repos/$repo/issues/$number/comments?per_page=100" 2>/dev/null) || return 1
-    reviews_json=$(gh api --paginate --slurp \
-        -H "Accept: application/vnd.github+json" \
-        -H "X-GitHub-Api-Version: 2022-11-28" \
-        "repos/$repo/pulls/$number/reviews?per_page=100" 2>/dev/null) || return 1
+    comments_json=$(fetch_issue_comments_json "$repo" "$number") || return 1
+    reviews_json=$(fetch_pr_reviews_json "$repo" "$number") || return 1
+    [ -n "$comments_json" ] && [ -n "$reviews_json" ] || return 1
 
     # The PM human-merge marker is head-scoped: a marker whose head sha no
     # longer prefixes the PR's current head is a stale handoff and must not

@@ -78,7 +78,10 @@ if endpoint == "notifications":
     sys.exit(0)
 
 # issues/{n}/comments — serve the fixture comments list and apply jq.
-if "/issues/" in endpoint and endpoint.endswith("/comments"):
+# activity-gate's canonical paginated read carries ?per_page=100; the
+# non-paginated maintainer-waiting probe keeps falling through to "empty".
+_paged_ep = endpoint.split("?")[0] if "--paginate" in argv else endpoint
+if "/issues/" in endpoint and _paged_ep.endswith("/comments"):
     data = json.dumps(fixture.get("comments", []))
     if jq_expr:
         r = sp.run(["jq", "-r", jq_expr], input=data, capture_output=True, text=True)
