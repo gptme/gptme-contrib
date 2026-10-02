@@ -17,7 +17,7 @@ tool:
 
 | Function | Runs |
 |----------|------|
-| `delegate(prompt, task_id=None, backend="gptme", agent_type="execute", timeout=600, background=True)` | `gptodo spawn <task_id> --prompt ...` in the background or `gptodo run ...` in the foreground. `backend` is `gptme` or `claude`. `agent_type` is `general`, `explore`, `plan` or `execute`. |
+| `delegate(prompt, task_id=None, backend="gptme", agent_type="execute", timeout=600, background=True)` | `gptodo spawn <task_id> --prompt ...` in the background or `gptodo run ...` in the foreground (broken without `task_id`, see below). `backend` is `gptme` or `claude`. `agent_type` is `general`, `explore`, `plan` or `execute`. |
 | `check_agent(session_id)` | `gptodo status <session_id>` (broken, see below) |
 | `list_agents()` | `gptodo agents --json` |
 | `list_tasks(state="active")` | `gptodo list`, plus `--active-only` when `state="active"` |

@@ -104,8 +104,10 @@ mkdir -p email/{inbox,sent,archive,drafts,filters}
 cat >> .env <<'EOF'
 AGENT_EMAIL=agent@example.com
 AGENT_EMAIL_NAME=My Agent
-EMAIL_SEND_ALLOWLIST=you@example.com             # who the agent may send to
-EMAIL_ALLOWLIST=you@example.com                  # whose mail it should answer
+# who the agent may send to
+EMAIL_SEND_ALLOWLIST=you@example.com
+# whose mail it should answer (comments must be on their own line)
+EMAIL_ALLOWLIST=you@example.com
 EOF
 
 # Write and send a message (send goes through msmtp)

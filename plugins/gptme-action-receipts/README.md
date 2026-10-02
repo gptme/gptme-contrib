@@ -102,8 +102,9 @@ scopes:
 
 The gate is fail-open: a missing or unparsable manifest, or a repo it can't
 resolve, never blocks. With no manifest every allowlist is empty, so in warn
-mode each gated command logs a `SCOPE VIOLATION` warning. Run in `warn` for a
-while and add legitimate repos to the allowlist.
+mode each gated command whose repo it resolves logs a `SCOPE VIOLATION`
+warning (an unresolvable repo is skipped silently). Run in `warn` for a while
+and add legitimate repos to the allowlist.
 
 The [operator guide](../../docs/plugins/gptme-action-receipts.md) covers the
 warn → block transition and log interpretation in detail.

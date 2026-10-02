@@ -152,7 +152,7 @@ pending handoff for review.
 ```text
 UserPromptSubmit hook
   1. memory/guidance.md                -> injected once, then cleared
-  2. memory/pending-updates.md         -> injected; dated blocks older than 3 days are pruned
+  2. memory/pending-updates.md         -> injected; dated blocks older than 3 days are skipped (file not rewritten)
   3. memory/pending-session-context.md -> injected once, then cleared
   4. memory/*.md (typed entries)       -> scored; top 2 above threshold injected
 ```
