@@ -126,6 +126,67 @@ def test_failed_post_does_not_mark(
     assert list(twitter_module.POST_DEDUP_DIR.glob("*.posted")) == []
 
 
+def test_empty_response_data_does_not_mark(
+    twitter_module: Any, posted, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A response with no data is a failed post, not a posted one: no marker, and
+    a retry is allowed (the dedup must not strand the user with --force)."""
+    monkeypatch.setattr(
+        twitter_module,
+        "load_twitter_client",
+        lambda require_auth=True, headless=False: SimpleNamespace(
+            create_tweet=lambda **kwargs: SimpleNamespace(data=None)
+        ),
+    )
+    with pytest.raises(SystemExit) as exc:
+        twitter_module.post("hello world", None, False)
+    assert exc.value.code == 1
+    assert list(twitter_module.POST_DEDUP_DIR.glob("*.posted")) == []
+
+    # Recovery: the same text posts normally once the API behaves.
+    def working_create_tweet(**kwargs):
+        posted.append(kwargs)
+        return SimpleNamespace(data={"id": "1"})
+
+    monkeypatch.setattr(
+        twitter_module,
+        "load_twitter_client",
+        lambda require_auth=True, headless=False: SimpleNamespace(
+            create_tweet=working_create_tweet
+        ),
+    )
+    twitter_module.post("hello world", None, False)
+    assert len(posted) == 1
+
+
+def test_thread_first_tweet_with_empty_data_does_not_mark(
+    twitter_module: Any, posted, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        twitter_module,
+        "split_thread",
+        lambda text: [SimpleNamespace(text="one"), SimpleNamespace(text="two")],
+    )
+    calls: list[str] = []
+
+    def create_tweet(**kwargs):
+        calls.append(kwargs["text"])
+        return SimpleNamespace(data=None)
+
+    monkeypatch.setattr(
+        twitter_module,
+        "load_twitter_client",
+        lambda require_auth=True, headless=False: SimpleNamespace(
+            create_tweet=create_tweet
+        ),
+    )
+    with pytest.raises(SystemExit) as exc:
+        twitter_module.post("one\n---\ntwo", None, True)
+    assert exc.value.code == 1
+    assert calls == ["one"]
+    assert list(twitter_module.POST_DEDUP_DIR.glob("*.posted")) == []
+
+
 def test_thread_failing_after_first_tweet_still_marks(
     twitter_module: Any, posted, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -983,8 +983,9 @@ def _post_now(
     quote_id: str | None,
     on_posted: Callable[[], None],
 ) -> None:
-    # ``on_posted`` runs right after the first create_tweet returns, so a thread
-    # that fails part-way still counts as posted and a retry is refused.
+    # ``on_posted`` runs only once the first tweet is *confirmed created* (the
+    # response carries a tweet id), so a failed first call writes no marker while
+    # a thread that fails part-way still counts as posted and a retry is refused.
     # Handle thread posting
     if thread:
         thread_messages = split_thread(text)
@@ -997,8 +998,6 @@ def _post_now(
                 in_reply_to_tweet_id=reply_to_id,
                 user_auth=_get_user_auth(client),
             )
-            if reply_to_id is None:
-                on_posted()
             if not response.data:
                 console.print("[red]Error: No response data from tweet creation")
                 sys.exit(1)
@@ -1009,10 +1008,16 @@ def _post_now(
                 console.print("[red]Error: Unexpected response data format")
                 sys.exit(1)
 
-            reply_to_id = tweet_data.get("id")
-            if not reply_to_id:
+            tweet_id = tweet_data.get("id")
+            if not tweet_id:
                 console.print("[red]Error: Could not get tweet ID from response")
                 sys.exit(1)
+
+            if reply_to_id is None:
+                # First message is confirmed created — mark before continuing so a
+                # thread that fails part-way still counts as posted.
+                on_posted()
+            reply_to_id = tweet_id
 
             console.print(f"[green]Posted tweet: {message.text}")
     else:
@@ -1023,7 +1028,6 @@ def _post_now(
             quote_tweet_id=quote_id,
             user_auth=_get_user_auth(client),
         )
-        on_posted()
         if not response.data:
             console.print("[red]Error: No response data from tweet creation")
             sys.exit(1)
@@ -1037,6 +1041,8 @@ def _post_now(
         if not tweet_id:
             console.print("[red]Error: Could not get tweet ID from response")
             sys.exit(1)
+
+        on_posted()
 
         console.print(f"[green]Posted tweet: {text}")
         console.print(f"[blue]Tweet ID: {tweet_id}")
