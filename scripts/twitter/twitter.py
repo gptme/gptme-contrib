@@ -51,10 +51,15 @@ For OAuth 2.0 setup:
 4. Add client credentials to .env file
 """
 
+import contextlib
+import fcntl
+import hashlib
 import os
 import re
 import sys
+import time
 import warnings
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -859,6 +864,57 @@ def me(limit: int) -> None:
         sys.exit(1)
 
 
+POST_DEDUP_TTL = 24 * 60 * 60  # 24 hours
+POST_DEDUP_DIR = Path.home() / ".local" / "state" / "gptme" / "twitter-post-dedup"
+POST_DUPLICATE_EXIT_CODE = 3
+
+
+def _post_dedup_key(
+    text: str, reply_to: str | None, quote_id: str | None, account: str
+) -> str:
+    """Key a post by its target, so a second reply to the same tweet is a duplicate.
+
+    Replies and quote-tweets are keyed on the target tweet (any text): concurrent
+    sessions answering the same mention draft different wording, which a text
+    hash would miss. Standalone posts are keyed on their whitespace-normalized
+    text. The account is part of the key so multi-account announcements of the
+    same text stay independent.
+    """
+    if reply_to:
+        target = f"reply:{reply_to}"
+    elif quote_id:
+        target = f"quote:{quote_id}"
+    else:
+        target = "text:" + " ".join(text.split())
+    return hashlib.sha256(f"{account}|{target}".encode()).hexdigest()[:16]
+
+
+@contextlib.contextmanager
+def _post_dedup_gate(key: str, force: bool):
+    """Hold an exclusive per-key lock across check -> post -> mark.
+
+    Yields a ``mark_posted`` callback, or ``None`` if an identical post was made
+    within ``POST_DEDUP_TTL`` (and ``force`` is false). The lock serializes
+    concurrent sessions, so the second one sees the first one's marker instead
+    of racing past a check that ran before the first post landed.
+    """
+    POST_DEDUP_DIR.mkdir(parents=True, exist_ok=True)
+    marker = POST_DEDUP_DIR / f"{key}.posted"
+    with open(POST_DEDUP_DIR / f"{key}.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            recent = (
+                marker.exists()
+                and time.time() - marker.stat().st_mtime < POST_DEDUP_TTL
+            )
+            if recent and not force:
+                yield None
+            else:
+                yield marker.touch
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 @cli.command()
 @click.argument("text")
 @click.option("--reply-to", help="Tweet ID to reply to")
@@ -869,26 +925,69 @@ def me(limit: int) -> None:
     is_flag=True,
     help="Never start interactive OAuth; fail if saved credentials cannot authenticate.",
 )
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Post even if the same tweet (or a reply/quote to the same target) "
+    "was posted from this account within the last 24h.",
+)
 def post(
     text: str,
     reply_to: str | None,
     thread: bool,
     quote_id: str | None = None,
     headless: bool = False,
+    force: bool = False,
 ) -> None:
-    """Post a tweet (requires OAuth authentication)"""
+    """Post a tweet (requires OAuth authentication)
+
+    Refuses (exit code 3) to repeat an identical post, or a second reply/quote
+    to the same tweet, within 24h unless --force is given.
+    """
     if quote_id and thread:
         console.print("[red]--quote cannot be combined with --thread")
         sys.exit(1)
     if quote_id and reply_to:
         console.print("[red]--quote cannot be combined with --reply-to")
         sys.exit(1)
-    client = load_twitter_client(require_auth=True, headless=headless)
+    if thread:
+        _abort_on_bad_urls([message.text for message in split_thread(text)])
+    else:
+        _abort_on_bad_urls([text])
 
+    key = _post_dedup_key(text, reply_to, quote_id, current_account())
+    with _post_dedup_gate(key, force) as mark_posted:
+        if mark_posted is None:
+            target = (
+                f"a reply to {reply_to}"
+                if reply_to
+                else f"a quote of {quote_id}"
+                if quote_id
+                else "this exact tweet"
+            )
+            console.print(
+                f"[red]Refusing duplicate post: {target} was already posted from "
+                f"this account within the last {POST_DEDUP_TTL // 3600}h. "
+                "Use --force to post anyway."
+            )
+            sys.exit(POST_DUPLICATE_EXIT_CODE)
+        client = load_twitter_client(require_auth=True, headless=headless)
+        _post_now(client, text, reply_to, thread, quote_id, mark_posted)
+
+
+def _post_now(
+    client,
+    text: str,
+    reply_to: str | None,
+    thread: bool,
+    quote_id: str | None,
+    on_posted: Callable[[], None],
+) -> None:
+    # ``on_posted`` runs right after the first create_tweet returns, so a thread
+    # that fails part-way still counts as posted and a retry is refused.
     # Handle thread posting
     if thread:
         thread_messages = split_thread(text)
-        _abort_on_bad_urls([message.text for message in thread_messages])
         reply_to_id: str | None = None
 
         for message in thread_messages:
@@ -898,6 +997,8 @@ def post(
                 in_reply_to_tweet_id=reply_to_id,
                 user_auth=_get_user_auth(client),
             )
+            if reply_to_id is None:
+                on_posted()
             if not response.data:
                 console.print("[red]Error: No response data from tweet creation")
                 sys.exit(1)
@@ -916,13 +1017,13 @@ def post(
             console.print(f"[green]Posted tweet: {message.text}")
     else:
         # Single tweet
-        _abort_on_bad_urls([text])
         response = client.create_tweet(
             text=text,
             in_reply_to_tweet_id=reply_to,
             quote_tweet_id=quote_id,
             user_auth=_get_user_auth(client),
         )
+        on_posted()
         if not response.data:
             console.print("[red]Error: No response data from tweet creation")
             sys.exit(1)
