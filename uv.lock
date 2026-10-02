@@ -1257,6 +1257,23 @@ wheels = [
 ]
 
 [[package]]
+name = "fastapi"
+version = "0.142.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "annotated-doc" },
+    { name = "opentelemetry-api" },
+    { name = "pydantic" },
+    { name = "starlette" },
+    { name = "typing-extensions" },
+    { name = "typing-inspection" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/56/4f/f7c30a73127e0a8bbffe788369b8359e530b01ae06e2757936fa35bc5e6d/fastapi-0.142.2.tar.gz", hash = "sha256:06366626f2e70576367714d9ab2fe8472e6c8456dba69b399f9f797ab5e92570", size = 466721, upload-time = "2026-09-30T09:51:11.277Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a0/b6/78aaf9141fb46742928c113f3cf6ef2259d538cb02b604b7656c1dc9883c/fastapi-0.142.2-py3-none-any.whl", hash = "sha256:bd5f4d81f1e93a88bcd77caf4dfe3c2dbffc3805407a0007e9a114c18b3a670b", size = 144409, upload-time = "2026-09-30T09:51:09.8Z" },
+]
+
+[[package]]
 name = "fastuuid"
 version = "0.14.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2577,23 +2594,32 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
+    { name = "fastapi" },
+    { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-mock" },
+    { name = "uvicorn" },
 ]
 test = [
+    { name = "fastapi" },
+    { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-mock" },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "fastapi", marker = "extra == 'test'", specifier = ">=0.109.0" },
     { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
     { name = "gptme-tts", extras = ["test"], marker = "extra == 'all'" },
+    { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
     { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.12.0" },
     { name = "requests" },
     { name = "scipy" },
     { name = "sounddevice", specifier = ">=0.5.1" },
+    { name = "uvicorn", marker = "extra == 'test'", specifier = ">=0.27.0" },
 ]
 provides-extras = ["test", "all"]
 
