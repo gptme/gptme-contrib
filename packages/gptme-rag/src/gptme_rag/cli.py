@@ -646,7 +646,11 @@ def search(
                             )
 
                         if min_relevance is not None and distances:
-                            keep = [i for i, d in enumerate(distances) if 1 - d >= min_relevance]
+                            keep = [
+                                i
+                                for i, d in enumerate(distances)
+                                if max(0.0, min(1.0, 1 - d)) >= min_relevance
+                            ]
                             documents = [documents[i] for i in keep]
                             distances = [distances[i] for i in keep]
                             if explanations:
