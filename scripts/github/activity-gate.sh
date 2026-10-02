@@ -482,7 +482,7 @@ fetch_pr_data_with_ttl() {
     local repo=$1
     local ttl=$2
     # Filter out draft PRs — they're intentionally deprioritized/not on merge path
-    gh_cache_get_or_fetch "pr-${repo}" "$ttl" \
+    gh_cache_get_or_fetch "pr-v2-${repo}" "$ttl" \
         "fetch_pr_data_search '$repo'" \
         "[]"
 }
