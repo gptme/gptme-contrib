@@ -107,9 +107,17 @@ def _mentions_model_stream_crash(lower: str) -> bool:
 # numeric substring of trailing usage metadata (``"costUsdTicks": 402322000``)
 # and, because the last match wins, shadowed the real ``402 Payment Required``
 # error line — recording an infra death as ``nonzero_exit_unclassified``.
+#
+# ``\b`` rejects word-adjacent matches (``402322000``, ``402abc``) but treats
+# ``.``/``,`` as boundaries, so a decimal (``402.5``) or thousands separator
+# (``429,500``) still slips through. Excluding ``.``/``,`` outright would drop
+# legitimate JSON values whose field is followed by a comma (``"http_status":
+# 402,``). A status code is therefore a maximal digit run: forbid adjacency to
+# a word character, and forbid a ``.``/``,`` that merely continues a number.
+# ``402,`` / ``402.`` (separator not followed by a digit) still match.
 _ERROR_LINE_RE = re.compile(
     r"(?i)(error|exception|traceback|failed|rate.?limit|weekly.?limit|"
-    r"(?<![\d.,])(?:400|401|402|403|429)(?![\d.,])|authentication|quota|payment required)"
+    r"(?<!\d[.,])\b(?:400|401|402|403|429)\b(?![.,]\d)|authentication|quota|payment required)"
 )
 _ASSISTANT_ROLES = frozenset({"assistant"})
 

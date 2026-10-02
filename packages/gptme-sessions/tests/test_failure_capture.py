@@ -966,3 +966,14 @@ def test_error_line_regex_requires_status_code_boundaries():
     assert _ERROR_LINE_RE.search('"costUsd": 402.5') is None
     assert _ERROR_LINE_RE.search('"rate": 429,500') is None
     assert _ERROR_LINE_RE.search("HTTP/1.1 402 Payment Required") is not None
+    # Alphanumeric adjacency is not a standalone code either.
+    assert _ERROR_LINE_RE.search("402abc") is None
+    assert _ERROR_LINE_RE.search("abc402") is None
+    assert _ERROR_LINE_RE.search('"costUsdTicks402322000"') is None
+    # Thousands-separated values are not codes.
+    assert _ERROR_LINE_RE.search("1,402") is None
+    # ...but a JSON value followed by a field comma IS a real code.
+    assert _ERROR_LINE_RE.search('"http_status": 402,') is not None
+    assert _ERROR_LINE_RE.search('{"http_status": 429, "quota": true}') is not None
+    # A comma-separated list of statuses still matches.
+    assert _ERROR_LINE_RE.search("401, 402") is not None
