@@ -14,7 +14,7 @@ SAMPLE_RATE = 8000
 # path a pure tone sits in a single critical band and reads perceptually louder
 # than speech at the same level, so a hot tone dominates the conversation
 # instead of acting as a subtle progress signal. The original 0.45 amplitude
-# was reported as "very loud" on a real call (Erik, 2026-08-31), where it peaked
+# was reported as "very loud" on a real call (2026-08-31), where it peaked
 # at −6.9 dBFS with −11.3 dBFS RMS — hotter than normal speech. Both cues now
 # sit below the RMS of a representative speech reference; see
 # ``tests/test_sounds.py`` for the enforced peak/RMS ceilings.
