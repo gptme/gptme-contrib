@@ -129,6 +129,7 @@ def _run_gate(
     comments: list[dict] | None = None,
     reviews: list[dict] | None = None,
     author: str = "test-author",
+    prior_timestamp: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
     fake_gh.write_text(FAKE_GH)
@@ -146,6 +147,11 @@ def _run_gate(
 
     # Established state dir: seed a sibling so first-sight emits.
     (state_dir / "notif-99999999999.state").write_text("2026-08-01T00:00:00Z")
+
+    # Optionally pre-seed a prior timestamp for the tested notification to
+    # simulate a second-or-later run (prior is set, notification is revisited).
+    if prior_timestamp is not None:
+        (state_dir / f"notif-{NOTIF_ID}.state").write_text(prior_timestamp)
 
     return subprocess.run(
         [
@@ -199,12 +205,24 @@ def _human_comment(created_at: str = "2026-08-26T17:00:00Z") -> dict:
 
 
 def test_bot_only_author_notification_suppressed() -> None:
-    """A Codecov-only bump on an author notification is consumed, not dispatched."""
+    """A Codecov-only bump re-seen after a prior dispatch is consumed, not dispatched.
+
+    Suppression requires prior to be set: we must have already dispatched the
+    notification once (at the prior timestamp), so any human ask that existed
+    at that time was already handled.  A purely-bot bump since then is safe to
+    drop.
+    """
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
         state_dir = tmp / "state"
         state_dir.mkdir()
-        result = _run_gate(tmp, state_dir, comments=[_bot_comment()])
+        # prior = timestamp of the previous dispatch cycle (before the bot bump)
+        result = _run_gate(
+            tmp,
+            state_dir,
+            comments=[_bot_comment()],
+            prior_timestamp="2026-08-26T16:00:00Z",
+        )
         assert result.returncode in (0, 1), result.stderr
         assert _emitted_notifications(result.stdout) == [], result.stdout
         # Persisted so the bump is not retried until updated_at advances.
@@ -214,14 +232,48 @@ def test_bot_only_author_notification_suppressed() -> None:
 
 
 def test_bot_only_comment_notification_suppressed() -> None:
-    """Same suppression applies to the `comment` reason on a PR subject."""
+    """Same suppression (with prior set) applies to the `comment` reason on a PR."""
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
         state_dir = tmp / "state"
         state_dir.mkdir()
-        result = _run_gate(tmp, state_dir, reason="comment", comments=[_bot_comment()])
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason="comment",
+            comments=[_bot_comment()],
+            prior_timestamp="2026-08-26T16:00:00Z",
+        )
         assert result.returncode in (0, 1), result.stderr
         assert _emitted_notifications(result.stdout) == [], result.stdout
+
+
+def test_first_sight_with_human_comment_predating_bot_emits() -> None:
+    """First-sight notification with a human comment before the bot must emit.
+
+    Scenario (the bug fixed in this PR): a human commented at T1, then a bot
+    commented at T2 > T1.  The notification is first seen (no prior state) with
+    updated_at=T2 and latest actor=bot.  Without the prior guard, the suppression
+    would swallow the human ask.  With the guard, we emit so the human comment
+    can be dispatched.
+    """
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        # No prior_timestamp — this is the first time the gate sees this notification.
+        # Human commented at T1, bot bumped at T2 (notification updated_at = T2).
+        result = _run_gate(
+            tmp,
+            state_dir,
+            comments=[
+                _human_comment(created_at="2026-08-26T16:00:00Z"),
+                _bot_comment(created_at="2026-08-26T16:30:00Z"),
+            ],
+        )
+        assert result.returncode in (0, 1), result.stderr
+        emitted = _emitted_notifications(result.stdout)
+        assert len(emitted) == 1, result.stdout
 
 
 def test_human_reply_after_bot_activity_emits_with_actor_class() -> None:

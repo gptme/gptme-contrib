@@ -2435,11 +2435,19 @@ def notification_priority:
                 # emit-eligible — those are human asks. Persist so the bump is not
                 # retried until updated_at advances, but do not count against the
                 # per-run cap.
+                #
+                # Always fetch the actor class for PR author/comment notifications
+                # so the detail string is enriched even on first sight. Suppress
+                # only when prior is set: the prior dispatch already handled any
+                # human comment visible at that time, so a bot-only bump since then
+                # has nothing new to act on. On first sight (prior empty), always
+                # emit — a human comment that predates the bot bump has never been
+                # dispatched and must not be silently swallowed.
                 if [ "$_subj_type" = "PullRequest" ] \
                         && { [ "$_notif_reason" = "author" ] || [ "$_notif_reason" = "comment" ]; } \
                         && [ "$number" -gt 0 ] 2>/dev/null; then
                     _actor_class=$(notification_latest_actor_class "$repo" "$number")
-                    if [ "$_actor_class" = "bot" ]; then
+                    if [ -n "$prior" ] && [ "$_actor_class" = "bot" ]; then
                         printf '%s' "$notif_updated" > "$state_file"
                         printf '%s#%s' "$repo" "$number" > "$map_file"
                         continue
@@ -2500,9 +2508,13 @@ def notification_priority:
                 fi
                 # Mirror the jsonl branch's bot-only author/comment filter so
                 # the reported count matches what would actually be dispatched.
+                # Same prior-set guard as jsonl branch: first-sight notifications
+                # (prior empty) must emit even when latest actor is a bot, because
+                # a human comment predating the bot bump has never been dispatched.
                 if [ "$notif_subject_type" = "PullRequest" ] \
                         && { [ "$notif_reason" = "author" ] || [ "$notif_reason" = "comment" ]; } \
                         && [ "$number" -gt 0 ] 2>/dev/null \
+                        && [ -n "$prior" ] \
                         && [ "$(notification_latest_actor_class "$repo" "$number")" = "bot" ]; then
                     continue
                 fi
