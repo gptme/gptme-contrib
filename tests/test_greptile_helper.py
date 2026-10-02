@@ -1781,7 +1781,13 @@ def test_review_reads_use_one_cacheable_request(tmp_path: Path):
     """Formal reviews share one ETag-eligible request per helper process."""
     calls = tmp_path / "calls.jsonl"
     env = {"GH_CALLS": str(calls), "GREPTILE_HELPER_CACHE_DIR": str(tmp_path / "c")}
-    status = _run_helper("status", _sha_mismatch_fixture(), extra_env=env)
+    fixture = _sha_mismatch_fixture()
+    # A prior trigger comment makes the trigger-count path read reviews too, so
+    # two call sites must share the one request.
+    fixture["raw_comments"].append(
+        _make_trigger_comment("test-user", _iso_ago(minutes=60))
+    )
+    status = _run_helper("status", fixture, extra_env=env)
     assert status.stdout.strip() == "needs-re-review", f"stderr: {status.stderr}"
     review_calls = _rest_review_calls(_calls(calls))
     assert review_calls == [["api", "repos/gptme/gptme/pulls/123/reviews?per_page=100"]]
