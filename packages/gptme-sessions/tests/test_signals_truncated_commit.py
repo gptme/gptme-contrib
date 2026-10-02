@@ -10,10 +10,18 @@ the 0.25 floor even though the session committed and pushed.
 from gptme_sessions.signals import extract_signals_cc, grade_signals
 
 
-def _bash(tool_id: str, command: str, result: str, *, is_error: bool = False) -> list[dict]:
+def _bash(
+    tool_id: str,
+    command: str,
+    result: str,
+    *,
+    is_error: bool = False,
+    cwd: str | None = None,
+) -> list[dict]:
     return [
         {
             "type": "assistant",
+            "cwd": cwd,
             "timestamp": "2026-09-29T15:00:00Z",
             "message": {
                 "content": [
@@ -21,7 +29,7 @@ def _bash(tool_id: str, command: str, result: str, *, is_error: bool = False) ->
                         "type": "tool_use",
                         "id": tool_id,
                         "name": "Bash",
-                        "input": {"command": command},
+                        "input": {"command": command, "cwd": cwd},
                     }
                 ]
             },
@@ -57,11 +65,46 @@ _21E9_RESULT = (
 
 
 def test_piped_commit_output_still_counts_commit_and_heredoc_write():
-    signals = extract_signals_cc(_bash("t1", _21E9_CMD, _21E9_RESULT))
+    signals = extract_signals_cc(_bash("t1", _21E9_CMD, _21E9_RESULT, cwd="/home/bob/bob"))
     assert len(signals["git_commits"]) == 1
     assert "52fad08fbe" in signals["git_commits"][0]
     assert signals["file_writes"] == ["tasks/some-task.md"]
+    detail = next(detail for detail in signals["deliverable_details"] if detail["kind"] == "commit")
+    assert detail["evidence"]["subject"] == "docs: x"
+    assert detail["evidence"]["repo"] == "/home/bob/bob"
     assert grade_signals(signals) >= 0.6  # was the 0.25 floor
+
+
+def test_quiet_mutations_preserve_reconciliation_evidence():
+    commit_cmd = (
+        'git -C /tmp/worktrees/r commit -m "fix: quiet" 2>&1 | tail -1; '
+        "git -C /tmp/worktrees/r push -q fork feature >/dev/null"
+    )
+    msgs = _bash("commit123456", commit_cmd, "", cwd="/home/bob/bob")
+    msgs += _bash(
+        "pr123456",
+        'gh pr create --repo Org/r --head me:feature --title "fix: quiet" --body body >/dev/null',
+        "",
+        cwd="/tmp/worktrees/r",
+    )
+
+    signals = extract_signals_cc(msgs)
+
+    commit = next(detail for detail in signals["deliverable_details"] if detail["kind"] == "commit")
+    assert commit["evidence"]["subject"] == "fix: quiet"
+    assert commit["evidence"]["repo"] == "/tmp/worktrees/r"
+    assert commit["evidence"]["quiet_push"] is True
+    push = next(detail for detail in signals["deliverable_details"] if detail["kind"] == "push")
+    assert push["evidence"]["repo"] == "/tmp/worktrees/r"
+    assert push["evidence"]["output_swallowed"] is True
+    pull_request = next(
+        detail for detail in signals["deliverable_details"] if detail["kind"] == "pull_request"
+    )
+    assert pull_request["evidence"]["repo"] == "Org/r"
+    assert pull_request["evidence"]["head"] == "me:feature"
+    assert pull_request["evidence"]["title"] == "fix: quiet"
+    assert pull_request["evidence"]["cwd"] == "/tmp/worktrees/r"
+    assert signals["prs_submitted"] == ["PR (output swallowed)"]
 
 
 def test_git_safe_push_line_alone_counts_for_commit_command():
