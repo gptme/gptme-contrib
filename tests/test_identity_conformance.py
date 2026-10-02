@@ -88,7 +88,14 @@ class Identity:
 def find_identity_leaks(text: str, allow: tuple[str, ...] = ()) -> list[str]:
     """Return Bob-identity leaks in *text*, ignoring the exact *allow* strings."""
     for allowed in allow:
-        text = text.replace(allowed, "")
+        # Use identifier boundaries so a superset like "BOB_BACKEND_EXTRA" is
+        # not accidentally allowed when the allow list contains "BOB_BACKEND".
+        text = re.sub(
+            r"(?<![A-Za-z0-9_])" + re.escape(allowed) + r"(?![A-Za-z0-9_])",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
     leaks = []
     for match in _LEAK_RE.finditer(text):
         start = max(match.start() - 40, 0)
@@ -165,6 +172,8 @@ def test_leak_detector_catches_bob_markers() -> None:
     for clean in ("Bobby", "kebob", "Erika", "erikson", "Quinn1a2b"):
         assert not find_identity_leaks(clean), clean
     assert not find_identity_leaks("x BOB_A y", allow=("BOB_A",))
+    # Superset strings must still be caught even when a prefix is allowed.
+    assert find_identity_leaks("x BOB_A_EXTRA y", allow=("BOB_A",))
 
 
 # --- gptme-ace -------------------------------------------------------------
@@ -221,6 +230,19 @@ def test_ace_storage_cli(identity: Identity) -> None:
     assert not (identity.home / "bob").exists()
     assert_tree_has_no_identity_leak(identity.workspace, identity.sandbox)
     assert_tree_has_no_identity_leak(identity.home, identity.sandbox)
+
+    # Scan the env dict handed to the subprocess.  Interpreter-plumbing vars
+    # (PYTHONPATH etc.) may legitimately contain host-specific paths that include
+    # the developer's username, so they are excluded from this scan.
+    _PLUMBING = frozenset(
+        {"PYTHONPATH", "LANG", "LC_ALL", "SYSTEMROOT", "TMPDIR", "PATH"}
+    )
+    env_text = "\n".join(
+        f"{k}={v}" for k, v in identity.env().items() if k not in _PLUMBING
+    )
+    assert_no_identity_leak(
+        env_text, where="subprocess env (non-plumbing vars)", sandbox=identity.sandbox
+    )
 
 
 # --- gptme-runloops: erik_decision prompt ----------------------------------
@@ -283,9 +305,12 @@ def test_pm_dispatch_launch(
     from gptme_runloops.pm_dispatch import LaneDispatcher, SlotItem, SlotManager
 
     launched: list[list[str]] = []
+    launched_envs: list[dict[str, str]] = []
 
     def fake_run(cmd, *args, **kwargs):
         launched.append(list(cmd))
+        if kwargs.get("env"):
+            launched_envs.append(dict(kwargs["env"]))
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -327,4 +352,16 @@ def test_pm_dispatch_launch(
         allow=_PM_DISPATCH_LEGACY_ALIASES,
         sandbox=identity.sandbox,
     )
+    # Also scan any explicit env dict passed to subprocess.run.
+    _PLUMBING = frozenset(
+        {"PYTHONPATH", "LANG", "LC_ALL", "SYSTEMROOT", "TMPDIR", "PATH"}
+    )
+    for env in launched_envs:
+        env_text = "\n".join(f"{k}={v}" for k, v in env.items() if k not in _PLUMBING)
+        assert_no_identity_leak(
+            env_text,
+            where="pm_dispatch subprocess env (non-plumbing vars)",
+            allow=_PM_DISPATCH_LEGACY_ALIASES,
+            sandbox=identity.sandbox,
+        )
     assert_tree_has_no_identity_leak(tmp_path / "slot-tmp", identity.sandbox)
