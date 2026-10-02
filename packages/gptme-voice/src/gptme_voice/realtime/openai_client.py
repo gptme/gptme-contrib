@@ -285,9 +285,7 @@ class SessionConfig:
     vad_threshold: float = 0.7
     vad_silence_duration_ms: int = 500
     vad_prefix_padding_ms: int = 300
-    available_agents: list[str] = field(
-        default_factory=lambda: ["alice", "gordon", "sven"]
-    )
+    available_agents: list[str] = field(default_factory=list)
     # Extra function-tool schemas appended to the built-in tool set —
     # e.g. capability-gated body_* tools from gptme_voice.body.
     extra_tools: list[dict] = field(default_factory=list)
