@@ -1,57 +1,79 @@
 # gptme-cc-memory
 
-Typed, git-tracked, hook-injected session memory for Claude Code.
+Typed, git-tracked, hook-injected cross-session memory for **Claude Code**:
+plain Markdown memory files in your repo, scored against each prompt and
+injected as context by a `UserPromptSubmit` hook — no vector DB, no LLM calls.
+
+**Status:** experimental (`0.1.0`, alpha). Targets Claude Code hooks. For
+gptme itself, see the [gptme-user-memories](../../plugins/gptme-user-memories/)
+plugin and gptme's built-in lessons system.
 
 ## Why
 
-Claude Code forgets everything between sessions. At least 8 memory tools exist —
-but all share the same architectural gap: **flat, untyped, untracked facts**.
+Claude Code forgets everything between sessions, and most memory add-ons store
+flat, untyped facts. This package adds four memory types whose type affects
+retrieval scoring, and keeps every memory as a git-tracked Markdown file so
+you get history and diffs for free (`git log memory/`).
 
-`gptme-cc-memory` changes that with four memory types that encode *what-to-do-with-this*
-semantics:
+| Type | What it encodes | Retrieval effect |
+|------|-----------------|------------------|
+| `feedback` | Behavioral rules from corrections or confirmations | Highest default confidence (0.88) and a 1.10 score boost |
+| `user` | Who the user is — role, expertise, preferences | Default confidence 0.75 |
+| `project` | Ongoing work, goals, decisions, deadlines | Default confidence 0.78 |
+| `reference` | Where to find things in external systems | Default confidence 0.72, 0.96 score boost |
 
-| Type | What it encodes | When it's injected |
-|------|----------------|-------------------|
-| `user` | Who the user is — role, expertise, preferences | When tailoring depth or framing |
-| `feedback` | Behavioral rules from corrections or confirmations | **Always** (behavioral overrides) |
-| `project` | Ongoing work, goals, decisions, deadlines | When working on related tasks |
-| `reference` | Where to find things in external systems | When that system is mentioned |
+Properties:
 
-### Key differentiators
+- **Git-tracked** — memories are ordinary files in `<workspace>/memory/`.
+- **Typed schema** — `name`, `description`, and `metadata.type` frontmatter,
+  validated by `validate_memory_file()`.
+- **Behavioral correction** — `feedback` memories carry **Why** and **How to
+  apply**, giving the model enough context for edge cases.
+- **Zero API cost** — pure file reads plus a small JSON state file.
 
-- **Git-tracked** — every memory has full history (`git log memory/`, `git diff`)
-- **Typed schema** — injection priority depends on memory type, not just cosine similarity
-- **Behavioral correction** — `feedback` type includes **Why** and **How to apply**, giving
-  the model enough context to handle edge cases
-- **Bidirectional pipeline** — `stop-hook` extracts corrections from session trajectories;
-  `prompt-inject` surfaces relevant memories at the next session start
-- **Zero API cost** — pure file reads, no LLM calls for retrieval
+## Install
 
-## Installation
+Not published to PyPI. Install the console scripts from the repository
+subdirectory:
 
 ```bash
-# From gptme-contrib
+uv tool install "git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-cc-memory"
+# or, from a gptme-contrib checkout:
 uv pip install -e packages/gptme-cc-memory
-
-# For tests
-uv pip install -e "packages/gptme-cc-memory[test]"
 ```
 
-## Quick Start
+This provides three commands:
 
-### 1. Initialize memory directory
+| Command | Purpose |
+|---------|---------|
+| `gptme-cc-memory-prompt-submit` | `UserPromptSubmit` hook: reads the hook JSON on stdin, prints the memory block to inject |
+| `gptme-cc-memory-extract <trajectory.jsonl>` | Heuristic extractor over a Claude Code transcript |
+| `gptme-cc-memory-stop-hook` | Thin wrapper that runs the extractor on `$CC_TRAJECTORY_FILE` (no-op if unset) |
+
+## Quickstart
+
+### 1. Create the memory directory
+
+Memory lives at `<workspace>/memory/`, where `<workspace>` is
+`$GPTME_CC_MEMORY_DIR` if set, otherwise the hook's working directory (your
+project root under Claude Code).
 
 ```bash
-mkdir -p ~/.claude/projects/my-project/memory/
-cp packages/gptme-cc-memory/MEMORY.md.template my-project/memory/MEMORY.md
+mkdir -p memory
+cp path/to/gptme-contrib/packages/gptme-cc-memory/MEMORY.md.template memory/MEMORY.md
 ```
 
-### 2. Create your first memory file
+`MEMORY.md` is a human/model-readable index; it is never itself injected.
+
+### 2. Write a memory file
+
+`memory/prefer-python-typing.md`:
 
 ```markdown
 ---
 name: prefer-python-typing
 description: Use Python typing hints for all function signatures
+aliases: ["type hints"]   # optional extra match phrases
 metadata:
   type: feedback
 ---
@@ -65,93 +87,131 @@ have been there from the start.
 new function. Use `| None` instead of `Optional[]`.
 ```
 
-### 3. Add the stop hook
+### 3. Register the prompt hook
 
-Add to your `.claude/settings.local.json`:
+In `.claude/settings.json` (or `.claude/settings.local.json`):
 
 ```json
 {
   "hooks": {
-    "Stop": "gptme-cc-memory-stop-hook"
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "gptme-cc-memory-prompt-submit" }
+        ]
+      }
+    ]
   }
 }
 ```
 
-### 4. The pipeline runs automatically
+On each prompt the hook scores every memory file and injects at most the two
+most relevant, wrapped in `<memory_relevant_entries>`, capped at 4000
+characters.
 
-- **Stop hook**: When the session ends, the extractor reads the trajectory and writes
-  pending updates, session context, and new feedback memories.
-- **Prompt injection**: At the next session start, `prompt-inject` reads the memory
-  directory, scores each file, and injects the top-N relevant memories.
+### 4. (Optional) Extract corrections at session end
 
-## Architecture
+`gptme-cc-memory-extract` reads a Claude Code transcript (JSONL) and, when
+`GPTME_CC_MEMORY_DIR` is set, writes two handoff files into
+`<workspace>/memory/`:
 
-```
-Interactive session ends
-        │
-        ▼
-   stop-hook (async)
-        │
-        ▼
-   extractor
-     • Reads CC trajectory (JSONL)
-     • Detects: corrections, confirmations, new instructions
-     • Writes pending-updates.md + pending-session-context.md
-        │
-        ▼ (next session starts)
-        │
-   UserPromptSubmit hook fires
-        │
-        ▼
-   injector
-     • Reads memory/ directory
-     • Scores each file: lexical match × confidence × recency decay
-     • Selects top-N by type priority
-     • Injects as additionalContext (stdout → CC harness)
-```
+- `pending-updates.md` — detected corrections ("don't…", "always…"),
+  confirmations, and guidance lines, appended to the file (corrections go
+  under a dated `## Pending — YYYY-MM-DD HH:MM (corrections)` header). Review these and promote the real
+  ones into typed memory files by hand.
+- `pending-session-context.md` — the previous session's goal, last turn, and
+  message/tool-call counts.
 
-## Memory File Format
+Claude Code passes the transcript path to hooks as `transcript_path` in the
+stdin JSON, while `gptme-cc-memory-stop-hook` only reads `$CC_TRAJECTORY_FILE`.
+Under plain Claude Code, a `Stop` hook that calls the extractor directly is the
+simpler wiring:
 
-Every memory file must have YAML frontmatter:
-
-```markdown
----
-name: short-kebab-case-slug
-description: one-line hook for retrieval scoring
-metadata:
-  type: user | feedback | project | reference
----
-
-[Memory body]
-
-For feedback type, include:
-**Why:** [reason the rule exists]
-**How to apply:** [when/where this guidance kicks in]
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "GPTME_CC_MEMORY_DIR=\"$CLAUDE_PROJECT_DIR\" gptme-cc-memory-extract \"$(jq -r .transcript_path)\""
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
 
-## Package Structure
+The extractor does **not** create memory files itself; it only produces the
+pending handoff for review.
 
-```
-gptme-cc-memory/
-  src/gptme_cc_memory/
-    __init__.py         # Package exports
-    schema.py           # Memory type definitions and frontmatter validator
-    memory_retrieval.py # Shared retrieval helpers (scoring, discovery, state)
-    injector.py         # Prompt-inject logic (scoring + injection)
-    extractor.py        # Heuristic extractor (no LLM dependency)
-    hooks/
-      __init__.py       # Empty init
-      stop_hook.sh      # Template stop hook
-      prompt_submit.py  # UserPromptSubmit hook implementation
-  MEMORY.md.template    # Empty memory index template
-  README.md
-  pyproject.toml
-  tests/
-    test_schema.py      # Schema validation tests
-    test_retrieval.py   # Retrieval scoring tests
+## How injection works
+
+```text
+UserPromptSubmit hook
+  1. memory/guidance.md                -> injected once, then cleared
+  2. memory/pending-updates.md         -> injected; dated blocks older than 3 days are pruned
+  3. memory/pending-session-context.md -> injected once, then cleared
+  4. memory/*.md (typed entries)       -> scored; top 2 above threshold injected
 ```
 
-## Related
+Scoring for typed entries:
 
-- [Design doc](https://github.com/ErikBjare/bob/blob/master/knowledge/technical-designs/typed-memory-schema-design.md)
-- [Peer research](https://github.com/ErikBjare/bob/blob/master/knowledge/research/2026-06-22-cc-memory-ecosystem-recall-analysis.md)
+```text
+score = lexical_match × confidence × recency × type_boost × repeat_decay
+```
+
+- **lexical_match** — token overlap with `description`, body, and aliases
+  (`name`, filename stem, and `aliases:`); a multi-word alias appearing in the
+  prompt adds a strong bonus. At least two overlapping non-stopword tokens are
+  required.
+- **confidence** — per-type default, overridable per entry in the state file.
+- **recency** — exponential decay with a 45-day half-life (floor 0.18), from
+  `last_verified` in the state file or the file's mtime.
+- **repeat_decay** — an entry injected within the last 45 minutes is
+  suppressed (ramping from 0.15 back to 1.0), so the same fact is not
+  re-injected on every prompt; a strong match can still break through.
+
+Entries scoring below 0.85 are dropped. Retrieval state (`last_injected`,
+`injections`, optional `confidence` / `last_verified`) lives in
+`<workspace>/state/cc-memory/metadata.json` — add `state/` to `.gitignore` if
+you don't want it tracked.
+
+Files never treated as memory entries: `MEMORY.md`, `MEMORY-archive.md`,
+`guidance.md`, `pending-updates.md`, `pending-session-context.md`, and the
+retired `pending-items.md`.
+
+## Python API
+
+```python
+from pathlib import Path
+from gptme_cc_memory import discover_memory_files, parse_memory_file, validate_memory_file, load_yaml_frontmatter
+
+for mem in discover_memory_files(Path("memory")):
+    print(mem.type, mem.name, mem.description)
+
+meta, body = load_yaml_frontmatter(Path("memory/prefer-python-typing.md").read_text())
+print(validate_memory_file(meta, body))  # [] when valid
+```
+
+Scoring and injection helpers live in `gptme_cc_memory.memory_retrieval`
+(`select_relevant_memories`, `render_relevant_memory_block`) and
+`gptme_cc_memory.injector` (`inject_memories`).
+
+## Package layout
+
+```text
+src/gptme_cc_memory/
+  schema.py            # memory types, frontmatter parsing, validation, discovery
+  memory_retrieval.py  # scoring, state file, rendering
+  injector.py          # assembles the injected block (guidance, pending, entries)
+  extractor.py         # heuristic transcript extractor (regex, no LLM)
+  hooks/
+    prompt_submit.py   # gptme-cc-memory-prompt-submit
+    stop_hook.py       # gptme-cc-memory-stop-hook
+    stop_hook.sh       # shell variant of the stop hook
+MEMORY.md.template     # empty index template
+tests/                 # schema, retrieval, injector, extractor tests
+```

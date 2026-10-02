@@ -1,300 +1,126 @@
-# Example Hooks Plugin for gptme
+# gptme-hooks-examples — template plugin for writing gptme lifecycle hooks
 
-**Purpose**: Demonstrates how to create plugins with hooks that extend gptme's behavior at various lifecycle points.
+A minimal, copyable gptme plugin that registers hooks at session start, before
+tool execution, and after each turn. Use it as a starting point for your own
+hook plugin (guardrails, logging/analytics, context injection, ...).
 
-## What This Plugin Shows
+**Status:** example / template. Not meant to be enabled in day-to-day use — it
+posts a system message on every hook it handles.
 
-This example plugin demonstrates:
-1. **Plugin structure** with hooks directory
-2. **Hook registration** via `register()` function
-3. **Multiple hook types** (SESSION_START, TOOL_PRE_EXECUTE, MESSAGE_POST_PROCESS)
-4. **Type-safe hooks** using Protocol classes
-5. **Priority-based execution**
-6. **Message generation** from hooks
-7. **StopPropagation** usage
+## What it shows
 
-## Plugin Structure
+- Plugin layout with a `hooks/` package and a `register()` function
+- Registering hooks with `register_hook(name, hook_type, func, priority)`
+- Yielding `Message`s from a hook
+- Priorities (higher runs first)
+
+> **Heads-up:** `tool_pre_execute_hook` in `example_hooks.py` still uses the
+> older `(log, workspace, tool_use)` signature. Current gptme calls
+> `TOOL_EXECUTE_PRE` hooks with a single `ToolExecutePreData` argument (see
+> [signatures](#hook-signatures) below). For an up-to-date tool hook, see
+> [gptme-action-receipts](../gptme-action-receipts/README.md).
+
+For real-world hook plugins in this repo, see
+[gptme-action-receipts](../gptme-action-receipts/README.md) (`TOOL_EXECUTE_PRE`
+audit + gate) and
+[gptme-headroom-compressor](../gptme-headroom-compressor/README.md)
+(`GENERATION_PRE` context rewriting).
+
+## Layout
+
+```text
 gptme-hooks-examples/
-├── pyproject.toml           # Plugin metadata
-├── README.md                # This file
-├── src/
-│   └── gptme_example_hooks/
-│       ├── __init__.py      # Package initialization
-│       └── hooks/
-│           ├── __init__.py  # Hooks package
-│           └── example_hooks.py  # Hook implementations + register()
-└── tests/
-    └── test_example_hooks.py  # Plugin tests
-
-## How Hooks Work
-
-### Hook Lifecycle
-
-Hooks are functions that run at specific points in gptme's execution:
-
-1. **SESSION_START**: When a conversation session begins
-2. **TOOL_PRE_EXECUTE**: Before any tool executes
-3. **MESSAGE_POST_PROCESS**: After processing a message
-4. **And 9+ other types**: See gptme/hooks/__init__.py for complete list
-
-### Hook Registration
-
-Each hook module must have a `register()` function that registers hooks with gptme:
-
-```python
-from gptme.hooks import HookType, register_hook
-
-def my_hook(logdir, workspace, initial_msgs):
-    yield Message("system", "Hook executed!")
-
-def register():
-    register_hook(
-        name="plugin_name.hook_name",
-        hook_type=HookType.SESSION_START,
-        func=my_hook,
-        priority=100,
-    )
+├── pyproject.toml
+├── src/gptme_example_hooks/
+│   ├── __init__.py
+│   └── hooks/
+│       ├── __init__.py          # re-exports register()
+│       └── example_hooks.py     # hook functions + register()
+└── tests/test_example_hooks.py
 ```
 
-### Hook Signatures
+## Try it
 
-Each HookType expects a specific signature (via Protocol classes):
-
-- **SESSION_START**: `(logdir: Path, workspace: Path | None, initial_msgs: list[Message])`
-- **TOOL_PRE_EXECUTE**: `(log: Log, workspace: Path | None, tool_use: ToolUse)`
-- **MESSAGE_POST_PROCESS**: `(manager: LogManager)`
-
-See `gptme/hooks/__init__.py` for all hook type signatures.
-
-## Installation
-
-### For Development
-
-```bash
-# From this directory
-pip install -e .
-
-# Or with uv
-uv pip install -e .
-```
-
-### For Production
-
-```bash
-# pipx users (recommended)
-pipx inject gptme /path/to/gptme-hooks-examples
-
-# uv users
-uv tool install gptme --with /path/to/gptme-hooks-examples
-```
-
-## Usage
-
-Once installed, gptme automatically discovers and loads the plugin. Add to your `gptme.toml` ([user or project level](https://gptme.org/docs/plugins.html#configuration)):
+The package has no entry point; load it as a folder plugin. Point
+`[plugins] paths` at **this plugin's directory** (gptme then finds
+`src/gptme_example_hooks/hooks/` and calls its `register()`):
 
 ```toml
+# gptme.toml or ~/.config/gptme/config.toml
 [plugins]
-paths = ["/path/to/gptme-contrib/plugins"]
-enabled = ["gptme_example_hooks"]  # Optional: limit which plugins load
+paths = ["path/to/gptme-contrib/plugins/gptme-hooks-examples"]
+enabled = ["gptme_example_hooks"]   # only needed if you use an allowlist
 ```
 
-```bash
-# Run gptme - hooks will execute automatically
-gptme "hello"
-```
+Pointing `paths` at the parent `plugins/` directory is not enough for hook
+plugins: src-layout plugins found that way only contribute tools.
 
-You'll see messages from the hooks at:
-- Session start
-- Before tool execution
-- After message processing
-
-## Example Hooks Included
-
-### 1. Session Start Hook
-
-**When**: At the beginning of every conversation session
-**Purpose**: Initialize plugin state, announce presence
-**Output**: System message welcoming user
+## Writing a hook
 
 ```python
+from gptme.hooks import HookType, StopPropagation, register_hook
+from gptme.message import Message
+
+
 def session_start_hook(logdir, workspace, initial_msgs):
-    yield Message("system", f"Example hooks plugin loaded! Workspace: {workspace}")
-```
+    yield Message("system", f"Plugin loaded in {workspace}")
 
-### 2. Tool Pre-Execute Hook
 
-**When**: Before any tool executes
-**Purpose**: Validate, transform, or log tool usage
-**Output**: System message announcing tool execution
+def warn_rm_rf(data):  # TOOL_EXECUTE_PRE: data is a ToolExecutePreData
+    tool_use = data.tool_use
+    if tool_use and tool_use.tool == "shell" and "rm -rf" in (tool_use.content or ""):
+        yield Message("system", "Warning: destructive command about to run")
+        yield StopPropagation()  # skip lower-priority TOOL_EXECUTE_PRE hooks
 
-```python
-def tool_pre_execute_hook(log, workspace, tool_use):
-    yield Message("system", f"About to execute tool: {tool_use.tool}")
-```
 
-### 3. Message Post-Process Hook
-
-**When**: After processing any message
-**Purpose**: Analytics, logging, or reactions to messages
-**Output**: System message confirming processing
-
-```python
-def message_post_process_hook(manager):
-    last_msg = manager.log.messages[-1] if manager.log.messages else None
-    if last_msg:
-        yield Message("system", f"Processed {last_msg.role} message")
-```
-
-## Advanced Features
-
-### Priority-Based Execution
-
-Hooks with higher priority run first:
-
-```python
-register_hook(
-    name="high_priority_hook",
-    hook_type=HookType.SESSION_START,
-    func=my_hook,
-    priority=200,  # Higher = runs first
-)
-```
-
-### StopPropagation
-
-Prevent lower-priority hooks from running:
-
-```python
-from gptme.hooks import StopPropagation
-
-def my_hook(manager):
-    if some_condition:
-        yield Message("system", "Stopping further hooks")
-        yield StopPropagation()  # No lower-priority hooks will run
-```
-
-### Multiple Hooks
-
-A single plugin can register many hooks:
-
-```python
 def register():
-    # Register multiple hooks of different types
-    register_hook("plugin.session_start", HookType.SESSION_START, session_start_hook)
-    register_hook("plugin.tool_pre", HookType.TOOL_PRE_EXECUTE, tool_pre_hook)
-    register_hook("plugin.msg_post", HookType.MESSAGE_POST_PROCESS, msg_post_hook)
+    register_hook("my_plugin.session_start", HookType.SESSION_START,
+                  session_start_hook, priority=100)
+    register_hook("my_plugin.warn_rm_rf", HookType.TOOL_EXECUTE_PRE,
+                  warn_rm_rf, priority=10)
 ```
 
-## Testing
+Hooks are generators; a hook that only observes can `return` without yielding.
+Yielded `Message`s are added to the conversation. `StopPropagation()` (no
+arguments) stops lower-priority hooks of the same type; it does **not** cancel
+the tool call itself. Allowing or skipping a tool call goes through gptme's
+confirmation mechanism (`TOOL_CONFIRM` hooks returning a `ConfirmationResult`).
 
-```bash
-# Run tests
-pytest tests/
+## Hook signatures
 
-# With coverage
-pytest --cov=src/gptme_example_hooks tests/
-```
+| Hook type(s) | Called with |
+|--------------|-------------|
+| `SESSION_START` | `(logdir, workspace, initial_msgs)` |
+| `SESSION_END`, `STEP_PRE`, `TURN_POST`, `MESSAGE_TRANSFORM` | `(manager)` — a `LogManager` |
+| `TOOL_EXECUTE_PRE` / `TOOL_EXECUTE_POST` | `(data)` — `ToolExecutePreData` / `ToolExecutePostData` with `.log`, `.workspace`, `.tool_use` (and `.result_msgs` for post) |
+| `GENERATION_PRE` | `(messages, **kwargs)` — kwargs include `workspace`, `model` |
+| `GENERATION_POST` | `(message, **kwargs)` |
+| `CACHE_INVALIDATED` | `(manager, reason, tokens_before, tokens_after)` |
 
-## Extending This Example
+All hook types (`gptme.hooks.HookType`): `STEP_PRE`, `STEP_POST`,
+`TURN_PRE`, `TURN_POST`, `MESSAGE_TRANSFORM`, `TOOL_EXECUTE_PRE`,
+`TOOL_EXECUTE_POST`, `TOOL_TRANSFORM`, `FILE_SAVE_PRE`, `FILE_SAVE_POST`,
+`FILE_PATCH_PRE`, `FILE_PATCH_POST`, `SESSION_START`, `SESSION_END`,
+`GENERATION_PRE`, `GENERATION_POST`, `GENERATION_CHUNK`,
+`GENERATION_INTERRUPT`, `LOOP_CONTINUE`, `CWD_CHANGED`, `CACHE_INVALIDATED`,
+`TOOL_CONFIRM`, `ELICIT`. The authoritative signatures are the Protocol classes
+in [`gptme/hooks/types.py`](https://github.com/gptme/gptme/blob/master/gptme/hooks/types.py).
 
-To create your own plugin with hooks:
+## Making your own
 
-1. **Copy this directory structure**
-2. **Rename package** (gptme_example_hooks → gptme_your_plugin)
-3. **Implement your hooks** in hooks/your_hooks.py
-4. **Update register()** to register your hooks
-5. **Add tests** in tests/
-6. **Update pyproject.toml** with your metadata
-
-## Common Use Cases
-
-### Analytics and Logging
-
-Track tool usage, message patterns, or conversation metrics:
-
-```python
-def analytics_hook(log, workspace, tool_use):
-    # Log to external analytics service
-    log_tool_usage(tool_use.tool, tool_use.args)
-    # Don't yield any messages - just collect data
-    return
-    yield  # Makes it a generator
-```
-
-### Validation and Safety
-
-Prevent dangerous operations:
-
-```python
-def safety_hook(log, workspace, tool_use):
-    if tool_use.tool == "shell" and "rm -rf" in tool_use.content:
-        yield Message("system", "❌ Dangerous command blocked!")
-        yield StopPropagation()  # Stop tool from executing
-```
-
-### Auto-Enhancement
-
-Automatically improve tool inputs:
-
-```python
-def enhancement_hook(log, workspace, tool_use):
-    # Example: Auto-add --verbose to shell commands
-    if tool_use.tool == "shell" and "--verbose" not in tool_use.content:
-        tool_use.content += " --verbose"
-```
-
-### Context Injection
-
-Add helpful information to conversations:
-
-```python
-def context_hook(logdir, workspace, initial_msgs):
-    # Add workspace info to context
-    if workspace:
-        file_count = len(list(workspace.rglob("*.py")))
-        yield Message("system", f"Workspace has {file_count} Python files")
-```
-
-## Hook Types Reference
-
-Available in `gptme.hooks.HookType`:
-
-**Message Lifecycle**:
-- MESSAGE_PRE_PROCESS
-- MESSAGE_POST_PROCESS
-- MESSAGE_TRANSFORM
-
-**Tool Lifecycle**:
-- TOOL_PRE_EXECUTE
-- TOOL_POST_EXECUTE
-- TOOL_TRANSFORM
-
-**File Operations**:
-- FILE_PRE_SAVE
-- FILE_POST_SAVE
-- FILE_PRE_PATCH
-- FILE_POST_PATCH
-
-**Session Lifecycle**:
-- SESSION_START
-- SESSION_END
-
-**Generation**:
-- GENERATION_PRE
-- GENERATION_POST
-- GENERATION_INTERRUPT
-
-**Loop Control**:
-- LOOP_CONTINUE
-
-See `gptme/hooks/__init__.py` for complete documentation of each type.
+1. Copy this directory and rename the package (`gptme_example_hooks` →
+   `gptme_your_plugin`) and the project name in `pyproject.toml`.
+2. Put hook functions in `src/<package>/hooks/*.py` and register them in
+   `register()`.
+3. Optionally make it pip-installable as a unified plugin by exporting a
+   `GptmePlugin(name=..., register_hooks=register)` and adding a
+   `[project.entry-points."gptme.plugins"]` entry, as
+   [gptme-action-receipts](../gptme-action-receipts/) does.
 
 ## Resources
 
-- [gptme Documentation](https://gptme.org/docs/)
-- [Plugin System](https://gptme.org/docs/plugins.html)
-- [Hook System Source](https://github.com/gptme/gptme/blob/master/gptme/hooks/__init__.py)
-- [Plugin Discovery Source](https://github.com/gptme/gptme/blob/master/gptme/plugins/__init__.py)
+- [gptme hooks docs](https://gptme.org/docs/hooks.html)
+- [gptme plugin docs](https://gptme.org/docs/plugins.html)
 
 ## License
 

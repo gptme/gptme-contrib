@@ -1,5 +1,12 @@
 # Message System Design Notes
 
+> **Historical.** These are the early design notes, kept for context, and they do not
+> describe the current implementation. Today sending goes through msmtp, receiving
+> through mbsync plus `gptmail sync-maildir`, and threading uses
+> `In-Reply-To`/`References`. Inter-agent messaging is `gptmail agent`. Discord,
+> Telegram and Twitter are separate scripts that reuse `communication_utils`; they are
+> not bridges. See the [package README](../../README.md).
+
 ## Email Integration
 
 ### SMTP/IMAP Support

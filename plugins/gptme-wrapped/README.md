@@ -1,72 +1,63 @@
 # gptme-wrapped
 
-Year-end analytics for your gptme usage - inspired by Spotify Wrapped.
+"Spotify Wrapped" for your [gptme](https://gptme.org) usage: a yearly report of conversations, tokens, LLM costs, favourite models, cache efficiency and when you use gptme most, built from your local conversation logs.
 
-## Features
+**Status:** experimental. Read-only; it never modifies your logs.
 
-- **Token usage tracking**: Input/output tokens, cache hits
-- **Cost analysis**: Total spend, by model, by month
-- **Model preferences**: Most used models
-- **Usage patterns**: Peak hours, active days
-- **Cache efficiency**: Prompt caching effectiveness
+## What it reports
 
-## Installation
+- Conversations and messages per year
+- Input/output tokens, cache reads/writes and cache hit rate, with a rough savings estimate
+- Total cost, plus breakdowns by model and by month
+- Top models by usage
+- Peak hour and weekday, and a GitHub-style activity heatmap
 
-```bash
-pip install -e plugins/gptme-wrapped
+Data comes from the `conversation.jsonl` files in gptme's logs directory (by default `~/.local/share/gptme/logs/`). Token and cost figures depend on per-message metadata, which older gptme versions didn't record. Conversations without it still count towards conversation and message totals, and the report shows how many conversations had metadata.
+
+## Standalone CLI
+
+No gptme session needed. Run it from the gptme-contrib workspace:
+
+```sh
+cd /path/to/gptme-contrib
+uv run --package gptme-wrapped python -m gptme_wrapped                    # this year's report
+uv run --package gptme-wrapped python -m gptme_wrapped report 2025        # a specific year
+uv run --package gptme-wrapped python -m gptme_wrapped heatmap            # activity heatmap
+uv run --package gptme-wrapped python -m gptme_wrapped stats              # raw stats as JSON
+uv run --package gptme-wrapped python -m gptme_wrapped export -f html > wrapped.html   # json (default), csv or html
 ```
 
-## Configuration
+Or run it without cloning:
 
-Add to your `gptme.toml` ([user or project level](https://gptme.org/docs/plugins.html#configuration)):
+```sh
+uv run --with "git+https://github.com/gptme/gptme-contrib#subdirectory=plugins/gptme-wrapped" \
+  python -m gptme_wrapped
+```
+
+Every subcommand takes an optional `YEAR` argument and defaults to the current year.
+
+## Use inside gptme
+
+Point gptme at the parent `plugins/` directory and enable the plugin by its directory name, in `gptme.toml` or `~/.config/gptme/config.toml`:
 
 ```toml
 [plugins]
-paths = ["path/to/gptme-contrib/plugins"]
-enabled = ["gptme_wrapped"]  # Optional: limit which plugins load
+paths = ["/path/to/gptme-contrib/plugins"]
+enabled = ["gptme-wrapped"]
 ```
 
-## Standalone Usage (without loading into gptme)
-
-Run directly from the command line:
-
-```bash
-# Show your wrapped report
-python -m gptme_wrapped
-
-# Show activity heatmap
-python -m gptme_wrapped heatmap
-
-# Show stats for a specific year
-python -m gptme_wrapped report 2024
-
-# Get raw stats as JSON
-python -m gptme_wrapped stats
-
-# Export to HTML
-python -m gptme_wrapped export --format html > wrapped.html
-
-# From the workspace with uv
-cd /path/to/gptme-contrib
-uv run python -m gptme_wrapped
-```
-
-## Usage in gptme
-
-Once installed, the wrapped tool is available in gptme:
+This adds a `wrapped` tool whose functions the agent calls from Python blocks, so you can just ask "show me my gptme wrapped":
 
 ```python
-# Get your Wrapped report
-print(wrapped_report())
-
-# Get detailed stats
-stats = wrapped_stats(2025)
-
-# Export to JSON/CSV/HTML
-print(wrapped_export(format='json'))
+print(wrapped_report())          # formatted report, current year
+wrapped_stats(2025)              # dict of raw statistics
+print(wrapped_heatmap())         # activity heatmap
+print(wrapped_export(format="csv"))   # "json", "csv" or "html"
 ```
 
-## Example Output
+All four functions take an optional `year`.
+
+## Example output
 
 ```text
 🎁 gptme Wrapped 2025 🎁
@@ -99,15 +90,14 @@ print(wrapped_export(format='json'))
   ...
 ```
 
-## Note on Data Availability
+## Development
 
-Token and cost metadata tracking is relatively recent in gptme. For the best analytics:
-- 2025 data may be partial (depends on when you started using recent versions)
-- 2026+ will have complete metadata from the start
-
-Historical conversations without metadata are still counted but won't contribute to token/cost totals.
+```sh
+# from the gptme-contrib repo root
+uv run pytest plugins/gptme-wrapped/tests
+```
 
 ## Related
 
-- [gptme-wrapped skill](../../skills/gptme-wrapped/SKILL.md) - Understanding the storage format
-- [gptme documentation](https://gptme.org/docs/)
+- [gptme-wrapped skill](../../skills/gptme-wrapped/SKILL.md): the conversation storage format and further analysis ideas
+- [gptme-usage](../../packages/gptme-usage/): cross-backend usage, cost and quota tracking

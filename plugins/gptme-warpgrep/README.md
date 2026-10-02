@@ -1,97 +1,81 @@
 # gptme-warpgrep
 
-Agentic code search plugin for gptme using [Morph's warp-grep](https://docs.morphllm.com/sdk/components/warp-grep/direct).
+Natural-language code search for [gptme](https://gptme.org) using [Morph's warp-grep](https://docs.morphllm.com/sdk/components/warp-grep/direct) model. Ask "where are JWT tokens validated?" and get back the relevant code snippets with line numbers, instead of guessing regex patterns.
 
-## Overview
+**Status:** experimental. Requires an API key for Morph (a third-party hosted service).
 
-Warp Grep is an AI-powered code search tool that intelligently explores codebases over multiple turns (up to 4) until it finds the relevant code for your query.
+## How it works
 
-Unlike simple grep, it:
-- Understands natural language queries
-- Strategically navigates large codebases
-- Returns contextually relevant code snippets with line numbers
-- Handles conceptual queries like "how does authentication work?"
+warp-grep is a small search agent. For each query it explores your repository over up to 4 turns. The Morph model decides what to run; the plugin executes those operations **locally** against your checkout:
 
-## Installation
+- `grep` searches for a regex, with `git grep` in a git repository or ripgrep (`rg`) otherwise,
+- `read` reads a file or line range,
+- `analyse` lists directory structure (git-tracked files only in a git repository),
+- `finish` returns the final file and line ranges.
 
-```bash
-# Install the plugin
-pip install -e plugins/gptme-warpgrep
+In a git repository only tracked files are searched, so `.gitignore` applies. Outside git, version-control directories, dependency folders (`node_modules`, `.venv`, `vendor`), caches, build output and lock files are excluded. File contents the model asks to see are sent to Morph's API (`api.morphllm.com`) as part of the search, so don't use it on code you can't share with that service.
 
-# Or with uv
-uv pip install -e plugins/gptme-warpgrep
+Use it for conceptual or exploratory questions in unfamiliar codebases. For exact-symbol lookups, plain `grep`/`rg` or [gptme-lsp](../gptme-lsp/README.md) are faster and free.
+
+## Install
+
+1. To search directories that are not git repositories, install [ripgrep](https://github.com/BurntSushi/ripgrep) so `rg` is on `PATH` (git repositories only need `git`).
+2. Point gptme at the plugin in `gptme.toml` (project) or `~/.config/gptme/config.toml` (user):
+
+   ```toml
+   [plugins]
+   paths = ["/path/to/gptme-contrib/plugins/gptme-warpgrep"]
+   enabled = ["gptme_warp_grep"]
+   ```
+
+   The plugin uses `httpx`, which must be importable in gptme's environment.
+3. Set your Morph API key ([get one here](https://morphllm.com/dashboard)), either as an environment variable or in the `[env]` table of your gptme config:
+
+   ```sh
+   export MORPH_API_KEY="your-api-key"
+   ```
+
+## Quickstart
+
+```sh
+gptme "use warp_grep to find where database connection errors are handled"
 ```
 
-## Configuration
-
-Set your Morph API key:
-
-```bash
-export MORPH_API_KEY="your-api-key"
-```
-
-Get an API key at [morphllm.com/dashboard](https://morphllm.com/dashboard).
-
-## Usage
-
-### In gptme
-
-Add to your `gptme.toml` ([user or project level](https://gptme.org/docs/plugins.html#configuration)):
-
-```toml
-[plugins]
-paths = ["path/to/gptme-contrib/plugins"]
-enabled = ["gptme_warp_grep"]  # Optional: limit which plugins load
-```
-
-Then use in conversations:
+The tool exposes one function, which the agent calls from a Python block:
 
 ```python
-# Search for specific code patterns
 warp_grep("Find authentication middleware")
-
-# Search in a specific repo
-warp_grep("Find all API endpoints", "/path/to/project")
-
-# Conceptual queries work too
-warp_grep("How are database errors handled?")
+warp_grep("Find all API endpoints", "/path/to/project")   # search another repo
 ```
+
+It returns Markdown with one fenced, syntax-highlighted snippet per matching file, or `No relevant code found for the query.`
 
 ### As a library
 
 ```python
-from gptme_warp_grep import warp_grep_search
+from gptme_warp_grep.tools.warp_grep import warp_grep_search
 
-# Returns list of ResolvedFile objects
 results = warp_grep_search(
     query="Find where JWT tokens are validated",
     repo_root="/path/to/project",
+    # api_key="...",  # defaults to MORPH_API_KEY
 )
-
-for file in results:
-    print(f"=== {file.path} ===")
-    print(file.content)
+for f in results:  # list of ResolvedFile(path, content)
+    print(f"=== {f.path} ===")
+    print(f.content)
 ```
 
-## How it Works
+## Agent lesson
 
-1. **Query Analysis**: The model classifies your query (specific/conceptual/exploratory)
-2. **Strategic Search**: Uses parallel grep, analyse, and read operations
-3. **Iterative Refinement**: Up to 4 turns of searching and narrowing down
-4. **Context Extraction**: Returns relevant code snippets with line numbers
+[`lessons/tools/warp-grep-usage.md`](lessons/tools/warp-grep-usage.md) is a keyword-triggered lesson that teaches an agent when to reach for warp-grep. Copy it into your agent's lessons directory if you use the gptme lesson system.
 
-### Available Tools (used internally)
+## Development
 
-- `grep '<pattern>' <path>` - Ripgrep search for regex patterns
-- `read <path>[:start-end]` - Read file contents with optional line range
-- `analyse <path> [pattern]` - List directory structure
-- `finish <file:ranges>` - Return final code snippets
-
-## Requirements
-
-- Python 3.10+
-- `ripgrep` (rg) installed and in PATH
-- MORPH_API_KEY environment variable
+```sh
+cd plugins/gptme-warpgrep
+make test        # uv run pytest tests/ -v
+make typecheck   # uv run mypy src/ --ignore-missing-imports
+```
 
 ## License
 

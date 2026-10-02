@@ -1,55 +1,114 @@
 # gptme-usage
 
-Cross-backend **usage / cost / quota** surface for gptme agents.
+Cost estimation and model/quota registry for agents that run on several LLM
+backends (Claude Code, Codex, gptme via OpenRouter or local models): turn a
+session's token counts — or just its duration — into an estimated USD cost, and
+map each model to the quota pool it draws from.
 
-This package owns the *usage and capacity* concern: the model registry, cost
-math, and per-agent quota configuration that inform harness/model selection for
-autonomous runs (and, downstream, subscription pressure scoring). It is
-deliberately **separate** from `gptme-subscription`, which owns credential-slot
-rotation — a different concern (see "Why a separate package" below).
+**Status:** alpha, library only (no CLI yet). The package ships the generic
+math and an empty registry; each agent supplies its own prices, throughput and
+routes in a TOML file.
 
-## What's here
+## When to use it
 
-- `harness_models.py` — model registry, cost estimation
-  (`estimate_session_cost`, `estimate_tokens_from_duration`), cache pricing
-  multipliers, Agent SDK credit facts, and the per-agent quota config schema
-  (`HarnessQuotaConfig` + `load_quota_config()`).
+- You log agent sessions and want comparable cost numbers across backends,
+  including cache-aware pricing (cache reads/writes priced at provider
+  multipliers rather than full input price).
+- Some sessions lack token counts and you want a duration-based estimate from
+  empirical tokens-per-second.
+- You select harness/model per run and need to know which quota pool a model
+  uses (`openrouter`, `chatgpt`, `local`, Claude subscription, …).
+- You dispatch Claude Code and want an explicit, versioned model ID instead of a
+  floating alias like `opus`.
 
-## Per-agent config
+Related packages:
 
-Agent-specific data (price tables, TPS estimates, model routes, quota sources,
-plan tier) lives in `~/.config/gptme/harness-quota.toml`, loaded via
-`load_quota_config()`. The package ships **no agent's data** — an unconfigured
-agent gets an empty config and the generic cost math degrades gracefully.
+- [gptme-sessions](../gptme-sessions/README.md) — session records and analytics;
+  uses `gptme-usage` for token-based cost estimates via its optional `cost`
+  extra.
+- [gptme-subscription](../gptme-subscription/README.md) — credential-slot
+  rotation. Layering rule: **`gptme_usage` never imports
+  `gptme_subscription`** — usage/capacity is a separate concern from flipping
+  credentials, and spans backends that have no credential slot at all.
 
-```python
-from gptme_usage import load_quota_config, estimate_session_cost
+## Install
 
-cfg = load_quota_config()  # ~/.config/gptme/harness-quota.toml (or empty)
-cost = estimate_session_cost("claude-code", "opus", cache_read_tokens=1_000_000, config=cfg)
+```bash
+pip install "git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-usage"
 ```
 
-TOML schema: see the `load_quota_config` docstring in `harness_models.py`.
+Or, from a gptme-contrib checkout: `uv sync --package gptme-usage`.
 
-## Why a separate package
+The only runtime dependency is `tomli` on Python 3.10.
 
-`harness_models` / quota checking spans backends with no credential slot at all
-(OpenRouter API key, local LM Studio) and never flips a credential symlink. It
-is a *usage/capacity* concern, not a *subscription/slot* concern. Keeping it out
-of `gptme-subscription` lets both the subscription manager and the autonomous
-harness selector depend on usage without dragging in each other.
+## Configure
 
-Layering invariant: **`gptme_usage` must not import from `gptme_subscription`.**
-A top-level quota CLI may compose both, but the libraries stay decoupled.
+Copy [`harness-quota.example.toml`](./harness-quota.example.toml) to
+`~/.config/gptme/harness-quota.toml` (or gptme's configured config dir) and
+replace the placeholder values:
 
-Design: `ErikBjare/bob knowledge/technical-designs/gptme-usage-package-split.md`.
+```toml
+claude_plan_tier = "max-5x"      # optional
+
+[prices.claude-code]             # USD per 1M tokens: [input, output]
+opus   = [5.0, 25.0]
+sonnet = [3.0, 15.0]
+
+[tps.claude-code]                # tokens/second, for duration-based estimates
+opus = 18000
+
+[quota_sources]                  # gptme model -> "openrouter" | "chatgpt" | "local"
+"example-openrouter-model" = "openrouter"
+
+[model_routes]                   # short name -> provider-qualified gptme model
+"example-openrouter-model" = "openrouter/vendor/example-model@vendor"
+
+[openrouter_key_contexts]
+default = "autonomous"
+```
+
+A missing or unreadable file (or Python 3.10 without `tomli`) yields an empty
+config; cost functions then return `None` instead of guessing. A non-empty table in your config *replaces* the
+module default table rather than merging with it. Use
+`merge_with_module_defaults()` if you want merge semantics.
+
+## Quickstart
+
+```python
+from gptme_usage import load_quota_config, estimate_session_cost, estimate_tokens_from_duration
+
+cfg = load_quota_config()  # ~/.config/gptme/harness-quota.toml, or empty
+
+cost = estimate_session_cost(
+    "claude-code", "opus",
+    input_tokens=20_000, output_tokens=5_000, cache_read_tokens=1_000_000,
+    config=cfg,
+)  # float USD, or None if the model has no configured price
+
+tokens = estimate_tokens_from_duration("claude-code", "opus", 600, config=cfg)
+```
+
+## API
+
+Exported from `gptme_usage`:
+
+| Name | Purpose |
+|---|---|
+| `load_quota_config(path=None)` | Load `HarnessQuotaConfig` from TOML (empty config on any failure) |
+| `HarnessQuotaConfig` | Dataclass: `price_table`, `tps_table`, `quota_sources`, `model_routes`, `openrouter_key_contexts`, `claude_plan_tier` |
+| `estimate_session_cost(harness, model, *, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, token_count, config)` | Cache-aware USD estimate |
+| `estimate_tokens_from_duration(harness, model, duration_seconds, *, config)` | Tokens from duration × configured TPS |
+| `pricing_key_for_model(harness, model, config=None)` | Normalize model names (versioned Claude IDs, provider-qualified gptme routes, `@provider` pins) to a pricing-table key |
+| `merge_with_module_defaults(config)` | Overlay your config on the module defaults |
+
+More helpers live in `gptme_usage.harness_models`, including
+`quota_pool_label()`, `resolve_gptme_model()`, `openrouter_models()`,
+`local_models()`, and the Claude Code model-ID helpers
+`resolve_cc_version()` / `cc_dispatch_model_id()` (e.g.
+`cc_dispatch_model_id("opus-5-5") -> "claude-opus-5-5"`; floating aliases map
+to a pinned, validated version).
 
 ## Roadmap
 
-- **Done**: scaffold + move `harness_models` out of `gptme-subscription`.
-- **Done**: config-driven data. The module ships EMPTY tables; `check-quota.py`
-  loads `load_quota_config()` once and threads it through every call, so each
-  agent's `harness-quota.toml` drives cost/availability. See
-  `harness-quota.example.toml` for the schema.
-- **Next**: move `check-quota.py` + the `check-*-usage` scrapers in behind a
-  `gptme-usage check <backend>` console entry point.
+- Move per-backend quota checks behind a `gptme-usage check <backend>` console
+  entry point (today they live in agent workspaces).

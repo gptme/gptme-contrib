@@ -1,74 +1,93 @@
-# Lessons Package
+# gptme-lessons-extras
 
-Lesson validation, analysis, and management system for persistent learning patterns.
+Tooling for maintaining a gptme **lessons** library: a lesson/skill format validator, plus
+LLM-assisted lesson generation, usage analytics, similarity/duplicate detection and
+effectiveness tracking from conversation logs.
 
-## Overview
+**Status:** internal toolbox, experimental. There are no installed console scripts — modules are
+run with `python3 -m` or by path. The validator is the most actively maintained part; the
+analytics, generation and agent-network sharing modules (`export`, `import`, `sync`, `review`,
+`adopt`, `evolution`, `metrics`) are older and less polished.
 
-This package provides tools for managing the lessons system - a meta-learning framework that captures behavioral patterns, prevents known failures, and improves agent reliability over time.
+## Why / when to use it
 
-## Features
+gptme injects lessons — short Markdown files with keyword-matching frontmatter — into an agent's
+context when they are relevant ([gptme lessons docs](https://gptme.org/docs/lessons.html)). Core
+gptme handles *matching*; this package helps you *curate* the library: keep the format consistent
+in CI/pre-commit, find which lessons fire, spot duplicates, and draft new lessons from
+conversations.
 
-- **Lesson Validation**: Validate lesson format and frontmatter
-- **Lesson Analysis**: Analyze lesson effectiveness and usage patterns
-- **Lesson Generation**: Tools for creating new lessons from patterns
-- **Workflow Management**: Lesson lifecycle management (creation, review, adoption)
-- **Format Conversion**: Convert lessons to/from various formats (Markdown, YAML, Cursor rules)
+Related:
 
-## Installation
+- [gptme-lessons-mcp](../gptme-lessons-mcp/README.md) — serve lessons to any MCP client
+- [`lessons/`](../../lessons/) in this repo — shared lessons validated with this tool
+- [gptme-agent-template](https://github.com/gptme/gptme-agent-template) — workspace layout with a
+  `lessons/` directory
+
+## Install
+
+Not published on PyPI. From a clone of gptme-contrib:
 
 ```bash
-# From workspace root
-uv sync --all-packages
-
-# Or install just this package
-cd packages/lessons
-uv sync
+uv pip install -e packages/gptme-lessons-extras
 ```
 
-## Dependencies
+Depends on `gptme` (used by the LLM-backed generation/judging helpers), `click`, `PyYAML`,
+`python-frontmatter` and `rich`.
 
-- **PyYAML**: YAML parsing for lesson frontmatter
-- **click**: CLI interface for lesson tools
+## Quickstart: validate lessons
 
-## Usage
+```bash
+# Validate a directory (recursive by default) or individual files; exit code 1 on any failure
+python3 -m gptme_lessons_extras.validate lessons/
+python3 -m gptme_lessons_extras.validate lessons/workflow/my-lesson.md -v   # -v shows warnings
+```
 
-### Validation
+From Python:
 
 ```python
-from lessons.validate import validate_lesson_file
+from pathlib import Path
+from gptme_lessons_extras.validate import LessonValidator, validate_lesson_file
 
-# Validate single lesson
-errors = validate_lesson_file("path/to/lesson.md")
-if errors:
-    print(f"Validation errors: {errors}")
+ok = validate_lesson_file(Path("lessons/workflow/my-lesson.md"))  # prints results, returns bool
+
+v = LessonValidator(Path("lessons/workflow/my-lesson.md"))
+v.validate()
+print(v.format_type, v.errors, v.warnings)
 ```
 
-### CLI Tools
+As a pre-commit hook (requires the package to be importable by the hook's Python):
 
-```bash
-# Validate lessons
-./validate.py lessons/workflow/example.md
-
-# Analyze lesson usage
-./analytics.py
-
-# Generate new lesson
-./generate.py --pattern "error pattern"
-
-# Review lessons
-./review.py
+```yaml
+- id: validate-lessons
+  name: Validate lesson files
+  entry: python3 -m gptme_lessons_extras.validate
+  language: system
+  files: ^lessons/.*\.md$
 ```
 
-## Lesson Format
+### What the validator checks
 
-Lessons use YAML frontmatter + Markdown:
+It auto-detects three formats:
+
+- **Two-file (preferred):** a concise primary lesson (soft target ~100 lines) with sections
+  `Rule`, `Context`, `Detection`, `Pattern`, `Outcome`, `Related`, plus an optional companion doc
+  under `knowledge/lessons/`.
+- **Original (verbose):** all-in-one lessons with `Rule`, `Context`, `Failure Signals`,
+  `Anti-pattern (concise)`, `Recommended Pattern`, `Fix Recipe`, `Rationale`,
+  `Verification Checklist`, `Exceptions`, `Automation Hooks`, `Origin`, `Related`.
+- **Skill:** `SKILL.md` files, which must have `name` and `description` frontmatter.
+
+It also checks frontmatter (keywords, `status`) and that an optional `target_grade` is one of
+`trajectory_grade`, `productivity`, `alignment`, `harm`.
+
+Minimal two-file lesson:
 
 ```markdown
 ---
 match:
-  keywords: ["keyword1", "keyword2"]
+  keywords: ["specific trigger phrase", "another distinctive phrase"]
 status: active
-target_grade: harm  # optional: trajectory_grade | productivity | alignment | harm
 ---
 
 # Lesson Title
@@ -92,66 +111,23 @@ What happens when you follow this pattern.
 - Related lessons
 ```
 
-## Testing
+## Other tools
 
-```bash
-# Run all tests
-make test
+Run from the root of an agent workspace (most default to `./lessons` and gptme's log directory
+`~/.local/share/gptme/logs`). Use `--help` on any click-based module for full options.
 
-# Type check
-make typecheck
-```
+| Module | What it does |
+|--------|--------------|
+| `python3 -m gptme_lessons_extras.generate` | LLM lesson pipeline: `workflow` (analyze → generate → judge a conversation), `generate`, `evolve` (multi-variant, Pareto selection), `judge`, `deduplicate`. Drafts go to `knowledge/meta/lessons-draft/` |
+| `python3 -m gptme_lessons_extras.analytics` | Which lessons are referenced in gptme conversation logs; writes `knowledge/meta/lesson-usage-report.md` |
+| `python3 -m gptme_lessons_extras.effectiveness_tracker` | Incremental, resumable correlation of lesson inclusion with session outcomes (`--report`, `--limit`, `--full`, `--reset`, `--logs-dir`, `--state-file`) |
+| `python3 -m gptme_lessons_extras.discovery` | `recommend` lessons for context keywords, find `similar` lessons, list `duplicates` |
+| `gptme_lessons_extras.similarity` / `utils.similarity` | Keyword/content similarity and recency scoring (library) |
+| `check-staleness.py`, `analyze-lesson-usage.py`, `improve-lesson-keywords.py`, `detect-lesson-patterns.py`, `generate-review-prompts.py`, `create-pr.py` | Standalone maintenance scripts — run by path from `src/gptme_lessons_extras/` |
+| `export`, `import`, `sync`, `review`, `adopt`, `evolution`, `metrics`, `network_schema` | Experimental sharing of lessons between agents via a git repo |
 
-## Architecture
+## Notes
 
-### Core Modules
-
-- **validate.py**: Lesson format validation
-- **analytics.py**: Usage and effectiveness analysis
-- **generate.py**: New lesson creation tools
-- **review.py**: Lesson review and refinement
-- **workflow.py**: Lesson lifecycle management
-- **adopt.py**: Lesson adoption and integration
-
-### Validation Rules
-
-The validator checks:
-- Valid YAML frontmatter
-- Optional `target_grade` is a known dimension (`trajectory_grade`, `productivity`, `alignment`, `harm`)
-- Required sections present
-- Proper Markdown formatting
-- Keyword specificity
-- Status values
-
-## Integration
-
-### Pre-commit Hooks
-
-Lessons are validated automatically:
-
-```yaml
-- id: validate-lessons
-  name: Validate lesson files
-  entry: ./scripts/lessons/validate.py
-  language: system
-  files: ^lessons/.*\.md$
-```
-
-### gptme Integration
-
-Lessons are automatically included in gptme context when relevant keywords match.
-
-## Related Documentation
-
-- See the [gptme lessons documentation](https://gptme.org/docs/lessons.html) for lesson system overview
-- Check the lessons/ directory in gptme-agent-template for example lessons
-
-## Development
-
-### Adding New Tools
-
-1. Create tool script in `src/lessons/`
-2. Use click for CLI interface
-3. Follow existing patterns for validation/analysis
-4. Add tests
-5. Document in this README
+- Import as `gptme_lessons_extras`. In source checkouts, a `src/lessons` symlink keeps the legacy
+  `from lessons import ...` path working.
+- Tests: `uv run pytest packages/gptme-lessons-extras/tests/`

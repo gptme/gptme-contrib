@@ -1,62 +1,76 @@
-# gptme-gupp
+# gptme-gupp — resume in-flight work across sessions, crashes and compactions
 
-Work persistence plugin for gptme - track work across session boundaries using the GUPP pattern.
+Lets an agent leave itself a small "work hook" — what it was doing, the context,
+and the exact next action — as a JSON file in the workspace, so the next session
+(after a crash, restart, or context compaction) picks up where the last one
+stopped.
 
-## Overview
+**Status:** experimental. Small and dependency-free apart from gptme.
 
-GUPP (based on Gas Town's "Gastown Universal Propulsion Principle") implements a simple but powerful pattern:
+The pattern is borrowed from Gas Town's "Gastown Universal Propulsion
+Principle": *if there is work on your hook, you must run it.*
 
-> **"If there is work on your hook, YOU MUST RUN IT"**
+> "Hook" here means a work-in-progress marker. It is unrelated to gptme's
+> lifecycle hook system (see [gptme-hooks-examples](../gptme-hooks-examples/README.md)).
 
-This plugin enables agents to persist work state across session boundaries, crashes, compactions, and restarts.
+## Why / when to use it
 
-## Installation
+Long-running or autonomous agents lose their place when a session ends
+mid-task. A task tracker records *what* needs doing; a GUPP hook records *where
+you are in it right now* and *what to do next*. Use it alongside a task system
+such as [gptodo](../../packages/gptodo/README.md) (or your own): one hook per
+in-flight task, deleted when the task step completes.
 
-```bash
-# From gptme-contrib
-pip install -e plugins/gptme-gupp
+## Install
 
-# Or add to your gptme.toml
+There is no package entry point; load it as a folder plugin from a
+gptme-contrib checkout:
+
+```toml
+# gptme.toml
 [plugins]
-paths = ["path/to/gptme-contrib/plugins/gptme-gupp/src"]
-enabled = ["gptme_gupp"]
+paths = ["path/to/gptme-contrib/plugins/gptme-gupp"]
+enabled = ["gptme_gupp"]   # only needed if you use an allowlist
 ```
 
-## Usage
+This registers a `gupp` tool whose functions are callable from gptme's Python
+(ipython) tool.
 
-The plugin provides these functions for the `ipython` tool:
+## Quickstart
 
 ```python
-# Create a hook when starting work
-hook_start("task-id", "Context summary", "Next action to take")
+print(hook_status())   # at session start: anything left from last time?
 
-# Update progress during work
-hook_update("task-id", current_step="Step 2", next_action="What to do next")
-
-# List pending hooks
-hooks = hook_list()
-
-# Complete when done
-hook_complete("task-id")
-
-# Check status as formatted summary
-status = hook_status()
-
-# Abandon with reason
-hook_abandon("task-id", "Reason for abandonment")
+hook_start("fix-auth-bug", "User login failing after token refresh",
+           "Debug auth middleware", priority="high")
+hook_update("fix-auth-bug", current_step="Root cause found",
+            next_action="Add regression test")
+hook_complete("fix-auth-bug")                       # deletes the hook
+# or: hook_abandon("fix-auth-bug", "Superseded by #123")  # archives it
 ```
 
-## How It Works
+Nothing runs automatically: to make "check hooks first" a habit, tell the agent
+to call `hook_status()` at session start (e.g. in its system prompt or context
+script).
 
-1. **At session start**: Check for pending hooks and resume work
-2. **During work**: Create/update hooks to track progress
-3. **On completion**: Clean up hooks
-4. **On crash/restart**: Hooks persist and surface in next session
+## Functions
 
-## Hook Storage
+| Function | Purpose |
+|----------|---------|
+| `hook_start(task_id, context_summary, next_action, current_step="Starting", priority="medium")` | Create a hook (`priority`: `low`/`medium`/`high`) |
+| `hook_update(task_id, current_step=None, context_summary=None, next_action=None, partial_results=None)` | Update fields of an existing hook |
+| `hook_complete(task_id)` | Delete the hook |
+| `hook_abandon(task_id, reason)` | Move the hook to `archive/` with the reason |
+| `hook_list()` | Pending hooks as dicts, high priority first, then most recently updated |
+| `hook_status(stale_threshold_hours=24)` | Markdown summary; flags hooks not updated within the threshold as stale |
 
-Hooks are stored as JSON files in `state/hooks/` within the workspace:
+## Storage
+
+Hooks live in `state/hooks/` relative to the current working directory (run
+gptme from the workspace root), one `<task_id>.json` per hook:
+
+```text
 state/hooks/
-├── task-1.json
-├── task-2.json
-└── archive/        # Abandoned hooks
+├── fix-auth-bug.json
+└── archive/          # abandoned hooks, <task_id>-<timestamp>.json
+```
