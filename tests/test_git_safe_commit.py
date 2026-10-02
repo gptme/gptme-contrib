@@ -3056,3 +3056,54 @@ def test_dot_pathspec_stages_when_submodule_reachable(tmp_path: Path):
     assert (
         committed_sha == new_sha
     ), f"`.` should bump the gitlink to {new_sha[:12]}, got {committed_sha[:12]}"
+
+
+def test_new_gitlink_with_unresolvable_default_branch_names_the_real_gap(
+    tmp_path: Path,
+):
+    """origin exists, but its default branch is neither master nor main and
+    origin/HEAD is unset: refuse (fail closed), but don't claim the remote is
+    missing."""
+    super_dir, _sub_path, _sha = _superproject_with_submodule(tmp_path)
+
+    upstream = tmp_path / "upstream-trunk.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "trunk", str(upstream)],
+        check=True,
+        capture_output=True,
+    )
+    nested = super_dir / "vendor" / "sub2"
+    nested.mkdir(parents=True)
+    for cmd in (
+        ["git", "init", "-b", "trunk"],
+        ["git", "config", "user.email", "test@test.com"],
+        ["git", "config", "user.name", "Test"],
+        ["git", "config", "core.hooksPath", "/dev/null"],
+        ["git", "remote", "add", "origin", str(upstream)],
+    ):
+        subprocess.run(cmd, cwd=nested, check=True, capture_output=True)
+    (nested / "f.txt").write_text("nested work")
+    for cmd in (
+        ["git", "add", "f.txt"],
+        ["git", "commit", "-m", "nested work"],
+        ["git", "push", "origin", "trunk"],
+        ["git", "fetch", "origin"],
+    ):
+        subprocess.run(cmd, cwd=nested, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "set-head", "origin", "-d"],
+        cwd=nested,
+        capture_output=True,
+    )
+    (super_dir / "vendor" / "new.txt").write_text("regular file")
+
+    result = subprocess.run(
+        [str(SAFE_COMMIT), "vendor", "-m", "vendor changes", "--no-verify"],
+        cwd=super_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0, "unresolvable default branch should be refused"
+    stderr = result.stderr.lower()
+    assert "no origin remote" not in stderr, f"misleading refusal: {result.stderr!r}"
+    assert "default branch" in stderr, f"got: {result.stderr!r}"
