@@ -955,6 +955,11 @@ def post(
     else:
         _abort_on_bad_urls([text])
 
+    # Load the client outside the dedup lock — OAuth or token-refresh can take
+    # minutes; holding the flock across that would block every concurrent post
+    # to the same key, turning the duplicate guard into a serialisation hazard.
+    # The flock still spans check → post → mark, so the race-free dedup holds.
+    client = load_twitter_client(require_auth=True, headless=headless)
     key = _post_dedup_key(text, reply_to, quote_id, current_account())
     with _post_dedup_gate(key, force) as mark_posted:
         if mark_posted is None:
@@ -971,7 +976,6 @@ def post(
                 "Use --force to post anyway."
             )
             sys.exit(POST_DUPLICATE_EXIT_CODE)
-        client = load_twitter_client(require_auth=True, headless=headless)
         _post_now(client, text, reply_to, thread, quote_id, mark_posted)
 
 
