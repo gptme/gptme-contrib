@@ -121,7 +121,9 @@ def test_cors_disabled_by_default(server, monkeypatch):
     )
     assert response.status_code == 405
     assert "access-control-allow-origin" not in response.headers
-    assert client.get("/").status_code == 200
+    response = client.get("/", headers={"Origin": "https://chat.gptme.org"})
+    assert response.status_code == 200
+    assert "access-control-allow-origin" not in response.headers
 
 
 def test_cors_env_and_cli_override(server, monkeypatch):
