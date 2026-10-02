@@ -24,7 +24,7 @@ alone or alongside others, or bring your own messaging system entirely:
 WhatsApp (phone) ⇄ whatsapp-web.js bridge (Node.js)
                        │ spawns per message
                        ▼
-     gptme -p "<msg>" --name whatsapp-<agent>-<sender> --non-interactive -y --workspace <ws>
+     gptme --name whatsapp-<agent>-<sender> --non-interactive -y -- "<msg>"
   or claude -p "<msg>" --output-format text --resume whatsapp-<agent>-<sender>
                        │
                        ▼
@@ -138,3 +138,5 @@ directory, so `.wwebjs_auth/` from your first run there is reused.
 - **Re-auth**: if the session expires, delete `.wwebjs_auth/` and rescan.
 - **One process per message**: each message starts a fresh `gptme`/`claude`
   run, so replies take as long as a cold agent start.
+- **Claude Code stdin**: The bridge closes stdin immediately to prevent SIGSTOP
+  in non-interactive contexts.

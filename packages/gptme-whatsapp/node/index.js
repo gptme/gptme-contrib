@@ -118,12 +118,15 @@ async function callAgent(sender, message) {
 async function callGptme(sender, message) {
     const convName = `whatsapp-${AGENT_NAME}-${sender.replace(/[^a-zA-Z0-9]/g, '-')}`;
 
+    // gptme takes the prompt as a positional argument (there is no -p flag).
+    // '--' stops a message starting with '-' from being parsed as an option.
     const args = [
-        '-p', message,
         '--name', convName,
         '--non-interactive',
         '-y',
         '--workspace', WORKSPACE,
+        '--',
+        message,
     ];
 
     return spawnAndCapture(GPTME_CMD, args, extractResponse);
