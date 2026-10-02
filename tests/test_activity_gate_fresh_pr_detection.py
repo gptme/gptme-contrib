@@ -232,14 +232,17 @@ if argv[0] == "api":
         print("true")
         sys.exit(0)
     # Issue comments endpoint is called in two different ways:
-    # 1. check_greptile_scores: --jq with "greptile" → return the extracted
-    #    score digit (as gh --jq would after filtering), not raw JSON.
-    # 2. has_maintainer_waiting_comment / suppression checks: --jq WITHOUT
-    #    "greptile" → return [] (no prior bot comments).
+    # 1. fetch_issue_comments_json (check_greptile_scores et al.): raw
+    #    `--paginate` read, filtered locally → return the Greptile review.
+    # 2. has_maintainer_waiting_comment / suppression checks: --jq bot filter
+    #    → return [] (no prior bot comments).
     if "issues" in path and "comments" in path:
-        if "greptile" in jq:
-            # Simulate gh --jq output: just the captured digit "4", one per line.
-            print("4")
+        if "--paginate" in argv and not jq:
+            print(json.dumps([{
+                "user": {"login": "greptile-apps[bot]", "type": "Bot"},
+                "body": "<h3>Greptile Summary</h3> Confidence Score: 4/5",
+                "created_at": "2026-07-10T00:00:00Z",
+            }]))
         else:
             print("[]")
         sys.exit(0)
