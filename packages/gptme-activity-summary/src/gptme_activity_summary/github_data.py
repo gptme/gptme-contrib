@@ -424,8 +424,14 @@ def get_commit_count(start: date, end: date, repo_path: str | None = None) -> in
         return 0
 
 
-def get_reviews_received(start: date, end: date, repos: list[str]) -> list[PRReview]:
-    """Get PR review comments received on our PRs in a date range."""
+def get_reviews_received(
+    start: date, end: date, repos: list[str], author: str | None = None
+) -> list[PRReview]:
+    """Get PR review comments received on our PRs in a date range.
+
+    Default to ``BOT_USERNAME`` or gh's authenticated user (``@me``).
+    """
+    author = author or os.environ.get("BOT_USERNAME") or "@me"
     reviews: list[PRReview] = []
     for repo in repos:
         output = _run_command(
@@ -435,6 +441,8 @@ def get_reviews_received(start: date, end: date, repos: list[str]) -> list[PRRev
                 "list",
                 "--repo",
                 repo,
+                "--author",
+                author,
                 "--state",
                 "all",
                 "--search",

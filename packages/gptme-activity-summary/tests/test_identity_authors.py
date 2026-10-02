@@ -24,6 +24,23 @@ def test_cross_repo_search_uses_deployment_author(monkeypatch, configured, expli
     assert cmd[cmd.index("--author") + 1] == expected
 
 
+@pytest.mark.parametrize(
+    ("configured", "explicit", "expected"),
+    [(None, None, "@me"), ("NewAgent", None, "NewAgent"), ("NewAgent", "OtherUser", "OtherUser")],
+)
+def test_reviews_received_uses_deployment_author(monkeypatch, configured, explicit, expected):
+    if configured:
+        monkeypatch.setenv("BOT_USERNAME", configured)
+    else:
+        monkeypatch.delenv("BOT_USERNAME", raising=False)
+    with patch("gptme_activity_summary.github_data._run_command", return_value="[]") as run:
+        get_reviews_received(
+            date(2026, 10, 1), date(2026, 10, 2), ["NewAgent/brain"], author=explicit
+        )
+    cmd = run.call_args.args[0]
+    assert cmd[cmd.index("--author") + 1] == expected
+
+
 @pytest.mark.parametrize("pr_author", [{"login": "NewAgent"}, None])
 def test_reviews_preserve_operator_and_exclude_actual_pr_author(pr_author):
     payload = [
