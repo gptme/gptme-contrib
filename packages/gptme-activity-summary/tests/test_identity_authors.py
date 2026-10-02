@@ -41,6 +41,39 @@ def test_reviews_received_uses_deployment_author(monkeypatch, configured, explic
     assert cmd[cmd.index("--author") + 1] == expected
 
 
+def test_reviews_received_author_stable_across_repos(monkeypatch):
+    """Reviewer logins must not overwrite the query author across repos.
+
+    With two repos, the first PR's reviewer (ErikBjare) must not bleed into
+    the --author flag for the second repo's command.
+    """
+    monkeypatch.setenv("BOT_USERNAME", "NewAgent")
+    payload_with_review = json.dumps(
+        [
+            {
+                "number": 1,
+                "title": "A change",
+                "url": "https://example.test/pr/1",
+                "author": {"login": "NewAgent"},
+                "reviews": [{"author": {"login": "ErikBjare"}}],
+            }
+        ]
+    )
+    calls: list[list[str]] = []
+
+    def capture(cmd):
+        calls.append(cmd)
+        return payload_with_review
+
+    with patch("gptme_activity_summary.github_data._run_command", side_effect=capture):
+        get_reviews_received(
+            date(2026, 10, 1), date(2026, 10, 2), ["NewAgent/brain", "NewAgent/tools"]
+        )
+    assert len(calls) == 2, "expected one command per repo"
+    for cmd in calls:
+        assert cmd[cmd.index("--author") + 1] == "NewAgent"
+
+
 def test_reviews_null_review_author_does_not_raise():
     payload = [
         {
