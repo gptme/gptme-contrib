@@ -64,7 +64,7 @@ If the config file does not exist, all allowlists are empty and
 version: 1
 
 # 'warn'  — log a warning, allow the action (default; safe for soak periods)
-# 'block' — abort the action; the agent sees "[scope-gate] BLOCKED: ..."
+# 'block' — intended to abort the action; currently does NOT (see the block-mode note above)
 violation_action: warn
 
 scopes:

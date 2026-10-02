@@ -21,7 +21,7 @@ communication_utils/
 │                               #   CallbackServer (needs gptmail[oauth])
 ├── monitoring/                 # get_logger, configure_logging, MetricsCollector
 ├── error_handling/             # retry, RetryConfig, exponential_backoff, error classes
-└── outbound_redact.py          # optional fail-closed secret gate used before sending
+└── outbound_redact.py          # optional secret gate used before sending; blocks on a detected secret, skipped with a warning if redact is absent
 ```
 
 ## Examples

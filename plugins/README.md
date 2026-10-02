@@ -67,7 +67,7 @@ pip install "git+https://github.com/gptme/gptme-contrib#subdirectory=plugins/gpt
 
 If you use an allowlist, add the plugin's entry-point name or package name to `[plugins] enabled`.
 
-**Or load from a checkout** by pointing `paths` at the plugin's directory in `gptme.toml` (project) or the gptme user config. This works for every plugin, including those without an entry point:
+**Or load from a checkout** by pointing `paths` at the plugin's directory in `gptme.toml` (project) or the gptme user config. This works for every plugin whose package has a `tools/`, `hooks/` or `commands/` subpackage, including those without an entry point (`gptme-ace`, `gptme-retrieval` and `gptme-tts` have none, so install those instead):
 
 ```toml
 [plugins]
