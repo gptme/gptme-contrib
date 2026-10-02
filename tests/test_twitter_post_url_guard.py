@@ -112,8 +112,12 @@ def _load_twitter_module() -> tuple[Any, dict[str, Any], list[str]]:
 
 
 @pytest.fixture(scope="module")
-def twitter_module() -> Generator[Any, None, None]:
+def twitter_module(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Generator[Any, None, None]:
     module, original_modules, original_sys_path = _load_twitter_module()
+    # Never let post() write dedup markers into the real ~/.local/state.
+    module.POST_DEDUP_DIR = tmp_path_factory.mktemp("twitter-post-dedup")
     yield module
     sys.path[:] = original_sys_path
     sys.modules.pop("twitter_post_guard_under_test", None)
