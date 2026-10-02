@@ -24,13 +24,14 @@ def test_cross_repo_search_uses_deployment_author(monkeypatch, configured, expli
     assert cmd[cmd.index("--author") + 1] == expected
 
 
-def test_reviews_preserve_operator_and_exclude_actual_pr_author():
+@pytest.mark.parametrize("pr_author", [{"login": "NewAgent"}, None])
+def test_reviews_preserve_operator_and_exclude_actual_pr_author(pr_author):
     payload = [
         {
             "number": 7,
             "title": "A change",
             "url": "https://example.test/pr/7",
-            "author": {"login": "NewAgent"},
+            "author": pr_author,
             "reviews": [
                 {"author": {"login": "NewAgent"}},
                 {"author": {"login": "ErikBjare"}},
@@ -42,6 +43,9 @@ def test_reviews_preserve_operator_and_exclude_actual_pr_author():
         "gptme_activity_summary.github_data._run_command", return_value=json.dumps(payload)
     ) as run:
         reviews = get_reviews_received(date(2026, 10, 1), date(2026, 10, 2), ["NewAgent/brain"])
-    assert [review.reviewer for review in reviews] == ["ErikBjare", "AnotherReviewer"]
+    expected = ["ErikBjare", "AnotherReviewer"]
+    if pr_author is None:
+        expected.insert(0, "NewAgent")
+    assert [review.reviewer for review in reviews] == expected
     cmd = run.call_args.args[0]
     assert "author" in cmd[cmd.index("--json") + 1].split(",")

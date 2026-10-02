@@ -450,7 +450,7 @@ def get_reviews_received(start: date, end: date, repos: list[str]) -> list[PRRev
         try:
             prs = json.loads(output)
             for pr in prs:
-                pr_author = pr.get("author", {}).get("login", "")
+                pr_author = (pr.get("author") or {}).get("login", "")
                 for review in pr.get("reviews", []):
                     author = review.get("author", {}).get("login", "")
                     if author and author not in (pr_author, "bot"):
