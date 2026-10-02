@@ -1,4 +1,4 @@
-.PHONY: help test typecheck test-packages typecheck-packages test-plugins test-integration test-unit check-names list-packages list-plugins
+.PHONY: help test typecheck test-packages test-changed-packages typecheck-packages test-plugins test-integration test-unit check-names list-packages list-plugins
 
 # Plugins not yet CI-ready (tests exist but weren't validated before dynamic discovery)
 # TODO: Fix these tests and remove from exclude list - see GitHub issue tracking
@@ -9,6 +9,8 @@ EXCLUDE_PLUGINS :=
 
 # Dynamic discovery - find all directories with Makefile (skip symlinks)
 PACKAGE_DIRS := $(shell find packages -maxdepth 1 -mindepth 1 -type d ! -type l ! -name '__pycache__' 2>/dev/null)
+# Base ref for changed-package detection (override with BASE=<ref>)
+BASE ?= origin/master
 PLUGIN_DIRS := $(shell find plugins -maxdepth 1 -mindepth 1 -type d ! -type l 2>/dev/null)
 
 # Centralize tool caches at the repo root so per-package runs (which cd into
@@ -55,6 +57,27 @@ test-packages:  ## Run tests for all packages
 		fi \
 	done; \
 	if [ -n "$$failed" ]; then exit 1; fi
+
+test-changed-packages:  ## Run tests only for packages changed since BASE (default: origin/master)
+	@ALL=$$(git diff --name-only "$(BASE)"...HEAD 2>/dev/null); \
+	CHANGED=$$(echo "$$ALL" | grep '^packages/' | cut -d/ -f1-2 | sort -u \
+		| while IFS= read -r p; do [ -f "$$p/Makefile" ] && echo "$$p"; done); \
+	if echo "$$ALL" | grep -qE '^(Makefile|pyproject\.toml|uv\.lock|\.github/workflows/test-packages\.yml)'; then \
+		echo "Shared workspace config changed vs $(BASE) — running all packages"; \
+		$(MAKE) test-packages; \
+	elif [ -z "$$CHANGED" ]; then \
+		echo "No changed packages detected vs $(BASE) — running all packages"; \
+		$(MAKE) test-packages; \
+	else \
+		printf 'Changed packages:\n'; \
+		echo "$$CHANGED" | sed 's/^/  /'; \
+		failed=; \
+		for pkg in $$CHANGED; do \
+			printf '\n=== Testing %s (changed) ===\n' "$$(basename $$pkg)"; \
+			$(MAKE) -C "$$pkg" test || failed=1; \
+		done; \
+		if [ -n "$$failed" ]; then exit 1; fi; \
+	fi
 
 typecheck-packages:  ## Run mypy for all packages
 	@echo "Running typecheck for all packages..."
