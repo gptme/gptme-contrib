@@ -650,3 +650,32 @@ def test_search_non_json_surfaces_warning_before_failure(tmp_path):
     assert warning in result.output
     assert isinstance(result.exception, RuntimeError)
     assert str(result.exception) == "embedding dimension mismatch"
+
+
+def test_search_min_relevance_filters_results(populated_index):
+    """--min-relevance drops results below the threshold; 0 keeps all, 1.0 drops weak ones."""
+    runner = CliRunner()
+    base = ["search", "Python programming", "--persist-dir", str(populated_index), "--json"]
+
+    all_result = runner.invoke(cli, base, catch_exceptions=False)
+    all_data = json.loads(all_result.output)
+    assert all_data["total_results"] >= 1
+    relevances = [r["relevance"] for r in all_data["results"]]
+
+    threshold = max(relevances)
+    kept = json.loads(
+        runner.invoke(
+            cli, [*base, "--min-relevance", str(threshold)], catch_exceptions=False
+        ).output
+    )
+    assert 1 <= kept["total_results"] <= all_data["total_results"]
+    assert all(r["relevance"] >= threshold - 1e-6 for r in kept["results"])
+
+    none_left = runner.invoke(cli, [*base, "--min-relevance", "1.0"], catch_exceptions=False)
+    assert none_left.exit_code == 0, none_left.output
+    none_left_data = json.loads(none_left.output)
+    # Only exact-match documents (relevance 1.0) may remain; any sub-1.0 result is a filter bug
+    if max(relevances) < 1.0:
+        assert none_left_data["total_results"] == 0
+    else:
+        assert all(r["relevance"] == 1.0 for r in none_left_data["results"])
