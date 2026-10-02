@@ -19,21 +19,28 @@ fi
 # Auto-symlink node_modules in linked git worktrees to prevent --no-verify bypass.
 # Proper worktree detection via git-common-dir vs git-dir (works for all git versions).
 #
-# WHAT YOU ARE TRADING: this is a SHARED tree, not a private copy. Every linked
-# worktree points at the ONE node_modules in the main checkout, so anything that
-# writes through it — `npm install`, a pnpm store write, a postinstall script,
-# `node_modules/.cache` — writes into the main checkout, and two worktrees doing
-# that at once race on the same files. That is accepted deliberately: the tree is
-# here to be READ, by lint/format hooks resolving binaries, and the alternative it
-# replaces is not an isolated tree per worktree — a fresh worktree has NO
-# node_modules at all, which fails those hooks with exit 127 and sends the worker
-# to `--no-verify`, i.e. no hooks whatsoever. A shared read-mostly tree is the
-# better of those two, not a free lunch.
+# WHAT YOU ARE TRADING: the worktree's node_modules is a REAL directory whose
+# entries (packages, `.bin`, `@scope` dirs) are symlinks into the ONE node_modules
+# in the main checkout. Reads — lint/format hooks resolving binaries — hit the
+# shared tree, which is what this exists for: a fresh worktree has NO node_modules
+# at all, which fails those hooks with exit 127 and sends the worker to
+# `--no-verify`, i.e. no hooks whatsoever.
 #
-# So: DO NOT run `npm install` (or any installer) inside a linked worktree. If you
-# need one, `rm` the symlink first and let the installer create a real directory —
-# an existing non-symlink node_modules is left alone by the loop below, so a
-# worktree that opts out this way stays opted out across checkouts.
+# Why per-entry links and not one symlink to the whole tree: an installer
+# (`npm ci`, `npm install`) rm-rf's node_modules before rebuilding. Through a
+# single directory symlink that follows the link and EMPTIES THE MAIN CHECKOUT's
+# dependencies (aw-webui 2026-09-25, gptme 2026-10-02: ~400 MB gone each time, and
+# every sibling worktree's hooks fail with exit 127). Removing a directory of
+# per-entry links deletes only the links. `.cache` and `.vite` are deliberately
+# NOT linked, so tool caches stay worktree-local instead of racing in the main
+# checkout. Writes INTO a linked package (a postinstall, a patch) still land in
+# the shared tree, so installers remain unwelcome here.
+#
+# If you need your own dependencies, just run the installer: it replaces this
+# directory of links with a real tree and leaves the main checkout alone. An
+# existing real node_modules is left alone by the loop below, so a worktree that
+# has done this stays opted out across checkouts. Legacy worktrees that already
+# hold a whole-directory symlink keep it; `rm` it and re-run the hook to upgrade.
 #
 # ORDERING IS LOAD-BEARING: this runs BEFORE the branch-base validation below,
 # which returns `exit 0` on detached HEAD, on master/main, and when origin has
@@ -64,13 +71,18 @@ if [ -n "$_gw_git_dir" ] && [ "$_gw_git_dir" != "$_gw_common_dir" ]; then
             _gw_target="$_gw_wt_root/$_gw_rel"
             _gw_parent=$(dirname "$_gw_target")
             [ -d "$_gw_parent" ] || continue
+            if [ -L "$_gw_target" ] && [ ! -d "$_gw_target" ]; then
+                rm "$_gw_target"  # broken symlink: rebuild below
+                echo "[git-worktree] Fixed broken symlink $_gw_rel"
+            fi
             if [ ! -e "$_gw_target" ]; then
-                ln -s "$_gw_base" "$_gw_target"
-                echo "[git-worktree] Symlinked $_gw_rel -> $_gw_base"
-            elif [ -L "$_gw_target" ] && [ ! -d "$_gw_target" ]; then
-                rm "$_gw_target"
-                ln -s "$_gw_base" "$_gw_target"
-                echo "[git-worktree] Fixed broken symlink $_gw_rel -> $_gw_base"
+                mkdir "$_gw_target"
+                for _gw_entry in "$_gw_base"/* "$_gw_base"/.[!.]*; do
+                    [ -e "$_gw_entry" ] || [ -L "$_gw_entry" ] || continue
+                    case "${_gw_entry##*/}" in .cache | .vite) continue ;; esac
+                    ln -s "$_gw_entry" "$_gw_target/${_gw_entry##*/}"
+                done
+                echo "[git-worktree] Linked $_gw_rel entries from $_gw_base"
             fi
         done < <(find "$_gw_main_root" -maxdepth 3 -type d -name node_modules \
                  -not -path "*/node_modules/*" -print0 2>/dev/null)
