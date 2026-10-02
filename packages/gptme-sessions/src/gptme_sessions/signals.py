@@ -52,7 +52,9 @@ _COMMIT_RE = re.compile(
 # matches nothing, even though the commit landed.
 _COMMIT_CMD_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+commit\b|\bgit-safe-commit\b")
 _COMMIT_SUBJECT_RE = re.compile(r"""-m\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""")
-_COMMIT_HEREDOC_SUBJECT_RE = re.compile(r"""-m\s+"\$\(cat\s+<<-?\s*'?(\w+)'?\s*\n(.*?)\n""", re.S)
+_COMMIT_HEREDOC_SUBJECT_RE = re.compile(
+    r"""-m\s+"\$\(cat\s+<<-?\s*'?(\w+)'?\s*\n(.*?)\n\1\b""", re.S
+)
 _GIT_REPO_RE = re.compile(r"""\bgit\s+-C\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([^\s;&|]+))""")
 _GIT_PUSH_CMD_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+push\b")
 _QUIET_PUSH_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+push\b[^;&|\n]*(?:\s-q\b|--quiet\b)")
@@ -1229,11 +1231,14 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                             "quiet_push": bool(_QUIET_PUSH_RE.search(cmd)),
                         }
                     if tool_id and _GIT_PUSH_CMD_RE.search(cmd) and _QUIET_PUSH_RE.search(cmd):
-                        _quiet_push_pending[tool_id] = {
-                            "cwd": command_cwd,
-                            "repo": _command_repo(cmd, command_cwd),
-                            "quiet": True,
-                        }
+                        # Skip if the same command has a commit: the commit path already
+                        # records this push via quiet_push=True evidence, avoiding double-count.
+                        if not _COMMIT_CMD_RE.search(cmd):
+                            _quiet_push_pending[tool_id] = {
+                                "cwd": command_cwd,
+                                "repo": _command_repo(cmd, command_cwd),
+                                "quiet": True,
+                            }
 
                     # Heredoc file writes (`cat > f <<EOF`, `tee f <<EOF`) are
                     # file writes just like the Write tool; count them the same.

@@ -94,9 +94,8 @@ def test_quiet_mutations_preserve_reconciliation_evidence():
     assert commit["evidence"]["subject"] == "fix: quiet"
     assert commit["evidence"]["repo"] == "/tmp/worktrees/r"
     assert commit["evidence"]["quiet_push"] is True
-    push = next(detail for detail in signals["deliverable_details"] if detail["kind"] == "push")
-    assert push["evidence"]["repo"] == "/tmp/worktrees/r"
-    assert push["evidence"]["output_swallowed"] is True
+    # The push is absorbed into the commit evidence (quiet_push=True); no separate push detail.
+    assert not any(detail["kind"] == "push" for detail in signals["deliverable_details"])
     pull_request = next(
         detail for detail in signals["deliverable_details"] if detail["kind"] == "pull_request"
     )
@@ -211,3 +210,25 @@ def test_heredoc_journal_write_is_not_a_file_write():
     cmd = "cat > journal/2026-09-29/session.md <<'EOF'\nx\nEOF"
     signals = extract_signals_cc(_bash("t1", cmd, ""))
     assert signals["file_writes"] == []
+
+
+def test_commit_heredoc_subject_extracted():
+    """Heredoc commit message subject should be captured even when output is truncated."""
+    cmd = (
+        "git commit -m \"$(cat <<'EOF'\n"
+        "fix: quiet heredoc\n\n"
+        "body line\n"
+        "EOF\n"
+        ')" 2>&1 | tail -1'
+    )
+    signals = extract_signals_cc(_bash("t1", cmd, " 1 file changed, 1 insertion(+)"))
+    assert len(signals["git_commits"]) == 1
+    detail = next(d for d in signals["deliverable_details"] if d["kind"] == "commit")
+    assert detail["evidence"]["subject"] == "fix: quiet heredoc"
+
+
+def test_standalone_quiet_push_is_credited():
+    """A standalone git push -q (no commit in same command) should be a push deliverable."""
+    cmd = "git push -q origin master >/dev/null 2>&1"
+    signals = extract_signals_cc(_bash("t1", cmd, ""))
+    assert any(d["kind"] == "push" for d in signals["deliverable_details"])
