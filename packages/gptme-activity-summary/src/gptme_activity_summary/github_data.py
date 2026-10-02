@@ -460,14 +460,14 @@ def get_reviews_received(
             for pr in prs:
                 pr_author = (pr.get("author") or {}).get("login", "")
                 for review in pr.get("reviews", []):
-                    author = review.get("author", {}).get("login", "")
-                    if author and author not in (pr_author, "bot"):
+                    reviewer = review.get("author", {}).get("login", "")
+                    if reviewer and reviewer not in (pr_author, "bot"):
                         reviews.append(
                             PRReview(
                                 repo=repo,
                                 pr_number=pr.get("number", 0),
                                 pr_title=pr.get("title", ""),
-                                reviewer=author,
+                                reviewer=reviewer,
                                 url=pr.get("url", ""),
                             )
                         )
