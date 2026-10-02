@@ -314,7 +314,7 @@ def test_author_pr_emits_without_waiting_comment() -> None:
         assert result.returncode in (0, 1), result.stderr
         emitted = _emitted_notifications(result.stdout)
         assert len(emitted) == 1, result.stdout
-        assert emitted[0]["detail"] == "author"
+        assert emitted[0]["detail"].split(";")[0].strip() == "author"
 
 
 def test_author_pr_notification_suppressed_when_bot_commented_after_waiting() -> None:
@@ -344,7 +344,7 @@ def test_author_pr_emits_when_human_commented_after_waiting() -> None:
         assert result.returncode in (0, 1), result.stderr
         emitted = _emitted_notifications(result.stdout)
         assert len(emitted) == 1, result.stdout
-        assert emitted[0]["detail"] == "author"
+        assert emitted[0]["detail"].split(";")[0].strip() == "author"
 
 
 def test_author_pr_emits_when_human_review_follows_waiting_comment() -> None:
@@ -357,7 +357,7 @@ def test_author_pr_emits_when_human_review_follows_waiting_comment() -> None:
         assert result.returncode in (0, 1), result.stderr
         emitted = _emitted_notifications(result.stdout)
         assert len(emitted) == 1, result.stdout
-        assert emitted[0]["detail"] == "author"
+        assert emitted[0]["detail"].split(";")[0].strip() == "author"
 
 
 def test_author_pr_emits_when_human_comment_is_after_page_one() -> None:
@@ -376,7 +376,7 @@ def test_author_pr_emits_when_human_comment_is_after_page_one() -> None:
         assert result.returncode in (0, 1), result.stderr
         emitted = _emitted_notifications(result.stdout)
         assert len(emitted) == 1, result.stdout
-        assert emitted[0]["detail"] == "author"
+        assert emitted[0]["detail"].split(";")[0].strip() == "author"
 
 
 def test_author_pr_emits_when_bot_reaffirms_after_human_comment() -> None:
@@ -408,7 +408,7 @@ def test_author_pr_emits_when_bot_reaffirms_after_human_comment() -> None:
         assert result.returncode in (0, 1), result.stderr
         emitted = _emitted_notifications(result.stdout)
         assert len(emitted) == 1, result.stdout
-        assert emitted[0]["detail"] == "author"
+        assert emitted[0]["detail"].split(";")[0].strip() == "author"
 
 
 PM_HUMAN_MERGE_BODY = (
@@ -456,7 +456,7 @@ def test_human_merge_marker_reopens_on_human_comment() -> None:
         assert result.returncode in (0, 1), result.stderr
         emitted = _emitted_notifications(result.stdout)
         assert len(emitted) == 1, result.stdout
-        assert emitted[0]["detail"] == "author"
+        assert emitted[0]["detail"].split(";")[0].strip() == "author"
 
 
 def test_author_identity_handoff_suppresses_without_bot_username() -> None:
@@ -521,7 +521,7 @@ def test_author_identity_handoff_reopens_on_human_comment() -> None:
         assert result.returncode in (0, 1), result.stderr
         emitted = _emitted_notifications(result.stdout)
         assert len(emitted) == 1, result.stdout
-        assert emitted[0]["detail"] == "author"
+        assert emitted[0]["detail"].split(";")[0].strip() == "author"
 
 
 def test_author_pr_notification_suppressed_when_subject_merged() -> None:
@@ -555,4 +555,4 @@ def test_author_pr_notification_still_emits_when_subject_open() -> None:
         assert result.returncode in (0, 1), result.stderr
         emitted = _emitted_notifications(result.stdout)
         assert len(emitted) == 1, result.stdout
-        assert emitted[0]["detail"] == "author"
+        assert emitted[0]["detail"].split(";")[0].strip() == "author"

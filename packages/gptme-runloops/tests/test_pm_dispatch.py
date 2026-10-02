@@ -502,6 +502,45 @@ class TestBuildFullLedgerEntry:
         assert len(entry["items"]) == 20  # but list capped at 20
         assert len(entry["item_refs"]) == 50
 
+    def test_carries_item_detail_into_ledger(self, tmp_path):
+        """Notification reason + actor class must survive into the ledger.
+
+        The event-value report segments the notification class by reason and
+        actor class; that only works if the grouped item's detail reaches the
+        ledger ``items`` entries (it was previously dropped).
+        """
+        work = tmp_path / "work.jsonl"
+        work.write_text(
+            json.dumps(
+                {
+                    "repo": "a/b",
+                    "number": 7,
+                    "types": ["notification"],
+                    "title": "bot bump",
+                    "detail": "author; actor_class=bot",
+                }
+            )
+            + "\n"
+        )
+        entry = build_full_ledger_entry(phase="dispatched", work_file=work)
+        assert entry["items"][0]["detail"] == "author; actor_class=bot"
+
+    def test_item_detail_is_bounded(self, tmp_path):
+        work = tmp_path / "work.jsonl"
+        work.write_text(
+            json.dumps(
+                {
+                    "repo": "a/b",
+                    "number": 7,
+                    "types": ["ci_failure"],
+                    "detail": "ci_completed:" + "x" * 1000,
+                }
+            )
+            + "\n"
+        )
+        entry = build_full_ledger_entry(phase="dispatched", work_file=work)
+        assert len(entry["items"][0]["detail"]) == 300
+
     def test_dedupes_item_refs_preserving_order(self, tmp_path):
         work = tmp_path / "work.jsonl"
         work.write_text(

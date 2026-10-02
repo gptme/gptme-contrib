@@ -2262,6 +2262,50 @@ notification_subject_is_closed() {
     [ "$state" = "closed" ]
 }
 
+# Return the actor class of the most recent comment/review on a PR subject:
+# "bot" (automation), "human", "self" (the running identity), or "unknown"
+# (no activity or API error — fail open). Used to decide whether an
+# author/comment notification's trigger is bot-only automation with no later
+# human handoff (see check_notifications).
+#
+# Bot detection is heuristic on login shape because gh's comment/review author
+# objects carry only .login: the same pattern used by pr_human_priority_tokens
+# and pr_has_unresolved_human_thread. GitHub Apps appear WITHOUT the "[bot]"
+# suffix here (e.g. "greptile-apps"), so -bot/-apps suffixes and well-known
+# CI/review bots are matched too. Failure direction is safe: an unknown actor
+# class returns "unknown" and the caller keeps today's emit behavior.
+# Args: <owner/repo> <pr_number>.
+notification_latest_actor_class() {
+    local repo=$1 number=$2
+    local bot="${BOT_USERNAME:-$AUTHOR}"
+    local author="${AUTHOR:-$bot}"
+    local comments_json reviews_json
+    comments_json=$(gh api --paginate --slurp \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "repos/$repo/issues/$number/comments?per_page=100" 2>/dev/null) || { printf 'unknown'; return 0; }
+    reviews_json=$(gh api --paginate --slurp \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "repos/$repo/pulls/$number/reviews?per_page=100" 2>/dev/null) || { printf 'unknown'; return 0; }
+    jq -nr --arg bot "$bot" --arg author "$author" \
+        --argjson comments "$comments_json" \
+        --argjson reviews "$reviews_json" '
+        def is_self_login:
+            (ascii_downcase == ($bot | ascii_downcase))
+            or (ascii_downcase == ($author | ascii_downcase));
+        def is_bot_login:
+            test("(\\[bot\\]$)|(-bot$)|(-apps$)|(^github-actions$)|(^dependabot)|(^renovate)|(^codecov)|(^coderabbitai$)|(^copilot)|(^greptile)"; "i");
+        ([ (($comments | flatten)[] | {login: (.user.login // ""), time: (.created_at // "")}),
+           (($reviews | flatten)[] | {login: (.user.login // ""), time: (.submitted_at // "")}) ]
+         | map(select(.login != "" and .time != "")) | sort_by(.time) | last) as $latest
+        | if $latest == null then "unknown"
+          elif ($latest.login | is_self_login) then "self"
+          elif ($latest.login | is_bot_login) then "bot"
+          else "human" end
+    ' 2>/dev/null || printf 'unknown'
+}
+
 # Check for actionable unread notifications (review requests, mentions, assigns, author, comments)
 # State-tracked by notification ID to avoid re-triggering for the same unread notification.
 # Returns individual notification items in jsonl mode, count in markdown mode.
@@ -2355,7 +2399,7 @@ def notification_priority:
                 # mention/assign/review_requested stay emit-eligible — those
                 # are human asks. Persist so we don't retry until updated_at
                 # advances, but do not count against the per-run cap.
-                local _subj_type _notif_reason
+                local _subj_type _notif_reason _actor_class=""
                 _subj_type=$(echo "$item" | jq -r '.subject_type // ""')
                 _notif_reason=$(echo "$item" | jq -r '.detail // ""')
                 if [ "$_subj_type" = "PullRequest" ] \
@@ -2382,11 +2426,34 @@ def notification_priority:
                     [ "$number" -gt 0 ] 2>/dev/null && printf '%s#%s' "$repo" "$number" > "$map_file"
                     continue
                 fi
+                # Bot-only author/comment PR notifications: the trigger was
+                # automation (Codecov/Greptile/Dependabot) and no later human
+                # comment or review exists, so there is no human handoff to act
+                # on. The audit attributes 47% of PM equivalent dispatches to the
+                # undifferentiated notification class (2026-09-27); this is its
+                # reason+actor-aware slice. mention/assign/review_requested stay
+                # emit-eligible — those are human asks. Persist so the bump is not
+                # retried until updated_at advances, but do not count against the
+                # per-run cap.
+                if [ "$_subj_type" = "PullRequest" ] \
+                        && { [ "$_notif_reason" = "author" ] || [ "$_notif_reason" = "comment" ]; } \
+                        && [ "$number" -gt 0 ] 2>/dev/null; then
+                    _actor_class=$(notification_latest_actor_class "$repo" "$number")
+                    if [ "$_actor_class" = "bot" ]; then
+                        printf '%s' "$notif_updated" > "$state_file"
+                        printf '%s#%s' "$repo" "$number" > "$map_file"
+                        continue
+                    fi
+                fi
                 _notif_emitted=$((_notif_emitted + 1))
                 if [ "$_notif_emitted" -le "$max_notif_per_run" ]; then
                     # Emit first so a jq failure leaves the state file untouched and the
                     # notification is retried on the next run (emit-before-persist semantics).
-                    echo "$item" | jq -c 'del(.id, .updated_at, .subject_type)'
+                    # carry the actor class on the detail string so reason + actor
+                    # survive into the grouped work file and the dispatch ledger.
+                    printf '%s' "$item" | jq -c \
+                        --arg detail "$_notif_reason${_actor_class:+; actor_class=$_actor_class}" \
+                        'del(.id, .updated_at, .subject_type) | .detail = $detail'
                     printf '%s' "$notif_updated" > "$state_file"
                     [ "$number" -gt 0 ] 2>/dev/null && printf '%s#%s' "$repo" "$number" > "$map_file"
                 fi
@@ -2396,7 +2463,7 @@ def notification_priority:
         # Count new notifications and create state files (process substitution avoids subshell)
         local new_count=0
         while IFS= read -r line; do
-            local notif_id notif_updated state_file map_file prior repo number notif_reason
+            local notif_id notif_updated state_file map_file prior repo number notif_reason notif_subject_type
             notif_id=${line%%$'\t'*}
             remaining=${line#*$'\t'}
             notif_updated=${remaining%%$'\t'*}
@@ -2404,7 +2471,9 @@ def notification_priority:
             repo=${remaining%%$'\t'*}
             remaining=${remaining#*$'\t'}
             number=${remaining%%$'\t'*}
-            notif_reason=${remaining#*$'\t'}
+            remaining=${remaining#*$'\t'}
+            notif_reason=${remaining%%$'\t'*}
+            notif_subject_type=${remaining#*$'\t'}
             state_file="$STATE_DIR/notif-${notif_id}.state"
             map_file="$STATE_DIR/notif-${notif_id}.map"
             prior=""
@@ -2429,9 +2498,17 @@ def notification_priority:
                         && notification_subject_is_closed "$repo" "$number"; then
                     continue
                 fi
+                # Mirror the jsonl branch's bot-only author/comment filter so
+                # the reported count matches what would actually be dispatched.
+                if [ "$notif_subject_type" = "PullRequest" ] \
+                        && { [ "$notif_reason" = "author" ] || [ "$notif_reason" = "comment" ]; } \
+                        && [ "$number" -gt 0 ] 2>/dev/null \
+                        && [ "$(notification_latest_actor_class "$repo" "$number")" = "bot" ]; then
+                    continue
+                fi
                 new_count=$((new_count + 1))
             fi
-        done < <(echo "$notifs" | jq -r '"\(.id)\t\(.updated_at)\t\(.repository.full_name)\t\(.subject.url // "" | split("/") | last | tonumber? // 0)\t\(.reason // "")"' 2>/dev/null)
+        done < <(echo "$notifs" | jq -r '"\(.id)\t\(.updated_at)\t\(.repository.full_name)\t\(.subject.url // "" | split("/") | last | tonumber? // 0)\t\(.reason // "")\t\(.subject.type // "")"' 2>/dev/null)
         echo "$new_count"
     fi
 }
