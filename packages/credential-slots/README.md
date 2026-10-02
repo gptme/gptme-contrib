@@ -1,59 +1,48 @@
 # credential-slots
 
-Safe credential-slot rotation for gptme agents running Claude Max or other
-OAuth-backed subscriptions.
+Safe rotation between multiple OAuth credential files ("slots") behind one
+live symlink — for agents that switch between several Claude Max / OAuth-backed
+subscriptions without landing on an expired or stale token.
+
+**Status:** beta (`0.3.0`). Small, offline, no dependencies; used in production
+as the switching layer under [gptme-subscription](../gptme-subscription/README.md).
+
+## What it does
 
 A **slot** is a named credential file next to a live symlink, e.g.:
 
 ```text
 ~/.claude/.credentials.json             # symlink → one of the slots below
-~/.claude/.credentials.json.bob
-~/.claude/.credentials.json.alice
-~/.claude/.credentials.json.erik
+~/.claude/.credentials.json.work
+~/.claude/.credentials.json.personal
 ```
 
 This package handles the offline safety checks around flipping that symlink:
 
-- Reading a slot's stored `expiresAt`
-- Refusing to switch into an expired or unreadable slot
-- Detecting "drift" where the live file no longer matches any named slot
-  (typical after an operator runs `/login`)
-- Deferring automated switches while busy-signals are active
+- Reading a slot's stored `expiresAt` and refusing to switch into an expired,
+  missing or unreadable slot — even with `force=True`.
+- Detecting **drift**: the live file no longer matches any named slot
+  (typical after running `/login`, which writes a fresh token to the live file
+  and leaves the named slots stale). Switching back would silently restore the
+  stale token.
+- Detecting **identity drift**: a new login written *through* the symlink
+  replaces a slot's identity while the files still match. Caught by comparing
+  a stored refresh-token fingerprint (a sidecar file) with the current one.
+- **Healing** drift by syncing the live file back into a slot and restoring
+  the symlink.
+- Deferring automated switches while the caller reports busy-signals (e.g.
+  running sessions).
 
-Everything else — usage polling, switch logging, rebalance strategy — stays
-in the calling agent, with hooks (`on_switch`, `lock_guard`, `logger`) for
-injection.
-
-## Motivating incident — 2026-04-23
-
-Bob's live `~/.claude/.credentials.json` OAuth token became invalid
-server-side while still claiming a future `expiresAt`. Every autonomous
-Claude Code session hit 401. The per-backend crash counter tripped after
-three infra failures and opus was locked out for 1 h.
-
-When Erik refreshed the token via `claude /login`, the new credentials
-were written to the live file only — none of the named slots were
-updated. The next `manage-subscription.py --switch bob` would have
-silently put the stale token back.
-
-Bob's `manage-subscription.py` was hardened in commit `e9ea27097`
-(ErikBjare/bob) with three defensive checks. This package lifts those
-checks out of Bob's workspace so other agents inherit the same
-guarantees:
-
-1. **Target-slot expiry validation** in `switch_to` — refuses known-bad
-   tokens even under `force=True`.
-2. **`detect_live_slot_drift`** — warns when the live file hashes to
-   nothing the caller recognizes.
-3. **Lock-guard injection** — automated switches defer while the caller
-   reports active busy-signals; `force=True` overrides.
+Everything else — usage polling, switch logging, when to rebalance — stays in
+the caller, which plugs in through callbacks (`lock_guard`, `on_switch`,
+`logger`). For quota-aware decisions on top of this, use
+[gptme-subscription](../gptme-subscription/README.md).
 
 ## Install
 
-Dev-time (workspace mode, recommended for agents checking out
-gptme-contrib as a submodule):
-
 ```bash
+pip install "git+https://github.com/gptme/gptme-contrib#subdirectory=packages/credential-slots"
+# or, from a gptme-contrib checkout:
 uv pip install -e packages/credential-slots
 ```
 
@@ -65,96 +54,95 @@ from credential_slots import SlotManager, reason_is_refreshable
 
 mgr = SlotManager(
     creds_dir=Path.home() / ".claude",
-    subscriptions=["bob", "alice", "erik"],
-    # Optional: defer automated switches while a busy-signal is present.
+    subscriptions=["work", "personal"],
+    # Optional: names of holds that should defer automated switches.
     lock_guard=lambda: [p.stem for p in Path("/tmp").glob("agent-*.lock")],
     # Optional: persist a switch log.
-    on_switch=lambda sub, reason: switch_log.write_text(
-        f"{datetime.utcnow()} switched to {sub} — {reason}\n"
-    ),
+    on_switch=lambda sub, reason: print(f"switched to {sub}: {reason}"),
     logger=print,  # defaults to silent
 )
 
-# Introspection
-mgr.get_active_subscription()       # "bob" | None
-mgr.get_available_subscriptions()   # ["bob", "alice"]
+mgr.get_active_subscription()       # "work" | None
+mgr.get_available_subscriptions()   # slots whose files exist
 
-# Safety checks
-ok, reason = mgr.slot_is_fresh("bob")
-# A stale access token is often still recoverable: CC refreshes it from the
-# stored refresh token on first use. Classify the reason instead of matching
-# its text — "expired 7m ago" and "expires within grace" are both probeable,
-# while "slot missing"/"unreadable" are not.
-if not ok and reason_is_refreshable(reason):
-    # probe_ok asserts "an online probe just confirmed this slot works". Only
-    # pass it with a *fresh* probe result in hand — it disables the expiry gate
-    # that force=True cannot. It is deliberately narrow: honored only when the
-    # freshness failure is expiry-class AND the slot actually holds a refresh
-    # token. A malformed/unreadable slot, or one with nothing to auto-refresh,
-    # is still refused (the gate stays in force, the ignore is logged) — so
-    # switch_to re-checks both itself rather than trusting the caller's filter.
-    # Every bypass and every ignored probe_ok is logged distinctly.
-    if online_probe_succeeds("bob"):
-        mgr.switch_to("bob", "operator switch", probe_ok=True)  # skips the expiry gate
+ok, reason = mgr.slot_is_fresh("personal")
+
+# Switch (deferred while lock_guard returns holds, unless force=True)
+result = mgr.switch_to("personal", reason="work quota exhausted")
+if not result.ok:
+    print(result.reason, result.deferred_locks)
+
+# Live file matches no slot (e.g. after /login)?
 drift = mgr.detect_live_slot_drift()
 if drift and drift["drift"]:
-    warn("live creds file matches no named slot — run /login then persist")
+    # The caller decides which slot was active before the refresh.
+    print(mgr.heal_drift_to("work").reason)
 
-# Identity drift — catches the case where an operator (or stray
-# `claude /login`) writes a new OAuth credential *through* the live
-# symlink, silently replacing the slot's tokens. Hash-based
-# detect_live_slot_drift() can't see this because live and slot still match.
-# See ErikBjare/bob#769.
-ident = mgr.detect_slot_identity_drift("bob")
+# Slot identity replaced through the symlink?
+ident = mgr.detect_slot_identity_drift("work")
 if ident["drift"]:
-    warn(f"slot identity changed: {ident['reason']}")
-# After a fresh login that establishes a new identity for a slot, capture it:
-# mgr.capture_slot_fingerprint("bob")  # switch_to/heal_drift_to do this automatically
-
-# Switching
-result = mgr.switch_to("alice", reason="bob quota exhausted")
-if not result.ok:
-    print(f"could not switch: {result.reason}")
-    if result.deferred_locks:
-        print(f"deferred by: {result.deferred_locks}")
-
-# Healing drift after CC OAuth refresh (live file replaced by a regular file
-# with a fresh token; named slots stranded at the old token).
-# Caller decides which sub was active before the refresh — typically by
-# inspecting their own switch log.
-last_active = read_my_switch_log()  # caller-owned
-if last_active:
-    result = mgr.heal_drift_to(last_active)
-    if result.ok:
-        print(result.reason)  # "healed: synced live → .credentials.json.bob, ..."
+    print(ident["reason"])
 ```
+
+### Expired access token, valid refresh token
+
+An expired access token is often still recoverable: Claude Code refreshes it
+from the stored refresh token on first use. Use `reason_is_refreshable()` to
+classify the `slot_is_fresh` reason (don't substring-match it — the grace-window
+reason says "expires", not "expired"). If an online probe you ran confirms the
+slot works, pass `probe_ok=True`:
+
+```python
+ok, reason = mgr.slot_is_fresh("work")
+if not ok and reason_is_refreshable(reason) and my_online_probe("work"):
+    mgr.switch_to("work", "probe confirmed", probe_ok=True)
+```
+
+`probe_ok` is deliberately narrow: it is honored only for expiry-class failures
+on a slot that actually holds a refresh token. Missing or malformed slots are
+still refused, and every bypass is logged.
+
+## API
+
+| Name | Purpose |
+|------|---------|
+| `SlotManager(creds_dir, subscriptions, *, slot_template, live_name, fingerprint_template, grace_seconds, lock_guard, on_switch, logger)` | Manages one family of slots |
+| `.get_active_subscription()` / `.get_available_subscriptions()` | Introspection |
+| `.slot_is_fresh(sub)` / `.read_slot_expiry(sub)` / `.slot_has_refresh_token(sub)` | Per-slot checks |
+| `.switch_to(sub, reason, *, force=False, probe_ok=False)` | Flip the live symlink; returns `SwitchResult(ok, reason, deferred_locks)` |
+| `.detect_live_slot_drift()` | `DriftInfo` (`drift`, `matching_slot`, `live_hash`, `slot_hashes`) or `None` |
+| `.heal_drift_to(sub, *, force=False)` | Sync the drifted live file into `sub`'s slot and re-symlink |
+| `.detect_slot_identity_drift(sub)` / `.capture_slot_fingerprint(sub)` | Refresh-token fingerprint checks (`switch_to` and `heal_drift_to` capture automatically) |
+| `reason_is_refreshable(reason)` | Whether a freshness failure is only an expiry problem |
+| `read_slot_expiry(path)`, `slot_is_fresh(path, ...)`, `compute_slot_fingerprint(path)` | Path-based helpers |
+
+Defaults: live file `.credentials.json`, slots `.credentials.json.{sub}`,
+fingerprints `.credentials.json.{sub}.fingerprint.json`, grace window 300 s.
 
 ## Design
 
-- **Offline-only**: this package never makes network calls. Server-side
-  token invalidation (valid `expiresAt` but the API still returns 401)
-  must be detected by the agent's API response classifier.
-- **Dependency injection for paths**: nothing is hardcoded to
-  `~/.claude` or any single-agent layout. Tests instantiate the class
-  against `tmp_path`; agents pass whatever directory works for them.
-- **No workspace dependencies**: switch logs, rate-limit files,
-  usage-polling scripts, and rebalance state all stay in the caller.
-  This package provides the callbacks those callers plug into.
+- **Offline-only.** No network calls. Server-side invalidation (a valid-looking
+  `expiresAt` while the API returns 401) must be detected by the caller.
+- **Paths are injected.** Nothing is hardcoded to `~/.claude`; tests run
+  against a temp directory.
+- **No workspace state.** Switch logs, rate-limit files and rebalance state
+  belong to the caller.
+
+Why it exists: a live OAuth token was invalidated server-side while still
+claiming a future `expiresAt`, and the operator's `/login` fix wrote the new
+token only to the live file — so the next scripted switch would have silently
+restored the stale one. These checks make that class of mistake fail loudly.
 
 ## Tests
 
 ```bash
-uv pip install -e packages/credential-slots
 uv run pytest packages/credential-slots/tests/ -v
 ```
 
-## Status
+## Changelog
 
-- **`v0.2.0`** — added `SlotManager.heal_drift_to(sub, *, force=False)`
-  for OAuth-refresh recovery. Ported from Bob's `manage-subscription.py`
-  auto-heal logic (commit `b59d54d72`, ErikBjare/bob#685). Handles the
-  recurring case where CC writes a fresh OAuth token to the live file
-  (turning the symlink into a regular file) and every named slot is
-  stranded at the old token.
-- `v0.1.0` — initial release, ported from `manage-subscription.py` in
-  ErikBjare/bob, commit `e9ea27097`.
+- Unreleased — `switch_to(..., probe_ok=True)` and `reason_is_refreshable()`
+  for expired-access-token slots with a confirmed refresh.
+- `0.3.0` — identity-drift detection via refresh-token fingerprints.
+- `0.2.0` — `SlotManager.heal_drift_to()` for OAuth-refresh recovery.
+- `0.1.0` — initial release.

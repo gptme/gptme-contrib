@@ -1,93 +1,57 @@
 # gptme-user-memories
 
-A gptme plugin that automatically extracts user facts from past conversations and stores them for inclusion in future sessions — like ChatGPT's "memory" feature but fully local.
+Long-term user memory for [gptme](https://gptme.org), similar to ChatGPT's "memory" feature: after each conversation it extracts durable facts about you (preferences, projects, working style) and saves them to a local Markdown file that future sessions can include in context.
+
+**Status:** experimental.
 
 ## How it works
 
-1. A `SESSION_END` hook runs after each conversation
-2. It checks if the session was a personal (non-autonomous) conversation
-3. Uses Claude Haiku to extract key user facts from the conversation
-4. Stores them in `~/.config/gptme/user-memories/facts.md`
-5. You include that file in your gptme.toml or context script
+1. A `SESSION_END` hook runs when a gptme conversation ends.
+2. It skips sessions that look autonomous (agent run-loop prompts), sessions with fewer than 50 characters of user text, and sessions it has already processed (a `.memories-extracted` marker file in the conversation's log directory).
+3. It sends **your messages only** (capped at 400 characters per message and 8,000 characters in total) to an Anthropic model, `claude-haiku-4-5-20251001` by default, and asks for a list of facts about you.
+4. New facts are merged into `~/.config/gptme/user-memories/facts.md`, case-insensitively deduplicated and sorted.
+5. You include that file in future sessions (see below). The plugin does not inject it for you.
 
-## Installation
+If the API call fails or no API key is configured, the conversation is left unmarked, so it is retried the next time that conversation ends (for example after resuming it) or by the backfill CLI below.
+
+## Install
+
+Install the package into the same Python environment as gptme (it depends on the `anthropic` SDK and provides the `gptme-user-memories` CLI):
 
 ```sh
-pip install gptme-user-memories
-# or
-uv pip install gptme-user-memories
+pip install "git+https://github.com/gptme/gptme-contrib#subdirectory=plugins/gptme-user-memories"
+# or, for a pipx-installed gptme:
+pipx inject --include-apps gptme "git+https://github.com/gptme/gptme-contrib#subdirectory=plugins/gptme-user-memories"
 ```
 
-## Configuration
-
-### 1. Enable the plugin in `gptme.toml`
+Then point gptme at the plugin so the hook is registered, in `~/.config/gptme/config.toml` (recommended, since memories are per-user) or a project's `gptme.toml`:
 
 ```toml
 [plugins]
-paths = ["~/.config/gptme/plugins"]
-enabled = ["user_memories"]
+paths = ["/path/to/gptme-contrib/plugins/gptme-user-memories"]
+enabled = ["gptme_user_memories"]
 ```
 
-### 2. Include extracted memories in future sessions
+### API key
 
-Add to your `gptme.toml`:
+The extractor reads `ANTHROPIC_API_KEY` from the environment, or from the `[env]` table of `~/.config/gptme/config.toml`.
+
+## Use the memories in future sessions
+
+Add the file to the prompt files in your user config, `~/.config/gptme/config.toml` (a project `gptme.toml` only includes files inside the workspace, so it can't reference this path):
 
 ```toml
 [prompt]
-files = [
-    # ... other files ...
-    "~/.config/gptme/user-memories/facts.md",
-]
+files = ["~/.config/gptme/user-memories/facts.md"]
 ```
 
-Or in your context script (`context.sh`):
-
-```bash
-if [[ -f ~/.config/gptme/user-memories/facts.md ]]; then
-    echo "# User Memories"
-    cat ~/.config/gptme/user-memories/facts.md
-fi
-```
-
-### 3. Provide an Anthropic API key
-
-The plugin uses Claude Haiku for fact extraction. It reads the key from:
-
-1. `ANTHROPIC_API_KEY` environment variable
-2. `~/.config/gptme/config.toml` under `[env] ANTHROPIC_API_KEY`
-
-### 4. (Optional) Override the extraction model
-
-The hook uses `claude-haiku-4-5-20251001` by default. To use a different model:
+or print it from a context script:
 
 ```sh
-export GPTME_MEMORIES_MODEL=claude-3-5-haiku-20241022
+cat ~/.config/gptme/user-memories/facts.md 2>/dev/null
 ```
 
-This applies to both the `SESSION_END` hook and the `gptme-user-memories` CLI.
-
-## What gets extracted
-
-The plugin looks for personalisation-relevant facts:
-
-- Technical preferences (languages, frameworks, editors, workflows)
-- Communication style (terse vs detailed, what they find helpful)
-- Ongoing projects and goals
-- Personal facts relevant to work (timezone, company, role)
-
-It deliberately skips:
-- Autonomous agent sessions (looks for gptme/Claude Code autonomous patterns)
-- Generic preferences ("prefers code that works")
-- Short conversations (< 50 chars of user content)
-- Already-processed sessions (sentinel files prevent re-mining)
-
-## Privacy
-
-All processing is local. The only external call is to Anthropic's API to extract facts — the conversation text is sent to Claude Haiku for analysis. No data is sent to any other service. To avoid sending sensitive conversations, the plugin includes autonomous session filtering and skips conversations with < 50 chars of user content.
-
-## Storage
-
-Memories are stored in `~/.config/gptme/user-memories/facts.md` as a simple markdown list:
+The file is plain Markdown that you can read and edit:
 
 ```markdown
 # User Memories
@@ -96,48 +60,48 @@ Facts about the user extracted from past gptme conversations.
 Last updated: 2026-03-11
 
 - Prefers Python for scripting, TypeScript for web
-- Works on open-source time tracking (ActivityWatch)
 - Uses Vim as primary editor
 ```
 
-Facts are deduplicated and sorted alphabetically on each update.
+## Backfill from past sessions (CLI)
 
-## CLI usage
-
-After installation, the `gptme-user-memories` command is available for backfilling memories from past sessions:
+`gptme-user-memories` scans recent conversations and writes the results to the same file. It reads gptme logs (`~/.local/share/gptme/logs/`) **and Claude Code transcripts (`~/.claude/projects/`)**, applying the same autonomous-session and length filters.
 
 ```sh
-# Dry-run: show what would be extracted without writing anything
-gptme-user-memories --dry-run
-
-# Backfill the last 30 days, up to 50 sessions
-gptme-user-memories --days 30 --limit 50
-
-# Re-process already-handled sessions
-gptme-user-memories --force
-
-# Write to a custom output file
+gptme-user-memories --dry-run              # print what would be extracted, write nothing
+gptme-user-memories --days 30 --limit 50   # scan the last 30 days, at most 50 sessions
+gptme-user-memories --force                # re-process sessions already marked as done
 gptme-user-memories --output ~/my-memories.md
-
-# Use a specific model
-gptme-user-memories --model claude-3-5-haiku-20241022
+gptme-user-memories --model claude-haiku-4-5-20251001
+gptme-user-memories --categorize           # write preferences.md, projects.md, personal.md instead of facts.md
 ```
 
-## Manual extraction (Python API)
+Defaults: `--days 14`, `--limit 30`. With `--categorize`, files go to `~/.config/gptme/user-memories/` and `--output` is ignored.
 
-You can also drive extraction directly from the `extractor` module:
+### Choosing the model
+
+- Hook: set the `GPTME_MEMORIES_MODEL` environment variable to an Anthropic model ID.
+- CLI: pass `--model`; the CLI does not read `GPTME_MEMORIES_MODEL`.
+
+## Privacy
+
+Conversation text, limited to your own messages, is sent to Anthropic's API for extraction; nothing else leaves your machine, and the results are stored locally. The extraction prompt asks the model not to keep private or sensitive information, but this is not guaranteed, so review `facts.md` from time to time. To keep certain conversations out entirely, don't enable the plugin for those projects, and avoid running the CLI backfill over logs you don't want processed.
+
+## Python API
 
 ```python
-from gptme_user_memories.extractor import process_logdir, USER_MEMORIES_FILE
-from gptme_user_memories.extractor import load_existing_memories, merge_facts, save_memories
 from pathlib import Path
+from gptme_user_memories.extractor import (
+    USER_MEMORIES_FILE, process_logdir, load_existing_memories, merge_facts, save_memories,
+)
 
-# Process a specific session
-new_facts = process_logdir(Path("~/.local/share/gptme/logs/my-session").expanduser())  # gptme logs path (unchanged)
-
-# Merge and save (process_logdir returns None if session was filtered)
-if new_facts is not None:
-    existing = load_existing_memories(USER_MEMORIES_FILE)
-    merged = merge_facts(existing, new_facts)
+new_facts = process_logdir(Path("~/.local/share/gptme/logs/<conversation>").expanduser())
+if new_facts is not None:  # None: skipped (filtered or already processed) or API error
+    merged = merge_facts(load_existing_memories(USER_MEMORIES_FILE), new_facts)
     save_memories(USER_MEMORIES_FILE, merged)
 ```
+
+## Related
+
+- [gptme plugin docs](https://gptme.org/docs/plugins.html)
+- [Other gptme-contrib plugins](../README.md)

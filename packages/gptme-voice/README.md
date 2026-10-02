@@ -1,226 +1,254 @@
 # gptme-voice
 
-Voice interface for gptme agents using OpenAI or xAI Grok Realtime APIs.
+Real-time voice interface for gptme agents: talk to your agent by microphone,
+browser or phone (Twilio) through the OpenAI Realtime or xAI Grok voice APIs.
+The agent keeps its own personality and can hand work to a gptme subagent that
+reads files, checks tasks and runs commands in its workspace.
+
+**Status:** experimental but in daily use. It is a server with many optional
+integrations (Twilio phone calls, callbacks, cross-agent handoff, physical
+"body" control). The core path is a local mic or phone conversation.
+
+## How it fits
+
+- Runs next to an agent workspace (a repo with `gptme.toml`, for example one
+  created from [gptme-agent-template](https://github.com/gptme/gptme-agent-template)).
+  It loads the personality files listed there.
+- Delegates real work to `gptme` subprocesses, so tools, lessons and context
+  work as in a normal gptme session.
+- Optional companions:
+  - [gptme-voice-node](../gptme-voice-node/README.md) is a headless client for
+    embedded devices (Raspberry Pi + mic array).
+  - [gptme-vision-node](../gptme-vision-node/README.md) adds a camera with an
+    on-demand `look` tool.
+  - [gptme-rag](../gptme-rag/README.md) powers the opt-in `workspace_search` tool.
+  - [gptme-body-protocol](../gptme-body-protocol/) is the remote body-node
+    protocol.
 
 ## Features
 
-- **Real-time voice conversations** with low-latency audio streaming
-- **Agent personality loading** from gptme.toml project config (ABOUT.md, etc.)
-- **Subagent tool** dispatches tasks to gptme for workspace interaction (read files, check tasks, run commands)
-- **workspace_search** (opt-in `GPTME_VOICE_RAG=1`) — fast gptme-rag lookup over recent journals for recap / "last hour" questions, without a subagent
-- **Auto-detection** of agent repo when installed in gptme-contrib
-- **Feedback loop prevention** by muting mic during playback
-- **Twilio integration** for phone call support via Media Streams
-- **Local testing** with direct microphone/speaker I/O
-- **BobBrain camera tool** — the `/local` session exposes `look` and runs VLM
-  inference only after the edge node returns an on-demand frame
-- **Goal-level body tools** — in-process MAVSDK or an authenticated remote
-  `bob-body/0` node can handle status, bounded movement, stop, turn, and local
-  interaction directly in the realtime tool bridge (never via a subagent)
+- **Low-latency voice conversations** via OpenAI Realtime (default) or xAI Grok
+- **Agent personality** loaded from the workspace's `gptme.toml` prompt files
+  (`ABOUT.md` first)
+- **Subagent tools**: `subagent`, `subagent_status`, `subagent_cancel`
+  dispatch tasks to gptme in the background while the conversation continues
+- **`workspace_search`** (opt-in): fast gptme-rag lookup over recent journals
+  for "what have you been doing?" questions, without a subagent
+- **Phone calls via Twilio**: inbound (`/incoming` webhook + `/twilio` media
+  stream) and outbound (`gptme-voice-call`), with a caller allowlist
+- **Call continuity**: quick reconnects resume the previous transcript, and
+  trusted callbacks after a missed outbound call get that call's prepared
+  context
+- **Cross-agent handoff** (`handoff_to_agent`): transfer a caller to a peer
+  agent through a signed, file-based protocol
+- **Camera `look` tool** for `/local` clients that advertise a camera
+- **Body tools** (`body_status`, `body_move`, `body_turn`, `body_stop`, …):
+  capability-gated goal-level commands to an in-process MAVSDK vehicle or an
+  authenticated remote body node, handled directly in the tool bridge and never
+  through a subagent
+- **Browser transport** (opt-in): `/voice` WebSocket and a `/browser` test page
+- **Latency tracing**: per-utterance ASR / first-audio / round-trip JSONL
 
-## Installation
+## Install
+
+`gptme-voice` depends on workspace-only packages (`gptme-body-protocol`), so
+install it from a gptme-contrib checkout with uv:
 
 ```bash
-# Install with poetry (from gptme-contrib)
-cd packages/gptme-voice
-poetry install
-
-# For local mic/speaker testing
-poetry install -E local
+git clone https://github.com/gptme/gptme-contrib
+cd gptme-contrib
+uv sync --package gptme-voice                  # server + phone
+uv sync --package gptme-voice --extra local    # + PyAudio for gptme-voice-client
+uv sync --package gptme-voice --extra body     # + MAVSDK for drone/rover bodies
 ```
 
-## Usage
+PyAudio needs PortAudio headers (`portaudio19-dev` on Debian/Ubuntu).
 
-### Start the server
+### API keys
+
+Keys and most settings below are read from the environment **or** gptme config
+(`~/.config/gptme/config.toml` / `config.local.toml`), so you don't need to
+export them if gptme already has them:
+
+- `OPENAI_API_KEY` for the default `openai` provider
+- `XAI_API_KEY` for `--provider grok`
+
+## Quickstart: talk to your agent locally
 
 ```bash
-# Auto-detects agent repo and loads personality
-gptme-voice-server
-
-# Use xAI Grok
-gptme-voice-server --provider grok
-
-# With debug logging
-gptme-voice-server --debug
-
-# Explicit workspace
+# Terminal 1: start the server (auto-detects the agent workspace, see below)
 gptme-voice-server --workspace /path/to/agent-repo
-```
 
-The server auto-detects the agent repo by walking up from gptme-contrib to find `gptme.toml`, and loads personality files (prioritizing ABOUT.md).
-
-### Connect with local client
-
-```bash
-# In a separate terminal
+# Terminal 2: local mic/speaker client (needs the `local` extra)
 gptme-voice-client
 ```
 
-Speak into your microphone. The agent responds with its configured personality and can use the subagent tool to interact with its workspace.
+Use headphones. The local client mutes the mic while audio plays to avoid a
+speaker-to-mic feedback loop, so without headphones you can't interrupt the
+agent mid-sentence.
 
-**Tip:** Use headphones to enable interrupting the agent mid-sentence (see Limitations below).
+Without `--workspace`, the server checks whether it is running from a
+`gptme-contrib/` checkout nested inside an agent repo (i.e. the parent of
+`gptme-contrib/` contains a `gptme.toml`) and uses that repo. If not, it uses
+generic instructions.
 
-### Receive phone calls via Twilio
+### Server options
 
-1. Start the server with a public URL (e.g. via ngrok):
-   ```bash
-   gptme-voice-server --port 8080
-   ngrok http 8080
-   ```
-2. In the Twilio console, set your phone number's **Voice webhook** to:
-   `https://<your-ngrok-url>/incoming` (HTTP POST)
-3. Call the Twilio number — Twilio connects the call to the voice server.
-
-### Missed-call context persistence
-
-When a trusted operator calls back within 30 minutes of an unanswered outbound
-call, the inbound session receives the context that was prepared for the original
-call — as if the call took place but the operator was silent. The original call
-must also have been placed on the same UTC calendar day: a call placed at 23:50
-UTC that is returned at 00:10 UTC the next day will not restore context.
-
-**Context note format** — the outbound call path writes
-`state/voice-calls/missed-call-context.json`:
-
-```json
-{
-  "type": "standup",
-  "sid": "CA...",
-  "date": "2026-09-15",
-  "placed_at": "2026-09-15T10:00:00+00:00",
-  "caller": "+15551212",
-  "context_file": "state/standup-brief.json"
-}
+```text
+gptme-voice-server [--host 0.0.0.0] [--port 8080] [--workspace PATH]
+                   [--provider openai|grok] [--model MODEL]
+                   [--reasoning-effort minimal|low|medium|high|xhigh]
+                   [--voice VOICE] [--output-speed 0.25-1.5]
+                   [--enable-browser-transport] [--debug]
 ```
 
-The inbound reader treats all `type` values the same. It **reads the
-referenced `context_file`** (workspace-relative; path traversal is rejected)
-and injects that content into the callback session, including the file path
-so the session can see the link. A standup-brief-shaped JSON file
-(`generated_at` + `text`) keeps the existing freshness checks. Other JSON
-and text files are loaded as-is — `generated_at` is taken from the missed
-call so a long-lived notes file still restores on callback. An optional
-inlined `context` snapshot is a fallback when the file is missing, stale,
-or unreadable (for example a replacement brief generated after the missed
-call).
+Endpoints: `GET /` (health), `WS /local` (local and embedded clients),
+`POST /incoming` + `WS /twilio` (phone), and with `--enable-browser-transport`
+also `WS /voice` + `GET /browser`.
 
-The outbound call path (`create_outbound_call` / `gptme-voice-call
---context-file`) writes the note when callers pass `workspace` plus a
-`context_file` and/or a prepared `missed_call_context` snapshot. The
-inbound loader still requires Twilio to confirm the outbound leg ended
-unanswered.
+## Phone calls via Twilio
+
+### Inbound
+
+1. Expose the server publicly (for example `ngrok http 8080`).
+2. In the Twilio console, set the number's **Voice webhook** to
+   `https://<public-url>/incoming` (HTTP POST).
+3. Set `TWILIO_AUTH_TOKEN` (used to verify webhook signatures) and
+   `TWILIO_CALLER_ALLOWLIST` (comma-separated numbers). Body tools and
+   `workspace_search` are exposed only to allowlisted callers (and loopback
+   clients). When the allowlist is set, inbound calls from any other number
+   are rejected (HTTP 403); without `TWILIO_AUTH_TOKEN` the caller number is
+   unauthenticated and can be spoofed. Callers are recognised from the workspace `people/` directory.
+   Internal context such as the activity digest and ops status goes only to
+   people marked `- Call role: operator`. Everyone else is treated as an
+   external guest.
+
+### Outbound
 
 ```bash
-gptme-voice-call +46701234567 \
+export TWILIO_ACCOUNT_SID=... TWILIO_AUTH_TOKEN=... TWILIO_PHONE_NUMBER=...
+export GPTME_VOICE_PUBLIC_BASE_URL=https://<public-url>   # or TWILIO_PUBLIC_BASE_URL
+
+gptme-voice-call +12025550123
+gptme-voice-call +12025550123 --dry-run      # print the TwiML, don't dial
+```
+
+Options: `--from-number`, `--public-base-url`, `--workspace`, `--context-file`,
+`--call-type` (default `general`), `--dry-run`.
+
+### Missed-call callbacks
+
+If an outbound call goes unanswered and the operator calls back, the callback
+session gets the context prepared for the original call, as if the call had
+happened with the operator silent.
+
+```bash
+gptme-voice-call +12025550123 \
   --workspace /path/to/agent-repo \
   --context-file state/standup-brief.json \
   --call-type standup
 ```
 
-**Trust requirements** — the callback path requires a signed `/incoming`
-webhook, an exact `TWILIO_CALLER_ALLOWLIST` match, and `Call role: operator` in
-the caller's people file. The WebSocket must present the webhook's grant bound
-to both number and CallSid. A bounded two-second Twilio lookup must confirm the
-stamped outbound call went to this caller and ended `no-answer`, `busy`,
-`failed`, or `canceled`. Answered, unresolved, stale, missing, or malformed
-evidence leaves normal inbound behavior intact. API errors fail closed.
+This appends a note to `state/voice-calls/callback-history.jsonl` and writes
+`state/voice-calls/missed-call-context.json` in the workspace. On a callback,
+the server reads the referenced `context_file` (workspace-relative, path
+traversal rejected) and injects it, including the path. Standup-brief-shaped
+JSON (`generated_at` + `text`) gets freshness checks. Other JSON and text files
+load as-is. An inlined `context` snapshot in the note is the fallback when the
+file is missing, stale or unreadable. Every inbound session also receives a
+compact index of the last few calls (pointers, not payloads).
 
-Callback sessions bypass generic number-keyed prewarms. While a trusted caller
-has fresh local callback evidence, `/incoming` skips prewarming so it cannot
-consume recent-call state before the routing decision. An intervening call
-takes precedence and resumes normally.
+Restore conditions, all required:
 
-**Legacy standup files** — if no `missed-call-context.json` exists, the loader
-falls back to reading `state/voice-calls/last-standup-call-sid.txt` +
-`state/standup-brief.json` so existing deployments continue to work.
+- the callback arrives within **4 hours** of the original call and on the same
+  UTC calendar day (a call at 23:50 UTC returned at 00:10 UTC does not restore);
+- a signed `/incoming` webhook, an exact `TWILIO_CALLER_ALLOWLIST` match, and
+  `Call role: operator` in the caller's people file;
+- the media WebSocket presents the webhook's grant bound to both number and
+  CallSid;
+- a bounded Twilio lookup confirms the outbound call went to this caller and
+  ended `no-answer`, `busy`, `failed` or `canceled`.
 
-### Place outbound phone calls via Twilio
+Answered, unresolved, stale or malformed evidence leaves normal inbound
+behaviour intact, and API errors fail closed. For older deployments, the server
+falls back to `state/voice-calls/last-standup-call-sid.txt` +
+`state/standup-brief.json` when no newer note exists.
 
-Set these values in your environment or gptme config:
+## Other integrations
 
-```bash
-TWILIO_ACCOUNT_SID=...
-TWILIO_AUTH_TOKEN=...
-TWILIO_PHONE_NUMBER=...
-GPTME_VOICE_PUBLIC_BASE_URL=https://<your-ngrok-url>
-```
+### Workspace search (gptme-rag)
 
-Then place a call:
+Set `GPTME_VOICE_RAG=1` to advertise `workspace_search`. It is disabled
+automatically if gptme-rag is not installed. Recap questions search recent
+`journal/` files (lexical first) and return in a few seconds. Tunables:
+`GPTME_VOICE_RAG_TIMEOUT_SECONDS` (default 8) and
+`GPTME_VOICE_RAG_RECENCY_HOURS` (default 24).
 
-```bash
-gptme-voice-call +46701234567
-```
+### Cross-agent handoff
 
-Pass `--context-file` (and optionally `--workspace` / `--call-type`) to drop a
-missed-call context note so a trusted callback can pick up that file if the
-call goes unanswered.
+Set `GPTME_VOICE_HANDOFF_DIR` (a state directory shared with peer agents),
+`GPTME_VOICE_HANDOFF_SECRET` (HMAC key; handoff stays disabled without it), and
+`GPTME_VOICE_AGENTS` (comma-separated roster of participating agents). The
+server's own identity comes from `GPTME_VOICE_AGENT_NAME`, `AGENT_NAME`, or
+`[agent] name` in `gptme.toml`. `GPTME_VOICE_HANDOFF_AGENTS` limits which peers
+this server may transfer to (default: the roster minus itself).
 
-Use `--dry-run` to print the generated TwiML without dialing.
-
-### Connect a remote body node
-
-Configure a private body endpoint and pass its token separately so credentials
-do not appear in URLs or logs:
+### Remote body node
 
 ```bash
 GPTME_VOICE_BODY_URL=tcp://127.0.0.1:7777
 GPTME_VOICE_BODY_TOKEN=<body-node-token>
-GPTME_VOICE_BODY_CONTROLLER_ID=gptme-voice-local  # optional
+GPTME_VOICE_BODY_CONTROLLER_ID=gptme-voice-local   # optional
 ```
 
-Plaintext `tcp://` is loopback-only (`127.0.0.1` / `::1`; hostnames including
-`localhost` are refused). A non-loopback host is refused so the bearer token
-and physical commands never cross the network in the clear.
+`GPTME_VOICE_BODY_URL` also accepts `null` (status only, for a tabletop device)
+and `mavsdk://<system_address>` (for example `mavsdk://udpin://0.0.0.0:14540`
+for PX4 SITL; needs the `body` extra). Plaintext `tcp://` is loopback-only
+(`127.0.0.1` / `::1`; hostnames, including `localhost`, are refused), so the
+bearer token and physical commands never cross a network in the clear. The
+remote node negotiates its capabilities in the handshake, and only matching
+tools are registered. Safety (leases, command TTLs, deadman, collision) stays
+the body node's job. Limits: `GPTME_VOICE_BODY_MAX_ALT_M` (30),
+`GPTME_VOICE_BODY_MAX_MOVE_M` (50), `GPTME_VOICE_BODY_CALL_TIMEOUT_S` (12).
 
-The remote node negotiates its actual capabilities during the
-controller-authenticated handshake. `gptme-voice` registers only the
-corresponding realtime tools. The body node remains responsible for controller
-leases, command TTLs, idempotency, deadman behavior, and collision/local
-safety.
-
-### API keys
-
-Keys are loaded from gptme config (`~/.config/gptme/config.toml` or
-`config.local.toml`):
-
-- `OPENAI_API_KEY` for the default `openai` provider
-- `XAI_API_KEY` for `--provider grok`
-
-No need to export them as shell env vars if they're already configured in gptme.
-
-### Workspace search (gptme-rag)
-
-Set `GPTME_VOICE_RAG=1` to advertise a `workspace_search` tool. Recap questions
-such as "what have you been doing in the last hour?" search recent `journal/`
-files through gptme-rag (lexical first) and return in a few seconds instead of
-dispatching a subagent. Optional: `GPTME_VOICE_RAG_TIMEOUT_SECONDS` (default 8)
-and `GPTME_VOICE_RAG_RECENCY_HOURS` (default 24).
-
-### Voice latency tracing
+### Latency tracing
 
 Set `GPTME_VOICE_LATENCY_SINK` to a file path or `-` (stdout). Each utterance
-emits one JSONL `utterance_trace` with:
+emits one JSONL `utterance_trace` with `asr_ms` (speech stopped → transcript),
+`tts_first_audio_ms` (`response.created` → first audio chunk) and
+`round_trip_ms` (speech stopped → first audio chunk).
 
-- `asr_ms` — VAD speech_stopped → user transcript completed
-- `tts_first_audio_ms` — `response.created` → first audio chunk
-- `round_trip_ms` — speech_stopped → first audio chunk
+## Configuration reference
 
-`send_audio` is counted (`input_audio_chunks`) but is not the round-trip clock;
-Twilio streams PCM continuously.
+| Variable | Default | Purpose |
+|---|---|---|
+| `GPTME_VOICE_SUBAGENT_MODEL_FAST` / `_SMART` | `openrouter/anthropic/claude-haiku-4.5` / gptme default | Subagent models (`GPTME_VOICE_SUBAGENT_MODEL` sets both) |
+| `GPTME_VOICE_SUBAGENT_TIMEOUT_FAST_SECONDS` / `_SMART_SECONDS` | `60` / `120` | Subagent timeouts |
+| `GPTME_VOICE_SUBAGENT_PATH` | `gptme` on `PATH` | gptme binary used for subagents |
+| `GPTME_VOICE_RESUME_WINDOW_SECONDS` | `300` | Reconnects within this window resume the previous transcript |
+| `GPTME_VOICE_STATE_DIR` | `/tmp/gptme-voice-call-state` | Per-call state and transcript records |
+| `GPTME_VOICE_POST_CALL_COMMAND` | unset | Command run after a call, given the call record paths as arguments and `GPTME_VOICE_POST_CALL_JSON(S)` / `GPTME_VOICE_CALLER_ID` in its environment |
+| `GPTME_VOICE_POST_CALL_DELAY_SECONDS` | resume window | Intended post-call delay. The server runs the command right away and passes this value in the command's environment; the command is responsible for waiting (e.g. by scheduling a timer) |
+| `GPTME_VOICE_GPTME_SERVER_URL` / `_KEY` | unset | Also post call transcripts to a gptme server conversation |
 
 ## Architecture
 
-- **openai_client.py** - WebSocket client for OpenAI Realtime API with VAD, audio streaming, and event handling
-- **xai_client.py** - xAI Grok Voice Agent adapter (OpenAI-compatible WebSocket protocol)
-- **server.py** - Starlette WebSocket server bridging clients to OpenAI or xAI
-- **tool_bridge.py** - Async subagent dispatcher plus body/vision/RAG tool routing
-- **rag.py** - Recency-scoped gptme-rag search for live recap queries
-- **vision.py** - Correlated camera-frame requests, edge-event handling, and host-side VLM inference
-- **audio.py** - Audio format conversion (PCM ↔ μ-law for Twilio)
-- **client.py** - Local client with mic/speaker I/O and feedback loop prevention
-- **latency.py** - Per-utterance ASR / TTS-first-audio / round-trip tracing
+| Module | Role |
+|---|---|
+| `realtime/server.py` | Starlette server: endpoints, Twilio auth, call state, callbacks |
+| `realtime/openai_client.py` / `xai_client.py` | Realtime API clients (VAD, audio streaming, tool schemas) |
+| `realtime/tool_bridge.py` | Async subagent dispatcher plus body/vision/RAG/handoff routing |
+| `realtime/missed_call_context.py` | Callback-history notes and callback context loading |
+| `realtime/twilio_integration.py`, `call.py` | Twilio TwiML, signing, outbound calls |
+| `realtime/client.py` | Local mic/speaker test client |
+| `realtime/audio.py`, `latency.py` | PCM ↔ μ-law conversion, latency tracing |
+| `rag.py`, `vision.py`, `handoff.py`, `body/` | Workspace search, camera bridge, handoff protocol, body adapters |
 
 ## Limitations
 
-- **No interruption without headphones.** The local test client mutes the mic while audio is playing to prevent feedback loops (speaker → mic → infinite loop). This means you can't interrupt the agent mid-sentence when using speakers. Use headphones to avoid this — with headphones there's no speaker bleed into the mic, so the client could skip muting. A proper fix would be acoustic echo cancellation (AEC), e.g. via `speexdsp` or WebRTC AEC.
-- **Subagent latency.** Tool calls dispatch a full gptme subprocess, which takes a few seconds. The voice conversation continues while it runs, and the result is injected when ready.
+- **No barge-in without headphones**: the local client mutes the mic during
+  playback. Acoustic echo cancellation (e.g. speexdsp or WebRTC AEC) would fix
+  this.
+- **Subagent latency**: each subagent call starts a full gptme process, which
+  takes a few seconds. The conversation continues and the result is injected
+  when ready.

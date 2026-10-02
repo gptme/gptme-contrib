@@ -1,136 +1,137 @@
 # gptme-runloops
 
-Python-based run loop framework for autonomous AI agent operation.
+A run-loop framework for operating AI agents autonomously on a schedule: lock-protected
+autonomous sessions, GitHub PR/issue monitoring, email handling and team coordination, executed
+on interchangeable backends (gptme, Claude Code, Codex, Grok Build), plus a one-shot,
+resumable `run` command for any backend.
 
-## Overview
+**Status:** experimental, in production use by the gptme agent fleet. The generic pieces
+(`run`, `select`, the backend executors, `BaseRunLoop`, `review`) are reusable as-is; the
+`autonomous`, `monitoring`, `run-item` and `team` loops assume a
+[gptme-agent-template](https://github.com/gptme/gptme-agent-template)-style workspace and are
+more opinionated.
 
-This package provides infrastructure for running autonomous AI agents with:
+## Why / when to use it
 
-- **Autonomous Run Loops**: Base framework for scheduled/triggered agent execution
-- **Project Monitoring**: GitHub PR/issue monitoring with automated responses
-- **PR Review**: Versioned review schema, golden corpus, and model evaluation tooling
-- **Email Integration**: Email-based communication loops
-- **Team Coordination**: Multi-agent team management
-- **Utilities**: Locking, logging, GitHub API, git operations
+An agent that runs unattended needs more than a cron line: it needs a lock so runs don't overlap,
+backoff when the same work keeps failing, a git pull before starting, structured logs, and a way
+to swap the underlying agent CLI without rewriting the loop. `gptme-runloops` provides those as a
+`BaseRunLoop` class and a CLI you schedule with cron or a systemd timer.
 
-## Installation
+It composes with other contrib packages — use them, or bring your own task and communication
+systems:
+
+- [gptodo](../gptodo/README.md) — task management; the `team` loop's coordinator delegates
+  through it
+- [gptmail](../gptmail/README.md) — the `email` loop syncs and answers mail through it
+- [gptme-sessions](../gptme-sessions/README.md) — analyse the sessions these loops produce
+- [gptme-coordination](../gptme-coordination/README.md) — work claims between concurrent agents
+
+## Install
+
+Not published on PyPI. Install from the repository:
 
 ```bash
+uv tool install "git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-runloops"
+# or, from a clone of gptme-contrib:
 uv pip install -e packages/gptme-runloops
 ```
 
-## Usage
+The backend CLIs (`gptme`, `claude`, `codex`, `grok`) and `gh` are external and must be on
+`PATH` for the backends/loops that use them. The console script is `gptme-runloops`
+(`run-loops` is a deprecated alias).
 
-### CLI
+> **Safety:** the loops run their backend non-interactively with permission prompts bypassed
+> (e.g. Claude Code with `--dangerously-skip-permissions`). Run them under an account and in a
+> workspace where that is acceptable.
 
-The primary entrypoint is `gptme-runloops`:
+## Quickstart: one-shot runs on any backend
 
 ```bash
-# Run autonomous loop
-gptme-runloops autonomous --workspace /path/to/workspace
-
-# Run project monitoring
-gptme-runloops monitoring --workspace /path/to/workspace
-
-# Run a single project-monitoring work item
-gptme-runloops run-item \
-  --workspace /path/to/workspace \
-  --work-file /path/to/work-item.jsonl \
-  --backend gptme
-
-# Run email monitoring
-gptme-runloops email --workspace /path/to/workspace
-
-# Run team coordination
-gptme-runloops team --workspace /path/to/workspace
-
-# One-shot run on any backend: prints one JSON line with the final message,
-# the model used and the backend's session_id
+# Run one prompt; prints one JSON line: backend, model, session_id, result,
+# exit_code, is_error, resumed, timed_out, cost_usd, agent_output
 gptme-runloops run --workspace . --backend claude-code --allowed-tool Read "summarise TODO.md"
+
 # Continue that session (same backend + model)
 gptme-runloops run --workspace . --backend claude-code --model <model> --resume <session_id> "and now?"
 ```
 
-`run` resume mapping: claude-code `--resume <id>`, codex `codex exec resume <id>`,
-gptme `--name <id>`. Backends without resume (grok-build) fail with a usage error
-instead of starting fresh; a rejected resume id is an error unless
-`--on-resume-failure fresh` explicitly opts into a fresh session (optionally with
-`--fallback-prompt-file` for carried-over context). Tool restriction is backend-native:
-`--allowed-tool` (claude-code `--allowedTools`, gptme `--tools`) or `--sandbox` (codex).
+Resume mapping: claude-code `--resume <id>`, codex `codex exec resume <id>`, gptme `--name <id>`.
+Backends without resume support (grok-build) fail with a usage error rather than silently
+starting fresh. A rejected resume id is an error unless `--on-resume-failure fresh` opts into a
+new session (optionally with `--fallback-prompt-file` to carry context over). Tool restriction is
+backend-native: `--allowed-tool` (claude-code `--allowedTools`, gptme `--tools`) or `--sandbox`
+(codex). Other options: `--prompt-file`, `--timeout` (default 1800 s); `--backend` defaults to
+`$AGENT_BACKEND`, else `gptme`. Exit code is 0 on success, 1 on an error result, 2 on usage errors.
 
-### Python API
+## Commands
 
-```python
-from gptme_runloops.autonomous import AutonomousRun
-from gptme_runloops.project_monitoring import ProjectMonitoringRun
-from gptme_runloops.email import EmailRun
+| Command | Description |
+|---------|-------------|
+| `run [PROMPT]` | One prompt on any backend, JSON result (see above) |
+| `select [--config PATH] [--state-dir DIR] [--json]` | Print the first viable `backend`/`model` from `harness-quota.toml`, skipping candidates whose binary is missing or that are blocked in the block registry. Exit 1 if none |
+| `autonomous` | One autonomous session. Prompt from `scripts/runs/autonomous/autonomous-prompt.txt` in the workspace, else a built-in fallback |
+| `monitoring [--org ORG]... [--repo OWNER/REPO]... [--author LOGIN] [--agent-name NAME]` | GitHub project monitoring: find PRs/issues needing action (CI failures, review comments, merge eligibility) and act on them. Defaults to the `claude-code` backend |
+| `run-item --workspace DIR [--work-file F] ...` | Execute a single project-monitoring work item (`--dry-run` prints the execution plan) |
+| `email` | Sync mail (`mbsync -a`), then answer unreplied messages using [gptmail](../gptmail/README.md) |
+| `team [--tools LIST]` | Coordinator agent with restricted tools that delegates work to subagents via gptodo |
+| `review [--working-tree \| --base SHA --head SHA] [--output F] [--model M]` | LLM review of a local diff, emitted as `ReviewArtifact` JSON (no forge access needed) |
+| `review-pr OWNER/REPO#NUM [--shadow\|--publish] [--min-confidence X]` | Review a GitHub PR; `--publish` posts findings as inline comments (default is shadow mode) |
+
+`autonomous`, `email`, `team` and `monitoring` accept `--workspace` (default: current
+directory), `--model`, `--tool-format markdown|xml|tool` and `--backend`.
+
+`harness-quota.toml` (default `~/.config/gptme/harness-quota.toml`):
+
+```toml
+[[candidates]]
+backend  = "claude-code"
+model    = "claude-sonnet-4-6"
+priority = 1
+
+[[candidates]]
+backend  = "gptme"
+model    = "openrouter/deepseek/deepseek-chat-v3-0324:free"
+priority = 2
 ```
 
-## Components
+## Python API
 
-### Core Run Loops
+```python
+from pathlib import Path
+from gptme_runloops import AutonomousRun, get_executor, list_backends
 
-**`autonomous.py`** — Main autonomous operation loop
-- Executes scheduled runs via systemd timers
-- Handles task selection and execution
-- Manages hot-loop coordination
+print(list_backends())  # ['claude-code', 'codex', 'gptme', 'grok-build']
+run = AutonomousRun(Path("."), executor=get_executor("claude-code"))
+exit_code = run.run()
+```
 
-**`project_monitoring.py`** — GitHub monitoring
-- Checks PRs for CI failures, review comments, and merge eligibility
-- Classifies work as actionable or blocked
-- Executes eligible work automatically
+Write your own loop by subclassing `BaseRunLoop` and overriding `generate_prompt()` (plus
+optionally `has_work()`, `pre_run()`, `post_run()`). The base class provides the lock (in
+`<workspace>/logs/`), git pull with retry, timeout handling, logging, and opt-in
+consecutive-failure backoff.
 
-**`email.py`** — Email-based communication
-- Syncs with Gmail via mbsync
-- Processes incoming emails and generates responses
+Other modules:
 
-**`team.py`** — Multi-agent team coordination
+- `gptme_runloops.utils.executor` — backend registry (`get_executor`, `list_backends`):
+  `execute()` for loops, `run_once()` for one-shot/resumable runs
+- `gptme_runloops.gates` — composable runtime-admission gates ("does this triggered session
+  deserve to spend inference?"), as pure functions
+- `gptme_runloops.triggers` — composable trigger gates ("should a scheduled slot fire at all?")
+- `gptme_runloops.pr_review` — versioned, forge-neutral `ReviewArtifact`/`Finding` schema, reviewer,
+  verifier, GitHub adapter and a golden corpus for evaluating reviewer models
+- `gptme_runloops.pm_dispatch`, `merge_lifecycle`, `pm_bandit`, `worker_records`,
+  `prompt_templates` — project-monitoring internals (lane dispatch, PR merge state machine,
+  session records)
+- `gptme_runloops.utils` — `lock`, `github`, `git`, `logging`, `prompt`, `state`
 
-**`run_item.py` / `run_item_config.py`** — Single run-item executor and config
+The legacy import path `run_loops` is kept as a symlink to `gptme_runloops` in source checkouts.
 
-### PM Infrastructure
+## Development
 
-**`merge_lifecycle.py`** — PR merge lifecycle state machine
-
-**`pm_bandit.py`** — Bandit-based project monitoring dispatch
-
-**`pm_dispatch.py`** — Dispatch logic for PM work items
-
-**`prompt_templates.py`** — Structured prompt templates for agent runs
-
-**`worker_records.py`** — Worker session record tracking
-
-### PR Review (`pr_review/`)
-
-Phase 0 tooling for evaluating PR reviewer models before deployment:
-
-- **`schema.py`** — Versioned `ReviewArtifact` / `Finding` types; forge-neutral (GitHub and Forgejo adapters produce the same schema)
-- **`corpus.py`** — Golden corpus of historical PRs with hand-labeled ground-truth findings for model evaluation
-
-Phase 1 (in progress): CLI runner that produces `ReviewArtifact` JSON locally without publishing to GitHub.
-
-### Utilities (`utils/`)
-
-- `lock.py`: Distributed locking for coordination
-- `github.py`: GitHub API wrapper
-- `git.py`: Git operations
-- `logging.py`: Structured logging
-- `prompt.py`: Prompt generation
-- `execution.py`: gptme execution wrapper
-- `executor.py`: backend registry (gptme, claude-code, codex, grok-build): `execute()` for run loops, `run_once()` for one-shot/resumable runs
-- `run_once.py`: per-backend one-shot runs (final message, model, session id, resume)
-
-## Configuration
-
-Run loops are configured via systemd timers. See `dotfiles/.config/systemd/user/` in agent workspaces for examples.
-
-## Requirements
-
-- Python >= 3.10
-- click >= 8.0.0
-- pyyaml >= 6.0.0
-- gptme (for execution)
-- gh CLI (for GitHub operations)
+```bash
+uv run pytest packages/gptme-runloops/tests/
+```
 
 ## License
 

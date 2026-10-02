@@ -1,28 +1,16 @@
 # gptme-contrib Packages
 
-Python packages for gptme agents.
+Python packages for gptme agents. All packages (and plugins) are members of one [uv workspace](https://docs.astral.sh/uv/concepts/projects/workspaces/).
 
 ## Packages
 
-| Package | Purpose | Install |
-|---------|---------|---------|
-| **gptme-forum** | Git-native agent forum (agentboard) — posts, @mentions, direct messages | `uv pip install -e packages/gptme-forum` |
-| **gptme-subscription** | Subscription observation, pressure scoring, and capacity-aware routing | `uv pip install -e packages/gptme-subscription` |
-| **gptme-daily-briefing** | Daily briefing generation for agents | `uv pip install -e packages/gptme-daily-briefing` |
-| **gptme-dashboard** | Agent usage dashboards and metrics | `uv pip install -e packages/gptme-dashboard` |
-| **gptmail** | Email/message handling | `uv pip install -e packages/gptmail` |
-| **gptodo** | Task management and work queues | `uv pip install -e packages/gptodo` |
-| **gptme-activity-summary** | Activity summarization (journals, GitHub, sessions, tweets, email) | `uv pip install -e packages/gptme-activity-summary` |
-| **gptme-browser-semantic** | Semantic observe/act/extract over gptme's ARIA snapshot (Path A; no stagehand) | `uv pip install -e packages/gptme-browser-semantic` |
-| **gptme-body-protocol** | Neutral versioned wire DTOs shared by voice clients and body nodes | `uv pip install -e packages/gptme-body-protocol` |
-| **gptme-block-registry** | State-dir block-file wire contract + registry for arm dispatch (credential-survival sublayer) | `uv pip install -e packages/gptme-block-registry` |
-| **gptme-sessions** | Session tracking, analytics, and trajectory extraction | `uv pip install -e packages/gptme-sessions` |
-| **gptme-voice** | Voice interface using OpenAI Realtime API | `uv pip install -e packages/gptme-voice` |
-| **gptme-whatsapp** | WhatsApp integration for agents | `uv pip install -e packages/gptme-whatsapp` |
-| **gptme_lessons_extras** | Lesson format validation and analysis | `uv pip install -e packages/gptme-lessons-extras` |
-| **gptme_contrib_lib** | Shared utilities across packages | `uv pip install -e packages/gptme-contrib-lib` |
-| **gptme_runloops** | Autonomous run loop infrastructure | `uv pip install -e packages/gptme-runloops` |
-| **gptme-cc-memory** | Typed, git-tracked, hook-injected session memory for Claude Code | `uv pip install -e packages/gptme-cc-memory` |
+The full list of packages, grouped by category with status and one-line descriptions, is in the [top-level README](../README.md#catalog-by-category). Each package directory has its own README with install and usage details.
+
+From a clone, install a single package in editable mode with:
+
+```shell
+uv pip install -e packages/<name>
+```
 
 ## Backward Compatibility
 

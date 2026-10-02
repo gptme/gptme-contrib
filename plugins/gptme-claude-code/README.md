@@ -1,114 +1,89 @@
-# gptme-claude-code
+# gptme-claude-code — delegate coding tasks from gptme to Claude Code
 
-Claude Code plugin for gptme - spawn Claude Code subagents for various coding tasks.
+Lets a gptme agent spawn the Claude Code CLI (`claude -p`) as a one-shot
+subagent to analyze, answer questions about, fix, or implement things in a
+codebase — synchronously or in a background tmux session.
 
-## Features
+**Status:** experimental. Small, thin wrapper; behaviour is mostly "build a
+prompt, run `claude -p`, return the output".
 
-This plugin allows gptme agents to leverage Claude Code (the `claude` CLI) as subagents for:
+## Why / when to use it
 
-- **Analyze**: Code reviews, security audits, test coverage analysis
-- **Ask**: Answer questions about codebases
-- **Fix**: Fix lint errors, build issues, type errors
-- **Implement**: Implement features in isolated worktrees
+Use a Claude Code subagent when the task is self-contained and benefits from a
+fresh context: a security review, "where is X configured?", fixing a failing
+build, or implementing a small feature while the main gptme session keeps its
+own context (and prompt cache) intact. Several background runs can go in
+parallel.
 
-## Installation
+Keep the work in gptme itself for multi-step workflows that need gptme's tools,
+lessons, or interactive review.
 
-Requires Claude Code CLI (`claude`) to be installed:
+Alternatives: gptme's built-in `subagent` tool spawns gptme subagents, and can
+drive any ACP-compatible agent (`use_acp=True, acp_command=...`).
+
+## Requirements
+
+- The `claude` CLI on `PATH`, already authenticated
+  (`npm install -g @anthropic-ai/claude-code`).
+- `tmux` for `background=True`.
+
+## Install
+
+Not published on PyPI. Install into the same environment as gptme:
 
 ```bash
-npm install -g @anthropic-ai/claude-code
+pip install "gptme-claude-code @ git+https://github.com/gptme/gptme-contrib.git#subdirectory=plugins/gptme-claude-code"
 ```
 
-Then install this plugin:
+It registers a `gptme.plugins` entry point named `gptme_claude_code`, so it
+loads automatically (add `gptme_claude_code` to `[plugins] enabled` if you use
+an allowlist). Or load it from a checkout without installing:
 
-```bash
-pip install gptme-claude-code
+```toml
+# gptme.toml
+[plugins]
+paths = ["path/to/gptme-contrib/plugins/gptme-claude-code"]
 ```
 
-## Usage
+This adds a `claude_code` tool whose functions are callable from gptme's
+Python (ipython) tool.
 
-The plugin provides several functions available via ipython:
-
-### analyze() - Code Analysis
+## Quickstart
 
 ```python
-# Quick security scan
-analyze("Review this codebase for security vulnerabilities.")
-
-# Code review
-analyze("Review changes in the last commit for code quality issues.")
-
-# Test coverage analysis
-analyze("Analyze test coverage and identify critical untested paths.")
-```
-
-### ask() - Code Questions
-
-```python
-# Understand code structure
-ask("How does the authentication flow work in this codebase?")
-
-# Find implementations
+# Quick question (sync, default timeout 300s)
 ask("Where is the database connection pool configured?")
+
+# Fix something without committing (default); auto_commit=True to commit
+fix("The tests fail with ImportError in test_api.py — diagnose and fix.")
+
+# Longer work: run in tmux and poll
+sid = analyze("Review this codebase for security vulnerabilities.",
+              background=True, timeout=1800)
+check_session("claude_code_a1b2c3d4")   # session ID from the returned message
+kill_session("claude_code_a1b2c3d4")
 ```
 
-### fix() - Fix Issues
+## Functions
 
-```python
-# Fix lint errors
-fix("Fix all mypy type errors in src/")
+| Function | Default timeout | Notes |
+|----------|-----------------|-------|
+| `analyze(prompt, workspace=None, timeout=600, background=False)` | 600s | Sync calls with `timeout >= 300` raise `ValueError` (to avoid blocking the session and losing the prompt cache) — pass `background=True` or a shorter `timeout` |
+| `ask(question, workspace=None, timeout=300, background=False)` | 300s | |
+| `fix(issue, workspace=None, timeout=600, background=False, auto_commit=False)` | 600s | Tells Claude Code not to commit unless `auto_commit=True` |
+| `implement(feature, workspace=None, timeout=900, background=False, use_worktree=False, branch_name=None)` | 900s | `use_worktree=True` instructs Claude Code to work in `../worktree-<branch>` on a new branch |
+| `check_session(session_id)` | | Shows tmux pane output for a background run |
+| `kill_session(session_id)` | | Kills a background run |
 
-# Fix build issues
-fix("The tests are failing with ImportError, diagnose and fix.")
-```
+`workspace` defaults to the current directory. Sync calls return a result with
+the output, exit code and duration; background calls return a message
+containing the tmux session ID (`claude_code_<8 hex>`).
 
-### implement() - Implement Features
+## Notes
 
-```python
-# Simple implementation
-implement("Add a --verbose flag to the CLI")
-
-# Complex implementation (uses worktree for isolation)
-implement("Implement rate limiting for the API endpoints", use_worktree=True)
-```
-
-### Background Tasks
-
-For long-running tasks, use `background=True`:
-
-```python
-result = analyze("Comprehensive security audit", background=True, timeout=1800)
-# Returns session ID
-
-check_session("claude_code_a1b2c3d4")  # Check progress
-kill_session("claude_code_a1b2c3d4")   # Cancel if needed
-```
-
-## Configuration
-
-The plugin requires:
-
-1. Claude Code CLI installed (`npm install -g @anthropic-ai/claude-code`)
-2. Anthropic API key configured (usually via Claude Code's own auth)
-
-## Cost Efficiency
-
-Claude Code uses a subscription model ($200/mo for Pro), making it cost-effective
-for parallel analysis tasks compared to direct API calls.
-
-## When to Use
-
-**Use Claude Code subagents for:**
-- Single-purpose analysis (no gptme tool ecosystem needed)
-- Parallel analysis tasks
-- Tasks that benefit from fresh context (no accumulated history)
-- Long-running analysis where background mode is appropriate
-
-**Use gptme tools directly for:**
-- Complex multi-step workflows
-- Tasks requiring file modifications with review
-- Interactive debugging sessions
-- Tasks needing gptme's full context
+- Authentication, model choice and billing are whatever your `claude` CLI is
+  configured with; this plugin passes no model or permission flags.
+- Background runs are wrapped in `timeout <seconds>` inside tmux.
 
 ## License
 

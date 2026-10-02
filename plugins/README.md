@@ -1,105 +1,96 @@
-# gptme Plugins
+# gptme plugins
 
-Collection of plugins for [gptme](https://github.com/ErikBjare/gptme).
+Plugins that add tools and hooks to [gptme](https://github.com/gptme/gptme): agent infrastructure, memory and retrieval, context and cost control, developer tools, voice and media, and analytics. All are experimental unless a plugin's README says otherwise. For the Python packages and the wider catalog, see the [top-level README](../README.md#catalog-by-category).
 
-## Available Plugins
+## Available plugins
 
-### 🎯 gptme-ace
-ACE (Agentic Context Engineering) context optimization plugin with hybrid retrieval, semantic matching, and context curation.
+"Package" is the Python package under `src/`; use it as the `[plugins] enabled` name when loading from a path. "Entry point" means the plugin registers a `gptme.plugins` entry point and loads automatically once installed into gptme's environment.
 
-**Use for**: Optimizing context for better agent performance, semantic search, context budget management.
+### Agent infrastructure
 
-[Documentation](./gptme-ace/README.md)
+| Plugin | What it does | Package | Entry point |
+|--------|--------------|---------|-------------|
+| [gptme-gptodo](./gptme-gptodo/README.md) | Exposes the [gptodo](../packages/gptodo/README.md) task CLI as Python functions (`delegate`, `check_agent`, `list_tasks`, …) for coordinator agents that delegate to sub-agents | `gptme_gptodo` | yes |
+| [gptme-gupp](./gptme-gupp/README.md) | Work-in-progress hooks (JSON files in `state/hooks/`) so an agent can resume after crashes, restarts or context compaction | `gptme_gupp` | no |
+| [gptme-ralph](./gptme-ralph/README.md) | Ralph Loop: drive a spec + checkbox plan to completion one step at a time, with a fresh gptme or Claude Code context per step | `gptme_ralph` | yes |
+| [gptme-action-receipts](./gptme-action-receipts/README.md) | Append-only, hashed audit ledger of every tool call, plus a `scope.yaml` allowlist for merges, force-pushes and repo/release deletes | `gptme_action_receipts` | yes |
+| [gptme-hooks-examples](./gptme-hooks-examples/README.md) | Copyable template showing how to write and register lifecycle hooks (session start, tool pre-execute, turn post) | `gptme_example_hooks` | no |
 
-### 🧠 gptme-attention-tracker
-Attention tracking and routing plugin combining history tracking and HOT/WARM/COLD tier management. Implements dynamic context management for both meta-learning and token optimization.
+### Memory, knowledge and retrieval
 
-**Use for**: Reducing token usage by dynamically loading context based on relevance, analyzing context patterns, improving keyword matching.
+| Plugin | What it does | Package | Entry point |
+|--------|--------------|---------|-------------|
+| [gptme-retrieval](./gptme-retrieval/README.md) | Automatic RAG: before each step, queries qmd, [gptme-rag](../packages/gptme-rag/README.md), grep or a custom command and injects new, deduplicated matches | `gptme_retrieval` | yes |
+| [gptme-user-memories](./gptme-user-memories/README.md) | ChatGPT-style long-term memory: extracts facts about the user at session end into a local Markdown file (plus a backfill CLI) | `gptme_user_memories` | yes |
+| [gptme-ace](./gptme-ace/README.md) | Agentic Context Engineering for lessons: hybrid keyword + semantic retrieval, embedding dedup, and a pipeline that turns session logs into reviewable lesson deltas | `gptme_ace` | yes |
+| [gptme-attention-tracker](./gptme-attention-tracker/README.md) | Keyword-activated HOT/WARM/COLD attention scores with decay for workspace files, plus per-turn context-usage history | `gptme_attention_tracker` | no |
 
-[Documentation](./gptme-attention-tracker/README.md)
+### Context and cost management
 
-### 🤖 gptme-claude-code
-Full Claude Code integration plugin. Spawn Claude Code subagents from within gptme for analysis, Q&A, bug fixes, and implementation.
+| Plugin | What it does | Package | Entry point |
+|--------|--------------|---------|-------------|
+| [gptme-tooloutput-trimmer](./gptme-tooloutput-trimmer/README.md) | Trims (or LLM-summarizes) old oversized tool outputs before each request, only when the prompt cache is likely cold or context is under pressure. Opt-in. | `tooloutput_trimmer` | yes |
+| [gptme-headroom-compressor](./gptme-headroom-compressor/README.md) | Losslessly compresses large JSON/tabular tool outputs with headroom-ai's SmartCrusher before they reach the model. Opt-in. | `headroom_compressor` | yes |
 
-**Use for**: Security audits, code reviews, codebase Q&A, bug fixes, feature implementation.
+### Developer tools and integrations
 
-[Documentation](./gptme-claude-code/README.md)
+| Plugin | What it does | Package | Entry point |
+|--------|--------------|---------|-------------|
+| [gptme-lsp](./gptme-lsp/README.md) | LSP diagnostics, definition/references/hover, call hierarchy and rename/format previews via pyright, typescript-language-server, gopls and rust-analyzer | `gptme_lsp` | no |
+| [gptme-warpgrep](./gptme-warpgrep/README.md) | Natural-language code search with Morph's warp-grep model, which drives local ripgrep/read/list operations (needs a Morph API key) | `gptme_warp_grep` | no |
+| [gptme-claude-code](./gptme-claude-code/README.md) | Delegate analyze/ask/fix/implement tasks to the Claude Code CLI (`claude -p`), synchronously or in background tmux sessions | `gptme_claude_code` | yes |
+| [gptme-consortium](./gptme-consortium/README.md) | Ask several LLMs the same question, then have an arbiter model synthesize one answer with a confidence score | `gptme_consortium` | no |
 
-### 🤝 gptme-consortium
-Multi-model consensus decision-making system that orchestrates multiple LLMs to provide diverse perspectives and synthesize consensus responses.
+### Voice and media
 
-**Use for**: Important decisions, architectural choices, code review from multiple perspectives, model comparison.
+| Plugin | What it does | Package | Entry point |
+|--------|--------------|---------|-------------|
+| [gptme-tts](./gptme-tts/README.md) | Reads replies aloud sentence by sentence as they stream, via a bundled local server (Kokoro, KittenTTS, Chatterbox) or OpenRouter speech models | `gptme_tts` | yes |
+| [gptme-imagen](./gptme-imagen/README.md) | Text-to-image (Gemini, DALL-E 3/2): `image_gen` tool, `gptme-imagen` CLI, style presets, view-back to the model, local cost tracking | `gptme_imagen` | yes |
+| [gptme-youtube](./gptme-youtube/README.md) | Fetch a YouTube video's transcript from a URL or ID and summarize it | `gptme_youtube` | yes |
 
-[Documentation](./gptme-consortium/README.md)
+### Analytics
 
-### 🪝 gptme-hooks-examples
-Example implementations of gptme hooks for customizing agent behavior.
-
-**Use for**: Learning how to create custom hooks, template for new hook development.
-
-[Documentation](./gptme-hooks-examples/README.md)
-
-### 📝 gptme-gupp
-Work persistence plugin for session continuity. Saves and restores work state across sessions.
-
-**Use for**: Resuming work after interruptions, maintaining context across sessions.
-
-[Documentation](./gptme-gupp/README.md)
-
-### 🎨 gptme-imagen
-Multi-provider image generation supporting Google Gemini (Imagen), OpenAI DALL-E, and more with a unified interface.
-
-**Use for**: Creating diagrams, UI mockups, presentation graphics, visual prototyping.
-
-[Documentation](./gptme-imagen/README.md)
-
-### 🔧 gptme-lsp
-Language Server Protocol integration for enhanced code intelligence.
-
-**Use for**: Code completion, diagnostics, and navigation within gptme.
-
-[Documentation](./gptme-lsp/README.md)
-
-### 🔄 gptme-ralph
-Iterative execution plugin implementing Ralph loops for complex multi-step tasks with automatic iteration and convergence.
-
-**Use for**: Complex tasks requiring multiple iterations, self-correcting workflows, tasks that need refinement cycles.
-
-[Documentation](./gptme-ralph/README.md)
-
-### 🔍 gptme-warpgrep
-Enhanced search capabilities with Warp-style filtering and presentation.
-
-**Use for**: Fast, intuitive code search with visual highlighting.
-
-[Documentation](./gptme-warpgrep/README.md)
-
-### 📦 gptme-wrapped
-Wrapped tool definitions for safer, constrained tool execution.
-
-**Use for**: Creating sandboxed tool environments with restricted capabilities.
-
-[Documentation](./gptme-wrapped/README.md)
+| Plugin | What it does | Package | Entry point |
+|--------|--------------|---------|-------------|
+| [gptme-wrapped](./gptme-wrapped/README.md) | Spotify-Wrapped-style yearly stats from local conversation logs: tokens, costs, top models, cache efficiency, activity heatmap | `gptme_wrapped` | yes |
 
 ## Installation
 
-Add to your gptme.toml:
+**Install into gptme's environment** (plugins with an entry point load automatically):
+
+```bash
+pipx inject gptme "git+https://github.com/gptme/gptme-contrib#subdirectory=plugins/gptme-tts"
+# or, if gptme is installed with pip in the current environment:
+pip install "git+https://github.com/gptme/gptme-contrib#subdirectory=plugins/gptme-tts"
+```
+
+If you use an allowlist, add the plugin's entry-point name or package name to `[plugins] enabled`.
+
+**Or load from a checkout** by pointing `paths` at the plugin's directory in `gptme.toml` (project) or the gptme user config. This works for every plugin, including those without an entry point:
 
 ```toml
 [plugins]
-paths = ["path/to/gptme-contrib/plugins"]
-enabled = ["gptme_attention_tracker"]
+paths = ["path/to/gptme-contrib/plugins/gptme-lsp"]
+enabled = ["gptme_lsp"]   # optional allowlist; omit or leave empty to enable everything discovered
 ```
 
-## Plugin Naming Convention
+Pointing `paths` at the whole `plugins/` directory also discovers the tool plugins, but the allowlist then matches directory names (`gptme-lsp`) rather than package names.
 
-All plugins in this collection follow the naming convention:
-- **Directory**: `gptme-<name>/` (with hyphen)
-- **Package name**: `gptme-<name>` (with hyphen, in pyproject.toml)
-- **Python module**: `gptme_<name>` (with underscore, for imports)
+Plugin dependencies, extras and config keys differ. Each plugin's README has its exact install line and settings.
 
-This ensures unique, valid package names and clear identification as gptme plugins.
+## Plugin layout and naming
 
-## Usage
+Each plugin is a src-layout Python package and a member of this repo's uv workspace:
 
-Once configured, plugins are automatically loaded.
+```text
+plugins/gptme-<name>/
+├── pyproject.toml   # package name gptme-<name>; optional [project.entry-points."gptme.plugins"]
+├── README.md
+├── src/<package>/   # usually gptme_<name>
+└── tests/
+```
+
+The directory and distribution name use `gptme-<name>`. The Python package is usually `gptme_<name>`, with a few exceptions (`gptme_example_hooks`, `gptme_warp_grep`, `headroom_compressor`, `tooloutput_trimmer`); the tables above list the actual names.
+
+To write your own, start from [gptme-hooks-examples](./gptme-hooks-examples/README.md) and the [plugin-development skill](../skills/plugin-development/), and see the [gptme plugin docs](https://gptme.org/docs/plugins.html). Testing conventions are in [README_TESTS.md](./README_TESTS.md).

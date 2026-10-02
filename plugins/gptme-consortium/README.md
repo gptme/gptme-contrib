@@ -1,146 +1,83 @@
-# Consortium Plugin for gptme
+# gptme-consortium — multi-model consensus ("ask several LLMs, then synthesize")
 
-Multi-model consensus decision-making for gptme.
+Ask the same question to several LLMs through gptme's provider layer, then
+have an arbiter model synthesize a single consensus answer with a confidence
+score and its reasoning.
 
-**Status**: ✅ Phase 1 Complete - Core functionality implemented and tested
+**Status:** experimental. Works, but simple: models are queried sequentially,
+and the default model list is pinned in code and ages quickly — pass `models=`
+explicitly.
 
-## Overview
+## Why / when to use it
 
-The consortium plugin orchestrates multiple LLMs to provide diverse perspectives and synthesize consensus responses. It queries multiple frontier models in parallel, then uses an arbiter model to analyze and synthesize a consensus answer with confidence scoring.
+For decisions where one model's blind spots are costly — architecture choices,
+reviewing a risky plan, comparing how providers answer a question. You get each
+model's raw answer plus a synthesized consensus, so disagreement is visible
+rather than hidden.
 
-**Key improvements** (Phase 1):
-- ✅ Real model integration via gptme.llm
-- ✅ Robust JSON extraction (handles markdown code blocks, embedded JSON)
-- ✅ Error handling with graceful fallbacks
-- ✅ Comprehensive test coverage (14 unit tests + integration tests)
-- ✅ Type-safe confidence scoring
+It uses whatever providers your gptme installation is configured for (API keys
+via environment or gptme config); models without working credentials fail
+individually and are excluded from the synthesis.
 
-## Features
+## Install
 
-- **Multi-model orchestration**: Query multiple models in parallel
-- **Consensus synthesis**: Arbiter model synthesizes best answer
-- **Confidence scoring**: Quantifies agreement between models
-- **Flexible configuration**: Choose models and arbiter
-- **Detailed output**: See individual responses and synthesis reasoning
-
-## Installation
-
-The plugin is automatically discovered when placed in a configured plugin path. Add to your `gptme.toml` ([user or project level](https://gptme.org/docs/plugins.html#configuration)):
+There is no package entry point; load it as a folder plugin from a
+gptme-contrib checkout:
 
 ```toml
+# gptme.toml (or [plugins] in ~/.config/gptme/config.toml)
 [plugins]
-paths = ["path/to/plugins"]
-enabled = ["gptme_consortium"]  # Optional: limit which plugins load
+paths = ["path/to/gptme-contrib/plugins/gptme-consortium"]
+enabled = ["gptme_consortium"]   # only needed if you use an allowlist
 ```
 
-## Usage
+This registers a `consortium` tool whose `query_consortium` function is
+callable from gptme's Python (ipython) tool.
 
-### Basic Query
+## Quickstart
 
-```consortium
-query_consortium(
-    question="What's the best approach for handling rate limiting?"
-)
-```
-
-### With Custom Models
-
-```consortium
-query_consortium(
-    question="Should we use microservices or monolith?",
+```python
+result = query_consortium(
+    question="For a 3-person team expecting 100K users in 2 years: "
+             "modular monolith or microservices?",
     models=[
         "anthropic/claude-sonnet-4-5",
-        "openai/gpt-4o",
-        "openai/o1"
+        "openai/gpt-5.1",
+        "gemini/gemini-3-pro-preview",
     ],
-    arbiter="anthropic/claude-opus-4"
+    arbiter="anthropic/claude-sonnet-4-5",
 )
+print(result.consensus)
+print(f"confidence={result.confidence:.2f} agreement={result.agreement_score:.2f}")
+for model, answer in result.responses.items():
+    print(model, "→", answer[:200])
 ```
 
-### With Confidence Threshold
+## API
 
-```consortium
-query_consortium(
-    question="Critical architectural decision...",
-    confidence_threshold=0.9  # Require 90% confidence
-)
-```
+`query_consortium(question, models=None, arbiter=None, confidence_threshold=0.8, query_delay=0.5) -> ConsortiumResult`
 
-## Output Format
+| Argument | Default | Notes |
+|----------|---------|-------|
+| `models` | `anthropic/claude-opus-4-5`, `openai/gpt-5.1`, `gemini/gemini-3-pro-preview`, `xai/grok-4`, `openrouter/perplexity/sonar-pro` | Any gptme model ID |
+| `arbiter` | `anthropic/claude-sonnet-4-5` | Model that writes the synthesis |
+| `confidence_threshold` | `0.8` | Passed to the synthesis step; currently informational — it does not reject low-confidence results |
+| `query_delay` | `0.5` | Seconds between model queries (rate-limit friendliness) |
 
-The tool returns:
-- **Consensus**: Synthesized answer incorporating all perspectives
-- **Confidence**: Score from 0-1 indicating model agreement
-- **Individual Responses**: Each model's perspective
-- **Synthesis Reasoning**: Why the arbiter chose this consensus
-- **Metadata**: Models used, arbiter model
+`ConsortiumResult` fields: `question`, `consensus`, `confidence`, `responses`
+(model → answer or `"Error: ..."`), `synthesis_reasoning`, `models_used`,
+`arbiter_model`, `agreement_score`.
 
-## Use Cases
+How confidence is computed: the arbiter's self-reported 0–1 confidence is
+multiplied by the fraction of models that answered successfully and by
+`0.5 + 0.5 × agreement_score`. Here `agreement_score` is the average pairwise
+word-level Jaccard similarity between the successful answers. Each failed
+model call gets up to 3 retries with exponential backoff, and rate-limit
+errors wait longer. No exception is raised if the arbiter fails: the call
+returns a placeholder consensus with base confidence 0.3. Unparsable arbiter
+output is returned as the raw consensus with base confidence 0.5.
 
-- **Architectural Decisions**: Get multiple expert perspectives
-- **Code Review**: Multiple models review the same code
-- **Quality Checking**: Validate important outputs
-- **Model Comparison**: See how different models approach a problem
-- **High-Stakes Decisions**: Require consensus before proceeding
+## Tests
 
-## Implementation Status
-
-### ✅ Phase 1 Complete (Core Functionality)
-- Real model integration via `gptme.llm.reply()`
-- Robust JSON parsing from arbiter responses
-- Error handling with fallback synthesis
-- Comprehensive test suite (14 tests, 100% pass)
-- Confidence type validation
-
-### 🚧 Phase 2 Planned (Advanced Features)
-- Iterative refinement (multi-round consensus)
-- Response caching (avoid redundant queries)
-- Parallel querying (faster execution)
-- Voting mechanisms (for discrete choices)
-
-### 🔮 Phase 3 Future (Production Polish)
-- Detailed metadata tracking (tokens, costs)
-- Custom arbiter strategies
-- Performance optimization
-- Cost tracking dashboard
-
-## Dependencies
-
-- gptme >= 0.27.0
-- Access to configured LLM providers (Anthropic, OpenAI, etc.)
-- Valid API keys in environment or config
-
-## Testing
-
-```bash
-# Run all tests
-uv run --with pytest --with pytest-mock pytest tests/test_consortium.py -v
-
-# Run fast tests only (skip integration)
-uv run --with pytest --with pytest-mock pytest tests/ -v -m "not slow"
-
-# Run with coverage
-uv run --with pytest --with pytest-mock --with pytest-cov pytest tests/ --cov=src/gptme_consortium
-```
-
-## Configuration
-
-Default models (used if not specified):
-- anthropic/claude-sonnet-4-5 (Claude Sonnet 4.5, Sept 2025)
-- openai/gpt-5.1 (GPT-5.1, Nov 2025)
-- google/gemini-3-pro (Gemini 3 Pro, Nov 2025)
-- xai/grok-4 (Grok 4)
-
-Default arbiter:
-- anthropic/claude-sonnet-4-5 (Claude Sonnet 4.5)
-
-These represent diverse frontier models for comprehensive perspectives.
-
-## Future Enhancements
-
-- [ ] Iterative refinement with multiple rounds
-- [ ] Voting mechanisms for discrete choices
-- [ ] Integration with gptme's model configuration
-- [ ] Caching of model responses
-- [ ] Async parallel querying for speed
-- [ ] Support for structured output formats
+Unit tests use mocks; tests under `tests/integration/` call real models and
+need API keys.

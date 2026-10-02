@@ -9,13 +9,9 @@ For installation and receipt format details, see the
 ## Phase 1 — Ledger
 
 Every tool execution emits one JSON line to `~/.local/share/gptme/receipts.jsonl`
-before the tool runs. The plugin must be loaded via `gptme.toml`:
-
-```toml
-[plugin.action_receipts]
-```
-
-No further configuration is needed for Phase 1.
+before the tool runs. Install or load the plugin as described in the
+[plugin README](../../plugins/gptme-action-receipts/README.md#install); no further
+configuration is needed for Phase 1.
 
 ---
 
@@ -34,7 +30,9 @@ not in the operator's allowlist.
    patterns.
 4. If not authorized:
    - **warn mode** (default): logs a warning; the tool executes normally.
-   - **block mode**: raises `StopPropagation`; the tool is aborted.
+   - **block mode**: intended to abort the tool. **It currently does not**: see
+     [Known issues](../../plugins/gptme-action-receipts/README.md#known-issues).
+     Keep `violation_action: warn` until that is fixed.
 
 The gate is fail-open: any config parse error or extraction failure logs a
 warning and falls back to "no violation". The agent is never crashed by an
@@ -72,12 +70,12 @@ violation_action: warn
 scopes:
   # Repos where 'gh pr merge' is authorized
   merge_repos:
-    - ErikBjare/bob          # exact match
-    - ErikBjare/*            # wildcard: all repos under ErikBjare
+    - my-org/my-agent        # exact match
+    - my-org/*               # wildcard: all repos under my-org
 
   # Repos where 'git push --force' is authorized
   force_push_repos:
-    - ErikBjare/bob
+    - my-org/my-agent
 
   # Repos where 'gh repo delete' is authorized (leave empty to deny all)
   repo_delete: []
@@ -87,13 +85,13 @@ scopes:
 ```
 
 Patterns follow Python `fnmatch` rules: `*` matches any sequence of characters
-**including** `/`, so `ErikBjare/*` matches `ErikBjare/bob` but not `other/repo`.
+**including** `/`, so `my-org/*` matches `my-org/my-agent` but not `other/repo`.
 A bare `*` authorizes **every** repository — use it only if that is intentional.
 
 #### Worked example — single-agent allowlist
 
 An agent permitted to self-merge PRs in its own brain repo and force-push its
-own PR worktrees, but nothing else:
+own PR branches, but nothing else:
 
 ```yaml
 version: 1
@@ -101,10 +99,10 @@ violation_action: warn
 
 scopes:
   merge_repos:
-    - ErikBjare/bob          # agent's brain repo
+    - my-org/my-agent        # the agent's own workspace repo
 
   force_push_repos:
-    - ErikBjare/bob          # rebase fixup pushes on own branches
+    - my-org/my-agent        # rebase fixup pushes on own branches
 
   repo_delete: []
   release_delete: []
@@ -113,7 +111,7 @@ scopes:
 The `gptme/gptme-contrib#1175` incident (unauthorized `gh pr merge 1175 --squash
 --repo gptme/gptme-contrib`) would have triggered `merge_repos` here because
 `gptme/gptme-contrib` is absent from `merge_repos`. In warn mode a log line
-appears; in block mode the command is aborted before execution.
+appears. (Block mode is meant to abort the command, but see the known issue above.)
 
 ---
 
@@ -122,7 +120,7 @@ appears; in block mode the command is aborted before execution.
 **Warn mode** — search gptme's log output for:
 
 ```txt
-action-receipts: SCOPE VIOLATION (warn only): action 'merge_repos' on 'gptme/gptme-contrib' not in allowlist ['ErikBjare/bob']
+action-receipts: SCOPE VIOLATION (warn only): action 'merge_repos' on 'gptme/gptme-contrib' not in allowlist ['my-org/my-agent']
 ```
 
 Fields:
@@ -130,10 +128,10 @@ Fields:
 - `on` — the repository the command targeted
 - `not in allowlist` — the configured allowlist at the time
 
-**Block mode** — the agent's tool call returns an error:
+**Block mode** (once the known issue is fixed): the agent's tool call returns an error:
 
 ```txt
-[scope-gate] BLOCKED: action 'merge_repos' on 'gptme/gptme-contrib' not in allowlist ['ErikBjare/bob']
+[scope-gate] BLOCKED: action 'merge_repos' on 'gptme/gptme-contrib' not in allowlist ['my-org/my-agent']
 ```
 
 The same information appears in the log at `WARNING` level.
@@ -168,7 +166,7 @@ allowlist before any command is hard-blocked.
    - **False positive** (legitimate action): add the repo to the allowlist.
    - **True positive** (unauthorized action): leave it out; block mode will stop it.
 4. Update the allowlist in `scope.yaml`.
-5. Set `violation_action: block`.
+5. Set `violation_action: block` (only after the block-mode known issue is fixed).
 6. Verify with a dry-run (inspect log for unexpected block events in the first session).
 
 **Reversing a block** — if a legitimate command gets blocked unexpectedly, add

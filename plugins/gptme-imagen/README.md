@@ -1,379 +1,123 @@
-# Image Generation Plugin for gptme
+# gptme-imagen — AI image generation for gptme and the terminal (Gemini, DALL-E)
 
-Multi-provider image generation for gptme.
+Generate images from text prompts — diagrams, UI mockups, logos, illustrations —
+with Google Gemini or OpenAI DALL-E, from inside a gptme conversation or with
+the standalone `gptme-imagen` CLI. Generated images are saved to disk, can be
+shown back to the model for review, and their estimated cost is logged locally.
 
-## Overview
+**Status:** experimental. Usable; provider model names and prices are
+hard-coded and may lag behind the providers.
 
-The image generation plugin provides a unified interface for generating images from text descriptions across multiple providers including Google Gemini (Imagen), OpenAI DALL-E, and more.
+## Why / when to use it
 
-## Features
+- Let an agent produce visual assets as part of a task (README diagrams,
+  mockups, slide graphics) and **look at its own output** (`view=True`) to
+  iterate.
+- Compare providers on the same prompt, or generate several variants and pick.
+- Use the same code from a shell script via the CLI, without gptme installed.
 
-- **Multi-provider support**: Gemini, DALL-E 3, DALL-E 2
-- **Unified interface**: Same API across all providers
-- **Automatic file handling**: Images saved to disk with metadata
-- **Quality options**: Choose between standard and HD quality
-- **Flexible sizing**: Provider-specific size options
-- **Multiple options generation**: Generate variations for comparison (count parameter) **[Phase 1]**
-- **View integration**: Display images to assistant for verification (view parameter) **[Phase 1]**
-- **Enhanced error handling**: Clear error messages with context **[Phase 1]**
-- **Style presets**: 8 predefined styles for consistent results (style parameter) **[Phase 2]**
-- **Prompt enhancement**: Automatic quality and composition improvements (enhance parameter) **[Phase 2]**
-- **Progress indicators**: Visual feedback during multi-image generation **[Phase 2]**
-- **Cost tracking**: Automatic tracking and reporting of generation costs **[Phase 3]**
-- **Standalone CLI**: Use from the terminal without gptme installed **[Phase 4]**
+## Install
 
-## Installation
+Not published on PyPI. Install from the repository subdirectory and pick the
+extras you need:
 
-### As gptme plugin
+```bash
+# gptme plugin + both providers + CLI
+pip install "gptme-imagen[all] @ git+https://github.com/gptme/gptme-contrib.git#subdirectory=plugins/gptme-imagen"
 
-Add to your `gptme.toml` ([user or project level](https://gptme.org/docs/plugins.html#configuration)):
+# CLI only, Gemini only (no gptme dependency)
+pip install "gptme-imagen[cli,gemini] @ git+https://github.com/gptme/gptme-contrib.git#subdirectory=plugins/gptme-imagen"
+```
+
+Extras: `gptme` (plugin), `cli` (click), `gemini` (google-genai), `dalle`
+(openai), `all`. Reference images additionally need Pillow, and DALL-E
+URL responses need `requests`.
+
+API keys are read from gptme's config/env lookup when gptme is installed,
+otherwise from the environment:
+
+```bash
+export GOOGLE_API_KEY=...   # Gemini (GEMINI_API_KEY also accepted)
+export OPENAI_API_KEY=...   # DALL-E 3 / DALL-E 2
+```
+
+### Enabling in gptme
+
+When installed, the package registers a `gptme.plugins` entry point named
+`gptme-imagen`, so the `image_gen` tool loads automatically (add `gptme-imagen`
+to `[plugins] enabled` if you use an allowlist). From a gptme-contrib checkout
+you can instead use:
 
 ```toml
 [plugins]
-paths = ["path/to/plugins"]
-enabled = ["gptme_imagen"]  # Optional: limit which plugins load
+paths = ["path/to/gptme-contrib/plugins/gptme-imagen"]
 ```
 
-### As standalone CLI
+## Quickstart
 
-```bash
-# Install with CLI support and your preferred provider
-pip install 'gptme-imagen[cli,gemini]'
-pip install 'gptme-imagen[cli,dalle]'
-pip install 'gptme-imagen[cli,gemini,dalle]'
+### In gptme
 
-# Or install everything
-pip install 'gptme-imagen[all]'
+The model writes `image_gen` blocks containing Python calls; results (with the
+image attached) come back to the conversation:
+
+```image_gen
+generate_image(
+    prompt="Architecture diagram of a three-tier web app",
+    style="technical-diagram",
+    output_path="docs/architecture.png",
+    view=True,
+)
 ```
 
-Set up API keys:
-```bash
-export GOOGLE_API_KEY="your-key"  # For Gemini
-export OPENAI_API_KEY="your-key"  # For DALL-E
-```
-
-## CLI Usage
-
-The `gptme-imagen` command works standalone, without the full gptme runtime:
+### CLI
 
 ```bash
-# Generate an image
 gptme-imagen generate "a sunset over mountains"
-
-# Choose provider and style
-gptme-imagen generate "tech logo" --provider dalle --style flat-design --quality hd
-
-# Generate multiple images
-gptme-imagen generate "logo variations" --count 3 --output logos/option.png
-
-# Use reference images (Gemini only)
-gptme-imagen generate "change background to beach" --images photo.png
-
-# View costs and history
-gptme-imagen cost
-gptme-imagen history --limit 20
-
-# List available styles
+gptme-imagen generate "tech startup logo" -p dalle --quality hd --style flat-design -o logo.png
+gptme-imagen generate "logo variations" -n 3   # generated_<timestamp>_001.png ... _003.png
+gptme-imagen generate "change the background to a beach" -i photo.png   # Gemini only
 gptme-imagen styles
+gptme-imagen cost --since 2026-01-01
+gptme-imagen history -n 20
 ```
 
-## Plugin Usage
+`generate` options: `--provider/-p {gemini,dalle,dalle2}`, `--output/-o`,
+`--size/-s`, `--quality/-q {standard,hd}`, `--count/-n`, `--style`,
+`--enhance`, `--images/-i` (repeatable), `--open`. The CLI refuses an
+`--output` that has a file extension when `--count` is greater than 1. For
+numbered files such as `logos/option_001.png`, use the Python
+`generate_image(..., output_path="logos/option.png", count=3)`.
 
-### Basic Generation
+## Functions (gptme tool)
 
-```image_gen
-generate_image(
-    prompt="A modern office workspace with clean design",
-    provider="gemini"
+| Function | Purpose |
+|----------|---------|
+| `generate_image(prompt, provider="gemini", size="1024x1024", quality="standard", output_path=None, count=1, view=False, style=None, enhance=False, show_progress=True, images=None)` | Generate one or `count` images; `images` = reference image path(s) for editing/multi-reference generation (Gemini only) |
+| `generate_variation(image_path, provider="dalle2", count=1, size="1024x1024", output_path=None, view=False)` | Variations of an existing image (DALL-E 2 only) |
+| `batch_generate(prompts, provider="gemini", output_dir=None, view=False, **kwargs)` | One image per prompt |
+| `compare_providers(prompt, providers=None, view=True, **kwargs)` | Same prompt across providers |
+
+- `provider`: `gemini` (model `gemini-3-pro-image-preview`), `dalle`
+  (`dall-e-3`), `dalle2` (`dall-e-2`).
+- `style` presets: `photo`, `illustration`, `sketch`, `technical-diagram`,
+  `flat-design`, `cyberpunk`, `watercolor`, `oil-painting`.
+- `enhance=True` appends generic quality/composition keywords to the prompt
+  (template-based, no extra LLM call).
+- Default output name is `generated_<timestamp>.png` in the current
+  directory; with `count > 1`, `_001`, `_002`, ... suffixes are added.
+
+## Cost tracking
+
+Every generation is recorded in a local SQLite database at
+`~/.gptme/imagen_costs.db`, with a cost **estimated** from a static per-image
+price table (roughly $0.02–$0.08 per image; not reconciled with provider
+billing). Query it with the CLI (`cost`, `history`) or from Python:
+
+```python
+from gptme_imagen.tools.image_gen import (
+    get_total_cost, get_cost_breakdown, get_generation_history,
 )
+get_total_cost(provider="gemini", start_date="2026-01-01")
+get_cost_breakdown()
+get_generation_history(limit=10)
 ```
-
-### With Custom Output Path
-
-```image_gen
-generate_image(
-    prompt="Architecture diagram of microservices",
-    provider="gemini",
-    output_path="diagrams/architecture.png"
-)
-```
-
-### High Quality DALL-E
-
-```image_gen
-generate_image(
-    prompt="Professional logo design for tech startup",
-    provider="dalle",
-    quality="hd",
-    output_path="branding/logo.png"
-)
-```
-
-### Multiple Options (Phase 1 NEW)
-
-Generate multiple variations for comparison:
-
-```image_gen
-generate_image(
-    prompt="Modern minimalist logo for tech startup",
-    provider="gemini",
-    count=3,
-    output_path="logos/option.png"
-)
-```
-
-Output: `logos/option_001.png`, `logos/option_002.png`, `logos/option_003.png`
-
-### View Integration (Phase 1 NEW)
-
-Display generated images to the assistant for verification and feedback:
-
-```image_gen
-generate_image(
-    prompt="UI mockup for dashboard",
-    provider="gemini",
-    view=True,
-    output_path="mockups/dashboard.png"
-)
-```
-
-The assistant can see the generated image and provide feedback like "The layout looks good, but the colors could be brighter."
-
-### Combined: Multiple Options with View
-
-```image_gen
-generate_image(
-    prompt="Logo concept with geometric shapes",
-    provider="gemini",
-    count=3,
-    view=True,
-    output_path="concepts/logo.png"
-)
-```
-
-The assistant sees all 3 variations and can recommend the best one.
-
-## Providers
-
-### Gemini (Imagen 3)
-- **Model**: imagen-3-fast-generate-001
-- **Best for**: Fast, high-quality generations
-- **Requires**: GOOGLE_API_KEY
-
-### DALL-E 3
-- **Model**: dall-e-3
-- **Best for**: Creative, detailed images
-- **Quality**: standard, hd
-- **Requires**: OPENAI_API_KEY
-
-### DALL-E 2
-- **Model**: dall-e-2
-- **Best for**: Faster, lower cost
-- **Requires**: OPENAI_API_KEY
-
-## Parameters
-
-- `prompt` (required): Text description of image
-- `provider` (optional): "gemini", "dalle", or "dalle2" (default: "gemini")
-- `size` (optional): Image size like "1024x1024" (default: "1024x1024")
-- `quality` (optional): "standard" or "hd" (default: "standard")
-- `output_path` (optional): Save location (default: auto-generated)
-- `count` (optional): Number of variations to generate (default: 1) **[Phase 1 NEW]**
-- `view` (optional): Display generated images to assistant (default: False) **[Phase 1 NEW]**
-
-## Use Cases
-
-- **Technical Diagrams**: Architecture, flow charts, system diagrams
-- **UI Mockups**: Interface designs, wireframes
-- **Presentations**: Illustrations, graphics, slides
-- **Documentation**: Visual aids, examples
-- **Branding**: Logos, icons, graphics
-- **Concept Art**: Prototypes, visual exploration
-
-## Output
-
-The tool returns:
-- **Provider**: Which service generated the image
-- **Prompt**: Original text description
-- **Image Path**: Where the image was saved
-- **Metadata**: Model, size, quality details
-
-## Dependencies
-
-Required:
-```bash
-pip install google-genai  # For Gemini
-pip install openai               # For DALL-E
-pip install requests             # For image downloads
-```
-
-## Phase 1 Enhancements (Completed)
-
-- [x] Multiple options generation (count parameter)
-- [x] View integration (view parameter)
-- [x] Enhanced error handling
-
-## Phase 2 Enhancements (Completed)
-
-### Style Presets
-
-Apply predefined style presets to enhance your prompts with consistent artistic direction:
-
-**Available Styles:**
-- `photo` - Photorealistic rendering
-- `illustration` - Digital illustration style
-- `sketch` - Hand-drawn sketch aesthetic
-- `technical-diagram` - Clean technical visualization
-- `flat-design` - Minimalist flat design
-- `cyberpunk` - Futuristic neon aesthetic
-- `watercolor` - Traditional watercolor painting
-- `oil-painting` - Classic oil painting style
-
-**Usage:**
-```image_gen
-generate_image(
-    prompt="mountain landscape",
-    style="watercolor",
-    provider="gemini"
-)
-```
-
-### Prompt Enhancement
-
-Automatically enhance prompts with quality keywords and composition guidance:
-
-**Usage:**
-```image_gen
-generate_image(
-    prompt="cat sitting",
-    enhance=True,
-    provider="gemini"
-)
-```
-
-The enhance parameter adds:
-- Quality keywords (high quality, detailed, professional)
-- Composition guidance for short prompts
-- Avoids duplicate keywords already in prompt
-
-**Combined Example:**
-```image_gen
-generate_image(
-    prompt="futuristic city",
-    style="cyberpunk",
-    enhance=True,
-    count=3,
-    view=True,
-    provider="gemini"
-)
-```
-
-## Cost Tracking
-
-All image generations are automatically tracked in a local SQLite database (`~/.gptme/imagen_costs.db`).
-
-### Query Total Cost
-
-```ipython
-from gptme_imagen.tools.image_gen import get_total_cost
-
-# Get total cost across all providers
-total = get_total_cost()
-print(f"Total spent: ${total:.2f}")
-
-# Filter by provider
-gemini_cost = get_total_cost(provider="gemini")
-print(f"Gemini cost: ${gemini_cost:.2f}")
-
-# Filter by date range
-cost = get_total_cost(start_date="2024-11-01", end_date="2024-11-30")
-print(f"November cost: ${cost:.2f}")
-```
-
-### Cost Breakdown
-
-```ipython
-from gptme_imagen.tools.image_gen import get_cost_breakdown
-
-breakdown = get_cost_breakdown()
-for provider, cost in breakdown.items():
-    print(f"{provider}: ${cost:.2f}")
-```
-
-### Generation History
-
-```ipython
-from gptme_imagen.tools.image_gen import get_generation_history
-
-history = get_generation_history(limit=10)
-for gen in history:
-    print(f"{gen['timestamp']}: {gen['prompt'][:50]}... (${gen['cost_usd']:.3f})")
-```
-
-**Cost per image** (approximate as of Nov 2024):
-- Gemini Imagen-3: $0.04 per image (standard)
-- DALL-E 3: $0.04 per image (standard), $0.08 per image (HD)
-- DALL-E 2: $0.02 per image
-
-**Note**: Costs are tracked automatically with each generation and stored locally.
-
-## Phase 3.2 Enhancements (Completed)
-
-### Image Variations
-
-Generate variations of existing images (DALL-E 2 only):
-
-```image_gen
-generate_variation(
-    image_path="original.png",
-    provider="dalle2",
-    count=4,
-    view=True
-)
-```
-
-**Note**: Image variations are currently only supported by DALL-E 2. For other providers, use `generate_image` with descriptive prompts.
-
-### Batch Operations
-
-Generate multiple images from a list of prompts efficiently:
-
-```image_gen
-batch_generate(
-    prompts=["sunset over ocean", "mountain landscape", "city skyline"],
-    provider="gemini",
-    style="photo",
-    output_dir="landscapes",
-    view=True
-)
-```
-
-Benefits:
-- Process multiple prompts in one call
-- Automatic filename generation
-- Progress tracking
-- Optional view all results
-
-### Provider Comparison
-
-Compare the same prompt across multiple providers:
-
-```image_gen
-compare_providers(
-    prompt="futuristic city skyline at night",
-    providers=["gemini", "dalle"],
-    quality="hd",
-    view=True
-)
-```
-
-Results are saved with provider-specific filenames for easy comparison. Perfect for:
-- Evaluating provider strengths
-- Choosing best result for your use case
-- A/B testing prompts
-
-## Future Enhancements (Phase 4+)
-
-- [ ] Local Stable Diffusion support
-- [ ] Image editing with masks (inpainting)
-- [ ] Advanced image-to-image transformations

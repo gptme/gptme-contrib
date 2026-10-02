@@ -1,265 +1,221 @@
 # gptodo
 
-Task management and work queue generation utilities for gptme agents.
+**A file-based task manager and work-queue CLI for autonomous AI agents.** Tasks are
+Markdown files with YAML frontmatter in a git repository, so an agent's to-do list
+survives across sessions, shows up in diffs, and can be edited by humans and agents alike.
+`gptodo` answers the question a long-running agent asks at the start of every session:
+*what should I work on next?*
 
-## Features
+**Status:** beta. Used daily by production [gptme](https://github.com/gptme/gptme) agents.
+The core task commands (`status`, `ready`, `next`, `show`, `edit`, `claim`, `add`, `lint`)
+are stable; the sub-agent and worktree commands are more experimental.
 
-- Manage tasks with YAML frontmatter metadata
-- Generate work queues from task files and GitHub issues
-- Prioritize tasks based on priority labels and assignments
-- Task locking for multi-agent coordination
-- Support for multiple task sources (local files, GitHub)
-- Configurable workspace structure
+> **gptodo is optional.** gptme does not require it, and an agent can track work in
+> GitHub Issues, Linear, a single `TODO.md`, or anything else. gptodo is one
+> well-integrated option, and it can import from GitHub and Linear if you want both.
 
-## Installation
+## Contents
 
-### Standalone (Recommended)
+- [Why gptodo](#why-gptodo)
+- [How it fits with gptme](#how-it-fits-with-gptme)
+- [Install](#install)
+- [Quickstart](#quickstart)
+- [Task files](#task-files)
+- [Task states](#task-states)
+- [Command reference](#command-reference)
+- [Machine-readable output](#machine-readable-output)
+- [Sequential planning (`next --limit`)](#sequential-planning-next---limit)
+- [Auto-expire](#auto-expire)
+- [Frontmatter schema and `lint`](#frontmatter-schema-and-lint)
+- [Configuration](#configuration)
+- [Development](#development)
 
-Install as a CLI tool:
+## Why gptodo
+
+An agent that runs for weeks across hundreds of sessions has no memory between sessions
+except what it writes down. Keeping task state as plain files in the agent's own repo
+means:
+
+- **Persistent and inspectable.** Every state change is a git diff. A human can review,
+  revert, or edit a task with any editor.
+- **Picking work, not just listing it.** `gptodo ready` and `gptodo next` only return work
+  that is actually unblocked: dependencies resolved (`requires:`), no outstanding
+  `waiting_for:`, no future `wait:` date, and not parked as `draft` or `someday`.
+- **Safe with several agents at once.** `gptodo claim` records an owner, `gptodo lock`
+  holds file-based locks with a timeout, and `ready --skip-claimed` hides work that
+  another session has already claimed.
+- **Agent-proof state.** A defined state machine (`gptodo transitions`) plus a frontmatter
+  linter (`gptodo lint`) catch the usual drift, such as tasks left in `active`
+  indefinitely or made-up frontmatter fields.
+- **Connected to issue trackers.** Tasks can link GitHub issues/PRs and keep their state
+  in sync with them (`fetch`, `sync`), and issues can be imported as tasks (`import`).
+
+## How it fits with gptme
+
+| Piece | Role |
+|-------|------|
+| [gptme-agent-template](https://github.com/gptme/gptme-agent-template) | The agent workspace template. Its [`TASKS.md`](https://github.com/gptme/gptme-agent-template/blob/master/TASKS.md) and `tasks/` directory follow gptodo's conventions out of the box. |
+| [gptme-gptodo](../../plugins/gptme-gptodo/README.md) | A gptme plugin that wraps the gptodo CLI as Python functions so a "coordinator" agent can delegate work to sub-agents. |
+| [gptme-coordination](../gptme-coordination/README.md) | SQLite-based multi-agent coordination. `gptodo ready --skip-claimed` reads its claims from `state/coordination/coord.db`. Without that database, the flag has no effect. |
+| [gptmail](../gptmail/README.md) | The companion communication package (email and agent-to-agent messaging). It is independent of gptodo. |
+
+## Install
+
+gptodo requires Python 3.10 or newer. Install it from the gptme-contrib repository:
 
 ```bash
-# Using uv (recommended)
+# As a standalone CLI (recommended)
 uv tool install git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptodo
-
-# Using pipx
+# or
 pipx install git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptodo
 ```
 
-### From gptme-contrib workspace
+From a checkout of gptme-contrib (it is a uv workspace member):
 
 ```bash
-# Install with workspace
-uv sync
-
-# Or install package directly
-uv pip install -e packages/gptodo
+uv sync --all-packages            # whole workspace
+uv pip install -e packages/gptodo # just gptodo
 ```
 
-## Usage
+`python -m gptodo` works the same as the `gptodo` entry point.
 
-### Task Management CLI
+Some features need extra tools:
+
+| Feature | Needs |
+|---------|-------|
+| GitHub features (`generate-queue`, `fetch`, `sync`, `import --source github`, `check-waiting`, `worktree pr`) | [`gh`](https://cli.github.com/), authenticated |
+| `import --source linear` | `LINEAR_API_KEY` |
+| `spawn` (background sub-agents) | `tmux`, plus `gptme` or `claude` on `PATH` |
+| `browse` | `fzf` (optional; falls back to a pager) |
+
+## Quickstart
 
 ```bash
-# View task status
+mkdir my-agent && cd my-agent && git init
+
+# Create tasks. The filename (and task ID) is a slug of the title.
+gptodo add --priority high --tags docs "Write project README"
+echo "Run lint and tests on every push." | gptodo add "Set up CI"
+
+# Overview of everything vs. what is actually workable
 gptodo status
-gptodo status --compact
+gptodo ready
+gptodo next                 # the single best task to pick up
 
-# Show specific task
-gptodo show <task-id>
+# Make one task depend on another
+gptodo edit set-up-ci --add requires write-project-readme
 
-# Edit task metadata
-gptodo edit <task-id> --set state active
-gptodo edit <task-id> --set priority high
-gptodo edit <task-id> --add tag feature
-
-# Validate tasks
-gptodo validate
-
-# List tasks with filters
-gptodo list --priority high
-gptodo list --state active
-
-# Auto-expire long-quiet tasks (default: 90 days since `created`)
-gptodo expire --dry-run          # preview
-gptodo expire                    # apply
-gptodo expire --days 60          # tighter window
-gptodo expire --state backlog    # only reap backlog
+# Claim, work, finish
+gptodo claim write-project-readme --agent alice   # state: active, assigned_to: alice
+gptodo edit write-project-readme --set state done # set-up-ci is now ready
 ```
 
-### Sequential Planning (`next --limit`)
+The first `gptodo add` creates `tasks/write-project-readme.md`:
 
-`gptodo ready` and a bare `gptodo next` answer a **parallel** question: what is
-unblocked *right now*. If task A unblocks task B, B is invisible to both until
-A is actually completed — so a deep queue can look one task shallow.
+```markdown
+---
+state: backlog
+created: 2026-01-01T12:00:00.000000+00:00
+priority: high
+task_type: action
+assigned_to: agent
+tags: ["docs"]
+---
 
-`gptodo next --limit N` answers the **sequential** question instead. It greedily
-simulates completing each pick (in memory — task files are never written),
-recomputes the ready set, and lets newly unblocked tasks join the list:
-
-```bash
-gptodo next                       # top ready task (unchanged)
-gptodo next --limit 5             # next 5, in unblocking order
-gptodo next -n 5 --order unblock  # critical path first
-gptodo next --limit 5 --json      # ordered array with attribution
+# Write project README
 ```
 
-Every item past the first states *why* it is there — `unblocked by #3
-<task>`, or `(already ready)` if it needed nothing.
+## Task files
 
-Two orderings:
+- **Location.** Tasks are `tasks/*.md` at the workspace root. gptodo looks for the root in
+  this order: `GPTODO_TASKS_DIR` (or `--tasks-dir`), then `TASKS_REPO_ROOT`, then the
+  nearest parent directory with a `gptme.toml`, then the nearest git repo that has a
+  `tasks/` directory, then the nearest git repo, and finally the current directory.
+- **Task ID.** The task ID is the filename without `.md`. Commands also accept a path such
+  as `tasks/foo.md`.
+- **Archive.** Files under `tasks/archive/` are not listed, but `requires:` references to
+  them still resolve, so a dependency on an archived `done` task does not block.
+- **Required fields.** Every task needs `state` and `created`. Everything else is optional.
 
-| `--order` | Behaviour |
-|-----------|-----------|
-| `priority` (default) | Greedy by the normal `next` ordering — literally "what's next, then next". |
-| `unblock` | At each step take the task that unblocks the most downstream work — surfaces the **critical path** rather than the priority path. |
-
-If fewer than N tasks are reachable, that is stated explicitly (`only 3 of 5
-reachable — nothing further is unblocked by this sequence`) rather than
-silently returning a short list. `--pool` / `--exclude-pool` / `--use-cache`
-apply at every step, not just the first pick, and dependency cycles terminate
-the simulation instead of hanging it.
-
-`--limit 1` (and omitting the flag) produce byte-identical output to the
-previous behaviour, including the `--json` shape — autonomous sessions calling
-`gptodo next --json` are unaffected. The `--order` flag is also ignored when
-`--limit 1` (it only changes sequencing within a multi-task cascade). In
-multi-task mode the JSON gains `sequence`, `order`, `requested`, `reachable`,
-`complete`, and `note` keys alongside the unchanged `next_task` / `alternatives`.
-
-### Machine-Readable Output (`--json`)
-
-Scripts should parse `--json` rather than grep the rendered human output (the
-emoji/formatting are not a stable contract).
-
-```bash
-# Detect whether any task is active (used by autonomous-run gates)
-gptodo status --json | jq -e 'any(.tasks[]; .state == "active")'
-
-# Per-state counts
-gptodo status --json | jq '.summary.by_state'
-```
-
-Single-type shape (default):
-
-```json
-{
-  "type": "tasks",
-  "tasks": [ { "id": "...", "state": "active", "priority": "high", ... } ],
-  "summary": {
-    "total": 12,
-    "by_state": { "active": 1, "backlog": 11 },
-    "issues": 0,
-    "untracked": 0
-  }
-}
-```
-
-With `--all`, results are grouped under `types` keyed by directory type, each
-holding the same `{type, tasks, summary}` shape. `gptodo list`, `ready`, and
-`next` also support `--json` (and `--jsonl`).
-
-### Generate Work Queue
-
-```bash
-# Basic usage (current directory as workspace)
-gptodo generate-queue
-
-# Specify workspace path
-gptodo generate-queue --workspace ~/my-agent
-
-# Specify GitHub username for assignee filtering
-gptodo generate-queue --github-username YourUsername
-```
-
-### Task Locking (Multi-Agent)
-
-```bash
-# Acquire lock on a task
-gptodo lock acquire <task-id>
-
-# Release lock
-gptodo lock release <task-id>
-
-# Check lock status
-gptodo lock status <task-id>
-```
-
-### Output
-
-Generates `state/queue-generated.md` with:
-- **Current Run**: Summary from latest journal entry
-- **Planned Next**: Top 5 prioritized tasks
-- **Last Updated**: Timestamp
-
-### Task Sources
-
-1. **Local Task Files** (`tasks/*.md`):
-   - Filter: priority=high/urgent AND state=new/active
-   - Uses frontmatter metadata
-
-2. **GitHub Issues**:
-   - Filter: label=priority:high/urgent AND state=open
-   - Boosts score if assigned to configured username
-
-## Configuration
-
-Via command-line arguments or environment variables:
-
-- `TASKS_REPO_ROOT` / `--workspace`: Agent workspace path
-- `GITHUB_USERNAME` / `--github-username`: GitHub username for filtering
-- `--journal-dir`: Journal directory name (default: journal)
-- `--tasks-dir`: Tasks directory name (default: tasks)
-- `--state-dir`: State directory name (default: state)
-
-## Task Format
-
-Task files should use frontmatter metadata:
+A typical task:
 
 ```yaml
 ---
-state: active      # draft, backlog, todo, active, ready_for_review, waiting, someday, done, cancelled, expired
-priority: high     # low, medium, high
-task_type: project # project (multi-step) or action (single-step)
-assigned_to: bob   # agent name
-tags: [ai, dev]    # categorization tags
+state: todo
+created: 2026-01-01
+priority: high              # high | medium | low
+task_type: project          # project (multi-step) | action (single-step)
+assigned_to: alice
+tags: [infra, ci]
+requires:                   # blocks readiness until each one is done/cancelled
+  - write-project-readme
+  - https://github.com/owner/repo/issues/42   # a closed issue counts as resolved (needs `fetch` + `--use-cache`)
+next_action: "Draft the workflow file"
+success_criterion: "CI green on master for 3 consecutive pushes"
+tracking: [https://github.com/owner/repo/issues/42]
+pool: general               # general | frontier, see --pool on ready/next
 ---
-# Task Title
-
-Task description...
+# Set up CI
 
 ## Subtasks
-- [ ] First subtask
-- [x] Completed subtask
+- [x] Pick a CI provider
+- [ ] Add workflow file
 ```
 
-## State Semantics
+Behaviour attached to particular fields:
 
-The ten canonical states and what they *mean* — not just what they're
-called. The autonomous loop drifts when "active" gets used as an opaque
-"recently touched" tag; enforcing the semantics is the point of the
-`gptodo transitions` table and the `--force` gate on `gptodo edit --set state`.
+- **Blocked work.** `requires:` lists task IDs or issue URLs. A task whose dependencies are
+  not resolved has the virtual effective state `blocked` (see `gptodo effective <id>`).
+  `depends:` and `blocks:` are deprecated aliases.
+- **Hidden until a date.** `wait: 2026-02-01` (a date or datetime) keeps a task out of
+  `ready`/`next` until that time.
+- **External blockers.** `waiting_for:` takes free text or structured conditions that
+  `gptodo check-waiting` and `gptodo watch` can resolve automatically:
+  ```yaml
+  waiting_for:
+    - type: pr_merged        # also: pr_ci, comment (with `pattern:`), time
+      ref: "owner/repo#123"
+  ```
+- **Recurring tasks.** With `recur: 7d`, `24h`, `weekly` or `monthly` set, marking the task
+  `done` re-parks it as `waiting` with the next `wait:` date instead of closing it. Cron
+  expressions are accepted but not evaluated, so such a task closes normally.
+- **Auto-unblock.** Marking a task `done` updates the tasks that depend on it. If the
+  `HOOK_TASK_DONE` environment variable names an executable, it is run as
+  `$HOOK_TASK_DONE <task-id> <task-name> <repo-root>` for every completed task.
 
-| State              | Meaning                                                                                                    | In `next`/`ready`? |
-| ------------------ | ---------------------------------------------------------------------------------------------------------- | ------------------ |
-| `draft`            | In-progress plan, filed so it isn't lost, but **not released** to the fleet. Use while a planning session is still writing the plan. | No                 |
-| `backlog`          | Queued, not yet triaged. Default for newly-created tasks.                                                  | Yes                |
-| `todo`             | Triaged and ready to start; unclaimed; nothing is blocking work.                                           | Yes                |
-| `active`           | A human or agent is working on it **right now**. Should be paired with `assigned_to` and `assigned_at`.    | Yes (already owned; still listed) |
-| `waiting`          | Blocked on an external event (a date, a reply, an approval, a gate firing). Should carry `wait:` and/or `waiting_for:` explaining *what* it's waiting for. | No             |
-| `ready_for_review` | Work done, awaiting operator sign-off before `done`. Should reference a commit or PR in the body.          | No (query `--state ready_for_review`) |
-| `someday`          | Parked idea; may or may not ever be picked up. Explicitly excluded from `next`/`ready` (GTD someday/maybe). | No                 |
-| `done`             | Terminal. Work merged / criterion met.                                                                     | No (terminal)      |
-| `cancelled`        | Terminal. Will not be picked up; rationale in body.                                                        | No (terminal)      |
-| `expired`          | Soft-terminal. Auto-applied by `gptodo expire` when a `backlog`/`todo`/`someday` task has sat quiet longer than the expire window (default 90d since `created`). Revive to `backlog`/`todo` without `--force`. | No |
+## Task states
 
-Legacy deprecated aliases (still accepted with a warning): `new` → `backlog`,
-`paused` → `backlog`. **`paused` is not a hold** — it normalizes to `backlog`
-and is claimable. Do not file in-progress plans as `paused`; use `draft`.
+Each state has a specific meaning, and that meaning is enforced. Problems start when an
+agent uses `active` to mean "recently touched".
 
-### Common confusions to avoid
+| State              | Meaning | In `ready`/`next`? |
+| ------------------ | ------- | ------------------ |
+| `draft`            | An in-progress plan, filed so it isn't lost but **not released** to agents. | No |
+| `backlog`          | Queued, not yet triaged. Default for new tasks. | Yes |
+| `todo`             | Triaged, unclaimed, and nothing blocks it. | Yes |
+| `active`           | Someone is working on it **right now**. Should have `assigned_to` and `assigned_at` (set by `gptodo claim`). | Yes (already owned) |
+| `waiting`          | Blocked on an external event such as a date, reply, approval, or merge. Should have `wait:` and/or `waiting_for:`. | No |
+| `ready_for_review` | The work is done and awaits sign-off. | No (`ready --state ready_for_review`) |
+| `someday`          | A parked idea that may never be picked up (GTD "someday/maybe"). | No |
+| `done`             | Terminal. The work is merged or the criterion is met. | No |
+| `cancelled`        | Terminal. Won't be done; the reason goes in the body. | No |
+| `expired`          | Soft-terminal, set by `gptodo expire`. Can be revived to `backlog`/`todo`. | No |
 
-- **`active` is NOT "recently touched" or "in-progress work by me generally".**
-  It means an agent has claimed the task and is executing on it *in this
-  session*. If nobody's actively driving it, it should be `todo`, `waiting`,
-  or `someday`. Watch-* tasks that sit waiting for a gate to fire belong in
-  `waiting` (with a `wait:` or `waiting_for:` explaining what triggers them),
-  not `active`.
-- **`waiting` is for external blockers**, not "I haven't gotten to it yet"
-  (that's `backlog`/`todo`) and not "I'm blocked on another task" (that's
-  handled by `requires:` — the effective state is computed as `blocked`
-  automatically). Use `waiting` when a real-world event needs to arrive:
-  a date, a message, a PR merge, an approval.
-- **`todo` is unclaimed and ready.** If someone starts on it, they should
-  transition it to `active` via `gptodo claim` (which also records
-  `assigned_to`).
-- **`someday` is not the same as `backlog`.** `backlog` says "we'll get to
-  this"; `someday` says "maybe never, but keep it around".
-- **`draft` is not `someday` and not `paused`.** `draft` says "complete,
-  approved-or-approvable plan, deliberately not yet released." `someday` is
-  GTD maybe-never. `paused` is a deprecated alias that **normalizes to
-  `backlog`** — it is not a guard and eager agents will claim it. File
-  in-progress plans as `draft`. Both `draft` and `someday` are excluded
-  from `gptodo next`/`ready` and from `gptodo claim`.
+`new` and `paused` are deprecated aliases that are still accepted with a warning. Both
+normalize to `backlog`. **`paused` does not hold a task**: agents will claim it. File
+unreleased plans as `draft`.
+
+Common confusions:
+
+- **`active` is not "touched recently".** It means an agent claimed the task and is
+  executing it now. If nobody is driving the task, it belongs in `todo`, `waiting`, or
+  `someday`.
+- **`waiting` is for external blockers.** "Not started yet" is `backlog`/`todo`. "Blocked
+  on another task" is expressed with `requires:`, which gptodo turns into an effective
+  `blocked` state.
+- **`someday` is not `backlog`.** `backlog` means "we'll get to this", while `someday`
+  means "maybe never". `draft`, `someday`, `waiting`, `ready_for_review` and terminal tasks
+  cannot be claimed.
 
 ### Legal transitions
 
@@ -305,129 +261,216 @@ stateDiagram-v2
     expired --> [*]
 ```
 
-### Auto-expire
+`gptodo transitions` (or `--json`) prints this table. `gptodo edit --set state X` enforces
+it at three levels:
 
-The queue grows without bound if long-quiet tasks never get closed. `gptodo
-expire` walks the tree, finds tasks in eligible states
-(`backlog`/`todo`/`someday` by default) whose `created` date is older than
-`--days N` (default `90`, env `GPTODO_EXPIRE_DAYS`), and transitions them to
-`expired`. `expired_from` and `expired_at` are stamped so revival is a
-one-liner:
+1. **Reopening `done` or `cancelled`** is refused unless you pass `--force`.
+2. **Any other illegal transition** (for example `active → todo`) prints a warning and goes
+   ahead. With `GPTODO_STRICT_TRANSITIONS=1`, it is refused instead unless you pass
+   `--force`.
+3. **Legal transitions** go through silently.
+
+`gptodo edit` also maintains bookkeeping fields. Entering `waiting` stamps
+`waiting_since`, `first_waiting_since` and `waiting_spell_count`. Moving to `done` or
+`cancelled` clears stale `waiting_for`/`wait`/`next_action` and sets `completed`.
+
+## Command reference
+
+Every command has `--help`. The top-level options are `-v/--verbose` and
+`--tasks-dir PATH`.
+
+**Viewing and selecting work**
+
+| Command | What it does |
+|---------|--------------|
+| `status [--compact] [--summary] [--issues] [--json] [--github]` | Overview grouped by state. `--compact` shows only backlog/todo/active/ready_for_review. `--type` / `--all` also cover the `tweets` and `email` directory types. |
+| `list [--sort state\|date\|name\|completion] [--active-only] [--context @tag] [--json\|--jsonl]` | Table of tasks. |
+| `ready [--state ...] [--json\|--jsonl] [--skip-claimed] [--use-cache]` | All unblocked tasks. `--state` takes `backlog`, `todo`, `active`, `ready_for_review`, `someday`, `draft`, `both` (the default: backlog+todo+active) or `actionable`. |
+| `next [--limit N] [--order priority\|unblock] [--json]` | The highest-priority ready task, or a simulated sequence of N tasks (see below). |
+| `show <id> [--render]` | One task's metadata and body. |
+| `browse [--all] [--state S] [--project P] [--no-fzf]` | Interactive browser (fzf, or a pager). |
+| `tags [--state S] [--list] [TAG...]` | Tag counts and the tasks under each tag. |
+| `stale [--days 30] [--state active\|backlog\|waiting\|all]` | Tasks not modified recently. |
+| `effective <id>` / `explain <id>` | Why a task is or isn't ready: its effective state, and each readiness filter in turn. |
+| `plan <id>` | What finishing this task would unblock. |
+
+`list`, `ready`, `next` and `loop` show only the `general` pool by default. Pass
+`--pool all` or `--pool frontier`, or `--exclude-pool frontier`. A task is in the
+`frontier` pool if it sets `pool: frontier`, has a `frontier-` ID prefix, or has a
+`frontier` tag.
+
+**Editing**
+
+| Command | What it does |
+|---------|--------------|
+| `add "Title" [--priority] [--tags a,b] [--state] [--type action\|project] [--assigned-to]` | Create a task. Text piped on stdin becomes the body. |
+| `edit <id>... --set F V \| --add F V \| --remove F V \| --set-subtask "text" done\|todo [--force]` | Change frontmatter. Several IDs can be given at once. `--set F none` clears a field, and `tag`/`dep` are shorthands for `tags`/`depends`. |
+| `claim <id> [--agent NAME]` | Set `active`, `assigned_to` and `assigned_at`. Running it again with the same owner does nothing. |
+| `subtask <parent> -n a -n b [--mode parallel\|sequential\|fan-out-fan-in]` | Split a task into child task files (`spawned_from` / `spawned_tasks`). |
+| `expire [--days N] [--state S] [--dry-run] [--json]` | Auto-expire long-quiet tasks (see below). |
+
+**Integrity**
+
+| Command | What it does |
+|---------|--------------|
+| `check [--fix] [FILES...]` | Check integrity and relationships, such as broken references and unparseable frontmatter. |
+| `lint [--json] [--strict] [FILES...]` | Find frontmatter schema errors and unknown or deprecated fields. |
+| `transitions [--json]` | The state-transition table. |
+| `dep tree <id> [-f ascii\|mermaid] [-d up\|down\|both]`, `dep check`, `dep dag [--no-power]` | Dependency trees, cycle detection, and the whole-workspace graph with unblocking-power scores. |
+| `checker <id> [--poll]` | Verify subtask completion, dependency resolution and state validity for a task. |
+
+**External trackers**
+
+| Command | What it does |
+|---------|--------------|
+| `fetch [--all] [URL...]` | Cache issue/PR states in `state/issue-cache.json`. `ready`, `next` and `sync` read the cache with `--use-cache`. |
+| `sync [--update] [--light\|--full] [--changes-only]` | Compare task states with their linked GitHub issues and optionally update the tasks. |
+| `import --source github --repo owner/repo [--label L] [--assignee me]` / `import --source linear --team KEY` | Create placeholder tasks from issues. Issues that already have a task are skipped. |
+| `check-waiting [--fix]` / `watch [--interval 300] [--once]` | Resolve structured `waiting_for:` conditions, once or as a loop. |
+| `generate-queue [--workspace .] [--github-username U] [--user U]` | Write `state/queue-generated.md`: the 5 top high/urgent tasks plus high/urgent GitHub issues (`priority:high` / `priority:urgent` labels). |
+
+**Multi-agent and sub-agents** (experimental)
+
+| Command | What it does |
+|---------|--------------|
+| `lock <id> [--worker W] [--timeout H]`, `unlock <id>`, `locks [--cleanup]` | File locks in `state/locks/` that expire after a timeout. |
+| `agents [--all] [--cleanup] [--json]` | Agents registered in `state/agents/`, by heartbeat. |
+| `run <id>` / `spawn <id>` `[--backend gptme\|claude] [--type general\|explore\|plan\|execute] [--model M] [--prompt P]` | Run a sub-agent on a task, in the foreground or in the background (tmux). Session records go in `state/sessions/`. |
+| `sessions [--status S]`, `output <session>`, `kill <session>`, `cleanup-sessions` | Manage spawned sessions. |
+| `loop [-n 5] [--parallel N] [--dry-run]` | Work through ready tasks with sub-agents. |
+| `worktree create <id> [--base origin/master]`, `list`, `status`, `pr`, `merge`, `remove`, `cleanup` | Per-task git worktrees under `.worktrees/` for isolated agent work. |
+
+## Machine-readable output
+
+Scripts should parse `--json` rather than the rendered output, because the emoji and
+formatting may change. Most commands accept `--json`, including `status`, `list`, `ready`,
+`next`, `stale`, `plan`, `fetch`, `sync`, `import`, `expire`, `lint` and `transitions`.
+`list`, `ready` and `stale` also accept `--jsonl` (one task per line).
 
 ```bash
-gptodo expire --dry-run       # preview what would be reaped
-gptodo expire                 # apply
-gptodo expire --days 60       # tighter window
-gptodo expire --state backlog # only reap backlog
-gptodo expire --json          # machine-readable output for cron/CI
+# Is any task active?
+gptodo status --json | jq -e 'any(.tasks[]; .state == "active")'
 
-# Revive an expired task (no --force needed — expired is soft-terminal)
-gptodo edit <task> --set state backlog
+# Per-state counts
+gptodo status --json | jq '.summary.by_state'
 ```
 
-Auto-expire deliberately **skips**:
+`status --json` returns:
 
-- Tasks in `active` / `waiting` / `ready_for_review` (live work — age there
-  is a symptom, not queue rot).
-- Tasks with `recur:` set (legitimately dormant between fires).
-- Tasks with a future `wait:` date (intentionally hidden, not stale).
+```json
+{
+  "type": "tasks",
+  "tasks": [ { "id": "...", "state": "active", "priority": "high", "...": "..." } ],
+  "summary": { "total": 12, "by_state": { "active": 1, "backlog": 11 }, "issues": 0, "untracked": 0 }
+}
+```
 
-Age is measured from `created`, **not** `modified`, because a task that only
-gets touched by lint/reformat still hasn't been *worked* — using mtime would
-let queue drift hide behind incidental edits.
+With `--all`, the results are grouped under `types`, keyed by directory type, and each
+group has the same `{type, tasks, summary}` shape.
 
-`gptodo transitions` prints the machine-readable table. `gptodo edit --set state X`
-enforces legality and refuses illegal transitions unless you pass `--force`
-(e.g. reopening a `done` task, or dropping `active` back to `todo` without
-finishing / handing off). The escape hatch exists — the check is a nudge,
-not a wall — but every `--force` should be a conscious act, not a habit.
+## Sequential planning (`next --limit`)
 
-## Frontmatter Schema — Known vs. Hallucinated Fields
+`ready` and a bare `next` answer a parallel question: what is unblocked right now. If task
+A unblocks task B, B is invisible to both until A is done, so a deep queue can look one
+task deep.
 
-The set of *supported* frontmatter fields lives in
-`KNOWN_FRONTMATTER_FIELDS` (see `src/gptodo/utils.py`). `gptodo lint` scans
-task files for anything outside that set and emits a warning.
-
-**Do not add ad-hoc fields.** Autonomous LLM sessions repeatedly invent
-plausible-sounding fields under pressure — `modified`, `last_modified`,
-`updated_at`, `last_completed` — most of which duplicate information you
-can already get for free.
-
-The canonical anti-example is `modified:` (proposed by an autonomous loop
-in 2026-07-01 as a "solution" to queue-health monitoring). It was rejected
-as an anti-design-goal: it's a high-churn field that would have to be wired
-into *every* edit path, and the answer it purports to provide is already
-available via:
+`gptodo next --limit N` answers the sequential question instead. It simulates completing
+each pick in memory (task files are never written), recomputes the ready set, and lets
+newly unblocked tasks join the list:
 
 ```bash
-python -c "import os; print(os.path.getmtime('tasks/foo.md'))"   # file mtime
-git log -1 --format=%ai tasks/foo.md                             # last commit
+gptodo next --limit 5                 # next 5, in unblocking order
+gptodo next -n 5 --order unblock      # take the task that unblocks the most first (critical path)
+gptodo next --limit 5 --json          # ordered array; each item says what unblocked it
 ```
 
-Both are free. Adding a stored `modified` field creates a churn hazard
-(every edit forgets to update it, every test needs to inject it, every
-diff carries noise) with no net information gain.
+- **Reachability.** If fewer than N tasks are reachable, the output says so instead of
+  quietly returning a short list.
+- **Filters.** `--pool`, `--exclude-pool` and `--use-cache` apply at every step.
+- **Cycles.** A dependency cycle ends the simulation.
+- **Compatibility.** `--limit 1`, the default, gives exactly the old output, including the
+  `--json` shape. In multi-task mode the JSON gains `sequence`, `order`, `requested`,
+  `reachable`, `complete` and `note` keys next to `next_task` / `alternatives`.
 
-The `gptodo lint` command surfaces these to keep the schema clean:
+## Auto-expire
+
+Without cleanup, the queue keeps growing. `gptodo expire` finds tasks in
+`backlog`/`todo`/`someday` whose `created` date is older than `--days` (default 90, or
+`GPTODO_EXPIRE_DAYS`) and moves them to `expired`. It stamps `expired_from` and
+`expired_at` on each one.
 
 ```bash
-gptodo lint                        # scan all tasks
-gptodo lint tasks/foo.md           # single file
-gptodo lint --json                 # machine-readable
-gptodo lint --strict               # non-zero exit if warnings found (CI)
+gptodo expire --dry-run                    # preview
+gptodo expire --days 60 --state backlog    # tighter window, backlog only
+gptodo edit <task> --set state backlog     # revive (no --force needed)
 ```
 
-Deprecated / anti-goal warnings suggest the correct alternative in the
-message body. Unknown-field warnings ask you to either add the field to
-`KNOWN_FRONTMATTER_FIELDS` (deliberate PR + test) or remove it. Warnings
-never reject a task — a fresh loop must still be able to write whatever
-frontmatter it decides on; the linter's job is to *nudge* toward the
-schema, not gate loop output.
+It skips:
 
-## GitHub Integration
+- live states (`active`, `waiting`, `ready_for_review`)
+- tasks with `recur:`
+- tasks with a future `wait:` date
 
-Requires GitHub CLI (`gh`) installed and authenticated:
+Age is measured from `created`, not file mtime, so edits from lint or reformatting don't
+make a task look active.
+
+## Frontmatter schema and `lint`
+
+The supported fields are listed in `KNOWN_FRONTMATTER_FIELDS` in
+[`src/gptodo/utils.py`](src/gptodo/utils.py). `gptodo lint` warns about anything outside
+that set and about known bad fields such as `modified`, `updated_at`, `owner` (use
+`assigned_to`) and `discovered_from` (use `discovered-from`). Each warning names the
+alternative.
 
 ```bash
-gh auth login
+gptodo lint                  # all tasks
+gptodo lint tasks/foo.md     # one file
+gptodo lint --strict         # non-zero exit on warnings (for CI / pre-commit)
 ```
 
-Priority labels:
-- `priority:urgent` - Highest priority
-- `priority:high` - High priority
-- `priority:medium` - Medium priority (not included in queue)
-- `priority:low` - Low priority (not included in queue)
+A `modified:` timestamp is deliberately not part of the schema. Every edit path would have
+to keep it up to date, and the same information is free from
+`git log -1 --format=%ai tasks/foo.md`. Warnings never reject a task. The linter only
+pushes towards the schema.
+
+**Workspace-specific fields.** Fields specific to one workspace can be registered so they
+lint clean and can be set with `gptodo edit`. Use either of these:
+
+```toml
+# pyproject.toml at the workspace root
+[tool.gptodo]
+extra_frontmatter_fields = ["review_owner", "premise_check"]
+```
+
+```bash
+export GPTODO_EXTRA_FRONTMATTER_FIELDS="review_owner,premise_check"
+```
+
+## Configuration
+
+| Variable | Effect |
+|----------|--------|
+| `GPTODO_TASKS_DIR` / `--tasks-dir` | Use this tasks directory. Its parent becomes the workspace root. |
+| `TASKS_REPO_ROOT` | Start root detection from this path. The `lock`, `unlock`, `locks` and `agents` commands use it directly as the root, defaulting to the current directory. |
+| `GPTODO_AGENT_NAME` | Default owner for `claim` and `add`. Without it, gptodo uses `[agent].name` from `gptme.toml`, then `agent`. |
+| `GPTODO_STRICT_TRANSITIONS=1` | Refuse illegal state transitions instead of warning. |
+| `GPTODO_EXPIRE_DAYS` | Default `--days` for `expire`. |
+| `GPTODO_EXTRA_FRONTMATTER_FIELDS` | Extra allowed frontmatter fields, comma- or space-separated. |
+| `HOOK_TASK_DONE` | Executable run when a task is marked `done`. |
+| `GITHUB_USERNAME` | Assignee boost for `generate-queue`. |
+| `LINEAR_API_KEY` | Required for `import --source linear`. |
+
+gptodo writes its runtime state under `state/` in the workspace: `issue-cache.json`,
+`locks/`, `agents/`, `sessions/` and `queue-generated.md`. Add the volatile parts to
+`.gitignore`.
 
 ## Development
 
-### Running Tests
-
 ```bash
 cd packages/gptodo
-make test
+make test        # pytest
+make typecheck   # mypy
 ```
 
-### Type Checking
-
-```bash
-cd packages/gptodo
-make typecheck
-```
-
-## Migration from tasks
-
-If you were using `scripts/tasks.py`, the wrapper script will continue to work
-but will show a deprecation warning. To migrate:
-
-1. Install gptodo directly: `uv tool install git+...`
-2. Replace `./scripts/tasks.py` calls with `gptodo`
-3. All commands remain the same
-
-## Integration
-
-This package is designed to work with:
-- gptme autonomous runs
-- GitHub issue tracking
-- Agent workspace structures
-
-For full autonomous agent setup, see [gptme-agent-template](https://github.com/gptme/gptme-agent-template).
+`scripts/tasks.py` at the root of gptme-contrib is a deprecated wrapper around this CLI.
+Replace calls to it with `gptodo`; the commands are the same.

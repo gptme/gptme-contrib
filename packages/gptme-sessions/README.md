@@ -1,30 +1,61 @@
 # gptme-sessions
 
-Session tracking and analytics for agents. Supports trajectories from gptme,
-Claude Code, Codex, Copilot, Grok Build, and Pi native v3 sessions.
+Session tracking and analytics for AI coding agents: discover trajectories from gptme, Claude
+Code, Codex, Copilot CLI and Pi, extract productivity signals (commits, file writes, errors,
+token usage, cost), and keep an append-only JSONL ledger you can query, grade and audit.
 
-Provides an append-only JSONL-based session record system that any agent can use
-to track operational metadata across sessions: which harness and inference
-provider ran, what model was used, what type of work was done, and the outcome.
+**Status:** beta, actively developed. The `SessionRecord`/`SessionStore` API and the core CLI
+(`sync`, `query`, `stats`, `post-session`) are stable in practice; analysis commands evolve
+faster.
 
-## Installation
+## Why / when to use it
+
+Once an agent runs many sessions — often across several harnesses and models — you need to answer
+questions like *which model/backend actually ships work?*, *how many sessions were no-ops?*,
+*what did last week cost?* or *which session wrote this line?* `gptme-sessions` normalises each
+harness's native trajectory format into one record schema (harness, provider, model, run type,
+category, outcome, duration, tokens, cost, deliverables) so those questions are one command away.
+
+Related:
+
+- [gptme-runloops](../gptme-runloops/README.md) — runs the sessions this package records
+- [gptme-dashboard](../gptme-dashboard/README.md) — shows session stats from this store in a web UI
+- [gptme-usage](../gptme-usage/README.md) — model registry and cost math (optional `cost` extra)
+
+## Install
+
+Not published on PyPI. Install from the repository:
 
 ```bash
-pip install gptme-sessions
+uv tool install "git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-sessions"
+# or, from a clone of gptme-contrib:
+uv pip install -e packages/gptme-sessions
 ```
 
-## Usage
+Extras: `shell-parse` (tree-sitter-bash for more robust commit/heredoc detection) and `cost`
+(depends on [gptme-usage](../gptme-usage/README.md), also not on PyPI — install it from the repo
+first).
 
-### Python API
+## Quickstart
+
+```bash
+gptme-sessions discover --since 7d    # find trajectories on this machine (read-only)
+gptme-sessions sync --since 14d       # import them into the store (idempotent, deduplicates)
+gptme-sessions                        # 30-day summary
+gptme-sessions query --model opus --since 7d
+```
+
+The store lives in `~/.local/share/gptme-sessions/` (override with `GPTME_SESSIONS_DIR` or
+`--sessions-dir`).
+
+## Python API
 
 ```python
 from pathlib import Path
 from gptme_sessions import SessionRecord, SessionStore
 
-# Create a store (defaults to ./state/sessions/)
-store = SessionStore(sessions_dir=Path("state/sessions"))
+store = SessionStore(sessions_dir=Path("state/sessions"))  # default: GPTME_SESSIONS_DIR or ~/.local/share/gptme-sessions
 
-# Append a session record
 store.append(SessionRecord(
     harness="pi",
     provider="openai-codex",
@@ -38,174 +69,141 @@ store.append(SessionRecord(
     deliverables=["abc123"],
 ))
 
-# Query records
 recent = store.query(model="gpt-5.6-luna", since_days=7)
-
-# Get stats
 stats = store.stats()
 print(f"Success rate: {stats['success_rate']:.0%}")
 ```
 
-Grok Build usage records retain `sys_prompt_tokens` (the first observed prompt,
-including cached input) and `context_peak_tokens` (the largest per-call prompt).
-These are stored alongside session input, output, cache-read, cache-creation,
-and total token counts, so analytics do not need to reparse the trajectory.
-The terminal `end.usage` provides cumulative totals, never context size. An
-incomplete stream uses its observed per-call totals; older streams with only
-an `end` record leave context metrics unknown.
+Also exported: `post_session()` (the full record-a-session pipeline), `extract_from_path()` /
+`extract_signals*()` (per-harness signal extraction), `discover_*_sessions()`, and
+`normalize_model()`. Build agent-specific features (journal parsing, backfills) on top of these.
 
-### CLI
+## CLI
+
+### Recording sessions
 
 ```bash
-# Show stats (default — auto-falls back to discover if store is empty)
-gptme-sessions stats
-
-# Show details for a single session by ID (or prefix)
-gptme-sessions show a1b2c3d4
-gptme-sessions show a1b2 --json
-
-# Query with filters
-gptme-sessions query --model opus --since 7d
-gptme-sessions query --run-type autonomous --outcome productive --json
-
-# Structured export (JSON or CSV) — backups, audit trails, data portability
-gptme-sessions export --format json --since 7d
-gptme-sessions export --format csv --category code --model opus -o sessions.csv
-
-# --since accepts sub-day windows and natural phrasing (units: s, m, h, d, w).
-# Sub-day windows filter precisely (no rounding up to a whole day).
-gptme-sessions query --since 2h               # last 2 hours
-gptme-sessions query --since 30m --stats      # last 30 minutes
-gptme-sessions query --since "2 hours ago"    # same as 2h
-gptme-sessions query --since all              # no time filter
-
-# Run analytics (duration distribution, NOOP rates, trends)
-gptme-sessions runs --since 14d
-
-# Discover trajectory files across all harnesses (no store required)
-gptme-sessions discover --since 7d
-gptme-sessions discover --harness claude-code --signals
-gptme-sessions discover --harness pi --signals
-
-# Import discovered sessions into the store (safe to re-run — deduplicates)
-gptme-sessions sync --since 14d
-gptme-sessions sync --signals  # extract productivity signals (slower)
-gptme-sessions sync --dry-run  # preview what would be imported
-
-# Annotate an existing session record (amend fields after the fact)
-gptme-sessions annotate a1b2c3d4 --outcome productive --add-deliverable pr#42
-gptme-sessions annotate a1b2 --duration 3600 --token-count 50000
-
-# Score recent sessions with an LLM judge (goal-alignment rating 1–5)
-gptme-sessions judge
-gptme-sessions judge --last 5
-gptme-sessions judge --update-store  # write scores back to the store
-
-# Record a session at the end of an agent run (full pipeline)
+# Record a session at the end of an agent run: extract signals, determine outcome, append
 gptme-sessions post-session --harness gptme --model opus \
   --trajectory ~/.local/share/gptme/logs/2026-03-07-foo/conversation.jsonl
 
-# Reasoning telemetry: --reasoning-profile is the semantic intent
-# (routine|default|deep); --reasoning-effort is the backend-native level the
-# harness ran with (low/medium/high/xhigh/max/ultra/...; free-form, unknown
-# values warn but never fail). Omit --reasoning-effort to fill it from the
-# trajectory (Claude Code `effort`, Codex `reasoning_effort`, gptme metadata).
-gptme-sessions post-session --harness claude-code --model claude-fable-5-1 \
+# Reasoning telemetry: --reasoning-profile is the semantic intent (routine|default|deep);
+# --reasoning-effort is the backend-native level (free-form; filled from the trajectory if omitted)
+gptme-sessions post-session --harness claude-code --model <model> \
   --reasoning-profile deep --reasoning-effort high --trajectory ~/.claude/projects/x/id.jsonl
 
-# Append a record manually (deprecated: prefer post-session or sync)
-gptme-sessions append --harness claude-code --model opus --outcome productive
+# Or import whatever is on disk
+gptme-sessions sync --since 14d
+gptme-sessions sync --signals    # also extract productivity signals (slower)
+gptme-sessions sync --dry-run
 
-# Custom sessions directory
-gptme-sessions --sessions-dir /path/to/state/sessions stats
+# Amend a record after the fact (ID prefix match)
+gptme-sessions annotate a1b2c3d4 --outcome productive --add-deliverable pr#42
+gptme-sessions annotate a1b2 --duration 3600 --token-count 50000
 ```
 
-Pi discovery recursively scans native v3 tree sessions under
-`PI_CODING_AGENT_SESSION_DIR`, or `$PI_CODING_AGENT_DIR/sessions` and then
-`~/.pi/agent/sessions` when no direct override is set. Print-mode streams and
-unsupported native versions are visibly warned and skipped instead of being
-imported as false NOOPs. For a session Pi is actively appending, discovery uses
-the last complete newline-delimited prefix; a transient partial tail cannot hide
-that session or abort discovery of its siblings.
+`post-session --harness` accepts `gptme`, `claude-code`, `codex`, `copilot-cli` and `pi`.
+`append` still exists but is deprecated in favour of `post-session`/`sync`.
 
-Discovery and sync are non-mutating. A synced record retains the source
-`trajectory_path`; it does not copy or own the trajectory. Pi session JSONL is
-a historical artifact, so keep or independently back up the source tree—do not
-delete it after sync.
-
-The parser is pinned to Pi 0.84.4's v3 session contract and route catalogs. Run
-the explicit upstream drift sentinel after upgrading Pi or refreshing retained
-fixtures:
+### Querying
 
 ```bash
-cd packages/gptme-sessions
-uv run python3 scripts/check_pi_compat.py
+gptme-sessions stats
+gptme-sessions show a1b2 --json
+gptme-sessions query --run-type autonomous --outcome productive --json
+gptme-sessions export --format csv --category code --model opus -o sessions.csv
+gptme-sessions runs --since 14d     # duration distribution, NOOP rates, trends
+gptme-sessions cost --days 7 --by-model
+gptme-sessions search "rate limit" --days 30
 ```
 
-The command downloads Pi's release source archive and fails if the session
-version, entry types, stop reasons, pinned route catalogs (Anthropic, OpenAI
-Codex, xAI), or live fixture models no longer match. Two retained upstream
-fixtures use models already retired from those catalogs
-(`google-antigravity`/`claude-opus-4-5-thinking` and `openai-codex`/`gpt-5.3-codex`);
-they remain parser-shape coverage only. Network/download failures are errors
-rather than false green checks. Update the parser and retained fixtures before
-advancing the pin.
+`--since` accepts sub-day windows and natural phrasing (`30m`, `2h`, `7d`, `2w`,
+`"2 hours ago"`, `all`).
+
+### All commands
+
+| Group | Commands |
+|-------|----------|
+| Record | `post-session`, `sync`, `annotate`, `append` (deprecated), `stamp-attempt-kind` |
+| Inspect | `stats` (also the default with no subcommand), `query`, `show`, `export`, `runs`, `cost`, `cost-attribution`, `search` |
+| Trajectories | `discover`, `signals PATH` (productivity signals, grade, `--usage`), `transcript PATH` (normalised transcript), `replay TARGET` (terminal replay) |
+| Classify & grade | `classify`, `classify-stats`, `auto-tag`, `judge`, `regrade`, `repair-grades` |
+| Maintenance | `dedup` (merge duplicate records), `rotate` (archive records older than `--keep-days`, default 30) |
+| Provenance | `blame` |
+
+Run `gptme-sessions <command> --help` for options.
+
+`judge` scores autonomous-session journal entries (`journal/YYYY-MM-DD/autonomous-session-*.md`)
+for goal alignment (0.0–1.0 plus a one-line reason) with an LLM; the default model is Claude
+Haiku via `ANTHROPIC_API_KEY`, and other provider-prefixed models route through gptme when it is
+installed. `--update-store` writes scores back to matching records.
 
 ### Session provenance (`blame`)
 
-`gptme-sessions blame` answers *"which AI session produced this line / commit?"*
-by correlating git author-dates with session time-windows from the records store.
+`blame` answers *"which AI session produced this line / commit?"* by correlating git
+author-dates with session time windows from the store.
 
 ```bash
-# Attribute the commits touching a file to their authoring session(s)
-gptme-sessions blame scripts/watchdog.py
-gptme-sessions blame scripts/watchdog.py --line 42
-gptme-sessions blame scripts/watchdog.py --limit 5 --json
-
-# GitHub refs (PR or issue) — no local git history needed
-# (requires the gh CLI installed and authenticated)
-gptme-sessions blame gptme/gptme-contrib#1252
-
-# Point at a specific records store (default: auto-detected from git root)
+gptme-sessions blame src/watchdog.py
+gptme-sessions blame src/watchdog.py --line 42
+gptme-sessions blame src/watchdog.py --limit 5 --json
+gptme-sessions blame gptme/gptme-contrib#1252          # PR/issue ref; needs an authenticated gh CLI
 gptme-sessions blame src/hello.py --records /path/to/session-records.jsonl
 ```
 
 A runnable, self-contained demo lives in
-[`examples/sessions-blame/`](examples/sessions-blame/README.md) — it builds a
-throwaway repo, makes a commit inside a sample session window, and shows the
-attribution (`./demo.sh`).
+[`examples/sessions-blame/`](examples/sessions-blame/README.md).
 
-## Model Normalization
+## Where trajectories are discovered
 
-Model names are automatically normalized to short canonical forms:
+| Harness | Default location | Override |
+|---------|------------------|----------|
+| gptme | `~/.local/share/gptme/logs` | `GPTME_LOGS_DIR` |
+| Claude Code | `~/.claude/projects` | `CLAUDE_HOME` (uses `$CLAUDE_HOME/projects`); extra roots via `GPTME_CC_EXTRA_PROJECTS_DIRS` |
+| Codex | `~/.codex/sessions` | `CODEX_SESSIONS_DIR` |
+| Copilot CLI | `~/.copilot/session-state` | `COPILOT_STATE_DIR` |
+| Pi (native v3) | `~/.pi/agent/sessions` | `PI_CODING_AGENT_SESSION_DIR`, else `sessionDir` in Pi's `settings.json`, else `$PI_CODING_AGENT_DIR/sessions` |
 
-| Input | Normalized |
-|-------|-----------|
-| `claude-opus-4-6` | `opus` |
-| `anthropic/claude-sonnet-4-5` | `sonnet` |
-| `openrouter/anthropic/claude-haiku-4-5` | `haiku` |
-| `gpt-5.3-codex` | `gpt-5.3-codex` |
+Grok Build trajectories are parsed by the signal/transcript extractors but are not auto-discovered.
 
-## Storage Format
+Discovery and sync never modify or delete trajectories: a record keeps the source
+`trajectory_path` but does not own the file, so keep (or back up) your trajectories. For Pi,
+print-mode streams and unsupported session versions are skipped with a warning rather than
+recorded as false no-ops, and a session Pi is still writing is read up to its last complete line.
 
-Records are stored as append-only JSONL (one JSON object per line):
+## Records and storage
+
+Records are append-only JSONL (`session-records.jsonl`, one object per line); `rotate` moves old
+records into monthly archive files.
 
 ```jsonl
 {"session_id":"a1b2c3d4","timestamp":"2026-08-31T12:00:00+00:00","harness":"pi","provider":"openai-codex","model":"gpt-5.6-luna","run_type":"autonomous","category":"code","outcome":"productive","stop_reason":"stop","cost_usd":0.0004264,"duration_seconds":2400,"deliverables":["abc123"]}
 ```
 
-`cost_usd` is the USD-equivalent cost reported by the harness. With OAuth or
-subscription access it can be a nominal API-equivalent value rather than an
-incremental charge on the subscription invoice. Missing cost is `null`; a
-reported `0.0` is retained as a real observation.
+Field notes:
 
-## Extending
-
-Agent-specific features (journal parsing, log extraction, backfill) should be built on top of this package by importing `SessionRecord` and `SessionStore`.
+- `model` is the requested model, normalised via an alias table (`claude-opus-4-6` → `opus`,
+  `anthropic/claude-sonnet-4-5` → `sonnet`); models without an alias just lose a known provider
+  prefix (`openrouter/<org>/`, `anthropic/`, `openai/`, `openai-subscription/`, `xai/`), e.g.
+  `openrouter/moonshotai/kimi-k3` → `kimi-k3`. `served_model` records what the provider reported serving,
+  when the trajectory includes it.
+- `cost_usd` is the USD-equivalent cost reported by the harness. Under OAuth/subscription access
+  it can be a nominal API-equivalent value, not an incremental charge. Missing cost is `null`; a
+  reported `0.0` is kept as a real observation.
+- Token usage is stored alongside the record (input, output, cache-read, cache-creation, total),
+  plus `sys_prompt_tokens` (first observed prompt) and `context_peak_tokens` (largest per-call
+  prompt) where the trajectory allows, so analytics don't need to reparse trajectories.
 
 ## Development
 
 ```bash
-cd packages/gptme-sessions
-uv run pytest tests/ -v
+uv run pytest packages/gptme-sessions/tests/ -v
+```
+
+The Pi parser is pinned to a specific upstream Pi session contract. After upgrading Pi or
+refreshing fixtures, run the drift check (downloads Pi's release source; network failures are
+errors, not passes):
+
+```bash
+cd packages/gptme-sessions && uv run python3 scripts/check_pi_compat.py
 ```

@@ -1,95 +1,71 @@
 # gptme-retrieval
 
-Automatic context retrieval plugin for gptme.
+Automatic RAG for [gptme](https://gptme.org): before each LLM step, search your notes, docs or past conversations for content relevant to the latest user message and inject the best matches into context, without the agent having to ask.
 
-This plugin adds a STEP_PRE hook that automatically retrieves relevant context before each LLM step, using backends like [qmd](https://github.com/ErikBjare/qmd) for semantic and keyword search. A per-conversation deduplication layer ensures each document is injected at most once, so there's no context bloat in multi-step turns.
+**Status:** experimental.
 
-## Installation
+## How it works
 
-```bash
-# Install the plugin
-pip install -e plugins/gptme-retrieval
+The plugin registers a `STEP_PRE` hook. Before every LLM step it:
 
-# Make sure qmd is installed (for default backend)
-cargo install qmd
+1. Takes the text of the most recent user message as the query.
+2. Runs the configured search backend ([qmd](https://github.com/tobi/qmd), [gptme-rag](../../packages/gptme-rag/README.md), `grep`, or your own command).
+3. Drops results below the score threshold and deduplicates them per conversation (keyed by source path plus a content hash), so a document is injected at most once per conversation even across many tool-call steps.
+4. Injects any new results as a system message headed `## Retrieved Context`.
+
+The backend is queried on every step, so new documents surface as soon as the topic changes; only injection is deduplicated.
+
+## Install
+
+Install into the same Python environment as gptme. The package registers itself through the `gptme.plugins` entry point:
+
+```sh
+pip install "git+https://github.com/gptme/gptme-contrib#subdirectory=plugins/gptme-retrieval"
+# or, for a pipx-installed gptme:
+pipx inject gptme "git+https://github.com/gptme/gptme-contrib#subdirectory=plugins/gptme-retrieval"
+```
+
+Then install a backend. For the default `qmd` backend, follow the [qmd install instructions](https://github.com/tobi/qmd) and index something:
+
+```sh
+qmd collection add ~/notes --name notes
+qmd embed   # needed for the default "vsearch" (semantic) mode
 ```
 
 ## Configuration
 
-Configure in your `gptme.toml`:
+Settings live under `[plugin.retrieval]` in the project's `gptme.toml` or in `~/.config/gptme/config.toml`. The whole table is taken from the project config if present, otherwise from the user config; missing keys fall back to defaults.
 
 ```toml
 [plugin.retrieval]
-enabled = true           # Enable/disable retrieval (default: true)
-backend = "qmd"          # Backend: "qmd", "gptme-rag", "grep", or custom command
-mode = "vsearch"         # qmd mode: "search" (BM25), "vsearch" (semantic), "query" (hybrid)
-max_results = 5          # Maximum results to inject (default: 5)
-threshold = 0.3          # Minimum score threshold (default: 0.3)
-collections = []         # Optional: filter by collection names
-inject_as = "system"     # "system" for visible, "hidden" for background context
+enabled = true          # default: true
+backend = "qmd"         # "qmd" (default), "gptme-rag", "grep", or a custom command
+mode = "vsearch"        # qmd only: "search" (BM25), "vsearch" (semantic, default), "query" (hybrid)
+max_results = 5         # default: 5
+threshold = 0.3         # drop results scoring below this; default: 0.3
+collections = []        # qmd only: restrict to these collection names
+inject_as = "system"    # "system" (visible, default) or "hidden"
 ```
-
-## How It Works
-
-1. **STEP_PRE Hook**: Before each LLM step, the plugin extracts the last user message
-2. **Retrieval**: Queries the configured backend with the user's message text
-3. **Deduplication**: Checks each result against a per-conversation set of already-injected documents (keyed by source path + content hash)
-4. **Injection**: Adds only new documents as a system message; skips the step silently if nothing new was retrieved
-
-This approach is correct for both interactive and autonomous sessions:
-- **Interactive (multi-step)**: Fires on every tool-call step, but deduplication prevents the same doc being injected 5× in a single turn
-- **Autonomous (single-step)**: Behaves identically to TURN_PRE since there's only one step per turn
-- **Topic changes**: When a new user message triggers a different retrieval result, new documents are injected immediately
 
 ## Backends
 
-### qmd (default)
+| Backend | Command run | Notes |
+|---------|-------------|-------|
+| `qmd` | `qmd <mode> <query> --json -n <max_results> [--collection <name> ...]` | Local BM25 / vector / hybrid search over indexed collections. |
+| `gptme-rag` | `gptme-rag search <query> -n <max_results> --json` | Local ChromaDB semantic search; see [gptme-rag](../../packages/gptme-rag/README.md). |
+| `grep` | `grep -r -l -i <query> .` | Fallback: lists matching file *names* in the current directory (no content). |
+| custom | `<your command> <query> --mode <mode> -n <max_results>` | Must print a JSON list of objects with `content`, `source` and `score` keys. |
 
-Uses [qmd](https://github.com/ErikBjare/qmd) for retrieval. Supports three modes:
-- `search`: BM25 keyword search
-- `vsearch`: Semantic/vector search
-- `query`: Hybrid search combining both
+Each backend call times out after 10 seconds (15 for `gptme-rag`); failures are logged and the step continues without retrieved context.
 
-### gptme-rag
+> **Known issue:** current qmd releases emit `file` and `snippet` fields in `--json` output, while the plugin reads `content` and `path`/`source`. With such versions results may be injected with empty content. Check what your qmd version prints before relying on this backend, or use `gptme-rag` or a custom command.
 
-Uses [gptme-rag](https://github.com/gptme/gptme-rag) for retrieval. Experimental but integrates well with gptme:
+## Indexing past conversations
 
-```toml
-[plugin.retrieval]
-backend = "gptme-rag"
-```
-
-Install with: `pipx install gptme-rag`
-
-Note: gptme-rag is currently experimental and may have issues.
-
-### grep
-
-Simple grep-based fallback for basic keyword matching.
-
-### Custom
-
-Any command that accepts a query and outputs JSON can be used:
-
-```toml
-[plugin.retrieval]
-backend = "my-search --json"
-```
-
-## Indexing Conversations
-
-To index gptme conversations with qmd:
-
-```bash
-# Extract user/assistant messages (skip system)
-jq 'select(.role != "system") | {role, content}' ~/.local/share/gptme/logs/*/conversation.jsonl > filtered.jsonl
-
-# Index with qmd
-qmd index filtered.jsonl --collection conversations
-```
+gptme stores conversations as `conversation.jsonl` files under its logs directory (by default `~/.local/share/gptme/logs/`). To make them searchable, export the user and assistant messages to text files in a directory and add that directory as a qmd collection (or index it with `gptme-rag`).
 
 ## Related
 
-- [Issue #59](https://github.com/gptme/gptme/issues/59) - Original feature discussion
-- [PR #1197](https://github.com/gptme/gptme/pull/1197) - `[plugin.*]` config namespace support
-- [qmd](https://github.com/tobi/qmd) - The recommended retrieval backend
+- [gptme-rag](../../packages/gptme-rag/README.md): local semantic search as a CLI, gptme tool, or MCP server
+- [gptme plugin docs](https://gptme.org/docs/plugins.html)
+- [gptme/gptme#59](https://github.com/gptme/gptme/issues/59): the original feature discussion

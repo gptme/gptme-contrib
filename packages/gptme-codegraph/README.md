@@ -1,135 +1,169 @@
 # gptme-codegraph
 
-Structural code retrieval for gptme via [tree-sitter](https://tree-sitter.github.io/tree-sitter/) — complementary to gptme-rag (text chunks), this retrieves code *structure*: function/class definitions, call graphs, blast radius, and impact analysis.
+Structural code retrieval with [tree-sitter](https://tree-sitter.github.io/tree-sitter/):
+"where is `X` defined?", "who calls `X`?", "what breaks if I change `X`?", and a
+token-cheap repo map — as a CLI, a Python library, and an MCP server for gptme,
+Claude Code, or any MCP client.
+
+**Status:** experimental (`0.1.0`). Python support is the deepest path; other
+languages get symbol extraction and best-effort cross-file resolution.
+
+Complementary to [gptme-rag](../gptme-rag/README.md) (semantic search over text
+chunks): codegraph retrieves code *structure* — definitions, call graphs,
+dependency closure, and impact radius.
 
 ## Features
 
-- **10 MCP tools**: `codegraph_parse`, `codegraph_index`, `codegraph_map`, `codegraph_def`, `codegraph_callers`, `codegraph_callees`, `codegraph_refs`, `codegraph_blast`, `codegraph_search`, `codegraph_impact`
-- **Multi-language symbol extraction** for Python, JavaScript/TypeScript, Rust, Go, Java, C#, Ruby, C, C++, PHP, Kotlin, and Swift
-- **Cross-file import capture** across supported languages, with strongest semantic resolution on Python
-- **Qualified symbol IDs** (`module::Class.method`) for unambiguous cross-file references
-- **SQLite index cache** — optional persistent cache for large codebases
-- **Blast/impact semantics split**: `blast` = dependency closure (what X needs), `impact` = what breaks if you change X
-- **Repo map / symbol skeletons** for token-cheap default codebase context
+- **Multi-language symbol extraction** for Python, JavaScript (`.js/.jsx/.mjs/.cjs`),
+  TypeScript (`.ts/.tsx`), Rust, Go, Java, C#, Ruby, C, C++, PHP, Kotlin, and Swift
+- **Cross-file call graph** with qualified symbol IDs (`module::Class.method`);
+  strongest on Python, with cross-module resolution also for TypeScript, Go, and Rust
+- **Impact vs dependencies**: `impact` = what breaks if you change X (callers,
+  upstream); `deps` = what X transitively depends on (callees, downstream)
+- **Repo map / symbol skeletons** for cheap codebase context, plus a committed
+  `.gptme-codegraph-map.json` artifact with freshness checks
+- **Local lexical (BM25) symbol search** for "find the code that handles retries"
+  when you don't know the name — no external APIs
+- **SQLite index cache** so large repos are indexed once and reused
 
 ## When to use
 
-Reach for the right retrieval tool by the *shape* of the question, not by habit:
+Pick the retrieval tool by the *shape* of the question:
 
-- **codegraph** — structural / symbol questions: *where is `X` defined?*, *who calls `X`?*, *what breaks if I change `X`?*, *give me a repo skeleton*. Use it when you care about definitions, call graphs, blast radius, or impact.
-- **grep / ripgrep** — exact strings and known patterns: a literal identifier, an error message, a config key. Fastest when you already know the text to match.
-- **semantic search (gptme-rag / semble)** — conceptual queries where you don't know the exact tokens: *how does auth work here?*, *where is retry logic?*. Matches by meaning over text chunks.
+- **codegraph** — symbol questions: *where is `X` defined?*, *who calls `X`?*,
+  *what breaks if I change `X`?*, *give me a repo skeleton*.
+- **grep / ripgrep** — exact strings: a literal identifier, an error message, a
+  config key.
+- **semantic search** ([gptme-rag](../gptme-rag/README.md)) — conceptual queries
+  over prose and code text: *how does auth work here?*
 
-Rule of thumb: exact text → grep; "what does this concept look like" → semantic; "how is this symbol wired" → codegraph.
+Rule of thumb: exact text → grep; "what does this concept look like" → semantic;
+"how is this symbol wired" → codegraph.
 
 ## Install
 
-```bash
-pip install gptme-codegraph[treesitter,mcp]
-```
-
-Or with uv:
+Not published to PyPI. Install from the repository subdirectory with the
+tree-sitter grammars (and the MCP server, if you want it):
 
 ```bash
-uv add gptme-codegraph[treesitter,mcp]
+uv tool install "gptme-codegraph[treesitter,mcp] @ git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-codegraph"
+# or
+pip install "gptme-codegraph[treesitter,mcp] @ git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-codegraph"
 ```
 
-## Usage
+Extras: `treesitter` (grammars for all supported languages), `mcp` (MCP server).
+This installs three commands: `gptme-codegraph`, `gptme-codegraph-mcp`, and
+`gptme-codegraph-commit-map`.
 
-### CLI
+## CLI
+
+The first argument is a file or directory, followed by a subcommand:
 
 ```bash
-# Extract symbols from a file
-gptme-codegraph path/to/file.py parse
-gptme-codegraph path/to/file.ts parse
+gptme-codegraph src/app.py parse                  # list symbols in a file
+gptme-codegraph src/app.py def my_function        # where is it defined?
+gptme-codegraph src/app.py callers my_function    # who calls it?
+gptme-codegraph src/app.py callees my_function    # what does it call?
+gptme-codegraph src/app.py refs my_function       # references
+gptme-codegraph src/app.py impact my_function     # what breaks if it changes?
+gptme-codegraph src/app.py deps my_function       # what it depends on
 
-# Who calls a function?
-gptme-codegraph path/to/file.py callers my_function
+# Cross-file: build an index over a directory (optionally cached in SQLite)
+gptme-codegraph src/app.py --directory src/ --use-sqlite impact "app::Server.start"
 
-# What does a function call?
-gptme-codegraph path/to/file.py callees my_function
+# Repo map / symbol skeleton
+gptme-codegraph . map --max-files 20 --max-symbols 12
 
-# What breaks if you change a function?
-gptme-codegraph path/to/file.py impact my_function
-
-# Where is a symbol defined?
-gptme-codegraph path/to/file.py def my_function
-
-# Show a repo-map style symbol skeleton for a directory
-gptme-codegraph path/to/repo map
+# Concept search over indexed symbols (BM25, local)
+gptme-codegraph . search "retry with backoff" --limit 10
 ```
 
-### Committed repo-map artifact
+Every subcommand accepts `--json`. `impact`, `deps`, and the deprecated `blast`
+(use `impact` or `deps`) take `--max-depth` (default 10). Global options
+(`--directory`, `--use-sqlite`) go before the subcommand. The SQLite cache lives
+under `~/.local/state/codegraph/`.
 
-"Analyze once, commit the graph." Generate a `.gptme-codegraph-map.json` that
-teammates and agents can read for a repo's structural outline without re-running
-the tree-sitter pipeline:
+## Committed repo-map artifact
+
+"Analyze once, commit the graph." Generate `.gptme-codegraph-map.json` so
+teammates and agents can read a repo's structural outline without re-running
+tree-sitter:
 
 ```bash
-# Generate and save the artifact at <repo>/.gptme-codegraph-map.json
-gptme-codegraph-commit-map path/to/repo
-
-# Check freshness (exit 0 = fresh, 1 = stale/missing) — for pre-commit/CI gating
-gptme-codegraph-commit-map path/to/repo --check
-
-# Regenerate only if stale (use in a pre-commit hook); --force always regenerates
-gptme-codegraph-commit-map path/to/repo --refresh
+gptme-codegraph-commit-map path/to/repo             # generate and save
+gptme-codegraph-commit-map path/to/repo --check     # exit 0 = fresh, 1 = stale/missing
+gptme-codegraph-commit-map path/to/repo --refresh   # regenerate only if stale
+gptme-codegraph-commit-map path/to/repo --refresh --force   # always regenerate
 ```
 
-Freshness is keyed off a digest of supported source files (`*.py`, `*.ts`,
-`*.tsx`, `*.js`, `*.rs`, `*.go`, `*.java`, `*.cs`, `*.rb`, `*.c`, `*.cpp`,
-`*.php`, `*.kt`, `*.kts`, `*.swift`), not `HEAD` — so an artifact regenerated in a
-pre-commit hook stays fresh after the commit that contains it lands. The default
-staleness window is 1 day (`--stale-after-days N` to change it). The artifact is
-structural only (paths, class/function names, nesting) — no source, comments, or
-values — so it is safe to commit to any repo.
+Other options: `--output/-o` (default `.gptme-codegraph-map.json`),
+`--max-files` (20), `--max-symbols-per-file` (12), `--stale-after-days` (1),
+and `--no-cache` to bypass the stat-fingerprint cache in `~/.cache/gptme-codegraph/`.
 
-### MCP Server
+Freshness is keyed off a digest of git-tracked `*.py`, `*.ts`, `*.tsx`, `*.js`,
+and `*.rs` files, not `HEAD`, so an artifact regenerated in a pre-commit hook
+stays fresh after the commit that contains it lands. The artifact is structural
+only (paths, class/function names, nesting) — no source, comments, or values.
 
-```bash
-# Start the MCP server (stdio transport)
-gptme-codegraph-mcp
-```
+## MCP server
 
-Configure in Claude Code:
+`gptme-codegraph-mcp` runs over stdio and exposes 10 tools:
+`codegraph_parse`, `codegraph_index`, `codegraph_map`, `codegraph_def`,
+`codegraph_callers`, `codegraph_callees`, `codegraph_refs`, `codegraph_search`,
+`codegraph_impact` (upstream: what breaks), and `codegraph_blast` (downstream:
+dependency closure). Most tools take either a `filepath` or a `directory` for
+cross-file mode.
+
+Claude Code:
 
 ```bash
 claude mcp add codegraph -- gptme-codegraph-mcp
 ```
 
-### Python API
+gptme (`~/.config/gptme/config.toml` or a project `gptme.toml`):
+
+```toml
+[mcp]
+enabled = true
+
+[[mcp.servers]]
+name = "codegraph"
+command = "gptme-codegraph-mcp"
+```
+
+## Python API
 
 ```python
+from pathlib import Path
 from gptme_codegraph import (
     build_call_graph,
     build_cross_file_call_graph,
     build_index,
+    build_repo_map,
+    dependency_closure,
     extract_symbols,
+    format_repo_map,
     impact_radius,
 )
-from pathlib import Path
 
-# Single-file: extract symbols and build call graph
+# Single file
 symbols = extract_symbols(Path("src/my_module.py"))
-_callees_graph, callers_graph = build_call_graph(symbols)
+callees, callers = build_call_graph(symbols)
+print(impact_radius("my_function", callers, max_depth=5))   # {"depth_0": {...}, "depth_1": {...}}
+print(dependency_closure("my_function", callees, max_depth=5))
 
-# Compute impact radius: what breaks if you change this symbol?
-radius = impact_radius("my_function", callers_graph, max_depth=5)
-print(radius)  # {"depth_0": {…}, "depth_1": {…}, …}
-
-# Cross-file: build an index over a whole directory
+# Cross-file
 index = build_index(Path("src/"))
-_callees_graph, callers_graph = build_cross_file_call_graph(index, Path("src/"))
-radius = impact_radius("my_module::MyClass.my_method", callers_graph, max_depth=5)
-print(radius)  # {"depth_0": {…}, "depth_1": {…}, …}
+callees, callers = build_cross_file_call_graph(index, Path("src/"))
+print(impact_radius("my_module::MyClass.my_method", callers, max_depth=5))
 ```
 
-## Status
+Also exported: `SymbolIndex`, `SqliteIndexCache`, `parse_file`,
+`build_repo_map` / `format_repo_map`, and the search types `LexicalScorer`,
+`SearchDocument`, `SearchResult`, `extract_search_documents`.
 
-Experimental package — Python support is the deepest path today, with broad
-tree-sitter extraction now wired into the same surface for common web, systems,
-JVM, scripting, PHP/Kotlin, and Swift codebases. Cross-file resolution remains
-strongest on Python; non-Python import handling is best-effort rather than fully
-semantic.
+## Known gaps
 
-> Namespace packages (`import google.cloud.storage` without `__init__.py`) are a known v1.1 gap.
+- Non-Python import resolution is best-effort, not fully semantic.
+- Python namespace packages (no `__init__.py`) are not resolved yet.
+- `search` has only the `lexical` backend.

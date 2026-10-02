@@ -1,156 +1,101 @@
 # gptme-lsp
 
-LSP (Language Server Protocol) integration plugin for gptme, providing code intelligence features like diagnostics, definitions, and references.
+Language Server Protocol (LSP) integration for [gptme](https://gptme.org): gives the agent IDE-grade code intelligence — diagnostics, go-to-definition, find-references, hover/type info, call hierarchy, and rename previews — by talking to the same language servers your editor uses.
 
-## Features
+**Status:** experimental. Works with Python, TypeScript/JavaScript, Go and Rust.
 
-### Phase 1: Diagnostics ✅
+## Why use it
 
-- **`lsp diagnostics <file>`** - Get errors/warnings for a file
-- **`lsp status`** - Show available language servers
-- **`lsp check`** - Run diagnostics on all changed files (git)
-- **Post-save hook** - Automatically shows errors after saving files
+Plain `grep` and file reads tell an agent *where text is*; a language server tells it *what the code means*. With this plugin the agent can check a file for type errors before and after editing it, resolve a symbol to its definition, list every caller of a function, and preview a project-wide rename. A post-save hook also surfaces new errors right after the agent writes a file, so mistakes get caught in the same turn.
 
-### Phase 2.1: Navigation ✅
+## Install
 
-- **`lsp definition <file:line:col>`** - Jump to symbol definition
-- **`lsp references <file:line:col>`** - Find all references to a symbol
-- **`lsp hover <file:line:col>`** - Get documentation and type information
+The plugin is not published to PyPI. Point gptme at the plugin directory in `gptme.toml` (project) or `~/.config/gptme/config.toml` (user):
 
-### Phase 2.2: Refactoring Tools ✅
+```toml
+[plugins]
+paths = ["/path/to/gptme-contrib/plugins/gptme-lsp"]
+enabled = ["gptme_lsp"]
+```
 
-- **`lsp rename <file:line:col> <new_name>`** - Rename symbol across project
+Pointing at the plugin directory itself (not the parent `plugins/` folder) loads both the `lsp` tool and the post-save diagnostics hook.
 
-### Phase 2.3: User Experience ✅
+Then install the language servers you need and make sure they are on `PATH`:
 
-- **Config file support** - Custom language server paths via `gptme.toml`
-- **Better error messages** - Helpful hints when servers not found or fail
-- **Lazy initialization** - Servers start only when first needed
+| Language | Extensions | Server binary | Install |
+|----------|------------|---------------|---------|
+| Python | `.py`, `.pyi` | `pyright-langserver` | `pip install pyright` or `npm i -g pyright` |
+| TypeScript / JavaScript | `.ts`, `.tsx`, `.js`, `.jsx` | `typescript-language-server` | `npm i -g typescript-language-server typescript` |
+| Go | `.go` | `gopls` | `go install golang.org/x/tools/gopls@latest` |
+| Rust | `.rs` | `rust-analyzer` | `rustup component add rust-analyzer` |
 
-### Phase 3: Advanced Features ✅
+## Quickstart
 
-- **`lsp actions <file:line:col>`** - Get available code actions
-- **`lsp symbols [query]`** - Search workspace symbols
+Ask gptme to use it:
 
-### Phase 4: Formatting & Assistance ✅
+```sh
+gptme "run lsp diagnostics on src/main.py and fix any errors"
+```
 
-- **`lsp format <file>`** - Format document using LSP
-- **`lsp signature <file:line:col>`** - Get function signature help
+Inside a session, `/lsp` (or `/lsp status`) shows which servers are available. The agent invokes the tool with an `lsp` block, for example:
 
-### Phase 5: Inlay Hints & Call Hierarchy ✅
+````
+```lsp
+diagnostics src/main.py
+```
+````
 
-- **`lsp hints <file> [start:end]`** - Get inlay hints (parameter names, types)
-- **`lsp callers <file:line:col>`** - Find functions that call a symbol
-- **`lsp callees <file:line:col>`** - Find functions called by a symbol
+Positions use `file:line:col` or `file:line` (1-based). The workspace root is the git root of the current directory.
 
-### Phase 6: Advanced Analysis ✅ (NEW)
+## Actions
 
-- **`lsp tokens <file> [start:end]`** - Get semantic tokens for syntax highlighting info
-- **`lsp links <file>`** - Find document links (URLs, file paths)
-- **`lsp lens <file>`** - Get code lenses (actionable annotations like "5 references")
+| Action | Arguments | What it does |
+|--------|-----------|--------------|
+| `status` | — | Show which language servers are installed |
+| `diagnostics` | `<file>` | Errors and warnings for a file |
+| `check` | — | Diagnostics for every file changed according to `git` |
+| `definition` | `<file:line:col>` | Where a symbol is defined |
+| `references` | `<file:line:col>` | All references to a symbol |
+| `hover` | `<file:line:col>` | Type information and docs |
+| `signature` | `<file:line:col>` | Function signature help |
+| `rename` | `<file:line:col> <new_name>` | Preview a project-wide rename |
+| `format` | `<file>` | Preview formatting edits |
+| `actions` | `<file:line:col>` | Available code actions / quick fixes |
+| `symbols` | `<query>` | Search workspace symbols |
+| `hints` | `<file> [start:end]` | Inlay hints (parameter names, inferred types) |
+| `callers` / `callees` | `<file:line:col>` | Incoming / outgoing call hierarchy |
+| `tokens` | `<file> [start:end]` | Semantic tokens |
+| `links` | `<file>` | Document links (URLs, file paths) |
+| `lens` | `<file>` | Code lenses (e.g. reference counts) |
+
+`rename` and `format` only **preview** edits; they do not modify files. The agent applies the edits afterwards with its normal editing tools.
+
+### Post-save hook
+
+After gptme saves a file with a supported extension, the plugin runs a quick diagnostics pass and reports any errors in the conversation.
 
 ## Configuration
 
-### Custom Language Servers
-
-Configure custom servers in `gptme.toml` (project root) or `~/.config/gptme/config.toml` (user-level).
-
-Uses the `[plugin.lsp]` namespace to integrate with gptme's existing config system:
+Override or add server commands under `[plugin.lsp.servers]` in `~/.config/gptme/config.toml` or the project's `gptme.toml` (project settings win):
 
 ```toml
 [plugin.lsp.servers]
-# Override default server
-python = ["pyright-langserver", "--stdio"]
-
-# Use alternative server
 python = ["pylsp"]
-
-# Custom path
 go = ["/custom/path/to/gopls", "serve"]
-
-# Add new language
-ocaml = ["ocamllsp"]
 ```
 
-Project config (`gptme.toml`) overrides user config (`~/.config/gptme/config.toml`), which overrides built-in defaults.
+Built-in defaults are `pyright-langserver --stdio`, `typescript-language-server --stdio`, `gopls` and `rust-analyzer`.
 
-### Lazy Initialization
-
-By default, language servers start only when first needed:
-
-```python
-# Server starts on first command, not at LSPManager creation
-manager = LSPManager(workspace)  # No servers started yet
-manager.get_diagnostics(file)    # Python server starts now
-manager.get_definition(file2)    # Server already running, reused
-
-# Force eager initialization (previous behavior)
-manager = LSPManager(workspace, lazy=False)  # All detected servers start
-```
-
-
-## Supported Languages
-
-| Language | Server | Install |
-|----------|--------|---------|
-| Python | pyright | `npm i -g pyright` or `pipx install pyright` |
-| TypeScript/JavaScript | typescript-language-server | `npm i -g typescript-language-server typescript` |
-| Go | gopls | `go install golang.org/x/tools/gopls@latest` |
-| Rust | rust-analyzer | `rustup component add rust-analyzer` |
-| C/C++ | clangd | System package manager |
-
-## Installation
-
-```bash
-pip install gptme-lsp
-```
-
-Or install from source:
-
-```bash
-cd plugins/gptme-lsp
-pip install -e .
-```
-
-## Usage
-
-The LSP tool is automatically registered when the plugin is installed. Use the `lsp` command prefix:
-
-```bash
-# Check diagnostics for current file
-gptme "lsp diagnostics src/main.py"
-
-# Jump to definition
-gptme "lsp definition src/main.py:42:5"
-
-# Find all references
-gptme "lsp references src/utils.py:15:10"
-
-# Get hover information
-gptme "lsp hover src/config.py:8:12"
-
-# Rename a symbol across project
-gptme "lsp rename src/utils.py:15:5 new_function_name"
-```
+> **Current limitation:** custom server commands are only used by the `tokens`, `links` and `lens` actions. The other actions and the post-save hook always use the built-in defaults, and only the four languages above are mapped to file extensions.
 
 ## Development
 
-```bash
-# Run tests
-cd plugins/gptme-lsp
-make test
-
-# Type check
-make typecheck
+```sh
+# from the gptme-contrib repo root
+uv run pytest plugins/gptme-lsp/tests
 ```
 
-## Roadmap
+## Related
 
-- [x] Phase 1: Diagnostics
-- [x] Phase 2.1: Navigation (definition, references, hover)
-- [x] Phase 2.2: Refactoring (rename)
-- [x] Phase 2.3: User Experience (config files, error messages, lazy init)
-- [x] Phase 3: Code Actions, Workspace Symbols
-- [x] Phase 4: Formatting, Signature Help
-- [x] Phase 5: Inlay Hints, Call Hierarchy
-- [x] Phase 6: Semantic Tokens, Document Links, Code Lens
+- [gptme plugin docs](https://gptme.org/docs/plugins.html)
+- [Other gptme-contrib plugins](../README.md)
