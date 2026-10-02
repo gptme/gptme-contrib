@@ -61,6 +61,29 @@ def test_mark_sent_atomic_concurrent(tmp_dedup_dir):
     assert tool_pushover._is_recent_duplicate("X", "Y")
 
 
+def test_try_claim_send_blocks_concurrent(tmp_dedup_dir):
+    """_try_claim_send: only the first caller gets True; concurrent caller gets False."""
+    assert tool_pushover._try_claim_send("Alert", "Down") is True
+    # Second call within TTL — marker already exists, claim denied
+    assert tool_pushover._try_claim_send("Alert", "Down") is False
+
+
+def test_try_claim_send_expired_allows_resend(tmp_dedup_dir):
+    """_try_claim_send: expired marker is cleared and new claim succeeds."""
+    tool_pushover._try_claim_send("Alert", "Down")
+    marker = tmp_dedup_dir / f"{tool_pushover._dedup_key('Alert', 'Down')}.txt"
+    old_time = time.time() - 31 * 60
+    os.utime(marker, (old_time, old_time))
+    assert tool_pushover._try_claim_send("Alert", "Down") is True
+
+
+def test_release_claim_allows_retry(tmp_dedup_dir):
+    """After _release_claim, a subsequent _try_claim_send must succeed."""
+    tool_pushover._try_claim_send("Alert", "Down")
+    tool_pushover._release_claim("Alert", "Down")
+    assert tool_pushover._try_claim_send("Alert", "Down") is True
+
+
 @patch("tool_pushover.requests.post")
 def test_execute_deduplicates_repeat_call(mock_post, tmp_dedup_dir):
     mock_post.return_value = MagicMock(status_code=200)
@@ -92,4 +115,26 @@ def test_execute_force_bypasses_dedup(mock_post, tmp_dedup_dir):
             None, None, {"title": "Alert", "message": "Down", "force": "true"}
         )
         assert "sent successfully" in result.content
+        assert mock_post.call_count == 2
+
+
+@patch("tool_pushover.requests.post")
+def test_execute_releases_claim_on_failure(mock_post, tmp_dedup_dir):
+    """On send failure the pre-send claim is released so the next send can retry."""
+    mock_post.return_value = MagicMock(status_code=500)
+    with (
+        patch("tool_pushover.PUSHOVER_USER_KEY", "user"),
+        patch("tool_pushover.PUSHOVER_API_TOKEN", "token"),
+    ):
+        result1 = tool_pushover.execute(
+            None, None, {"title": "Alert", "message": "Down"}
+        )
+        assert "couldn't be sent" in result1.content
+
+        # Marker must have been released — next call should proceed, not be deduped
+        mock_post.return_value = MagicMock(status_code=200)
+        result2 = tool_pushover.execute(
+            None, None, {"title": "Alert", "message": "Down"}
+        )
+        assert "sent successfully" in result2.content
         assert mock_post.call_count == 2
