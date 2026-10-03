@@ -112,3 +112,16 @@ def test_native_string_tool_calls_classified(tmp_path: Path) -> None:
     result = extract_from_path(parent)
     assert result["subagent_summary"]["subagents_acting"] == 1
     assert result["tool_calls"]["shell"] == 1
+
+
+def test_native_string_tool_calls_multiline_json_classified(tmp_path: Path) -> None:
+    parent = write_log(tmp_path / "run-parent")
+    a = child(tmp_path, "native-tool-ml", parent.parent)
+    records = [json.loads(line) for line in a.read_text().splitlines()]
+    records[1]["content"] = (
+        '@shell(call-2): {\n  "command": "echo \\"brace } in string\\" && git commit"\n}'
+    )
+    a.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    result = extract_from_path(parent)
+    assert result["subagent_summary"]["subagents_acting"] == 1
+    assert result["tool_calls"]["shell"] == 1

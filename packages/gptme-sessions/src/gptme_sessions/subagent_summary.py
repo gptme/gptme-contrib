@@ -576,6 +576,44 @@ _GPTME_WRITE_LANGS = {
 }
 
 
+_TOOL_CALL_HEADER_RE = re.compile(r"^@(\w+)\([^)]+\):", re.M)
+
+
+def _iter_tool_call_args(content: str) -> Iterable[tuple[str, str]]:
+    """Extract (tool_name, args_json) from string-form tool calls.
+
+    Handles both single-line ``@tool(id): {json}`` and multi-line JSON
+    arguments (pretty-printed params), by scanning to the balanced closing
+    brace of the JSON object rather than stopping at end of line.
+    """
+    for match in _TOOL_CALL_HEADER_RE.finditer(content):
+        rest = content[match.end() :]
+        stripped = rest.lstrip()
+        if not stripped.startswith("{"):
+            continue
+        depth = 0
+        in_str = False
+        escaped = False
+        for i, ch in enumerate(stripped):
+            if in_str:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    yield match.group(1), stripped[: i + 1]
+                    break
+
+
 def _scan_gptme(records: list[dict[str, Any]]) -> TranscriptScan:
     """Scan a gptme-format transcript (role + content blocks).
 
@@ -600,13 +638,13 @@ def _scan_gptme(records: list[dict[str, Any]]) -> TranscriptScan:
                     {"type": "code", "lang": match[0].split()[0], "content": match[1]}
                     for match in re.findall(r"^```([^\n]+)\n(.*?)^```", content, re.M | re.S)
                 ]
-                for match in re.finditer(r"^@(\w+)\([^)]+\):\s*(.*)$", content, re.M):
+                for name, args_text in _iter_tool_call_args(content):
                     try:
-                        args = json.loads(match[2])
+                        args = json.loads(args_text)
                     except ValueError:
                         continue
                     if isinstance(args, dict):
-                        blocks.append({"type": "tool_use", "name": match[1], "input": args})
+                        blocks.append({"type": "tool_use", "name": name, "input": args})
                 content = blocks
             elif role == "system":
                 scan.result_bytes += len(content)
