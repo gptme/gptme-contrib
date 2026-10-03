@@ -1264,6 +1264,22 @@ def test_twilio_signed_outbound_leg_grants_rag_tools_to_allowlisted_party(
     asyncio.run(_exercise(sign_stream_params({"from_number": "+15551212"}, "secret")))
     assert captured.get("rag") is None
 
+    # The fields the outbound branch authorizes on are inside the HMAC, so a
+    # start that mutates any of them after signing fails verification and is
+    # rejected outright — the grant is not a client-controlled label.
+    # (TTL enforcement is pinned by
+    # test_twilio_reconnect_of_verified_call_outlives_token_ttl.)
+    signed = sign_stream_params(outbound_identity_params("+15551212"), "secret")
+    for field, value in (
+        ("remote_party", "+46700000001"),
+        ("from_number", "+46700000001"),
+        ("direction", "inbound"),
+    ):
+        captured.clear()
+        ws = asyncio.run(_exercise({**signed, field: value}))
+        assert ws.close_code == 1008, f"tampered {field} was admitted"
+        assert captured.get("rag") is None, f"tampered {field} received tools"
+
 
 def test_twilio_spoof_cannot_steal_rag_capable_prewarm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
