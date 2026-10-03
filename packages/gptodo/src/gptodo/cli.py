@@ -2795,7 +2795,10 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                 try:
                     datetime.fromisoformat(value)
                 except ValueError:
-                    console.print(f"[red]Invalid {field} format. Use YYYY-MM-DD or ISO datetime[/]")
+                    console.print(
+                        f"[red]Invalid {field} format. Use YYYY-MM-DD or ISO datetime, "
+                        "or 'none' to clear the field[/]"
+                    )
                     return
             else:
                 try:
@@ -2803,7 +2806,8 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                     value = created_dt.isoformat()
                 except ValueError:
                     console.print(
-                        f"[red]Invalid {field} date format. Use ISO format (YYYY-MM-DD[THH:MM:SS+HH:MM])[/]"
+                        f"[red]Invalid {field} date format. Use ISO format "
+                        "(YYYY-MM-DD[THH:MM:SS+HH:MM]), or 'none' to clear the field[/]"
                     )
                     return
         elif field_spec["type"] == "string":
