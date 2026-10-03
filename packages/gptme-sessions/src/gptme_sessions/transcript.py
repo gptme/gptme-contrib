@@ -1018,8 +1018,8 @@ def _find_subagents_dir(parent_jsonl: Path) -> Path | None:
     """Locate the ``subagents/`` directory for a session, or ``None``.
 
     Claude Code stores subagents under ``<session-id>/subagents/`` next to the
-    ``<session-id>.jsonl`` parent; gptme stores them under the session
-    directory (which contains ``conversation.jsonl``) as ``subagents/``.
+    ``<session-id>.jsonl`` parent. Also covers legacy session-local layouts;
+    native gptme siblings are resolved separately through parent_logdir.
     """
     candidates = (
         parent_jsonl.parent / parent_jsonl.stem / "subagents",  # claude-code
@@ -1035,16 +1035,90 @@ def subagent_record_files(path: Path) -> list[Path]:
     """JSONL files of every subagent spawned by the session at ``path``.
 
     Accepts a JSONL file or a gptme session directory. Covers both the flat
-    ``agent-*.jsonl`` agents (nested ones included) and workflow agents under
-    ``workflows/*/``. Returns ``[]`` when the session has no subagents.
+    ``agent-*.jsonl`` agents (nested ones included), workflow agents under
+    ``workflows/*/``, and native gptme sibling directories with explicit
+    ``subagent-meta.json.parent_logdir``. No name/mtime inference is used.
     """
     parent_jsonl = _resolve_parent_jsonl(path)
     sub_dir = _find_subagents_dir(parent_jsonl)
-    if sub_dir is None:
-        return []
-    files = sorted(sub_dir.glob("agent-*.jsonl"))
-    files += sorted(sub_dir.glob("workflows/*/agent-*.jsonl"))
+    files = []
+    if sub_dir is not None:
+        files = sorted(sub_dir.glob("agent-*.jsonl"))
+        files += sorted(sub_dir.glob("workflows/*/agent-*.jsonl"))
+    files += [file for file, _meta, _depth in _native_subagents(parent_jsonl)]
     return files
+
+
+def subagent_record_metadata(path: Path) -> list[tuple[Path, dict, int]]:
+    """Resolved transcripts, provenance and depth for signal extraction."""
+    parent_jsonl = _resolve_parent_jsonl(path)
+    native = _native_subagents(parent_jsonl)
+    native_paths = {file for file, _meta, _depth in native}
+    out = []
+    for file in subagent_record_files(parent_jsonl):
+        if file in native_paths:
+            continue
+        meta = read_subagent_metadata(file)
+        try:
+            depth = int(meta.get("spawnDepth") or 1)
+        except (TypeError, ValueError):
+            depth = 1
+        out.append((file, meta, depth))
+    return out + native
+
+
+def read_subagent_metadata(path: Path) -> dict:
+    """Read child provenance in either CC or native gptme layout."""
+    native = path.name == "conversation.jsonl"
+    meta_path = path.parent / "subagent-meta.json" if native else path.with_suffix(".meta.json")
+    try:
+        meta = json.loads(meta_path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(meta, dict):
+        return {}
+    if native:
+        return {
+            **meta,
+            "agentType": meta.get("profile") or meta.get("agent_type"),
+            "description": meta.get("prompt"),
+            "session_id": meta.get("agent_id") or path.parent.name,
+        }
+    return meta
+
+
+def _native_subagents(parent_jsonl: Path) -> list[tuple[Path, dict, int]]:
+    """Resolve native siblings by exact parent identity, never time/name proximity.
+
+    Scan only the parent's logs root. Retained roots and legacy roots share the
+    same layout; an absent/invalid parent_logdir is intentionally not inferred.
+    """
+    if parent_jsonl.name != "conversation.jsonl":
+        return []
+    by_parent: dict[Path, list[tuple[Path, dict]]] = {}
+    for meta_path in sorted(parent_jsonl.parent.parent.glob("subagent-*/subagent-meta.json")):
+        file = meta_path.parent / "conversation.jsonl"
+        if not file.is_file():
+            continue
+        meta = read_subagent_metadata(file)
+        identity = meta.get("parent_logdir")
+        if not isinstance(identity, str) or not identity or not Path(identity).is_absolute():
+            continue
+        by_parent.setdefault(Path(identity).resolve(), []).append((file, meta))
+    out: list[tuple[Path, dict, int]] = []
+    visited = {parent_jsonl.resolve()}
+
+    def walk(parent: Path, depth: int) -> None:
+        for file, meta in by_parent.get(parent.resolve(), []):
+            resolved = file.resolve()
+            if resolved in visited:
+                continue
+            visited.add(resolved)
+            out.append((file, meta, depth))
+            walk(file.parent, depth + 1)
+
+    walk(parent_jsonl.parent, 1)
+    return out
 
 
 def _agent_tool_use_ids(records: list[dict]) -> list[tuple[str, dict]]:
@@ -1173,4 +1247,17 @@ def read_session_tree(path: Path) -> SessionTree:
         if str(child_path) in visited:
             continue
         tree.subagents.append(_make_subagent_node(child_path, {}, None, 0, agent_map, visited))
+    native_nodes: dict[Path, SubagentNode] = {}
+    for child_path, meta, depth in _native_subagents(parent_jsonl):
+        if str(child_path) in visited:
+            continue
+        node = _make_subagent_node(child_path, meta, None, depth - 1, {}, visited)
+        node.session_id = str(meta["session_id"])
+        node.spawn_depth = depth
+        native_nodes[child_path.parent.resolve()] = node
+        parent_node = native_nodes.get(Path(meta["parent_logdir"]).resolve())
+        if parent_node is not None:
+            parent_node.children.append(node)
+        else:
+            tree.subagents.append(node)
     return tree
