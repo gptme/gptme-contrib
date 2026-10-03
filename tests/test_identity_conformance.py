@@ -536,7 +536,8 @@ def test_activity_summary_cli_workspace_repos(
                 return real_command(cmd, timeout)
             if os.environ["TEST_GITHUB_ENABLED"] == "0":
                 return None
-            with Path("github-commands.jsonl").open("a") as log:
+            log_path = Path(os.environ.get("GITHUB_CMD_LOG", "/tmp/github-commands.jsonl"))
+            with log_path.open("a") as log:
                 log.write(json.dumps(cmd) + "\\n")
             if cmd[1:3] == ["auth", "status"]:
                 return "authenticated"
@@ -551,7 +552,12 @@ def test_activity_summary_cli_workspace_repos(
             "narrative": kw["extra_context"], "accomplishments": [entries[0][1]],
         }
     """,
-        env={"TEST_GITHUB_ENABLED": "1" if github_enabled else "0"},
+        env={
+            "TEST_GITHUB_ENABLED": "1" if github_enabled else "0",
+            # Write the diagnostic log outside the workspace so the identity
+            # tree scan doesn't find gh commands that include the real GH username.
+            "GITHUB_CMD_LOG": str(identity.sandbox / "github-commands.jsonl"),
+        },
     )
     summaries = identity.workspace / "knowledge" / "summaries"
     assert summaries.is_dir()
