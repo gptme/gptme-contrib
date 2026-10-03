@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
+from gptme_voice.realtime import missed_call_context
 from gptme_voice.realtime import server as server_mod
 from gptme_voice.realtime.missed_call_context import MAX_CONTEXT_AGE
 from gptme_voice.realtime.twilio_integration import sign_stream_params
@@ -391,15 +392,22 @@ def test_callback_crossing_utc_midnight_is_not_same_day(callback_case):
     )
 
 
-def test_trusted_callback_at_58_minutes_receives_prepared_brief(callback_case):
+def test_trusted_callback_at_58_minutes_receives_prepared_brief(
+    callback_case, monkeypatch
+):
     """Regression: same-morning callback 58 min after the missed standup must
     deliver the prepared brief — the 2026-09-17 failure case."""
     run, _, _, requests, state, stamp, brief = callback_case
-    now = datetime.now(timezone.utc)
+    # Anchor to a fixed same-morning time. With a real ``now`` the 3.5h-old
+    # brief crosses midnight when the suite runs before ~03:30 UTC, and the
+    # loader's same-calendar-date check then drops a perfectly valid callback;
+    # the test was time-of-day dependent.
+    anchor = datetime(2026, 10, 3, 9, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(missed_call_context, "_as_utc", lambda now=None: anchor)
     # Outbound was 58 minutes ago; context was generated 3.5h ago
-    stamp["placed_at"] = (now - timedelta(minutes=58)).isoformat()
-    stamp["date"] = now.date().isoformat()
-    brief["generated_at"] = (now - timedelta(hours=3, minutes=30)).isoformat()
+    stamp["placed_at"] = (anchor - timedelta(minutes=58)).isoformat()
+    stamp["date"] = anchor.date().isoformat()
+    brief["generated_at"] = (anchor - timedelta(hours=3, minutes=30)).isoformat()
     (state / "standup-brief.json").write_text(json.dumps(brief))
     (state / "voice-calls/last-standup-call-sid.txt").write_text(json.dumps(stamp))
     cfg = run()
