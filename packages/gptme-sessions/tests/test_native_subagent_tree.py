@@ -125,3 +125,27 @@ def test_native_string_tool_calls_multiline_json_classified(tmp_path: Path) -> N
     result = extract_from_path(parent)
     assert result["subagent_summary"]["subagents_acting"] == 1
     assert result["tool_calls"]["shell"] == 1
+
+
+def test_native_empty_parent_does_not_adopt_child_identity(tmp_path: Path) -> None:
+    """A parent with no transcript bytes must not inherit a child's model identity.
+
+    When the parent transcript is empty (e.g. a crashed parent that spawned a
+    child), extract_usage_gptme(parent_msgs) is {}, so the old override loop was
+    a no-op and the child's model/served fields leaked into the parent's usage.
+    A parent with content but no usage metadata is already safe: byte metrics
+    make parent_usage non-empty with model=None.
+    """
+    parent_dir = tmp_path / "run-empty"
+    parent_dir.mkdir()
+    parent = parent_dir / "conversation.jsonl"
+    parent.write_text("")
+    child(tmp_path, "a", parent_dir)
+    result = extract_from_path(parent_dir)
+    usage = result["usage"]
+    # Child token usage is still rolled up additively.
+    assert usage["total_tokens"] == 15
+    # But no child identity masquerades as the parent's.
+    assert "model" not in usage
+    assert "served_model" not in usage
+    assert "served_models" not in usage

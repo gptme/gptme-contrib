@@ -3778,6 +3778,13 @@ def extract_from_path(jsonl_path: Path) -> dict:
         ):
             if key in parent_usage:
                 usage[key] = parent_usage[key]
+            elif key in usage:
+                # Parent has no value for this identity/context field, so a
+                # child's value must not be reported as the parent's. Reachable
+                # when the parent transcript is empty (e.g. a crashed parent
+                # with retained children): no byte metrics means ``parent_usage``
+                # is ``{}`` and the child's model/served identity would leak.
+                usage.pop(key, None)
     inferred_category = infer_category(signals)
     grade = grade_signals(signals, category=inferred_category)
     result: dict = {
