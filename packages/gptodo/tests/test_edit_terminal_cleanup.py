@@ -180,11 +180,18 @@ def test_invalid_date_value_hints_none_clears_field(tmp_path: Path, monkeypatch)
     (tasks_dir / "my-task.md").write_text(OPEN_WITH_CUMULATIVE_HISTORY)
     monkeypatch.chdir(tmp_path)
 
+    before = _meta(tasks_dir, "my-task")
+
     result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "first_waiting_since", ""])
     flat = " ".join(result.output.split())  # rich wraps at 80 columns
     assert "Invalid first_waiting_since date format" in flat
     assert "'none' to clear the field" in flat
-    assert "first_waiting_since" in _meta(tasks_dir, "my-task")
+    # The rejected edit must leave the field's value untouched, not just the key
+    # present — compare the full metadata so a partial/incorrect write is caught.
+    assert _meta(tasks_dir, "my-task") == before
 
     result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "waiting_since", "not-a-date"])
-    assert "'none' to clear the field" in " ".join(result.output.split())
+    flat = " ".join(result.output.split())
+    assert "Invalid waiting_since format" in flat
+    assert "'none' to clear the field" in flat
+    assert _meta(tasks_dir, "my-task") == before
