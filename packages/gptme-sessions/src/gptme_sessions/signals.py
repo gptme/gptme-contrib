@@ -3718,33 +3718,17 @@ def extract_from_path(jsonl_path: Path) -> dict:
     # Best-effort: subagent resolution must never break signal extraction.
     try:
         from .subagent_summary import ChildSpec
-        from .transcript import subagent_record_files
+        from .transcript import subagent_record_metadata
 
-        for sub_file in subagent_record_files(jsonl_path):
+        for sub_file, meta, depth in subagent_record_metadata(jsonl_path):
             child_msgs = parse_trajectory(sub_file)
             subagent_msgs.append(child_msgs)
             msgs.extend(child_msgs)
-            meta: dict = {}
-            meta_path = sub_file.with_name(f"{sub_file.stem}.meta.json")
-            if meta_path.exists():
-                try:
-                    loaded = json.loads(meta_path.read_text())
-                    if isinstance(loaded, dict):
-                        meta = loaded
-                except (OSError, json.JSONDecodeError):
-                    meta = {}
-            # Guard each child's depth independently: a nonnumeric spawnDepth in
-            # one metadata file must not abort the loop-wide best-effort block
-            # and silently drop every later child.
-            try:
-                depth = int(meta.get("spawnDepth") or 1)
-            except (TypeError, ValueError):
-                depth = 1
             child_specs.append(
                 ChildSpec(
                     records=child_msgs,
                     spawn_depth=depth,
-                    session_id=sub_file.stem,
+                    session_id=meta.get("session_id") or sub_file.stem,
                     tool_use_id=meta.get("toolUseId"),
                     agent_type=meta.get("agentType"),
                 )
@@ -3778,6 +3762,22 @@ def extract_from_path(jsonl_path: Path) -> dict:
     else:
         signals = extract_signals(msgs)
         usage = extract_usage_gptme(msgs)
+        # Children may use different models. Keep parent identity/context metrics
+        # while retaining the additive token/cost totals computed above.
+        parent_usage = extract_usage_gptme(parent_msgs)
+        for key in (
+            "model",
+            "served_model",
+            "served_models",
+            "sys_prompt_tokens",
+            "context_peak_tokens",
+            "sys_prompt_bytes",
+            "first_turn_bytes",
+            "context_peak_bytes",
+            "reasoning_effort",
+        ):
+            if key in parent_usage:
+                usage[key] = parent_usage[key]
     inferred_category = infer_category(signals)
     grade = grade_signals(signals, category=inferred_category)
     result: dict = {

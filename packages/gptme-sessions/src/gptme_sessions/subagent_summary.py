@@ -594,6 +594,22 @@ def _scan_gptme(records: list[dict[str, Any]]) -> TranscriptScan:
             scan.turn_ts.append(ts)
         if role == "user" and not scan.first_prompt:
             scan.first_prompt = _text_of(content)[:400]
+        if isinstance(content, str):
+            if role == "assistant":
+                blocks = [
+                    {"type": "code", "lang": match[0].split()[0], "content": match[1]}
+                    for match in re.findall(r"^```([^\n]+)\n(.*?)^```", content, re.M | re.S)
+                ]
+                for match in re.finditer(r"^@(\w+)\([^)]+\):\s*(.*)$", content, re.M):
+                    try:
+                        args = json.loads(match[2])
+                    except ValueError:
+                        continue
+                    if isinstance(args, dict):
+                        blocks.append({"type": "tool_use", "name": match[1], "input": args})
+                content = blocks
+            elif role == "system":
+                scan.result_bytes += len(content)
         if not isinstance(content, list):
             continue
         for block in content:

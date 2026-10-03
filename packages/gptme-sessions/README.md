@@ -48,6 +48,20 @@ gptme-sessions query --model opus --since 7d
 The store lives in `~/.local/share/gptme-sessions/` (override with `GPTME_SESSIONS_DIR` or
 `--sessions-dir`).
 
+## Native gptme child sessions
+
+`read_session_tree()` and signal extraction resolve native gptme children from
+sibling `subagent-*/conversation.jsonl` directories in the parent's logs root.
+Each child must carry an absolute `parent_logdir` in `subagent-meta.json` that
+matches its parent directory. Nested children are resolved by the same identity;
+missing or malformed metadata is not guessed from names or modification times.
+This works for both retained per-run logs roots and legacy logs roots.
+
+Child tokens, tools, duration and mutation classification feed the parent's
+`subagent_summary`; the parent's model identity remains its own. Incomplete
+children with retained transcripts are counted, not silently dropped. Existing
+Claude Code flat/workflow layouts remain supported.
+
 ## Python API
 
 ```python
