@@ -581,8 +581,18 @@ def test_voice_cli_identity(identity: Identity, declared: bool) -> None:
             import gptme_voice.realtime.server as voice
             def capture_startup(server):
                 print(server._instructions)
-                print(voice._resolve_protocol_identity(server.workspace, None))
-                print(voice._build_fresh_call_greeting_instructions("", server.workspace))
+                # Mirror the production call sites: the configured name comes
+                # from GPTME_VOICE_AGENT_NAME and the greeting gets the
+                # resolved agent name. Calling the helpers with their defaults
+                # would exercise the legacy "bob" fallback instead of the
+                # configured identity this test is verifying.
+                print(voice._resolve_protocol_identity(
+                    server.workspace,
+                    voice._get_config_env("GPTME_VOICE_AGENT_NAME"),
+                ))
+                print(voice._build_fresh_call_greeting_instructions(
+                    "", server.workspace, server._agent_name
+                ))
             voice.VoiceServer.run = capture_startup
         """,
         env={
