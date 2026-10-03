@@ -1245,6 +1245,8 @@ def load_tasks(
     recursive: bool = False,
     single_file: Path | None = None,
     errors_out: list[Tuple[Path, str]] | None = None,
+    *,
+    include_subtasks: bool = True,
 ) -> List[TaskInfo]:
     """Load tasks from directory or single file with metadata.
 
@@ -1256,6 +1258,9 @@ def load_tasks(
             that failed to load. When None (default), errors are only logged via
             ``logging.error`` — preserving the legacy behaviour. Pass a list to
             surface dropped files to the caller (e.g. for ``gptodo check``).
+        include_subtasks: Count body checkboxes (default True). Dependency-only
+            consumers can disable this unused scan; metadata and load errors
+            are still processed normally, with zero subtask counts returned.
 
     Returns:
         List of TaskInfo objects
@@ -1290,8 +1295,8 @@ def load_tasks(
             # Validate file format and required fields
             issues = validate_task_file(file, post)
 
-            # Count subtasks
-            subtasks = count_subtasks(post.content)
+            # Dependency-only consumers do not need body checkbox counts.
+            subtasks = count_subtasks(post.content) if include_subtasks else SubtaskCount(0, 0, 0)
 
             # Get state (default to backlog if missing)
             state = metadata.get("state")

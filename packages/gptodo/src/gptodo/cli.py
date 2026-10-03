@@ -2060,7 +2060,10 @@ def check(fix: bool, task_files: list[str]):
     dependency_universe = list(all_tasks)
     if archive_dir.is_dir():
         dependency_universe += load_tasks(
-            archive_dir, recursive=True, errors_out=archive_load_errors
+            archive_dir,
+            recursive=True,
+            errors_out=archive_load_errors,
+            include_subtasks=False,
         )
 
     # Determine which tasks to validate
