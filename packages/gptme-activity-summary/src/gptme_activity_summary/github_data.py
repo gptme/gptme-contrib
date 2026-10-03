@@ -7,6 +7,7 @@ instead of relying on LLM guessing.
 
 import json
 import logging
+import os
 import subprocess
 from collections import Counter
 from dataclasses import dataclass, field
@@ -423,8 +424,14 @@ def get_commit_count(start: date, end: date, repo_path: str | None = None) -> in
         return 0
 
 
-def get_reviews_received(start: date, end: date, repos: list[str]) -> list[PRReview]:
-    """Get PR review comments received on our PRs in a date range."""
+def get_reviews_received(
+    start: date, end: date, repos: list[str], author: str | None = None
+) -> list[PRReview]:
+    """Get PR review comments received on our PRs in a date range.
+
+    Default to ``BOT_USERNAME`` or gh's authenticated user (``@me``).
+    """
+    author = author or os.environ.get("BOT_USERNAME") or "@me"
     reviews: list[PRReview] = []
     for repo in repos:
         output = _run_command(
@@ -434,12 +441,14 @@ def get_reviews_received(start: date, end: date, repos: list[str]) -> list[PRRev
                 "list",
                 "--repo",
                 repo,
+                "--author",
+                author,
                 "--state",
                 "all",
                 "--search",
                 f"updated:{start.isoformat()}..{end.isoformat()}",
                 "--json",
-                "number,title,url,reviews",
+                "number,title,url,author,reviews",
                 "--limit",
                 "50",
             ]
@@ -449,15 +458,16 @@ def get_reviews_received(start: date, end: date, repos: list[str]) -> list[PRRev
         try:
             prs = json.loads(output)
             for pr in prs:
+                pr_author = (pr.get("author") or {}).get("login", "")
                 for review in pr.get("reviews", []):
-                    author = review.get("author", {}).get("login", "")
-                    if author and author not in ("ErikBjare", "bot"):
+                    reviewer = (review.get("author") or {}).get("login", "")
+                    if reviewer and reviewer not in (pr_author, "bot"):
                         reviews.append(
                             PRReview(
                                 repo=repo,
                                 pr_number=pr.get("number", 0),
                                 pr_title=pr.get("title", ""),
-                                reviewer=author,
+                                reviewer=reviewer,
                                 url=pr.get("url", ""),
                             )
                         )
@@ -469,10 +479,14 @@ def get_reviews_received(start: date, end: date, repos: list[str]) -> list[PRRev
 def get_cross_repo_prs(
     start: date,
     end: date,
-    author: str = "ErikBjare",
+    author: str | None = None,
     exclude_repos: list[str] | None = None,
 ) -> list[CrossRepoPR]:
-    """Get PRs authored in repos outside the excluded list."""
+    """Get PRs authored in repos outside the excluded list.
+
+    Default to ``BOT_USERNAME`` or gh's authenticated user (``@me``).
+    """
+    author = author or os.environ.get("BOT_USERNAME") or "@me"
     if exclude_repos is None:
         exclude_repos = list(PROJECT_REPOS)
     output = _run_command(
