@@ -47,6 +47,32 @@ def test_cache_only_explicit_rate(rate: float, expected: float) -> None:
     )
 
 
+def test_token_count_only_explicit_rate_without_provider() -> None:
+    """A configured rate prices token_count-only sessions for non-provider models.
+
+    ``grok-build`` is subscription-backed but has no provider heuristic, so the
+    explicit rate is the only source of a cache-read price.
+    """
+    cfg = HarnessQuotaConfig(
+        price_table={("grok-build", "grok-build"): (3.0, 15.0)},
+        cache_read_price_table={("grok-build", "grok-build"): 0.3},
+    )
+    assert (
+        estimate_session_cost(
+            "grok-build", "grok-build", token_count=1_000_000, config=cfg
+        )
+        == 0.3
+    )
+    # Without an explicit rate the model stays unknown (no provider heuristic).
+    cfg.cache_read_price_table.clear()
+    assert (
+        estimate_session_cost(
+            "grok-build", "grok-build", token_count=1_000_000, config=cfg
+        )
+        is None
+    )
+
+
 def test_mixed_gptme_usage_and_unconfigured_fallback() -> None:
     cfg = HarnessQuotaConfig(
         price_table={("gptme", "glm-5.3-flash"): (0.15, 0.50)},
