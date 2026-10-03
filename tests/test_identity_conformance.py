@@ -585,7 +585,13 @@ def test_voice_cli_identity(identity: Identity, declared: bool) -> None:
                 print(voice._build_fresh_call_greeting_instructions("", server.workspace))
             voice.VoiceServer.run = capture_startup
         """,
-        env={"GPTME_VOICE_STATE_DIR": str(identity.workspace / "state" / "voice")},
+        env={
+            "GPTME_VOICE_STATE_DIR": str(identity.workspace / "state" / "voice"),
+            # Ensure the voice server resolves to the test identity's name
+            # rather than falling back to the deployment-specific default.
+            "GPTME_VOICE_AGENT_NAME": identity.agent,
+            "AGENT_NAME": identity.agent,
+        },
     )
     if declared:
         assert f"You are {identity.agent}" in output
