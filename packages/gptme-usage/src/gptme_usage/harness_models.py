@@ -15,6 +15,7 @@ cost/lookup helpers return None/empty. See harness-quota.example.toml.
 
 from __future__ import annotations
 
+import math
 import re
 import sys
 from dataclasses import dataclass, field
@@ -103,6 +104,8 @@ class HarnessQuotaConfig:
     # Agent's Claude plan tier (e.g. "max-5x", "max-20x"). None = unconfigured;
     # callers must not assume a specific agent's plan as a generic default.
     claude_plan_tier: str | None = None
+    # Absolute USD per 1M cached tokens; zero is an explicit free rate.
+    cache_read_price_table: dict[tuple[str, str], float] = field(default_factory=dict)
 
 
 def _resolve_config_path(path: Path | None) -> Path:
@@ -188,6 +191,18 @@ def load_quota_config(path: Path | None = None) -> HarnessQuotaConfig:
                 except (TypeError, ValueError):
                     pass
 
+    cache_read_price_table: dict[tuple[str, str], float] = {}
+    for backend, models in (raw.get("cache_read_prices") or {}).items():
+        if not isinstance(models, dict):
+            continue
+        for model, value in models.items():
+            try:
+                rate = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(rate) and rate >= 0:
+                cache_read_price_table[(backend, model)] = rate
+
     tps_table: dict[tuple[str, str], float] = {}
     for backend, models in (raw.get("tps") or {}).items():
         if not isinstance(models, dict):
@@ -218,6 +233,7 @@ def load_quota_config(path: Path | None = None) -> HarnessQuotaConfig:
 
     return HarnessQuotaConfig(
         price_table=price_table,
+        cache_read_price_table=cache_read_price_table,
         tps_table=tps_table,
         quota_sources=quota_sources,
         model_routes=model_routes,
@@ -420,7 +436,8 @@ def harness_cost_rows() -> list[HarnessCostRow]:
 #   Source: https://docs.anthropic.com/en/docs/about-claude/pricing
 # OpenAI: cached input = 0.5x input, no separate creation cost.
 #   Source: https://platform.openai.com/docs/pricing
-# OpenRouter/others: no cache pricing exposed; treat cache tokens as regular input.
+# OpenRouter/others: configure explicit per-model rates via cache_read_prices.
+# Without a verified rate, retain the regular-input estimate (not a free rate).
 CACHE_READ_MULTIPLIER: dict[str, float] = {
     "anthropic": 0.1,  # Opus/Sonnet cache reads
     "openai": 0.5,  # GPT cached input
@@ -452,7 +469,7 @@ _CACHE_PRICING_PROVIDER: dict[tuple[str, str], str] = {
     ("gptme", "gpt-5.6-sol"): "openai",
     ("gptme", "gpt-5.6-terra"): "openai",
     ("gptme", "gpt-5.6-luna"): "openai",
-    # kimi-k2.6: no cache pricing exposed on OpenRouter
+    # Other models use explicit config rates or the regular-input fallback.
 }
 
 # Harnesses whose recorded ``input_tokens`` already INCLUDE cache reads.
@@ -507,6 +524,12 @@ def estimate_session_cost(
         return None
 
     input_price, output_price = prices
+    provider = _CACHE_PRICING_PROVIDER.get(key)
+    cache_read_price = (
+        config.cache_read_price_table.get(key) if config is not None else None
+    )
+    if cache_read_price is None:
+        cache_read_price = input_price * CACHE_READ_MULTIPLIER.get(provider or "", 1.0)
 
     inp = input_tokens or 0
     out = output_tokens or 0
@@ -519,15 +542,11 @@ def estimate_session_cost(
         # show 99.9%+ of billed tokens are cache reads, so token_count
         # ≈ cache_read_tokens for these sessions.
         if token_count and token_count > 0 and key in SUBSCRIPTION_BACKED_MODELS:
-            provider = _CACHE_PRICING_PROVIDER.get(key)
             if provider:
-                cache_read_rate = CACHE_READ_MULTIPLIER.get(provider, 1.0)
-                cost_usd = (token_count * input_price * cache_read_rate) / 1_000_000
+                cost_usd = (token_count * cache_read_price) / 1_000_000
                 return round(cost_usd, 6)
         return None
 
-    provider = _CACHE_PRICING_PROVIDER.get(key)
-    cache_read_rate = CACHE_READ_MULTIPLIER.get(provider or "", 1.0)
     cache_create_rate = CACHE_CREATION_MULTIPLIER.get(provider or "", 1.0)
 
     if harness in _INPUT_INCLUDES_CACHE_READ:
@@ -556,7 +575,7 @@ def estimate_session_cost(
         inp * input_price
         + out * output_price
         + cache_create * input_price * cache_create_rate
-        + cache_read * input_price * cache_read_rate
+        + cache_read * cache_read_price
     ) / 1_000_000
 
     return round(cost_usd, 6)
