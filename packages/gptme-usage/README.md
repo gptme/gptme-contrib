@@ -54,6 +54,9 @@ claude_plan_tier = "max-5x"      # optional
 opus   = [5.0, 25.0]
 sonnet = [3.0, 15.0]
 
+[cache_read_prices.claude-code]  # optional absolute USD per 1M cached tokens
+opus = 0.50                     # overrides the provider multiplier; 0 means free
+
 [tps.claude-code]                # tokens/second, for duration-based estimates
 opus = 18000
 
@@ -71,6 +74,14 @@ A missing or unreadable file (or Python 3.10 without `tomli`) yields an empty
 config; cost functions then return `None` instead of guessing. A non-empty table in your config *replaces* the
 module default table rather than merging with it. Use
 `merge_with_module_defaults()` if you want merge semantics.
+
+Optional `[cache_read_prices.<harness>]` entries use the same canonical model
+keys as `[prices.<harness>]`. They override provider cache-read multipliers,
+including with an explicit zero. Omitted entries retain the provider heuristic
+(or regular-input pricing where no heuristic is known); negative/non-finite
+rates are ignored. Cache creation pricing and each harness's token-counter
+conventions are unchanged. These are API-equivalent estimates, not invoices or
+subscription marginal costs; a session's reported cost remains authoritative.
 
 ## Quickstart
 

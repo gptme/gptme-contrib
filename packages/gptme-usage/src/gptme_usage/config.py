@@ -52,6 +52,7 @@ def merge_with_module_defaults(config: HarnessQuotaConfig) -> HarnessQuotaConfig
 
     return HarnessQuotaConfig(
         price_table=merged_price,
+        cache_read_price_table=dict(config.cache_read_price_table),
         tps_table=merged_tps,
         quota_sources=merged_quota,
         model_routes=merged_routes,
