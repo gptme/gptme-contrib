@@ -525,9 +525,10 @@ def estimate_session_cost(
 
     input_price, output_price = prices
     provider = _CACHE_PRICING_PROVIDER.get(key)
-    cache_read_price = (
+    configured_cache_read_price = (
         config.cache_read_price_table.get(key) if config is not None else None
     )
+    cache_read_price = configured_cache_read_price
     if cache_read_price is None:
         cache_read_price = input_price * CACHE_READ_MULTIPLIER.get(provider or "", 1.0)
 
@@ -542,7 +543,10 @@ def estimate_session_cost(
         # show 99.9%+ of billed tokens are cache reads, so token_count
         # ≈ cache_read_tokens for these sessions.
         if token_count and token_count > 0 and key in SUBSCRIPTION_BACKED_MODELS:
-            if provider:
+            # A provider heuristic or an explicit configured rate both price the
+            # cache-read-dominated token_count. A subscription model with neither
+            # stays unknown rather than guessing at the full input price.
+            if provider or configured_cache_read_price is not None:
                 cost_usd = (token_count * cache_read_price) / 1_000_000
                 return round(cost_usd, 6)
         return None
