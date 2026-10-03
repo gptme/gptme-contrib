@@ -457,6 +457,17 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
         monkeypatch.setattr(smc, "run_gh", fake_run_gh)
         monkeypatch.setattr(smc, "run_gh_checked", fake_run_gh)
         monkeypatch.setattr(smc, "fetch_pr", lambda repo, number: _pr_payload())
+        monkeypatch.setattr(
+            smc,
+            "_fetch_contrib_pr_file_shapes",
+            lambda repo, number: [
+                {
+                    "path": "docs/review-tools.md",
+                    "status": "modified",
+                    "patch": "+Document the review tools.\n",
+                }
+            ],
+        )
         monkeypatch.setattr(smc, "get_gh_user", lambda: AUTHOR)
         monkeypatch.setattr(smc, "merge_permission", lambda repo: True)
         monkeypatch.setattr(smc, "_fetch_greptile_review_data", lambda r, n: ([], []))
@@ -504,6 +515,17 @@ def test_evaluate_pr_blocks_fallback_when_greptile_state_fetch_failed(
     a warning and the AI reviewer's clean verdict makes the PR eligible.
     """
     monkeypatch.setattr(smc, "fetch_pr", lambda repo, number: _pr_payload())
+    monkeypatch.setattr(
+        smc,
+        "_fetch_contrib_pr_file_shapes",
+        lambda repo, number: [
+            {
+                "path": "docs/review-tools.md",
+                "status": "modified",
+                "patch": "+Document the review tools.\n",
+            }
+        ],
+    )
     monkeypatch.setattr(smc, "get_gh_user", lambda: AUTHOR)
     monkeypatch.setattr(smc, "merge_permission", lambda repo: True)
     monkeypatch.setattr(smc, "_fetch_greptile_review_data", lambda r, n: None)

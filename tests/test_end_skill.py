@@ -100,6 +100,8 @@ def _env_without_cc_session() -> dict:
         not in (
             "CC_SESSION_ID",
             "CLAUDE_CODE_SESSION_ID",
+            "GPTME_SESSION_ID",
+            "CODEX_THREAD_ID",
             "CLAUDECODE",
             "CLAUDE_CODE_ENTRYPOINT",
             "CC_MODEL",
@@ -310,7 +312,9 @@ def test_exit_dry_run_never_signals(tmp_path: Path):
         victim.kill()
 
 
-def test_no_session_id_recent_commit_not_attributed(tmp_path: Path):
+def test_no_session_id_recent_commit_not_attributed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """P1: without a session_id (gptme/Codex env), recent commits must not block.
 
     When no CC_SESSION_ID is present, `check_commits` cannot distinguish this
@@ -331,8 +335,24 @@ def test_no_session_id_recent_commit_not_attributed(tmp_path: Path):
     # Journal dir exists; this is what triggers the false BLOCKED when
     # did_work=True leaks in from unattributed commits.
     (work / "journal").mkdir()
-    # Strip CC session env vars to simulate gptme / Codex (no session_id).
+    # Simulate a native runtime, then strip every supported session ID.
+    for name in (
+        "CLAUDE_CODE_SESSION_ID",
+        "CC_SESSION_ID",
+        "GPTME_SESSION_ID",
+        "CODEX_THREAD_ID",
+    ):
+        monkeypatch.setenv(name, "native-runtime-session")
     env = _env_without_cc_session()
+    assert (
+        not {
+            "CLAUDE_CODE_SESSION_ID",
+            "CC_SESSION_ID",
+            "GPTME_SESSION_ID",
+            "CODEX_THREAD_ID",
+        }
+        & env.keys()
+    )
     rc, rep = run_check(work, "--since", "1h", env=env)
     assert rc == 0, rep
     assert rep["commits"] == [], "without session_id, no commits should be attributed"
