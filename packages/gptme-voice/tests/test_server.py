@@ -1167,6 +1167,120 @@ def test_twilio_websocket_does_not_grant_rag_tools_from_spoofed_from_number(
     assert captured.get("rag") is not None
 
 
+def test_twilio_signed_outbound_leg_grants_rag_tools_to_allowlisted_party(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outbound legs carry no body grant; the signed TwiML params authorize them.
+
+    create_outbound_call signs outbound_identity_params (direction=outbound,
+    remote_party) with the Twilio auth token. With no /incoming webhook there
+    is nothing to mint a grant, so the verified signature must unlock
+    workspace_search for an allowlisted dialed party — and nothing else:
+    non-allowlisted parties, unsigned starts and inbound starts stay closed.
+    """
+    pytest.importorskip("gptme_rag")
+    monkeypatch.setenv("GPTME_VOICE_RAG", "1")
+    monkeypatch.delenv("GPTME_VOICE_BODY_URL", raising=False)
+    import gptme_voice.realtime.server as server_mod
+
+    real_get = server_mod._get_config_env
+
+    def fake_get(name: str) -> str | None:
+        if name == "TWILIO_CALLER_ALLOWLIST":
+            return "+15551212"
+        if name == "TWILIO_AUTH_TOKEN":
+            return "secret"
+        return real_get(name)
+
+    monkeypatch.setattr(server_mod, "_get_config_env", fake_get)
+
+    captured: dict[str, object] = {}
+
+    class _CapturingBridge(_DummyToolBridge):
+        def __init__(self, *args, **kwargs) -> None:
+            captured["rag"] = kwargs.get("rag")
+
+    async def _exercise(custom: dict[str, str]) -> _DummyTwilioWebSocket:
+        captured.clear()
+        server = VoiceServer(workspace=str(tmp_path))
+        websocket = _DummyTwilioWebSocket(
+            [
+                {"event": "connected"},
+                {
+                    "event": "start",
+                    "start": {
+                        "streamSid": "MZout",
+                        "callSid": "CAout",
+                        "customParameters": custom,
+                    },
+                },
+                {"event": "stop"},
+            ]
+        )
+        fake_client = _FakeRealtimeClient()
+
+        async def _fake_build_session_bootstrap(**_kwargs) -> SessionBootstrap:
+            return SessionBootstrap("You are Bob.")
+
+        monkeypatch.setattr(
+            server, "_build_session_bootstrap", _fake_build_session_bootstrap
+        )
+        monkeypatch.setattr(server, "_make_client", lambda _cfg, **_kw: fake_client)
+
+        async def _fake_on_call_end(*_args, **_kwargs) -> None:
+            return None
+
+        monkeypatch.setattr(server, "_on_call_end", _fake_on_call_end)
+        monkeypatch.setattr(
+            "gptme_voice.realtime.server.GptmeToolBridge", _CapturingBridge
+        )
+        await server.handle_twilio_websocket(websocket)
+        return websocket
+
+    from gptme_voice.realtime.twilio_integration import outbound_identity_params
+
+    # Signed outbound leg to an allowlisted party: tools wired.
+    ws = asyncio.run(
+        _exercise(sign_stream_params(outbound_identity_params("+15551212"), "secret"))
+    )
+    assert ws.close_code is None
+    assert captured.get("rag") is not None
+
+    # Signed outbound leg to a party not on the allowlist: still closed.
+    asyncio.run(
+        _exercise(
+            sign_stream_params(outbound_identity_params("+46700000001"), "secret")
+        )
+    )
+    assert captured.get("rag") is None
+
+    # Unsigned outbound params are rejected outright (no session, no tools).
+    ws = asyncio.run(_exercise(outbound_identity_params("+15551212")))
+    assert ws.close_code == 1008
+    assert captured.get("rag") is None
+
+    # A signed *inbound* start without a grant still gets nothing: the
+    # direction label alone never authorizes.
+    asyncio.run(_exercise(sign_stream_params({"from_number": "+15551212"}, "secret")))
+    assert captured.get("rag") is None
+
+    # The fields the outbound branch authorizes on are inside the HMAC, so a
+    # start that mutates any of them after signing fails verification and is
+    # rejected outright — the grant is not a client-controlled label.
+    # (TTL enforcement is pinned by
+    # test_twilio_reconnect_of_verified_call_outlives_token_ttl.)
+    signed = sign_stream_params(outbound_identity_params("+15551212"), "secret")
+    for field, value in (
+        ("remote_party", "+46700000001"),
+        ("from_number", "+46700000001"),
+        ("direction", "inbound"),
+    ):
+        captured.clear()
+        ws = asyncio.run(_exercise({**signed, field: value}))
+        assert ws.close_code == 1008, f"tampered {field} was admitted"
+        assert captured.get("rag") is None, f"tampered {field} received tools"
+
+
 def test_twilio_spoof_cannot_steal_rag_capable_prewarm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

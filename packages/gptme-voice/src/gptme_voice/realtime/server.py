@@ -2684,8 +2684,9 @@ class VoiceServer:
                     caller_id = remote_party or call_sid or stream_sid
                     # Twilio marks outbound legs via the TwiML custom parameters
                     # set by outbound_identity_params; every other Twilio stream
-                    # is an inbound call. Label only — never an authorization
-                    # input (customParameters are client-replayable).
+                    # is an inbound call. Unsigned, this is a label only; once
+                    # verify_stream_params has accepted the HMAC over these
+                    # parameters it also authorizes the outbound caller below.
                     call_direction = custom_params.get("direction") or "inbound"
                     metadata = {
                         "from_number": from_number,
@@ -2755,6 +2756,21 @@ class VoiceServer:
                             )
                         else:
                             granted_from = grant_from
+                    if (
+                        granted_from is None
+                        and stream_auth_token
+                        and call_direction == "outbound"
+                        and remote_party
+                    ):
+                        # Outbound legs are placed by us: there is no signed
+                        # /incoming webhook to mint a body grant, and the
+                        # CallSid does not exist until after the TwiML (with
+                        # its parameters) has been handed to Twilio. The HMAC
+                        # over these parameters (verified above, with the
+                        # TTL) is the authority instead; the allowlist check
+                        # still applies to the dialed party. Without a Twilio
+                        # auth token nothing is verified and nothing is granted.
+                        granted_from = remote_party
                     body_adapter = self._body_adapter_for_websocket(
                         websocket,
                         transport="twilio",
