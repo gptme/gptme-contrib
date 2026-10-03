@@ -1477,10 +1477,16 @@ def test_build_runtime_identity_instructions_unknown_provider() -> None:
     assert "anthropic" in result
 
 
-def test_voice_server_prepends_runtime_identity_to_instructions() -> None:
+def test_voice_server_prepends_runtime_identity_to_instructions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "gptme_voice.realtime.server._get_config_env", lambda name: None
+    )
+    monkeypatch.setattr("gptme_voice.realtime.server._detect_agent_repo", lambda: None)
     server = VoiceServer(provider="grok")
     # Stable persona identity leads the prompt, followed by runtime provider identity.
-    assert server._instructions.startswith("IDENTITY: You are Bob.")
+    assert server._instructions.startswith("IDENTITY: You are Agent.")
     assert "RUNTIME IDENTITY:" in server._instructions
     assert "Grok" in server._instructions
 
@@ -1878,6 +1884,7 @@ def test_build_session_bootstrap_personalizes_known_caller_greeting() -> None:
             "# Erik Bjäreholt\n\nPhone: +46700000001\n"
         )
         server = VoiceServer(workspace=tmpdir)
+        server._agent_name = "bob"
         server._instructions = "You are Bob."
 
         bootstrap = asyncio.run(
@@ -1923,6 +1930,7 @@ def test_build_session_bootstrap_avoids_full_name_warning_for_single_token_name(
 
 def test_build_session_bootstrap_asks_unknown_caller_to_identify() -> None:
     server = VoiceServer()
+    server._agent_name = "bob"
     server._instructions = "You are Bob."
 
     bootstrap = asyncio.run(
@@ -3231,10 +3239,10 @@ def test_greeting_unknown_caller_capitalizes_agent_name() -> None:
     assert "Alice" in greeting
 
 
-def test_greeting_unknown_caller_default_name_is_bob() -> None:
+def test_greeting_unknown_caller_default_name_is_neutral() -> None:
     greeting = _build_fresh_call_greeting_instructions("+1555000000", None)
-    assert "You are Bob" in greeting
-    assert "Hello, this is Bob" in greeting
+    assert "You are Agent" in greeting
+    assert "Hello, this is Agent" in greeting
 
 
 def test_server_uses_general_agent_name_for_identity(
@@ -3262,9 +3270,8 @@ def test_server_general_display_name_does_not_change_handoff_identity(
     server = VoiceServer()
 
     assert server._agent_name == "Alice Smith"
-    assert server._handoff_writer is not None
-    assert server._handoff_writer.from_agent == "bob"
-    assert "bob" not in server._available_agents
+    assert server._handoff_writer is None
+    assert server._available_agents == []
 
 
 def test_server_voice_agent_name_overrides_general_name(
@@ -3381,7 +3388,7 @@ def test_resolve_protocol_identity_does_not_infer_from_display_name(
         assert _resolve_protocol_identity(str(workspace), None) == declared.lower()
 
 
-def test_resolve_protocol_identity_keeps_unregistered_name_and_legacy_default(
+def test_resolve_protocol_identity_keeps_unregistered_name_and_neutral_default(
     tmp_path: Path,
 ) -> None:
     workspace = _write_agent_config(tmp_path, "Nova")
@@ -3389,8 +3396,8 @@ def test_resolve_protocol_identity_keeps_unregistered_name_and_legacy_default(
     # An unregistered name is preserved so the caller can fail loudly rather
     # than sign handoffs as another agent...
     assert _resolve_protocol_identity(str(workspace), None) == "nova"
-    # ...while a deployment that declares nothing keeps the legacy default.
-    assert _resolve_protocol_identity(None, None) == "bob"
+    # ...while a deployment that declares nothing cannot sign as Bob.
+    assert _resolve_protocol_identity(None, None) == "agent"
 
 
 def test_server_multi_word_workspace_name_keeps_display_and_disables_handoff(
