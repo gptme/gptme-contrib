@@ -304,7 +304,7 @@ Every command has `--help`. The top-level options are `-v/--verbose` and
 | Command | What it does |
 |---------|--------------|
 | `add "Title" [--priority] [--tags a,b] [--state] [--type action\|project] [--assigned-to]` | Create a task. Text piped on stdin becomes the body. |
-| `edit <id>... --set F V \| --add F V \| --remove F V \| --set-subtask "text" done\|todo [--force]` | Change frontmatter. Several IDs can be given at once. `--set F none` clears a field, and `tag`/`dep` are shorthands for `tags`/`depends`. |
+| `edit <id>... --set F V \| --add F V \| --remove F V \| --set-subtask "text" done\|todo [--force]` | Change frontmatter or checkboxes. Several IDs can be given at once. Repeat `--set-subtask` for a batch: each selector must match exactly one checkbox in every target, and no two selectors may address the same checkbox. Invalid selectors reject the whole invocation with nonzero status before any file is written. Partial text matches remain supported. `--set F none` clears a field, and `tag`/`dep` are shorthands for `tags`/`depends`. |
 | `claim <id> [--agent NAME]` | Set `active`, `assigned_to` and `assigned_at`. Running it again with the same owner does nothing. |
 | `subtask <parent> -n a -n b [--mode parallel\|sequential\|fan-out-fan-in]` | Split a task into child task files (`spawned_from` / `spawned_tasks`). |
 | `expire [--days N] [--state S] [--dry-run] [--json]` | Auto-expire long-quiet tasks (see below). |

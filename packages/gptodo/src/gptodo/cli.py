@@ -2504,7 +2504,8 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
     "--set-subtask",
     "set_subtask",
     type=(str, str),
-    help="Set subtask state (subtask_text, state). State must be 'done' or 'todo'",
+    multiple=True,
+    help="Set subtask state (subtask_text, done|todo). Repeat for a batch; selectors must be unique and unambiguous in every target task.",
 )
 @click.option(
     "--force",
@@ -2570,6 +2571,8 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
     # Load all tasks
     tasks = load_tasks(tasks_dir)
     if not tasks:
+        if set_subtask:
+            raise click.ClickException("No tasks found")
         console.print("[red]No tasks found[/]")
         return
 
@@ -2577,6 +2580,8 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
     try:
         target_tasks = resolve_tasks(task_ids, tasks, tasks_dir)
     except ValueError as e:
+        if set_subtask:
+            raise click.ClickException(str(e)) from e
         console.print(f"[red]{e}[/]")
         return
 
@@ -2823,11 +2828,11 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         changes.append(("set", field, value))
 
     # Validate subtask operation
-    if set_subtask:
-        subtask_text, state = set_subtask
+    for subtask_text, state in set_subtask:
         if state not in ["done", "todo"]:
-            console.print(f"[red]Invalid subtask state: {state}. Valid values: done, todo[/]")
-            return
+            raise click.ClickException(f"Invalid subtask state: {state}. Valid values: done, todo")
+        if not subtask_text.strip():
+            raise click.ClickException("Subtask selector must not be empty")
         changes.append(("set_subtask", subtask_text, state))
 
     # Canonical list fields in task metadata (no aliases)
@@ -2883,9 +2888,37 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         console.print("[red]No changes specified. Use --set, --add, or --remove.[/]")
         return
 
+    # Resolve the complete checklist batch against the original in-memory bodies
+    # before writing any target. Different selectors that hit the same line are
+    # duplicates too; resolving after each toggle would make this order-dependent.
+    import re
+
+    posts = {task.path: frontmatter.load(task.path) for task in target_tasks}
+    subtask_lines = {}
+    for task in target_tasks:
+        lines = posts[task.path].content.split("\n")
+        selected = {}
+        used_lines = set()
+        for subtask_text, _state in set_subtask:
+            matches = [
+                i
+                for i, line in enumerate(lines)
+                if subtask_text in line and re.match(r"^\s*(?:>\s*)?- \[[ x-]\]", line)
+            ]
+            if not matches:
+                raise click.ClickException(f"{task.name}: Subtask not found: {subtask_text}")
+            if len(matches) != 1:
+                raise click.ClickException(f"{task.name}: Ambiguous subtask: {subtask_text}")
+            index = matches[0]
+            if index in used_lines:
+                raise click.ClickException(f"{task.name}: Duplicate subtask: {subtask_text}")
+            used_lines.add(index)
+            selected[subtask_text] = index
+        subtask_lines[task.path] = selected
+
     # Apply changes
     for task in target_tasks:
-        post = frontmatter.load(task.path)
+        post = posts[task.path]
 
         # Snapshot the pre-edit state: the completed-stamp logic below must key off
         # a real *transition*, not the post-edit final state (which cannot tell an
@@ -2914,8 +2947,8 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
 
                 markers = ("- [ ]", "- [x]", "- [-]")
                 for i, line in enumerate(lines):
-                    # Check if this line is a subtask checkbox with matching text
-                    if subtask_text in line and any(m in line for m in markers):
+                    # Use the unique line resolved from the original body.
+                    if i == subtask_lines[task.path][subtask_text]:
                         target = "- [x]" if state == "done" else "- [ ]"
                         for marker in markers:
                             # Anchor to line start (after optional whitespace/blockquote)
@@ -2951,8 +2984,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
                             break
 
                 if not updated:
-                    console.print(f"[red]Subtask not found: {subtask_text}[/]")
-                    return
+                    raise click.ClickException(f"Subtask not found: {subtask_text}")
 
                 post.content = "\n".join(lines)
             elif field in CANONICAL_LIST_FIELDS:
