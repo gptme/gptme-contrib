@@ -151,11 +151,14 @@ check_repo() {
     # default-branch HEAD — a common case when path filters skip CI on
     # journal-only / docs-only commits.  event is needed so Dependabot's
     # `dynamic` runs can be dropped without hiding product CI.
-    local run_json run_err_file run_err
+    local run_json run_err_file run_err run_rc
     local run_fields="conclusion,status,url,name,headSha,event"
     run_err_file=$(mktemp)
-    run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json "$run_fields" 2>"$run_err_file" || echo "error")
+    # Capture the exit status separately from stdout: `|| echo error` appended
+    # the sentinel to any partial stdout, corrupting it.
+    run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json "$run_fields" 2>"$run_err_file") && run_rc=0 || run_rc=$?
     run_err=$(cat "$run_err_file"); rm -f "$run_err_file"
+    [ "$run_rc" -ne 0 ] && run_json="error"
 
     if [ "$run_json" = "error" ]; then
         # A cached default branch can go stale if the repo renamed it (7-day TTL) —
@@ -167,7 +170,7 @@ check_repo() {
         if echo "$run_err" | grep -qiE "not found|no commit|does not exist|unknown ref|no ref|could not resolve|no such branch"; then
             rm -f "$_DB_CACHE_DIR/${repo//\//__}" 2>/dev/null || true
             default_branch=$(_default_branch "$repo")
-            run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json "$run_fields" 2>/dev/null || echo "error")
+            run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json "$run_fields" 2>/dev/null) || run_json="error"
         fi
     fi
 
@@ -176,7 +179,15 @@ check_repo() {
         return
     fi
 
-    if [ "$run_json" = "[]" ]; then
+    # A successful exit can still carry empty stdout or non-array JSON (e.g.
+    # `null`); report that explicitly instead of letting jq/arithmetic below
+    # emit diagnostics and drop the row.
+    if ! echo "$run_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        echo -e "${YELLOW}?${NC} $label: Unavailable (invalid gh run list response)"
+        return
+    fi
+
+    if [ "$(echo "$run_json" | jq 'length')" -eq 0 ]; then
         echo -e "${YELLOW}-${NC} $label: No runs"
         return
     fi

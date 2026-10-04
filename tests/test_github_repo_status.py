@@ -39,6 +39,15 @@ if len(argv) >= 2 and argv[0] == "api" and argv[1].startswith("repos/"):
     raise SystemExit(0)
 
 if argv[:2] == ["run", "list"]:
+    bad = os.environ.get("FAKE_GH_BAD_REPO")
+    if bad and f"--repo {bad}" in " ".join(argv):
+        mode = os.environ["FAKE_GH_BAD_MODE"]
+        if mode == "partial_failure":
+            print("[", end="")
+            raise SystemExit(1)
+        if mode == "null":
+            print("null")
+        raise SystemExit(0)
     raw = os.environ.get("FAKE_GH_RUNS")
     if raw:
         emit_json(json.loads(raw))
@@ -67,6 +76,7 @@ raise SystemExit(f"unexpected gh invocation: {argv}")
 
 def _run_script(
     extra_env: dict[str, str] | None = None,
+    args: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
@@ -92,7 +102,7 @@ def _run_script(
             env.update(extra_env)
 
         return subprocess.run(
-            ["bash", str(SCRIPT), "gptme/gptme-cloud:gptme-cloud"],
+            ["bash", str(SCRIPT), *(args or ["gptme/gptme-cloud:gptme-cloud"])],
             env=env,
             capture_output=True,
             text=True,
@@ -256,3 +266,34 @@ def test_named_startup_failure_still_surfaces_alongside_ghosts() -> None:
     assert "gptme-cloud: startup_failure" in result.stdout
     assert "No runs" not in result.stdout
     assert "Passing" not in result.stdout
+
+
+def _assert_bad_response_isolated(mode: str, expected: str) -> None:
+    result = _run_script(
+        extra_env={"FAKE_GH_BAD_REPO": "gptme/bad", "FAKE_GH_BAD_MODE": mode},
+        args=["gptme/bad:bad", "gptme/gptme-cloud:good"],
+    )
+    out = result.stdout + result.stderr
+    assert "integer expression" not in out
+    assert "parse error" not in out.lower()
+    assert "Cannot iterate" not in out
+    assert "Unknown (" not in out
+    assert f"bad: {expected}" in out
+    assert "good: Passing" in out
+
+
+def test_empty_success_response_reports_unavailable() -> None:
+    _assert_bad_response_isolated("empty", "Unavailable")
+
+
+def test_null_success_response_reports_unavailable() -> None:
+    _assert_bad_response_isolated("null", "Unavailable")
+
+
+def test_partial_stdout_with_failure_reports_no_actions() -> None:
+    _assert_bad_response_isolated("partial_failure", "No Actions")
+
+
+def test_valid_empty_array_still_reports_no_runs() -> None:
+    result = _run_script(extra_env={"FAKE_GH_RUNS": "[]"})
+    assert "gptme-cloud: No runs" in result.stdout
