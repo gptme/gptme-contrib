@@ -42,6 +42,11 @@ oauth = [
     "werkzeug>=2.0",
     "python-dotenv>=0.19",
 ]
+bridge = [
+    "mcp>=1.2",
+    "starlette>=0.27",
+    "uvicorn>=0.23",
+]
 test = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
