@@ -474,3 +474,58 @@ make typecheck   # mypy
 
 `scripts/tasks.py` at the root of gptme-contrib is a deprecated wrapper around this CLI.
 Replace calls to it with `gptodo`; the commands are the same.
+
+## Shared lifecycle mutations (Python)
+
+`gptodo.lifecycle.mutate_task(path, patch={...})` is the writer used by `edit`,
+`utils.update_task_state`, external sync, fan-in, claim and expiry. It returns
+`MutationResult` with old/requested/effective states, changed metadata, the resulting
+Post and whether bytes were written. `update_task_state(path, state)` retains its
+boolean compatibility contract: a missing file, invalid state or rejected write
+returns `False`.
+
+- `transform_post(prior, changes, now=...)` is the pure metadata/body transformation.
+  It shares edit's completion stamps, explicit overrides, terminal cleanup,
+  cumulative waiting history, alias normalization and recurrence handling.
+- `mutate_task` locks a stable separate inode, reads fresh metadata/body, checks an
+  optional `expected_state`, validates and atomically replaces the task. A
+  `prepare(fresh_post)` callback returns operations derived **inside** that lock;
+  use it for decisions depending on metadata/body, not a stale whole-Post write.
+  `("set_body", "", text)` joins evidence/body changes to the same transaction.
+  `dry_run=True` computes the result without file writes, hooks or propagation.
+- Locks use POSIX `fcntl.flock`, consistent with existing execution locks. This
+  mutation facade currently targets Unix. They are short-lived mutation locks,
+  **not** execution leases; only cooperating writers are serialized. Atomic rename
+  prevents partial YAML visibility for unlocked readers. Validation/replace errors
+  leave the exact old bytes intact; existing unrelated schema defects may remain
+  so legacy malformed recurrence can still be closed rather than trapped.
+- `state=None` or removal is rejected, even with force. `None` clears optional
+  fields. Ordinary off-table nonterminal edges retain edit's warning behavior;
+  `strict=True` (or `GPTODO_STRICT_TRANSITIONS=1`) rejects them. Terminal reopens
+  require force or explicit intent. Named machine edges are in `gptodo transitions`.
+- Exceptional intents are narrow: `sync_reopen` authorizes done→active,
+  `requeue` authorizes active→todo and `alert_refire` authorizes terminal→todo/waiting.
+  `operator_reopen`/force are deliberate overrides, not routine automation defaults.
+  Sync leaves cancelled tasks sticky for either OPEN or CLOSED remote state.
+  Claim refuses expired tasks: revive to backlog/todo explicitly before claiming.
+- Missing/reopened fan-in children fail closed. Fan-in reads the fresh parent's
+  child list and fresh child files. Cancelled children count as resolved, preserving
+  existing policy. A recurring parent reschedules rather than falsely completing.
+- Completion effects run after releasing the mutation lock, recheck current done
+  state before hooks and propagation, and guard recursive cycles. Same-state done
+  requests retain the legacy hook rerun behavior without inventing timestamps.
+  Parent fan-in gets the same hooks. Effects are not a cross-file transaction:
+  a concurrent reopen after a check can still race an external hook. Hooks should
+  therefore be idempotent; no exactly-once external delivery is promised.
+- Interval recurrence lands atomically in waiting, with generated machine blocker,
+  missing completion stamp and stale probe cleared. Its reset preserves the legacy
+  cumulative-history behavior (does not add a new waiting spell). The optional
+  injected clock also drives `advance_wait`; date-only/sub-day scheduling retains
+  the existing local-naive encoding. Uncomputed valid cron stays done and stamped
+  but keeps scheduler fields. Malformed recurrence gets normal terminal cleanup;
+  cancellation always remains terminal. Tracking IDs and unrelated probes survive
+  ordinary cleanup unless explicitly patched.
+
+Initial creation/import is outside this mutation facade. Reasserting a legacy
+terminal task does not fabricate `completed`; no historical backfill is performed.
+External script writer migrations remain separate from these internal adapters.

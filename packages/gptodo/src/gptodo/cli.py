@@ -100,7 +100,6 @@ from gptodo.subagent import (
 from gptodo.sequence import SequenceStep, shortfall_note, simulate_sequence
 
 # Import unblocking functionality with fan-in support
-from gptodo.unblock import auto_unblock_with_fan_in
 
 # Import utilities directly from utils
 # Using absolute imports (not relative) for uv script compatibility
@@ -135,7 +134,6 @@ from gptodo.utils import (
     KNOWN_FRONTMATTER_FIELDS,
     lint_frontmatter_fields,
     resolve_known_frontmatter_fields,
-    is_generated_recurrence_waiting_for,
     task_has_waiting_blocker,
     task_is_waiting_for_date,
     task_matches_pool_filter,
@@ -144,12 +142,10 @@ from gptodo.utils import (
     load_tasks,
     normalize_state,
     # Phase 4: Effective state computation (bob#240)
-    parse_recur_interval,
     parse_tracking_ref,
     resolve_tasks,
     task_to_dict,
     update_cache,
-    update_task_state,
 )
 
 # Import generate-queue command (migrated from argparse to Click)
@@ -2883,416 +2879,21 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         console.print("[red]No changes specified. Use --set, --add, or --remove.[/]")
         return
 
-    # Apply changes
+    from gptodo.lifecycle import mutate_task, TransitionError
+
     for task in target_tasks:
-        post = frontmatter.load(task.path)
-
-        # Snapshot the pre-edit state: the completed-stamp logic below must key off
-        # a real *transition*, not the post-edit final state (which cannot tell an
-        # idempotent re-save apart from a state change).
-        _prior_state = normalize_state(
-            str(post.metadata.get("state", "backlog") or "backlog"), warn=False
-        )
-
-        # Apply all changes
-        for op, field, value in changes:
-            if op == "set_subtask":
-                # field is subtask_text, value is state ("done" or "todo")
-                subtask_text = field
-                state = value
-
-                # Parse markdown body to find and update subtask
-                lines = post.content.split("\n")
-                updated = False
-                # "- [-]" is the intentionally-skipped marker; recognize it here
-                # so an already-skipped item can still be toggled back to
-                # done/todo. Setting an item *to* skipped is not exposed via the
-                # CLI: a skip must carry a reason, and there is no flag to pass
-                # one — write the line by hand (see TASKS.md, Checkbox
-                # Semantics).
-                import re
-
-                markers = ("- [ ]", "- [x]", "- [-]")
-                for i, line in enumerate(lines):
-                    # Check if this line is a subtask checkbox with matching text
-                    if subtask_text in line and any(m in line for m in markers):
-                        target = "- [x]" if state == "done" else "- [ ]"
-                        for marker in markers:
-                            # Anchor to line start (after optional whitespace/blockquote)
-                            # so prose occurrences like "- [x] See - [ ] item" don't
-                            # steal the slot before the actual leading checkbox is found.
-                            if re.match(rf"^\s*(?:>\s*)?{re.escape(marker)}", line):
-                                new_line = line.replace(marker, target, 1)
-                                # Strikethrough forms (- [ ] ~~text~~ or - [x] ~~text~~)
-                                # must have their ~~ markup stripped when toggling back
-                                # to done/todo; otherwise count_subtasks re-classifies
-                                # the result as skipped and the toggle is a silent no-op.
-                                new_line = re.sub(
-                                    r"([ \t]*- \[[x ]\])\s*~~(.+?)~~.*$",
-                                    r"\1 \2",
-                                    new_line,
-                                )
-                                # For the bare [-] form, strip the trailing reason
-                                # parenthetical via regex — not a position-based
-                                # truncation — so partial-match subtask_text values
-                                # (prefixes of the full title) don't clip the title.
-                                # Pattern handles one level of nested parens, e.g.
-                                # "(deferred: see (issue #5))".
-                                if marker == "- [-]":
-                                    new_line = re.sub(
-                                        r"\s*\([^)]*(?:\([^)]*\)[^)]*)*\)\s*$",
-                                        "",
-                                        new_line,
-                                    ).rstrip()
-                                lines[i] = new_line
-                                updated = True
-                                break
-                        if updated:
-                            break
-
-                if not updated:
-                    console.print(f"[red]Subtask not found: {subtask_text}[/]")
-                    return
-
-                post.content = "\n".join(lines)
-            elif field in CANONICAL_LIST_FIELDS:
-                # Handle list fields (after normalization via FIELD_ALIASES)
-                current = post.metadata.get(field, [])
-                if op == "add":
-                    post.metadata[field] = list(set(current + [value]))
-                else:  # remove
-                    post.metadata[field] = [x for x in current if x != value]
-            else:  # set operation
-                if value is None:  # Clear field with "none" value
-                    post.metadata.pop(field, None)
-                else:
-                    # Normalize deprecated states at write time (defense in depth)
-                    if field == "state":
-                        value = normalize_state(value, warn=False)
-
-                    post.metadata[field] = value
-        # When --set wait is used on a recurrence-reset task (state=waiting,
-        # wait_kind=machine, waiting_for="next recurrence gate (wait: ...)"),
-        # keep waiting_for in sync with the new wait value so
-        # task_has_waiting_blocker can still match the recurrence-gate pattern.
-        # Without this, a manual wait adjustment permanently traps the task.
-        #
-        # Must run AFTER every --set in this invocation is applied. Doing it
-        # inside the per-field loop misses `--set wait X --set state waiting`
-        # because state still holds the pre-edit value when wait is processed
-        # (P1 on gptme/gptme-contrib#1539). Combined with the existing
-        # transitioning_to_waiting check just below, this covers both orderings.
-        # Last --set wait wins (same as the apply loop). next() without
-        # reversed() would rewrite waiting_for from the first wait while
-        # metadata['wait'] holds a later one, permanently trapping the task.
-        wait_change = next(
-            (
-                (True, value)
-                for op, field, value in reversed(changes)
-                if op == "set" and field == "wait"
-            ),
-            (False, None),
-        )
-        wait_was_set, wait_set = wait_change
-        if wait_was_set:
-            _wf = post.metadata.get("waiting_for", "")
-            generated_wf = is_generated_recurrence_waiting_for(_wf)
-            wait_kind = post.metadata.get("wait_kind")
-            # A leftover generated waiting_for without wait_kind is still a
-            # recurrence gate: `--set wait none --set state waiting` pops
-            # wait_kind (state=waiting requires waiting_for) and a later
-            # `--set wait NEW` must restore the machine gate. Otherwise the
-            # old generated string permanently traps the task after the new
-            # date expires (P1 on gptme/gptme-contrib#1539 / 7a046593).
-            recurrence_gate = generated_wf and wait_kind in ("machine", None)
-            if recurrence_gate and wait_set is None:
-                # Clearing a generated recurrence gate means it is no longer
-                # a machine time-gate. Remove the generated blocker metadata as
-                # one unit so the task cannot stay permanently blocked without
-                # a date. Only default state to todo when this edit did not
-                # set state — `--set wait none --set state done` must not
-                # overwrite the explicit state (P1 on gptme/gptme-contrib#1539).
-                explicit_state = any(
-                    op == "set" and field == "state" for op, field, _value in changes
-                )
-                # Only default waiting → todo. A leftover recurrence-gate
-                # string on done/cancelled/active must not reopen or demote
-                # the task (P1 on gptme/gptme-contrib#1539 / ecb15242).
-                if not explicit_state and post.metadata.get("state") == "waiting":
-                    post.metadata["state"] = "todo"
-                if post.metadata.get("state") == "waiting":
-                    # `--set wait none --set state waiting` must not pop
-                    # waiting_for/waiting_since: state=waiting requires both
-                    # (P1 on gptme/gptme-contrib#1539 / b859fbf4). Drop
-                    # wait_kind so this is no longer a machine time-gate.
-                    post.metadata.pop("wait_kind", None)
-                else:
-                    post.metadata.pop("waiting_for", None)
-                    post.metadata.pop("waiting_since", None)
-                    post.metadata.pop("wait_kind", None)
-            elif recurrence_gate and post.metadata.get("state") == "waiting":
-                post.metadata["waiting_for"] = f"next recurrence gate (wait: {wait_set})"
-                post.metadata["wait_kind"] = "machine"
-            elif recurrence_gate:
-                # Wait changed but the task is no longer waiting. Drop the
-                # generated recurrence string so it cannot trap a todo/done
-                # task as a leftover human-looking blocker.
-                post.metadata.pop("waiting_for", None)
-                post.metadata.pop("waiting_since", None)
-                post.metadata.pop("wait_kind", None)
-        # Drop generated recurrence-gate waiting_for whenever the final state
-        # is not waiting, even if this edit did not touch wait. A state-only
-        # `--set state todo` used to skip the wait-sync (gated on wait_was_set)
-        # and leave waiting_for, which task_has_waiting_blocker treats as a
-        # human blocker on non-waiting states (P1 on gptme/gptme-contrib#1539
-        # / 69034e96). Keep wait: — the user did not ask to clear the date.
-        if post.metadata.get("state") != "waiting" and is_generated_recurrence_waiting_for(
-            post.metadata.get("waiting_for", "")
-        ):
-            post.metadata.pop("waiting_for", None)
-            post.metadata.pop("waiting_since", None)
-            post.metadata.pop("wait_kind", None)
-        # Auto-set waiting_since only when THIS edit explicitly sets state to waiting
-        # AND waiting_for is either already present or being set in the same edit.
-        # Guarding on waiting_for prevents an injected waiting_since from triggering
-        # the pre-commit hook error "waiting_since requires waiting_for".
-        transitioning_to_waiting = any(
-            op == "set" and field == "state" and value == "waiting" for op, field, value in changes
-        )
-        waiting_for_present = post.metadata.get("waiting_for") or any(
-            op == "set" and field == "waiting_for" and value is not None
-            for op, field, value in changes
-        )
-        if transitioning_to_waiting and waiting_for_present:
-            from datetime import datetime as _dt, timezone as _tz
-
-            # Full ISO datetime for intra-day resolution (ErikBjare request, 2026-06-16).
-            # validate_task_frontmatter.py's validate_timestamp() accepts both YYYY-MM-DD
-            # and full ISO datetime via datetime.fromisoformat().
-            _now_iso = _dt.now(_tz.utc).isoformat(timespec="seconds")
-            if not post.metadata.get("waiting_since"):
-                post.metadata["waiting_since"] = _now_iso
-
-            # Cumulative waiting history (TASKS.md schema), written here so it can
-            # never disagree with waiting_since. Both fields were documented but
-            # had no live writer until 2026-09-03 — the only writer was a one-shot
-            # git-history backfill with no caller, so every value in the tree was
-            # frozen at whenever someone last ran it by hand.
-            #
-            # The discriminator is the *prior* state, not a missing waiting_since:
-            # leaving waiting does not clear waiting_since, so its absence would
-            # miss exactly the re-parks these fields exist to count.
-            if _prior_state != "waiting":
-                # first_waiting_since is stamped once and never overwritten — it
-                # is the cumulative blocker age that survives re-parks.
-                _since = post.metadata.get("waiting_since")
-                post.metadata.setdefault(
-                    "first_waiting_since", str(_since) if _since is not None else _now_iso
-                )
-
-                # waiting_spell_count counts distinct waiting spells; >= 3 is the
-                # re-park signal read by task_metadata_hygiene_audit check 16.
-                # Absent (or hand-corrupted) means "no spells recorded yet", so
-                # the post-increment value is 1.
-                try:
-                    _prior_spells = int(post.metadata.get("waiting_spell_count") or 0)
-                except (TypeError, ValueError):
-                    _prior_spells = 0
-                post.metadata["waiting_spell_count"] = max(_prior_spells, 0) + 1
-
-        # Strip now-stale actionable/blocker metadata when the edit lands the task
-        # in a terminal state (TASKS.md best-practice #7: terminal tasks must not
-        # keep next_action/waiting_for/waiting_since/wait). Recurring tasks reset to
-        # waiting further below and must keep these fields, so skip when recur is set.
-        # tracking_issue / upstream_coordination_id are intentionally preserved for
-        # permanent traceability.
-        # cancelled is terminal regardless of recur. A done task only escapes the
-        # terminal path when the recurrence reset below actually fires, and that
-        # reset is gated on parse_recur_interval() — so gate the *completed stamp*
-        # on the same parse rather than on the truthiness of recur:. Values the
-        # parser rejects (malformed strings, and cron expressions, which are
-        # documented-valid but not yet computed) leave the task sitting in done, so
-        # they are terminal in practice and must be stamped like any other.
-        #
-        # Stale-field cleanup is deliberately gated *differently*, on
-        # is_valid_recur_value() rather than parse_recur_interval(). A cron recur:
-        # is a documented-valid recurrence that gptodo simply cannot compute yet —
-        # the next-fire date lives in wait: and is maintained by whatever external
-        # scheduler owns the cron. Stripping wait:/next_action: there destroys that
-        # external state irrecoverably, so cron tasks keep their scheduling fields
-        # even though they are stamped and left in done. Genuinely malformed recur:
-        # values are not a recurrence at all, so they are cleaned like any terminal
-        # task.
-        recur = post.metadata.get("recur")
-        _will_recur = (
-            post.metadata.get("state") == "done"
-            and recur is not None
-            and parse_recur_interval(str(recur)) is not None
-        )
-        _recur_is_valid = recur is not None and is_valid_recur_value(str(recur))
-        _is_terminal_nonrecurring = post.metadata.get("state") == "cancelled" or (
-            post.metadata.get("state") == "done" and not _will_recur
-        )
-        _should_strip_stale_fields = post.metadata.get("state") == "cancelled" or (
-            post.metadata.get("state") == "done" and not _recur_is_valid
-        )
-        if _should_strip_stale_fields:
-            for _stale_field in (
-                "next_action",
-                "waiting_for",
-                "waiting_since",
-                "wait",
-                # Cumulative waiting history is cleared on terminal states only
-                # (TASKS.md schema): it exists to answer "how long was this
-                # really stuck?" and is meaningless once the task is closed.
-                "first_waiting_since",
-                "waiting_spell_count",
-            ):
-                post.metadata.pop(_stale_field, None)
-
-        # Auto-set completed timestamp when transitioning to a terminal state, and
-        # clear a stale stamp when this edit reopens a task. Both halves defer to an
-        # explicit `--set completed ...` in the same edit: the user's value wins over
-        # the automation in either direction.
-        #
-        # A non-terminal task carrying completed is stale even if the reopen happened
-        # outside gptodo (for example by editing the Markdown directly). Replace that
-        # stale value on the next terminal transition so the latest completion gets
-        # the timestamp, unless this invocation explicitly supplies or clears it.
-        #
-        # Both halves are gated on `_prior_state` — the state the task held *before*
-        # this edit — because a post-edit-only check cannot distinguish a transition
-        # from a re-assertion:
-        #   - Without the prior-state gate on the stamp, re-saving an already-done
-        #     legacy task (`--set state done` on a task that is already done and
-        #     predates this feature, so has no `completed`) fabricates a completion
-        #     of "just now", corrupting exactly the completion-duration / fast-close
-        #     signals this stamp exists to measure.
-        #   - Without the prior-state gate on the clear, an ordinary forward move
-        #     like waiting → active or backlog → todo silently deletes a `completed`
-        #     the task legitimately carries. Only a genuine reopen (terminal → open)
-        #     should drop it.
-        _terminal_states = ("done", "cancelled")
-        _state_target = next(
-            (value for op, field, value in reversed(changes) if op == "set" and field == "state"),
-            None,
-        )
-        _completed_explicitly_cleared = any(
-            op == "set" and field == "completed" and value is None for op, field, value in changes
-        )
-        _completed_explicitly_set = any(
-            op == "set" and field == "completed" and value is not None
-            for op, field, value in changes
-        )
-        _is_terminal_transition = (
-            _prior_state not in _terminal_states
-            and _state_target in _terminal_states
-            and _is_terminal_nonrecurring
-        )
-        if (
-            _is_terminal_transition
-            and not _completed_explicitly_set
-            and not _completed_explicitly_cleared
-        ):
-            post.metadata["completed"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        elif (
-            _prior_state in _terminal_states
-            and _state_target is not None
-            and _state_target not in _terminal_states
-            and not _completed_explicitly_set
-        ):
-            post.metadata.pop("completed", None)
-
-        # Report the actual metadata changes, including automatic fields such as
-        # completed and waiting_since, immediately before writing them.
+        try:
+            result = mutate_task(task.path, changes, force=force)
+        except TransitionError as exc:
+            console.print(f"[red]{exc}[/]")
+            raise SystemExit(1) from exc
         console.print(f"\nChanges to apply:\n  {task.name}:")
-        before = task.metadata
-        for field in sorted(set(before) | set(post.metadata)):
-            current = before.get(field)
-            new = post.metadata.get(field)
-            if current != new:
-                console.print(f"    {field}: {current} -> {new}")
-
-        # Save changes
-        with open(task.path, "w") as f:
-            f.write(frontmatter.dumps(post))
-
-    # Check if any tasks were marked as done and run completion hook
-    state_changes = [(op, field, value) for op, field, value in changes if field == "state"]
-    # An explicit `--set completed <value>` in this edit wins over every automatic
-    # clear, including the recurrence reset below — same contract the stamp/clear
-    # pair honours above. `changes` is per-invocation, not per-task, so it is
-    # computed once here.
-    _completed_explicitly_set_global = any(
-        op == "set" and field == "completed" and value is not None for op, field, value in changes
-    )
-    if any(value == "done" for _, _, value in state_changes):
-        completed_task_ids = []
-        for task in target_tasks:
-            # Re-load task to get updated metadata
-            post = frontmatter.load(task.path)
-            if post.metadata.get("state") == "done":
-                # Handle recur: reset task to waiting with advanced wait: date
-                recur = post.metadata.get("recur")
-                if recur:
-                    if parse_recur_interval(str(recur)) is None:
-                        completed_task_ids.append(task.id)
-                        continue
-                    from gptodo.utils import advance_wait, parse_wait
-
-                    current_wait = parse_wait(post.metadata.get("wait"))
-                    next_wait = advance_wait(current_wait, recur)
-                    wait_iso = next_wait.isoformat()
-                    post.metadata["state"] = "waiting"
-                    post.metadata["wait"] = wait_iso
-                    post.metadata["wait_kind"] = "machine"
-                    # validate_task_frontmatter requires waiting_for + waiting_since
-                    # on state=waiting. A leftover human blocker (e.g. "John to review")
-                    # would trap the task after the gate expires, so REPLACE it with a
-                    # recurrence-gate string. "next recurrence gate (wait: <date>)" is
-                    # classified as a time_gate by the auto-releaser, so the task
-                    # re-surfaces when wait: expires.
-                    post.metadata["waiting_for"] = f"next recurrence gate (wait: {wait_iso})"
-                    post.metadata["waiting_since"] = datetime.now(timezone.utc).isoformat(
-                        timespec="seconds"
-                    )
-                    # A stale probe from a previous waiting cycle no longer describes
-                    # the new recurrence gate. Clear it so task_has_waiting_blocker
-                    # uses the wait: date rather than the old probe exit-code.
-                    post.metadata.pop("probe", None)
-                    if not _completed_explicitly_set_global:
-                        post.metadata.pop("completed", None)
-                    with open(task.path, "w") as f:
-                        f.write(frontmatter.dumps(post))
-                    console.print(
-                        f"[cyan]↩ {task.name} recurring — reset to waiting, next wait: {next_wait}[/]"
-                    )
-                    continue  # skip done-completion logic for recurring tasks
-
-                completed_task_ids.append(task.id)
-
-                # Run task completion hook if configured via env var
-                import subprocess
-
-                hook_cmd = os.environ.get("HOOK_TASK_DONE")
-                if hook_cmd:
-                    try:
-                        subprocess.run([hook_cmd, task.id, task.name, str(repo_root)], check=False)
-                    except Exception as e:
-                        console.print(f"[yellow]Note: Task completion hook error: {e}[/]")
-
-        # Auto-unblock dependent tasks and handle fan-in completion
-        if completed_task_ids:
-            # Reload all tasks to get fresh state
-            all_tasks = load_tasks(tasks_dir)
-            unblocked = auto_unblock_with_fan_in(completed_task_ids, all_tasks, tasks_dir)
-            if unblocked:
-                console.print("\n[cyan]📋 Auto-unblocked/completed:[/]")
-                for task_name, action in unblocked:
-                    if "fan-in" in action:
-                        console.print(f"  [magenta]🎯[/] {task_name} ({action})")
-                    else:
-                        console.print(f"  [green]✓[/] {task_name} ({action})")
+        for field, (current, new) in sorted(result.changed_fields.items()):
+            console.print(f"    {field}: {current} -> {new}")
+        if result.requested_state == "done" and result.effective_state == "waiting":
+            console.print(
+                f"[cyan]↩ {task.name} recurring — reset to waiting, next wait: {result.post.metadata['wait']}[/]"
+            )
 
     # Show success message
     count = len(target_tasks)
@@ -3307,6 +2908,7 @@ _CLAIM_REFUSED_STATES = {
     "someday",
     "done",
     "cancelled",
+    "expired",
 }
 # States that get auto-promoted to active on claim.
 _CLAIM_PROMOTABLE_STATES = {"backlog", "todo"}
@@ -3400,47 +3002,38 @@ def claim(task_id: str, agent_override: str | None):
     task = target_tasks[0]
     agent = _resolve_agent_name(repo_root, agent_override)
 
-    current_state = normalize_state(task.metadata.get("state", "backlog"), warn=False)
-    current_assignee = task.metadata.get("assigned_to")
-    current_assigned_at = task.metadata.get("assigned_at")
+    from gptodo.lifecycle import mutate_task, TransitionError
 
-    if current_state in _CLAIM_REFUSED_STATES:
-        console.print(
-            f"[red]Refusing to claim {task.id}: state is '{current_state}'. "
-            "Release from draft, resolve the blocker, or revive from someday "
-            "before claiming.[/]"
-        )
+    def prepare(post):
+        current_state = normalize_state(post.metadata.get("state", "backlog"), warn=False)
+        if current_state in _CLAIM_REFUSED_STATES:
+            raise TransitionError(
+                f"Refusing to claim {task.id}: state is '{current_state}'. "
+                "Release from draft, resolve the blocker, or revive from someday/expired before claiming."
+            )
+        if (
+            current_state == "active"
+            and post.metadata.get("assigned_to") == agent
+            and post.metadata.get("assigned_at") is not None
+        ):
+            return []
+        return [
+            ("set", "state", "active"),
+            ("set", "assigned_to", agent),
+            ("set", "assigned_at", datetime.now(timezone.utc).replace(microsecond=0).isoformat()),
+        ]
+
+    try:
+        result = mutate_task(task.path, prepare=prepare, expected_state=task.state)
+    except TransitionError as exc:
+        console.print(f"[red]{exc}[/]")
         sys.exit(1)
-
-    # Idempotent no-op: already active, same owner, has assigned_at.
-    if current_state == "active" and current_assignee == agent and current_assigned_at is not None:
-        console.print(
-            f"[yellow]Already claimed:[/] {task.id} (owner={agent}, since={current_assigned_at})"
-        )
-        return
-
-    post = frontmatter.load(task.path)
-
-    new_state = "active" if current_state in _CLAIM_PROMOTABLE_STATES else current_state
-    if current_state in _CLAIM_PROMOTABLE_STATES:
-        post.metadata["state"] = new_state
-
-    post.metadata["assigned_to"] = agent
-    now_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    post.metadata["assigned_at"] = now_utc
-
-    with open(task.path, "w") as f:
-        f.write(frontmatter.dumps(post))
-
-    if current_state in _CLAIM_PROMOTABLE_STATES:
-        console.print(
-            f"[green]✓ Claimed[/] {task.id} (state: {current_state} → active, owner: {agent})"
-        )
-    elif current_assignee != agent:
-        prev = current_assignee or "unassigned"
-        console.print(f"[green]✓ Reassigned[/] {task.id} (owner: {prev} → {agent}, state: active)")
+    if not result.written:
+        console.print(f"[yellow]Already claimed:[/] {task.id} (owner={agent})")
     else:
-        console.print(f"[green]✓ Re-claimed[/] {task.id} (owner: {agent}, state: active)")
+        console.print(
+            f"[green]✓ Claimed[/] {task.id} (state: {result.old_state} → active, owner: {agent})"
+        )
 
 
 @cli.command("tags")
@@ -4441,8 +4034,6 @@ def expire(days: int, states: tuple[str, ...], dry_run: bool, output_json: bool)
         gptodo expire --dry-run             # preview, don't modify
         gptodo expire --json                # machine-readable output
     """
-    frontmatter_ = frontmatter  # local alias for clarity
-
     if days <= 0:
         msg = "--days must be a positive integer"
         if output_json:
@@ -4498,12 +4089,22 @@ def expire(days: int, states: tuple[str, ...], dry_run: bool, output_json: bool)
             # Stamp frontmatter and rewrite the file. We intentionally do this
             # per-task rather than batching so a mid-run failure leaves the
             # already-updated files consistent.
-            post = frontmatter_.load(task.path)
-            post.metadata["expired_from"] = task.state
-            post.metadata["expired_at"] = expired_at_str
-            post.metadata["state"] = "expired"
-            with open(task.path, "w") as f:
-                f.write(frontmatter_.dumps(post))
+            from gptodo.lifecycle import mutate_task, TransitionError
+
+            def prepare(post):
+                fresh = load_tasks(tasks_dir, single_file=task.path)[0]
+                if not _task_is_expirable(fresh, cutoff, eligible):
+                    raise TransitionError("Task is no longer expirable")
+                return [
+                    ("set", "expired_from", fresh.state),
+                    ("set", "expired_at", expired_at_str),
+                    ("set", "state", "expired"),
+                ]
+
+            try:
+                mutate_task(task.path, prepare=prepare, expected_state=task.state)
+            except (TransitionError, FileNotFoundError):
+                continue
         expired_records.append(record)
 
     if output_json:
@@ -4836,9 +4437,13 @@ def sync(update, output_json, use_cache, light, full, changes_only):
         expected_state = "done" if issue_state == "CLOSED" else (task.state or "active")
         if issue_state == "OPEN" and task.state == "done":
             expected_state = "active"  # Reopened issue
+        if task.state == "cancelled":
+            expected_state = "cancelled"  # External sync never revives cancellation.
 
-        in_sync = (issue_state == "CLOSED" and task.state == "done") or (
-            issue_state == "OPEN" and task.state in ["backlog", "active", "waiting"]
+        in_sync = (
+            task.state == "cancelled"
+            or (issue_state == "CLOSED" and task.state == "done")
+            or (issue_state == "OPEN" and task.state in ["backlog", "active", "waiting"])
         )
 
         # Check for new activity since waiting_since (Issue #241 feature)
@@ -4881,11 +4486,27 @@ def sync(update, output_json, use_cache, light, full, changes_only):
 
         # Update task if requested and out of sync
         if update and not in_sync:
-            if update_task_state(task.path, expected_state):
-                result["updated"] = True
-                result["new_state"] = expected_state
-            else:
-                result["error"] = "Failed to update task file"
+            from gptodo.lifecycle import mutate_task, TransitionError
+
+            def prepare(post):
+                fresh_state = normalize_state(post.metadata.get("state", "backlog"), warn=False)
+                if fresh_state == "cancelled":
+                    return []
+                target = (
+                    "done"
+                    if issue_state == "CLOSED"
+                    else ("active" if fresh_state == "done" else fresh_state)
+                )
+                return [("set", "state", target)]
+
+            try:
+                mutation = mutate_task(
+                    task.path, prepare=prepare, expected_state=task.state, intent="sync_reopen"
+                )
+                result["updated"] = mutation.written
+                result["new_state"] = mutation.effective_state
+            except (TransitionError, OSError) as exc:
+                result["error"] = f"Failed to update task file: {exc}"
 
         results.append(result)
 
