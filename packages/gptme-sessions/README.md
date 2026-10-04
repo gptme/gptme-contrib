@@ -196,6 +196,16 @@ records into monthly archive files.
 
 Field notes:
 
+- `session_id` is the record identity. Autonomous launchers should pass their
+  existing immutable full run UUID to `post_session(session_id=...)` and carry
+  the compact operator label separately as `session_label`. The label may
+  repeat; never use it for joins, updates, or commit-trailer ownership.
+  Legacy short-ID records remain readable without relabelling or deduplication.
+  Attempt-kind stamping refuses a four-hex ID spanning distinct timestamps.
+- `session_label` is optional display metadata, independent of the harness's
+  native session ID and any trajectory-binding sentinel. This API does not
+  allocate a second run ID or migrate existing launcher consumers.
+
 - `model` is the requested model, normalised via an alias table (`claude-opus-4-6` → `opus`,
   `anthropic/claude-sonnet-4-5` → `sonnet`); models without an alias just lose a known provider
   prefix (`openrouter/<org>/`, `anthropic/`, `openai/`, `openai-subscription/`, `xai/`), e.g.
