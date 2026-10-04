@@ -935,7 +935,9 @@ def is_valid_recur_value(recur: str) -> bool:
     return parse_recur_interval(recur) is not None or is_cron_recur_expression(recur)
 
 
-def advance_wait(current_wait: date | datetime | None, recur: str) -> date | datetime:
+def advance_wait(
+    current_wait: date | datetime | None, recur: str, *, now: datetime | None = None
+) -> date | datetime:
     """Compute the next wait: value after completing a recurring task.
 
     Behaviour depends on the wait type and recur interval:
@@ -949,13 +951,27 @@ def advance_wait(current_wait: date | datetime | None, recur: str) -> date | dat
 
     if isinstance(current_wait, datetime):
         # Match tz-awareness to avoid TypeError when current_wait is tz-aware
-        now = datetime.now(tz=current_wait.tzinfo)
+        if now is None:
+            now = datetime.now(tz=current_wait.tzinfo)
+        elif current_wait.tzinfo is None:
+            now = now.replace(tzinfo=None)
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=current_wait.tzinfo)
+        else:
+            now = now.astimezone(current_wait.tzinfo)
         base = now if current_wait < now else current_wait
         return (now + timedelta(days=7)) if interval is None else (base + interval)
 
     # Date-only or None path
-    now = datetime.now()
-    today = date.today()
+    if now is None:
+        now = datetime.now()
+        today = date.today()
+    else:
+        # Legacy date-only recurrence uses local naive datetime for sub-day
+        # waits. Preserve that encoding while sharing the supplied instant.
+        if now.tzinfo is not None:
+            now = now.astimezone().replace(tzinfo=None)
+        today = now.date()
     if interval is None:
         return today + timedelta(days=7)
     # Sub-day interval: date arithmetic silently drops hours; return datetime instead
@@ -2034,14 +2050,11 @@ def update_task_state(task_path: Path, new_state: str) -> bool:
     If new_state is a deprecated alias (new, paused),
     it will be normalized to the canonical state (backlog) with a warning.
     """
-    frontmatter = _get_frontmatter()
+    from gptodo.lifecycle import mutate_task
+
     try:
-        # Normalize deprecated states with warning
         canonical_state = normalize_state(new_state, warn=True)
-        post = frontmatter.load(task_path)
-        post["state"] = canonical_state
-        with open(task_path, "w") as f:
-            f.write(frontmatter.dumps(post))
+        mutate_task(task_path, patch={"state": canonical_state})
         return True
     except Exception:
         return False
