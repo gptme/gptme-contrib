@@ -1,6 +1,7 @@
 """Canonical run IDs remain independent from reusable display labels."""
 
 import json
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -47,7 +48,11 @@ def test_run_id_with_label_uses_canonical_commit_trailer_ownership(tmp_path: Pat
         "productive": True,
         "tool_calls": {"patch": 1},
     }
-    with patch("gptme_sessions.post_session.extract_from_path", return_value=signals):
+    with patch.object(
+        sys.modules["gptme_sessions.post_session"],
+        "extract_from_path",
+        return_value=signals,
+    ):
         result = post_session(
             store=SessionStore(sessions_dir=tmp_path / "store"),
             harness="gptme",
