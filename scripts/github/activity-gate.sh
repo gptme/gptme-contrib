@@ -2392,8 +2392,11 @@ notification_latest_actor_class() {
            (($review_comments | flatten)[] | {login: (.user.login // ""), type: (.user.type // ""), time: (.created_at // "")}) ]
          | map(select(.login != "" and .time != "")) | sort_by(.time)) as $activity
         | ($activity | last) as $latest
+        # GitHub timestamps have one-second precision. A comment created in the
+        # same second as the prior notification watermark may still be unseen,
+        # so ties must fail open for non-self human activity.
         | if ($since != "" and any($activity[];
-                .time > $since
+                .time >= $since
                 and (.login | is_self_login | not)
                 and is_human_actor)) then "human"
           elif $latest == null then "unknown"
