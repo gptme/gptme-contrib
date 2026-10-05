@@ -2320,7 +2320,7 @@ notification_subject_is_closed() {
 # subject is closed/merged AND the latest comment/review is automation or the
 # running identity. A human comment on a closed thread stays emit-eligible
 # (it may be a reopen request). Without this, a bot/self comment on an
-# already-closed issue re-armed PM dispatches (ErikBjare/bob#1335, 2026-10-05).
+# already-closed issue re-armed PM dispatches (upstream issue #1335, 2026-10-05).
 # Fails open: any API error or unknown actor keeps today's emit behaviour.
 # Args: <owner/repo> <number> <subject_type>.
 notification_comment_is_closed_noise() {
