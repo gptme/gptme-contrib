@@ -186,6 +186,9 @@ def _run_gate(
     fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
 
     env = os.environ.copy()
+    # Keep actor classification deterministic when the developer's shell has a
+    # different live bot identity configured.
+    env["BOT_USERNAME"] = "test-author"
     env["TEST_NOTIF_ID"] = NOTIF_ID
     env["TEST_NOTIF_REPO"] = NOTIF_REPO
     env["TEST_NOTIF_NUMBER"] = str(NOTIF_NUMBER)
