@@ -2557,10 +2557,9 @@ def notification_priority:
                 if [ "$_subj_type" = "PullRequest" ] \
                         && { [ "$_notif_reason" = "author" ] || [ "$_notif_reason" = "comment" ]; } \
                         && [ "$number" -gt 0 ] 2>/dev/null; then
-                    _actor_since=""
+                    _actor_since=$prior
                     _actor_kind="pr"
                     if [ "$_notif_reason" = "comment" ]; then
-                        _actor_since=$prior
                         _actor_kind=pr-all
                     fi
                     _actor_class=$(notification_latest_actor_class \
@@ -2639,10 +2638,9 @@ def notification_priority:
                         && { [ "$notif_reason" = "author" ] || [ "$notif_reason" = "comment" ]; } \
                         && [ "$number" -gt 0 ] 2>/dev/null \
                         && [ -n "$prior" ]; then
-                    _actor_since=""
+                    _actor_since=$prior
                     _actor_kind="pr"
                     if [ "$notif_reason" = "comment" ]; then
-                        _actor_since=$prior
                         _actor_kind=pr-all
                     fi
                     if [ "$(notification_latest_actor_class "$repo" "$number" "$_actor_kind" "$_actor_since")" = "bot" ]; then

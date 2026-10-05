@@ -51,6 +51,7 @@ human_before_latest_updated_at = os.environ.get(
     "TEST_HUMAN_BEFORE_LATEST_UPDATED_AT", human_before_latest_at
 )
 older_comment_actor = os.environ.get("TEST_OLDER_COMMENT_ACTOR", "")
+older_comment_actor_type = os.environ.get("TEST_OLDER_COMMENT_ACTOR_TYPE", "User")
 
 
 def apply_jq(data, jq_expr):
@@ -119,7 +120,10 @@ if argv[0] == "api":
         if older_comment_actor:
             comments.append(
                 {
-                    "user": {"login": older_comment_actor, "type": "User"},
+                    "user": {
+                        "login": older_comment_actor,
+                        "type": older_comment_actor_type,
+                    },
                     "created_at": "2026-09-17T09:30:00Z",
                 }
             )
@@ -185,6 +189,7 @@ def _run_gate(
     human_before_latest_at: str = "2026-09-17T10:00:00Z",
     human_before_latest_updated_at: str | None = None,
     older_comment_actor: str = "",
+    older_comment_actor_type: str = "User",
     prior: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
@@ -212,6 +217,7 @@ def _run_gate(
         human_before_latest_updated_at or human_before_latest_at
     )
     env["TEST_OLDER_COMMENT_ACTOR"] = older_comment_actor
+    env["TEST_OLDER_COMMENT_ACTOR_TYPE"] = older_comment_actor_type
     env["PATH"] = f"{tmp}:{env['PATH']}"
 
     # Established state dir: seed a sibling so first-sight emits.
@@ -302,6 +308,7 @@ def test_unknown_actor_after_bot_on_closed_issue_emits() -> None:
             issue_state="closed",
             latest_actor_missing_user=True,
             older_comment_actor="codecov[bot]",
+            older_comment_actor_type="Bot",
             prior="2026-09-17T09:00:00Z",
         )
         assert result.returncode in (0, 1), result.stderr
