@@ -2547,7 +2547,14 @@ def notification_priority:
                 if [ "$_subj_type" = "PullRequest" ] \
                         && { [ "$_notif_reason" = "author" ] || [ "$_notif_reason" = "comment" ]; } \
                         && [ "$number" -gt 0 ] 2>/dev/null; then
-                    _actor_class=$(notification_latest_actor_class "$repo" "$number")
+                    _actor_since=""
+                    _actor_kind="pr"
+                    if [ "$_notif_reason" = "comment" ]; then
+                        _actor_since=$prior
+                        _actor_kind=pr-all
+                    fi
+                    _actor_class=$(notification_latest_actor_class \
+                        "$repo" "$number" "$_actor_kind" "$_actor_since")
                     if [ -n "$prior" ] && [ "$_actor_class" = "bot" ]; then
                         printf '%s' "$notif_updated" > "$state_file"
                         printf '%s#%s' "$repo" "$number" > "$map_file"
@@ -2621,9 +2628,16 @@ def notification_priority:
                 if [ "$notif_subject_type" = "PullRequest" ] \
                         && { [ "$notif_reason" = "author" ] || [ "$notif_reason" = "comment" ]; } \
                         && [ "$number" -gt 0 ] 2>/dev/null \
-                        && [ -n "$prior" ] \
-                        && [ "$(notification_latest_actor_class "$repo" "$number")" = "bot" ]; then
-                    continue
+                        && [ -n "$prior" ]; then
+                    _actor_since=""
+                    _actor_kind="pr"
+                    if [ "$notif_reason" = "comment" ]; then
+                        _actor_since=$prior
+                        _actor_kind=pr-all
+                    fi
+                    if [ "$(notification_latest_actor_class "$repo" "$number" "$_actor_kind" "$_actor_since")" = "bot" ]; then
+                        continue
+                    fi
                 fi
                 new_count=$((new_count + 1))
             fi

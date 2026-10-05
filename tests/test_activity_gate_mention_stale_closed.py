@@ -42,6 +42,7 @@ issue_state = os.environ.get("TEST_ISSUE_STATE", "open")
 latest_actor = os.environ.get("TEST_LATEST_ACTOR", "test-author")
 latest_actor_surface = os.environ.get("TEST_LATEST_ACTOR_SURFACE", "comment")
 human_before_latest = os.environ.get("TEST_HUMAN_BEFORE_LATEST", "")
+older_comment_actor = os.environ.get("TEST_OLDER_COMMENT_ACTOR", "")
 
 
 def apply_jq(data, jq_expr):
@@ -107,6 +108,13 @@ if argv[0] == "api":
         sys.exit(0)
     if f"/issues/{notif_number}/comments" in endpoint:
         comments = []
+        if older_comment_actor:
+            comments.append(
+                {
+                    "user": {"login": older_comment_actor},
+                    "created_at": "2026-09-17T09:30:00Z",
+                }
+            )
         if human_before_latest:
             comments.append(
                 {
@@ -159,6 +167,7 @@ def _run_gate(
     latest_actor: str = "test-author",
     latest_actor_surface: str = "comment",
     human_before_latest: str = "",
+    older_comment_actor: str = "",
     prior: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
@@ -175,6 +184,7 @@ def _run_gate(
     env["TEST_LATEST_ACTOR"] = latest_actor
     env["TEST_LATEST_ACTOR_SURFACE"] = latest_actor_surface
     env["TEST_HUMAN_BEFORE_LATEST"] = human_before_latest
+    env["TEST_OLDER_COMMENT_ACTOR"] = older_comment_actor
     env["PATH"] = f"{tmp}:{env['PATH']}"
 
     # Established state dir: seed a sibling so first-sight emits.
@@ -286,6 +296,7 @@ def test_inline_human_comment_on_closed_pr_emits() -> None:
             issue_state="closed",
             latest_actor="maintainer",
             latest_actor_surface="inline",
+            older_comment_actor="test-author",
             prior="2026-09-17T09:00:00Z",
         )
         assert result.returncode in (0, 1), result.stderr
