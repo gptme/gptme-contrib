@@ -40,6 +40,7 @@ notif_reason = os.environ.get("TEST_NOTIF_REASON", "mention")
 subject_type = os.environ.get("TEST_SUBJECT_TYPE", "Issue")
 issue_state = os.environ.get("TEST_ISSUE_STATE", "open")
 latest_actor = os.environ.get("TEST_LATEST_ACTOR", "test-author")
+latest_actor_type = os.environ.get("TEST_LATEST_ACTOR_TYPE", "")
 latest_actor_surface = os.environ.get("TEST_LATEST_ACTOR_SURFACE", "comment")
 human_before_latest = os.environ.get("TEST_HUMAN_BEFORE_LATEST", "")
 older_comment_actor = os.environ.get("TEST_OLDER_COMMENT_ACTOR", "")
@@ -111,21 +112,21 @@ if argv[0] == "api":
         if older_comment_actor:
             comments.append(
                 {
-                    "user": {"login": older_comment_actor},
+                    "user": {"login": older_comment_actor, "type": "User"},
                     "created_at": "2026-09-17T09:30:00Z",
                 }
             )
         if human_before_latest:
             comments.append(
                 {
-                    "user": {"login": human_before_latest},
+                    "user": {"login": human_before_latest, "type": "User"},
                     "created_at": "2026-09-17T10:00:00Z",
                 }
             )
         if latest_actor_surface == "comment":
             comments.append(
                 {
-                    "user": {"login": latest_actor},
+                    "user": {"login": latest_actor, "type": latest_actor_type},
                     "created_at": "2026-09-17T11:00:00Z",
                 }
             )
@@ -135,14 +136,14 @@ if argv[0] == "api":
     if f"/pulls/{notif_number}/reviews" in endpoint:
         reviews = []
         if latest_actor_surface == "review":
-            reviews = [{"user": {"login": latest_actor}, "submitted_at": "2026-09-17T10:00:00Z"}]
+            reviews = [{"user": {"login": latest_actor, "type": latest_actor_type}, "submitted_at": "2026-09-17T10:00:00Z"}]
         pages = [reviews]
         print(apply_jq(pages, jq_expr) if jq_expr else json.dumps(pages))
         sys.exit(0)
     if f"/pulls/{notif_number}/comments" in endpoint:
         comments = []
         if latest_actor_surface == "inline":
-            comments = [{"user": {"login": latest_actor}, "created_at": "2026-09-17T10:00:00Z"}]
+            comments = [{"user": {"login": latest_actor, "type": latest_actor_type}, "created_at": "2026-09-17T10:00:00Z"}]
         pages = [comments]
         print(apply_jq(pages, jq_expr) if jq_expr else json.dumps(pages))
         sys.exit(0)
@@ -165,6 +166,7 @@ def _run_gate(
     subject_type: str = "Issue",
     issue_state: str = "open",
     latest_actor: str = "test-author",
+    latest_actor_type: str = "",
     latest_actor_surface: str = "comment",
     human_before_latest: str = "",
     older_comment_actor: str = "",
@@ -181,7 +183,9 @@ def _run_gate(
     env["TEST_NOTIF_REASON"] = reason
     env["TEST_SUBJECT_TYPE"] = subject_type
     env["TEST_ISSUE_STATE"] = issue_state
+    env["TEST_NOTIF_UPDATED_AT"] = "2026-09-17T11:00:00Z"
     env["TEST_LATEST_ACTOR"] = latest_actor
+    env["TEST_LATEST_ACTOR_TYPE"] = latest_actor_type
     env["TEST_LATEST_ACTOR_SURFACE"] = latest_actor_surface
     env["TEST_HUMAN_BEFORE_LATEST"] = human_before_latest
     env["TEST_OLDER_COMMENT_ACTOR"] = older_comment_actor
@@ -282,6 +286,25 @@ def test_human_comment_after_prior_then_bot_on_closed_issue_emits() -> None:
         assert len(emitted) == 1, result.stdout
 
 
+def test_bot_shaped_user_comment_on_closed_issue_emits() -> None:
+    """An explicit REST User type outranks bot-like login heuristics."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason="comment",
+            issue_state="closed",
+            latest_actor="renovate-helper",
+            latest_actor_type="User",
+            prior="2026-09-17T09:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert len(_emitted_notifications(result.stdout)) == 1, result.stdout
+
+
 def test_inline_human_comment_on_closed_pr_emits() -> None:
     """A human inline reply must outrank an older self issue comment."""
     with tempfile.TemporaryDirectory() as tmp_str:
@@ -295,6 +318,7 @@ def test_inline_human_comment_on_closed_pr_emits() -> None:
             subject_type="PullRequest",
             issue_state="closed",
             latest_actor="maintainer",
+            latest_actor_type="User",
             latest_actor_surface="inline",
             older_comment_actor="test-author",
             prior="2026-09-17T09:00:00Z",

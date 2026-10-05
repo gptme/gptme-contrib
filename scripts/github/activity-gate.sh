@@ -2381,19 +2381,26 @@ notification_latest_actor_class() {
             or (ascii_downcase == ($author | ascii_downcase));
         def is_bot_login:
             test("(\\[bot\\]$)|(-bot$)|(-apps$)|(^github-actions$)|(^dependabot)|(^renovate)|(^codecov)|(^coderabbitai$)|(^copilot)|(^greptile)"; "i");
-        ([ (($comments | flatten)[] | {login: (.user.login // ""), time: (.created_at // "")}),
-           (($reviews | flatten)[] | {login: (.user.login // ""), time: (.submitted_at // "")}),
-           (($review_comments | flatten)[] | {login: (.user.login // ""), time: (.created_at // "")}) ]
+        def is_bot_actor:
+            .type == "Bot"
+            or ((.type == "") and (.login | is_bot_login));
+        def is_human_actor:
+            .type == "User"
+            or ((.type == "") and (.login | is_bot_login | not));
+        ([ (($comments | flatten)[] | {login: (.user.login // ""), type: (.user.type // ""), time: (.created_at // "")}),
+           (($reviews | flatten)[] | {login: (.user.login // ""), type: (.user.type // ""), time: (.submitted_at // "")}),
+           (($review_comments | flatten)[] | {login: (.user.login // ""), type: (.user.type // ""), time: (.created_at // "")}) ]
          | map(select(.login != "" and .time != "")) | sort_by(.time)) as $activity
         | ($activity | last) as $latest
         | if ($since != "" and any($activity[];
                 .time > $since
                 and (.login | is_self_login | not)
-                and (.login | is_bot_login | not))) then "human"
+                and is_human_actor)) then "human"
           elif $latest == null then "unknown"
           elif ($latest.login | is_self_login) then "self"
-          elif ($latest.login | is_bot_login) then "bot"
-          else "human" end
+          elif ($latest | is_bot_actor) then "bot"
+          elif ($latest | is_human_actor) then "human"
+          else "unknown" end
     ' 2>/dev/null || printf 'unknown'
 }
 
