@@ -1240,6 +1240,18 @@ def load_task(file: Path) -> Tuple[fmPost, SubtaskCount]:
     return post, subtasks
 
 
+def _as_list(value: Any) -> list:
+    """Coerce a list-typed frontmatter value so one malformed file can't crash every consumer.
+
+    ``validate_task_file`` already reports non-list values; this keeps the task loadable.
+    """
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    return [str(value)]
+
+
 def load_tasks(
     tasks_dir: Path,
     recursive: bool = False,
@@ -1351,9 +1363,9 @@ def load_tasks(
             # Create TaskInfo object
             # Get relationship fields (new typed dependencies)
             # requires is canonical, depends is deprecated alias, blocks is NOT merged (different semantics)
-            depends_list = metadata.get("depends", [])
-            blocks_list = metadata.get("blocks", [])  # NOT merged - different semantics
-            requires_list = metadata.get("requires", [])
+            depends_list = _as_list(metadata.get("depends"))
+            blocks_list = _as_list(metadata.get("blocks"))  # NOT merged - different semantics
+            requires_list = _as_list(metadata.get("requires"))
 
             # Warn if multiple fields are present (potential confusion)
             fields_present = []
@@ -1393,12 +1405,12 @@ def load_tasks(
                 created=created,
                 modified=modified,
                 priority=metadata.get("priority"),
-                tags=metadata.get("tags", []),
+                tags=_as_list(metadata.get("tags")),
                 depends=depends_list,  # Deprecated, use requires instead
                 requires=effective_requires,  # Canonical required deps
-                related=metadata.get("related", []),
+                related=_as_list(metadata.get("related")),
                 parent=metadata.get("parent"),
-                discovered_from=metadata.get("discovered-from", []),
+                discovered_from=_as_list(metadata.get("discovered-from")),
                 subtasks=subtasks,
                 issues=issues,
                 metadata=metadata,
