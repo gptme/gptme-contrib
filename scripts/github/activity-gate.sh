@@ -2316,6 +2316,21 @@ notification_subject_is_closed() {
     [ "$state" = "closed" ]
 }
 
+# Returns exit 0 when a `comment`-reason notification is pure noise: the
+# subject is closed/merged AND the latest comment/review is automation or the
+# running identity. A human comment on a closed thread stays emit-eligible
+# (it may be a reopen request). Without this, a bot/self comment on an
+# already-closed issue re-armed PM dispatches (ErikBjare/bob#1335, 2026-10-05).
+# Fails open: any API error or unknown actor keeps today's emit behaviour.
+# Args: <owner/repo> <number> <subject_type>.
+notification_comment_is_closed_noise() {
+    local repo="$1" number="$2" subject_type="$3" kind=pr actor
+    notification_subject_is_closed "$repo" "$number" || return 1
+    [ "$subject_type" = "Issue" ] && kind=issue
+    actor=$(notification_latest_actor_class "$repo" "$number" "$kind")
+    [ "$actor" = "bot" ] || [ "$actor" = "self" ]
+}
+
 # Return the actor class of the most recent comment/review on a PR subject:
 # "bot" (automation), "human", "self" (the running identity), or "unknown"
 # (no activity or API error — fail open). Used to decide whether an
@@ -2328,9 +2343,9 @@ notification_subject_is_closed() {
 # suffix here (e.g. "greptile-apps"), so -bot/-apps suffixes and well-known
 # CI/review bots are matched too. Failure direction is safe: an unknown actor
 # class returns "unknown" and the caller keeps today's emit behavior.
-# Args: <owner/repo> <pr_number>.
+# Args: <owner/repo> <number> [kind]; kind=issue skips the PR-only reviews read.
 notification_latest_actor_class() {
-    local repo=$1 number=$2
+    local repo=$1 number=$2 kind="${3:-pr}"
     local bot="${BOT_USERNAME:-$AUTHOR}"
     local author="${AUTHOR:-$bot}"
     local comments_json reviews_json
@@ -2338,10 +2353,14 @@ notification_latest_actor_class() {
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
         "repos/$repo/issues/$number/comments?per_page=100" 2>/dev/null) || { printf 'unknown'; return 0; }
-    reviews_json=$(gh api --paginate --slurp \
-        -H "Accept: application/vnd.github+json" \
-        -H "X-GitHub-Api-Version: 2022-11-28" \
-        "repos/$repo/pulls/$number/reviews?per_page=100" 2>/dev/null) || { printf 'unknown'; return 0; }
+    if [ "$kind" = "issue" ]; then
+        reviews_json='[[]]'
+    else
+        reviews_json=$(gh api --paginate --slurp \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$repo/pulls/$number/reviews?per_page=100" 2>/dev/null) || { printf 'unknown'; return 0; }
+    fi
     jq -nr --arg bot "$bot" --arg author "$author" \
         --argjson comments "$comments_json" \
         --argjson reviews "$reviews_json" '
@@ -2480,6 +2499,15 @@ def notification_priority:
                     [ "$number" -gt 0 ] 2>/dev/null && printf '%s#%s' "$repo" "$number" > "$map_file"
                     continue
                 fi
+                # `comment` on a closed thread whose latest actor is bot/self:
+                # same drop-only staleness, but a human comment still emits.
+                if [ "$_notif_reason" = "comment" ] \
+                        && [ "$number" -gt 0 ] 2>/dev/null \
+                        && notification_comment_is_closed_noise "$repo" "$number" "$_subj_type"; then
+                    printf '%s' "$notif_updated" > "$state_file"
+                    printf '%s#%s' "$repo" "$number" > "$map_file"
+                    continue
+                fi
                 # Bot-only author/comment PR notifications: the trigger was
                 # automation (Codecov/Greptile/Dependabot) and no later human
                 # comment or review exists, so there is no human handoff to act
@@ -2558,6 +2586,11 @@ def notification_priority:
                 if { [ "$notif_reason" = "mention" ] || [ "$notif_reason" = "author" ]; } \
                         && [ "$number" -gt 0 ] 2>/dev/null \
                         && notification_subject_is_closed "$repo" "$number"; then
+                    continue
+                fi
+                if [ "$notif_reason" = "comment" ] \
+                        && [ "$number" -gt 0 ] 2>/dev/null \
+                        && notification_comment_is_closed_noise "$repo" "$number" "$notif_subject_type"; then
                     continue
                 fi
                 # Mirror the jsonl branch's bot-only author/comment filter so
