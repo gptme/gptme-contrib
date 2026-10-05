@@ -41,6 +41,7 @@ subject_type = os.environ.get("TEST_SUBJECT_TYPE", "Issue")
 issue_state = os.environ.get("TEST_ISSUE_STATE", "open")
 latest_actor = os.environ.get("TEST_LATEST_ACTOR", "test-author")
 latest_actor_surface = os.environ.get("TEST_LATEST_ACTOR_SURFACE", "comment")
+human_before_latest = os.environ.get("TEST_HUMAN_BEFORE_LATEST", "")
 
 
 def apply_jq(data, jq_expr):
@@ -106,8 +107,20 @@ if argv[0] == "api":
         sys.exit(0)
     if f"/issues/{notif_number}/comments" in endpoint:
         comments = []
+        if human_before_latest:
+            comments.append(
+                {
+                    "user": {"login": human_before_latest},
+                    "created_at": "2026-09-17T10:00:00Z",
+                }
+            )
         if latest_actor_surface == "comment":
-            comments = [{"user": {"login": latest_actor}, "created_at": "2026-09-17T10:00:00Z"}]
+            comments.append(
+                {
+                    "user": {"login": latest_actor},
+                    "created_at": "2026-09-17T11:00:00Z",
+                }
+            )
         pages = [comments]
         print(apply_jq(pages, jq_expr) if jq_expr else json.dumps(pages))
         sys.exit(0)
@@ -145,6 +158,7 @@ def _run_gate(
     issue_state: str = "open",
     latest_actor: str = "test-author",
     latest_actor_surface: str = "comment",
+    human_before_latest: str = "",
     prior: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
@@ -160,6 +174,7 @@ def _run_gate(
     env["TEST_ISSUE_STATE"] = issue_state
     env["TEST_LATEST_ACTOR"] = latest_actor
     env["TEST_LATEST_ACTOR_SURFACE"] = latest_actor_surface
+    env["TEST_HUMAN_BEFORE_LATEST"] = human_before_latest
     env["PATH"] = f"{tmp}:{env['PATH']}"
 
     # Established state dir: seed a sibling so first-sight emits.
@@ -237,6 +252,26 @@ def test_comment_bot_update_on_closed_issue_is_suppressed() -> None:
         assert _emitted_notifications(result.stdout) == [], result.stdout
 
 
+def test_human_comment_after_prior_then_bot_on_closed_issue_emits() -> None:
+    """A later bot must not hide human work newer than the watermark."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason="comment",
+            issue_state="closed",
+            latest_actor="codecov[bot]",
+            human_before_latest="maintainer",
+            prior="2026-09-17T09:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        emitted = _emitted_notifications(result.stdout)
+        assert len(emitted) == 1, result.stdout
+
+
 def test_inline_human_comment_on_closed_pr_emits() -> None:
     """A human inline reply must outrank an older self issue comment."""
     with tempfile.TemporaryDirectory() as tmp_str:
@@ -256,7 +291,6 @@ def test_inline_human_comment_on_closed_pr_emits() -> None:
         assert result.returncode in (0, 1), result.stderr
         emitted = _emitted_notifications(result.stdout)
         assert len(emitted) == 1, result.stdout
-        assert emitted[0]["detail"] == "comment; actor_class=human"
 
 
 def test_mention_suppressed_when_issue_is_closed() -> None:

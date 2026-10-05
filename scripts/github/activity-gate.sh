@@ -2322,12 +2322,12 @@ notification_subject_is_closed() {
 # (it may be a reopen request). Without this, a bot/self comment on an
 # already-closed issue re-armed PM dispatches (upstream issue #1335, 2026-10-05).
 # Fails open: any API error or unknown actor keeps today's emit behaviour.
-# Args: <owner/repo> <number> <subject_type>.
+# Args: <owner/repo> <number> <subject_type> <previous_notification_timestamp>.
 notification_comment_is_closed_noise() {
-    local repo="$1" number="$2" subject_type="$3" kind=pr actor
+    local repo="$1" number="$2" subject_type="$3" prior="$4" kind=pr-all actor
     notification_subject_is_closed "$repo" "$number" || return 1
     [ "$subject_type" = "Issue" ] && kind=issue
-    actor=$(notification_latest_actor_class "$repo" "$number" "$kind")
+    actor=$(notification_latest_actor_class "$repo" "$number" "$kind" "$prior")
     [ "$actor" = "bot" ] || [ "$actor" = "self" ]
 }
 
@@ -2343,9 +2343,11 @@ notification_comment_is_closed_noise() {
 # suffix here (e.g. "greptile-apps"), so -bot/-apps suffixes and well-known
 # CI/review bots are matched too. Failure direction is safe: an unknown actor
 # class returns "unknown" and the caller keeps today's emit behavior.
-# Args: <owner/repo> <number> [kind]; kind=issue skips the PR-only reviews read.
+# Args: <owner/repo> <number> [kind] [since]. kind=issue skips PR-only
+# activity; kind=pr-all also reads inline comments. With since, any later
+# human activity wins even if automation commented afterward.
 notification_latest_actor_class() {
-    local repo=$1 number=$2 kind="${3:-pr}"
+    local repo=$1 number=$2 kind="${3:-pr}" since="${4:-}"
     local bot="${BOT_USERNAME:-$AUTHOR}"
     local author="${AUTHOR:-$bot}"
     local comments_json reviews_json review_comments_json
@@ -2361,12 +2363,16 @@ notification_latest_actor_class() {
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "repos/$repo/pulls/$number/reviews?per_page=100" 2>/dev/null) || { printf 'unknown'; return 0; }
-        review_comments_json=$(gh api --paginate --slurp \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "repos/$repo/pulls/$number/comments?per_page=100" 2>/dev/null) || { printf 'unknown'; return 0; }
+        if [ "$kind" = "pr-all" ]; then
+            review_comments_json=$(gh api --paginate --slurp \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "repos/$repo/pulls/$number/comments?per_page=100" 2>/dev/null) || { printf 'unknown'; return 0; }
+        else
+            review_comments_json='[[]]'
+        fi
     fi
-    jq -nr --arg bot "$bot" --arg author "$author" \
+    jq -nr --arg bot "$bot" --arg author "$author" --arg since "$since" \
         --argjson comments "$comments_json" \
         --argjson reviews "$reviews_json" \
         --argjson review_comments "$review_comments_json" '
@@ -2378,8 +2384,13 @@ notification_latest_actor_class() {
         ([ (($comments | flatten)[] | {login: (.user.login // ""), time: (.created_at // "")}),
            (($reviews | flatten)[] | {login: (.user.login // ""), time: (.submitted_at // "")}),
            (($review_comments | flatten)[] | {login: (.user.login // ""), time: (.created_at // "")}) ]
-         | map(select(.login != "" and .time != "")) | sort_by(.time) | last) as $latest
-        | if $latest == null then "unknown"
+         | map(select(.login != "" and .time != "")) | sort_by(.time)) as $activity
+        | ($activity | last) as $latest
+        | if ($since != "" and any($activity[];
+                .time > $since
+                and (.login | is_self_login | not)
+                and (.login | is_bot_login | not))) then "human"
+          elif $latest == null then "unknown"
           elif ($latest.login | is_self_login) then "self"
           elif ($latest.login | is_bot_login) then "bot"
           else "human" end
@@ -2511,7 +2522,7 @@ def notification_priority:
                 if [ "$_notif_reason" = "comment" ] \
                         && [ -n "$prior" ] \
                         && [ "$number" -gt 0 ] 2>/dev/null \
-                        && notification_comment_is_closed_noise "$repo" "$number" "$_subj_type"; then
+                        && notification_comment_is_closed_noise "$repo" "$number" "$_subj_type" "$prior"; then
                     printf '%s' "$notif_updated" > "$state_file"
                     printf '%s#%s' "$repo" "$number" > "$map_file"
                     continue
@@ -2599,7 +2610,7 @@ def notification_priority:
                 if [ "$notif_reason" = "comment" ] \
                         && [ -n "$prior" ] \
                         && [ "$number" -gt 0 ] 2>/dev/null \
-                        && notification_comment_is_closed_noise "$repo" "$number" "$notif_subject_type"; then
+                        && notification_comment_is_closed_noise "$repo" "$number" "$notif_subject_type" "$prior"; then
                     continue
                 fi
                 # Mirror the jsonl branch's bot-only author/comment filter so
