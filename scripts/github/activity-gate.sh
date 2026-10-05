@@ -2390,7 +2390,7 @@ notification_latest_actor_class() {
         ([ (($comments | flatten)[] | {login: (.user.login // ""), type: (.user.type // ""), time: (.updated_at // .created_at // "")}),
            (($reviews | flatten)[] | {login: (.user.login // ""), type: (.user.type // ""), time: (.submitted_at // "")}),
            (($review_comments | flatten)[] | {login: (.user.login // ""), type: (.user.type // ""), time: (.updated_at // .created_at // "")}) ]
-         | map(select(.login != "" and .time != "")) | sort_by(.time)) as $activity
+         | map(select(.time != "")) | sort_by(.time)) as $activity
         | ($activity | last) as $latest
         # GitHub timestamps have one-second precision. A comment created in the
         # same second as the prior notification watermark may still be unseen,
