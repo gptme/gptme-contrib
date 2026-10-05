@@ -46,6 +46,9 @@ human_before_latest = os.environ.get("TEST_HUMAN_BEFORE_LATEST", "")
 human_before_latest_at = os.environ.get(
     "TEST_HUMAN_BEFORE_LATEST_AT", "2026-09-17T10:00:00Z"
 )
+human_before_latest_updated_at = os.environ.get(
+    "TEST_HUMAN_BEFORE_LATEST_UPDATED_AT", human_before_latest_at
+)
 older_comment_actor = os.environ.get("TEST_OLDER_COMMENT_ACTOR", "")
 
 
@@ -124,6 +127,7 @@ if argv[0] == "api":
                 {
                     "user": {"login": human_before_latest, "type": "User"},
                     "created_at": human_before_latest_at,
+                    "updated_at": human_before_latest_updated_at,
                 }
             )
         if latest_actor_surface == "comment":
@@ -173,6 +177,7 @@ def _run_gate(
     latest_actor_surface: str = "comment",
     human_before_latest: str = "",
     human_before_latest_at: str = "2026-09-17T10:00:00Z",
+    human_before_latest_updated_at: str | None = None,
     older_comment_actor: str = "",
     prior: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -193,6 +198,9 @@ def _run_gate(
     env["TEST_LATEST_ACTOR_SURFACE"] = latest_actor_surface
     env["TEST_HUMAN_BEFORE_LATEST"] = human_before_latest
     env["TEST_HUMAN_BEFORE_LATEST_AT"] = human_before_latest_at
+    env["TEST_HUMAN_BEFORE_LATEST_UPDATED_AT"] = (
+        human_before_latest_updated_at or human_before_latest_at
+    )
     env["TEST_OLDER_COMMENT_ACTOR"] = older_comment_actor
     env["PATH"] = f"{tmp}:{env['PATH']}"
 
@@ -305,6 +313,27 @@ def test_human_comment_at_prior_timestamp_then_bot_on_closed_issue_emits() -> No
             latest_actor="codecov[bot]",
             human_before_latest="maintainer",
             human_before_latest_at="2026-09-17T09:00:00Z",
+            prior="2026-09-17T09:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert len(_emitted_notifications(result.stdout)) == 1, result.stdout
+
+
+def test_edited_human_comment_after_prior_then_bot_on_closed_issue_emits() -> None:
+    """A human edit after the watermark must count as fresh human activity."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason="comment",
+            issue_state="closed",
+            latest_actor="codecov[bot]",
+            human_before_latest="maintainer",
+            human_before_latest_at="2026-09-17T08:00:00Z",
+            human_before_latest_updated_at="2026-09-17T10:00:00Z",
             prior="2026-09-17T09:00:00Z",
         )
         assert result.returncode in (0, 1), result.stderr
