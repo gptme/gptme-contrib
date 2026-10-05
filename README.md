@@ -161,15 +161,32 @@ gh repo edit owner/your-repo --add-topic gptme-plugin
 
 ## Dependencies
 
-Some scripts require additional dependencies:
+For a contributor checkout, start with Git, Python, and [pipx](https://pipx.pypa.io/stable/installation/)
+installed. Individual packages may require a newer Python version than the workspace
+root; uv can download a compatible interpreter. If you already have `uv` on your
+PATH, skip the pipx steps.
 
 ```bash
 # Required for scripts with uv run shebangs
 pipx install uv
+pipx ensurepath
+# If ensurepath changed PATH, open a new terminal before continuing.
 
-# Install all packages
+# Run workspace commands inside a checkout, not an empty agent directory.
+git clone https://github.com/gptme/gptme-contrib.git
+cd gptme-contrib
+
+# Install all workspace packages and plugins into a local .venv.
 uv sync --all-packages
+
+# Verify a contributed CLI starts without configuring an API key.
+uv run --no-sync gptodo --help
 ```
+
+The full workspace includes large dependencies (for example, CPU PyTorch).
+For just one capability, use its linked package or plugin README instead of
+installing the entire workspace. Installing a plugin does not enable it in your
+agent; follow that plugin's configuration instructions.
 
 ## Contributing
 
