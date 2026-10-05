@@ -207,13 +207,17 @@ class SessionStore:
         if not path.exists():
             return []
         records = []
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8", errors="surrogateescape") as f:
             for line in f:
                 line = line.strip()
                 if line:
                     try:
+                        # Undecodable bytes (e.g. a torn multibyte tail) arrive as
+                        # lone surrogates; treat the row as malformed rather than
+                        # let them crash a later print/encode.
+                        line.encode("utf-8")
                         records.append(SessionRecord.from_dict(json.loads(line)))
-                    except (json.JSONDecodeError, TypeError, AttributeError):
+                    except (json.JSONDecodeError, UnicodeEncodeError, TypeError, AttributeError):
                         continue
         return records
 
@@ -276,23 +280,29 @@ class SessionStore:
             malformed_lines: list[str] = []
 
             if self.path.exists():
-                with open(self.path, encoding="utf-8") as f:
+                with open(self.path, encoding="utf-8", errors="surrogateescape") as f:
                     for raw in f:
                         raw = raw.strip()
                         if not raw:
                             continue
                         try:
+                            raw.encode("utf-8")  # lone surrogates = undecodable bytes
                             rec = SessionRecord.from_dict(json.loads(raw))
                             if rec.session_id not in known_ids:
                                 extra_records.append(rec)
-                        except (json.JSONDecodeError, TypeError, AttributeError):
+                        except (
+                            json.JSONDecodeError,
+                            UnicodeEncodeError,
+                            TypeError,
+                            AttributeError,
+                        ):
                             malformed_lines.append(raw)
 
             tmp_path = self.path.with_name(
                 f"{self.path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
             )
             try:
-                with open(tmp_path, "w", encoding="utf-8") as f:
+                with open(tmp_path, "w", encoding="utf-8", errors="surrogateescape") as f:
                     for record in records:
                         f.write(record.to_json() + "\n")
                     for record in extra_records:
@@ -346,7 +356,7 @@ class SessionStore:
 
             keep_lines: list[str] = []
             by_month: dict[str, list[str]] = {}
-            with open(self.path, encoding="utf-8") as f:
+            with open(self.path, encoding="utf-8", errors="surrogateescape") as f:
                 for raw in f:
                     raw = raw.strip()
                     if not raw:
@@ -371,9 +381,9 @@ class SessionStore:
                 # Append first, fsync, and only then drop from the active file.
                 # Do not add this batch's hashes to ``existing``: duplicate
                 # active rows are distinct historical records and must survive.
-                with open(archive_path, "a", encoding="utf-8") as af:
+                with open(archive_path, "a", encoding="utf-8", errors="surrogateescape") as af:
                     for raw in entries:
-                        line_hash = hashlib.sha256(raw.encode()).digest()
+                        line_hash = hashlib.sha256(raw.encode(errors="surrogateescape")).digest()
                         if line_hash in existing:
                             skipped += 1
                             continue
@@ -388,7 +398,7 @@ class SessionStore:
                 f"{self.path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
             )
             try:
-                with open(tmp_path, "w", encoding="utf-8") as f:
+                with open(tmp_path, "w", encoding="utf-8", errors="surrogateescape") as f:
                     f.writelines(f"{line}\n" for line in keep_lines)
                     f.flush()
                     os.fsync(f.fileno())
@@ -444,11 +454,11 @@ class SessionStore:
         hashes: set[bytes] = set()
         if not archive_path.exists():
             return hashes
-        with open(archive_path, encoding="utf-8") as f:
+        with open(archive_path, encoding="utf-8", errors="surrogateescape") as f:
             for raw in f:
                 raw = raw.strip()
                 if raw:
-                    hashes.add(hashlib.sha256(raw.encode()).digest())
+                    hashes.add(hashlib.sha256(raw.encode(errors="surrogateescape")).digest())
         return hashes
 
     def stamp_attempt_kind(self, session_id: str, attempt_kind: str) -> bool:
