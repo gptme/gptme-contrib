@@ -36,8 +36,18 @@ def test_scalar_list_field_is_coerced_to_list(tmp_path, field, value):
     assert any("must be a list" in i for i in bad.issues)
 
 
-@pytest.mark.parametrize("command", ["list", "check", "ready", "next"])
-def test_commands_survive_scalar_depends(tmp_path, command):
+@pytest.mark.parametrize(
+    "command,expected_exit,expected_in_output",
+    [
+        ("list", 0, "good"),  # workspace loaded; both tasks visible
+        ("check", 1, "must be a list"),  # validation ran; errors reported
+        ("ready", 0, "good"),  # dependency coercion unblocked good task
+        ("next", 0, "good"),  # workspace loaded; good task surfaced
+    ],
+)
+def test_commands_survive_scalar_depends(tmp_path, command, expected_exit, expected_in_output):
     tasks = _write(tmp_path, "bad", "depends: 7\ntags: foo\n")
     result = CliRunner().invoke(cli, ["--tasks-dir", str(tasks), command])
     assert not isinstance(result.exception, TypeError), result.output
+    assert result.exit_code == expected_exit, f"exit {result.exit_code}: {result.output}"
+    assert expected_in_output in result.output, result.output
