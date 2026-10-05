@@ -2391,9 +2391,20 @@ notification_latest_actor_class() {
         def is_human_actor:
             .type == "User"
             or ((.type == "") and (.login | is_bot_login | not));
-        ([ (($comments | flatten)[] | {login: (.user.login // ""), type: (.user.type // ""), time: (.updated_at // .created_at // "")}),
-           (($reviews | flatten)[] | {login: (.user.login // ""), type: (.user.type // ""), time: (.submitted_at // "")}),
-           (($review_comments | flatten)[] | {login: (.user.login // ""), type: (.user.type // ""), time: (.updated_at // .created_at // "")}) ]
+        ([ (($comments | flatten)[]
+              | {login: (.user.login // ""), type: (.user.type // ""),
+                 created: (.created_at // ""), updated: (.updated_at // .created_at // "")}),
+           (($reviews | flatten)[]
+              | {login: (.user.login // ""), type: (.user.type // ""),
+                 created: (.submitted_at // ""), updated: (.submitted_at // "")}),
+           (($review_comments | flatten)[]
+              | {login: (.user.login // ""), type: (.user.type // ""),
+                 created: (.created_at // ""), updated: (.updated_at // .created_at // "")}) ]
+         # A post-snapshot edit must not erase activity that was already present
+         # in the notification snapshot. Use the edit time only when it falls
+         # inside the snapshot; otherwise retain the creation/submission time.
+         | map(.time = (if $until != "" and .updated > $until
+                        then .created else .updated end))
          | map(select(.time != "" and ($until == "" or .time <= $until)))
          | sort_by(.time)) as $activity
         | ($activity | last) as $latest

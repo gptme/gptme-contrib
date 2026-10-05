@@ -50,6 +50,9 @@ human_before_latest_at = os.environ.get(
 human_before_latest_updated_at = os.environ.get(
     "TEST_HUMAN_BEFORE_LATEST_UPDATED_AT", human_before_latest_at
 )
+human_before_latest_post_snapshot_edit = os.environ.get(
+    "TEST_HUMAN_BEFORE_LATEST_POST_SNAPSHOT_EDIT", ""
+)
 older_comment_actor = os.environ.get("TEST_OLDER_COMMENT_ACTOR", "")
 older_comment_actor_type = os.environ.get("TEST_OLDER_COMMENT_ACTOR_TYPE", "User")
 
@@ -132,7 +135,10 @@ if argv[0] == "api":
                 {
                     "user": {"login": human_before_latest, "type": "User"},
                     "created_at": human_before_latest_at,
-                    "updated_at": human_before_latest_updated_at,
+                    "updated_at": (
+                        human_before_latest_post_snapshot_edit
+                        or human_before_latest_updated_at
+                    ),
                 }
             )
         if latest_actor_surface == "comment":
@@ -188,6 +194,7 @@ def _run_gate(
     human_before_latest: str = "",
     human_before_latest_at: str = "2026-09-17T10:00:00Z",
     human_before_latest_updated_at: str | None = None,
+    human_before_latest_post_snapshot_edit: str | None = None,
     older_comment_actor: str = "",
     older_comment_actor_type: str = "User",
     prior: str | None = None,
@@ -215,6 +222,9 @@ def _run_gate(
     env["TEST_HUMAN_BEFORE_LATEST_AT"] = human_before_latest_at
     env["TEST_HUMAN_BEFORE_LATEST_UPDATED_AT"] = (
         human_before_latest_updated_at or human_before_latest_at
+    )
+    env["TEST_HUMAN_BEFORE_LATEST_POST_SNAPSHOT_EDIT"] = (
+        human_before_latest_post_snapshot_edit or ""
     )
     env["TEST_OLDER_COMMENT_ACTOR"] = older_comment_actor
     env["TEST_OLDER_COMMENT_ACTOR_TYPE"] = older_comment_actor_type
@@ -370,6 +380,27 @@ def test_edited_human_comment_after_prior_then_bot_on_closed_issue_emits() -> No
             human_before_latest="maintainer",
             human_before_latest_at="2026-09-17T08:00:00Z",
             human_before_latest_updated_at="2026-09-17T10:00:00Z",
+            prior="2026-09-17T09:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert len(_emitted_notifications(result.stdout)) == 1, result.stdout
+
+
+def test_post_snapshot_edit_preserves_human_comment_created_in_window() -> None:
+    """A later edit must not erase a human comment present in the snapshot."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason="comment",
+            issue_state="closed",
+            latest_actor="codecov[bot]",
+            human_before_latest="maintainer",
+            human_before_latest_at="2026-09-17T10:00:00Z",
+            human_before_latest_post_snapshot_edit="2026-09-17T12:00:00Z",
             prior="2026-09-17T09:00:00Z",
         )
         assert result.returncode in (0, 1), result.stderr
