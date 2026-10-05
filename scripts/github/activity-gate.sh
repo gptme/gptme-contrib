@@ -2322,12 +2322,14 @@ notification_subject_is_closed() {
 # (it may be a reopen request). Without this, a bot/self comment on an
 # already-closed issue re-armed PM dispatches (upstream issue #1335, 2026-10-05).
 # Fails open: any API error or unknown actor keeps today's emit behaviour.
-# Args: <owner/repo> <number> <subject_type> <previous_notification_timestamp>.
+# Args: <owner/repo> <number> <subject_type>
+#       <previous_notification_timestamp> <notification_snapshot_timestamp>.
 notification_comment_is_closed_noise() {
-    local repo="$1" number="$2" subject_type="$3" prior="$4" kind=pr-all actor
+    local repo="$1" number="$2" subject_type="$3" prior="$4" until="$5"
+    local kind=pr-all actor
     notification_subject_is_closed "$repo" "$number" || return 1
     [ "$subject_type" = "Issue" ] && kind=issue
-    actor=$(notification_latest_actor_class "$repo" "$number" "$kind" "$prior")
+    actor=$(notification_latest_actor_class "$repo" "$number" "$kind" "$prior" "$until")
     [ "$actor" = "bot" ] || [ "$actor" = "self" ]
 }
 
@@ -2343,11 +2345,12 @@ notification_comment_is_closed_noise() {
 # suffix here (e.g. "greptile-apps"), so -bot/-apps suffixes and well-known
 # CI/review bots are matched too. Failure direction is safe: an unknown actor
 # class returns "unknown" and the caller keeps today's emit behavior.
-# Args: <owner/repo> <number> [kind] [since]. kind=issue skips PR-only
+# Args: <owner/repo> <number> [kind] [since] [until]. kind=issue skips PR-only
 # activity; kind=pr-all also reads inline comments. With since, any later
-# human activity wins even if automation commented afterward.
+# human activity wins even if automation commented afterward. With until,
+# activity newer than the notification snapshot is left for the next poll.
 notification_latest_actor_class() {
-    local repo=$1 number=$2 kind="${3:-pr}" since="${4:-}"
+    local repo=$1 number=$2 kind="${3:-pr}" since="${4:-}" until="${5:-}"
     local bot="${BOT_USERNAME:-$AUTHOR}"
     local author="${AUTHOR:-$bot}"
     local comments_json reviews_json review_comments_json
@@ -2372,7 +2375,8 @@ notification_latest_actor_class() {
             review_comments_json='[[]]'
         fi
     fi
-    jq -nr --arg bot "$bot" --arg author "$author" --arg since "$since" \
+    jq -nr --arg bot "$bot" --arg author "$author" \
+        --arg since "$since" --arg until "$until" \
         --argjson comments "$comments_json" \
         --argjson reviews "$reviews_json" \
         --argjson review_comments "$review_comments_json" '
@@ -2390,7 +2394,8 @@ notification_latest_actor_class() {
         ([ (($comments | flatten)[] | {login: (.user.login // ""), type: (.user.type // ""), time: (.updated_at // .created_at // "")}),
            (($reviews | flatten)[] | {login: (.user.login // ""), type: (.user.type // ""), time: (.submitted_at // "")}),
            (($review_comments | flatten)[] | {login: (.user.login // ""), type: (.user.type // ""), time: (.updated_at // .created_at // "")}) ]
-         | map(select(.time != "")) | sort_by(.time)) as $activity
+         | map(select(.time != "" and ($until == "" or .time <= $until)))
+         | sort_by(.time)) as $activity
         | ($activity | last) as $latest
         # GitHub timestamps have one-second precision. A comment created in the
         # same second as the prior notification watermark may still be unseen,
@@ -2532,7 +2537,8 @@ def notification_priority:
                 if [ "$_notif_reason" = "comment" ] \
                         && [ -n "$prior" ] \
                         && [ "$number" -gt 0 ] 2>/dev/null \
-                        && notification_comment_is_closed_noise "$repo" "$number" "$_subj_type" "$prior"; then
+                        && notification_comment_is_closed_noise \
+                            "$repo" "$number" "$_subj_type" "$prior" "$notif_updated"; then
                     printf '%s' "$notif_updated" > "$state_file"
                     printf '%s#%s' "$repo" "$number" > "$map_file"
                     continue
@@ -2563,7 +2569,7 @@ def notification_priority:
                         _actor_kind=pr-all
                     fi
                     _actor_class=$(notification_latest_actor_class \
-                        "$repo" "$number" "$_actor_kind" "$_actor_since")
+                        "$repo" "$number" "$_actor_kind" "$_actor_since" "$notif_updated")
                     if [ -n "$prior" ] && [ "$_actor_class" = "bot" ]; then
                         printf '%s' "$notif_updated" > "$state_file"
                         printf '%s#%s' "$repo" "$number" > "$map_file"
@@ -2626,7 +2632,8 @@ def notification_priority:
                 if [ "$notif_reason" = "comment" ] \
                         && [ -n "$prior" ] \
                         && [ "$number" -gt 0 ] 2>/dev/null \
-                        && notification_comment_is_closed_noise "$repo" "$number" "$notif_subject_type" "$prior"; then
+                        && notification_comment_is_closed_noise \
+                            "$repo" "$number" "$notif_subject_type" "$prior" "$notif_updated"; then
                     continue
                 fi
                 # Mirror the jsonl branch's bot-only author/comment filter so
@@ -2643,7 +2650,7 @@ def notification_priority:
                     if [ "$notif_reason" = "comment" ]; then
                         _actor_kind=pr-all
                     fi
-                    if [ "$(notification_latest_actor_class "$repo" "$number" "$_actor_kind" "$_actor_since")" = "bot" ]; then
+                    if [ "$(notification_latest_actor_class "$repo" "$number" "$_actor_kind" "$_actor_since" "$notif_updated")" = "bot" ]; then
                         continue
                     fi
                 fi

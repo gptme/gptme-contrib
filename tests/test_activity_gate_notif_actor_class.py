@@ -211,6 +211,30 @@ def _human_comment(created_at: str = "2026-08-26T17:00:00Z") -> dict:
     }
 
 
+def test_activity_after_notification_snapshot_is_deferred() -> None:
+    """Actor classification must not consume activity from a later snapshot."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            comments=[
+                _bot_comment(
+                    created_at="2026-08-26T16:30:00Z",
+                    updated_at="2026-08-26T17:15:04Z",
+                ),
+                _human_comment(created_at="2026-08-26T17:30:00Z"),
+            ],
+            prior_timestamp="2026-08-26T16:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert _emitted_notifications(result.stdout) == [], result.stdout
+        state_file = state_dir / f"notif-{NOTIF_ID}.state"
+        assert state_file.read_text().strip() == "2026-08-26T17:15:04Z"
+
+
 def test_bot_only_author_notification_suppressed() -> None:
     """A Codecov-only bump re-seen after a prior dispatch is consumed, not dispatched.
 
