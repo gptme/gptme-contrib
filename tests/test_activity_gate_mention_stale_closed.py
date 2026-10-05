@@ -39,6 +39,8 @@ notif_number = int(os.environ.get("TEST_NOTIF_NUMBER", "688"))
 notif_reason = os.environ.get("TEST_NOTIF_REASON", "mention")
 subject_type = os.environ.get("TEST_SUBJECT_TYPE", "Issue")
 issue_state = os.environ.get("TEST_ISSUE_STATE", "open")
+latest_actor = os.environ.get("TEST_LATEST_ACTOR", "test-author")
+latest_actor_surface = os.environ.get("TEST_LATEST_ACTOR_SURFACE", "comment")
 
 
 def apply_jq(data, jq_expr):
@@ -95,14 +97,35 @@ if argv[0] == "api":
         }]
         print(apply_jq(notifs, jq_expr))
         sys.exit(0)
-    # mention_subject_is_closed() calls repos/{repo}/issues/{number}
+    # notification_subject_is_closed() calls repos/{repo}/issues/{number}
     if (f"/issues/{notif_number}" in endpoint
             and "/comments" not in endpoint
             and "/reviews" not in endpoint):
         issue = {"state": issue_state, "number": notif_number}
         print(apply_jq(issue, jq_expr))
         sys.exit(0)
-    # Fallback for any other endpoint (comments, reviews, etc.)
+    if f"/issues/{notif_number}/comments" in endpoint:
+        comments = []
+        if latest_actor_surface == "comment":
+            comments = [{"user": {"login": latest_actor}, "created_at": "2026-09-17T10:00:00Z"}]
+        pages = [comments]
+        print(apply_jq(pages, jq_expr) if jq_expr else json.dumps(pages))
+        sys.exit(0)
+    if f"/pulls/{notif_number}/reviews" in endpoint:
+        reviews = []
+        if latest_actor_surface == "review":
+            reviews = [{"user": {"login": latest_actor}, "submitted_at": "2026-09-17T10:00:00Z"}]
+        pages = [reviews]
+        print(apply_jq(pages, jq_expr) if jq_expr else json.dumps(pages))
+        sys.exit(0)
+    if f"/pulls/{notif_number}/comments" in endpoint:
+        comments = []
+        if latest_actor_surface == "inline":
+            comments = [{"user": {"login": latest_actor}, "created_at": "2026-09-17T10:00:00Z"}]
+        pages = [comments]
+        print(apply_jq(pages, jq_expr) if jq_expr else json.dumps(pages))
+        sys.exit(0)
+    # Fallback for any other endpoint.
     if "--paginate" in argv or "--slurp" in argv:
         print(apply_jq([[]], jq_expr) if jq_expr else "[[]]")
     else:
@@ -120,6 +143,9 @@ def _run_gate(
     reason: str = "mention",
     subject_type: str = "Issue",
     issue_state: str = "open",
+    latest_actor: str = "test-author",
+    latest_actor_surface: str = "comment",
+    prior: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
     fake_gh.write_text(FAKE_GH)
@@ -132,10 +158,14 @@ def _run_gate(
     env["TEST_NOTIF_REASON"] = reason
     env["TEST_SUBJECT_TYPE"] = subject_type
     env["TEST_ISSUE_STATE"] = issue_state
+    env["TEST_LATEST_ACTOR"] = latest_actor
+    env["TEST_LATEST_ACTOR_SURFACE"] = latest_actor_surface
     env["PATH"] = f"{tmp}:{env['PATH']}"
 
     # Established state dir: seed a sibling so first-sight emits.
     (state_dir / "notif-99999999999.state").write_text("2026-09-01T00:00:00Z")
+    if prior is not None:
+        (state_dir / f"notif-{NOTIF_ID}.state").write_text(prior)
 
     return subprocess.run(
         [
@@ -170,6 +200,63 @@ def _emitted_notifications(stdout: str) -> list[dict]:
         if obj.get("type") == "notification":
             items.append(obj)
     return items
+
+
+def test_comment_first_sight_on_closed_issue_emits() -> None:
+    """Never swallow older human work when this notification has no watermark."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason="comment",
+            issue_state="closed",
+            latest_actor="codecov[bot]",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert len(_emitted_notifications(result.stdout)) == 1, result.stdout
+
+
+def test_comment_bot_update_on_closed_issue_is_suppressed() -> None:
+    """After a prior dispatch, a bot-only closed-thread bump is noise."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason="comment",
+            issue_state="closed",
+            latest_actor="codecov[bot]",
+            prior="2026-09-17T09:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert _emitted_notifications(result.stdout) == [], result.stdout
+
+
+def test_inline_human_comment_on_closed_pr_emits() -> None:
+    """A human inline reply must outrank an older self issue comment."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason="comment",
+            subject_type="PullRequest",
+            issue_state="closed",
+            latest_actor="maintainer",
+            latest_actor_surface="inline",
+            prior="2026-09-17T09:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        emitted = _emitted_notifications(result.stdout)
+        assert len(emitted) == 1, result.stdout
+        assert emitted[0]["detail"] == "comment; actor_class=human"
 
 
 def test_mention_suppressed_when_issue_is_closed() -> None:

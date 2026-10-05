@@ -2348,29 +2348,36 @@ notification_latest_actor_class() {
     local repo=$1 number=$2 kind="${3:-pr}"
     local bot="${BOT_USERNAME:-$AUTHOR}"
     local author="${AUTHOR:-$bot}"
-    local comments_json reviews_json
+    local comments_json reviews_json review_comments_json
     comments_json=$(gh api --paginate --slurp \
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
         "repos/$repo/issues/$number/comments?per_page=100" 2>/dev/null) || { printf 'unknown'; return 0; }
     if [ "$kind" = "issue" ]; then
         reviews_json='[[]]'
+        review_comments_json='[[]]'
     else
         reviews_json=$(gh api --paginate --slurp \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "repos/$repo/pulls/$number/reviews?per_page=100" 2>/dev/null) || { printf 'unknown'; return 0; }
+        review_comments_json=$(gh api --paginate --slurp \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$repo/pulls/$number/comments?per_page=100" 2>/dev/null) || { printf 'unknown'; return 0; }
     fi
     jq -nr --arg bot "$bot" --arg author "$author" \
         --argjson comments "$comments_json" \
-        --argjson reviews "$reviews_json" '
+        --argjson reviews "$reviews_json" \
+        --argjson review_comments "$review_comments_json" '
         def is_self_login:
             (ascii_downcase == ($bot | ascii_downcase))
             or (ascii_downcase == ($author | ascii_downcase));
         def is_bot_login:
             test("(\\[bot\\]$)|(-bot$)|(-apps$)|(^github-actions$)|(^dependabot)|(^renovate)|(^codecov)|(^coderabbitai$)|(^copilot)|(^greptile)"; "i");
         ([ (($comments | flatten)[] | {login: (.user.login // ""), time: (.created_at // "")}),
-           (($reviews | flatten)[] | {login: (.user.login // ""), time: (.submitted_at // "")}) ]
+           (($reviews | flatten)[] | {login: (.user.login // ""), time: (.submitted_at // "")}),
+           (($review_comments | flatten)[] | {login: (.user.login // ""), time: (.created_at // "")}) ]
          | map(select(.login != "" and .time != "")) | sort_by(.time) | last) as $latest
         | if $latest == null then "unknown"
           elif ($latest.login | is_self_login) then "self"
@@ -2502,6 +2509,7 @@ def notification_priority:
                 # `comment` on a closed thread whose latest actor is bot/self:
                 # same drop-only staleness, but a human comment still emits.
                 if [ "$_notif_reason" = "comment" ] \
+                        && [ -n "$prior" ] \
                         && [ "$number" -gt 0 ] 2>/dev/null \
                         && notification_comment_is_closed_noise "$repo" "$number" "$_subj_type"; then
                     printf '%s' "$notif_updated" > "$state_file"
@@ -2589,6 +2597,7 @@ def notification_priority:
                     continue
                 fi
                 if [ "$notif_reason" = "comment" ] \
+                        && [ -n "$prior" ] \
                         && [ "$number" -gt 0 ] 2>/dev/null \
                         && notification_comment_is_closed_noise "$repo" "$number" "$notif_subject_type"; then
                     continue
