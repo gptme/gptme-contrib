@@ -1364,14 +1364,13 @@ def load_tasks(
             # Get relationship fields (new typed dependencies)
             # requires is canonical, depends is deprecated alias, blocks is NOT merged (different semantics)
             depends_list = _as_list(metadata.get("depends"))
-            blocks_list = _as_list(metadata.get("blocks"))  # NOT merged - different semantics
             requires_list = _as_list(metadata.get("requires"))
 
             # Warn if multiple fields are present (potential confusion)
             fields_present = []
             if requires_list:
                 fields_present.append("requires")
-            if blocks_list:
+            if _as_list(metadata.get("blocks")):
                 fields_present.append("blocks")
             if depends_list:
                 fields_present.append("depends")

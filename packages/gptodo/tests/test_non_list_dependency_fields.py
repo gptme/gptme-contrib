@@ -25,15 +25,21 @@ def _write(tmp_path, name, frontmatter):
     return tasks
 
 
-@pytest.mark.parametrize("field", ["depends", "requires", "tags", "related", "blocks"])
+@pytest.mark.parametrize("field", ["depends", "requires", "tags", "related"])
 @pytest.mark.parametrize("value", ["7", "foo", "null"])
 def test_scalar_list_field_is_coerced_to_list(tmp_path, field, value):
     tasks = _write(tmp_path, "bad", f"{field}: {value}\n")
     loaded = {t.name: t for t in load_tasks(tasks)}
     bad = loaded["bad"]
-    for attr in ("depends", "requires", "tags", "related"):
-        assert isinstance(getattr(bad, attr), list), attr
-    assert any("must be a list" in i for i in bad.issues)
+    assert isinstance(getattr(bad, field), list)
+    assert any("must be a list" in issue for issue in bad.issues)
+
+
+@pytest.mark.parametrize("value", ["7", "foo", "null"])
+def test_scalar_blocks_field_is_validated_without_crashing(tmp_path, value):
+    tasks = _write(tmp_path, "bad", f"blocks: {value}\n")
+    bad = {task.name: task for task in load_tasks(tasks)}["bad"]
+    assert any("Blocks must be a list" in issue for issue in bad.issues)
 
 
 @pytest.mark.parametrize(
