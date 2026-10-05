@@ -567,6 +567,14 @@ def parse_trajectory(jsonl_path: Path) -> list[dict]:
                         f"invalid JSON in Pi session on line {line_number}: {exc}"
                     ) from exc
                 continue
+            if not isinstance(record, dict):
+                # A bare array/string/number line is not a trajectory record;
+                # downstream format detection calls .get() on every record.
+                if pi_session:
+                    raise PiSessionFormatError(
+                        f"non-object record in Pi session on line {line_number}"
+                    )
+                continue
             msgs.append(record)
             if len(msgs) == 1 and is_pi_session_header(record):
                 pi_session = True
