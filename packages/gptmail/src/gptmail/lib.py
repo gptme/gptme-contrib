@@ -39,6 +39,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import uuid
 from datetime import datetime, timezone
 from email import message_from_bytes
@@ -1440,12 +1441,13 @@ class AgentEmail:
                 headers[current_key] = " ".join(current_value)
                 current_value = []
 
-            # Parse new header
-            if ": " in line:
-                current_key, value = line.split(": ", 1)
-                current_value = [value]
+            # Parse new header — partition on ":" handles both "Key: value" and
+            # "Key:" (empty value, e.g. X-GitHub-Labels: from GitHub notifications)
+            if ":" in line:
+                current_key, _, value = line.partition(":")
+                current_value = [value.lstrip()]
             else:
-                print(f"Warning: Invalid header line: {line}")
+                print(f"Warning: Invalid header line: {line}", file=sys.stderr)
 
         # Save last header
         if current_key and current_value:
