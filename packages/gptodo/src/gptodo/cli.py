@@ -2894,7 +2894,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
 
     # Resolve the whole checklist batch against every target before writing any
     # of them; mutate_task re-resolves under its lock against the fresh body.
-    subtask_edits = [(f, v) for op, f, v in changes if op == "set_subtask"]
+    subtask_edits = [(f, v) for op, f, v in changes if op == "set_subtask" and v is not None]
     for task in target_tasks:
         try:
             resolve_subtask_lines(frontmatter.load(task.path).content, subtask_edits)

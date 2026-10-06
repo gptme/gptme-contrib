@@ -11,7 +11,7 @@ test:  ## Run tests for this package
 	fi
 
 typecheck:  ## Run mypy for this package
-	uv run --with mypy --with types-tabulate --with types-PyYAML mypy -p gptodo --ignore-missing-imports --disable-error-code=unused-ignore
+	uv run --with mypy --with types-tabulate --with types-PyYAML mypy -p gptodo --ignore-missing-imports --disable-error-code=unused-ignore --explicit-package-bases
 
 publish:  ## Build and publish to PyPI
 	uv build
