@@ -539,9 +539,8 @@ def mutate_task(
             (value for op, key, value in reversed(operations) if op == "set" and key == "state"),
             None,
         )
-        result = MutationResult(
-            old, requested, post.metadata["state"], fields, post, changed and not dry_run
-        )
+        effective = normalize_state(str(post.metadata.get("state") or old), warn=False)
+        result = MutationResult(old, requested, effective, fields, post, changed and not dry_run)
         if result.written:
             _write_atomic(path, frontmatter.dumps(post))
     if (

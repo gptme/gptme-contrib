@@ -954,7 +954,10 @@ def advance_wait(
         if now is None:
             now = datetime.now(tz=current_wait.tzinfo)
         elif current_wait.tzinfo is None:
-            now = now.replace(tzinfo=None)
+            # Naive wait datetimes use local wall-clock time throughout gptodo.
+            # Convert an injected aware instant before dropping tzinfo so a UTC
+            # clock does not shift sub-day recurrence gates on non-UTC hosts.
+            now = now.astimezone().replace(tzinfo=None)
         elif now.tzinfo is None:
             now = now.replace(tzinfo=current_wait.tzinfo)
         else:

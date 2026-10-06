@@ -152,6 +152,22 @@ def test_validation_and_dry_run_leave_exact_bytes(tmp_path):
     assert path.read_bytes() == before
 
 
+def test_missing_state_metadata_edit_uses_backlog_effective_state(tmp_path):
+    path = write_task(tmp_path)
+    post = frontmatter.load(path)
+    post.metadata.pop("state")
+    path.write_text(frontmatter.dumps(post))
+
+    result = mutate_task(path, patch={"priority": "high"})
+
+    assert result.written
+    assert result.old_state == "backlog"
+    assert result.effective_state == "backlog"
+    updated = frontmatter.load(path)
+    assert updated.metadata["priority"] == "high"
+    assert "state" not in updated.metadata
+
+
 def test_wait_history_entry_reassertion_repark(tmp_path):
     path = write_task(tmp_path)
     first = datetime(2026, 1, 2, tzinfo=timezone.utc)
@@ -324,6 +340,25 @@ def test_frozen_recurrence_clock(wait, recur, expected):
     result = transform_post(frontmatter.Post("", **metadata), [("set", "state", "done")], now=now)
     assert result.metadata["wait"] == expected
     assert result.metadata["waiting_since"] == now.isoformat(timespec="seconds")
+
+
+def test_naive_recurrence_wait_uses_local_wall_clock(monkeypatch):
+    import time
+
+    from gptodo.utils import advance_wait
+
+    if not hasattr(time, "tzset"):
+        pytest.skip("requires time.tzset")
+    monkeypatch.setenv("TZ", "Europe/Stockholm")
+    time.tzset()
+
+    result = advance_wait(
+        datetime(2026, 1, 1, 1),
+        "6h",
+        now=datetime(2026, 1, 2, 12, tzinfo=timezone.utc),
+    )
+
+    assert result == datetime(2026, 1, 2, 19)
 
 
 def test_fan_in_fresh_same_state_child_list_and_parent_hooks(tmp_path, monkeypatch):
