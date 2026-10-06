@@ -2901,9 +2901,13 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
         except TransitionError as exc:
             raise click.ClickException(f"{task.name}: {exc}") from exc
 
+    completion_paths = []
     for task in target_tasks:
         try:
-            result = mutate_task(task.path, changes, force=force)
+            # Batch edits commit every target before any cross-task completion
+            # effect runs. Otherwise completing a child can mutate a parent that
+            # is still waiting for its explicit edit later in this same command.
+            result = mutate_task(task.path, changes, force=force, completion_effects=False)
         except TransitionError as exc:
             if subtask_edits:
                 raise click.ClickException(f"{task.name}: {exc}") from exc
@@ -2912,10 +2916,17 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
         console.print(f"\nChanges to apply:\n  {task.name}:")
         for field, (current, new) in sorted(result.changed_fields.items()):
             console.print(f"    {field}: {current} -> {new}")
+        if result.requested_state == "done" and result.effective_state == "done":
+            completion_paths.append(task.path)
         if result.requested_state == "done" and result.effective_state == "waiting":
             console.print(
                 f"[cyan]↩ {task.name} recurring — reset to waiting, next wait: {result.post.metadata['wait']}[/]"
             )
+
+    from gptodo.lifecycle import run_completion_effects
+
+    for path in completion_paths:
+        run_completion_effects(path)
 
     # Show success message
     count = len(target_tasks)
@@ -4462,8 +4473,17 @@ def sync(update, output_json, use_cache, light, full, changes_only):
         if task.state == "cancelled":
             expected_state = "cancelled"  # External sync never revives cancellation.
 
+        from gptodo.utils import is_generated_recurrence_waiting_for
+
+        recurring_closed_issue = (
+            issue_state == "CLOSED"
+            and task.state == "waiting"
+            and bool(task.metadata.get("recur"))
+            and is_generated_recurrence_waiting_for(task.metadata.get("waiting_for"))
+        )
         in_sync = (
             task.state == "cancelled"
+            or recurring_closed_issue
             or (issue_state == "CLOSED" and task.state == "done")
             or (issue_state == "OPEN" and task.state in ["backlog", "active", "waiting"])
         )

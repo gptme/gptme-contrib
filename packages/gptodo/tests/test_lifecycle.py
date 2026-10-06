@@ -168,6 +168,34 @@ def test_missing_state_metadata_edit_uses_backlog_effective_state(tmp_path):
     assert "state" not in updated.metadata
 
 
+def test_patch_replaces_and_clears_canonical_list_fields(tmp_path):
+    path = write_task(tmp_path, requires=["old"], tags=["one"])
+
+    replaced = mutate_task(path, patch={"requires": ["child"], "tags": []})
+    assert replaced.post.metadata["requires"] == ["child"]
+    assert replaced.post.metadata["tags"] == []
+
+    cleared = mutate_task(path, patch={"requires": None})
+    assert "requires" not in cleared.post.metadata
+
+
+def test_body_replacement_and_subtask_edit_share_the_same_snapshot(tmp_path):
+    path = write_task(tmp_path)
+    post = frontmatter.load(path)
+    post.content = "- [ ] A"
+    path.write_text(frontmatter.dumps(post))
+
+    result = mutate_task(
+        path,
+        changes=[
+            ("set_subtask", "A", "done"),
+            ("set_body", "", "- [ ] B\n- [ ] A"),
+        ],
+    )
+
+    assert result.post.content.splitlines() == ["- [ ] B", "- [x] A"]
+
+
 def test_wait_history_entry_reassertion_repark(tmp_path):
     path = write_task(tmp_path)
     first = datetime(2026, 1, 2, tzinfo=timezone.utc)
@@ -332,7 +360,12 @@ def test_effects_recheck_after_unlock_and_hook_reopen(tmp_path, monkeypatch):
         ("2026-01-05T01:00:00", "24h", "2026-01-06T01:00:00"),
     ],
 )
-def test_frozen_recurrence_clock(wait, recur, expected):
+def test_frozen_recurrence_clock(wait, recur, expected, monkeypatch):
+    import time
+
+    if hasattr(time, "tzset"):
+        monkeypatch.setenv("TZ", "UTC")
+        time.tzset()
     metadata = {"state": "active", "created": "2026-01-01", "recur": recur}
     if wait:
         metadata["wait"] = wait
@@ -412,6 +445,24 @@ def test_fan_in_recurring_parent_remains_waiting(tmp_path, monkeypatch):
         assert check_fan_in_completion(child, tasks, tmp_path / "tasks") is None
         hook.assert_not_called()
     assert frontmatter.load(parent).metadata["state"] == "waiting"
+
+
+def test_batch_edit_commits_parent_before_child_completion_effects(tmp_path, monkeypatch):
+    child = write_task(tmp_path, "child", state="active", spawned_from="parent")
+    parent = write_task(
+        tmp_path,
+        "parent",
+        state="waiting",
+        spawned_tasks=["child"],
+        waiting_for="child",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(cli, ["edit", "child", "parent", "--set", "state", "done"])
+
+    assert result.exit_code == 0, result.output
+    assert frontmatter.load(child).metadata["state"] == "done"
+    assert frontmatter.load(parent).metadata["state"] == "done"
 
 
 def test_malformed_recurrence_closure_legacy_compatible(tmp_path):
@@ -550,6 +601,31 @@ def test_sync_uses_completion_and_reopen_lifecycle(tmp_path, monkeypatch, initia
     else:
         assert "completed" not in post.metadata
     assert post.metadata["tracking"] == "org/repo#1"
+
+
+def test_sync_closed_issue_does_not_advance_existing_recurrence_gate(tmp_path, monkeypatch):
+    from unittest.mock import patch
+
+    path = write_task(
+        tmp_path,
+        state="waiting",
+        tracking="org/repo#1",
+        recur="7d",
+        wait="2099-01-01",
+        wait_kind="machine",
+        waiting_for="next recurrence gate (wait: 2099-01-01)",
+        waiting_since="2026-01-01",
+    )
+    monkeypatch.chdir(tmp_path)
+    before = path.read_bytes()
+    with (
+        patch("gptodo.cli.fetch_github_issue_state", return_value="CLOSED"),
+        patch("gptodo.cli.fetch_github_issue_details", return_value={}),
+    ):
+        result = CliRunner().invoke(cli, ["sync", "--update", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert path.read_bytes() == before
 
 
 def test_terminal_alias_reopen_clears_completed(tmp_path):

@@ -155,17 +155,25 @@ def transform_post(
         str(post.metadata.get("state", "backlog") or "backlog"), warn=False
     )
 
+    body_changes = [value for op, _field, value in changes if op == "set_body"]
+    if len(body_changes) > 1:
+        raise TransitionError("body may only be replaced once per mutation")
+    subtask_content = body_changes[0] if body_changes else post.content
     subtask_lines = resolve_subtask_lines(
-        post.content, [(f, v) for op, f, v in changes if op == "set_subtask"]
+        subtask_content, [(f, v) for op, f, v in changes if op == "set_subtask"]
     )
 
+    # Apply all changes. Body replacement is applied first so checklist indices
+    # are resolved against and written to the same content regardless of operation order.
+    if body_changes:
+        post.content = body_changes[0]
     # Apply all changes
     for op, field, value in changes:
         if op == "set_body":
-            post.content = value
+            continue
         elif op == "set_subtask":
             # field is subtask_text, value is state ("done" or "todo"). The target
-            # line was resolved against the original body above, so a batch is
+            # line was resolved against the effective body above, so a batch is
             # order-independent and never lands on a line another selector hit.
             import re
 
@@ -195,14 +203,14 @@ def transform_post(
                     lines[i] = new_line
                     break
             post.content = "\n".join(lines)
-        elif field in CANONICAL_LIST_FIELDS:
-            # Handle list fields (after normalization via FIELD_ALIASES)
+        elif field in CANONICAL_LIST_FIELDS and op in ("add", "remove"):
+            # Handle incremental list edits (after normalization via FIELD_ALIASES).
             current = post.metadata.get(field, [])
             if op == "add":
-                post.metadata[field] = list(set(current + [value]))
-            else:  # remove
+                post.metadata[field] = list(dict.fromkeys(current + [value]))
+            else:
                 post.metadata[field] = [x for x in current if x != value]
-        else:  # set operation
+        else:  # set operation, including replacement/clearing of list fields
             if value is None:  # Clear field with "none" value
                 post.metadata.pop(field, None)
             else:
@@ -549,7 +557,7 @@ def mutate_task(
         and requested == "done"
         and result.effective_state == "done"
     ):
-        _completion_effects(path)
+        run_completion_effects(path)
     return result
 
 
@@ -558,7 +566,9 @@ _effect_paths: ContextVar[frozenset[Path]] = ContextVar(
 )
 
 
-def _completion_effects(path: Path) -> None:
+def run_completion_effects(path: Path) -> None:
+    """Run hooks and propagation for a task after its mutation is committed."""
+    path = Path(path).resolve()
     active = _effect_paths.get()
     if path in active:
         return
@@ -567,6 +577,10 @@ def _completion_effects(path: Path) -> None:
         _run_completion_effects(path)
     finally:
         _effect_paths.reset(token)
+
+
+# Internal compatibility alias for callers/tests written before the public batch helper.
+_completion_effects = run_completion_effects
 
 
 def _run_completion_effects(path: Path) -> None:
