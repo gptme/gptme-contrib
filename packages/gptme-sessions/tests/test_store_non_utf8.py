@@ -7,7 +7,9 @@ from gptme_sessions import SessionRecord, SessionStore
 BAD_ROWS = [
     b'{"session_id": "x"}\xff\xfe\n',  # undecodable bytes after valid JSON
     b'{"session_id": "bad\xe2\x82", "model": "m"}\n',  # torn multibyte char inside a string
-    b"\xff\n",
+    b" \xff \r\n",  # whitespace and CRLF must survive byte-for-byte
+    # old timestamp must not let rotation relocate a corrupt row to an archive
+    b'{"session_id": "bad\xff", "timestamp": "2020-01-01T00:00:00Z"}\n',
 ]
 
 

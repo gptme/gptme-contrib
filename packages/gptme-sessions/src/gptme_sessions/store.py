@@ -280,14 +280,19 @@ class SessionStore:
             malformed_lines: list[str] = []
 
             if self.path.exists():
-                with open(self.path, encoding="utf-8", errors="surrogateescape") as f:
+                with open(
+                    self.path,
+                    encoding="utf-8",
+                    errors="surrogateescape",
+                    newline="",
+                ) as f:
                     for raw in f:
-                        raw = raw.strip()
-                        if not raw:
+                        line = raw.strip()
+                        if not line:
                             continue
                         try:
-                            raw.encode("utf-8")  # lone surrogates = undecodable bytes
-                            rec = SessionRecord.from_dict(json.loads(raw))
+                            line.encode("utf-8")  # lone surrogates = undecodable bytes
+                            rec = SessionRecord.from_dict(json.loads(line))
                             if rec.session_id not in known_ids:
                                 extra_records.append(rec)
                         except (
@@ -296,19 +301,26 @@ class SessionStore:
                             TypeError,
                             AttributeError,
                         ):
+                            # Keep the original bytes, including whitespace and
+                            # line ending, rather than the stripped parse input.
                             malformed_lines.append(raw)
 
             tmp_path = self.path.with_name(
                 f"{self.path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
             )
             try:
-                with open(tmp_path, "w", encoding="utf-8", errors="surrogateescape") as f:
+                with open(
+                    tmp_path,
+                    "w",
+                    encoding="utf-8",
+                    errors="surrogateescape",
+                    newline="",
+                ) as f:
                     for record in records:
                         f.write(record.to_json() + "\n")
                     for record in extra_records:
                         f.write(record.to_json() + "\n")
-                    for line in malformed_lines:
-                        f.write(line + "\n")
+                    f.writelines(malformed_lines)
                     f.flush()
                     os.fsync(f.fileno())
                 tmp_path.replace(self.path)
@@ -356,16 +368,27 @@ class SessionStore:
 
             keep_lines: list[str] = []
             by_month: dict[str, list[str]] = {}
-            with open(self.path, encoding="utf-8", errors="surrogateescape") as f:
+            with open(
+                self.path,
+                encoding="utf-8",
+                errors="surrogateescape",
+                newline="",
+            ) as f:
                 for raw in f:
-                    raw = raw.strip()
-                    if not raw:
+                    line = raw.strip()
+                    if not line:
                         continue
-                    month = self._archive_month(raw, cutoff)
-                    if month is None:
+                    try:
+                        line.encode("utf-8")  # lone surrogates = undecodable bytes
+                    except UnicodeEncodeError:
+                        # Preserve corrupt rows byte-for-byte in the active file.
                         keep_lines.append(raw)
                         continue
-                    by_month.setdefault(month, []).append(raw)
+                    month = self._archive_month(line, cutoff)
+                    if month is None:
+                        keep_lines.append(line + "\n")
+                        continue
+                    by_month.setdefault(month, []).append(line)
 
             if not by_month:
                 return {"archived": 0, "kept": len(keep_lines), "skipped_duplicate": 0}
@@ -398,8 +421,14 @@ class SessionStore:
                 f"{self.path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
             )
             try:
-                with open(tmp_path, "w", encoding="utf-8", errors="surrogateescape") as f:
-                    f.writelines(f"{line}\n" for line in keep_lines)
+                with open(
+                    tmp_path,
+                    "w",
+                    encoding="utf-8",
+                    errors="surrogateescape",
+                    newline="",
+                ) as f:
+                    f.writelines(keep_lines)
                     f.flush()
                     os.fsync(f.fileno())
                 tmp_path.replace(self.path)
