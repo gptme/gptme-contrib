@@ -343,22 +343,31 @@ def test_frozen_recurrence_clock(wait, recur, expected):
 
 
 def test_naive_recurrence_wait_uses_local_wall_clock(monkeypatch):
+    import os
     import time
 
     from gptodo.utils import advance_wait
 
     if not hasattr(time, "tzset"):
         pytest.skip("requires time.tzset")
-    monkeypatch.setenv("TZ", "Europe/Stockholm")
-    time.tzset()
+    original_tz = os.environ.get("TZ")
+    try:
+        monkeypatch.setenv("TZ", "Europe/Stockholm")
+        time.tzset()
 
-    result = advance_wait(
-        datetime(2026, 1, 1, 1),
-        "6h",
-        now=datetime(2026, 1, 2, 12, tzinfo=timezone.utc),
-    )
+        result = advance_wait(
+            datetime(2026, 1, 1, 1),
+            "6h",
+            now=datetime(2026, 1, 2, 12, tzinfo=timezone.utc),
+        )
 
-    assert result == datetime(2026, 1, 2, 19)
+        assert result == datetime(2026, 1, 2, 19)
+    finally:
+        if original_tz is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", original_tz)
+        time.tzset()
 
 
 def test_fan_in_fresh_same_state_child_list_and_parent_hooks(tmp_path, monkeypatch):
