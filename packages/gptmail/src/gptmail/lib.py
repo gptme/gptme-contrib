@@ -1436,21 +1436,26 @@ class AgentEmail:
                     current_value.append(line.strip())
                 continue
 
-            # Save previous header if any
-            if current_key and current_value:
+            # Save previous header if any. Empty current_value is a valid
+            # empty-value header (e.g. "X-GitHub-Labels:") and must be stored.
+            if current_key:
                 headers[current_key] = " ".join(current_value)
                 current_value = []
 
             # Parse new header — partition on ":" handles both "Key: value" and
-            # "Key:" (empty value, e.g. X-GitHub-Labels: from GitHub notifications)
+            # "Key:" (empty value, e.g. X-GitHub-Labels: from GitHub notifications).
+            # Do not seed current_value with "" — a folded continuation would
+            # then join as " <continued>" and leak a leading space into callers
+            # that do not strip (e.g. _send_unlocked Message-ID/References).
             if ":" in line:
                 current_key, _, value = line.partition(":")
-                current_value = [value.lstrip()]
+                current_value = [value.lstrip()] if value.strip() else []
             else:
                 print(f"Warning: Invalid header line: {line}", file=sys.stderr)
+                current_key = None
 
-        # Save last header
-        if current_key and current_value:
+        # Save last header (including empty-value)
+        if current_key:
             headers[current_key] = " ".join(current_value)
 
         return headers
