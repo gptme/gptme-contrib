@@ -49,7 +49,7 @@ registry = BlockRegistry(Path("state/backend-quota"))
 
 checks = registry.arm_checks("gptme", "glm-5.2")          # crash, daily crash, quality
 checks.append(registry.backend_check("gptme"))            # backend-wide exhaustion
-checks.append(registry.openrouter_check(context=None))    # shared OpenRouter chain
+checks.append(registry.openrouter_check(context=None))    # bare SHARED OpenRouter key
 
 verdict = registry.check(checks)
 if verdict.blocked:
@@ -88,7 +88,12 @@ All files live in one state directory chosen by the caller (conventionally
 | Backend-level | `{backend}-blocked-until.txt` |
 | Pool-level | `pool-{pool}-blocked-until.txt` |
 | OpenRouter limit (scoped) | `openrouter-{context}-daily-limit-until.txt` |
-| OpenRouter limit (shared) | `openrouter-daily-limit-until.txt` |
+| OpenRouter limit (SHARED key) | `openrouter-daily-limit-until.txt` |
+
+Each OpenRouter file covers exactly one key. The unscoped file is the bare
+SHARED key (`OPENROUTER_API_KEY`), not a whole dispatch chain: if a chain
+exports a dedicated key first and falls back to SHARED, treat it as blocked
+only when both files are active.
 
 `model_safe(model)` replaces `/` and spaces with `-`. Canonicalize model
 aliases before deriving a filename so an alias and its full name hit the same
