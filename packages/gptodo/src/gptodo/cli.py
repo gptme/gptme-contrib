@@ -2901,7 +2901,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
         except TransitionError as exc:
             raise click.ClickException(f"{task.name}: {exc}") from exc
 
-    completion_paths = []
+    completion_paths: list[Path] = []
     for task in target_tasks:
         try:
             # Batch edits commit every target before any cross-task completion
@@ -2909,6 +2909,10 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
             # is still waiting for its explicit edit later in this same command.
             result = mutate_task(task.path, changes, force=force, completion_effects=False)
         except TransitionError as exc:
+            from gptodo.lifecycle import run_completion_effects as _drain
+
+            for _path in completion_paths:
+                _drain(_path)
             if subtask_edits:
                 raise click.ClickException(f"{task.name}: {exc}") from exc
             console.print(f"[red]{exc}[/]")
@@ -4542,9 +4546,7 @@ def sync(update, output_json, use_cache, light, full, changes_only):
                 return [("set", "state", target)]
 
             try:
-                mutation = mutate_task(
-                    task.path, prepare=prepare, expected_state=task.state, intent="sync_reopen"
-                )
+                mutation = mutate_task(task.path, prepare=prepare, intent="sync_reopen")
                 result["updated"] = mutation.written
                 result["new_state"] = mutation.effective_state
             except (TransitionError, OSError) as exc:
