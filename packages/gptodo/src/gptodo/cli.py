@@ -24,6 +24,7 @@ Features:
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -2900,6 +2901,52 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
             resolve_subtask_lines(frontmatter.load(task.path).content, subtask_edits)
         except TransitionError as exc:
             raise click.ClickException(f"{task.name}: {exc}") from exc
+
+    # Reject incomplete done transitions before writing any target, so a
+    # rejected candidate never half-writes the batch. Counts run on the
+    # pre-edit body; set_subtask edits were validated above and mutate_task
+    # re-resolves under the lock.
+    def _projected_content(post) -> str:
+        # Project same-command subtask completions onto the body so a task
+        # whose last pending checkbox is ticked by this edit counts as resolved.
+        content = str(post.content)
+        if not subtask_edits:
+            return content
+        try:
+            selection = resolve_subtask_lines(content, subtask_edits)
+        except TransitionError:
+            return content
+        lines = content.split("\n")
+        for text, value in subtask_edits:
+            if value != "done" or text not in selection:
+                continue
+            line = lines[selection[text]]
+            lines[selection[text]] = re.sub(r"^(\s*)- \[ \]", r"\1- [x]", line, count=1)
+        return "\n".join(lines)
+
+    pending_done = []
+    for task in target_tasks:
+        post = frontmatter.load(task.path)
+        prior = normalize_state(str(post.metadata.get("state", "backlog") or "backlog"), warn=False)
+        if prior == "done":
+            continue
+        if not any(
+            op == "set" and field == "state" and value == "done" for op, field, value in changes
+        ):
+            continue
+        pending = count_subtasks(_projected_content(post), checklist_only=True).pending
+        if pending:
+            pending_done.append(f"{task.name}: {pending} unresolved checkbox(es)")
+
+    if pending_done:
+        details = "; ".join(pending_done)
+        if not allow_pending:
+            raise click.ClickException(
+                f"Cannot mark done: {details}. Tick completed items, skip dropped items "
+                "with a reason, or file a follow-up task and skip with a pointer. "
+                "Use --allow-pending only for an intentional override."
+            )
+        console.print(f"[yellow]--allow-pending: {details}[/]")
 
     from gptodo.lifecycle import run_completion_effects
 
