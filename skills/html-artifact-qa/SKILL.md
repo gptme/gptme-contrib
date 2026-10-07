@@ -55,7 +55,7 @@ HTML codeblock and the webui surfaces it as an iframe-previewed artifact.
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Answer: [question topic]</title>  <!-- escape user-derived text: see Output safety -->
+  <title>Answer: &lt;img&gt; — example of an already-escaped topic</title>  <!-- user-derived text must already be escaped: see Output safety -->
   <style>
     /* minimal accessible CSS — dark-mode aware */
     body { font-family: system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; color-scheme: light dark; }
@@ -67,8 +67,8 @@ HTML codeblock and the webui surfaces it as an iframe-previewed artifact.
   </style>
 </head>
 <body>
-  <h1>[Topic]</h1>
-  <p>[1-2 sentence TL;DR]</p>
+  <h1 id="qa-topic"></h1>
+  <p>[1-2 sentence TL;DR — your own wording; if it quotes the user, escape it]</p>
 
   <details open>
     <summary>Section 1: [key concept]</summary>
@@ -81,6 +81,11 @@ HTML codeblock and the webui surfaces it as an iframe-previewed artifact.
   </details>
 
   <!-- Add diagrams as inline SVG, tables for comparisons, or <pre><code> for examples -->
+  <script>
+    // Fill user-derived text ONLY via textContent (escaping is automatic).
+    // Never use innerHTML for anything the user influenced.
+    document.getElementById('qa-topic').textContent = "<the user's question>";
+  </script>
 </body>
 </html>
 ```
@@ -101,11 +106,21 @@ HTML codeblock and the webui surfaces it as an iframe-previewed artifact.
 ## Output safety: escape user-derived text
 
 The question topic and any quoted user content are user-controlled strings.
-**HTML-escape them before embedding** (`<` → `&lt;`, `>` → `&gt;`, `&` → `&amp;`,
-quotes → `&quot;`/`&#39;`) — a question like `explain <img src=x onerror=alert(1)>`
-must render as text, not execute. Treat the artifact as untrusted input rendered
-in an iframe on the user's machine: never interpolate raw user text into
-`<title>`, `<h1>`, attribute values, or inline `<script>`.
+**HTML-escape them before embedding** — a question like
+`explain <img src=x onerror=alert(1)>` must render as text, not execute. Use one
+of these two mechanisms, both shown in the template:
+
+1. **Preferred — `textContent`**: give the element an `id` and assign the
+   user-derived string from a `<script>` block via `textContent` (automatic
+   escaping; never `innerHTML`).
+2. **Static embedding — escape explicitly**: when you must write the text
+   directly into the markup, run it through this routine first:
+   `s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))`
+   (`<` → `&lt;`, `>` → `&gt;`, `&` → `&amp;`, quotes → `&quot;`/`&#39;`).
+
+Treat the artifact as untrusted input rendered in an iframe on the user's
+machine: never interpolate raw user text into `<title>`, `<h1>`, attribute
+values, or inline `<script>`.
 
 ## After the artifact
 
