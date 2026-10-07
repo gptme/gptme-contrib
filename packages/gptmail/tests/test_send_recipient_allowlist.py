@@ -172,7 +172,7 @@ def test_send_audit_failure_preserves_reply_completion(
     real_open = builtins.open
 
     def fail_audit(file, mode="r", *args, **kwargs):
-        if Path(file) == sent_path and mode == "a":
+        if isinstance(file, (str, Path)) and Path(file) == sent_path and mode == "r+":
             raise PermissionError("audit file is read-only")
         return real_open(file, mode, *args, **kwargs)
 
@@ -254,3 +254,47 @@ def test_send_audit_log_records_default(
     sent_path = tmp_path / "email" / "sent" / f"{draft_id}.md"
     content = sent_path.read_text()
     assert "allowlist=default" in content
+
+
+def test_send_audit_records_authorization_policy_despite_env_change(
+    agent: AgentEmail, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import subprocess
+
+    monkeypatch.setenv("EMAIL_SEND_ALLOWLIST", "*")
+    draft_id = agent.compose("anyone@external.com", "Snapshot", "Hello")
+
+    def deliver(*args, **kwargs):
+        if "input" in kwargs:
+            monkeypatch.delenv("EMAIL_SEND_ALLOWLIST")
+        return subprocess.CompletedProcess(args[0], 0)
+
+    monkeypatch.setattr(subprocess, "run", deliver)
+    agent.send(draft_id)
+    sent_path = tmp_path / "email" / "sent" / agent._format_filename(draft_id)
+    assert "allowlist=wildcard" in sent_path.read_text()
+
+
+def test_send_audit_does_not_recreate_archived_message(
+    agent: AgentEmail, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import subprocess
+
+    monkeypatch.delenv("EMAIL_SEND_ALLOWLIST", raising=False)
+    draft_id = agent.compose("erik@example.com", "Archive race", "Hello")
+    filename = agent._format_filename(draft_id)
+    draft_path = tmp_path / "email" / "drafts" / filename
+    sent_path = tmp_path / "email" / "sent" / filename
+    real_rename = Path.rename
+
+    def archive_after_rename(path, target):
+        result = real_rename(path, target)
+        if path == draft_path and Path(target) == sent_path:
+            agent.archive(draft_id)
+        return result
+
+    monkeypatch.setattr(Path, "rename", archive_after_rename)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a[0], 0))
+    agent.send(draft_id)
+    assert not sent_path.exists()
+    assert "Subject: Archive race" in agent.read_message(draft_id)
