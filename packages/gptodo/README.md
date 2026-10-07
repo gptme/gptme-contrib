@@ -268,7 +268,14 @@ it at three levels:
 2. **Any other illegal transition** (for example `active → todo`) prints a warning and goes
    ahead. With `GPTODO_STRICT_TRANSITIONS=1`, it is refused instead unless you pass
    `--force`.
-3. **Legal transitions** go through silently.
+3. **Legal transitions** go through silently, subject to the completion check below.
+
+Moving into `done` requires every checklist item to be completed or intentionally
+skipped. The entire edit batch is checked before any file is written, including
+checkbox changes supplied by `--set-subtask` in the same command. Fenced examples
+and checkbox-like prose are excluded. Existing `done` tasks and cancellation are
+unaffected. `--allow-pending` explicitly overrides this check with a warning; it
+does not bypass repository commit hooks. `--force` only overrides transition legality.
 
 `gptodo edit` also maintains bookkeeping fields. Entering `waiting` stamps
 `waiting_since`, `first_waiting_since` and `waiting_spell_count`. Moving to `done` or
@@ -304,7 +311,7 @@ Every command has `--help`. The top-level options are `-v/--verbose` and
 | Command | What it does |
 |---------|--------------|
 | `add "Title" [--priority] [--tags a,b] [--state] [--type action\|project] [--assigned-to]` | Create a task. Text piped on stdin becomes the body. |
-| `edit <id>... --set F V \| --add F V \| --remove F V \| --set-subtask "text" done\|todo [--force]` | Change frontmatter or checkboxes. Several IDs can be given at once. Repeat `--set-subtask` for a batch: each selector must match exactly one checkbox in every target, and no two selectors may address the same checkbox. Invalid selectors reject the whole invocation with nonzero status before any file is written. Partial text matches remain supported. `--set F none` clears a field, and `tag`/`dep` are shorthands for `tags`/`depends`. |
+| `edit <id>... --set F V \| --add F V \| --remove F V \| --set-subtask "text" done\|todo [--force] [--allow-pending]` | Change frontmatter or checkboxes. Several IDs can be given at once. Repeat `--set-subtask` for a batch: each selector must match exactly one checkbox in every target, and no two selectors may address the same checkbox. Invalid selectors or unresolved checkboxes on a done transition reject the whole invocation with nonzero status before any file is written. Partial text matches remain supported. `--set F none` clears a field, and `tag`/`dep` are shorthands for `tags`/`depends`. |
 | `claim <id> [--agent NAME]` | Set `active`, `assigned_to` and `assigned_at`. Running it again with the same owner does nothing. |
 | `subtask <parent> -n a -n b [--mode parallel\|sequential\|fan-out-fan-in]` | Split a task into child task files (`spawned_from` / `spawned_tasks`). |
 | `expire [--days N] [--state S] [--dry-run] [--json]` | Auto-expire long-quiet tasks (see below). |

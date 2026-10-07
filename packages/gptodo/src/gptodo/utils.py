@@ -1064,7 +1064,7 @@ def check_links(content: str, task_path: Path, repo_root: Path) -> List[str]:
     return broken
 
 
-def count_subtasks(content: str) -> SubtaskCount:
+def count_subtasks(content: str, *, checklist_only: bool = False) -> SubtaskCount:
     """Count completed, total, and intentionally-skipped subtasks.
 
     Looks for markdown task list items in the format:
@@ -1087,6 +1087,9 @@ def count_subtasks(content: str) -> SubtaskCount:
     recognised defensively so that old content using it is counted correctly,
     but the three interchangeable forms above are the documented interface.
 
+    ``checklist_only=True`` restricts counting to list entries outside fenced
+    code examples, ignoring checkbox-like text embedded in prose or item titles.
+
     THE DENOMINATOR RULE: skipped items stay in ``total``.
     ``total = completed + pending + skipped``. Simply ignoring the ``[-]``
     marker would drop the item from *both* numerator and denominator, so a task
@@ -1103,6 +1106,28 @@ def count_subtasks(content: str) -> SubtaskCount:
     Returns:
         SubtaskCount with completed, total, and skipped counts
     """
+    if checklist_only:
+        # Completion gates count actual list entries, excluding prose and fenced
+        # examples. Normalize titles so embedded checkbox examples do not count.
+        entries = []
+        fence = ""
+        for line in content.splitlines():
+            line = re.sub(r"^\s*(?:>\s*)?", "", line)
+            if fence:
+                if re.fullmatch(rf"{re.escape(fence[0])}{{{len(fence)},}}\s*", line):
+                    fence = ""
+                continue
+            opening = re.match(r"(`{3,}|~{3,})", line)
+            if opening:
+                fence = opening.group(1)
+                continue
+            item = re.match(r"- (\[[ x-]\]|\[SKIP\]|✅|🏃)\s*(.*)", line)
+            if item:
+                marker, title = item.groups()
+                title = "~~skipped~~" if re.match(r"~~.+?~~", title) else "item"
+                entries.append(f"- {marker} {title}")
+        content = "\n".join(entries)
+
     # Strip bare-skip and [SKIP] lines before scanning for completed/pending
     # markers so a title like "- [-] Use - [ ] thing (deferred: X)" does not
     # produce a spurious pending count from the "- [ ]" inside the title.
