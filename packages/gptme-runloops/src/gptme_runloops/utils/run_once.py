@@ -44,6 +44,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 CODEX_SANDBOXES = ("read-only", "workspace-write", "danger-full-access")
 CODEX_DEFAULT_SANDBOX = "workspace-write"
@@ -128,7 +129,7 @@ def _timeout_result(
 # --- claude-code ---
 
 
-def _claude_main_model(model_usage: dict) -> str | None:
+def _claude_main_model(model_usage: dict[str, Any]) -> str | None:
     """Pick the model that did most of the work (subagents may use others)."""
     if not model_usage:
         return None
