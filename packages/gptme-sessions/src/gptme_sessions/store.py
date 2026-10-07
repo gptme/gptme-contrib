@@ -482,6 +482,13 @@ class SessionStore:
             targets = [r for r in records if r.session_id == session_id]
             if not targets:
                 return False
+            # Historical four-hex IDs can name different runs. Keep readable
+            # history intact instead of broadcasting a mutation across them.
+            legacy_label = len(session_id) == 4 and all(
+                char in "0123456789abcdef" for char in session_id.lower()
+            )
+            if legacy_label and len({r.timestamp for r in targets}) > 1:
+                raise ValueError(f"ambiguous legacy session_id {session_id!r}")
             for target in targets:
                 target.attempt_kind = attempt_kind
             # Rewrite the full list so all duplicate rows for this session_id

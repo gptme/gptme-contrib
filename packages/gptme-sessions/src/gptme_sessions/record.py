@@ -555,6 +555,9 @@ class SessionRecord:
     # round-trips don't silently drop data (e.g. ``inferred_category``,
     # ``recommended_confidence``, ``notes``).
     _legacy_fields: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+    # Display-only label: reusable and never a mutation/join key. Appended to
+    # preserve the positional constructor order used by existing callers.
+    session_label: str | None = None
 
     def __post_init__(self) -> None:
         if not self.session_id:

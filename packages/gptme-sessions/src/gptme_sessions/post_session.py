@@ -352,6 +352,7 @@ def post_session(
     deliverables: list[str] | None = None,
     journal_path: str | None = None,
     session_id: str | None = None,
+    session_label: str | None = None,
     harness_session_id: str | None = None,
     harness_stderr_path: Path | None = None,
     failure_reason: str | None = None,
@@ -465,7 +466,11 @@ def post_session(
         When ``None`` and a trajectory is available, auto-detected from
         the first ``/journal/`` write in the trajectory signals.
     session_id:
-        Override the auto-generated session ID.
+        Override the auto-generated session ID. Launchers should supply their
+        immutable full run ID, not a reusable display label.
+    session_label:
+        Optional compact label for human display. It is not used for record
+        lookup, mutation, or commit-trailer ownership; those use session_id.
     commit_trailers:
         Optional map of caller commit SHA → ``Git-Session-Id`` trailer values.
         Used to distinguish session-trailer-owned SHAs from untagged/ambiguous
@@ -1205,6 +1210,8 @@ def post_session(
             logger.warning("smell-score computation failed", exc_info=True)
     if session_id is not None:
         record_kwargs["session_id"] = session_id
+    if session_label is not None:
+        record_kwargs["session_label"] = session_label
     if token_count is not None:
         record_kwargs["token_count"] = token_count
     if input_tokens is not None:
