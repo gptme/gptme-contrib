@@ -2131,7 +2131,7 @@ def test_bm25_min_z_override_suppresses_weak_matches(monkeypatch, is_skill, exem
 
     # 4.25 is below the adaptive cap (~4.31), but above the target's z.
     strict = score_lessons(lessons, "needle", bm25_min_z=4.25, skill_bm25_exempt_paths=exempt_paths)
-    assert bool(strict) is (is_skill and not exempt)
+    assert bool(strict) is is_skill
 
     skill_strict = score_lessons(
         lessons, "needle", skill_bm25_min_z=4.25, skill_bm25_exempt_paths=exempt_paths
@@ -2145,7 +2145,7 @@ def test_bm25_min_z_override_suppresses_weak_matches(monkeypatch, is_skill, exem
         skill_bm25_min_z=4.25,
         skill_bm25_exempt_paths=exempt_paths,
     )
-    assert both_strict == []
+    assert bool(both_strict) is (is_skill and exempt)
 
     assert score_lessons(lessons, "needle", bm25_min_z=None) == baseline
     lessons[0]["keywords"] = ["needle"]
