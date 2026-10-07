@@ -76,6 +76,17 @@ _utf8_qp = email.charset.Charset("utf-8")
 _utf8_qp.body_encoding = email.charset.QP
 
 
+def _body_dedup_snippet(body: str) -> str:
+    """Compare message content, not the recognized local send-audit trailer."""
+    body = re.sub(
+        r"\n<!-- send-audit: allowlist=(?:default|wildcard|\d+) "
+        r"sent_at=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z -->\s*\Z",
+        "",
+        body,
+    )
+    return "".join(body[:200].split())
+
+
 def _is_html(text: str) -> bool:
     """Detect if text content is already HTML."""
     stripped = text.strip().lower()
@@ -1527,7 +1538,7 @@ class AgentEmail:
                     msg_date = None
 
                 # Get body snippet (first 200 chars, normalized)
-                body_snippet = "".join(existing_body[:200].split()) if existing_body else ""
+                body_snippet = _body_dedup_snippet(existing_body) if existing_body else ""
 
                 # Create composite key from strong identifiers
                 # Use In-Reply-To + Subject as primary key (most reliable for matching)
@@ -1636,7 +1647,7 @@ class AgentEmail:
                 body = body.decode("utf-8", errors="replace")
 
         # Get first 200 chars of body for comparison (ignore whitespace differences)
-        body_snippet = "".join(body[:200].split()) if body else ""
+        body_snippet = _body_dedup_snippet(body) if body else ""
 
         # Check index for potential duplicates using keys
         primary_key, alt_key = self._get_message_key(email_msg, folder)
