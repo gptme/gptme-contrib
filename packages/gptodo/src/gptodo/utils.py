@@ -1244,10 +1244,13 @@ def _as_list(value: Any) -> list:
     """Coerce a list-typed frontmatter value so one malformed file can't crash every consumer.
 
     ``validate_task_file`` already reports non-list values; this keeps the task loadable.
+    Empty-string and whitespace-only values are treated like None (phantom dependency guard).
     """
     if isinstance(value, list):
         return value
     if value is None:
+        return []
+    if isinstance(value, str) and not value.strip():
         return []
     return [str(value)]
 

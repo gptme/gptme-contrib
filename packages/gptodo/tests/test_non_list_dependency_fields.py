@@ -64,3 +64,16 @@ def test_commands_survive_scalar_depends(tmp_path, command, expected_exit, expec
     ), f"Unexpected exception {type(result.exception).__name__}: {result.exception}\n{result.output}"
     assert result.exit_code == expected_exit, f"exit {result.exit_code}: {result.output}"
     assert expected_in_output in result.output, result.output
+
+
+@pytest.mark.parametrize("value", ['""', '"   "', "''", "~"])
+def test_empty_string_depends_does_not_create_phantom_dependency(tmp_path, value):
+    """``depends: ""`` must coerce to [] so the task isn't blocked on a phantom dep named ""."""
+    tasks = _write(tmp_path, "bad", f"depends: {value}\n")
+    loaded = {t.name: t for t in load_tasks(tasks)}
+    bad = loaded["bad"]
+    assert bad.depends == [], f"expected [], got {bad.depends!r}"
+    # The task must not appear blocked — ready should surface it
+    result = CliRunner().invoke(cli, ["--tasks-dir", str(tasks), "ready"])
+    assert result.exit_code == 0, f"exit {result.exit_code}: {result.output}"
+    assert "bad" in result.output, result.output
