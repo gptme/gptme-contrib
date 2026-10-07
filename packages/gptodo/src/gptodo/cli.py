@@ -125,6 +125,7 @@ from gptodo.utils import (
     # Core utilities
     build_dependency_universe,
     check_links,
+    count_subtasks,
     find_repo_root,
     get_blocking_reasons,
     # Cache
@@ -2508,6 +2509,11 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
     help="Set subtask state (subtask_text, done|todo). Repeat for a batch; selectors must be unique and unambiguous in every target task.",
 )
 @click.option(
+    "--allow-pending",
+    is_flag=True,
+    help="Allow a done transition with unresolved checkboxes. Does not bypass repository commit hooks.",
+)
+@click.option(
     "--force",
     is_flag=True,
     help=(
@@ -2517,7 +2523,7 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
         "'active' when they should be 'waiting'."
     ),
 )
-def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
+def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, allow_pending):
     """Edit task metadata.
 
     Recurring tasks:
@@ -2916,7 +2922,8 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
             selected[subtask_text] = index
         subtask_lines[task.path] = selected
 
-    # Apply changes
+    pending_done = []
+    # Plan all changes before writing any target.
     for task in target_tasks:
         post = posts[task.path]
 
@@ -3235,6 +3242,23 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force):
         ):
             post.metadata.pop("completed", None)
 
+        if _prior_state != "done" and post.metadata.get("state") == "done":
+            pending = count_subtasks(post.content, checklist_only=True).pending
+            if pending:
+                pending_done.append(f"{task.name}: {pending} unresolved checkbox(es)")
+
+    if pending_done:
+        details = "; ".join(pending_done)
+        if not allow_pending:
+            raise click.ClickException(
+                f"Cannot mark done: {details}. Tick completed items, skip dropped items "
+                "with a reason, or file a follow-up task and skip with a pointer. "
+                "Use --allow-pending only for an intentional override."
+            )
+        console.print(f"[yellow]--allow-pending: {details}[/]")
+
+    for task in target_tasks:
+        post = posts[task.path]
         # Report the actual metadata changes, including automatic fields such as
         # completed and waiting_since, immediately before writing them.
         console.print(f"\nChanges to apply:\n  {task.name}:")
