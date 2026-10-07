@@ -74,6 +74,37 @@ def test_post_session_context_tier_standard(tmp_path: Path):
     assert result.record.context_tier == "standard"
 
 
+def test_post_session_persists_attributed_git_summary(tmp_path: Path):
+    """A caller-owned Git summary survives storage without shared dirt."""
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="codex",
+        model="gpt-5.6-sol",
+        duration_seconds=60,
+        git_summary={
+            "attribution": "session",
+            "commits": ["abc1234 feat: ship"],
+            "files_changed": 2,
+            "insertions": 12,
+            "deletions": 3,
+            "sibling_commits": 4,
+            "dirty": True,
+        },
+    )
+
+    expected = {
+        "attribution": "session",
+        "commits": ["abc1234 feat: ship"],
+        "files_changed": 2,
+        "insertions": 12,
+        "deletions": 3,
+        "sibling_commits": 4,
+    }
+    assert result.record.git_summary == expected
+    assert SessionStore(sessions_dir=tmp_path).load_all()[0].git_summary == expected
+
+
 def test_post_session_ab_group_tier_version(tmp_path: Path):
     """ab_group and tier_version are stored in SessionRecord when passed to post_session."""
     store = SessionStore(sessions_dir=tmp_path)

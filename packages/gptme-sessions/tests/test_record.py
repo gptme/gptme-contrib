@@ -10,6 +10,7 @@ import pytest
 from gptme_sessions.record import (
     HARM_CATEGORY_LABELS,
     SessionRecord,
+    normalize_git_summary,
     normalize_model,
     trajectory_revision_for,
 )
@@ -47,6 +48,46 @@ def test_context_tier_roundtrip():
 
     r2 = SessionRecord.from_dict(d)
     assert r2.context_tier == "massive"
+
+
+def test_git_summary_roundtrip_excludes_shared_worktree_dirt():
+    """The bounded Git contract retains attribution, not global dirt."""
+    record = SessionRecord(
+        git_summary={
+            "head": "abc1234",
+            "branch": "master",
+            "attribution": "session",
+            "commits": ["abc1234 feat: ship", 123],
+            "files_changed": 2,
+            "insertions": 12,
+            "deletions": 3,
+            "sibling_commits": 4,
+            "shipped_class": "internal_code",
+            "owned_residue": ["journal/session.md", 123],
+            "dirty": True,
+        }
+    )
+
+    restored = SessionRecord.from_dict(json.loads(record.to_json()))
+
+    assert restored.git_summary == {
+        "attribution": "session",
+        "commits": ["abc1234 feat: ship"],
+        "head": "abc1234",
+        "branch": "master",
+        "shipped_class": "internal_code",
+        "files_changed": 2,
+        "insertions": 12,
+        "deletions": 3,
+        "sibling_commits": 4,
+        "owned_residue": ["journal/session.md"],
+    }
+    assert "dirty" not in restored.git_summary
+
+
+def test_normalize_git_summary_rejects_unbounded_or_invalid_values():
+    assert normalize_git_summary("not-a-mapping") is None
+    assert normalize_git_summary({"dirty": True, "insertions": -2}) == {"insertions": 0}
 
 
 def test_provider_cost_and_stop_reason_roundtrip():

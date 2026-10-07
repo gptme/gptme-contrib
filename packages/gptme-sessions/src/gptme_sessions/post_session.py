@@ -362,6 +362,7 @@ def post_session(
     reasoning_effort: str | None = None,
     commit_files: Mapping[str, Sequence[str]] | None = None,
     bookkeeping_path_prefixes: Sequence[str] = (),
+    git_summary: Mapping[str, Any] | None = None,
 ) -> PostSessionResult:
     """Record a completed agent session and extract trajectory signals.
 
@@ -506,6 +507,9 @@ def post_session(
     error:
         Optional override for error detail text. When ``None`` and the session
         failed, extracted from ``harness_stderr_path`` / trajectory.
+    git_summary:
+        Bounded Git output summary computed by a caller that owns commit
+        attribution. Global shared-worktree dirt is discarded by the record.
 
     Returns
     -------
@@ -1248,6 +1252,8 @@ def post_session(
         record_kwargs["tool_ms_total"] = tool_ms_total
     if subagent_summary is not None:
         record_kwargs["subagent_summary"] = subagent_summary
+    if git_summary is not None:
+        record_kwargs["git_summary"] = dict(git_summary)
 
     if exit_code != 0:
         if failure_reason is None or error is None:
