@@ -55,7 +55,7 @@ HTML codeblock and the webui surfaces it as an iframe-previewed artifact.
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Answer: [question topic]</title>
+  <title>Answer: [question topic]</title>  <!-- escape user-derived text: see Output safety -->
   <style>
     /* minimal accessible CSS — dark-mode aware */
     body { font-family: system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; color-scheme: light dark; }
@@ -97,6 +97,15 @@ HTML codeblock and the webui surfaces it as an iframe-previewed artifact.
   state diagrams. No external chart library needed for simple diagrams.
 - **Self-contained**: no external dependencies except optional CDN script tags.
   The artifact must render offline-first.
+
+## Output safety: escape user-derived text
+
+The question topic and any quoted user content are user-controlled strings.
+**HTML-escape them before embedding** (`<` → `&lt;`, `>` → `&gt;`, `&` → `&amp;`,
+quotes → `&quot;`/`&#39;`) — a question like `explain <img src=x onerror=alert(1)>`
+must render as text, not execute. Treat the artifact as untrusted input rendered
+in an iframe on the user's machine: never interpolate raw user text into
+`<title>`, `<h1>`, attribute values, or inline `<script>`.
 
 ## After the artifact
 
