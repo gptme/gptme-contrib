@@ -4,7 +4,7 @@ description: "Use when a user asks a complex, multi-part, or deeply technical qu
 license: MIT
 compatibility: gptme (webui with artifact rendering)
 metadata:
-  author: bob
+  author: gptme-contrib
   version: "0.1.0"
   tags:
     - ux
