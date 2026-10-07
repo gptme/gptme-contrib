@@ -18,10 +18,8 @@ from .record import ATTEMPT_KINDS, SessionRecord
 
 try:
     import fcntl as _fcntl
-
-    _has_fcntl = True
 except ImportError:  # pragma: no cover - non-POSIX platforms
-    _has_fcntl = False
+    _fcntl = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -125,14 +123,14 @@ class SessionStore:
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self.path.with_name(self.path.name + ".lock")
         with open(lock_path, "a", encoding="utf-8") as lock_file:
-            if _has_fcntl:
+            if _fcntl is not None:
                 _fcntl.flock(lock_file, _fcntl.LOCK_EX)
             self._lock_depth = 1
             try:
                 yield
             finally:
                 self._lock_depth = 0
-                if _has_fcntl:
+                if _fcntl is not None:
                     _fcntl.flock(lock_file, _fcntl.LOCK_UN)
 
     def _repair_tail(self) -> bool:
