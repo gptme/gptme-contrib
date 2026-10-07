@@ -76,14 +76,15 @@ _utf8_qp = email.charset.Charset("utf-8")
 _utf8_qp.body_encoding = email.charset.QP
 
 
-def _body_dedup_snippet(body: str) -> str:
-    """Compare message content, not the recognized local send-audit trailer."""
-    body = re.sub(
-        r"\n<!-- send-audit: allowlist=(?:default|wildcard|\d+) "
-        r"sent_at=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z -->\s*\Z",
-        "",
-        body,
-    )
+def _body_dedup_snippet(body: str, *, local_sent: bool = False) -> str:
+    """Ignore local send-audit metadata, never arbitrary incoming content."""
+    if local_sent:
+        body = re.sub(
+            r"\n<!-- send-audit: allowlist=(?:default|wildcard|\d+) "
+            r"sent_at=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z -->\s*\Z",
+            "",
+            body,
+        )
     return "".join(body[:200].split())
 
 
@@ -1537,8 +1538,16 @@ class AgentEmail:
                 except Exception:
                     msg_date = None
 
-                # Get body snippet (first 200 chars, normalized)
-                body_snippet = _body_dedup_snippet(existing_body) if existing_body else ""
+                # Only locally stored outbound mail can carry our send-audit trailer.
+                local_sent = (
+                    folder in {"sent", "archive"}
+                    and parseaddr(from_addr)[1].lower() in self.own_emails
+                )
+                body_snippet = (
+                    _body_dedup_snippet(existing_body, local_sent=local_sent)
+                    if existing_body
+                    else ""
+                )
 
                 # Create composite key from strong identifiers
                 # Use In-Reply-To + Subject as primary key (most reliable for matching)

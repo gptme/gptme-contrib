@@ -63,3 +63,24 @@ def test_non_trailing_or_unrecognized_comments_remain_part_of_body(
     incoming["In-Reply-To"] = "<original>"
     incoming.set_content("Hello")
     assert not agent._is_duplicate_message(incoming, "archive")
+
+
+@pytest.mark.parametrize("folder", ["inbox", "archive"])
+@pytest.mark.parametrize("audit_on_incoming", [True, False])
+def test_audit_shaped_incoming_content_is_not_local_metadata(
+    tmp_path: Path, folder: str, audit_on_incoming: bool
+) -> None:
+    agent = AgentEmail(str(tmp_path), "bob@gptme.org")
+    headers = (
+        "From: other@example.com\nTo: bob@gptme.org\nSubject: Reply\n" "In-Reply-To: <original>\n"
+    )
+    audited = "Hello\n" + AUDIT + "\n"
+    existing_body = "Hello\n" if audit_on_incoming else audited
+    (tmp_path / "email" / folder / "local.md").write_text(headers + "\n" + existing_body)
+    incoming = EmailMessage()
+    for line in headers.strip().splitlines():
+        key, value = line.split(": ", 1)
+        incoming[key] = value
+    incoming.set_content(audited if audit_on_incoming else "Hello")
+
+    assert not agent._is_duplicate_message(incoming, folder)
