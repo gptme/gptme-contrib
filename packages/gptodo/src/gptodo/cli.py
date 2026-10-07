@@ -2901,36 +2901,34 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
         except TransitionError as exc:
             raise click.ClickException(f"{task.name}: {exc}") from exc
 
-    completion_paths: list[Path] = []
-    for task in target_tasks:
-        try:
-            # Batch edits commit every target before any cross-task completion
-            # effect runs. Otherwise completing a child can mutate a parent that
-            # is still waiting for its explicit edit later in this same command.
-            result = mutate_task(task.path, changes, force=force, completion_effects=False)
-        except TransitionError as exc:
-            from gptodo.lifecycle import run_completion_effects as _drain
-
-            for _path in completion_paths:
-                _drain(_path)
-            if subtask_edits:
-                raise click.ClickException(f"{task.name}: {exc}") from exc
-            console.print(f"[red]{exc}[/]")
-            raise SystemExit(1) from exc
-        console.print(f"\nChanges to apply:\n  {task.name}:")
-        for field, (current, new) in sorted(result.changed_fields.items()):
-            console.print(f"    {field}: {current} -> {new}")
-        if result.requested_state == "done" and result.effective_state == "done":
-            completion_paths.append(task.path)
-        if result.requested_state == "done" and result.effective_state == "waiting":
-            console.print(
-                f"[cyan]↩ {task.name} recurring — reset to waiting, next wait: {result.post.metadata['wait']}[/]"
-            )
-
     from gptodo.lifecycle import run_completion_effects
 
-    for path in completion_paths:
-        run_completion_effects(path)
+    completion_paths: list[Path] = []
+    try:
+        for task in target_tasks:
+            try:
+                # Batch edits commit every target before any cross-task completion
+                # effect runs. Otherwise completing a child can mutate a parent that
+                # is still waiting for its explicit edit later in this same command.
+                result = mutate_task(task.path, changes, force=force, completion_effects=False)
+            except TransitionError as exc:
+                if subtask_edits:
+                    raise click.ClickException(f"{task.name}: {exc}") from exc
+                console.print(f"[red]{exc}[/]")
+                raise SystemExit(1) from exc
+            if result.requested_state == "done" and result.effective_state == "done":
+                completion_paths.append(task.path)
+            console.print(f"\nChanges to apply:\n  {task.name}:")
+            for field, (current, new) in sorted(result.changed_fields.items()):
+                console.print(f"    {field}: {current} -> {new}")
+            if result.requested_state == "done" and result.effective_state == "waiting":
+                console.print(
+                    f"[cyan]↩ {task.name} recurring — reset to waiting, next wait: {result.post.metadata['wait']}[/]"
+                )
+    finally:
+        # Earlier writes remain committed even if a later read/replace fails.
+        for path in completion_paths:
+            run_completion_effects(path)
 
     # Show success message
     count = len(target_tasks)
@@ -4127,9 +4125,13 @@ def expire(days: int, states: tuple[str, ...], dry_run: bool, output_json: bool)
             # per-task rather than batching so a mid-run failure leaves the
             # already-updated files consistent.
             from gptodo.lifecycle import mutate_task, TransitionError
+            from yaml import YAMLError
 
             def prepare(post):
-                fresh = load_tasks(tasks_dir, single_file=task.path)[0]
+                fresh_tasks = load_tasks(tasks_dir, single_file=task.path)
+                if not fresh_tasks:
+                    raise TransitionError("Task is no longer readable")
+                fresh = fresh_tasks[0]
                 if not _task_is_expirable(fresh, cutoff, eligible):
                     raise TransitionError("Task is no longer expirable")
                 return [
@@ -4140,7 +4142,7 @@ def expire(days: int, states: tuple[str, ...], dry_run: bool, output_json: bool)
 
             try:
                 mutate_task(task.path, prepare=prepare, expected_state=task.state)
-            except (TransitionError, FileNotFoundError):
+            except (TransitionError, FileNotFoundError, YAMLError):
                 continue
         expired_records.append(record)
 

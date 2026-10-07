@@ -653,6 +653,67 @@ def test_cli_stale_open_snapshot_cannot_reopen_fresh_terminal(tmp_path, monkeypa
     assert frontmatter.load(path).metadata["state"] == "done"
 
 
+@pytest.mark.parametrize("error", [OSError("replace failed"), FileNotFoundError("gone")])
+def test_batch_edit_drains_committed_effects_on_write_error(tmp_path, monkeypatch, error):
+    import gptodo.lifecycle as lifecycle
+
+    first = write_task(tmp_path, "first")
+    second = write_task(tmp_path, "second")
+    monkeypatch.chdir(tmp_path)
+    original = lifecycle.mutate_task
+    effects = []
+
+    def mutate(path, *args, **kwargs):
+        if path == second:
+            raise error
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(lifecycle, "mutate_task", mutate)
+    monkeypatch.setattr(lifecycle, "run_completion_effects", effects.append)
+    result = CliRunner().invoke(cli, ["edit", "first", "second", "--set", "state", "done"])
+    assert result.exit_code != 0
+    assert frontmatter.load(first).metadata["state"] == "done"
+    assert frontmatter.load(second).metadata["state"] == "todo"
+    assert effects == [first]
+
+
+@pytest.mark.parametrize("unreadable", ["metadata", "yaml"])
+def test_expire_skips_candidate_that_becomes_unreadable(tmp_path, monkeypatch, unreadable):
+    import gptodo.lifecycle as lifecycle
+
+    first = write_task(tmp_path, "first", created="2000-01-01", priority="low")
+    second = write_task(tmp_path, "second", created="2000-01-02", priority="low")
+    monkeypatch.chdir(tmp_path)
+    original = lifecycle.mutate_task
+    damaged = "---\nstate: todo\ncreated: 2000-01-01\n---\n# First\n"
+    if unreadable == "yaml":
+        damaged = "---\nstate: [\n---\n# First\n"
+    else:
+        import importlib
+
+        cli_module = importlib.import_module("gptodo.cli")
+        original_load = cli_module.load_tasks
+
+        def load(*args, **kwargs):
+            if kwargs.get("single_file") == first:
+                return []
+            return original_load(*args, **kwargs)
+
+        monkeypatch.setattr(cli_module, "load_tasks", load)
+
+    def mutate(path, *args, **kwargs):
+        if path == first:
+            first.write_text(damaged)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(lifecycle, "mutate_task", mutate)
+    result = CliRunner().invoke(cli, ["expire", "--days", "90", "--json"])
+    assert result.exit_code == 0, result.output
+    assert first.read_text() == damaged
+    assert frontmatter.load(second).metadata["state"] == "expired"
+    assert '"count": 1' in result.output
+
+
 def test_library_bool_failure_contract(tmp_path):
     assert not update_task_state(tmp_path / "missing.md", "done")
     path = write_task(tmp_path)
