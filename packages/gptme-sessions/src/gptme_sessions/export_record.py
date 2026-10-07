@@ -20,10 +20,12 @@ Usage::
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from gptme_sessions.record import SessionRecord
+    from gptme_sessions.store import SessionStore
 
 # Canonical run-type labels understood by both Calendar and Sheet sinks.
 # Extend here when new session categories emerge — never in the sinks.
@@ -197,3 +199,37 @@ class CompletedRunExport:
     def as_sheet_row_key(self) -> str:
         """Return the stable Sheet identity column value (= ``run_id``)."""
         return self.run_id
+
+
+def build_export_feed(
+    store: "SessionStore | None" = None,
+    store_path: "Path | None" = None,
+    filter: RunExportFilter | None = None,
+    include_archives: bool = True,
+) -> list["CompletedRunExport"]:
+    """Build a ``CompletedRunExport`` feed from a ``SessionStore``.
+
+    Both Calendar and Sheet sinks consume this feed as their source of truth
+    rather than scanning ICS files or journal globs.
+
+    Args:
+        store: An already-opened ``SessionStore``.  Created from ``store_path``
+            (or the default store directory) when ``None``.
+        store_path: Directory containing the session store.  Used only when
+            ``store`` is ``None``.  Defaults to the environment-configured
+            sessions directory when both are ``None``.
+        filter: Optional eligibility filter applied to each record.
+        include_archives: Whether to include archived session records.
+            Defaults to ``True`` so historical exports are complete.
+
+    Returns:
+        All ``CompletedRunExport`` records, eligible and ineligible.
+        Callers should filter on ``export.eligible`` before forwarding to sinks.
+    """
+    from gptme_sessions.store import SessionStore  # noqa: PLC0415 (avoid circular at module level)
+
+    if store is None:
+        store = SessionStore(sessions_dir=store_path)
+
+    records = store.load_all(include_archives=include_archives)
+    return [CompletedRunExport.from_session_record(r, filter=filter) for r in records]

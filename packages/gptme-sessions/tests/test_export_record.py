@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import pytest
 
 from gptme_sessions.export_record import (
@@ -9,8 +12,10 @@ from gptme_sessions.export_record import (
     CompletedRunExport,
     RunExportFilter,
     _normalize_run_type,
+    build_export_feed,
 )
 from gptme_sessions.record import SessionRecord
+from gptme_sessions.store import SessionStore
 
 
 # ---------------------------------------------------------------------------
@@ -196,3 +201,52 @@ def test_all_known_run_types_survive_filter(run_type: str) -> None:
     filt = RunExportFilter(run_types=list(KNOWN_RUN_TYPES))
     export = CompletedRunExport.from_session_record(record, filter=filt)
     assert export.eligible is True, f"{run_type} was unexpectedly excluded"
+
+
+# ---------------------------------------------------------------------------
+# build_export_feed
+# ---------------------------------------------------------------------------
+
+
+def _make_store_with_records(records: list[SessionRecord]) -> SessionStore:
+    """Write records to a temp JSONL store and return a SessionStore over it."""
+    tmp = Path(tempfile.mkdtemp())
+    store = SessionStore(sessions_dir=tmp)
+    for r in records:
+        store.append(r)
+    return store
+
+
+def test_build_export_feed_returns_all_records() -> None:
+    """build_export_feed returns one export per record."""
+    r1 = _make_record(session_id="run1aaaa", session_label="abcd")
+    r2 = _make_record(session_id="run2bbbb", session_label="efgh")
+    store = _make_store_with_records([r1, r2])
+    exports = build_export_feed(store=store)
+    assert len(exports) == 2
+    run_ids = {e.run_id for e in exports}
+    assert run_ids == {"run1aaaa", "run2bbbb"}
+
+
+def test_build_export_feed_two_same_label_are_independent() -> None:
+    """Two records with the same session_label produce two distinct exports."""
+    r1 = _make_record(session_id="run1aaaa", session_label="abcd")
+    r2 = _make_record(session_id="run2bbbb", session_label="abcd")  # same label
+    store = _make_store_with_records([r1, r2])
+    exports = build_export_feed(store=store)
+    assert len(exports) == 2
+    assert exports[0].run_id != exports[1].run_id
+    assert exports[0].session_label == exports[1].session_label == "abcd"
+
+
+def test_build_export_feed_filter_applied() -> None:
+    """RunExportFilter is applied per record; ineligible records are still returned."""
+    r_short = _make_record(session_id="run1aaaa", duration_seconds=10)
+    r_long = _make_record(session_id="run2bbbb", duration_seconds=3600)
+    store = _make_store_with_records([r_short, r_long])
+    filt = RunExportFilter(min_duration_seconds=60)
+    exports = build_export_feed(store=store, filter=filt)
+    assert len(exports) == 2  # both returned
+    eligible = [e for e in exports if e.eligible]
+    assert len(eligible) == 1
+    assert eligible[0].run_id == "run2bbbb"
