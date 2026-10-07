@@ -368,6 +368,13 @@ def test_malformed_pi_json_fails_visibly(tmp_path: Path) -> None:
         parse_trajectory(path)
 
 
+def test_non_object_pi_record_fails_visibly(tmp_path: Path) -> None:
+    path = tmp_path / "non-object.jsonl"
+    path.write_text(json.dumps(_header()) + "\n[]\n", encoding="utf-8")
+    with pytest.raises(PiSessionFormatError, match="non-object.*line 2"):
+        parse_trajectory(path)
+
+
 @pytest.mark.parametrize(
     "invalid_value",
     ["NaN", "1e400", "[" * 10000 + "0" + "]" * 10000],
