@@ -91,12 +91,13 @@ HTML codeblock and the webui surfaces it as an iframe-previewed artifact.
 - **`<details>` sections**: each major concept gets its own collapsible.
 - **Comparisons → tables**: use `<table>` for side-by-side comparisons or option
   lists.
-- **Code examples → `<pre><code>`**: syntax-highlighted if possible with a
-  lightweight inline highlighter (prism.js from a CDN is fine).
+- **Code examples → `<pre><code>`**: use plain `<pre><code>` blocks; no external
+  syntax highlighter. CSS `color: inherit` and a contrasting background are
+  enough for readability without an external library.
 - **Diagrams → inline SVG**: small ASCII-to-SVG or hand-crafted SVG for flow/
   state diagrams. No external chart library needed for simple diagrams.
-- **Self-contained**: no external dependencies except optional CDN script tags.
-  The artifact must render offline-first.
+- **Self-contained**: no external dependencies. The artifact must render
+  offline-first — no CDN script tags, no remote fetch.
 
 ## Output safety: escape user-derived text
 
