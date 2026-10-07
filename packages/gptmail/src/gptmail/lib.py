@@ -1586,7 +1586,7 @@ class AgentEmail:
                 is_recorded_local_send = (
                     existing_file.name in locally_sent
                     and locally_sent[existing_file.name]
-                    == hashlib.sha256(existing_body.encode("utf-8")).hexdigest()[:16]
+                    == hashlib.sha256(existing_body.encode("utf-8")).hexdigest()
                 )
                 body_snippet = (
                     _body_dedup_snippet(existing_body, local_sent=is_recorded_local_send)
