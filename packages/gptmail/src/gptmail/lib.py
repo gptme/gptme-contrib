@@ -1163,14 +1163,16 @@ class AgentEmail:
         """
         try:
             _, body = self._markdown_to_email(sent_path.read_text(encoding="utf-8"))
-        except Exception:
-            body = ""
-        filename = sent_path.name
-        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
-        record = self.email_dir / _LOCAL_SENT_RECORD
-        record.parent.mkdir(parents=True, exist_ok=True)
-        with open(record, "a", encoding="utf-8") as f:
-            f.write(f"{filename} {digest}\n")
+            filename = sent_path.name
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            record = self.email_dir / _LOCAL_SENT_RECORD
+            record.parent.mkdir(parents=True, exist_ok=True)
+            with open(record, "a", encoding="utf-8") as f:
+                f.write(f"{filename} {digest}\n")
+        except Exception as e:
+            # The send itself already succeeded; a failed provenance record only
+            # means this message will not be audit-stripped during dedup.
+            logger.warning(f"Failed to record local send for {sent_path.name}: {e}")
 
     def _load_local_sends(self) -> Dict[str, str]:
         """Load filenames and body digests recorded by _record_local_send."""
