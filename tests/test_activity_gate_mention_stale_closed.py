@@ -39,6 +39,22 @@ notif_number = int(os.environ.get("TEST_NOTIF_NUMBER", "688"))
 notif_reason = os.environ.get("TEST_NOTIF_REASON", "mention")
 subject_type = os.environ.get("TEST_SUBJECT_TYPE", "Issue")
 issue_state = os.environ.get("TEST_ISSUE_STATE", "open")
+latest_actor = os.environ.get("TEST_LATEST_ACTOR", "test-author")
+latest_actor_type = os.environ.get("TEST_LATEST_ACTOR_TYPE", "")
+latest_actor_surface = os.environ.get("TEST_LATEST_ACTOR_SURFACE", "comment")
+latest_actor_missing_user = os.environ.get("TEST_LATEST_ACTOR_MISSING_USER", "") == "1"
+human_before_latest = os.environ.get("TEST_HUMAN_BEFORE_LATEST", "")
+human_before_latest_at = os.environ.get(
+    "TEST_HUMAN_BEFORE_LATEST_AT", "2026-09-17T10:00:00Z"
+)
+human_before_latest_updated_at = os.environ.get(
+    "TEST_HUMAN_BEFORE_LATEST_UPDATED_AT", human_before_latest_at
+)
+human_before_latest_post_snapshot_edit = os.environ.get(
+    "TEST_HUMAN_BEFORE_LATEST_POST_SNAPSHOT_EDIT", ""
+)
+older_comment_actor = os.environ.get("TEST_OLDER_COMMENT_ACTOR", "")
+older_comment_actor_type = os.environ.get("TEST_OLDER_COMMENT_ACTOR_TYPE", "User")
 
 
 def apply_jq(data, jq_expr):
@@ -95,14 +111,65 @@ if argv[0] == "api":
         }]
         print(apply_jq(notifs, jq_expr))
         sys.exit(0)
-    # mention_subject_is_closed() calls repos/{repo}/issues/{number}
+    # notification_subject_is_closed() calls repos/{repo}/issues/{number}
     if (f"/issues/{notif_number}" in endpoint
             and "/comments" not in endpoint
             and "/reviews" not in endpoint):
         issue = {"state": issue_state, "number": notif_number}
         print(apply_jq(issue, jq_expr))
         sys.exit(0)
-    # Fallback for any other endpoint (comments, reviews, etc.)
+    if f"/issues/{notif_number}/comments" in endpoint:
+        comments = []
+        if older_comment_actor:
+            comments.append(
+                {
+                    "user": {
+                        "login": older_comment_actor,
+                        "type": older_comment_actor_type,
+                    },
+                    "created_at": "2026-09-17T09:30:00Z",
+                }
+            )
+        if human_before_latest:
+            comments.append(
+                {
+                    "user": {"login": human_before_latest, "type": "User"},
+                    "created_at": human_before_latest_at,
+                    "updated_at": (
+                        human_before_latest_post_snapshot_edit
+                        or human_before_latest_updated_at
+                    ),
+                }
+            )
+        if latest_actor_surface == "comment":
+            comments.append(
+                {
+                    "user": (
+                        None
+                        if latest_actor_missing_user
+                        else {"login": latest_actor, "type": latest_actor_type}
+                    ),
+                    "created_at": "2026-09-17T11:00:00Z",
+                }
+            )
+        pages = [comments]
+        print(apply_jq(pages, jq_expr) if jq_expr else json.dumps(pages))
+        sys.exit(0)
+    if f"/pulls/{notif_number}/reviews" in endpoint:
+        reviews = []
+        if latest_actor_surface == "review":
+            reviews = [{"user": {"login": latest_actor, "type": latest_actor_type}, "submitted_at": "2026-09-17T10:00:00Z"}]
+        pages = [reviews]
+        print(apply_jq(pages, jq_expr) if jq_expr else json.dumps(pages))
+        sys.exit(0)
+    if f"/pulls/{notif_number}/comments" in endpoint:
+        comments = []
+        if latest_actor_surface == "inline":
+            comments = [{"user": {"login": latest_actor, "type": latest_actor_type}, "created_at": "2026-09-17T10:00:00Z"}]
+        pages = [comments]
+        print(apply_jq(pages, jq_expr) if jq_expr else json.dumps(pages))
+        sys.exit(0)
+    # Fallback for any other endpoint.
     if "--paginate" in argv or "--slurp" in argv:
         print(apply_jq([[]], jq_expr) if jq_expr else "[[]]")
     else:
@@ -120,22 +187,53 @@ def _run_gate(
     reason: str = "mention",
     subject_type: str = "Issue",
     issue_state: str = "open",
+    latest_actor: str = "test-author",
+    latest_actor_type: str = "",
+    latest_actor_surface: str = "comment",
+    latest_actor_missing_user: bool = False,
+    human_before_latest: str = "",
+    human_before_latest_at: str = "2026-09-17T10:00:00Z",
+    human_before_latest_updated_at: str | None = None,
+    human_before_latest_post_snapshot_edit: str | None = None,
+    older_comment_actor: str = "",
+    older_comment_actor_type: str = "User",
+    prior: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
     fake_gh.write_text(FAKE_GH)
     fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
 
     env = os.environ.copy()
+    # Keep actor classification deterministic when the developer's shell has a
+    # different live bot identity configured.
+    env["BOT_USERNAME"] = "test-author"
     env["TEST_NOTIF_ID"] = NOTIF_ID
     env["TEST_NOTIF_REPO"] = NOTIF_REPO
     env["TEST_NOTIF_NUMBER"] = str(NOTIF_NUMBER)
     env["TEST_NOTIF_REASON"] = reason
     env["TEST_SUBJECT_TYPE"] = subject_type
     env["TEST_ISSUE_STATE"] = issue_state
+    env["TEST_NOTIF_UPDATED_AT"] = "2026-09-17T11:00:00Z"
+    env["TEST_LATEST_ACTOR"] = latest_actor
+    env["TEST_LATEST_ACTOR_TYPE"] = latest_actor_type
+    env["TEST_LATEST_ACTOR_SURFACE"] = latest_actor_surface
+    env["TEST_LATEST_ACTOR_MISSING_USER"] = "1" if latest_actor_missing_user else "0"
+    env["TEST_HUMAN_BEFORE_LATEST"] = human_before_latest
+    env["TEST_HUMAN_BEFORE_LATEST_AT"] = human_before_latest_at
+    env["TEST_HUMAN_BEFORE_LATEST_UPDATED_AT"] = (
+        human_before_latest_updated_at or human_before_latest_at
+    )
+    env["TEST_HUMAN_BEFORE_LATEST_POST_SNAPSHOT_EDIT"] = (
+        human_before_latest_post_snapshot_edit or ""
+    )
+    env["TEST_OLDER_COMMENT_ACTOR"] = older_comment_actor
+    env["TEST_OLDER_COMMENT_ACTOR_TYPE"] = older_comment_actor_type
     env["PATH"] = f"{tmp}:{env['PATH']}"
 
     # Established state dir: seed a sibling so first-sight emits.
     (state_dir / "notif-99999999999.state").write_text("2026-09-01T00:00:00Z")
+    if prior is not None:
+        (state_dir / f"notif-{NOTIF_ID}.state").write_text(prior)
 
     return subprocess.run(
         [
@@ -170,6 +268,185 @@ def _emitted_notifications(stdout: str) -> list[dict]:
         if obj.get("type") == "notification":
             items.append(obj)
     return items
+
+
+def test_comment_first_sight_on_closed_issue_emits() -> None:
+    """Never swallow older human work when this notification has no watermark."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason="comment",
+            issue_state="closed",
+            latest_actor="codecov[bot]",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert len(_emitted_notifications(result.stdout)) == 1, result.stdout
+
+
+def test_comment_bot_update_on_closed_issue_is_suppressed() -> None:
+    """After a prior dispatch, a bot-only closed-thread bump is noise."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason="comment",
+            issue_state="closed",
+            latest_actor="codecov[bot]",
+            prior="2026-09-17T09:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert _emitted_notifications(result.stdout) == [], result.stdout
+
+
+def test_unknown_actor_after_bot_on_closed_issue_emits() -> None:
+    """An unclassifiable latest actor must keep the notification visible."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason="comment",
+            issue_state="closed",
+            latest_actor_missing_user=True,
+            older_comment_actor="codecov[bot]",
+            older_comment_actor_type="Bot",
+            prior="2026-09-17T09:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert len(_emitted_notifications(result.stdout)) == 1, result.stdout
+
+
+def test_human_comment_after_prior_then_bot_on_closed_issue_emits() -> None:
+    """A later bot must not hide human work newer than the watermark."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason="comment",
+            issue_state="closed",
+            latest_actor="codecov[bot]",
+            human_before_latest="maintainer",
+            prior="2026-09-17T09:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        emitted = _emitted_notifications(result.stdout)
+        assert len(emitted) == 1, result.stdout
+
+
+def test_human_comment_at_prior_timestamp_then_bot_on_closed_issue_emits() -> None:
+    """A timestamp tie with the prior watermark must fail open for human work."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason="comment",
+            issue_state="closed",
+            latest_actor="codecov[bot]",
+            human_before_latest="maintainer",
+            human_before_latest_at="2026-09-17T09:00:00Z",
+            prior="2026-09-17T09:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert len(_emitted_notifications(result.stdout)) == 1, result.stdout
+
+
+def test_edited_human_comment_after_prior_then_bot_on_closed_issue_emits() -> None:
+    """A human edit after the watermark must count as fresh human activity."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason="comment",
+            issue_state="closed",
+            latest_actor="codecov[bot]",
+            human_before_latest="maintainer",
+            human_before_latest_at="2026-09-17T08:00:00Z",
+            human_before_latest_updated_at="2026-09-17T10:00:00Z",
+            prior="2026-09-17T09:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert len(_emitted_notifications(result.stdout)) == 1, result.stdout
+
+
+def test_post_snapshot_edit_preserves_human_comment_created_in_window() -> None:
+    """A later edit must not erase a human comment present in the snapshot."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason="comment",
+            issue_state="closed",
+            latest_actor="codecov[bot]",
+            human_before_latest="maintainer",
+            human_before_latest_at="2026-09-17T10:00:00Z",
+            human_before_latest_post_snapshot_edit="2026-09-17T12:00:00Z",
+            prior="2026-09-17T09:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert len(_emitted_notifications(result.stdout)) == 1, result.stdout
+
+
+def test_bot_shaped_user_comment_on_closed_issue_emits() -> None:
+    """An explicit REST User type outranks bot-like login heuristics."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason="comment",
+            issue_state="closed",
+            latest_actor="renovate-helper",
+            latest_actor_type="User",
+            prior="2026-09-17T09:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert len(_emitted_notifications(result.stdout)) == 1, result.stdout
+
+
+def test_inline_human_comment_on_closed_pr_emits() -> None:
+    """A human inline reply must outrank an older self issue comment."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason="comment",
+            subject_type="PullRequest",
+            issue_state="closed",
+            latest_actor="maintainer",
+            latest_actor_type="User",
+            latest_actor_surface="inline",
+            older_comment_actor="test-author",
+            prior="2026-09-17T09:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        emitted = _emitted_notifications(result.stdout)
+        assert len(emitted) == 1, result.stdout
 
 
 def test_mention_suppressed_when_issue_is_closed() -> None:

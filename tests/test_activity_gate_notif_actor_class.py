@@ -188,12 +188,19 @@ def _emitted_notifications(stdout: str) -> list[dict]:
     return items
 
 
-def _bot_comment(created_at: str = "2026-08-26T16:30:00Z") -> dict:
-    return {
+def _bot_comment(
+    created_at: str = "2026-08-26T16:30:00Z",
+    *,
+    updated_at: str | None = None,
+) -> dict:
+    comment = {
         "user": {"login": "codecov[bot]", "type": "Bot"},
         "body": "Coverage report",
         "created_at": created_at,
     }
+    if updated_at is not None:
+        comment["updated_at"] = updated_at
+    return comment
 
 
 def _human_comment(created_at: str = "2026-08-26T17:00:00Z") -> dict:
@@ -202,6 +209,30 @@ def _human_comment(created_at: str = "2026-08-26T17:00:00Z") -> dict:
         "body": "Please update the changelog.",
         "created_at": created_at,
     }
+
+
+def test_activity_after_notification_snapshot_is_deferred() -> None:
+    """Actor classification must not consume activity from a later snapshot."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            comments=[
+                _bot_comment(
+                    created_at="2026-08-26T16:30:00Z",
+                    updated_at="2026-08-26T17:15:04Z",
+                ),
+                _human_comment(created_at="2026-08-26T17:30:00Z"),
+            ],
+            prior_timestamp="2026-08-26T16:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert _emitted_notifications(result.stdout) == [], result.stdout
+        state_file = state_dir / f"notif-{NOTIF_ID}.state"
+        assert state_file.read_text().strip() == "2026-08-26T17:15:04Z"
 
 
 def test_bot_only_author_notification_suppressed() -> None:
@@ -306,6 +337,36 @@ def test_human_review_after_bot_activity_emits() -> None:
                     "submitted_at": "2026-08-26T17:00:00Z",
                 }
             ],
+        )
+        assert result.returncode in (0, 1), result.stderr
+        emitted = _emitted_notifications(result.stdout)
+        assert len(emitted) == 1, result.stdout
+        assert emitted[0]["detail"] == "author; actor_class=human"
+
+
+def test_author_notification_preserves_review_before_later_bot_edit() -> None:
+    """Fresh human review outranks a later bot edit after the watermark."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            comments=[
+                _bot_comment(
+                    created_at="2026-08-26T15:00:00Z",
+                    updated_at="2026-08-26T17:00:00Z",
+                )
+            ],
+            reviews=[
+                {
+                    "user": {"login": "ErikBjare", "type": "User"},
+                    "state": "CHANGES_REQUESTED",
+                    "submitted_at": "2026-08-26T16:30:00Z",
+                }
+            ],
+            prior_timestamp="2026-08-26T16:00:00Z",
         )
         assert result.returncode in (0, 1), result.stderr
         emitted = _emitted_notifications(result.stdout)

@@ -2316,6 +2316,23 @@ notification_subject_is_closed() {
     [ "$state" = "closed" ]
 }
 
+# Returns exit 0 when a `comment`-reason notification is pure noise: the
+# subject is closed/merged AND the latest comment/review is automation or the
+# running identity. A human comment on a closed thread stays emit-eligible
+# (it may be a reopen request). Without this, a bot/self comment on an
+# already-closed issue re-armed PM dispatches (upstream issue #1335, 2026-10-05).
+# Fails open: any API error or unknown actor keeps today's emit behaviour.
+# Args: <owner/repo> <number> <subject_type>
+#       <previous_notification_timestamp> <notification_snapshot_timestamp>.
+notification_comment_is_closed_noise() {
+    local repo="$1" number="$2" subject_type="$3" prior="$4" until="$5"
+    local kind=pr-all actor
+    notification_subject_is_closed "$repo" "$number" || return 1
+    [ "$subject_type" = "Issue" ] && kind=issue
+    actor=$(notification_latest_actor_class "$repo" "$number" "$kind" "$prior" "$until")
+    [ "$actor" = "bot" ] || [ "$actor" = "self" ]
+}
+
 # Return the actor class of the most recent comment/review on a PR subject:
 # "bot" (automation), "human", "self" (the running identity), or "unknown"
 # (no activity or API error — fail open). Used to decide whether an
@@ -2328,35 +2345,81 @@ notification_subject_is_closed() {
 # suffix here (e.g. "greptile-apps"), so -bot/-apps suffixes and well-known
 # CI/review bots are matched too. Failure direction is safe: an unknown actor
 # class returns "unknown" and the caller keeps today's emit behavior.
-# Args: <owner/repo> <pr_number>.
+# Args: <owner/repo> <number> [kind] [since] [until]. kind=issue skips PR-only
+# activity; kind=pr-all also reads inline comments. With since, any later
+# human activity wins even if automation commented afterward. With until,
+# activity newer than the notification snapshot is left for the next poll.
 notification_latest_actor_class() {
-    local repo=$1 number=$2
+    local repo=$1 number=$2 kind="${3:-pr}" since="${4:-}" until="${5:-}"
     local bot="${BOT_USERNAME:-$AUTHOR}"
     local author="${AUTHOR:-$bot}"
-    local comments_json reviews_json
+    local comments_json reviews_json review_comments_json
     comments_json=$(gh api --paginate --slurp \
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
         "repos/$repo/issues/$number/comments?per_page=100" 2>/dev/null) || { printf 'unknown'; return 0; }
-    reviews_json=$(gh api --paginate --slurp \
-        -H "Accept: application/vnd.github+json" \
-        -H "X-GitHub-Api-Version: 2022-11-28" \
-        "repos/$repo/pulls/$number/reviews?per_page=100" 2>/dev/null) || { printf 'unknown'; return 0; }
+    if [ "$kind" = "issue" ]; then
+        reviews_json='[[]]'
+        review_comments_json='[[]]'
+    else
+        reviews_json=$(gh api --paginate --slurp \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$repo/pulls/$number/reviews?per_page=100" 2>/dev/null) || { printf 'unknown'; return 0; }
+        if [ "$kind" = "pr-all" ]; then
+            review_comments_json=$(gh api --paginate --slurp \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "repos/$repo/pulls/$number/comments?per_page=100" 2>/dev/null) || { printf 'unknown'; return 0; }
+        else
+            review_comments_json='[[]]'
+        fi
+    fi
     jq -nr --arg bot "$bot" --arg author "$author" \
+        --arg since "$since" --arg until "$until" \
         --argjson comments "$comments_json" \
-        --argjson reviews "$reviews_json" '
+        --argjson reviews "$reviews_json" \
+        --argjson review_comments "$review_comments_json" '
         def is_self_login:
             (ascii_downcase == ($bot | ascii_downcase))
             or (ascii_downcase == ($author | ascii_downcase));
         def is_bot_login:
             test("(\\[bot\\]$)|(-bot$)|(-apps$)|(^github-actions$)|(^dependabot)|(^renovate)|(^codecov)|(^coderabbitai$)|(^copilot)|(^greptile)"; "i");
-        ([ (($comments | flatten)[] | {login: (.user.login // ""), time: (.created_at // "")}),
-           (($reviews | flatten)[] | {login: (.user.login // ""), time: (.submitted_at // "")}) ]
-         | map(select(.login != "" and .time != "")) | sort_by(.time) | last) as $latest
-        | if $latest == null then "unknown"
+        def is_bot_actor:
+            .type == "Bot"
+            or ((.type == "") and (.login | is_bot_login));
+        def is_human_actor:
+            .type == "User"
+            or ((.type == "") and (.login | is_bot_login | not));
+        ([ (($comments | flatten)[]
+              | {login: (.user.login // ""), type: (.user.type // ""),
+                 created: (.created_at // ""), updated: (.updated_at // .created_at // "")}),
+           (($reviews | flatten)[]
+              | {login: (.user.login // ""), type: (.user.type // ""),
+                 created: (.submitted_at // ""), updated: (.submitted_at // "")}),
+           (($review_comments | flatten)[]
+              | {login: (.user.login // ""), type: (.user.type // ""),
+                 created: (.created_at // ""), updated: (.updated_at // .created_at // "")}) ]
+         # A post-snapshot edit must not erase activity that was already present
+         # in the notification snapshot. Use the edit time only when it falls
+         # inside the snapshot; otherwise retain the creation/submission time.
+         | map(.time = (if $until != "" and .updated > $until
+                        then .created else .updated end))
+         | map(select(.time != "" and ($until == "" or .time <= $until)))
+         | sort_by(.time)) as $activity
+        | ($activity | last) as $latest
+        # GitHub timestamps have one-second precision. A comment created in the
+        # same second as the prior notification watermark may still be unseen,
+        # so ties must fail open for non-self human activity.
+        | if ($since != "" and any($activity[];
+                .time >= $since
+                and (.login | is_self_login | not)
+                and is_human_actor)) then "human"
+          elif $latest == null then "unknown"
           elif ($latest.login | is_self_login) then "self"
-          elif ($latest.login | is_bot_login) then "bot"
-          else "human" end
+          elif ($latest | is_bot_actor) then "bot"
+          elif ($latest | is_human_actor) then "human"
+          else "unknown" end
     ' 2>/dev/null || printf 'unknown'
 }
 
@@ -2480,6 +2543,17 @@ def notification_priority:
                     [ "$number" -gt 0 ] 2>/dev/null && printf '%s#%s' "$repo" "$number" > "$map_file"
                     continue
                 fi
+                # `comment` on a closed thread whose latest actor is bot/self:
+                # same drop-only staleness, but a human comment still emits.
+                if [ "$_notif_reason" = "comment" ] \
+                        && [ -n "$prior" ] \
+                        && [ "$number" -gt 0 ] 2>/dev/null \
+                        && notification_comment_is_closed_noise \
+                            "$repo" "$number" "$_subj_type" "$prior" "$notif_updated"; then
+                    printf '%s' "$notif_updated" > "$state_file"
+                    printf '%s#%s' "$repo" "$number" > "$map_file"
+                    continue
+                fi
                 # Bot-only author/comment PR notifications: the trigger was
                 # automation (Codecov/Greptile/Dependabot) and no later human
                 # comment or review exists, so there is no human handoff to act
@@ -2500,7 +2574,13 @@ def notification_priority:
                 if [ "$_subj_type" = "PullRequest" ] \
                         && { [ "$_notif_reason" = "author" ] || [ "$_notif_reason" = "comment" ]; } \
                         && [ "$number" -gt 0 ] 2>/dev/null; then
-                    _actor_class=$(notification_latest_actor_class "$repo" "$number")
+                    _actor_since=$prior
+                    _actor_kind="pr"
+                    if [ "$_notif_reason" = "comment" ]; then
+                        _actor_kind=pr-all
+                    fi
+                    _actor_class=$(notification_latest_actor_class \
+                        "$repo" "$number" "$_actor_kind" "$_actor_since" "$notif_updated")
                     if [ -n "$prior" ] && [ "$_actor_class" = "bot" ]; then
                         printf '%s' "$notif_updated" > "$state_file"
                         printf '%s#%s' "$repo" "$number" > "$map_file"
@@ -2560,6 +2640,13 @@ def notification_priority:
                         && notification_subject_is_closed "$repo" "$number"; then
                     continue
                 fi
+                if [ "$notif_reason" = "comment" ] \
+                        && [ -n "$prior" ] \
+                        && [ "$number" -gt 0 ] 2>/dev/null \
+                        && notification_comment_is_closed_noise \
+                            "$repo" "$number" "$notif_subject_type" "$prior" "$notif_updated"; then
+                    continue
+                fi
                 # Mirror the jsonl branch's bot-only author/comment filter so
                 # the reported count matches what would actually be dispatched.
                 # Same prior-set guard as jsonl branch: first-sight notifications
@@ -2568,9 +2655,15 @@ def notification_priority:
                 if [ "$notif_subject_type" = "PullRequest" ] \
                         && { [ "$notif_reason" = "author" ] || [ "$notif_reason" = "comment" ]; } \
                         && [ "$number" -gt 0 ] 2>/dev/null \
-                        && [ -n "$prior" ] \
-                        && [ "$(notification_latest_actor_class "$repo" "$number")" = "bot" ]; then
-                    continue
+                        && [ -n "$prior" ]; then
+                    _actor_since=$prior
+                    _actor_kind="pr"
+                    if [ "$notif_reason" = "comment" ]; then
+                        _actor_kind=pr-all
+                    fi
+                    if [ "$(notification_latest_actor_class "$repo" "$number" "$_actor_kind" "$_actor_since" "$notif_updated")" = "bot" ]; then
+                        continue
+                    fi
                 fi
                 new_count=$((new_count + 1))
             fi
