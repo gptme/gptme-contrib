@@ -2102,3 +2102,33 @@ def test_skill_only_bm25_dial(monkeypatch, is_skill, exempt, expected):
         assert treated == baseline
     lessons[0]["keywords"] = ["needle"]
     assert score_lessons(lessons, "needle", skill_bm25_min_z=5.0)[0]["path"] == "target"
+
+
+def test_bm25_min_z_override_suppresses_weak_matches(monkeypatch):
+    """bm25_min_z override raises the gate for all lessons, blocking weak BM25-only matches."""
+    # One target lesson (no keywords — BM25-only path) plus 30 noise lessons
+    lessons = [{"path": "target", "title": "", "description": "", "keywords": [], "patterns": []}]
+    lessons += [
+        {"path": str(i), "title": "", "description": "", "keywords": [], "patterns": []}
+        for i in range(30)
+    ]
+    # Fake BM25: target scores exactly at z=4.1 (just above default gate 4.0)
+    monkeypatch.setattr(
+        lesson_matcher_mod, "_build_bm25_index", lambda _: {"corpus": list(range(31))}
+    )
+    monkeypatch.setattr(lesson_matcher_mod, "_bm25_score", lambda query, doc, index: 100.0)
+    monkeypatch.setattr(lesson_matcher_mod, "_bm25_zscores", lambda _: [4.1] + [0.0] * 30)
+
+    # Default gate (4.0): target at z=4.1 passes
+    baseline = score_lessons(lessons, "needle")
+    assert any(r["path"] == "target" for r in baseline), "target should pass default gate at z=4.1"
+
+    # Raised gate (1000.0): nothing can reach z=1000, so target is suppressed
+    strict = score_lessons(lessons, "needle", bm25_min_z=1000.0)
+    assert not any(
+        r["path"] == "target" for r in strict
+    ), "target should be suppressed at bm25_min_z=1000"
+
+    # None keeps module default — same as baseline
+    same_as_default = score_lessons(lessons, "needle", bm25_min_z=None)
+    assert [r["path"] for r in same_as_default] == [r["path"] for r in baseline]
