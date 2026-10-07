@@ -1091,7 +1091,7 @@ class AgentEmail:
 
         # Move markdown file to sent folder (only after successful sending)
         draft_path.rename(sent_path)
-        self._record_local_send(sent_path.name)
+        self._record_local_send(sent_path)
 
         # If this is a reply, mark the original message as replied to
         headers, _ = self._markdown_to_email(content)
@@ -1151,25 +1151,39 @@ class AgentEmail:
 
         raise ValueError(f"Message not found: {message_id}")
 
-    def _record_local_send(self, filename: str) -> None:
-        """Record a filename as sent by this instance.
+    def _record_local_send(self, sent_path: Path) -> None:
+        """Record a sent file's filename and body digest.
 
         This is the only authoritative local-send provenance: folder names and
         From headers can also be produced by receive(), archive() of received
         mail, or maildir sync, and must never grant audit-stripping rights.
+        The digest binds the grant to this exact body, so a different message
+        that reuses the filename (e.g. a Message-ID collision or spoofed echo)
+        is never granted audit-stripping.
         """
+        try:
+            _, body = self._markdown_to_email(sent_path.read_text(encoding="utf-8"))
+        except Exception:
+            body = ""
+        filename = sent_path.name
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
         record = self.email_dir / _LOCAL_SENT_RECORD
         record.parent.mkdir(parents=True, exist_ok=True)
         with open(record, "a", encoding="utf-8") as f:
-            f.write(f"{filename}\n")
+            f.write(f"{filename} {digest}\n")
 
-    def _load_local_sends(self) -> set[str]:
-        """Load filenames recorded by _record_local_send."""
+    def _load_local_sends(self) -> Dict[str, str]:
+        """Load filenames and body digests recorded by _record_local_send."""
         record = self.email_dir / _LOCAL_SENT_RECORD
         try:
-            return set(record.read_text(encoding="utf-8").split())
+            entries: Dict[str, str] = {}
+            for line in record.read_text(encoding="utf-8").splitlines():
+                parts = line.split()
+                if len(parts) == 2:
+                    entries[parts[0]] = parts[1]
+            return entries
         except FileNotFoundError:
-            return set()
+            return {}
 
     def list_messages(self, folder: str = "inbox") -> list[tuple[str, str, datetime]]:
         """List messages in specified folder.
@@ -1565,13 +1579,22 @@ class AgentEmail:
 
                 # Only bodies recorded as locally sent can carry our send-audit
                 # trailer; folder and From headers do not establish provenance.
+                # The record binds the filename to the recorded body digest, so a
+                # different message reusing the filename is never granted stripping.
+                is_recorded_local_send = (
+                    existing_file.name in locally_sent
+                    and locally_sent[existing_file.name]
+                    == hashlib.sha256(existing_body.encode("utf-8")).hexdigest()[:16]
+                )
                 body_snippet = (
-                    _body_dedup_snippet(
-                        existing_body, local_sent=existing_file.name in locally_sent
-                    )
+                    _body_dedup_snippet(existing_body, local_sent=is_recorded_local_send)
                     if existing_body
                     else ""
                 )
+                # Raw (unstripped) stored snippet: local data, so it is trusted.
+                # Comparing the incoming raw snippet against it lets an incoming
+                # echo of a locally-sent message (trailer included) still match.
+                body_snippet_raw = _body_dedup_snippet(existing_body) if existing_body else ""
 
                 # Create composite key from strong identifiers
                 # Use In-Reply-To + Subject as primary key (most reliable for matching)
@@ -1586,6 +1609,7 @@ class AgentEmail:
                     "from": from_addr,
                     "date": msg_date,
                     "body_snippet": body_snippet,
+                    "body_snippet_raw": body_snippet_raw,
                     "file": existing_file,
                 }
 
@@ -1728,7 +1752,7 @@ class AgentEmail:
             if (
                 body_snippet
                 and existing["body_snippet"]
-                and body_snippet == existing["body_snippet"]
+                and body_snippet in (existing["body_snippet"], existing["body_snippet_raw"])
             ):
                 matches.append("body")
 
