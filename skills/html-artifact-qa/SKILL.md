@@ -55,7 +55,7 @@ HTML codeblock and the webui surfaces it as an iframe-previewed artifact.
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Answer: &lt;img&gt; — example of an already-escaped topic</title>  <!-- user-derived text must already be escaped: see Output safety -->
+  <title>Answer: &lt;img src=x&gt;</title>  <!-- shows what the Output-safety routine PRODUCES from raw user text `<img src=x>` — see Output safety -->
   <style>
     /* minimal accessible CSS — dark-mode aware */
     body { font-family: system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; color-scheme: light dark; }
@@ -67,8 +67,8 @@ HTML codeblock and the webui surfaces it as an iframe-previewed artifact.
   </style>
 </head>
 <body>
-  <h1>[Topic — written HTML-escaped, e.g. &lt;img src=x&amp;gt;]</h1>
-  <p>[1-2 sentence TL;DR — your own wording; if it quotes the user, write it escaped]</p>
+  <h1>[Topic — the OUTPUT of one escape-routine pass on the raw user text; e.g. raw `<img src=x>` becomes &lt;img src=x&gt;]</h1>
+  <p>[1-2 sentence TL;DR — your own wording; if it quotes the user, embed the routine's OUTPUT, never the raw quote]</p>
 
   <details open>
     <summary>Section 1: [key concept]</summary>
@@ -105,25 +105,26 @@ The question topic and any quoted user content are user-controlled strings.
 `explain <img src=x onerror=alert(1)>` must render as text, not execute. Use one
 of these two mechanisms, both shown in the template:
 
-1. **Write user-derived text into the markup already HTML-escaped** — entities
-   in text nodes render as the original characters, so the display is correct
-   and no script is involved. Run the text through this routine first:
+1. **Write user-derived text into the markup only as the routine's OUTPUT** —
+   run the RAW text through this routine exactly once, then embed what it
+   returns:
    `s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))`
-   (`<` → `&lt;`, `>` → `&gt;`, `&` → `&amp;`, quotes → `&quot;`/`&#39;`).
+   Entities in text nodes render as the original characters, so the display is
+   correct and no script is involved. Example: raw input `<img src=x>` →
+   embed `&lt;img src=x&gt;`.
 2. **No user text in JavaScript, ever**: no user-derived content inside
    `<script>` blocks, JS string literals, or event-handler attributes —
    `</script>` in the input would break out of the script element. Do not
    "un-escape" escaped markup by reading it back with `textContent` — entities
    would show literally.
 
-**Apply the routine to raw user input only, exactly once, before embedding.**
-The template's placeholders (`&lt;img&gt;`, `&quot;`) are already-escaped
-examples — they are pre-escaped literals in the finished document, not raw
-text awaiting the routine. Running already-escaped text through the routine
-again double-escapes it (`&lt;` → `&amp;lt;`) and renders entities visibly.
-Concretely: raw question `explain <img>` → run the routine → embed
-`explain &lt;img&gt;`; a placeholder already written as `&lt;img&gt;` in the
-template is final markup — embed it verbatim.
+**Exactly one routine pass per piece of raw text — never zero, never two.**
+Every `&lt;` `&amp;` sequence you write into the artifact must be the result of
+escaping one piece of RAW user text. The template's `&lt;img src=x&gt;` is an
+example of correct OUTPUT for the raw input `<img src=x>`, not text to copy
+and escape again. Running already-escaped text through the routine again
+double-escapes it (`&lt;` → `&amp;lt;`) and renders entities visibly; writing
+raw `<` from user input directly into markup is XSS.
 
 Treat the artifact as untrusted input rendered in an iframe on the user's
 machine: never interpolate raw user text into `<title>`, `<h1>`, attribute
