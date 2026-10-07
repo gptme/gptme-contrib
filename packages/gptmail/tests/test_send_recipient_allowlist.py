@@ -147,3 +147,75 @@ def test_send_allows_allowlisted_recipient(
         agent.send(draft_id)
     except ValueError as e:
         assert "not in the send allowlist" not in str(e), f"Unexpected block: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Send audit log
+# ---------------------------------------------------------------------------
+
+
+def test_send_appends_audit_log_to_sent_file(
+    agent: AgentEmail, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Sent file contains <!-- send-audit: allowlist=N sent_at=... --> comment.
+
+    The audit line lets post-hoc forensics detect if EMAIL_SEND_ALLOWLIST was
+    expanded (e.g. set to '*' in a gitignored .env) at send time.
+    """
+    import subprocess
+
+    monkeypatch.setenv("EMAIL_SEND_ALLOWLIST", "erik@example.com,other@example.com")
+
+    draft_id = "test-send-audit"
+    draft_path = tmp_path / "email" / "drafts" / f"{draft_id}.md"
+    draft_path.write_text("To: erik@example.com\nSubject: Audit test\n\nHello\n")
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0})())
+    agent.send(draft_id)
+
+    sent_path = tmp_path / "email" / "sent" / f"{draft_id}.md"
+    assert sent_path.exists()
+    content = sent_path.read_text()
+    assert "<!-- send-audit:" in content
+    assert "allowlist=2" in content  # two explicit entries
+    assert "sent_at=" in content
+
+
+def test_send_audit_log_records_wildcard(
+    agent: AgentEmail, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """When EMAIL_SEND_ALLOWLIST=*, audit log records 'wildcard'."""
+    import subprocess
+
+    monkeypatch.setenv("EMAIL_SEND_ALLOWLIST", "*")
+
+    draft_id = "test-send-audit-wildcard"
+    draft_path = tmp_path / "email" / "drafts" / f"{draft_id}.md"
+    draft_path.write_text("To: anyone@external.com\nSubject: Wildcard\n\nHello\n")
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0})())
+    agent.send(draft_id)
+
+    sent_path = tmp_path / "email" / "sent" / f"{draft_id}.md"
+    content = sent_path.read_text()
+    assert "allowlist=wildcard" in content
+
+
+def test_send_audit_log_records_default(
+    agent: AgentEmail, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """When EMAIL_SEND_ALLOWLIST is unset, audit log records 'default'."""
+    import subprocess
+
+    monkeypatch.delenv("EMAIL_SEND_ALLOWLIST", raising=False)
+
+    draft_id = "test-send-audit-default"
+    draft_path = tmp_path / "email" / "drafts" / f"{draft_id}.md"
+    draft_path.write_text("To: erik@example.com\nSubject: Default\n\nHello\n")
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0})())
+    agent.send(draft_id)
+
+    sent_path = tmp_path / "email" / "sent" / f"{draft_id}.md"
+    content = sent_path.read_text()
+    assert "allowlist=default" in content

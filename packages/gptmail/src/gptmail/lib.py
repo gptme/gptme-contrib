@@ -1077,6 +1077,22 @@ class AgentEmail:
         # Move markdown file to sent folder (only after successful sending)
         draft_path.rename(sent_path)
 
+        # Append send audit metadata so allowlist bypasses leave a forensic trace.
+        # Records the allowlist state at send time — "wildcard" if EMAIL_SEND_ALLOWLIST=*,
+        # the entry count if explicit, or "default" if env var was unset.
+        env_allowlist_at_send = os.getenv("EMAIL_SEND_ALLOWLIST", "")
+        if env_allowlist_at_send == "*":
+            allowlist_summary = "wildcard"
+        elif env_allowlist_at_send:
+            _entries = [e.strip() for e in env_allowlist_at_send.split(",") if e.strip()]
+            allowlist_summary = str(len(_entries))
+        else:
+            allowlist_summary = "default"
+        _sent_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        audit_line = f"\n<!-- send-audit: allowlist={allowlist_summary} sent_at={_sent_at} -->\n"
+        with open(sent_path, "a") as _af:
+            _af.write(audit_line)
+
         # If this is a reply, mark the original message as replied to
         headers, _ = self._markdown_to_email(content)
         in_reply_to = headers.get("In-Reply-To")
