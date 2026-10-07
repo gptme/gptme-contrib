@@ -75,6 +75,9 @@ SEND_LOCK_TIMEOUT = 120.0
 _utf8_qp = email.charset.Charset("utf-8")
 _utf8_qp.body_encoding = email.charset.QP
 
+# Sidecar record of filenames sent by this instance (see _record_local_send).
+_LOCAL_SENT_RECORD = ".local-sent"
+
 
 def _body_dedup_snippet(body: str, *, local_sent: bool = False) -> str:
     """Ignore local send-audit metadata, never arbitrary incoming content."""
@@ -1088,6 +1091,7 @@ class AgentEmail:
 
         # Move markdown file to sent folder (only after successful sending)
         draft_path.rename(sent_path)
+        self._record_local_send(sent_path.name)
 
         # If this is a reply, mark the original message as replied to
         headers, _ = self._markdown_to_email(content)
@@ -1146,6 +1150,26 @@ class AgentEmail:
                 return
 
         raise ValueError(f"Message not found: {message_id}")
+
+    def _record_local_send(self, filename: str) -> None:
+        """Record a filename as sent by this instance.
+
+        This is the only authoritative local-send provenance: folder names and
+        From headers can also be produced by receive(), archive() of received
+        mail, or maildir sync, and must never grant audit-stripping rights.
+        """
+        record = self.email_dir / _LOCAL_SENT_RECORD
+        record.parent.mkdir(parents=True, exist_ok=True)
+        with open(record, "a", encoding="utf-8") as f:
+            f.write(f"{filename}\n")
+
+    def _load_local_sends(self) -> set[str]:
+        """Load filenames recorded by _record_local_send."""
+        record = self.email_dir / _LOCAL_SENT_RECORD
+        try:
+            return set(record.read_text(encoding="utf-8").split())
+        except FileNotFoundError:
+            return set()
 
     def list_messages(self, folder: str = "inbox") -> list[tuple[str, str, datetime]]:
         """List messages in specified folder.
@@ -1518,6 +1542,7 @@ class AgentEmail:
         """
         index = {}
         folder_path = self.email_dir / folder
+        locally_sent = self._load_local_sends()
 
         for existing_file in folder_path.glob("*.md"):
             try:
@@ -1538,13 +1563,12 @@ class AgentEmail:
                 except Exception:
                     msg_date = None
 
-                # Only locally stored outbound mail can carry our send-audit trailer.
-                local_sent = (
-                    folder in {"sent", "archive"}
-                    and parseaddr(from_addr)[1].lower() in self.own_emails
-                )
+                # Only bodies recorded as locally sent can carry our send-audit
+                # trailer; folder and From headers do not establish provenance.
                 body_snippet = (
-                    _body_dedup_snippet(existing_body, local_sent=local_sent)
+                    _body_dedup_snippet(
+                        existing_body, local_sent=existing_file.name in locally_sent
+                    )
                     if existing_body
                     else ""
                 )
