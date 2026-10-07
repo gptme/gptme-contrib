@@ -55,7 +55,7 @@ HTML codeblock and the webui surfaces it as an iframe-previewed artifact.
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Answer: &lt;img src=x&gt;</title>  <!-- shows what the Output-safety routine PRODUCES from raw user text `<img src=x>` — see Output safety -->
+  <title>Answer: [topic — see Output safety]</title>
   <style>
     /* minimal accessible CSS — dark-mode aware */
     body { font-family: system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; color-scheme: light dark; }
@@ -67,7 +67,7 @@ HTML codeblock and the webui surfaces it as an iframe-previewed artifact.
   </style>
 </head>
 <body>
-  <h1>[Topic — the OUTPUT of one escape-routine pass on the raw user text; e.g. raw `<img src=x>` becomes &lt;img src=x&gt;]</h1>
+  <h1>[Topic — the OUTPUT of one escape-routine pass on raw user text]</h1>
   <p>[1-2 sentence TL;DR — your own wording; if it quotes the user, embed the routine's OUTPUT, never the raw quote]</p>
 
   <details open>
@@ -120,11 +120,11 @@ of these two mechanisms, both shown in the template:
 
 **Exactly one routine pass per piece of raw text — never zero, never two.**
 Every `&lt;` `&amp;` sequence you write into the artifact must be the result of
-escaping one piece of RAW user text. The template's `&lt;img src=x&gt;` is an
-example of correct OUTPUT for the raw input `<img src=x>`, not text to copy
-and escape again. Running already-escaped text through the routine again
-double-escapes it (`&lt;` → `&amp;lt;`) and renders entities visibly; writing
-raw `<` from user input directly into markup is XSS.
+escaping one piece of RAW user text. A concrete example of correct OUTPUT:
+raw input `<img src=x>` → embed `&lt;img src=x&gt;`. Running already-escaped
+text through the routine again double-escapes it (`&lt;` → `&amp;lt;`) and
+renders entities visibly; writing raw `<` from user input directly into
+markup is XSS.
 
 Treat the artifact as untrusted input rendered in an iframe on the user's
 machine: never interpolate raw user text into `<title>`, `<h1>`, attribute
