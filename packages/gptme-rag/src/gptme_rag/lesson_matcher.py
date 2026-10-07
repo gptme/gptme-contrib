@@ -1438,10 +1438,11 @@ def score_lessons(
         prompt: The query text (not pre-lowercased; handled internally).
         max_results: Maximum number of results to return.
         use_bm25: Enable BM25 semantic scoring (True by default).
-        bm25_min_z: Override the module-level ``BM25_MIN_Z`` gate for all
+        bm25_min_z: Override the module-level ``BM25_MIN_Z`` gate for non-skill
             lessons.  Useful when the corpus has grown since calibration and
-            the default 4.0 admits too many weak BM25-only matches.  ``None``
-            keeps the module default.
+            the default 4.0 admits too many weak BM25-only matches.  Skill
+            lessons keep the module default unless ``skill_bm25_min_z`` is
+            also set.  ``None`` keeps the module default.
         skill_bm25_min_z: Optional adaptive z-score ceiling for skills only.
             Keyword and descriptor matches are unaffected.
         skill_bm25_exempt_paths: Paths that retain the ordinary lesson gate.
@@ -1469,8 +1470,11 @@ def score_lessons(
         _effective_bm25_ceiling = bm25_min_z if bm25_min_z is not None else BM25_MIN_Z
         bm_min_z = _bm25_min_z(bm_n_nonzero, _effective_bm25_ceiling)
 
-    skill_bm_min_z = (
-        _bm25_min_z(bm_n_nonzero, skill_bm25_min_z) if skill_bm25_min_z is not None else bm_min_z
+    # Skill lessons keep the module default unless explicitly overridden by
+    # ``skill_bm25_min_z`` — ``bm25_min_z`` is a non-skill dial and must not
+    # silently suppress skill matches.
+    skill_bm_min_z = _bm25_min_z(
+        bm_n_nonzero, skill_bm25_min_z if skill_bm25_min_z is not None else BM25_MIN_Z
     )
     exempt_paths = set(skill_bm25_exempt_paths)
     results: list[dict[str, Any]] = []

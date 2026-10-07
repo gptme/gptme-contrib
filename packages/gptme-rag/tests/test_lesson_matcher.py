@@ -2104,31 +2104,52 @@ def test_skill_only_bm25_dial(monkeypatch, is_skill, exempt, expected):
     assert score_lessons(lessons, "needle", skill_bm25_min_z=5.0)[0]["path"] == "target"
 
 
-def test_bm25_min_z_override_suppresses_weak_matches(monkeypatch):
-    """bm25_min_z override raises the gate for all lessons, blocking weak BM25-only matches."""
+@pytest.mark.parametrize("is_skill", [False, True])
+@pytest.mark.parametrize("exempt", [False, True])
+def test_bm25_min_z_override_suppresses_weak_matches(monkeypatch, is_skill, exempt):
+    """Use real z-scores to verify independent lesson/skill dials and exemptions."""
     # One target lesson (no keywords — BM25-only path) plus 30 noise lessons
     lessons = [{"path": "target", "title": "", "description": "", "keywords": [], "patterns": []}]
     lessons += [
         {"path": str(i), "title": "", "description": "", "keywords": [], "patterns": []}
         for i in range(30)
     ]
-    # Fake BM25: target scores exactly at z=4.1 (just above default gate 4.0)
+    lessons[0]["is_skill"] = is_skill
+    exempt_paths = ["target"] if exempt else []
+    # Two strong overlaps and 29 weak ones produce a real standout z≈4.24.
     monkeypatch.setattr(
         lesson_matcher_mod, "_build_bm25_index", lambda _: {"corpus": list(range(31))}
     )
-    monkeypatch.setattr(lesson_matcher_mod, "_bm25_score", lambda query, doc, index: 100.0)
-    monkeypatch.setattr(lesson_matcher_mod, "_bm25_zscores", lambda _: [4.1] + [0.0] * 30)
+    monkeypatch.setattr(
+        lesson_matcher_mod,
+        "_bm25_score",
+        lambda query, doc, index: [100.0, 80.0][doc] if doc < 2 else 1.0,
+    )
 
-    # Default gate (4.0): target at z=4.1 passes
     baseline = score_lessons(lessons, "needle")
-    assert any(r["path"] == "target" for r in baseline), "target should pass default gate at z=4.1"
+    assert [r["path"] for r in baseline] == ["target"]
 
-    # Raised gate (1000.0): nothing can reach z=1000, so target is suppressed
-    strict = score_lessons(lessons, "needle", bm25_min_z=1000.0)
-    assert not any(
-        r["path"] == "target" for r in strict
-    ), "target should be suppressed at bm25_min_z=1000"
+    # 4.25 is below the adaptive cap (~4.31), but above the target's z.
+    strict = score_lessons(lessons, "needle", bm25_min_z=4.25, skill_bm25_exempt_paths=exempt_paths)
+    assert bool(strict) is (is_skill and not exempt)
 
-    # None keeps module default — same as baseline
-    same_as_default = score_lessons(lessons, "needle", bm25_min_z=None)
-    assert [r["path"] for r in same_as_default] == [r["path"] for r in baseline]
+    skill_strict = score_lessons(
+        lessons, "needle", skill_bm25_min_z=4.25, skill_bm25_exempt_paths=exempt_paths
+    )
+    assert bool(skill_strict) is (not is_skill or exempt)
+
+    both_strict = score_lessons(
+        lessons,
+        "needle",
+        bm25_min_z=4.25,
+        skill_bm25_min_z=4.25,
+        skill_bm25_exempt_paths=exempt_paths,
+    )
+    assert both_strict == []
+
+    assert score_lessons(lessons, "needle", bm25_min_z=None) == baseline
+    lessons[0]["keywords"] = ["needle"]
+    assert (
+        score_lessons(lessons, "needle", bm25_min_z=4.25, skill_bm25_min_z=4.25)[0]["path"]
+        == "target"
+    )
