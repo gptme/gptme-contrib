@@ -1090,8 +1090,12 @@ class AgentEmail:
             allowlist_summary = "default"
         _sent_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         audit_line = f"\n<!-- send-audit: allowlist={allowlist_summary} sent_at={_sent_at} -->\n"
-        with open(sent_path, "a") as _af:
-            _af.write(audit_line)
+        try:
+            with open(sent_path, "a", encoding="utf-8") as _af:
+                _af.write(audit_line)
+        except OSError as e:
+            # Delivery already succeeded; preserve reply bookkeeping even if auditing fails.
+            logger.warning("Failed to write send-audit for %s: %s", sent_path, e)
 
         # If this is a reply, mark the original message as replied to
         headers, _ = self._markdown_to_email(content)

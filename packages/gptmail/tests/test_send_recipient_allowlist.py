@@ -154,6 +154,41 @@ def test_send_allows_allowlisted_recipient(
 # ---------------------------------------------------------------------------
 
 
+def test_send_audit_failure_preserves_reply_completion(
+    agent: AgentEmail, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+):
+    """An audit I/O failure must not make a delivered reply retryable."""
+    import builtins
+    import subprocess
+
+    monkeypatch.delenv("EMAIL_SEND_ALLOWLIST", raising=False)
+    original_id = "<original@example.com>"
+    draft_id = "test-send-audit-failure"
+    draft_path = tmp_path / "email" / "drafts" / f"{draft_id}.md"
+    draft_path.write_text(
+        f"To: erik@example.com\nSubject: Reply\nIn-Reply-To: {original_id}\n\nHello\n"
+    )
+    sent_path = tmp_path / "email" / "sent" / f"{draft_id}.md"
+    real_open = builtins.open
+
+    def fail_audit(file, mode="r", *args, **kwargs):
+        if Path(file) == sent_path and mode == "a":
+            raise PermissionError("audit file is read-only")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fail_audit)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0})())
+    agent.send(draft_id)
+
+    assert sent_path.exists()
+    assert not draft_path.exists()
+    assert agent._is_completed(original_id)
+    assert "Failed to write send-audit" in caplog.text
+    second_id = agent.compose("erik@example.com", "Another reply", "Hello", reply_to=original_id)
+    with pytest.raises(ValueError, match="already replied"):
+        agent.send(second_id)
+
+
 def test_send_appends_audit_log_to_sent_file(
     agent: AgentEmail, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
