@@ -411,7 +411,7 @@ class SessionStore:
                         continue
                     month = self._archive_month(line, cutoff)
                     if month is None:
-                        keep_lines.append(line + "\n")
+                        keep_lines.append(raw)
                         continue
                     by_month.setdefault(month, []).append(line)
 

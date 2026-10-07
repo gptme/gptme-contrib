@@ -53,6 +53,23 @@ def test_append_after_unterminated_malformed_row_is_loadable(tmp_path: Path) -> 
     assert store.path.read_bytes().endswith(b"\n")
 
 
+def test_rotate_preserves_crlf_in_decodable_malformed_rows(tmp_path: Path) -> None:
+    """rotate() must keep the original bytes for decodable-but-malformed rows.
+
+    A row like b'{bad json  \\r\\n' is valid UTF-8, passes encode(), but yields
+    month=None (unparseable JSON).  Before the fix it was stripped and re-added
+    as ``line + "\\n"``, silently dropping the trailing CRLF.
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    rec = SessionRecord(model="opus", timestamp="2020-01-01T00:00:00+00:00")
+    store.append(rec)
+    crlf_row = b'{"not": "json"\r\n'
+    with open(store.path, "ab") as f:
+        f.write(crlf_row)
+    store.rotate(keep_days=0)
+    assert crlf_row in store.path.read_bytes()
+
+
 def test_rotate_onto_unterminated_archive_keeps_record(tmp_path: Path) -> None:
     store = SessionStore(sessions_dir=tmp_path)
     rec = SessionRecord(model="opus", timestamp="2020-01-01T00:00:00+00:00")
