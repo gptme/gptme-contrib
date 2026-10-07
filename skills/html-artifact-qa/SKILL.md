@@ -67,6 +67,7 @@ HTML codeblock and the webui surfaces it as an iframe-previewed artifact.
   </style>
 </head>
 <body>
+  <div id="qa-source" hidden>[user question — written HTML-escaped, e.g. &lt;img src=x&gt;]</div>
   <h1 id="qa-topic"></h1>
   <p>[1-2 sentence TL;DR — your own wording; if it quotes the user, escape it]</p>
 
@@ -82,9 +83,12 @@ HTML codeblock and the webui surfaces it as an iframe-previewed artifact.
 
   <!-- Add diagrams as inline SVG, tables for comparisons, or <pre><code> for examples -->
   <script>
-    // Fill user-derived text ONLY via textContent (escaping is automatic).
-    // Never use innerHTML for anything the user influenced.
-    document.getElementById('qa-topic').textContent = "<the user's question>";
+    // User-derived text lives ONLY in the hidden #qa-source text node, where it
+    // was written HTML-escaped. Copy it into visible elements via textContent
+    // (escaping is automatic in both directions). Never build a JS string
+    // literal from user input, and never use innerHTML for it.
+    document.getElementById('qa-topic').textContent =
+      document.getElementById('qa-source').textContent;
   </script>
 </body>
 </html>
@@ -110,9 +114,11 @@ The question topic and any quoted user content are user-controlled strings.
 `explain <img src=x onerror=alert(1)>` must render as text, not execute. Use one
 of these two mechanisms, both shown in the template:
 
-1. **Preferred — `textContent`**: give the element an `id` and assign the
-   user-derived string from a `<script>` block via `textContent` (automatic
-   escaping; never `innerHTML`).
+1. **Preferred — hidden source + `textContent`**: put the user-derived string
+   (HTML-escaped) in a `hidden` source element, then copy it into visible
+   elements via `textContent` (automatic escaping both ways; never
+   `innerHTML`). **Never place user input inside a JavaScript string
+   literal** — `</script>` in the input would break out of the script element.
 2. **Static embedding — escape explicitly**: when you must write the text
    directly into the markup, run it through this routine first:
    `s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))`
