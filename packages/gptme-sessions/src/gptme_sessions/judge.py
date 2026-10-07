@@ -1231,13 +1231,13 @@ def write_alignment_grade(
             # can find out WHY the judge produced no score by querying session
             # records rather than grepping logs (the records-queryable goal of
             # judge_status would be undermined without the accompanying reason).
-            if normalized.get("reason"):
-                record.llm_judge_reason = normalized["reason"]
+            if reason := normalized.get("reason"):
+                record.llm_judge_reason = reason
         else:
             record.set_alignment_grade(
                 score,
-                reason=normalized["reason"],
-                model=normalized["model"],
+                reason=normalized.get("reason", ""),
+                model=normalized.get("model", ""),
             )
         # Phase 3: persist intent-contract alignment fields via legacy bridge
         legacy_fields = getattr(record, "_legacy_fields", None)
@@ -1245,14 +1245,14 @@ def write_alignment_grade(
             # Always durable, so score-less verdicts are countable by querying
             # the session records rather than grepping logs.
             legacy_fields["judge_status"] = normalized.get("judge_status", JUDGE_STATUS_OK)
-            if normalized.get("alignment_score") is not None:
-                legacy_fields["alignment_score"] = normalized["alignment_score"]
-            if normalized.get("pivot_verdict") is not None:
-                legacy_fields["pivot_verdict"] = normalized["pivot_verdict"]
-            if normalized.get("delegation") is not None:
-                legacy_fields["delegation"] = normalized["delegation"]
-            if normalized.get("raw_response") is not None:
-                legacy_fields["llm_judge_raw_response"] = normalized["raw_response"]
+            if (score := normalized.get("alignment_score")) is not None:
+                legacy_fields["alignment_score"] = score
+            if (pivot := normalized.get("pivot_verdict")) is not None:
+                legacy_fields["pivot_verdict"] = pivot
+            if (deleg := normalized.get("delegation")) is not None:
+                legacy_fields["delegation"] = deleg
+            if (raw := normalized.get("raw_response")) is not None:
+                legacy_fields["llm_judge_raw_response"] = raw
             # Caller-supplied extra fields: merged in the same rewrite to avoid
             # a second full-store pass.  JSON-roundtrip coerces non-serialisable
             # objects (datetimes, etc.) to strings — same policy as callers that

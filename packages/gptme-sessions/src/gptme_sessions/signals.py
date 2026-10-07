@@ -1814,9 +1814,7 @@ def _summarize_message_bytes(
             if context_before > context_peak_bytes:
                 context_peak_bytes = context_before
 
-    session_total_bytes = sum(
-        msg_bytes for msg in messages if isinstance((msg_bytes := msg.get("bytes")), int)
-    )
+    session_total_bytes: int = sum(b for msg in messages if isinstance(b := msg.get("bytes"), int))
 
     return (
         sys_prompt_bytes if sys_prompt_bytes > 0 else None,
