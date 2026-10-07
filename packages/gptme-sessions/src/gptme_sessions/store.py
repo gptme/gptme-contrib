@@ -37,6 +37,29 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _ensure_trailing_newline(path: Path) -> None:
+    """If ``path`` exists and does not end with ``\\n``, append one and fsync.
+
+    JSONL append and archive writes assume a row boundary. ``rewrite()`` and
+    ``rotate()`` preserve malformed rows byte-for-byte, including an
+    unterminated last row; without this, the next ``append()`` or archive
+    write concatenates a valid record onto that tail and ``load_all()``
+    skips the combined row.
+    """
+    if not path.exists():
+        return
+    with open(path, "r+b") as f:
+        f.seek(0, os.SEEK_END)
+        if f.tell() == 0:
+            return
+        f.seek(-1, os.SEEK_END)
+        if f.read(1) == b"\n":
+            return
+        f.write(b"\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def _default_sessions_dir() -> Path:
     """Return the default sessions directory (XDG-compliant).
 
@@ -153,10 +176,17 @@ class SessionStore:
         try:
             json.loads(partial.decode("utf-8"))
             return False  # valid JSON even without trailing newline
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except UnicodeDecodeError:
+            # Undecodable bytes in the tail — a torn multibyte sequence from a
+            # concurrent write.  Preserve it byte-for-byte; _ensure_trailing_newline
+            # (called after _repair_tail in append()) will add the row boundary.
+            return False
+        except json.JSONDecodeError:
             pass
 
         # Truncate to the last valid line (including its newline).
+        # Only reached for a decodable-but-invalid-JSON partial — a process
+        # killed mid-write leaving a garbled record fragment.
         # Use ftruncate (f.truncate) rather than write_bytes so that a process
         # kill between the zero-truncate and the rewrite cannot destroy all
         # prior records.  ftruncate is a single syscall that only shortens the
@@ -177,6 +207,7 @@ class SessionStore:
         """Append and durably acknowledge one record after file and namespace sync."""
         with self.lock():
             self._repair_tail()
+            _ensure_trailing_newline(self.path)
             created = not self.path.exists()
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(record.to_json() + "\n")
@@ -207,13 +238,17 @@ class SessionStore:
         if not path.exists():
             return []
         records = []
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8", errors="surrogateescape") as f:
             for line in f:
                 line = line.strip()
                 if line:
                     try:
+                        # Undecodable bytes (e.g. a torn multibyte tail) arrive as
+                        # lone surrogates; treat the row as malformed rather than
+                        # let them crash a later print/encode.
+                        line.encode("utf-8")
                         records.append(SessionRecord.from_dict(json.loads(line)))
-                    except (json.JSONDecodeError, TypeError, AttributeError):
+                    except (json.JSONDecodeError, UnicodeEncodeError, TypeError, AttributeError):
                         continue
         return records
 
@@ -276,31 +311,50 @@ class SessionStore:
             malformed_lines: list[str] = []
 
             if self.path.exists():
-                with open(self.path, encoding="utf-8") as f:
+                with open(
+                    self.path,
+                    encoding="utf-8",
+                    errors="surrogateescape",
+                    newline="",
+                ) as f:
                     for raw in f:
-                        raw = raw.strip()
-                        if not raw:
+                        line = raw.strip()
+                        if not line:
                             continue
                         try:
-                            rec = SessionRecord.from_dict(json.loads(raw))
+                            line.encode("utf-8")  # lone surrogates = undecodable bytes
+                            rec = SessionRecord.from_dict(json.loads(line))
                             if rec.session_id not in known_ids:
                                 extra_records.append(rec)
-                        except (json.JSONDecodeError, TypeError, AttributeError):
+                        except (
+                            json.JSONDecodeError,
+                            UnicodeEncodeError,
+                            TypeError,
+                            AttributeError,
+                        ):
+                            # Keep the original bytes, including whitespace and
+                            # line ending, rather than the stripped parse input.
                             malformed_lines.append(raw)
 
             tmp_path = self.path.with_name(
                 f"{self.path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
             )
             try:
-                with open(tmp_path, "w", encoding="utf-8") as f:
+                with open(
+                    tmp_path,
+                    "w",
+                    encoding="utf-8",
+                    errors="surrogateescape",
+                    newline="",
+                ) as f:
                     for record in records:
                         f.write(record.to_json() + "\n")
                     for record in extra_records:
                         f.write(record.to_json() + "\n")
-                    for line in malformed_lines:
-                        f.write(line + "\n")
+                    f.writelines(malformed_lines)
                     f.flush()
                     os.fsync(f.fileno())
+                _ensure_trailing_newline(tmp_path)
                 tmp_path.replace(self.path)
                 _fsync_directory(self.sessions_dir)
             except BaseException:
@@ -346,16 +400,27 @@ class SessionStore:
 
             keep_lines: list[str] = []
             by_month: dict[str, list[str]] = {}
-            with open(self.path, encoding="utf-8") as f:
+            with open(
+                self.path,
+                encoding="utf-8",
+                errors="surrogateescape",
+                newline="",
+            ) as f:
                 for raw in f:
-                    raw = raw.strip()
-                    if not raw:
+                    line = raw.strip()
+                    if not line:
                         continue
-                    month = self._archive_month(raw, cutoff)
+                    try:
+                        line.encode("utf-8")  # lone surrogates = undecodable bytes
+                    except UnicodeEncodeError:
+                        # Preserve corrupt rows byte-for-byte in the active file.
+                        keep_lines.append(raw)
+                        continue
+                    month = self._archive_month(line, cutoff)
                     if month is None:
                         keep_lines.append(raw)
                         continue
-                    by_month.setdefault(month, []).append(raw)
+                    by_month.setdefault(month, []).append(line)
 
             if not by_month:
                 return {"archived": 0, "kept": len(keep_lines), "skipped_duplicate": 0}
@@ -371,9 +436,10 @@ class SessionStore:
                 # Append first, fsync, and only then drop from the active file.
                 # Do not add this batch's hashes to ``existing``: duplicate
                 # active rows are distinct historical records and must survive.
-                with open(archive_path, "a", encoding="utf-8") as af:
+                _ensure_trailing_newline(archive_path)
+                with open(archive_path, "a", encoding="utf-8", errors="surrogateescape") as af:
                     for raw in entries:
-                        line_hash = hashlib.sha256(raw.encode()).digest()
+                        line_hash = hashlib.sha256(raw.encode(errors="surrogateescape")).digest()
                         if line_hash in existing:
                             skipped += 1
                             continue
@@ -388,10 +454,17 @@ class SessionStore:
                 f"{self.path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
             )
             try:
-                with open(tmp_path, "w", encoding="utf-8") as f:
-                    f.writelines(f"{line}\n" for line in keep_lines)
+                with open(
+                    tmp_path,
+                    "w",
+                    encoding="utf-8",
+                    errors="surrogateescape",
+                    newline="",
+                ) as f:
+                    f.writelines(keep_lines)
                     f.flush()
                     os.fsync(f.fileno())
+                _ensure_trailing_newline(tmp_path)
                 tmp_path.replace(self.path)
                 _fsync_directory(self.sessions_dir)
             except BaseException:
@@ -444,11 +517,11 @@ class SessionStore:
         hashes: set[bytes] = set()
         if not archive_path.exists():
             return hashes
-        with open(archive_path, encoding="utf-8") as f:
+        with open(archive_path, encoding="utf-8", errors="surrogateescape") as f:
             for raw in f:
                 raw = raw.strip()
                 if raw:
-                    hashes.add(hashlib.sha256(raw.encode()).digest())
+                    hashes.add(hashlib.sha256(raw.encode(errors="surrogateescape")).digest())
         return hashes
 
     def stamp_attempt_kind(self, session_id: str, attempt_kind: str) -> bool:
