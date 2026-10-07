@@ -40,6 +40,11 @@ def test_scalar_blocks_field_is_validated_without_crashing(tmp_path, value):
     tasks = _write(tmp_path, "bad", f"blocks: {value}\n")
     bad = {task.name: task for task in load_tasks(tasks)}["bad"]
     assert any("Blocks must be a list" in issue for issue in bad.issues)
+    # Also verify the workspace is fully functional: commands must load both tasks
+    result = CliRunner().invoke(cli, ["--tasks-dir", str(tasks), "list"])
+    assert result.exception is None or isinstance(result.exception, SystemExit), result.output
+    assert result.exit_code == 0, f"exit {result.exit_code}: {result.output}"
+    assert "good" in result.output, result.output
 
 
 @pytest.mark.parametrize(
@@ -54,6 +59,8 @@ def test_scalar_blocks_field_is_validated_without_crashing(tmp_path, value):
 def test_commands_survive_scalar_depends(tmp_path, command, expected_exit, expected_in_output):
     tasks = _write(tmp_path, "bad", "depends: 7\ntags: foo\n")
     result = CliRunner().invoke(cli, ["--tasks-dir", str(tasks), command])
-    assert not isinstance(result.exception, TypeError), result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit), (
+        f"Unexpected exception {type(result.exception).__name__}: {result.exception}\n{result.output}"
+    )
     assert result.exit_code == expected_exit, f"exit {result.exit_code}: {result.output}"
     assert expected_in_output in result.output, result.output
