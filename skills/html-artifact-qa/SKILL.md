@@ -116,6 +116,15 @@ of these two mechanisms, both shown in the template:
    "un-escape" escaped markup by reading it back with `textContent` — entities
    would show literally.
 
+**Apply the routine to raw user input only, exactly once, before embedding.**
+The template's placeholders (`&lt;img&gt;`, `&quot;`) are already-escaped
+examples — they are pre-escaped literals in the finished document, not raw
+text awaiting the routine. Running already-escaped text through the routine
+again double-escapes it (`&lt;` → `&amp;lt;`) and renders entities visibly.
+Concretely: raw question `explain <img>` → run the routine → embed
+`explain &lt;img&gt;`; a placeholder already written as `&lt;img&gt;` in the
+template is final markup — embed it verbatim.
+
 Treat the artifact as untrusted input rendered in an iframe on the user's
 machine: never interpolate raw user text into `<title>`, `<h1>`, attribute
 values, or inline `<script>`.
