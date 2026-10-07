@@ -50,13 +50,18 @@ def test_scalar_blocks_field_is_validated_without_crashing(tmp_path, value):
 @pytest.mark.parametrize(
     "command,expected_exit,expected_in_output",
     [
-        ("list", 0, "good"),  # workspace loaded; both tasks visible
+        ("list", 0, "bad"),  # workspace loaded; both tasks visible
         ("check", 1, "must be a list"),  # validation ran; errors reported
-        ("ready", 0, "good"),  # dependency coercion unblocked good task
-        ("next", 0, "good"),  # workspace loaded; good task surfaced
+        ("ready", 0, "bad"),  # scalar dep coerced to [] so bad task is not blocked
+        ("next", 0, "Task Metadata"),  # workspace functional; a task is surfaced
     ],
 )
 def test_commands_survive_scalar_depends(tmp_path, command, expected_exit, expected_in_output):
+    """A scalar depends field must be coerced to [] so the task is NOT permanently blocked.
+
+    ``ready`` asserts that ``bad`` itself is surfaced (not stuck behind a phantom dep).
+    ``next`` picks whichever task wins — we only assert the workspace is functional.
+    """
     tasks = _write(tmp_path, "bad", "depends: 7\ntags: foo\n")
     result = CliRunner().invoke(cli, ["--tasks-dir", str(tasks), command])
     assert (

@@ -1240,17 +1240,23 @@ def load_task(file: Path) -> Tuple[fmPost, SubtaskCount]:
     return post, subtasks
 
 
-def _as_list(value: Any) -> list:
+def _as_list(value: Any, dep_field: bool = False) -> list:
     """Coerce a list-typed frontmatter value so one malformed file can't crash every consumer.
 
     ``validate_task_file`` already reports non-list values; this keeps the task loadable.
-    Empty-string and whitespace-only values are treated like None (phantom dependency guard).
+    Empty-string and whitespace-only values are treated like None.
+
+    When ``dep_field=True`` (depends/requires/blocks), any non-list scalar is also
+    coerced to [] — a scalar like ``depends: 7`` would otherwise create a real
+    phantom dependency named "7" that permanently blocks the task.
     """
     if isinstance(value, list):
         return value
     if value is None:
         return []
     if isinstance(value, str) and not value.strip():
+        return []
+    if dep_field:
         return []
     return [str(value)]
 
@@ -1366,14 +1372,14 @@ def load_tasks(
             # Create TaskInfo object
             # Get relationship fields (new typed dependencies)
             # requires is canonical, depends is deprecated alias, blocks is NOT merged (different semantics)
-            depends_list = _as_list(metadata.get("depends"))
-            requires_list = _as_list(metadata.get("requires"))
+            depends_list = _as_list(metadata.get("depends"), dep_field=True)
+            requires_list = _as_list(metadata.get("requires"), dep_field=True)
 
             # Warn if multiple fields are present (potential confusion)
             fields_present = []
             if requires_list:
                 fields_present.append("requires")
-            if _as_list(metadata.get("blocks")):
+            if _as_list(metadata.get("blocks"), dep_field=True):
                 fields_present.append("blocks")
             if depends_list:
                 fields_present.append("depends")
