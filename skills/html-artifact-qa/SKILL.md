@@ -67,9 +67,8 @@ HTML codeblock and the webui surfaces it as an iframe-previewed artifact.
   </style>
 </head>
 <body>
-  <div id="qa-source" hidden>[user question — written HTML-escaped, e.g. &lt;img src=x&gt;]</div>
-  <h1 id="qa-topic"></h1>
-  <p>[1-2 sentence TL;DR — your own wording; if it quotes the user, escape it]</p>
+  <h1>[Topic — written HTML-escaped, e.g. &lt;img src=x&amp;gt;]</h1>
+  <p>[1-2 sentence TL;DR — your own wording; if it quotes the user, write it escaped]</p>
 
   <details open>
     <summary>Section 1: [key concept]</summary>
@@ -82,14 +81,6 @@ HTML codeblock and the webui surfaces it as an iframe-previewed artifact.
   </details>
 
   <!-- Add diagrams as inline SVG, tables for comparisons, or <pre><code> for examples -->
-  <script>
-    // User-derived text lives ONLY in the hidden #qa-source text node, where it
-    // was written HTML-escaped. Copy it into visible elements via textContent
-    // (escaping is automatic in both directions). Never build a JS string
-    // literal from user input, and never use innerHTML for it.
-    document.getElementById('qa-topic').textContent =
-      document.getElementById('qa-source').textContent;
-  </script>
 </body>
 </html>
 ```
@@ -114,15 +105,16 @@ The question topic and any quoted user content are user-controlled strings.
 `explain <img src=x onerror=alert(1)>` must render as text, not execute. Use one
 of these two mechanisms, both shown in the template:
 
-1. **Preferred — hidden source + `textContent`**: put the user-derived string
-   (HTML-escaped) in a `hidden` source element, then copy it into visible
-   elements via `textContent` (automatic escaping both ways; never
-   `innerHTML`). **Never place user input inside a JavaScript string
-   literal** — `</script>` in the input would break out of the script element.
-2. **Static embedding — escape explicitly**: when you must write the text
-   directly into the markup, run it through this routine first:
+1. **Write user-derived text into the markup already HTML-escaped** — entities
+   in text nodes render as the original characters, so the display is correct
+   and no script is involved. Run the text through this routine first:
    `s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))`
    (`<` → `&lt;`, `>` → `&gt;`, `&` → `&amp;`, quotes → `&quot;`/`&#39;`).
+2. **No user text in JavaScript, ever**: no user-derived content inside
+   `<script>` blocks, JS string literals, or event-handler attributes —
+   `</script>` in the input would break out of the script element. Do not
+   "un-escape" escaped markup by reading it back with `textContent` — entities
+   would show literally.
 
 Treat the artifact as untrusted input rendered in an iframe on the user's
 machine: never interpolate raw user text into `<title>`, `<h1>`, attribute
