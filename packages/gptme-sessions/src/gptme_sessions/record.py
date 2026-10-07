@@ -62,6 +62,12 @@ DISPATCH_KINDS: frozenset[str] = frozenset(
 # independent of which backend-native knob the harness turned to honor it.
 REASONING_PROFILES: frozenset[str] = frozenset({"routine", "default", "deep"})
 
+GIT_SUMMARY_ATTRIBUTIONS: frozenset[str] = frozenset({"session", "window", "none"})
+_GIT_SUMMARY_TEXT_FIELDS: frozenset[str] = frozenset({"head", "branch", "shipped_class"})
+_GIT_SUMMARY_COUNT_FIELDS: frozenset[str] = frozenset(
+    {"files_changed", "insertions", "deletions", "sibling_commits"}
+)
+
 # Backend-native reasoning effort strings we have observed per harness.  These
 # are *documentation and warning* sets, never a hard validation gate: a grade
 # must never be lost because a harness introduced a new effort level.  Unknown
@@ -84,6 +90,42 @@ def normalize_reasoning_effort(value: object) -> str | None:
         return None
     normalized = value.strip().lower()
     return normalized or None
+
+
+def normalize_git_summary(value: object) -> dict[str, Any] | None:
+    """Return the bounded, JSON-safe per-session Git summary contract.
+
+    The caller owns commit attribution. This deliberately excludes a global
+    ``dirty`` flag: in a shared worktree it describes sibling state, not
+    residue owned by the recorded session.
+    """
+    if not isinstance(value, dict):
+        return None
+
+    summary: dict[str, Any] = {}
+    attribution = value.get("attribution")
+    if isinstance(attribution, str) and attribution in GIT_SUMMARY_ATTRIBUTIONS:
+        summary["attribution"] = attribution
+
+    commits = value.get("commits")
+    if isinstance(commits, list):
+        summary["commits"] = [commit for commit in commits if isinstance(commit, str)]
+
+    for field_name in _GIT_SUMMARY_TEXT_FIELDS:
+        field_value = value.get(field_name)
+        if isinstance(field_value, str):
+            summary[field_name] = field_value
+
+    for field_name in _GIT_SUMMARY_COUNT_FIELDS:
+        field_value = value.get(field_name)
+        if not isinstance(field_value, bool) and isinstance(field_value, int):
+            summary[field_name] = max(0, field_value)
+
+    owned_residue = value.get("owned_residue")
+    if isinstance(owned_residue, list):
+        summary["owned_residue"] = [path for path in owned_residue if isinstance(path, str)]
+
+    return summary or None
 
 
 # Scalar fields the ``annotate`` CLI can explicitly override. Persisting this
@@ -558,6 +600,9 @@ class SessionRecord:
     # Display-only label: reusable and never a mutation/join key. Appended to
     # preserve the positional constructor order used by existing callers.
     session_label: str | None = None
+    # Bounded Git output summary supplied by a caller that owns attribution.
+    # Global shared-worktree dirt is intentionally not part of this contract.
+    git_summary: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.session_id:
@@ -598,6 +643,7 @@ class SessionRecord:
             self.grades = {}
         if self.grade_reasons is None:
             self.grade_reasons = {}
+        self.git_summary = normalize_git_summary(self.git_summary)
         # Model stored as-is (raw) — use model_normalized for display
         # Normalize run_type — reject numeric values (session numbers) and clean prefixes
         self.run_type = normalize_run_type(self.run_type)
