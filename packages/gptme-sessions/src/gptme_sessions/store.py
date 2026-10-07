@@ -37,6 +37,29 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _ensure_trailing_newline(path: Path) -> None:
+    """If ``path`` exists and does not end with ``\\n``, append one and fsync.
+
+    JSONL append and archive writes assume a row boundary. ``rewrite()`` and
+    ``rotate()`` preserve malformed rows byte-for-byte, including an
+    unterminated last row; without this, the next ``append()`` or archive
+    write concatenates a valid record onto that tail and ``load_all()``
+    skips the combined row.
+    """
+    if not path.exists():
+        return
+    with open(path, "r+b") as f:
+        f.seek(0, os.SEEK_END)
+        if f.tell() == 0:
+            return
+        f.seek(-1, os.SEEK_END)
+        if f.read(1) == b"\n":
+            return
+        f.write(b"\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def _default_sessions_dir() -> Path:
     """Return the default sessions directory (XDG-compliant).
 
@@ -177,6 +200,7 @@ class SessionStore:
         """Append and durably acknowledge one record after file and namespace sync."""
         with self.lock():
             self._repair_tail()
+            _ensure_trailing_newline(self.path)
             created = not self.path.exists()
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(record.to_json() + "\n")
@@ -323,6 +347,7 @@ class SessionStore:
                     f.writelines(malformed_lines)
                     f.flush()
                     os.fsync(f.fileno())
+                _ensure_trailing_newline(tmp_path)
                 tmp_path.replace(self.path)
                 _fsync_directory(self.sessions_dir)
             except BaseException:
@@ -404,6 +429,7 @@ class SessionStore:
                 # Append first, fsync, and only then drop from the active file.
                 # Do not add this batch's hashes to ``existing``: duplicate
                 # active rows are distinct historical records and must survive.
+                _ensure_trailing_newline(archive_path)
                 with open(archive_path, "a", encoding="utf-8", errors="surrogateescape") as af:
                     for raw in entries:
                         line_hash = hashlib.sha256(raw.encode(errors="surrogateescape")).digest()
@@ -431,6 +457,7 @@ class SessionStore:
                     f.writelines(keep_lines)
                     f.flush()
                     os.fsync(f.fileno())
+                _ensure_trailing_newline(tmp_path)
                 tmp_path.replace(self.path)
                 _fsync_directory(self.sessions_dir)
             except BaseException:
