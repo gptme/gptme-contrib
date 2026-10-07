@@ -20,7 +20,7 @@ Quality             ``{backend}-{model_safe}-quality-blocked-until.txt``  qualit
 Backend-level       ``{backend}-blocked-until.txt``                       quota check
 Pool-level          ``pool-{pool}-blocked-until.txt``                     pool exhaustion
 OpenRouter limit    ``openrouter-{context}-daily-limit-until.txt``        autonomous-run / PM slots
-OpenRouter shared   ``openrouter-daily-limit-until.txt``                  same, unscoped context
+OpenRouter shared   ``openrouter-daily-limit-until.txt``                  same, bare SHARED key only
 ==================  ====================================================  ===========================
 
 ``model_safe(model)`` replaces ``/`` and spaces with ``-``. Callers must
@@ -145,7 +145,11 @@ def pool_block_path(state_dir: Path, pool: str) -> Path:
 def openrouter_block_path(state_dir: Path, context: str | None = None) -> Path:
     """Path of the OpenRouter limit block for ``context``.
 
-    ``context=None`` (or empty) is the shared/unscoped chain. The "daily" in the
+    ``context=None`` (or empty) is the bare SHARED key (``OPENROUTER_API_KEY``),
+    one key per file like every other context. A caller whose dispatch chain
+    exports a dedicated key first and falls back to SHARED is blocked only when
+    both files are active; this file alone does not speak for that chain.
+    The "daily" in the
     filename is **historical** — the file holds an absolute deadline for any
     limit window (daily/weekly/monthly/credits). Renaming it means updating
     every reader, so it stays.
