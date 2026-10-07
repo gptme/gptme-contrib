@@ -111,11 +111,7 @@ def auto_unblock_tasks(
 
             def prepare(post):
                 completed = all_tasks_dict.get(completed_id)
-                if (
-                    completed
-                    and completed.path.exists()
-                    and _fresh_state(completed) not in ("done", "cancelled")
-                ):
+                if completed is None or _fresh_state(completed) not in ("done", "cancelled"):
                     raise TransitionError("Completion was revoked")
                 if post.metadata.get("state") in ("done", "cancelled"):
                     raise TransitionError("Dependent became terminal")

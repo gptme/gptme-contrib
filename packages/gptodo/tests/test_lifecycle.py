@@ -572,6 +572,22 @@ def test_unblock_revoked_completion_preserves_blocker(tmp_path):
     assert frontmatter.load(parent).metadata["waiting_for"] == "child"
 
 
+@pytest.mark.parametrize("missing_from_snapshot", [False, True])
+def test_unblock_missing_completion_preserves_blocker(tmp_path, missing_from_snapshot):
+    child = write_task(tmp_path, "child", state="done")
+    parent = write_task(
+        tmp_path, "parent", state="waiting", waiting_for="child", waiting_since="2026-01-01"
+    )
+    stale = load_tasks(tmp_path / "tasks")
+    if missing_from_snapshot:
+        stale = [task for task in stale if task.name != "child"]
+    child.unlink()
+    original = parent.read_bytes()
+
+    assert not auto_unblock_tasks(["child"], stale, tmp_path / "tasks")
+    assert parent.read_bytes() == original
+
+
 @pytest.mark.parametrize(
     "initial,remote,target", [("waiting", "CLOSED", "done"), ("done", "OPEN", "active")]
 )
