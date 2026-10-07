@@ -70,6 +70,22 @@ def test_rotate_preserves_crlf_in_decodable_malformed_rows(tmp_path: Path) -> No
     assert crlf_row in store.path.read_bytes()
 
 
+def test_append_after_unterminated_undecodable_multirow_preserves_bytes(tmp_path: Path) -> None:
+    """_repair_tail() must NOT truncate a torn multibyte tail in a multi-row file.
+
+    Only decodable-but-invalid-JSON tails (process killed mid-write) are
+    truncated; undecodable tails are the PR's motivating case and must survive.
+    """
+    store = SessionStore(sessions_dir=tmp_path)
+    rec = SessionRecord(model="opus")
+    store.append(rec)
+    torn_tail = b'{"session_id": "bad\xe2\x82'  # torn UTF-8 multibyte, no trailing newline
+    with open(store.path, "ab") as f:
+        f.write(torn_tail)
+    store.append(SessionRecord(model="opus"))
+    assert torn_tail in store.path.read_bytes()
+
+
 def test_rotate_onto_unterminated_archive_keeps_record(tmp_path: Path) -> None:
     store = SessionStore(sessions_dir=tmp_path)
     rec = SessionRecord(model="opus", timestamp="2020-01-01T00:00:00+00:00")

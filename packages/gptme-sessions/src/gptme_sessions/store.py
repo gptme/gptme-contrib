@@ -176,10 +176,17 @@ class SessionStore:
         try:
             json.loads(partial.decode("utf-8"))
             return False  # valid JSON even without trailing newline
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except UnicodeDecodeError:
+            # Undecodable bytes in the tail — a torn multibyte sequence from a
+            # concurrent write.  Preserve it byte-for-byte; _ensure_trailing_newline
+            # (called after _repair_tail in append()) will add the row boundary.
+            return False
+        except json.JSONDecodeError:
             pass
 
         # Truncate to the last valid line (including its newline).
+        # Only reached for a decodable-but-invalid-JSON partial — a process
+        # killed mid-write leaving a garbled record fragment.
         # Use ftruncate (f.truncate) rather than write_bytes so that a process
         # kill between the zero-truncate and the rewrite cannot destroy all
         # prior records.  ftruncate is a single syscall that only shortens the
