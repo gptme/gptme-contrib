@@ -60,16 +60,19 @@ def _normalize_run_type(trigger: str | None, run_type_raw: str | None) -> str | 
         for prefix, canonical in _TRIGGER_TO_RUN_TYPE.items():
             if tl.startswith(prefix):
                 return canonical
-    # Fall back to legacy run_type field
-    if run_type_raw and run_type_raw not in ("unknown", ""):
+    # Fall back to legacy run_type field. Normalize BEFORE the guard so
+    # variants like "Unknown"/" UNKNOWN " collapse onto the None sentinel
+    # (run_type is documented as None when undetermined).
+    if run_type_raw:
         rtl = run_type_raw.lower().strip()
-        # Strip common prefixes ("autonomous-run" → "autonomous")
-        for known in sorted(KNOWN_RUN_TYPES, key=len, reverse=True):
-            if rtl.startswith(known.replace("-", "")):
-                return known
-            if rtl.startswith(known):
-                return known
-        return rtl or None
+        if rtl not in ("unknown", ""):
+            # Strip common prefixes ("autonomous-run" → "autonomous")
+            for known in sorted(KNOWN_RUN_TYPES, key=len, reverse=True):
+                if rtl.startswith(known.replace("-", "")):
+                    return known
+                if rtl.startswith(known):
+                    return known
+            return rtl or None
     return None
 
 
@@ -232,4 +235,11 @@ def build_export_feed(
         store = SessionStore(sessions_dir=store_path)
 
     records = store.load_all(include_archives=include_archives)
-    return [CompletedRunExport.from_session_record(r, filter=filter) for r in records]
+    # Dedup by session_id: the store may hold duplicate rows for one session
+    # (e.g. post_session() ran twice). run_id (= session_id) drives calendar
+    # UIDs and sheet row keys, so duplicates would collide in the sinks; keep
+    # the last row, matching dict-keyed sink behavior deterministically.
+    deduped: dict[str, "SessionRecord"] = {}
+    for record in records:
+        deduped[record.session_id] = record
+    return [CompletedRunExport.from_session_record(r, filter=filter) for r in deduped.values()]

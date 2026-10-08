@@ -2263,7 +2263,11 @@ def replay(
     """
     try:
         transcript = resolve_replay_target(target, sessions_dir=ctx.obj["sessions_dir"])
-    except (FileNotFoundError, ValueError, UnicodeDecodeError) as exc:
+    except UnicodeDecodeError:
+        # Must precede ValueError: UnicodeDecodeError is a subclass. Preserve
+        # the path-naming message the signals/transcript commands give.
+        raise click.ClickException(f"{target} contains non-UTF-8 content")
+    except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc))
     except PermissionError:
         raise click.ClickException(f"cannot read {target}: permission denied")
