@@ -5,7 +5,7 @@ Scopes `make -C packages/<pkg> typecheck` to packages with staged changes
 instead of running all 19 packages on every Python commit.
 
 Flags:
-  --all    Typecheck all packages (used by CI; skips staged-file filtering).
+  --all    Typecheck all packages explicitly (skips staged-file filtering).
 
 Env:
   HEAVY_VERIFICATION_WRAPPER    If set, prepend this script path to each
@@ -13,8 +13,10 @@ Env:
                                  (e.g. scripts/run-heavy-verification.sh).
 
 Trade-off: cross-package type errors are not caught incrementally.
-Mitigation: keep the full `make typecheck-packages` in CI (prek --all-files or
-explicit `make typecheck-packages`).
+Mitigation: CI's Test Packages workflow runs `make typecheck-packages` directly.
+`prek run --all-files` does not forward --all to this hook: it still checks only
+staged changes, and skips when the index is clean. For an explicit full sweep,
+run `python3 scripts/typecheck-changed.py --all` or `make typecheck-packages`.
 """
 
 import os
