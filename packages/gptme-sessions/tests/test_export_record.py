@@ -338,20 +338,20 @@ def test_build_export_feed_filter_applied(make_store) -> None:
     assert eligible[0].run_id == "run2bbbb"
 
 
-def test_build_export_feed_dedup_keeps_newest_regardless_of_order() -> None:
+def test_build_export_feed_dedup_keeps_newest_regardless_of_order(make_store) -> None:
     """Duplicate session_ids dedup to the NEWEST record, independent of load order."""
     older = _make_record(session_id="run1aaaa", outcome="noop")
     older.timestamp = "2026-10-07T08:00:00+00:00"
     newer = _make_record(session_id="run1aaaa", outcome="productive")
     newer.timestamp = "2026-10-07T09:00:00+00:00"
     # Insert newest first: even in reverse load order, the newer record wins.
-    store = _make_store_with_records([newer, older])
+    store = make_store([newer, older])
     exports = build_export_feed(store=store)
     assert len(exports) == 1
     assert exports[0].outcome == "productive"
 
 
-def test_build_export_feed_dedup_mixed_naive_and_missing_timestamps() -> None:
+def test_build_export_feed_dedup_mixed_naive_and_missing_timestamps(make_store) -> None:
     """Sorting must not raise TypeError when a naive-timestamped record
     coexists with one lacking a timestamp (naive vs aware comparison)."""
     naive = _make_record(session_id="run1aaaa", outcome="productive")
@@ -359,7 +359,7 @@ def test_build_export_feed_dedup_mixed_naive_and_missing_timestamps() -> None:
     naive.timestamp = "2030-01-01T08:00:00"
     missing = _make_record(session_id="run1aaaa", outcome="noop")
     missing.timestamp = ""  # store.append backfills with now() → later, loses
-    store = _make_store_with_records([missing, naive])
+    store = make_store([missing, naive])
     exports = build_export_feed(store=store)
     assert len(exports) == 1
     assert exports[0].outcome == "productive"
