@@ -88,12 +88,13 @@ repos:
 
   - id: typecheck-packages
     name: Typecheck packages
-    description: Run mypy for all packages
-    entry: make typecheck-packages
+    description: Run mypy only for packages with staged changes (use --all for full sweep).
+    entry: python3 scripts/typecheck-changed.py
     language: system
     pass_filenames: false
+    # always run; the script filters to python files and type-relevant
+    # configs (pyproject.toml, mypy.ini, uv.lock) and exits early otherwise
     always_run: true
-    types: [python]
 
   - id: validate-lesson-metadata
     name: Validate lesson metadata
