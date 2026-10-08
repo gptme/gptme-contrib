@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -136,9 +135,15 @@ def test_trigger_prefix_lookalike_is_not_coerced(trigger: str) -> None:
 
 @pytest.mark.parametrize(
     ("trigger", "expected"),
-    [("timer-auto", "autonomous"), ("monitoring-event", "project-monitoring")],
+    [
+        ("timer-auto", "autonomous"),
+        ("monitoring-event", "project-monitoring"),
+        ("timer.auto", "autonomous"),
+        ("event:github", "project-monitoring"),
+        ("dispatch/thing", None),
+    ],
 )
-def test_trigger_hyphen_boundary_still_matches(trigger: str, expected: str) -> None:
+def test_trigger_separator_boundary_matches(trigger: str, expected: str | None) -> None:
     assert _normalize_run_type(trigger, None) == expected
 
 
@@ -275,42 +280,46 @@ def test_all_known_run_types_survive_filter(run_type: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_store_with_records(records: list[SessionRecord]) -> SessionStore:
-    """Write records to a temp JSONL store and return a SessionStore over it."""
-    tmp = Path(tempfile.mkdtemp())
-    store = SessionStore(sessions_dir=tmp)
-    for r in records:
-        store.append(r)
-    return store
+@pytest.fixture
+def make_store(tmp_path: Path):
+    """Return a factory that writes records to a tmp_path store (auto-cleaned)."""
+
+    def _make(records: list[SessionRecord]) -> SessionStore:
+        store = SessionStore(sessions_dir=tmp_path)
+        for r in records:
+            store.append(r)
+        return store
+
+    return _make
 
 
-def test_build_export_feed_returns_all_records() -> None:
+def test_build_export_feed_returns_all_records(make_store) -> None:
     """build_export_feed returns one export per record."""
     r1 = _make_record(session_id="run1aaaa", session_label="abcd")
     r2 = _make_record(session_id="run2bbbb", session_label="efgh")
-    store = _make_store_with_records([r1, r2])
+    store = make_store([r1, r2])
     exports = build_export_feed(store=store)
     assert len(exports) == 2
     run_ids = {e.run_id for e in exports}
     assert run_ids == {"run1aaaa", "run2bbbb"}
 
 
-def test_build_export_feed_two_same_label_are_independent() -> None:
+def test_build_export_feed_two_same_label_are_independent(make_store) -> None:
     """Two records with the same session_label produce two distinct exports."""
     r1 = _make_record(session_id="run1aaaa", session_label="abcd")
     r2 = _make_record(session_id="run2bbbb", session_label="abcd")  # same label
-    store = _make_store_with_records([r1, r2])
+    store = make_store([r1, r2])
     exports = build_export_feed(store=store)
     assert len(exports) == 2
     assert exports[0].run_id != exports[1].run_id
     assert exports[0].session_label == exports[1].session_label == "abcd"
 
 
-def test_build_export_feed_filter_applied() -> None:
+def test_build_export_feed_filter_applied(make_store) -> None:
     """RunExportFilter is applied per record; ineligible records are still returned."""
     r_short = _make_record(session_id="run1aaaa", duration_seconds=10)
     r_long = _make_record(session_id="run2bbbb", duration_seconds=3600)
-    store = _make_store_with_records([r_short, r_long])
+    store = make_store([r_short, r_long])
     filt = RunExportFilter(min_duration_seconds=60)
     exports = build_export_feed(store=store, filter=filt)
     assert len(exports) == 2  # both returned

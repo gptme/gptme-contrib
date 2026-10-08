@@ -74,7 +74,9 @@ def _normalize_run_type(trigger: str | None, run_type_raw: str | None) -> str | 
     if trigger:
         tl = trigger.lower()
         for prefix, canonical in _TRIGGER_TO_RUN_TYPE.items():
-            if tl == prefix or tl.startswith((prefix + "-", prefix + "_", prefix + " ")):
+            if tl == prefix or tl.startswith(
+                (prefix + "-", prefix + "_", prefix + " ", prefix + ".", prefix + ":")
+            ):
                 return canonical
     return raw_fallback
 
