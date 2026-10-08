@@ -74,6 +74,19 @@ def test_normalize_run_type_unknown_returns_none() -> None:
     assert _normalize_run_type(None, "UNKNOWN") is None
     assert _normalize_run_type(None, "") is None
     assert _normalize_run_type(None, None) is None
+    # Whitespace-padded sentinels are undetermined too; they must not be
+    # exported verbatim or block trigger inference.
+    assert _normalize_run_type(None, " unknown ") is None
+    assert _normalize_run_type(None, "   ") is None
+    assert _normalize_run_type("timer", " unknown ") == "autonomous"
+    assert _normalize_run_type("timer", "   ") == "autonomous"
+
+
+def test_trigger_whitespace_is_stripped() -> None:
+    # A padded trigger still infers; the boundary check must not miss it.
+    assert _normalize_run_type(" timer", None) == "autonomous"
+    assert _normalize_run_type("timer ", None) == "autonomous"
+    assert _normalize_run_type(" timer ", None) == "autonomous"
 
 
 @pytest.mark.parametrize("run_type", ["workers", "interactives", "operators", "emailer"])

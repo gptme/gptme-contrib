@@ -56,8 +56,13 @@ _TRIGGER_TO_RUN_TYPE: dict[str, str] = {
 def _normalize_run_type(trigger: str | None, run_type_raw: str | None) -> str | None:
     """Prefer a recognized explicit type, then infer from the trigger."""
     raw_fallback: str | None = None
-    if run_type_raw and run_type_raw.lower() not in ("unknown", ""):
-        raw_fallback = run_type_raw.lower().strip()
+    # Strip before testing the sentinel: a whitespace-padded "unknown"/""
+    # (" unknown ", "   ") is undetermined, not an explicit type. Testing the
+    # raw value first let it slip through, block trigger inference, and export
+    # the padded sentinel verbatim.
+    raw_type = run_type_raw.strip() if run_type_raw else ""
+    if raw_type and raw_type.lower() != "unknown":
+        raw_fallback = raw_type.lower()
         normalized = raw_fallback.replace("_", "-").replace(" ", "-")
         if normalized == "monitoring":
             normalized = "project-monitoring"
@@ -74,7 +79,7 @@ def _normalize_run_type(trigger: str | None, run_type_raw: str | None) -> str | 
     # prefix look-alike ("emailer") must not be coerced to the trigger it merely
     # starts with.
     if trigger and raw_fallback is None:
-        tl = trigger.lower()
+        tl = trigger.strip().lower()
         for prefix, canonical in _TRIGGER_TO_RUN_TYPE.items():
             if tl == prefix or tl.startswith(
                 (prefix + "-", prefix + "_", prefix + " ", prefix + ".", prefix + ":")
