@@ -67,13 +67,18 @@ def _normalize_run_type(trigger: str | None, run_type_raw: str | None) -> str | 
     if run_type_raw:
         rtl = run_type_raw.lower().strip()
         if rtl not in ("unknown", ""):
+            # Exact legacy names map onto canonical labels ("monitoring" →
+            # "project-monitoring"); unrecognizable values are undetermined
+            # (None), never passed through verbatim — run_type is documented
+            # as either a canonical KNOWN_RUN_TYPES label or None.
+            if rtl in _TRIGGER_TO_RUN_TYPE:
+                return _TRIGGER_TO_RUN_TYPE[rtl]
             # Strip common prefixes ("autonomous-run" → "autonomous")
             for known in sorted(KNOWN_RUN_TYPES, key=len, reverse=True):
                 if rtl.startswith(known.replace("-", "")):
                     return known
                 if rtl.startswith(known):
                     return known
-            return rtl or None
     return None
 
 
@@ -213,9 +218,14 @@ def _record_ts_key(record: "SessionRecord") -> "datetime":
     """
     ts = getattr(record, "timestamp", "") or ""
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except ValueError:
         return datetime.min.replace(tzinfo=timezone.utc)
+    if dt.tzinfo is None:
+        # fromisoformat yields naive datetimes for tz-less strings; normalize
+        # to aware UTC so sort() never mixes naive and aware keys (TypeError).
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def build_export_feed(

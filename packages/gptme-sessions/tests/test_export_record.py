@@ -75,6 +75,19 @@ def test_normalize_run_type_unknown_returns_none() -> None:
     assert _normalize_run_type(None, None) is None
 
 
+def test_normalize_run_type_legacy_names_map_to_canonical() -> None:
+    # Legacy names without a trigger map exactly onto canonical labels
+    assert _normalize_run_type(None, "monitoring") == "project-monitoring"
+    assert _normalize_run_type(None, "event") == "project-monitoring"
+    assert _normalize_run_type(None, "timer") == "autonomous"
+
+
+def test_normalize_run_type_unrecognized_returns_none_not_verbatim() -> None:
+    # A legacy value matching no canonical label must not leak through
+    # verbatim — run_type is either canonical or None (undetermined).
+    assert _normalize_run_type(None, "something-weird") is None
+
+
 # ---------------------------------------------------------------------------
 # CompletedRunExport.from_session_record
 # ---------------------------------------------------------------------------
@@ -260,6 +273,20 @@ def test_build_export_feed_dedup_keeps_newest_regardless_of_order() -> None:
     newer.timestamp = "2026-10-07T09:00:00+00:00"
     # Insert newest first: even in reverse load order, the newer record wins.
     store = _make_store_with_records([newer, older])
+    exports = build_export_feed(store=store)
+    assert len(exports) == 1
+    assert exports[0].outcome == "productive"
+
+
+def test_build_export_feed_dedup_mixed_naive_and_missing_timestamps() -> None:
+    """Sorting must not raise TypeError when a naive-timestamped record
+    coexists with one lacking a timestamp (naive vs aware comparison)."""
+    naive = _make_record(session_id="run1aaaa", outcome="productive")
+    # no tz suffix → naive datetime after parse; future so it wins the dedup
+    naive.timestamp = "2030-01-01T08:00:00"
+    missing = _make_record(session_id="run1aaaa", outcome="noop")
+    missing.timestamp = ""  # store.append backfills with now() → later, loses
+    store = _make_store_with_records([missing, naive])
     exports = build_export_feed(store=store)
     assert len(exports) == 1
     assert exports[0].outcome == "productive"
