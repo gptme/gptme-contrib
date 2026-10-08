@@ -925,7 +925,7 @@ def post_session(
         )
 
     deliverable_details = _merge_deliverable_details(
-        deliverables=deliverables,
+        deliverables=deliverables or [],
         trajectory_details=traj_deliverable_details
         if isinstance(traj_deliverable_details, list)
         else [],
