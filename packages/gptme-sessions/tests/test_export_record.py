@@ -126,6 +126,16 @@ def test_trigger_is_fallback_for_absent_or_unknown_type(
     assert _normalize_run_type(trigger, run_type) == expected
 
 
+@pytest.mark.parametrize("run_type", ["workers", "interactives", "operators", "emailer"])
+def test_trigger_does_not_override_unrecognized_explicit_type(run_type: str) -> None:
+    # A trigger fills only absent/unknown types. An explicit but unrecognized
+    # type is preserved (same look-alike rule as the trigger-absent case), so a
+    # generic trigger must not coerce it to a canonical label.
+    assert _normalize_run_type("timer", run_type) == run_type
+    assert _normalize_run_type("spawn", run_type) == run_type
+    assert _normalize_run_type("timer", run_type) not in KNOWN_RUN_TYPES
+
+
 @pytest.mark.parametrize("trigger", ["emailer", "workers", "timers", "spawned"])
 def test_trigger_prefix_lookalike_is_not_coerced(trigger: str) -> None:
     # A trigger that merely starts with a known prefix must fall through; with

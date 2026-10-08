@@ -68,10 +68,12 @@ def _normalize_run_type(trigger: str | None, run_type_raw: str | None) -> str | 
             if normalized == known or normalized.startswith(known + "-"):
                 return known
 
-    # Generic triggers only fill absent, unknown, or unrecognized type data.
-    # Same boundary rule as above: a bare prefix look-alike ("emailer") must not
-    # be coerced to the trigger it merely starts with.
-    if trigger:
+    # Generic triggers only fill absent or unknown type data. An explicit but
+    # unrecognized type ("workers") is preserved, not coerced by the trigger —
+    # the same look-alike rule as above. Same boundary rule as well: a bare
+    # prefix look-alike ("emailer") must not be coerced to the trigger it merely
+    # starts with.
+    if trigger and raw_fallback is None:
         tl = trigger.lower()
         for prefix, canonical in _TRIGGER_TO_RUN_TYPE.items():
             if tl == prefix or tl.startswith(
