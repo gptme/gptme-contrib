@@ -54,32 +54,25 @@ _TRIGGER_TO_RUN_TYPE: dict[str, str] = {
 
 
 def _normalize_run_type(trigger: str | None, run_type_raw: str | None) -> str | None:
-    """Return a canonical run_type label from ``trigger`` (preferred) or legacy ``run_type``."""
-    # Try trigger first (more reliable, finer-grained)
+    """Prefer a recognized explicit type, then infer from the trigger."""
+    raw_fallback: str | None = None
+    if run_type_raw and run_type_raw not in ("unknown", ""):
+        raw_fallback = run_type_raw.lower().strip()
+        normalized = raw_fallback.replace("_", "-").replace(" ", "-")
+        if normalized == "monitoring":
+            normalized = "project-monitoring"
+        # Preserve legacy suffixes ("autonomous-run" → "autonomous").
+        for known in sorted(KNOWN_RUN_TYPES, key=len, reverse=True):
+            if normalized.startswith(known):
+                return known
+
+    # Generic triggers only fill absent, unknown, or unrecognized type data.
     if trigger:
         tl = trigger.lower()
         for prefix, canonical in _TRIGGER_TO_RUN_TYPE.items():
             if tl.startswith(prefix):
                 return canonical
-    # Fall back to legacy run_type field. Normalize BEFORE the guard so
-    # variants like "Unknown"/" UNKNOWN " collapse onto the None sentinel
-    # (run_type is documented as None when undetermined).
-    if run_type_raw:
-        rtl = run_type_raw.lower().strip()
-        if rtl not in ("unknown", ""):
-            # Exact legacy names map onto canonical labels ("monitoring" →
-            # "project-monitoring"); unrecognizable values are undetermined
-            # (None), never passed through verbatim — run_type is documented
-            # as either a canonical KNOWN_RUN_TYPES label or None.
-            if rtl in _TRIGGER_TO_RUN_TYPE:
-                return _TRIGGER_TO_RUN_TYPE[rtl]
-            # Strip common prefixes ("autonomous-run" → "autonomous")
-            for known in sorted(KNOWN_RUN_TYPES, key=len, reverse=True):
-                if rtl.startswith(known.replace("-", "")):
-                    return known
-                if rtl.startswith(known):
-                    return known
-    return None
+    return raw_fallback
 
 
 @dataclass

@@ -75,17 +75,38 @@ def test_normalize_run_type_unknown_returns_none() -> None:
     assert _normalize_run_type(None, None) is None
 
 
-def test_normalize_run_type_legacy_names_map_to_canonical() -> None:
-    # Legacy names without a trigger map exactly onto canonical labels
-    assert _normalize_run_type(None, "monitoring") == "project-monitoring"
-    assert _normalize_run_type(None, "event") == "project-monitoring"
-    assert _normalize_run_type(None, "timer") == "autonomous"
+@pytest.mark.parametrize(
+    ("run_type", "trigger", "expected"),
+    [
+        ("monitoring", "timer", "project-monitoring"),
+        ("autonomous", "spawn", "autonomous"),
+        ("worker", "timer", "worker"),
+        ("email", "dispatch", "email"),
+    ],
+)
+def test_recognized_explicit_run_type_is_authoritative(
+    run_type: str, trigger: str, expected: str
+) -> None:
+    assert _normalize_run_type(trigger, run_type) == expected
 
 
-def test_normalize_run_type_unrecognized_returns_none_not_verbatim() -> None:
-    # A legacy value matching no canonical label must not leak through
-    # verbatim — run_type is either canonical or None (undetermined).
-    assert _normalize_run_type(None, "something-weird") is None
+@pytest.mark.parametrize("run_type", ["monitoring", "project-monitoring", "project_monitoring"])
+def test_monitoring_aliases_are_canonical(run_type: str) -> None:
+    assert _normalize_run_type(None, run_type) == "project-monitoring"
+
+
+@pytest.mark.parametrize(
+    ("run_type", "trigger", "expected"),
+    [
+        (None, "timer", "autonomous"),
+        ("", "dispatch", "autonomous"),
+        ("unknown", "spawn", "worker"),
+    ],
+)
+def test_trigger_is_fallback_for_absent_or_unknown_type(
+    run_type: str | None, trigger: str, expected: str
+) -> None:
+    assert _normalize_run_type(trigger, run_type) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +175,7 @@ def test_filter_min_duration_passes_long_run() -> None:
 
 
 def test_filter_run_types_skips_excluded_type() -> None:
-    record = _make_record(trigger="worker")
+    record = _make_record(trigger="worker", run_type=None)
     filt = RunExportFilter(run_types=["autonomous", "project-monitoring"])
     export = CompletedRunExport.from_session_record(record, filter=filt)
 
@@ -163,7 +184,7 @@ def test_filter_run_types_skips_excluded_type() -> None:
 
 
 def test_filter_run_types_passes_included_type() -> None:
-    record = _make_record(trigger="dispatch")
+    record = _make_record(trigger="dispatch", run_type=None)
     filt = RunExportFilter(run_types=["autonomous"])
     export = CompletedRunExport.from_session_record(record, filter=filt)
 
