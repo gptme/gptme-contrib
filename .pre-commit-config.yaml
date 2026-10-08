@@ -92,7 +92,8 @@ repos:
     entry: python3 scripts/typecheck-changed.py
     language: system
     pass_filenames: false
-    types: [python]
+    # python files + package/global configs that affect type results
+    types_or: [python, toml, yaml]
 
   - id: validate-lesson-metadata
     name: Validate lesson metadata
