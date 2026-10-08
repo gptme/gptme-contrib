@@ -127,6 +127,21 @@ def test_trigger_is_fallback_for_absent_or_unknown_type(
     assert _normalize_run_type(trigger, run_type) == expected
 
 
+@pytest.mark.parametrize("trigger", ["emailer", "workers", "timers", "spawned"])
+def test_trigger_prefix_lookalike_is_not_coerced(trigger: str) -> None:
+    # A trigger that merely starts with a known prefix must fall through; with
+    # no explicit type there is nothing to infer, so the result is None.
+    assert _normalize_run_type(trigger, None) is None
+
+
+@pytest.mark.parametrize(
+    ("trigger", "expected"),
+    [("timer-auto", "autonomous"), ("monitoring-event", "project-monitoring")],
+)
+def test_trigger_hyphen_boundary_still_matches(trigger: str, expected: str) -> None:
+    assert _normalize_run_type(trigger, None) == expected
+
+
 # ---------------------------------------------------------------------------
 # CompletedRunExport.from_session_record
 # ---------------------------------------------------------------------------
