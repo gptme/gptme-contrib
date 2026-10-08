@@ -92,8 +92,9 @@ repos:
     entry: python3 scripts/typecheck-changed.py
     language: system
     pass_filenames: false
-    # python files + package/global configs that affect type results
-    types_or: [python, toml, yaml]
+    # always run; the script filters to python files and type-relevant
+    # configs (pyproject.toml, mypy.ini, uv.lock) and exits early otherwise
+    always_run: true
 
   - id: validate-lesson-metadata
     name: Validate lesson metadata
