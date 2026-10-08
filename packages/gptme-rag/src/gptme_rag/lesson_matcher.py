@@ -1409,6 +1409,7 @@ def score_lessons(
     max_results: int = 5,
     *,
     use_bm25: bool = True,
+    bm25_min_z: float | None = None,
     skill_bm25_min_z: float | None = None,
     skill_bm25_exempt_paths: Collection[str] = (),
 ) -> list[dict[str, Any]]:
@@ -1437,10 +1438,17 @@ def score_lessons(
         prompt: The query text (not pre-lowercased; handled internally).
         max_results: Maximum number of results to return.
         use_bm25: Enable BM25 semantic scoring (True by default).
+        bm25_min_z: Override the module-level ``BM25_MIN_Z`` gate for non-skill
+            lessons.  Useful when the corpus has grown since calibration and
+            the default 4.0 admits too many weak BM25-only matches.  Skill
+            lessons keep the module default unless ``skill_bm25_min_z`` is
+            also set and the skill is not exempt.  ``None`` keeps the module default.
         skill_bm25_min_z: Optional adaptive z-score ceiling for skills only.
             Keyword and descriptor matches are unaffected.
-        skill_bm25_exempt_paths: Paths that retain the ordinary lesson gate.
-            Policy classification belongs to the caller, not this library.
+        skill_bm25_exempt_paths: Skill paths that retain the module-default
+            ``BM25_MIN_Z`` gate, unaffected by either override.  Non-skill
+            lessons are unaffected by this collection.  Policy classification
+            belongs to the caller, not this library.
 
     Returns:
         List of matched lesson dicts, sorted descending by score, capped at
@@ -1461,10 +1469,15 @@ def score_lessons(
         ]
         bm_zs = _bm25_zscores(bm_scores)
         bm_n_nonzero = sum(1 for s in bm_scores if s > 0)
-        bm_min_z = _bm25_min_z(bm_n_nonzero)
+        _effective_bm25_ceiling = bm25_min_z if bm25_min_z is not None else BM25_MIN_Z
+        bm_min_z = _bm25_min_z(bm_n_nonzero, _effective_bm25_ceiling)
 
-    skill_bm_min_z = (
-        _bm25_min_z(bm_n_nonzero, skill_bm25_min_z) if skill_bm25_min_z is not None else bm_min_z
+    # Skill lessons keep the module default unless explicitly overridden by
+    # ``skill_bm25_min_z`` — ``bm25_min_z`` is a non-skill dial and must not
+    # silently suppress skill matches.
+    default_bm_min_z = _bm25_min_z(bm_n_nonzero, BM25_MIN_Z)
+    skill_bm_min_z = _bm25_min_z(
+        bm_n_nonzero, skill_bm25_min_z if skill_bm25_min_z is not None else BM25_MIN_Z
     )
     exempt_paths = set(skill_bm25_exempt_paths)
     results: list[dict[str, Any]] = []
@@ -1518,11 +1531,10 @@ def score_lessons(
             passes_raw_gate = bm_raw >= BM25_MIN_RAW or (corpus_below_floor and bm_raw > 0)
             # With two overlaps, only the positive-z standout should contribute;
             # flooring the weaker negative-z hit would over-credit noise.
-            gate = (
-                skill_bm_min_z
-                if lesson.get("is_skill") and lesson.get("path") not in exempt_paths
-                else bm_min_z
-            )
+            if lesson.get("is_skill"):
+                gate = default_bm_min_z if lesson.get("path") in exempt_paths else skill_bm_min_z
+            else:
+                gate = bm_min_z
             passes_z_gate = bm_z >= gate and not (bm_n_nonzero == 2 and bm_z <= 0)
             if passes_z_gate and passes_raw_gate:
                 # Use z-score as the contribution so ranking is preserved.
