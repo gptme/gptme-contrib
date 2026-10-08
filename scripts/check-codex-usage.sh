@@ -114,8 +114,12 @@ _cleanup() {
 trap _cleanup EXIT
 
 # --- Start codex in a headless tmux session ---
+# --no-daemon: with the managed app-server daemon running (codex >= 0.162
+# daemon), an interactive client refuses to start ("Cannot use the shared
+# background server: This session requires api_key_model_discovery to be
+# disabled") and every scrape since 2026-10-07 ~17Z returned no data.
 tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 \
-    "$CODEX_BIN --ask-for-approval never 2>&1; sleep 2"
+    "$CODEX_BIN --no-daemon --ask-for-approval never 2>&1; sleep 2"
 
 # --- Wait for codex to become ready, dismissing any residual update prompt ---
 # Readiness detection notes (codex 0.137.0):
@@ -254,15 +258,25 @@ def parse_limit(text, label, *, window_seconds):
             if reset_raw:
                 try:
                     now = datetime.now(timezone.utc)
-                    rm = re.match(r'(\d{1,2}):(\d{2})(?:\s+on\s+(\d+)\s+(\w+))?', reset_raw)
+                    # codex >= 0.159 prints 12h clock ("5:32 AM on 14 Oct"); older
+                    # builds printed "05:32 on 14 Oct". Without the AM/PM group the
+                    # date was silently dropped and the week read as ~9h from reset.
+                    rm = re.match(r'(\d{1,2}):(\d{2})(?:\s*([AaPp][Mm]))?(?:\s+on\s+(\d+)\s+(\w+))?', reset_raw)
                     if rm:
                         hour, minute = int(rm.group(1)), int(rm.group(2))
-                        if rm.group(3):
-                            day = int(rm.group(3))
-                            month_name = rm.group(4).lower()[:3]
+                        meridiem = (rm.group(3) or '').lower()
+                        if meridiem == 'pm' and hour != 12:
+                            hour += 12
+                        elif meridiem == 'am' and hour == 12:
+                            hour = 0
+                        if rm.group(4):
+                            day = int(rm.group(4))
+                            month_name = rm.group(5).lower()[:3]
                             months = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec']
                             month = months.index(month_name) + 1 if month_name in months else now.month
                             reset_dt = now.replace(month=month, day=day, hour=hour, minute=minute, second=0, microsecond=0)
+                            if reset_dt < now - timedelta(days=1):
+                                reset_dt = reset_dt.replace(year=now.year + 1)
                         else:
                             reset_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
                             if reset_dt <= now:
