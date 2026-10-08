@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>How does Raft consensus work?</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; color-scheme: light dark; }
+    h1 { font-size: 1.5rem; }
+    details { border: 1px solid #ddd; border-radius: 6px; margin: .75rem 0; }
+    details[open] { background: #fafafa; }
+    details summary { cursor: pointer; font-weight: 600; padding: .75rem 1rem; list-style: none; }
+    details summary::-webkit-details-marker { display: none; }
+    details summary::before { content: "▶ "; font-size: .75rem; }
+    details[open] summary::before { content: "▼ "; }
+    .detail-body { padding: .25rem 1rem 1rem; }
+    pre { overflow-x: auto; background: #f4f4f4; padding: .75rem 1rem; border-radius: 4px; font-size: .875rem; }
+    code { font-family: monospace; font-size: .9em; background: #f0f0f0; padding: .1em .3em; border-radius: 3px; }
+    table { border-collapse: collapse; width: 100%; margin: .5rem 0; }
+    th, td { border: 1px solid #ccc; padding: .4rem .7rem; text-align: left; font-size: .9rem; }
+    th { background: #f0f0f0; font-weight: 600; }
+    .tldr { background: #fff4e0; border-left: 4px solid #f80; padding: .75rem 1rem; border-radius: 0 4px 4px 0; margin: 1rem 0; }
+    svg { display: block; margin: .5rem auto; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #1a1a1a; color: #e0e0e0; }
+      details { border-color: #444; }
+      details[open] { background: #222; }
+      pre { background: #2a2a2a; color: #e0e0e0; }
+      code { background: #333; }
+      th { background: #333; }
+      th, td { border-color: #555; }
+      .tldr { background: #2a1a00; border-color: #f90; }
+    }
+  </style>
+</head>
+<body>
+
+<h1>How does Raft consensus work?</h1>
+
+<div class="tldr">
+  <strong>TL;DR</strong>: Raft keeps a cluster of servers agreeing on a replicated log
+  by electing one <em>leader</em> per term. The leader accepts all writes, replicates
+  them to followers, and commits only after a majority acknowledges. If the leader dies,
+  a new election starts. Raft is designed to be understandable — it avoids the complexity
+  of Paxos by decomposing consensus into three largely-independent sub-problems.
+</div>
+
+<details open>
+  <summary>The three sub-problems Raft solves</summary>
+  <div class="detail-body">
+    <table>
+      <tr><th>Sub-problem</th><th>What Raft does</th></tr>
+      <tr><td><strong>Leader election</strong></td><td>Use randomised timeouts to elect exactly one leader per term; re-elect on failure.</td></tr>
+      <tr><td><strong>Log replication</strong></td><td>Leader appends entries and sends AppendEntries RPCs; commits when a majority acknowledges.</td></tr>
+      <tr><td><strong>Safety</strong></td><td>Logs are only committed once a majority hold them; new leaders must contain all committed entries.</td></tr>
+    </table>
+  </div>
+</details>
+
+<details open>
+  <summary>Node state machine</summary>
+  <div class="detail-body">
+    <p>Every Raft node is always in one of three states:</p>
+    <!-- State machine SVG -->
+    <svg width="580" height="160" viewBox="0 0 580 160" xmlns="http://www.w3.org/2000/svg" style="max-width:100%">
+      <defs>
+        <marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L8,3 z" fill="#666"/>
+        </marker>
+      </defs>
+      <!-- Follower -->
+      <ellipse cx="100" cy="80" rx="75" ry="38" fill="#d0e8ff" stroke="#68a" stroke-width="2"/>
+      <text x="100" y="76" text-anchor="middle" font-size="14" font-weight="600" fill="#234">Follower</text>
+      <text x="100" y="93" text-anchor="middle" font-size="11" fill="#456">heartbeats in</text>
+      <!-- Candidate -->
+      <ellipse cx="290" cy="80" rx="75" ry="38" fill="#fff0c0" stroke="#a80" stroke-width="2"/>
+      <text x="290" y="76" text-anchor="middle" font-size="14" font-weight="600" fill="#430">Candidate</text>
+      <text x="290" y="93" text-anchor="middle" font-size="11" fill="#650">election timeout</text>
+      <!-- Leader -->
+      <ellipse cx="480" cy="80" rx="75" ry="38" fill="#d0ffd0" stroke="#484" stroke-width="2"/>
+      <text x="480" y="76" text-anchor="middle" font-size="14" font-weight="600" fill="#242">Leader</text>
+      <text x="480" y="93" text-anchor="middle" font-size="11" fill="#464">majority vote</text>
+      <!-- Follower → Candidate -->
+      <path d="M175,72 Q232,38 215,72" stroke="#666" fill="none" stroke-width="1.5" marker-end="url(#a)"/>
+      <text x="210" y="44" font-size="10" fill="#666" text-anchor="middle">timeout, no heartbeat</text>
+      <!-- Candidate → Leader -->
+      <line x1="365" y1="80" x2="403" y2="80" stroke="#484" stroke-width="2" marker-end="url(#a)"/>
+      <text x="384" y="72" font-size="10" fill="#484" text-anchor="middle">wins vote</text>
+      <!-- Candidate → Follower (loses election) -->
+      <path d="M215,92 Q232,130 175,92" stroke="#888" fill="none" stroke-width="1.5" marker-end="url(#a)"/>
+      <text x="206" y="130" font-size="10" fill="#888" text-anchor="middle">sees higher term</text>
+      <!-- Leader → Follower (partition) -->
+      <path d="M435,118 Q290,158 145,118" stroke="#a44" fill="none" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#a)"/>
+      <text x="290" y="155" font-size="10" fill="#a44" text-anchor="middle">higher term seen (network partition recovered)</text>
+    </svg>
+    <ul>
+      <li><strong>Follower</strong>: passive; replicates entries from the leader; resets its election timer on each heartbeat.</li>
+      <li><strong>Candidate</strong>: started an election; requests votes from peers; becomes leader on majority or reverts to follower if it sees a higher term.</li>
+      <li><strong>Leader</strong>: sends heartbeats (empty AppendEntries) to maintain authority; accepts client writes; steps down if it sees a higher term.</li>
+    </ul>
+  </div>
+</details>
+
+<details>
+  <summary>Leader election — randomised timeouts prevent split votes</summary>
+  <div class="detail-body">
+    <p>Each follower picks a random election timeout (e.g. 150–300 ms). If it receives
+    no heartbeat before the timeout fires, it:</p>
+    <ol>
+      <li>Increments its <strong>current term</strong></li>
+      <li>Votes for itself and sends <code>RequestVote</code> RPCs to all peers</li>
+      <li>Wins if it receives votes from a <strong>majority</strong> of the cluster</li>
+    </ol>
+    <p>Why random timeouts? They break ties: with high probability exactly one
+    node fires first, starts an election, and wins before the others even notice.
+    A split vote (two candidates each getting some votes) triggers a new term after
+    another random timeout — convergence is fast in practice.</p>
+    <pre><code># Safety invariant (§5.2)
+# A node grants a vote only if:
+#   1. candidate.term >= self.current_term
+#   2. candidate.log is at least as up-to-date as our own log
+#      (compare last log (term, index); higher term wins; same term = longer log wins)</code></pre>
+  </div>
+</details>
+
+<details>
+  <summary>Log replication — commit requires majority acknowledgement</summary>
+  <div class="detail-body">
+    <!-- Log replication sequence diagram -->
+    <svg width="580" height="200" viewBox="0 0 580 200" xmlns="http://www.w3.org/2000/svg" style="max-width:100%">
+      <defs>
+        <marker id="b" markerWidth="7" markerHeight="7" refX="5" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L7,3 z" fill="#555"/>
+        </marker>
+        <marker id="bg" markerWidth="7" markerHeight="7" refX="5" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L7,3 z" fill="#4a9"/>
+        </marker>
+      </defs>
+      <!-- Column headers -->
+      <text x="80"  y="18" text-anchor="middle" font-size="12" font-weight="600" fill="#333">Client</text>
+      <text x="240" y="18" text-anchor="middle" font-size="12" font-weight="600" fill="#333">Leader</text>
+      <text x="400" y="18" text-anchor="middle" font-size="12" font-weight="600" fill="#333">Follower 1</text>
+      <text x="520" y="18" text-anchor="middle" font-size="12" font-weight="600" fill="#333">Follower 2</text>
+      <!-- Lifelines -->
+      <line x1="80"  y1="22" x2="80"  y2="195" stroke="#ccc" stroke-dasharray="4,3"/>
+      <line x1="240" y1="22" x2="240" y2="195" stroke="#ccc" stroke-dasharray="4,3"/>
+      <line x1="400" y1="22" x2="400" y2="195" stroke="#ccc" stroke-dasharray="4,3"/>
+      <line x1="520" y1="22" x2="520" y2="195" stroke="#ccc" stroke-dasharray="4,3"/>
+      <!-- 1. Client → Leader -->
+      <line x1="80" y1="45" x2="232" y2="45" stroke="#555" stroke-width="1.5" marker-end="url(#b)"/>
+      <text x="156" y="40" font-size="10" fill="#555" text-anchor="middle">write(x=5)</text>
+      <!-- 2. Leader appends to local log -->
+      <rect x="215" y="52" width="50" height="18" rx="3" fill="#d0e8ff" stroke="#68a"/>
+      <text x="240" y="65" text-anchor="middle" font-size="10" fill="#234">append log</text>
+      <!-- 3. AppendEntries to followers -->
+      <line x1="240" y1="80" x2="392" y2="80" stroke="#555" stroke-width="1.5" marker-end="url(#b)"/>
+      <line x1="240" y1="92" x2="512" y2="92" stroke="#555" stroke-width="1.5" marker-end="url(#b)"/>
+      <text x="316" y="75" font-size="10" fill="#555" text-anchor="middle">AppendEntries</text>
+      <!-- 4. Followers append -->
+      <rect x="375" y="98" width="50" height="18" rx="3" fill="#d0e8ff" stroke="#68a"/>
+      <text x="400" y="111" text-anchor="middle" font-size="10" fill="#234">append log</text>
+      <rect x="495" y="98" width="50" height="18" rx="3" fill="#d0e8ff" stroke="#68a"/>
+      <text x="520" y="111" text-anchor="middle" font-size="10" fill="#234">append log</text>
+      <!-- 5. ACKs back -->
+      <line x1="400" y1="124" x2="248" y2="124" stroke="#4a9" stroke-width="1.5" marker-end="url(#bg)"/>
+      <line x1="520" y1="136" x2="248" y2="136" stroke="#4a9" stroke-width="1.5" marker-end="url(#bg)"/>
+      <text x="324" y="119" font-size="10" fill="#4a9" text-anchor="middle">ACK</text>
+      <text x="384" y="131" font-size="10" fill="#4a9" text-anchor="middle">ACK</text>
+      <!-- 6. Leader commits -->
+      <rect x="215" y="145" width="50" height="18" rx="3" fill="#b8ffb8" stroke="#484"/>
+      <text x="240" y="158" text-anchor="middle" font-size="10" fill="#242">commit ✓</text>
+      <!-- 7. Reply to client -->
+      <line x1="232" y1="172" x2="88" y2="172" stroke="#4a9" stroke-width="1.5" marker-end="url(#bg)"/>
+      <text x="160" y="167" font-size="10" fill="#4a9" text-anchor="middle">success</text>
+      <!-- 8. Notify followers of commit -->
+      <line x1="240" y1="184" x2="392" y2="184" stroke="#888" stroke-width="1" marker-end="url(#b)" stroke-dasharray="3,2"/>
+      <line x1="240" y1="190" x2="512" y2="190" stroke="#888" stroke-width="1" marker-end="url(#b)" stroke-dasharray="3,2"/>
+      <text x="316" y="179" font-size="9" fill="#888" text-anchor="middle">next heartbeat carries commitIndex</text>
+    </svg>
+    <p>The leader commits once it sees ACKs from a majority (itself + 1 follower in
+    a 3-node cluster). It then responds to the client and piggybacks the updated
+    <code>commitIndex</code> in the next heartbeat so followers apply the entry too.</p>
+  </div>
+</details>
+
+<details>
+  <summary>Safety guarantee — why committed entries are never lost</summary>
+  <div class="detail-body">
+    <p>Raft's election restriction ensures a candidate can only win if its log is
+    <em>at least as up-to-date</em> as a majority of the cluster. Because a committed
+    entry is held by a majority, any future leader must have seen it — committed
+    entries are never overwritten.</p>
+    <pre><code># Log completeness property (§5.4)
+# If an entry is committed at term T:
+#   - A majority of nodes hold it
+#   - Any candidate winning an election has a log ≥ that majority
+#   → future leader has the entry ✓
+
+# "Up-to-date" comparison (last log entry):
+#   if terms differ: higher term wins
+#   if terms equal:  longer log wins</code></pre>
+    <p>This is why Paxos is harder to understand: Paxos can elect a leader that
+    <em>doesn't</em> have all committed entries and must learn them via a separate
+    phase. Raft folds that learning into the election restriction itself.</p>
+  </div>
+</details>
+
+<details>
+  <summary>Raft vs Paxos vs ZAB — quick comparison</summary>
+  <div class="detail-body">
+    <table>
+      <tr><th>Property</th><th>Raft</th><th>Multi-Paxos</th><th>ZAB (Zookeeper)</th></tr>
+      <tr><td>Understandability</td><td>High (designed for it)</td><td>Low (many variants)</td><td>Medium</td></tr>
+      <tr><td>Leader election</td><td>Randomised timeouts</td><td>Varies by impl</td><td>Fast leader election (FLE)</td></tr>
+      <tr><td>Log gaps allowed?</td><td>No (sequential)</td><td>Yes (out-of-order)</td><td>No</td></tr>
+      <tr><td>Membership changes</td><td>Joint consensus / single-server</td><td>Varies</td><td>Dynamic reconfig</td></tr>
+      <tr><td>Notable uses</td><td>etcd, CockroachDB, TiKV</td><td>Chubby (Google), Spanner</td><td>Apache Zookeeper</td></tr>
+    </table>
+    <p>Raft's main advantage is its deliberate decomposition and sequential log — no
+    holes, no complex gap-filling logic. The tradeoff is that it is slightly less
+    write-optimal than some Paxos variants that allow out-of-order commits.</p>
+  </div>
+</details>
+
+</body>
+</html>

@@ -140,6 +140,25 @@ Skills extend gptme's lesson system by providing executable components alongside
 
 **Keywords**: `journal entry`, `backfill journal`, `work day`, `session notes`
 
+### 7. html-artifact-qa
+
+**Purpose**: Answer complex, multi-part technical questions with interactive HTML artifacts rendered natively in gptme's webui
+
+**Use cases**:
+- Explaining algorithms with visual recursion trees or step-by-step SVG diagrams
+- Comparing distributed protocols (Raft, Paxos, ZAB) side-by-side
+- Answering architecture questions with collapsible sections, code examples, and inline diagrams
+- Any deep technical Q&A where text-only answers lose fidelity
+
+**Features**:
+- Detection heuristic: fires on questions with ≥2 complexity signals (multi-part, visual benefit, technical depth, long)
+- HTML template: TL;DR first, `<details>` collapsibles, inline SVG, tables, `<pre><code>` blocks
+- Dark-mode aware via `color-scheme: light dark` + `@media (prefers-color-scheme: dark)`
+- Self-contained: no external dependencies; works offline
+- Three reference examples: `example-aw-sync.html`, `example-merge-sort.html`, `example-raft-consensus.html`
+
+**Keywords**: `explain with html`, `interactive visualization`, `visualize this`, `how does X work with diagram`, `complex question html`, `answer with interactive`
+
 ## Using Skills
 
 ### Loading a Skill

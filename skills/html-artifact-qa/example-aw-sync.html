@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>How does aw-sync work?</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; color-scheme: light dark; }
+    h1 { font-size: 1.5rem; }
+    h2 { font-size: 1.1rem; color: #555; margin: 0; }
+    details { border: 1px solid #ddd; border-radius: 6px; margin: .75rem 0; padding: 0; }
+    details[open] { background: #fafafa; }
+    details summary { cursor: pointer; font-weight: 600; padding: .75rem 1rem; list-style: none; }
+    details summary::-webkit-details-marker { display: none; }
+    details summary::before { content: "▶ "; font-size: .75rem; }
+    details[open] summary::before { content: "▼ "; }
+    .detail-body { padding: .25rem 1rem 1rem; }
+    pre { overflow-x: auto; background: #f4f4f4; padding: .75rem 1rem; border-radius: 4px; font-size: .875rem; }
+    code { font-family: monospace; font-size: .9em; background: #f0f0f0; padding: .1em .3em; border-radius: 3px; }
+    table { border-collapse: collapse; width: 100%; margin: .5rem 0; }
+    th, td { border: 1px solid #ccc; padding: .4rem .7rem; text-align: left; font-size: .9rem; }
+    th { background: #f0f0f0; font-weight: 600; }
+    .tldr { background: #e8f4e8; border-left: 4px solid #4a9; padding: .75rem 1rem; border-radius: 0 4px 4px 0; margin: 1rem 0; }
+    svg { display: block; margin: .5rem auto; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #1a1a1a; color: #e0e0e0; }
+      details { border-color: #444; }
+      details[open] { background: #222; }
+      h2 { color: #aaa; }
+      pre { background: #2a2a2a; color: #e0e0e0; }
+      code { background: #333; }
+      th { background: #333; }
+      th, td { border-color: #555; }
+      .tldr { background: #1a2e1a; border-color: #4a9; }
+    }
+  </style>
+</head>
+<body>
+
+<h1>How does <code>aw-sync</code> work?</h1>
+
+<div class="tldr">
+  <strong>TL;DR</strong>: aw-sync pulls activity buckets from remote ActivityWatch
+  instances and merges them into the local database. It tracks a cursor per peer to
+  resume incrementally, skips version-incompatible peers gracefully, and reports
+  every peer's outcome in a <code>PeerReport</code>.
+</div>
+
+<details open>
+  <summary>Architecture overview</summary>
+  <div class="detail-body">
+    <!-- Simple flow diagram as inline SVG -->
+    <svg width="600" height="120" viewBox="0 0 600 120" xmlns="http://www.w3.org/2000/svg"
+         style="max-width:100%">
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L8,3 z" fill="#555"/>
+        </marker>
+      </defs>
+      <!-- boxes -->
+      <rect x="10"  y="35" width="120" height="50" rx="6" fill="#d0e8ff" stroke="#68a"/>
+      <rect x="240" y="35" width="120" height="50" rx="6" fill="#d0e8ff" stroke="#68a"/>
+      <rect x="470" y="35" width="120" height="50" rx="6" fill="#d8f0d8" stroke="#484"/>
+      <!-- labels -->
+      <text x="70"  y="58" text-anchor="middle" font-size="13" fill="#333">Remote AW</text>
+      <text x="70"  y="74" text-anchor="middle" font-size="11" fill="#555">(:5601/:5602)</text>
+      <text x="300" y="58" text-anchor="middle" font-size="13" fill="#333">aw-sync</text>
+      <text x="300" y="74" text-anchor="middle" font-size="11" fill="#555">pull_from_remotes</text>
+      <text x="530" y="58" text-anchor="middle" font-size="13" fill="#333">Local AW</text>
+      <text x="530" y="74" text-anchor="middle" font-size="11" fill="#555">(:5600)</text>
+      <!-- arrows -->
+      <line x1="132" y1="60" x2="238" y2="60" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+      <line x1="362" y1="60" x2="468" y2="60" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+      <!-- cursor note -->
+      <text x="175" y="52" text-anchor="middle" font-size="10" fill="#777">GET /buckets</text>
+      <text x="415" y="52" text-anchor="middle" font-size="10" fill="#777">INSERT events</text>
+    </svg>
+    <p>The sync runner discovers peers from <code>~/.config/activitywatch/aw-server/aw-server.toml</code>
+    (or the CLI <code>--peers</code> flag). For each peer it calls
+    <code>open_peer_datastores()</code> then <code>pull_from_remotes()</code>.</p>
+  </div>
+</details>
+
+<details>
+  <summary>Cursor-based incremental sync</summary>
+  <div class="detail-body">
+    <p>A cursor file stores the last-synced timestamp per (peer, bucket) pair.
+    On each run, only events <em>after</em> the cursor are fetched — making syncs fast
+    after the first full pull.</p>
+    <pre><code># Cursor file location (per-peer, per-bucket)
+~/.local/share/activitywatch/aw-sync/
+  cursors/
+    192.168.1.10:5601/
+      aw-watcher-window_hostname.cursor   # ISO timestamp
+      aw-afk_hostname.cursor</code></pre>
+    <p>If a cursor file is missing, aw-sync performs a full pull from the beginning
+    of that bucket's history.</p>
+  </div>
+</details>
+
+<details>
+  <summary>Peer compatibility &amp; PeerReport</summary>
+  <div class="detail-body">
+    <p>Before syncing, aw-sync checks the remote's API version. If the version is
+    incompatible the peer is <em>skipped</em> (not fatal). Either way, a
+    <code>PeerReport</code> entry is written so callers can surface the outcome.</p>
+    <table>
+      <tr><th>Outcome</th><th>PeerReport field</th><th>Meaning</th></tr>
+      <tr><td>Success</td><td><code>succeeded</code></td><td>All buckets pulled cleanly</td></tr>
+      <tr><td>Version mismatch</td><td><code>skipped</code></td><td>Benign; peer not compatible</td></tr>
+      <tr><td>Network error</td><td><code>failed</code></td><td>Connection refused / timeout</td></tr>
+    </table>
+    <p>The <code>record_peers</code> flag must be <code>true</code> when calling
+    <code>pull_from_remotes</code> to populate these fields — without it,
+    failed/skipped peers are silently ignored (see
+    <a href="https://github.com/ActivityWatch/aw-server-rust/issues/688">issue #688</a>).</p>
+  </div>
+</details>
+
+<details>
+  <summary>Running aw-sync</summary>
+  <div class="detail-body">
+    <pre><code># Install (comes with ActivityWatch >= 0.13)
+# Run a one-shot sync against a remote at 192.168.1.10
+aw-sync --host 192.168.1.10:5601
+
+# Continuous mode (re-syncs every N minutes)
+aw-sync --host 192.168.1.10:5601 --interval 5
+
+# Dry-run: show what would be synced without writing
+aw-sync --host 192.168.1.10:5601 --dry-run</code></pre>
+  </div>
+</details>
+
+</body>
+</html>
