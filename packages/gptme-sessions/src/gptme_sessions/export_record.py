@@ -56,7 +56,7 @@ _TRIGGER_TO_RUN_TYPE: dict[str, str] = {
 def _normalize_run_type(trigger: str | None, run_type_raw: str | None) -> str | None:
     """Prefer a recognized explicit type, then infer from the trigger."""
     raw_fallback: str | None = None
-    if run_type_raw and run_type_raw not in ("unknown", ""):
+    if run_type_raw and run_type_raw.lower() not in ("unknown", ""):
         raw_fallback = run_type_raw.lower().strip()
         normalized = raw_fallback.replace("_", "-").replace(" ", "-")
         if normalized == "monitoring":

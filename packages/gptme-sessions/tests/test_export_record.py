@@ -71,6 +71,8 @@ def test_normalize_run_type_fallback_to_legacy() -> None:
 
 def test_normalize_run_type_unknown_returns_none() -> None:
     assert _normalize_run_type(None, "unknown") is None
+    assert _normalize_run_type(None, "Unknown") is None
+    assert _normalize_run_type(None, "UNKNOWN") is None
     assert _normalize_run_type(None, "") is None
     assert _normalize_run_type(None, None) is None
 
