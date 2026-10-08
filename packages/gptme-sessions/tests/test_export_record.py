@@ -250,3 +250,16 @@ def test_build_export_feed_filter_applied() -> None:
     eligible = [e for e in exports if e.eligible]
     assert len(eligible) == 1
     assert eligible[0].run_id == "run2bbbb"
+
+
+def test_build_export_feed_dedup_keeps_newest_regardless_of_order() -> None:
+    """Duplicate session_ids dedup to the NEWEST record, independent of load order."""
+    older = _make_record(session_id="run1aaaa", outcome="noop")
+    older.timestamp = "2026-10-07T08:00:00+00:00"
+    newer = _make_record(session_id="run1aaaa", outcome="productive")
+    newer.timestamp = "2026-10-07T09:00:00+00:00"
+    # Insert newest first: even in reverse load order, the newer record wins.
+    store = _make_store_with_records([newer, older])
+    exports = build_export_feed(store=store)
+    assert len(exports) == 1
+    assert exports[0].outcome == "productive"

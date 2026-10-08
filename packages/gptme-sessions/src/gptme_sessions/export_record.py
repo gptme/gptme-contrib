@@ -20,6 +20,7 @@ Usage::
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -204,6 +205,19 @@ class CompletedRunExport:
         return self.run_id
 
 
+def _record_ts_key(record: "SessionRecord") -> "datetime":
+    """Sort key for dedup ordering: record-creation time, oldest first.
+
+    Missing/unparseable timestamps sort before every real timestamp so a
+    timestamped duplicate row always wins the dedup.
+    """
+    ts = getattr(record, "timestamp", "") or ""
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
 def build_export_feed(
     store: "SessionStore | None" = None,
     store_path: "Path | None" = None,
@@ -238,7 +252,11 @@ def build_export_feed(
     # Dedup by session_id: the store may hold duplicate rows for one session
     # (e.g. post_session() ran twice). run_id (= session_id) drives calendar
     # UIDs and sheet row keys, so duplicates would collide in the sinks; keep
-    # the last row, matching dict-keyed sink behavior deterministically.
+    # the NEWEST row (by record timestamp), so the winner does not depend on
+    # load_all()'s file ordering — "last write wins" by record-creation time.
+    # Records with a missing/unparseable timestamp sort first (oldest), so a
+    # timestamped duplicate always outranks one without.
+    records.sort(key=_record_ts_key)
     deduped: dict[str, "SessionRecord"] = {}
     for record in records:
         deduped[record.session_id] = record
