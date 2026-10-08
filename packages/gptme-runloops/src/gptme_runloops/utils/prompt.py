@@ -11,7 +11,7 @@ else:
     try:
         import tomli as tomllib
     except ImportError:
-        tomllib = None  # type: ignore
+        tomllib = None  # type: ignore[assignment]
 
 
 def get_agent_name(workspace: Path) -> str:
