@@ -61,9 +61,11 @@ def _normalize_run_type(trigger: str | None, run_type_raw: str | None) -> str | 
         normalized = raw_fallback.replace("_", "-").replace(" ", "-")
         if normalized == "monitoring":
             normalized = "project-monitoring"
-        # Preserve legacy suffixes ("autonomous-run" → "autonomous").
+        # Preserve legacy hyphen-delimited suffixes ("autonomous-run" → "autonomous").
+        # Require an exact match or a "-" boundary so an unrecognized look-alike
+        # ("workers", "interactives") is preserved rather than silently truncated.
         for known in sorted(KNOWN_RUN_TYPES, key=len, reverse=True):
-            if normalized.startswith(known):
+            if normalized == known or normalized.startswith(known + "-"):
                 return known
 
     # Generic triggers only fill absent, unknown, or unrecognized type data.

@@ -77,6 +77,22 @@ def test_normalize_run_type_unknown_returns_none() -> None:
     assert _normalize_run_type(None, None) is None
 
 
+@pytest.mark.parametrize("run_type", ["workers", "interactives", "operators", "emailer"])
+def test_unknown_prefix_lookalike_is_preserved(run_type: str) -> None:
+    # Only a hyphen-delimited legacy suffix is stripped; a bare prefix
+    # ("workers" vs "worker") must not be silently truncated to a known type.
+    assert _normalize_run_type(None, run_type) == run_type
+    assert _normalize_run_type(None, run_type) not in KNOWN_RUN_TYPES
+
+
+@pytest.mark.parametrize(
+    ("run_type", "expected"),
+    [("autonomous-run", "autonomous"), ("worker-heartbeat", "worker")],
+)
+def test_legacy_hyphen_suffix_is_stripped(run_type: str, expected: str) -> None:
+    assert _normalize_run_type(None, run_type) == expected
+
+
 @pytest.mark.parametrize(
     ("run_type", "trigger", "expected"),
     [
