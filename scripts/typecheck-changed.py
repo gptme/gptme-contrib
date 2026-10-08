@@ -51,6 +51,9 @@ TYPECHECKED_PACKAGES = {
 
 # Changes to these files trigger a full-loop typecheck.
 GLOBAL_CONFIG_FILES = {"mypy.ini", "pyproject.toml", "uv.lock"}
+# Package-level config files whose change affects type results even without
+# any staged .py file (dependency additions, mypy settings).
+PACKAGE_CONFIG_FILES = {"pyproject.toml", "mypy.ini", "setup.cfg"}
 
 
 def get_staged_files() -> list[str]:
@@ -110,9 +113,11 @@ def main() -> int:
     # Determine which packages have staged Python changes.
     affected: set[str] = set()
     for f in staged:
-        if not f.endswith(".py"):
-            continue
         parts = f.split("/")
+        # A package-level config change (dependency addition, mypy settings)
+        # can affect type results without any .py file staged.
+        if not (f.endswith(".py") or parts[-1] in PACKAGE_CONFIG_FILES):
+            continue
         if parts[0] == "packages" and len(parts) >= 3:
             pkg_dir = parts[1]
             pkg_path = REPO_ROOT / "packages" / pkg_dir
