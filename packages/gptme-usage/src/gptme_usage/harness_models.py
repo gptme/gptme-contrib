@@ -721,6 +721,7 @@ CC_MODEL_IDS: dict[str, str] = {
     "sonnet-5": "claude-sonnet-5",
     "sonnet-5-5": "claude-sonnet-5-5",
     "haiku-4-5": "claude-haiku-4-5-20251001",
+    "haiku-5-5": "claude-haiku-5-5",
     "fable-5": "claude-fable-5",
     "fable-5-1": "claude-fable-5-1",
 }
@@ -728,7 +729,8 @@ CC_MODEL_IDS: dict[str, str] = {
 #: Floating CLI alias -> the VALIDATED versioned suffix it means for us.
 #: Human-edited pins; see rule 3 above. (2026-09-29: opus-5-5 and sonnet-5-5 are
 #: in succession windows and not yet validated; fable-5 is retired in favour of
-#: fable-5-1.)
+#: fable-5-1. 2026-10-09: haiku-5-5 registered, but its 2026-10-08 canary rejected
+#: a drop-in swap, so the haiku pin stays on haiku-4-5.)
 CC_ALIAS_PINS: dict[str, str] = {
     "opus": "opus-5",
     "sonnet": "sonnet-4-6",
