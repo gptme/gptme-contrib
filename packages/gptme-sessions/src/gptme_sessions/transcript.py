@@ -268,6 +268,13 @@ def _codex_output_text(output: object) -> tuple[str, bool]:
     """Unwrap exec JSON chunks without dropping plain-text tool results."""
     lines: list[str] = []
     is_error = False
+    if isinstance(output, list):
+        # Current codex-cli: a list of input_text blocks, headed by
+        # "Script completed|failed" and followed by exec JSON chunks.
+        output = "\n".join(
+            str(b.get("text", "")) if isinstance(b, dict) else str(b) for b in output
+        )
+        is_error = output.startswith("Script failed")
     for line in str(output).splitlines():
         try:
             chunk = json.loads(line)
@@ -347,6 +354,7 @@ def _normalize_codex(msgs: list[dict]) -> list[NormalizedMessage]:
                         timestamp=ts,
                         tool_name=tool_name,
                         tool_input=tool_input,
+                        tool_call_id=payload.get("call_id") or None,
                     )
                 )
 
@@ -359,6 +367,7 @@ def _normalize_codex(msgs: list[dict]) -> list[NormalizedMessage]:
                         timestamp=ts,
                         tool_result=output,
                         is_error=is_error,
+                        tool_call_id=payload.get("call_id") or None,
                     )
                 )
 
