@@ -429,6 +429,7 @@ def test_merge_with_module_defaults_does_not_mutate_input() -> None:
         # Successors are distinct explicit versions, never collapsed
         ("claude-opus-5-5", "opus-5-5"),
         ("claude-sonnet-5-5", "sonnet-5-5"),
+        ("claude-haiku-5-5", "haiku-5-5"),
         ("claude-sonnet-4-5", "sonnet-4-5"),
         # Dotted (copilot-style) and dated ids
         ("claude-opus-4.6", "opus-4-6"),
@@ -740,6 +741,7 @@ def test_estimate_session_cost_fable_alias_resolves(fable_toml_path: Path) -> No
         ("sonnet-5-5", "claude-sonnet-5-5"),
         ("fable-5-1", "claude-fable-5-1"),
         ("haiku-4-5", "claude-haiku-4-5-20251001"),
+        ("haiku-5-5", "claude-haiku-5-5"),
         ("claude-opus-5", "claude-opus-5"),
         ("claude-opus-4-7-20251014", "claude-opus-4-7-20251014"),
         ("opus-5-7", "claude-opus-5-7"),  # unregistered but explicit
