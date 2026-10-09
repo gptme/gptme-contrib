@@ -402,6 +402,7 @@ def _normalize_copilot(msgs: list[dict]) -> list[NormalizedMessage]:
                         timestamp=ts,
                         tool_name=tool_name,
                         tool_input=tool_input,
+                        tool_call_id=req.get("toolCallId") or None,
                     )
                 )
 
@@ -411,6 +412,10 @@ def _normalize_copilot(msgs: list[dict]) -> list[NormalizedMessage]:
             content = result.get("detailedContent", "") or result.get("content", "") or ""
             if isinstance(content, list):
                 content = " ".join(str(c) for c in content)
+            if not content and not success:
+                # Failed calls carry no `result`, only `error: {message, code}`.
+                error = data.get("error") or {}
+                content = error.get("message", "") if isinstance(error, dict) else str(error)
             normalized.append(
                 NormalizedMessage(
                     role="tool_result",
@@ -418,6 +423,7 @@ def _normalize_copilot(msgs: list[dict]) -> list[NormalizedMessage]:
                     timestamp=ts,
                     tool_result=str(content),
                     is_error=not success,
+                    tool_call_id=data.get("toolCallId") or None,
                 )
             )
 

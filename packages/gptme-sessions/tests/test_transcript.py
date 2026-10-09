@@ -377,6 +377,33 @@ class TestNormalizeCopilot:
         assert len(results) == 1
         assert results[0].is_error is False
 
+    def test_tool_call_id_links_request_and_result(self, copilot_jsonl: Path):
+        records = [json.loads(line) for line in copilot_jsonl.read_text().strip().splitlines()]
+        norm = _normalize_copilot(records)
+        request = next(m for m in norm if m.tool_name)
+        result = next(m for m in norm if m.role == "tool_result")
+        assert request.tool_call_id == "tc_001"
+        assert result.tool_call_id == "tc_001"
+
+    def test_failed_result_keeps_error_message(self):
+        # Live shape (copilot-cli, 2026-10): failures carry no `result`, only `error`.
+        records = [
+            {
+                "type": "tool.execution_complete",
+                "timestamp": "2026-10-09T07:09:47.487Z",
+                "data": {
+                    "toolCallId": "call_yOch1fsPKzS4tjqeN3LGNlYw",
+                    "success": False,
+                    "error": {"message": "Path does not exist", "code": "failure"},
+                },
+            }
+        ]
+        results = [m for m in _normalize_copilot(records) if m.role == "tool_result"]
+        assert len(results) == 1
+        assert results[0].is_error is True
+        assert results[0].tool_result == "Path does not exist"
+        assert results[0].content == "Path does not exist"
+
 
 # ---------------------------------------------------------------------------
 # Integration tests for read_transcript
