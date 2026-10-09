@@ -2,7 +2,12 @@
 
 import json
 
-from gptme_sessions.transcript import _normalize_codex, _normalize_grok
+from gptme_sessions.transcript import (
+    _normalize_cc,
+    _normalize_codex,
+    _normalize_grok,
+    _normalize_pi,
+)
 
 
 def test_codex_custom_calls_and_developer_role():
@@ -58,6 +63,127 @@ def test_codex_exec_output_unwraps_json_chunks():
     assert len(messages) == 1
     assert "FAILED test_example\n1 failed" in messages[0].tool_result
     assert messages[0].is_error is True
+
+
+def _codex_block_output(*texts: str) -> dict:
+    # Live shape (codex-cli, 2026-10): output is a list of input_text blocks.
+    return {
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call_output",
+            "call_id": "call_blk",
+            "output": [{"type": "input_text", "text": t} for t in texts],
+        },
+    }
+
+
+def test_codex_block_output_unwraps_exec_chunks():
+    chunk = json.dumps({"chunk_id": "52ac55", "exit_code": 0, "output": "/home/bob/bob\n"})
+    messages = _normalize_codex(
+        [_codex_block_output("Script completed\nWall time 0.1 seconds\nOutput:\n", chunk)]
+    )
+    assert len(messages) == 1
+    assert "/home/bob/bob" in messages[0].tool_result
+    assert "input_text" not in messages[0].tool_result
+    assert messages[0].is_error is False
+
+
+def test_codex_block_output_script_failed_is_error():
+    messages = _normalize_codex(
+        [
+            _codex_block_output(
+                "Script failed\nWall time 0.0 seconds\nOutput:\n",
+                "Script error:\napply_patch verification failed: Failed to find expected lines",
+            )
+        ]
+    )
+    assert len(messages) == 1
+    assert "apply_patch verification failed" in messages[0].tool_result
+    assert messages[0].is_error is True
+
+
+def test_codex_call_id_links_request_and_result():
+    messages = _normalize_codex(
+        [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "exec",
+                    "call_id": "call_blk",
+                    "input": "pwd",
+                },
+            },
+            _codex_block_output("Script completed\nOutput:\n", "/home/bob/bob"),
+        ]
+    )
+    assert [m.tool_call_id for m in messages] == ["call_blk", "call_blk"]
+
+
+def test_pi_call_id_links_request_and_result():
+    messages = _normalize_pi(
+        [
+            {
+                "type": "session",
+                "version": 3,
+                "id": "s1",
+                "timestamp": "2026-10-09T00:00:00Z",
+                "cwd": "/w",
+            },
+            {
+                "type": "message",
+                "id": "call",
+                "timestamp": "2026-10-09T00:00:01Z",
+                "parentId": None,
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "toolCall", "id": "call_1", "name": "bash", "arguments": {}}
+                    ],
+                },
+            },
+            {
+                "type": "message",
+                "id": "result",
+                "timestamp": "2026-10-09T00:00:02Z",
+                "parentId": "call",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": "call_1",
+                    "toolName": "bash",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "isError": False,
+                },
+            },
+        ]
+    )
+    assert [(m.role, m.tool_call_id) for m in messages] == [
+        ("assistant", "call_1"),
+        ("tool_result", "call_1"),
+    ]
+
+
+def test_cc_tool_use_id_links_request_and_result():
+    messages = _normalize_cc(
+        [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}}]
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]
+                },
+            },
+        ]
+    )
+    assert [(m.role, m.tool_call_id) for m in messages] == [
+        ("assistant", "toolu_1"),
+        ("tool_result", "toolu_1"),
+    ]
 
 
 def test_grok_data_deltas_and_content_result():

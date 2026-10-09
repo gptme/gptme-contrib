@@ -22,7 +22,15 @@ from .discovery import (
     extract_session_name,
 )
 from .pi import active_pi_records, pi_content_text
-from .signals import _parse_timestamp, detect_format, extract_usage_pi, parse_trajectory
+from .signals import (
+    _codex_output_text as _codex_raw_output_text,
+)
+from .signals import (
+    _parse_timestamp,
+    detect_format,
+    extract_usage_pi,
+    parse_trajectory,
+)
 
 TRANSCRIPT_SCHEMA_VERSION = 1
 
@@ -215,6 +223,7 @@ def _normalize_cc(msgs: list[dict]) -> list[NormalizedMessage]:
                             timestamp=ts,
                             tool_name=tool_name,
                             tool_input=tool_input if isinstance(tool_input, dict) else {},
+                            tool_call_id=item.get("id") or None,
                         )
                     )
             # Emit the text turn before tool calls (if any text)
@@ -246,6 +255,7 @@ def _normalize_cc(msgs: list[dict]) -> list[NormalizedMessage]:
                             timestamp=ts,
                             tool_result=result_str,
                             is_error=bool(item.get("is_error")),
+                            tool_call_id=item.get("tool_use_id") or None,
                         )
                     )
                 elif item.get("type") == "text":
@@ -268,6 +278,11 @@ def _codex_output_text(output: object) -> tuple[str, bool]:
     """Unwrap exec JSON chunks without dropping plain-text tool results."""
     lines: list[str] = []
     is_error = False
+    if isinstance(output, list):
+        # Current codex-cli: a list of input_text blocks, headed by
+        # "Script completed|failed" and followed by exec JSON chunks.
+        output = _codex_raw_output_text(output)
+        is_error = output.startswith("Script failed")
     for line in str(output).splitlines():
         try:
             chunk = json.loads(line)
@@ -347,6 +362,7 @@ def _normalize_codex(msgs: list[dict]) -> list[NormalizedMessage]:
                         timestamp=ts,
                         tool_name=tool_name,
                         tool_input=tool_input,
+                        tool_call_id=payload.get("call_id") or None,
                     )
                 )
 
@@ -359,6 +375,7 @@ def _normalize_codex(msgs: list[dict]) -> list[NormalizedMessage]:
                         timestamp=ts,
                         tool_result=output,
                         is_error=is_error,
+                        tool_call_id=payload.get("call_id") or None,
                     )
                 )
 
@@ -488,6 +505,7 @@ def _normalize_pi(msgs: list[dict]) -> list[NormalizedMessage]:
                         timestamp=ts,
                         tool_name=tool_name,
                         tool_input=arguments if isinstance(arguments, dict) else {},
+                        tool_call_id=block.get("id") or None,
                     )
                 )
 
@@ -500,6 +518,7 @@ def _normalize_pi(msgs: list[dict]) -> list[NormalizedMessage]:
                     timestamp=ts,
                     tool_result=content,
                     is_error=message.get("isError") is True,
+                    tool_call_id=message.get("toolCallId") or None,
                 )
             )
 
