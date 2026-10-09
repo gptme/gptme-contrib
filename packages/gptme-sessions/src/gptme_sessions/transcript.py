@@ -491,6 +491,7 @@ def _normalize_pi(msgs: list[dict]) -> list[NormalizedMessage]:
                         timestamp=ts,
                         tool_name=tool_name,
                         tool_input=arguments if isinstance(arguments, dict) else {},
+                        tool_call_id=block.get("id") or None,
                     )
                 )
 
@@ -503,6 +504,7 @@ def _normalize_pi(msgs: list[dict]) -> list[NormalizedMessage]:
                     timestamp=ts,
                     tool_result=content,
                     is_error=message.get("isError") is True,
+                    tool_call_id=message.get("toolCallId") or None,
                 )
             )
 

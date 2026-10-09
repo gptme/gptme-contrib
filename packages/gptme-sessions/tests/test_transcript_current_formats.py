@@ -2,7 +2,7 @@
 
 import json
 
-from gptme_sessions.transcript import _normalize_codex, _normalize_grok
+from gptme_sessions.transcript import _normalize_codex, _normalize_grok, _normalize_pi
 
 
 def test_codex_custom_calls_and_developer_role():
@@ -113,6 +113,49 @@ def test_codex_call_id_links_request_and_result():
         ]
     )
     assert [m.tool_call_id for m in messages] == ["call_blk", "call_blk"]
+
+
+def test_pi_call_id_links_request_and_result():
+    messages = _normalize_pi(
+        [
+            {
+                "type": "session",
+                "version": 3,
+                "id": "s1",
+                "timestamp": "2026-10-09T00:00:00Z",
+                "cwd": "/w",
+            },
+            {
+                "type": "message",
+                "id": "call",
+                "timestamp": "2026-10-09T00:00:01Z",
+                "parentId": None,
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "toolCall", "id": "call_1", "name": "bash", "arguments": {}}
+                    ],
+                },
+            },
+            {
+                "type": "message",
+                "id": "result",
+                "timestamp": "2026-10-09T00:00:02Z",
+                "parentId": "call",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": "call_1",
+                    "toolName": "bash",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "isError": False,
+                },
+            },
+        ]
+    )
+    assert [(m.role, m.tool_call_id) for m in messages] == [
+        ("assistant", "call_1"),
+        ("tool_result", "call_1"),
+    ]
 
 
 def test_grok_data_deltas_and_content_result():
