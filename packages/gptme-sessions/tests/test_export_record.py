@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -71,21 +70,115 @@ def test_normalize_run_type_fallback_to_legacy() -> None:
 
 def test_normalize_run_type_unknown_returns_none() -> None:
     assert _normalize_run_type(None, "unknown") is None
+    assert _normalize_run_type(None, "Unknown") is None
+    assert _normalize_run_type(None, "UNKNOWN") is None
     assert _normalize_run_type(None, "") is None
     assert _normalize_run_type(None, None) is None
+    # Whitespace-padded sentinels are undetermined too; they must not be
+    # exported verbatim or block trigger inference.
+    assert _normalize_run_type(None, " unknown ") is None
+    assert _normalize_run_type(None, "   ") is None
+    assert _normalize_run_type("timer", " unknown ") == "autonomous"
+    assert _normalize_run_type("timer", "   ") == "autonomous"
 
 
-def test_normalize_run_type_legacy_names_map_to_canonical() -> None:
-    # Legacy names without a trigger map exactly onto canonical labels
-    assert _normalize_run_type(None, "monitoring") == "project-monitoring"
-    assert _normalize_run_type(None, "event") == "project-monitoring"
-    assert _normalize_run_type(None, "timer") == "autonomous"
+def test_trigger_whitespace_is_stripped() -> None:
+    # A padded trigger still infers; the boundary check must not miss it.
+    assert _normalize_run_type(" timer", None) == "autonomous"
+    assert _normalize_run_type("timer ", None) == "autonomous"
+    assert _normalize_run_type(" timer ", None) == "autonomous"
 
 
-def test_normalize_run_type_unrecognized_returns_none_not_verbatim() -> None:
-    # A legacy value matching no canonical label must not leak through
-    # verbatim — run_type is either canonical or None (undetermined).
-    assert _normalize_run_type(None, "something-weird") is None
+@pytest.mark.parametrize(
+    "run_type", ["workers", "interactives", "operators", "emailer", "something-weird"]
+)
+def test_unrecognized_explicit_type_is_undetermined(run_type: str) -> None:
+    # Bare prefix look-alikes must not be truncated or exported verbatim:
+    # the feed contract is a canonical label or None.
+    assert _normalize_run_type(None, run_type) is None
+
+
+@pytest.mark.parametrize(
+    ("run_type", "expected"),
+    [("autonomous-run", "autonomous"), ("worker-heartbeat", "worker")],
+)
+def test_legacy_hyphen_suffix_is_stripped(run_type: str, expected: str) -> None:
+    assert _normalize_run_type(None, run_type) == expected
+
+
+@pytest.mark.parametrize(
+    ("run_type", "trigger", "expected"),
+    [
+        ("monitoring", "timer", "project-monitoring"),
+        ("autonomous", "spawn", "autonomous"),
+        ("worker", "timer", "worker"),
+        ("email", "dispatch", "email"),
+    ],
+)
+def test_recognized_explicit_run_type_is_authoritative(
+    run_type: str, trigger: str, expected: str
+) -> None:
+    assert _normalize_run_type(trigger, run_type) == expected
+
+
+@pytest.mark.parametrize("run_type", ["monitoring", "project-monitoring", "project_monitoring"])
+def test_monitoring_aliases_are_canonical(run_type: str) -> None:
+    assert _normalize_run_type(None, run_type) == "project-monitoring"
+
+
+@pytest.mark.parametrize(
+    ("run_type", "trigger", "expected"),
+    [
+        (None, "timer", "autonomous"),
+        ("", "dispatch", "autonomous"),
+        ("unknown", "spawn", "worker"),
+    ],
+)
+def test_trigger_is_fallback_for_absent_or_unknown_type(
+    run_type: str | None, trigger: str, expected: str
+) -> None:
+    assert _normalize_run_type(trigger, run_type) == expected
+
+
+@pytest.mark.parametrize(
+    "run_type", ["workers", "interactives", "operators", "emailer", "something-weird"]
+)
+def test_trigger_is_fallback_for_unrecognized_explicit_type(run_type: str) -> None:
+    assert _normalize_run_type("timer", run_type) == "autonomous"
+    assert _normalize_run_type("spawn", run_type) == "worker"
+
+
+@pytest.mark.parametrize(
+    ("run_type", "expected"),
+    [
+        ("monitoring", "project-monitoring"),
+        ("event", "project-monitoring"),
+        ("timer", "autonomous"),
+    ],
+)
+def test_legacy_names_map_to_canonical(run_type: str, expected: str) -> None:
+    assert _normalize_run_type(None, run_type) == expected
+
+
+@pytest.mark.parametrize("trigger", ["emailer", "workers", "timers", "spawned"])
+def test_trigger_prefix_lookalike_is_not_coerced(trigger: str) -> None:
+    # A trigger that merely starts with a known prefix must fall through; with
+    # no explicit type there is nothing to infer, so the result is None.
+    assert _normalize_run_type(trigger, None) is None
+
+
+@pytest.mark.parametrize(
+    ("trigger", "expected"),
+    [
+        ("timer-auto", "autonomous"),
+        ("monitoring-event", "project-monitoring"),
+        ("timer.auto", "autonomous"),
+        ("event:github", "project-monitoring"),
+        ("dispatch/thing", None),
+    ],
+)
+def test_trigger_separator_boundary_matches(trigger: str, expected: str | None) -> None:
+    assert _normalize_run_type(trigger, None) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +247,7 @@ def test_filter_min_duration_passes_long_run() -> None:
 
 
 def test_filter_run_types_skips_excluded_type() -> None:
-    record = _make_record(trigger="worker")
+    record = _make_record(trigger="worker", run_type=None)
     filt = RunExportFilter(run_types=["autonomous", "project-monitoring"])
     export = CompletedRunExport.from_session_record(record, filter=filt)
 
@@ -163,7 +256,7 @@ def test_filter_run_types_skips_excluded_type() -> None:
 
 
 def test_filter_run_types_passes_included_type() -> None:
-    record = _make_record(trigger="dispatch")
+    record = _make_record(trigger="dispatch", run_type=None)
     filt = RunExportFilter(run_types=["autonomous"])
     export = CompletedRunExport.from_session_record(record, filter=filt)
 
@@ -221,42 +314,46 @@ def test_all_known_run_types_survive_filter(run_type: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_store_with_records(records: list[SessionRecord]) -> SessionStore:
-    """Write records to a temp JSONL store and return a SessionStore over it."""
-    tmp = Path(tempfile.mkdtemp())
-    store = SessionStore(sessions_dir=tmp)
-    for r in records:
-        store.append(r)
-    return store
+@pytest.fixture
+def make_store(tmp_path: Path):
+    """Return a factory that writes records to a tmp_path store (auto-cleaned)."""
+
+    def _make(records: list[SessionRecord]) -> SessionStore:
+        store = SessionStore(sessions_dir=tmp_path)
+        for r in records:
+            store.append(r)
+        return store
+
+    return _make
 
 
-def test_build_export_feed_returns_all_records() -> None:
+def test_build_export_feed_returns_all_records(make_store) -> None:
     """build_export_feed returns one export per record."""
     r1 = _make_record(session_id="run1aaaa", session_label="abcd")
     r2 = _make_record(session_id="run2bbbb", session_label="efgh")
-    store = _make_store_with_records([r1, r2])
+    store = make_store([r1, r2])
     exports = build_export_feed(store=store)
     assert len(exports) == 2
     run_ids = {e.run_id for e in exports}
     assert run_ids == {"run1aaaa", "run2bbbb"}
 
 
-def test_build_export_feed_two_same_label_are_independent() -> None:
+def test_build_export_feed_two_same_label_are_independent(make_store) -> None:
     """Two records with the same session_label produce two distinct exports."""
     r1 = _make_record(session_id="run1aaaa", session_label="abcd")
     r2 = _make_record(session_id="run2bbbb", session_label="abcd")  # same label
-    store = _make_store_with_records([r1, r2])
+    store = make_store([r1, r2])
     exports = build_export_feed(store=store)
     assert len(exports) == 2
     assert exports[0].run_id != exports[1].run_id
     assert exports[0].session_label == exports[1].session_label == "abcd"
 
 
-def test_build_export_feed_filter_applied() -> None:
+def test_build_export_feed_filter_applied(make_store) -> None:
     """RunExportFilter is applied per record; ineligible records are still returned."""
     r_short = _make_record(session_id="run1aaaa", duration_seconds=10)
     r_long = _make_record(session_id="run2bbbb", duration_seconds=3600)
-    store = _make_store_with_records([r_short, r_long])
+    store = make_store([r_short, r_long])
     filt = RunExportFilter(min_duration_seconds=60)
     exports = build_export_feed(store=store, filter=filt)
     assert len(exports) == 2  # both returned
@@ -265,20 +362,20 @@ def test_build_export_feed_filter_applied() -> None:
     assert eligible[0].run_id == "run2bbbb"
 
 
-def test_build_export_feed_dedup_keeps_newest_regardless_of_order() -> None:
+def test_build_export_feed_dedup_keeps_newest_regardless_of_order(make_store) -> None:
     """Duplicate session_ids dedup to the NEWEST record, independent of load order."""
     older = _make_record(session_id="run1aaaa", outcome="noop")
     older.timestamp = "2026-10-07T08:00:00+00:00"
     newer = _make_record(session_id="run1aaaa", outcome="productive")
     newer.timestamp = "2026-10-07T09:00:00+00:00"
     # Insert newest first: even in reverse load order, the newer record wins.
-    store = _make_store_with_records([newer, older])
+    store = make_store([newer, older])
     exports = build_export_feed(store=store)
     assert len(exports) == 1
     assert exports[0].outcome == "productive"
 
 
-def test_build_export_feed_dedup_mixed_naive_and_missing_timestamps() -> None:
+def test_build_export_feed_dedup_mixed_naive_and_missing_timestamps(make_store) -> None:
     """Sorting must not raise TypeError when a naive-timestamped record
     coexists with one lacking a timestamp (naive vs aware comparison)."""
     naive = _make_record(session_id="run1aaaa", outcome="productive")
@@ -286,7 +383,7 @@ def test_build_export_feed_dedup_mixed_naive_and_missing_timestamps() -> None:
     naive.timestamp = "2030-01-01T08:00:00"
     missing = _make_record(session_id="run1aaaa", outcome="noop")
     missing.timestamp = ""  # store.append backfills with now() → later, loses
-    store = _make_store_with_records([missing, naive])
+    store = make_store([missing, naive])
     exports = build_export_feed(store=store)
     assert len(exports) == 1
     assert exports[0].outcome == "productive"

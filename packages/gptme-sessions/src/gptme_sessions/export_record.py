@@ -54,31 +54,30 @@ _TRIGGER_TO_RUN_TYPE: dict[str, str] = {
 
 
 def _normalize_run_type(trigger: str | None, run_type_raw: str | None) -> str | None:
-    """Return a canonical run_type label from ``trigger`` (preferred) or legacy ``run_type``."""
-    # Try trigger first (more reliable, finer-grained)
+    """Prefer a recognized explicit type, then infer from the trigger."""
+    # Strip before testing the sentinel so padded unknown/empty values still
+    # allow trigger inference.
+    raw_type = run_type_raw.strip().lower() if run_type_raw else ""
+    if raw_type and raw_type != "unknown":
+        normalized = raw_type.replace("_", "-").replace(" ", "-")
+        # Retain exact legacy aliases ("monitoring", "event", "timer", etc.).
+        normalized = _TRIGGER_TO_RUN_TYPE.get(normalized, normalized)
+        # Preserve legacy hyphen-delimited suffixes ("autonomous-run" → "autonomous").
+        # Require a boundary so look-alikes ("workers", "interactives") are not
+        # silently truncated to a recognized explicit type.
+        for known in sorted(KNOWN_RUN_TYPES, key=len, reverse=True):
+            if normalized == known or normalized.startswith(known + "-"):
+                return known
+
+    # Generic triggers fill absent, unknown, or unrecognized type data. A bare
+    # prefix look-alike ("emailer") must not match a trigger it merely starts with.
     if trigger:
-        tl = trigger.lower()
+        tl = trigger.strip().lower()
         for prefix, canonical in _TRIGGER_TO_RUN_TYPE.items():
-            if tl.startswith(prefix):
+            if tl == prefix or tl.startswith(
+                (prefix + "-", prefix + "_", prefix + " ", prefix + ".", prefix + ":")
+            ):
                 return canonical
-    # Fall back to legacy run_type field. Normalize BEFORE the guard so
-    # variants like "Unknown"/" UNKNOWN " collapse onto the None sentinel
-    # (run_type is documented as None when undetermined).
-    if run_type_raw:
-        rtl = run_type_raw.lower().strip()
-        if rtl not in ("unknown", ""):
-            # Exact legacy names map onto canonical labels ("monitoring" →
-            # "project-monitoring"); unrecognizable values are undetermined
-            # (None), never passed through verbatim — run_type is documented
-            # as either a canonical KNOWN_RUN_TYPES label or None.
-            if rtl in _TRIGGER_TO_RUN_TYPE:
-                return _TRIGGER_TO_RUN_TYPE[rtl]
-            # Strip common prefixes ("autonomous-run" → "autonomous")
-            for known in sorted(KNOWN_RUN_TYPES, key=len, reverse=True):
-                if rtl.startswith(known.replace("-", "")):
-                    return known
-                if rtl.startswith(known):
-                    return known
     return None
 
 
