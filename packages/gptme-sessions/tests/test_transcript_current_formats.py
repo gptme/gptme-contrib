@@ -2,7 +2,12 @@
 
 import json
 
-from gptme_sessions.transcript import _normalize_codex, _normalize_grok, _normalize_pi
+from gptme_sessions.transcript import (
+    _normalize_cc,
+    _normalize_codex,
+    _normalize_grok,
+    _normalize_pi,
+)
 
 
 def test_codex_custom_calls_and_developer_role():
@@ -155,6 +160,29 @@ def test_pi_call_id_links_request_and_result():
     assert [(m.role, m.tool_call_id) for m in messages] == [
         ("assistant", "call_1"),
         ("tool_result", "call_1"),
+    ]
+
+
+def test_cc_tool_use_id_links_request_and_result():
+    messages = _normalize_cc(
+        [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}}]
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]
+                },
+            },
+        ]
+    )
+    assert [(m.role, m.tool_call_id) for m in messages] == [
+        ("assistant", "toolu_1"),
+        ("tool_result", "toolu_1"),
     ]
 
 

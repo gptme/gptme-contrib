@@ -223,6 +223,7 @@ def _normalize_cc(msgs: list[dict]) -> list[NormalizedMessage]:
                             timestamp=ts,
                             tool_name=tool_name,
                             tool_input=tool_input if isinstance(tool_input, dict) else {},
+                            tool_call_id=item.get("id") or None,
                         )
                     )
             # Emit the text turn before tool calls (if any text)
@@ -254,6 +255,7 @@ def _normalize_cc(msgs: list[dict]) -> list[NormalizedMessage]:
                             timestamp=ts,
                             tool_result=result_str,
                             is_error=bool(item.get("is_error")),
+                            tool_call_id=item.get("tool_use_id") or None,
                         )
                     )
                 elif item.get("type") == "text":
