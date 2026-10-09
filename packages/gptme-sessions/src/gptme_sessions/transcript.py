@@ -22,7 +22,15 @@ from .discovery import (
     extract_session_name,
 )
 from .pi import active_pi_records, pi_content_text
-from .signals import _parse_timestamp, detect_format, extract_usage_pi, parse_trajectory
+from .signals import (
+    _codex_output_text as _codex_raw_output_text,
+)
+from .signals import (
+    _parse_timestamp,
+    detect_format,
+    extract_usage_pi,
+    parse_trajectory,
+)
 
 TRANSCRIPT_SCHEMA_VERSION = 1
 
@@ -271,9 +279,7 @@ def _codex_output_text(output: object) -> tuple[str, bool]:
     if isinstance(output, list):
         # Current codex-cli: a list of input_text blocks, headed by
         # "Script completed|failed" and followed by exec JSON chunks.
-        output = "\n".join(
-            str(b.get("text", "")) if isinstance(b, dict) else str(b) for b in output
-        )
+        output = _codex_raw_output_text(output)
         is_error = output.startswith("Script failed")
     for line in str(output).splitlines():
         try:
