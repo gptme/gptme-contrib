@@ -595,10 +595,12 @@ hook_allows_untracked_dirty_guard_relaxation() {
 
     # The bundled auto-stage hook captures the staged set and always runs
     # prek/pre-commit with `--files <staged>`, which avoids pre-commit's
-    # repo-wide stash/restore path. Symlinked and copied installs both work
-    # because grep reads the target file contents.
+    # repo-wide stash/restore path. Older copies fell back to a bare stashing
+    # run for deletion-only/empty commits, so match the current invocation.
+    # Symlinked and copied installs both work because grep reads the target
+    # file contents.
     if grep -Fq "Pre-commit hook with auto-staging and commit serialization." "$hook_path" 2>/dev/null && \
-       grep -Fq 'run --files "${ORIGINALLY_STAGED_FILES[@]}"' "$hook_path" 2>/dev/null; then
+       grep -Fq 'run --files "${HOOK_FILES[@]}"' "$hook_path" 2>/dev/null; then
         return 0
     fi
 
