@@ -107,12 +107,24 @@ while IFS= read -r line; do
   ORIGINALLY_STAGED_FILES+=("$line")
 done < <(git diff --cached --name-only --diff-filter=ACM)
 
+# Never run the hook runner without --files: a bare `prek run` (and
+# `pre-commit run`) stashes every unstaged change in the worktree and restores
+# it afterwards, silently overwriting anything a concurrent process wrote in
+# between (verified on prek 0.3.3). Deletion-, rename- or typechange-only
+# commits leave the ACM list above empty, so hand the runner every staged path.
+# Both runners drop paths that no longer exist, so file-scoped hooks skip the
+# deletions while always_run hooks still run. An empty commit gets a
+# nonexistent placeholder for the same reason.
+HOOK_FILES=()
+while IFS= read -r f; do
+  [ -n "$f" ] && HOOK_FILES+=("$f")
+done < <(git diff --cached --name-only)
+if [ ${#HOOK_FILES[@]} -eq 0 ]; then
+  HOOK_FILES=(".no-staged-files-placeholder")
+fi
+
 run_precommit() {
-  if [ ${#ORIGINALLY_STAGED_FILES[@]} -eq 0 ]; then
-    "$PRECOMMIT_CMD" run
-  else
-    "$PRECOMMIT_CMD" run --files "${ORIGINALLY_STAGED_FILES[@]}"
-  fi
+  "$PRECOMMIT_CMD" run --files "${HOOK_FILES[@]}"
 }
 
 WORKTREE_RAW_BEFORE="$(git diff --raw --no-ext-diff --ignore-submodules -- 2>/dev/null || true)"
