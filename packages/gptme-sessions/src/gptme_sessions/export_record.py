@@ -55,37 +55,30 @@ _TRIGGER_TO_RUN_TYPE: dict[str, str] = {
 
 def _normalize_run_type(trigger: str | None, run_type_raw: str | None) -> str | None:
     """Prefer a recognized explicit type, then infer from the trigger."""
-    raw_fallback: str | None = None
-    # Strip before testing the sentinel: a whitespace-padded "unknown"/""
-    # (" unknown ", "   ") is undetermined, not an explicit type. Testing the
-    # raw value first let it slip through, block trigger inference, and export
-    # the padded sentinel verbatim.
-    raw_type = run_type_raw.strip() if run_type_raw else ""
-    if raw_type and raw_type.lower() != "unknown":
-        raw_fallback = raw_type.lower()
-        normalized = raw_fallback.replace("_", "-").replace(" ", "-")
-        if normalized == "monitoring":
-            normalized = "project-monitoring"
+    # Strip before testing the sentinel so padded unknown/empty values still
+    # allow trigger inference.
+    raw_type = run_type_raw.strip().lower() if run_type_raw else ""
+    if raw_type and raw_type != "unknown":
+        normalized = raw_type.replace("_", "-").replace(" ", "-")
+        # Retain exact legacy aliases ("monitoring", "event", "timer", etc.).
+        normalized = _TRIGGER_TO_RUN_TYPE.get(normalized, normalized)
         # Preserve legacy hyphen-delimited suffixes ("autonomous-run" → "autonomous").
-        # Require an exact match or a "-" boundary so an unrecognized look-alike
-        # ("workers", "interactives") is preserved rather than silently truncated.
+        # Require a boundary so look-alikes ("workers", "interactives") are not
+        # silently truncated to a recognized explicit type.
         for known in sorted(KNOWN_RUN_TYPES, key=len, reverse=True):
             if normalized == known or normalized.startswith(known + "-"):
                 return known
 
-    # Generic triggers only fill absent or unknown type data. An explicit but
-    # unrecognized type ("workers") is preserved, not coerced by the trigger —
-    # the same look-alike rule as above. Same boundary rule as well: a bare
-    # prefix look-alike ("emailer") must not be coerced to the trigger it merely
-    # starts with.
-    if trigger and raw_fallback is None:
+    # Generic triggers fill absent, unknown, or unrecognized type data. A bare
+    # prefix look-alike ("emailer") must not match a trigger it merely starts with.
+    if trigger:
         tl = trigger.strip().lower()
         for prefix, canonical in _TRIGGER_TO_RUN_TYPE.items():
             if tl == prefix or tl.startswith(
                 (prefix + "-", prefix + "_", prefix + " ", prefix + ".", prefix + ":")
             ):
                 return canonical
-    return raw_fallback
+    return None
 
 
 @dataclass

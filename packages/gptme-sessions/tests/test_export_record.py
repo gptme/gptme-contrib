@@ -89,12 +89,13 @@ def test_trigger_whitespace_is_stripped() -> None:
     assert _normalize_run_type(" timer ", None) == "autonomous"
 
 
-@pytest.mark.parametrize("run_type", ["workers", "interactives", "operators", "emailer"])
-def test_unknown_prefix_lookalike_is_preserved(run_type: str) -> None:
-    # Only a hyphen-delimited legacy suffix is stripped; a bare prefix
-    # ("workers" vs "worker") must not be silently truncated to a known type.
-    assert _normalize_run_type(None, run_type) == run_type
-    assert _normalize_run_type(None, run_type) not in KNOWN_RUN_TYPES
+@pytest.mark.parametrize(
+    "run_type", ["workers", "interactives", "operators", "emailer", "something-weird"]
+)
+def test_unrecognized_explicit_type_is_undetermined(run_type: str) -> None:
+    # Bare prefix look-alikes must not be truncated or exported verbatim:
+    # the feed contract is a canonical label or None.
+    assert _normalize_run_type(None, run_type) is None
 
 
 @pytest.mark.parametrize(
@@ -139,14 +140,24 @@ def test_trigger_is_fallback_for_absent_or_unknown_type(
     assert _normalize_run_type(trigger, run_type) == expected
 
 
-@pytest.mark.parametrize("run_type", ["workers", "interactives", "operators", "emailer"])
-def test_trigger_does_not_override_unrecognized_explicit_type(run_type: str) -> None:
-    # A trigger fills only absent/unknown types. An explicit but unrecognized
-    # type is preserved (same look-alike rule as the trigger-absent case), so a
-    # generic trigger must not coerce it to a canonical label.
-    assert _normalize_run_type("timer", run_type) == run_type
-    assert _normalize_run_type("spawn", run_type) == run_type
-    assert _normalize_run_type("timer", run_type) not in KNOWN_RUN_TYPES
+@pytest.mark.parametrize(
+    "run_type", ["workers", "interactives", "operators", "emailer", "something-weird"]
+)
+def test_trigger_is_fallback_for_unrecognized_explicit_type(run_type: str) -> None:
+    assert _normalize_run_type("timer", run_type) == "autonomous"
+    assert _normalize_run_type("spawn", run_type) == "worker"
+
+
+@pytest.mark.parametrize(
+    ("run_type", "expected"),
+    [
+        ("monitoring", "project-monitoring"),
+        ("event", "project-monitoring"),
+        ("timer", "autonomous"),
+    ],
+)
+def test_legacy_names_map_to_canonical(run_type: str, expected: str) -> None:
+    assert _normalize_run_type(None, run_type) == expected
 
 
 @pytest.mark.parametrize("trigger", ["emailer", "workers", "timers", "spawned"])
