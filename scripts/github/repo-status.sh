@@ -156,7 +156,7 @@ check_repo() {
     run_err_file=$(mktemp)
     # Capture the exit status separately from stdout: `|| echo error` appended
     # the sentinel to any partial stdout, corrupting it.
-    run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json "$run_fields" 2>"$run_err_file") && run_rc=0 || run_rc=$?
+    run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 20 --json "$run_fields" 2>"$run_err_file") && run_rc=0 || run_rc=$?
     run_err=$(cat "$run_err_file"); rm -f "$run_err_file"
     [ "$run_rc" -ne 0 ] && run_json="error"
 
@@ -170,7 +170,7 @@ check_repo() {
         if echo "$run_err" | grep -qiE "not found|no commit|does not exist|unknown ref|no ref|could not resolve|no such branch"; then
             rm -f "$_DB_CACHE_DIR/${repo//\//__}" 2>/dev/null || true
             default_branch=$(_default_branch "$repo")
-            run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 5 --json "$run_fields" 2>/dev/null) || run_json="error"
+            run_json=$(gh run list --repo "$repo" --branch "$default_branch" --limit 20 --json "$run_fields" 2>/dev/null) || run_json="error"
         fi
     fi
 
@@ -234,7 +234,7 @@ check_repo() {
     # empty-name shape, not the conclusion alone: a real broken workflow that is
     # still present reports startup_failure with its own name and must keep
     # surfacing even alongside passing workflows. Always drop the ghost shape
-    # with no fallback: the runs window is --limit 5 and ghost fires (push +
+    # with no fallback: the runs window is --limit 20 and ghost fires (push +
     # schedule + issues) can crowd it out entirely, in which case keeping them
     # would mask the real runs that fell outside the window. A repo left with
     # only ghost runs reports "No runs", which is accurate.
@@ -247,6 +247,26 @@ check_repo() {
     if [ "$(echo "$run_json" | jq 'length')" -eq 0 ]; then
         echo -e "${YELLOW}-${NC} $label: No runs (only ghost startup_failure runs from deleted workflows)"
         return
+    fi
+
+    # Report a red workflow even when a newer run of a DIFFERENT workflow passed.
+    # Taking only the newest run let a green per-push workflow mask a red
+    # cron-only one (ErikBjare/bob 2026-10-09: Pre-commit red for 1h+ while a
+    # later "Isolated hook sandbox" run reported the repo Passing). Keep each
+    # workflow's newest completed run (input is newest-first); if any failed,
+    # report the newest such run. A later green run of the same workflow still
+    # clears it.
+    local failing_json
+    failing_json=$(echo "$run_json" | jq '[
+        reduce (.[] | select(.status == "completed")) as $r
+            ({seen: {}, out: []};
+             if .seen[$r.name // ""] then . else
+                 .seen[$r.name // ""] = true | .out += [$r] end)
+        | .out[]
+        | select(.conclusion == "failure" or .conclusion == "startup_failure")
+    ]')
+    if [ "$(echo "$failing_json" | jq 'length')" -gt 0 ]; then
+        run_json="$failing_json"
     fi
 
     local conclusion status in_progress=""

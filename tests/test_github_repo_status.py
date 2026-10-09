@@ -297,3 +297,55 @@ def test_partial_stdout_with_failure_reports_no_actions() -> None:
 def test_valid_empty_array_still_reports_no_runs() -> None:
     result = _run_script(extra_env={"FAKE_GH_RUNS": "[]"})
     assert "gptme-cloud: No runs" in result.stdout
+
+
+def _run(name: str, conclusion: str, sha: str, url: str, event: str = "push") -> dict:
+    return {
+        "conclusion": conclusion,
+        "status": "completed",
+        "url": url,
+        "name": name,
+        "headSha": sha,
+        "event": event,
+    }
+
+
+def test_newer_green_workflow_does_not_mask_red_workflow() -> None:
+    """A green per-push workflow must not hide an older red cron workflow
+    (ErikBjare/bob 2026-10-09: Pre-commit red, later hook-sandbox run green)."""
+    runs = [
+        _run(
+            "Isolated hook sandbox",
+            "success",
+            "abc1234",
+            "https://example.test/run/sandbox",
+        ),
+        _run(
+            "Pre-commit",
+            "failure",
+            "oldsha00",
+            "https://example.test/run/precommit",
+            "schedule",
+        ),
+        _run("Tests", "success", "oldsha00", "https://example.test/run/tests"),
+    ]
+    result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Failing" in result.stdout
+    assert "https://example.test/run/precommit" in result.stdout
+    assert "stale; HEAD=abc1234, run=oldsha0" in result.stdout
+
+
+def test_newer_green_run_of_same_workflow_clears_failure() -> None:
+    runs = [
+        _run(
+            "Pre-commit", "success", "abc1234", "https://example.test/run/precommit-2"
+        ),
+        _run(
+            "Pre-commit", "failure", "oldsha00", "https://example.test/run/precommit-1"
+        ),
+    ]
+    result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Passing" in result.stdout
+    assert "Failing" not in result.stdout
