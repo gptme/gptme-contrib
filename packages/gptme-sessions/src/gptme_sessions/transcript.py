@@ -536,9 +536,40 @@ def _normalize_pi(msgs: list[dict]) -> list[NormalizedMessage]:
     return normalized
 
 
+# Nested Grok variants (FileContent, TodosUpdated) put the prompt text on
+# these keys next to metadata such as absolute_path. Prefer them so a
+# multi-string payload is not dropped by the unique-string fallback.
+_GROK_VARIANT_CONTENT_KEYS = (
+    "output_for_prompt",
+    "tool_output_for_prompt",
+    "content",
+    "raw_output",
+    "content_concise",
+    "tool_output_for_prompt_concise",
+    "summary_for_prompt",
+)
+
+
+def _grok_coerce_text(value: object) -> str:
+    """Return prompt text, including Grok's byte-ordinal lists for stdout."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if (
+        isinstance(value, list)
+        and value
+        and all(isinstance(item, int) and 0 <= item <= 255 for item in value)
+    ):
+        return bytes(value).decode("utf-8", errors="replace")
+    return ""
+
+
 def _grok_output(raw: dict) -> tuple[str, bool]:
     """Read inline, polled, or variant output, including nested exit status."""
-    output = raw.get("output_for_prompt") or raw.get("output") or ""
+    output = _grok_coerce_text(raw.get("output_for_prompt")) or _grok_coerce_text(raw.get("output"))
+    if not output:
+        output = _grok_coerce_text(raw.get("stdout")) or _grok_coerce_text(raw.get("stderr"))
     exit_code = raw.get("exit_code")
     is_error = isinstance(exit_code, int) and exit_code != 0
     result = raw.get("Result")
@@ -553,18 +584,30 @@ def _grok_output(raw: dict) -> tuple[str, bool]:
         is_error |= failed
     output = output or "\n".join(parts)
     if not output:
-        # Variant payloads such as TodosUpdated carry a summary next to
-        # structured state. Only use a single direct string field; descending
-        # into state or choosing among several strings would invent output.
-        candidates = [
-            value
-            for key, variant in raw.items()
-            if key != "Result" and isinstance(variant, dict)
-            for value in variant.values()
-            if isinstance(value, str)
-        ]
-        if len(candidates) == 1:
-            output = candidates[0]
+        preferred = []
+        for key, variant in raw.items():
+            if key == "Result" or not isinstance(variant, dict):
+                continue
+            for field in _GROK_VARIANT_CONTENT_KEYS:
+                text = _grok_coerce_text(variant.get(field))
+                if text:
+                    preferred.append(text)
+                    break
+        if len(preferred) == 1:
+            output = preferred[0]
+        elif not preferred:
+            # Variant payloads such as TodosUpdated carry a summary next to
+            # structured state. Only use a single direct string field; descending
+            # into state or choosing among several strings would invent output.
+            candidates = [
+                value
+                for key, variant in raw.items()
+                if key != "Result" and isinstance(variant, dict)
+                for value in variant.values()
+                if isinstance(value, str)
+            ]
+            if len(candidates) == 1:
+                output = candidates[0]
     return str(output), is_error
 
 
