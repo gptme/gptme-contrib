@@ -1856,7 +1856,10 @@ def test_commit_info_cache_is_shared_across_processes(tmp_path: Path):
     calls.unlink()
     second = _run_helper("status", fixture, extra_env=env)
     assert second.stdout.strip() == "already-reviewed", f"stderr: {second.stderr}"
-    assert _graphql_calls(_calls(calls)) == [], "second run should hit the cache"
+    # _needs_re_review always confirms the head with a live read (a stale cache
+    # can falsely MATCH reviewed_sha), but that read is memoized per process and
+    # re-populates the shared cache — at most one GraphQL query per run.
+    assert len(_graphql_calls(_calls(calls))) == 1, "expected one memoized confirm read"
 
     # TTL=0 disables sharing.
     calls.unlink(missing_ok=True)

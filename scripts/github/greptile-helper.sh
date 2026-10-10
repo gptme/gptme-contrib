@@ -531,15 +531,14 @@ _needs_re_review() {
     fi
 
     if [ -n "$reviewed_sha" ]; then
-        head_sha=$(_pr_commit_info | jq -r '.head_sha // ""' 2>/dev/null) || head_sha=""
-        if [ -n "$head_sha" ] && [ "$reviewed_sha" != "$head_sha" ]; then
-            # The cached head may be up to GREPTILE_COMMITS_CACHE_TTL old. A stale
-            # head can only wrongly say "re-review needed" here (e.g. Greptile just
-            # reviewed a head pushed after we cached), so confirm a mismatch with a
-            # live read before acting on it. Matches stay cached: a stale match only
-            # delays a legitimate re-trigger by one TTL (the safe direction).
-            head_sha=$(_pr_commit_info fresh | jq -r '.head_sha // ""' 2>/dev/null) || head_sha=""
-        fi
+        # Always confirm the head with a live read before acting on the
+        # comparison. The cached head may be up to GREPTILE_COMMITS_CACHE_TTL
+        # old, and a stale cache cuts both ways: it can wrongly say
+        # "re-review needed", but it can also wrongly MATCH reviewed_sha and
+        # suppress a legitimate trigger for a just-pushed head (observed on
+        # gptme/gptme#4226, 2026-10-07 — fix pushed, trigger skipped until the
+        # cache entry was cleared by hand).
+        head_sha=$(_pr_commit_info fresh | jq -r '.head_sha // ""' 2>/dev/null) || head_sha=""
         if [ -n "$head_sha" ]; then
             if [ "$reviewed_sha" = "$head_sha" ]; then
                 return 1  # Formal PR review is on the current head — no re-review needed.
