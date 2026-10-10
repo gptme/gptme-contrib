@@ -75,6 +75,21 @@ SEND_LOCK_TIMEOUT = 120.0
 _utf8_qp = email.charset.Charset("utf-8")
 _utf8_qp.body_encoding = email.charset.QP
 
+# Sidecar record of filenames sent by this instance (see _record_local_send).
+_LOCAL_SENT_RECORD = ".local-sent"
+
+
+def _body_dedup_snippet(body: str, *, local_sent: bool = False) -> str:
+    """Ignore local send-audit metadata, never arbitrary incoming content."""
+    if local_sent:
+        body = re.sub(
+            r"\n<!-- send-audit: allowlist=(?:default|wildcard|\d+) "
+            r"sent_at=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z -->\s*\Z",
+            "",
+            body,
+        )
+    return "".join(body[:200].split())
+
 
 def _is_html(text: str) -> bool:
     """Detect if text content is already HTML."""
@@ -1080,6 +1095,7 @@ class AgentEmail:
 
         # Move markdown file to sent folder (only after successful sending)
         draft_path.rename(sent_path)
+        self._record_local_send(sent_path)
 
         # Append send audit metadata so allowlist bypasses leave a forensic trace.
         # Records the allowlist state at send time — "wildcard" if EMAIL_SEND_ALLOWLIST=*,
@@ -1159,6 +1175,42 @@ class AgentEmail:
                 return
 
         raise ValueError(f"Message not found: {message_id}")
+
+    def _record_local_send(self, sent_path: Path) -> None:
+        """Record a sent file's filename and body digest.
+
+        This is the only authoritative local-send provenance: folder names and
+        From headers can also be produced by receive(), archive() of received
+        mail, or maildir sync, and must never grant audit-stripping rights.
+        The digest binds the grant to this exact body, so a different message
+        that reuses the filename (e.g. a Message-ID collision or spoofed echo)
+        is never granted audit-stripping.
+        """
+        try:
+            _, body = self._markdown_to_email(sent_path.read_text(encoding="utf-8"))
+            filename = sent_path.name
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            record = self.email_dir / _LOCAL_SENT_RECORD
+            record.parent.mkdir(parents=True, exist_ok=True)
+            with open(record, "a", encoding="utf-8") as f:
+                f.write(f"{filename} {digest}\n")
+        except Exception as e:
+            # The send itself already succeeded; a failed provenance record only
+            # means this message will not be audit-stripped during dedup.
+            logger.warning(f"Failed to record local send for {sent_path.name}: {e}")
+
+    def _load_local_sends(self) -> Dict[str, str]:
+        """Load filenames and body digests recorded by _record_local_send."""
+        record = self.email_dir / _LOCAL_SENT_RECORD
+        try:
+            entries: Dict[str, str] = {}
+            for line in record.read_text(encoding="utf-8").splitlines():
+                parts = line.split()
+                if len(parts) == 2:
+                    entries[parts[0]] = parts[1]
+            return entries
+        except FileNotFoundError:
+            return {}
 
     def list_messages(self, folder: str = "inbox") -> list[tuple[str, str, datetime]]:
         """List messages in specified folder.
@@ -1531,6 +1583,7 @@ class AgentEmail:
         """
         index = {}
         folder_path = self.email_dir / folder
+        locally_sent = self._load_local_sends()
 
         for existing_file in folder_path.glob("*.md"):
             try:
@@ -1551,8 +1604,24 @@ class AgentEmail:
                 except Exception:
                     msg_date = None
 
-                # Get body snippet (first 200 chars, normalized)
-                body_snippet = "".join(existing_body[:200].split()) if existing_body else ""
+                # Only bodies recorded as locally sent can carry our send-audit
+                # trailer; folder and From headers do not establish provenance.
+                # The record binds the filename to the recorded body digest, so a
+                # different message reusing the filename is never granted stripping.
+                is_recorded_local_send = (
+                    existing_file.name in locally_sent
+                    and locally_sent[existing_file.name]
+                    == hashlib.sha256(existing_body.encode("utf-8")).hexdigest()
+                )
+                body_snippet = (
+                    _body_dedup_snippet(existing_body, local_sent=is_recorded_local_send)
+                    if existing_body
+                    else ""
+                )
+                # Raw (unstripped) stored snippet: local data, so it is trusted.
+                # Comparing the incoming raw snippet against it lets an incoming
+                # echo of a locally-sent message (trailer included) still match.
+                body_snippet_raw = _body_dedup_snippet(existing_body) if existing_body else ""
 
                 # Create composite key from strong identifiers
                 # Use In-Reply-To + Subject as primary key (most reliable for matching)
@@ -1567,6 +1636,7 @@ class AgentEmail:
                     "from": from_addr,
                     "date": msg_date,
                     "body_snippet": body_snippet,
+                    "body_snippet_raw": body_snippet_raw,
                     "file": existing_file,
                 }
 
@@ -1661,7 +1731,7 @@ class AgentEmail:
                 body = body.decode("utf-8", errors="replace")
 
         # Get first 200 chars of body for comparison (ignore whitespace differences)
-        body_snippet = "".join(body[:200].split()) if body else ""
+        body_snippet = _body_dedup_snippet(body) if body else ""
 
         # Check index for potential duplicates using keys
         primary_key, alt_key = self._get_message_key(email_msg, folder)
@@ -1709,7 +1779,7 @@ class AgentEmail:
             if (
                 body_snippet
                 and existing["body_snippet"]
-                and body_snippet == existing["body_snippet"]
+                and body_snippet in (existing["body_snippet"], existing["body_snippet_raw"])
             ):
                 matches.append("body")
 
