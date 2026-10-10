@@ -34,7 +34,9 @@ from .store import SessionStore
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_JUDGE_MODEL = "openrouter/anthropic/claude-haiku-5.5"
+# Provider selection is deployment-specific: preserve Anthropic-only installs
+# unless the operator explicitly selects another route before importing.
+DEFAULT_JUDGE_MODEL = os.environ.get("GPTME_SESSIONS_JUDGE_MODEL") or "claude-haiku-4-5-20251001"
 CONFIG_PATHS = (
     Path.home() / ".config" / "gptme" / "config.toml",
     Path.home() / ".config" / "gptme" / "config.local.toml",

@@ -2014,7 +2014,8 @@ def discover(
     default=None,
     help="Judge model ID. Anthropic IDs (claude-*, anthropic/*) use the anthropic SDK; "
     "other provider-prefixed IDs (openrouter/..., openai-subscription/..., lmstudio/...) "
-    "route via gptme.llm.reply.",
+    "route via gptme.llm.reply. Default: GPTME_SESSIONS_JUDGE_MODEL environment override "
+    "or claude-haiku-4-5-20251001.",
 )
 def signals(
     path: Path,
@@ -3059,7 +3060,8 @@ def post_session_cmd(
     default=None,
     help="Judge model ID. Anthropic IDs (claude-*, anthropic/*) use the anthropic SDK; "
     "other provider-prefixed IDs (openrouter/..., openai-subscription/..., lmstudio/...) "
-    "route via gptme.llm.reply. Default: openrouter/anthropic/claude-haiku-5.5.",
+    "route via gptme.llm.reply. Default: GPTME_SESSIONS_JUDGE_MODEL environment override "
+    "or claude-haiku-4-5-20251001.",
 )
 @click.option(
     "--update-store",
