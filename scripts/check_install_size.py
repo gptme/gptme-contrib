@@ -400,68 +400,13 @@ def measure_install_size(
             )
 
             if export_result.returncode == 0 and export_result.stdout.strip():
-                # Filter out git+ URL lines before installing. The lock pins workspace
-                # git deps (e.g. gptme) to a specific commit SHA, but installing the
-                # package source alongside that requirements file causes a conflict:
-                # the package's pyproject.toml (read via workspace sources) references
-                # the same dep at @master. Dropping git+ lines lets uv resolve those
-                # deps from the package's own declarations + workspace sources.
-                #
-                # When a git dep is dropped, its own lock-pinned version constraints
-                # stay in the requirements.txt. If the PyPI release of that git package
-                # has different constraints (e.g. gptme git needs anthropic^0.120 while
-                # gptme 0.34.0 on PyPI needs anthropic>=1.8), the install fails with an
-                # unsatisfiable constraint. Remove affected exact-pin lines entirely:
-                # bare requirements would keep obsolete deps as mandatory roots.
-                # The consumer and retained requirements still declare any shared
-                # deps they need, so uv can resolve those against the PyPI release.
-                all_raw_lines = export_result.stdout.splitlines()
-                dropped_git_names = {
-                    line.split(" @ ")[0].strip()
-                    for line in all_raw_lines
-                    if " @ git+" in line
-                }
-                git_dep_versions: dict[str, set[str | None]] = {}
-                if dropped_git_names:
-                    lock_path = package_path.parent.parent / "uv.lock"
-                    git_dep_versions = _get_git_dependency_versions(
-                        lock_path, dropped_git_names, package_name
-                    )
-
-                req_lines = []
-                for line in all_raw_lines:
-                    if " @ git+" in line or line.strip().startswith("git+"):
-                        continue  # drop the git source pin
-                    if git_dep_versions:
-                        # Ignore markers only while matching exact pins. Retained
-                        # requirements are emitted verbatim, including their markers.
-                        constraint_part = line.strip().split(" ; ", 1)[0]
-                        # Explicit artifact sources must not be replaced with index lookups.
-                        if " @" in constraint_part:
-                            req_lines.append(line)
-                            continue
-                        # Extract the package name from the constraint part
-                        # (handles "name==version", "name>=version", "name @ url", etc.)
-                        pkg_name = _normalize_name(
-                            constraint_part.split("==")[0]
-                            .split(">=")[0]
-                            .split("<=")[0]
-                            .split("!=")[0]
-                            .split(" @")[0]
-                            .strip()
-                        )
-                        versions = git_dep_versions.get(pkg_name, set())
-                        _, separator, pinned_version = constraint_part.partition("==")
-                        if separator and (
-                            None in versions or pinned_version.strip() in versions
-                        ):
-                            # Do not force an obsolete git-only dependency to remain
-                            # installed. Independent declarations still pull in shared
-                            # dependencies, with their own constraints and markers.
-                            continue
-                    req_lines.append(line)
+                # Preserve locked Git sources as well as their transitive pins.
+                # Ignore floating [tool.uv.sources] overrides during installation:
+                # they conflict with exported Git SHAs on newer uv versions.
+                # Dropping Git requirements instead substitutes a PyPI release
+                # with potentially incompatible dependencies.
                 req_file = tmpdir / "requirements.txt"
-                req_file.write_text("\n".join(req_lines) + "\n")
+                req_file.write_text(export_result.stdout)
                 install_cmd = [
                     "uv",
                     "pip",
@@ -471,6 +416,7 @@ def measure_install_size(
                     "--index-strategy",
                     "unsafe-best-match",
                     "--quiet",
+                    "--no-sources",
                     "-r",
                     str(req_file),
                     str(package_path),
