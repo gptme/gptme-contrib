@@ -2414,6 +2414,134 @@ def test_post_session_merge_ready_only_reply_is_not_effect(tmp_path) -> None:
     )
 
 
+def _viewer_activity_json(*, comment_at=None, review_at=None, author="TimeToBuildBob"):
+    comments = (
+        [{"author": {"login": author}, "createdAt": comment_at}] if comment_at else []
+    )
+    reviews = (
+        [{"author": {"login": author}, "submittedAt": review_at}] if review_at else []
+    )
+    return json.dumps(
+        {
+            "data": {
+                "viewer": {"login": "TimeToBuildBob"},
+                "repository": {
+                    "pullRequest": {
+                        "comments": {"nodes": comments},
+                        "reviews": {"nodes": reviews},
+                    }
+                },
+            }
+        }
+    )
+
+
+def _unmoved_comment_deliverable_fixture(tmp_path, types):
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, types=types
+    )
+    item = make_item(types=list(types))
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    hooks.fetch_pr_snapshot = lambda repo, num: {
+        "state": "OPEN",
+        "headRefOid": "aa",
+        "mergeCommit": None,
+    }
+    return config, item, plan, outcome, hooks, run_cmd
+
+
+@pytest.mark.parametrize(
+    "types", [("greptile_convergence_adjudication",), ("pr_never_checked",)]
+)
+def test_post_session_comment_deliverable_reply_is_observed(tmp_path, types) -> None:
+    """Adjudication / fork-PR sessions whose deliverable is a PR comment grade
+    observed when the viewer commented after session start, even though the
+    PR snapshot did not move (gptme/gptme#4235, #4223 on 2026-10-10)."""
+    config, item, plan, outcome, hooks, run_cmd = _unmoved_comment_deliverable_fixture(
+        tmp_path, types
+    )
+    run_cmd.on(
+        "graphql", stdout=_viewer_activity_json(comment_at="2026-07-11T10:03:00Z")
+    )
+
+    assert run_post_session(plan, item, outcome, config, hooks) == "observed"
+
+
+def test_post_session_comment_deliverable_review_is_observed(tmp_path) -> None:
+    config, item, plan, outcome, hooks, run_cmd = _unmoved_comment_deliverable_fixture(
+        tmp_path, ("greptile_convergence_adjudication",)
+    )
+    run_cmd.on(
+        "graphql", stdout=_viewer_activity_json(review_at="2026-07-11T10:03:00Z")
+    )
+
+    assert run_post_session(plan, item, outcome, config, hooks) == "observed"
+
+
+@pytest.mark.parametrize(
+    "activity",
+    [
+        # Viewer comment that predates the session is a previous dispatch's.
+        {"comment_at": "2026-07-11T09:59:59Z"},
+        # Someone else's comment (bot review, contributor) is not our effect.
+        {"comment_at": "2026-07-11T10:03:00Z", "author": "greptile-apps"},
+    ],
+)
+def test_post_session_comment_deliverable_without_own_new_comment_is_none(
+    tmp_path, activity
+) -> None:
+    config, item, plan, outcome, hooks, run_cmd = _unmoved_comment_deliverable_fixture(
+        tmp_path, ("pr_never_checked",)
+    )
+    run_cmd.on("graphql", stdout=_viewer_activity_json(**activity))
+
+    assert run_post_session(plan, item, outcome, config, hooks) == "none"
+
+
+def test_post_session_comment_deliverable_unobservable_stays_none(tmp_path) -> None:
+    """A gh failure must not invent an effect."""
+    config, item, plan, outcome, hooks, run_cmd = _unmoved_comment_deliverable_fixture(
+        tmp_path, ("greptile_convergence_adjudication",)
+    )
+    run_cmd.on("graphql", returncode=1)
+
+    assert run_post_session(plan, item, outcome, config, hooks) == "none"
+
+
+def test_post_session_merge_ready_viewer_comment_is_not_effect(tmp_path) -> None:
+    """merge_ready is not comment-deliverable: the viewer-activity probe must
+    not run and must not upgrade a comment-only merge_ready dispatch (#3531)."""
+    config, item, plan, outcome, hooks, run_cmd = _unmoved_comment_deliverable_fixture(
+        tmp_path, ("merge_ready",)
+    )
+    run_cmd.on(
+        "graphql", stdout=_viewer_activity_json(comment_at="2026-07-11T10:03:00Z")
+    )
+
+    assert run_post_session(plan, item, outcome, config, hooks) == "none"
+    assert not any("viewer{login}" in a for c in run_cmd.argvs() for a in c)
+
+
+def test_post_session_failed_comment_deliverable_is_not_upgraded(tmp_path) -> None:
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, exit_code=1, types=("pr_never_checked",)
+    )
+    item = make_item(types=["pr_never_checked"])
+    hooks.wait_merge_gate = None
+    hooks.arc_manager = None
+    hooks.fetch_pr_snapshot = lambda repo, num: {
+        "state": "OPEN",
+        "headRefOid": "aa",
+        "mergeCommit": None,
+    }
+    run_cmd.on(
+        "graphql", stdout=_viewer_activity_json(comment_at="2026-07-11T10:03:00Z")
+    )
+
+    assert run_post_session(plan, item, outcome, config, hooks) != "observed"
+
+
 def test_post_session_merge_ready_only_actual_merge_is_observed(tmp_path) -> None:
     """The same pure merge_ready item DOES grade observed when the PR merged."""
     config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(

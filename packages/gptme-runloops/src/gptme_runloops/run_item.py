@@ -128,6 +128,7 @@ from gptme_runloops.worker_records import (
     read_record_effect_signal,
     read_record_pr_state_after,
     update_record_pr_state,
+    viewer_activity_since,
     voice_postcall_effect_observed,
     write_fallback_session_record,
     write_post_session_record,
@@ -219,6 +220,18 @@ THREAD_DELIVERABLE_TYPES: frozenset[str] = frozenset(
         "merge_conflict",
         "notification",
     }
+)
+
+# PR item types whose deliverable can legitimately be a PR comment alone, but
+# which sit outside THREAD_DELIVERABLE_TYPES (no reply post-condition, no
+# fallback reply). An adjudication session's verdict IS its merge
+# recommendation comment; a fork PR with zero checks can only be unblocked by
+# asking a human. Without this, both graded effect=none on a session that
+# visibly posted, and recovery re-armed them as ineffective (gptme/gptme#4235,
+# 2026-10-10: comment at 01:38, `none` at 01:40, second LLM session at 02:43).
+# merge_ready stays out on purpose: a comment is not a merge (#3531).
+COMMENT_DELIVERABLE_TYPES: frozenset[str] = frozenset(
+    {"greptile_convergence_adjudication", "pr_never_checked"}
 )
 
 # CC stream-json trajectory floor (worker.sh:205) and grok floor (worker.sh:218).
@@ -2840,6 +2853,30 @@ def run_post_session(
         record_file,
         delivery_outcome=effect_delivery,
     )
+    # Comment-deliverable items: a clean exit that posted on the PR is an
+    # effect even though the head, state and threads did not move. Pure sets
+    # only, so mixed items keep their own (stricter) signals.
+    if (
+        effect != EFFECT_OBSERVED
+        and exit_code == 0
+        and item.types
+        and set(item.types) <= COMMENT_DELIVERABLE_TYPES
+        and item.repo
+        and item.number is not None
+        and item.number_str != "0"
+    ):
+        try:
+            commented = viewer_activity_since(
+                plan.repo,
+                plan.number,
+                outcome.started_iso,
+                cwd=config.workspace,
+                runner=hooks.run_cmd,
+            )
+        except Exception:
+            commented = None
+        if commented:
+            effect = EFFECT_OBSERVED
     # A pure voice_postcall item has no PR and no thread, so the signal above
     # grades it ``unknown`` even when the generic notification-triage route
     # completed the call (post-call.sh wrote a terminal trace row + journal).
