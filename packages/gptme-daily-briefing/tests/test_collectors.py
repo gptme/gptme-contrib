@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -115,6 +116,64 @@ def test_collect_blockers_url_encodes_special_chars(monkeypatch: pytest.MonkeyPa
     assert "labels=p1%26urgent" in url, f"& not encoded: {url}"
 
 
+def test_collect_blockers_priority_high_then_oldest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Urgent asks lead; the rest keep the API's oldest-first order; PRs dropped."""
+    captured: list[list[str]] = []
+    payload = [
+        {"number": 1, "title": "oldest", "labels": []},
+        {"number": 2, "title": "a PR", "labels": [], "pull_request": {}},
+        {"number": 3, "title": "older", "labels": None},
+        {"number": 4, "title": "urgent", "labels": [{"name": "priority:high"}]},
+        {"number": 5, "title": "newest", "labels": [{"name": "other"}]},
+    ]
+
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> str:
+        captured.append(cmd)
+        return json.dumps(payload)
+
+    from gptme_daily_briefing import collectors as col
+
+    monkeypatch.setattr(col, "_run", fake_run)
+    assert col.collect_blockers("owner/repo", "request-for-erik", limit=3) == [
+        "#4: urgent",
+        "#1: oldest",
+        "#3: older",
+    ]
+    url = captured[0][-1]
+    assert "direction=asc" in url
+    assert "per_page=100" in url
+    assert "page=1" in url
+    assert len(captured) == 1
+
+
+def test_collect_blockers_paginates_when_first_page_full(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full first page must keep scanning so a later priority:high is not dropped."""
+    captured: list[str] = []
+    page1 = [{"number": i, "title": f"old-{i}", "labels": []} for i in range(1, 101)]
+    page2 = [
+        {"number": 200, "title": "urgent-late", "labels": [{"name": "priority:high"}]},
+        {"number": 201, "title": "older-late", "labels": []},
+    ]
+    pages = {1: page1, 2: page2, 3: []}
+
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> str:
+        url = cmd[-1]
+        captured.append(url)
+        page = int(url.split("page=")[-1])
+        return json.dumps(pages.get(page, []))
+
+    from gptme_daily_briefing import collectors as col
+
+    monkeypatch.setattr(col, "_run", fake_run)
+    assert col.collect_blockers("owner/repo", "request-for-erik", limit=3) == [
+        "#200: urgent-late",
+        "#1: old-1",
+        "#2: old-2",
+    ]
+    assert any("page=1" in u for u in captured), captured
+    assert any("page=2" in u for u in captured), captured
+
+
 def test_collect_waiting_tasks_parses_frontmatter(tmp_path: Path) -> None:
     tasks = tmp_path / "tasks"
     tasks.mkdir()
@@ -128,7 +187,7 @@ def test_collect_waiting_tasks_parses_frontmatter(tmp_path: Path) -> None:
         "# A task\n"
     )
     (tasks / "active.md").write_text(
-        "---\n" "state: active\n" "created: 2026-04-29T00:00:00+00:00\n" "---\n" "# Another task\n"
+        "---\nstate: active\ncreated: 2026-04-29T00:00:00+00:00\n---\n# Another task\n"
     )
     (tasks / "waiting-no-blocker.md").write_text(
         "---\nstate: waiting\ncreated: 2026-04-29T00:00:00+00:00\n---\n"
@@ -145,11 +204,7 @@ def test_collect_waiting_tasks_truncates_long_blocker(tmp_path: Path) -> None:
     tasks.mkdir()
     big = "x" * 500
     (tasks / "long.md").write_text(
-        "---\n"
-        "state: waiting\n"
-        f"waiting_for: {big}\n"
-        "created: 2026-04-29T00:00:00+00:00\n"
-        "---\n"
+        f"---\nstate: waiting\nwaiting_for: {big}\ncreated: 2026-04-29T00:00:00+00:00\n---\n"
     )
     out = collect_waiting_tasks(tmp_path)
     assert len(out) == 1
