@@ -1,4 +1,4 @@
-"""Author/comment PR notifications whose trigger is bot-only must not emit.
+"""Repeat author/comment PR notifications with bot/self-only activity must not emit.
 
 The 2026-09-27 PM dispatch audit attributes 47% of equivalent dispatches (31.7
 slot-hours, 2.33M output tokens) to the undifferentiated ``notification``
@@ -6,7 +6,9 @@ class. That class merges human asks (``mention``/``assign``/
 ``review_requested``) with ``author``/``comment`` bumps whose only new activity
 is automation (Codecov/Greptile/Dependabot). This gate preserves the human
 reasons and suppresses an ``author``/``comment`` PR notification only when the
-most recent comment/review actor is a bot and no later human activity exists.
+most recent comment/review actor is a bot or self and no unseen human activity
+exists. First-sight notifications remain eligible. The 2026-10-07 audit found
+83/214 self-actor echo completions despite the other self-trigger guards.
 
 The emitted ``detail`` carries the actor class (``; actor_class=<class>``) so
 the reason and actor survive into the grouped work file and the dispatch
@@ -21,6 +23,8 @@ import stat
 import subprocess
 import tempfile
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "github" / "activity-gate.sh"
@@ -130,6 +134,7 @@ def _run_gate(
     reviews: list[dict] | None = None,
     author: str = "test-author",
     prior_timestamp: str | None = None,
+    output_format: str = "jsonl",
 ) -> subprocess.CompletedProcess[str]:
     fake_gh = tmp / "gh"
     fake_gh.write_text(FAKE_GH)
@@ -165,7 +170,7 @@ def _run_gate(
             "--state-dir",
             str(state_dir),
             "--format",
-            "jsonl",
+            output_format,
         ],
         capture_output=True,
         text=True,
@@ -387,12 +392,12 @@ def test_direct_mention_not_suppressed_by_bot_activity() -> None:
         assert emitted[0]["detail"] == "mention"
 
 
-def test_self_comment_does_not_count_as_bot_activity() -> None:
-    """The running identity's own comment is not a bot bump (no over-suppression).
+def test_first_sight_self_comment_emits_with_actor_class() -> None:
+    """First sight still emits: activity before our first poll is not yet handled.
 
-    The generic bot-only filter must not swallow a notification merely because
-    the latest actor is the agent itself; self-chatter is handled by the
-    existing maintainer-waiting / self-trigger guards, not this one.
+    The October 7 dispatch audit found 83/214 self-actor echo completions despite
+    the maintainer-waiting/self-trigger guards. Repeat self bumps must be consumed,
+    but that evidence does not justify swallowing a first-sight notification.
     """
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
@@ -426,3 +431,133 @@ def test_actor_probe_failure_fails_open() -> None:
         emitted = _emitted_notifications(result.stdout)
         assert len(emitted) == 1, result.stdout
         assert emitted[0]["detail"] == "author; actor_class=unknown"
+
+
+@pytest.mark.parametrize("reason", ["author", "comment"])
+@pytest.mark.parametrize("activity_kind", ["comment", "review"])
+def test_repeat_self_activity_is_consumed(reason: str, activity_kind: str) -> None:
+    """Self echoes are not work; persist the bump so the next poll cannot retry it."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        activity = {"user": {"login": "test-author", "type": "User"}}
+        comments = []
+        reviews = []
+        if activity_kind == "comment":
+            comments = [
+                dict(
+                    activity,
+                    body="Pushed a follow-up.",
+                    created_at="2026-08-26T17:00:00Z",
+                )
+            ]
+        else:
+            reviews = [
+                dict(activity, state="COMMENTED", submitted_at="2026-08-26T17:00:00Z")
+            ]
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason=reason,
+            comments=comments,
+            reviews=reviews,
+            prior_timestamp="2026-08-26T16:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        assert _emitted_notifications(result.stdout) == [], result.stdout
+        assert (
+            state_dir / f"notif-{NOTIF_ID}.state"
+        ).read_text() == "2026-08-26T17:15:04Z"
+        assert (
+            state_dir / f"notif-{NOTIF_ID}.map"
+        ).read_text() == f"{NOTIF_REPO}#{NOTIF_NUMBER}"
+
+
+@pytest.mark.parametrize("reason", ["mention", "assign", "review_requested"])
+def test_explicit_handoff_after_self_activity_emits(reason: str) -> None:
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason=reason,
+            comments=[
+                {
+                    "user": {"login": "test-author", "type": "User"},
+                    "body": "Pushed a follow-up.",
+                    "created_at": "2026-08-26T17:00:00Z",
+                }
+            ],
+            prior_timestamp="2026-08-26T16:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        emitted = _emitted_notifications(result.stdout)
+        assert len(emitted) == 1, result.stdout
+        assert emitted[0]["detail"] == reason
+
+
+@pytest.mark.parametrize("reason", ["author", "comment"])
+def test_fresh_human_activity_before_self_reply_still_emits(reason: str) -> None:
+    """Do not hide an unseen human ask behind Bob's later acknowledgement."""
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason=reason,
+            comments=[
+                _human_comment(created_at="2026-08-26T16:30:00Z"),
+                {
+                    "user": {"login": "test-author", "type": "User"},
+                    "body": "Acknowledged.",
+                    "created_at": "2026-08-26T17:00:00Z",
+                },
+            ],
+            prior_timestamp="2026-08-26T16:00:00Z",
+        )
+        assert result.returncode in (0, 1), result.stderr
+        emitted = _emitted_notifications(result.stdout)
+        assert len(emitted) == 1, result.stdout
+        assert emitted[0]["detail"] == f"{reason}; actor_class=human"
+
+
+@pytest.mark.parametrize("reason", ["author", "comment"])
+@pytest.mark.parametrize(
+    "actor,expected", [("test-author", 0), ("codecov[bot]", 0), ("ErikBjare", 1)]
+)
+def test_markdown_count_matches_actor_suppression(
+    reason: str, actor: str, expected: int
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        state_dir = tmp / "state"
+        state_dir.mkdir()
+        result = _run_gate(
+            tmp,
+            state_dir,
+            reason=reason,
+            output_format="markdown",
+            comments=[
+                {
+                    "user": {
+                        "login": actor,
+                        "type": "Bot" if "[bot]" in actor else "User",
+                    },
+                    "body": "Follow-up.",
+                    "created_at": "2026-08-26T17:00:00Z",
+                }
+            ],
+            prior_timestamp="2026-08-26T16:00:00Z",
+        )
+        assert result.returncode == (0 if expected else 1), result.stderr
+        assert ("notifications — 1 actionable" in result.stdout) == bool(
+            expected
+        ), result.stdout
+        assert (
+            state_dir / f"notif-{NOTIF_ID}.state"
+        ).read_text() == "2026-08-26T17:15:04Z"

@@ -2567,8 +2567,10 @@ def notification_priority:
                 # Always fetch the actor class for PR author/comment notifications
                 # so the detail string is enriched even on first sight. Suppress
                 # only when prior is set: the prior dispatch already handled any
-                # human comment visible at that time, so a bot-only bump since then
-                # has nothing new to act on. On first sight (prior empty), always
+                # human comment visible at that time, so a bot/self-only bump since
+                # then has nothing new to act on. The actor probe preserves any
+                # unseen human activity even if a self reply follows it. On first
+                # sight (prior empty), always
                 # emit — a human comment that predates the bot bump has never been
                 # dispatched and must not be silently swallowed.
                 if [ "$_subj_type" = "PullRequest" ] \
@@ -2581,7 +2583,8 @@ def notification_priority:
                     fi
                     _actor_class=$(notification_latest_actor_class \
                         "$repo" "$number" "$_actor_kind" "$_actor_since" "$notif_updated")
-                    if [ -n "$prior" ] && [ "$_actor_class" = "bot" ]; then
+                    if [ -n "$prior" ] \
+                            && { [ "$_actor_class" = "bot" ] || [ "$_actor_class" = "self" ]; }; then
                         printf '%s' "$notif_updated" > "$state_file"
                         printf '%s#%s' "$repo" "$number" > "$map_file"
                         continue
@@ -2647,7 +2650,7 @@ def notification_priority:
                             "$repo" "$number" "$notif_subject_type" "$prior" "$notif_updated"; then
                     continue
                 fi
-                # Mirror the jsonl branch's bot-only author/comment filter so
+                # Mirror the jsonl branch's bot/self-only author/comment filter so
                 # the reported count matches what would actually be dispatched.
                 # Same prior-set guard as jsonl branch: first-sight notifications
                 # (prior empty) must emit even when latest actor is a bot, because
@@ -2661,7 +2664,9 @@ def notification_priority:
                     if [ "$notif_reason" = "comment" ]; then
                         _actor_kind=pr-all
                     fi
-                    if [ "$(notification_latest_actor_class "$repo" "$number" "$_actor_kind" "$_actor_since" "$notif_updated")" = "bot" ]; then
+                    local _actor_class
+                    _actor_class=$(notification_latest_actor_class "$repo" "$number" "$_actor_kind" "$_actor_since" "$notif_updated")
+                    if [ "$_actor_class" = "bot" ] || [ "$_actor_class" = "self" ]; then
                         continue
                     fi
                 fi
