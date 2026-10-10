@@ -1564,6 +1564,11 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+bridge = [
+    { name = "mcp" },
+    { name = "starlette" },
+    { name = "uvicorn" },
+]
 oauth = [
     { name = "flask" },
     { name = "python-dotenv" },
@@ -1581,6 +1586,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "flask", marker = "extra == 'oauth'", specifier = ">=2.0" },
     { name = "markdown", specifier = ">=3.4" },
+    { name = "mcp", marker = "extra == 'bridge'", specifier = ">=1.2" },
     { name = "mypy", marker = "extra == 'test'", specifier = ">=1.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0" },
@@ -1589,9 +1595,11 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.28" },
     { name = "ruff", marker = "extra == 'test'", specifier = ">=0.1" },
+    { name = "starlette", marker = "extra == 'bridge'", specifier = ">=0.27" },
+    { name = "uvicorn", marker = "extra == 'bridge'", specifier = ">=0.23" },
     { name = "werkzeug", marker = "extra == 'oauth'", specifier = ">=2.0" },
 ]
-provides-extras = ["oauth", "test"]
+provides-extras = ["oauth", "bridge", "test"]
 
 [[package]]
 name = "gptme"
