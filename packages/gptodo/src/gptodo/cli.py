@@ -5623,7 +5623,7 @@ def add(
     state = normalize_state(state, warn=False)
     if state == "waiting" and not (waiting_for and waiting_for.strip()):
         raise click.UsageError("--state waiting requires --waiting-for")
-    if waiting_for and state != "waiting":
+    if waiting_for is not None and state != "waiting":
         raise click.UsageError("--waiting-for is only valid with --state waiting")
 
     console = Console()

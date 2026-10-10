@@ -218,11 +218,14 @@ def test_add_waiting_records_waiting_history(
     assert meta["waiting_spell_count"] == 1
 
 
+@pytest.mark.parametrize("waiting_for", ["x", "", "   "])
 def test_add_waiting_for_rejected_without_waiting_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, waiting_for: str
 ) -> None:
-    result = _add(tmp_path, monkeypatch, "--state", "todo", "--waiting-for", "x")
-    assert result.exit_code != 0
+    result = _add(tmp_path, monkeypatch, "--state", "todo", "--waiting-for", waiting_for)
+    assert result.exit_code == 2
+    assert "--waiting-for is only valid with --state waiting" in result.output
+    assert not list((tmp_path / "tasks").glob("*.md"))
 
 
 @pytest.mark.parametrize("state", ["done", "cancelled"])
