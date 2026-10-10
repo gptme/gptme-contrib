@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -113,6 +114,34 @@ def test_collect_blockers_url_encodes_special_chars(monkeypatch: pytest.MonkeyPa
     col.collect_blockers("owner/repo", "p1&urgent")
     url = captured[0][-1]
     assert "labels=p1%26urgent" in url, f"& not encoded: {url}"
+
+
+def test_collect_blockers_priority_high_then_oldest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Urgent asks lead; the rest keep the API's oldest-first order; PRs dropped."""
+    captured: list[list[str]] = []
+    payload = [
+        {"number": 1, "title": "oldest", "labels": []},
+        {"number": 2, "title": "a PR", "labels": [], "pull_request": {}},
+        {"number": 3, "title": "older", "labels": None},
+        {"number": 4, "title": "urgent", "labels": [{"name": "priority:high"}]},
+        {"number": 5, "title": "newest", "labels": [{"name": "other"}]},
+    ]
+
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> str:
+        captured.append(cmd)
+        return json.dumps(payload)
+
+    from gptme_daily_briefing import collectors as col
+
+    monkeypatch.setattr(col, "_run", fake_run)
+    assert col.collect_blockers("owner/repo", "request-for-erik", limit=3) == [
+        "#4: urgent",
+        "#1: oldest",
+        "#3: older",
+    ]
+    url = captured[0][-1]
+    assert "direction=asc" in url
+    assert "per_page=100" in url
 
 
 def test_collect_waiting_tasks_parses_frontmatter(tmp_path: Path) -> None:
