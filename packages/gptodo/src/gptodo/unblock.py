@@ -12,7 +12,7 @@ from typing import Dict, List, Tuple
 
 from gptodo.frontmatter_compat import frontmatter
 
-from gptodo.utils import TaskInfo
+from gptodo.utils import TaskInfo, load_tasks
 from gptodo.waiting import WaitType, parse_waiting_for
 
 
@@ -62,6 +62,14 @@ def find_dependent_tasks(
     return dependent_tasks
 
 
+def _fresh_state(task: TaskInfo) -> str | None:
+    try:
+        value = frontmatter.load(task.path).metadata.get("state")
+        return value if isinstance(value, str) else None
+    except OSError:
+        return None
+
+
 def auto_unblock_tasks(
     completed_task_ids: List[str],
     all_tasks: List[TaskInfo],
@@ -99,83 +107,109 @@ def auto_unblock_tasks(
 
             changes_made = []
 
-            # We need to reload from disk to get fresh state
-            task_path = task.path
-            post = frontmatter.load(task_path)
+            from gptodo.lifecycle import mutate_task, TransitionError
 
-            # Clear waiting_for if it was pointing to the completed task
-            waiting_for = post.metadata.get("waiting_for", "")
+            def prepare(post):
+                completed = all_tasks_dict.get(completed_id)
+                if completed is None or _fresh_state(completed) not in ("done", "cancelled"):
+                    raise TransitionError("Completion was revoked")
+                if post.metadata.get("state") in ("done", "cancelled"):
+                    raise TransitionError("Dependent became terminal")
+                before = dict(post.metadata)
+                # Clear waiting_for if it was pointing to the completed task
+                waiting_for = post.metadata.get("waiting_for", "")
 
-            # Handle legacy string format
-            if isinstance(waiting_for, str) and completed_id in waiting_for:
-                # Only clear if this was the only thing being waited on
-                # Check for exact match (with optional whitespace)
-                waiting_for_stripped = waiting_for.strip()
-                if waiting_for_stripped == completed_id:
-                    # Exact match - clear both fields
-                    post.metadata.pop("waiting_for", None)
-                    post.metadata.pop("waiting_since", None)
-                    changes_made.append("cleared waiting_for")
-                else:
-                    # Partial match - task ID is mentioned but there's more text
-                    # This could be multiple tasks or descriptive text like "PR #123 review"
-                    # Don't clear, but note the dependency was resolved
-                    changes_made.append(f"dependency {completed_id} resolved (still waiting)")
-
-            # Handle structured formats (dict or list)
-            elif isinstance(waiting_for, (dict, list)):
-                conditions = parse_waiting_for(post.metadata)
-                # Find TASK conditions that reference the completed task
-                remaining_conditions = []
-                cleared_any = False
-                for condition in conditions:
-                    if condition.type == WaitType.TASK and completed_id in condition.ref:
-                        cleared_any = True
-                    else:
-                        remaining_conditions.append(condition)
-
-                if cleared_any:
-                    if not remaining_conditions:
-                        # All conditions cleared
+                # Handle legacy string format
+                if isinstance(waiting_for, str) and completed_id in waiting_for:
+                    # Only clear if this was the only thing being waited on
+                    # Check for exact match (with optional whitespace)
+                    waiting_for_stripped = waiting_for.strip()
+                    if waiting_for_stripped == completed_id:
+                        # Exact match - clear both fields
                         post.metadata.pop("waiting_for", None)
                         post.metadata.pop("waiting_since", None)
                         changes_made.append("cleared waiting_for")
                     else:
-                        # Some conditions remain - update to remaining only
-                        if len(remaining_conditions) == 1:
-                            post.metadata["waiting_for"] = remaining_conditions[0].to_dict()
-                        else:
-                            post.metadata["waiting_for"] = [
-                                c.to_dict() for c in remaining_conditions
-                            ]
+                        # Partial match - task ID is mentioned but there's more text
+                        # This could be multiple tasks or descriptive text like "PR #123 review"
+                        # Don't clear, but note the dependency was resolved
                         changes_made.append(f"dependency {completed_id} resolved (still waiting)")
 
-            # Check if task is now fully unblocked using the existing task object
-            # Update requires from the modified metadata
-            task_requires = post.metadata.get("requires", []) or post.metadata.get("depends", [])
+                # Handle structured formats (dict or list)
+                elif isinstance(waiting_for, (dict, list)):
+                    # Preserve the complete unresolved condition dictionaries,
+                    # including caller evidence/extensions, not just the parser's
+                    # reduced type/ref projection.
+                    conditions = [waiting_for] if isinstance(waiting_for, dict) else waiting_for
+                    remaining_conditions = []
+                    cleared_any = False
+                    for condition in conditions:
+                        if (
+                            isinstance(condition, dict)
+                            and condition.get("type", "task") == "task"
+                            and completed_id == condition.get("ref")
+                        ):
+                            cleared_any = True
+                        else:
+                            remaining_conditions.append(condition)
 
-            # Check if all dependencies are satisfied
-            all_deps_done = True
-            for dep_name in task_requires:
-                # Skip URL-based dependencies
-                if isinstance(dep_name, str) and dep_name.startswith(("http://", "https://")):
-                    continue
-                dep_task = all_tasks_dict.get(dep_name)
-                if dep_task and dep_task.state not in ["done", "cancelled"]:
-                    all_deps_done = False
-                    break
-                elif dep_task is None:
-                    # Unknown dependency - assume still blocked
-                    all_deps_done = False
-                    break
+                    if cleared_any:
+                        if not remaining_conditions:
+                            # All conditions cleared
+                            post.metadata.pop("waiting_for", None)
+                            post.metadata.pop("waiting_since", None)
+                            changes_made.append("cleared waiting_for")
+                        else:
+                            # Some conditions remain - update to remaining only
+                            if len(remaining_conditions) == 1:
+                                post.metadata["waiting_for"] = remaining_conditions[0]
+                            else:
+                                post.metadata["waiting_for"] = remaining_conditions
+                            changes_made.append(
+                                f"dependency {completed_id} resolved (still waiting)"
+                            )
 
-            if all_deps_done and "cleared waiting_for" not in changes_made:
-                changes_made.append("now ready")
+                # Check if task is now fully unblocked using the existing task object
+                # Update requires from the modified metadata
+                task_requires = post.metadata.get("requires", []) or post.metadata.get(
+                    "depends", []
+                )
 
-            # Save changes if any were made
+                # Check if all dependencies are satisfied
+                all_deps_done = True
+                for dep_name in task_requires:
+                    # Skip URL-based dependencies
+                    if isinstance(dep_name, str) and dep_name.startswith(("http://", "https://")):
+                        continue
+                    dep_task = all_tasks_dict.get(dep_name)
+                    if dep_task and _fresh_state(dep_task) not in ["done", "cancelled"]:
+                        all_deps_done = False
+                        break
+                    elif dep_task is None:
+                        # Unknown dependency - assume still blocked
+                        all_deps_done = False
+                        break
+
+                if (
+                    all_deps_done
+                    and not post.metadata.get("waiting_for")
+                    and "cleared waiting_for" not in changes_made
+                ):
+                    changes_made.append("now ready")
+
+                return [
+                    ("set", key, post.metadata.get(key))
+                    for key in before.keys() | post.metadata.keys()
+                    if before.get(key) != post.metadata.get(key)
+                ]
+
+            try:
+                mutate_task(
+                    task.path, prepare=prepare, expected_state=task.state, completion_effects=False
+                )
+            except (TransitionError, OSError):
+                continue
             if changes_made:
-                with open(task_path, "w") as f:
-                    f.write(frontmatter.dumps(post))
                 unblocked.append((task.name, ", ".join(changes_made)))
 
     return unblocked
@@ -219,29 +253,32 @@ def check_fan_in_completion(
     if parent_task.state in ["done", "cancelled"]:
         return None
 
-    # Check if all spawned subtasks are done
-    spawned_tasks = parent_task.spawned_tasks
-    if not spawned_tasks:
+    from gptodo.lifecycle import mutate_task, TransitionError
+
+    def prepare(post):
+        if post.metadata.get("state") in ("done", "cancelled"):
+            raise TransitionError("Parent is already terminal")
+        spawned = post.metadata.get("spawned_tasks", [])
+        if not spawned:
+            raise TransitionError("No spawned children")
+        # Missing children fail closed. A stale loaded child cannot prove done.
+        fresh_tasks = load_tasks(tasks_dir)
+        fresh_lookup = {
+            **{task.id: task for task in fresh_tasks},
+            **{task.name: task for task in fresh_tasks},
+        }
+        for child_id in spawned:
+            child = fresh_lookup.get(child_id)
+            if child is None or _fresh_state(child) not in ("done", "cancelled"):
+                raise TransitionError(f"Unfinished or missing child: {child_id}")
+        return [("set", "state", "done")]
+
+    try:
+        result = mutate_task(parent_task.path, prepare=prepare, expected_state=parent_task.state)
+    except (TransitionError, OSError):
         return None
-
-    remaining = []
-    for subtask_id in spawned_tasks:
-        subtask = all_tasks_dict.get(subtask_id)
-        if subtask and subtask.state not in ["done", "cancelled"]:
-            remaining.append(subtask_id)
-
-    if remaining:
-        # Not all subtasks are done yet
+    if result.effective_state != "done":
         return None
-
-    # All subtasks are done! Mark parent as done
-    parent_path = parent_task.path
-    post = frontmatter.load(parent_path)
-    post.metadata["state"] = "done"
-
-    with open(parent_path, "w") as f:
-        f.write(frontmatter.dumps(post))
-
     return (parent_task.id, "all subtasks done (fan-in complete)")
 
 
