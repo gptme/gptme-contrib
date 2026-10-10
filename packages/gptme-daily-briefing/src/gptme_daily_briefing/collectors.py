@@ -62,7 +62,7 @@ def _is_priority_high(item: dict[str, Any]) -> bool:
     )
 
 
-def collect_blockers(repo: str, label: str, limit: int = 6) -> list[str]:
+def collect_blockers(repo: str, label: str, limit: int = 6, max_pages: int = 5) -> list[str]:
     """Open issues with `label` in `repo` (excludes PRs).
 
     Returns formatted strings like ``"#570: Title"``. The label is
@@ -73,25 +73,37 @@ def collect_blockers(repo: str, label: str, limit: int = 6) -> list[str]:
     newest first, so a ``per_page=limit`` slice showed only the latest asks
     and let a burst of fresh low-stakes issues push older or urgent ones out
     of the briefing entirely.
+
+    Paginates ``state=open&per_page=100`` the same way ``collect_open_prs``
+    does, so a later ``priority:high`` issue is not dropped when more than
+    100 matching issues exist. Stops at the first empty/short page or
+    ``max_pages`` (default 5 → up to 500 issues scanned).
     """
     encoded_label = quote(label, safe="")
-    out = _run(
-        [
-            "gh",
-            "api",
-            f"repos/{repo}/issues?labels={encoded_label}&state=open&sort=created&direction=asc&per_page=100",
-        ]
-    )
-    if not out:
-        return []
+    issues: list[dict[str, Any]] = []
+    for page in range(1, max_pages + 1):
+        out = _run(
+            [
+                "gh",
+                "api",
+                (
+                    f"repos/{repo}/issues?labels={encoded_label}&state=open"
+                    f"&sort=created&direction=asc&per_page=100&page={page}"
+                ),
+            ]
+        )
+        if not out:
+            break
+        try:
+            batch = json.loads(out)
+        except json.JSONDecodeError:
+            break
+        if not isinstance(batch, list) or not batch:
+            break
+        issues.extend(item for item in batch if "pull_request" not in item)
+        if len(batch) < 100:
+            break
     try:
-        data = json.loads(out)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(data, list):
-        return []
-    try:
-        issues = [item for item in data if "pull_request" not in item]
         # Stable sort keeps the API's oldest-first order within each band.
         issues.sort(key=lambda item: not _is_priority_high(item))
         blockers = [f"#{item['number']}: {item['title']}" for item in issues]
