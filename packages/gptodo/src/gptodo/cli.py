@@ -5576,6 +5576,11 @@ def list_all_locks(cleanup: bool, output_json: bool):
     default="action",
     help="Task type (action=single-step, project=multi-step)",
 )
+@click.option(
+    "--waiting-for",
+    default=None,
+    help="What/who blocks the task (required with --state waiting)",
+)
 def add(
     title: str,
     priority: str,
@@ -5583,6 +5588,7 @@ def add(
     assigned_to: str | None,
     state: str,
     task_type: str,
+    waiting_for: str | None,
 ):
     """Create a new task from title and optional stdin body.
 
@@ -5609,6 +5615,16 @@ def add(
         EOF
     """
     import re
+
+    # Initial-state contract: write the canonical state (aliases normalized),
+    # and give a task born waiting or terminal the same metadata an edit into
+    # that state would record. Creation is a newly observed event, so a
+    # terminal task is stamped `completed` now; imported history uses `import`.
+    state = normalize_state(state, warn=False)
+    if state == "waiting" and not (waiting_for and waiting_for.strip()):
+        raise click.UsageError("--state waiting requires --waiting-for")
+    if waiting_for is not None and state != "waiting":
+        raise click.UsageError("--waiting-for is only valid with --state waiting")
 
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -5662,6 +5678,14 @@ def add(
     lines.append(f"assigned_to: {frontmatter_data['assigned_to']}")
     if "tags" in frontmatter_data:
         lines.append(f"tags: {json.dumps(frontmatter_data['tags'])}")
+    stamp = now.isoformat()
+    if state == "waiting":
+        lines.append(f"waiting_for: {json.dumps(waiting_for.strip() if waiting_for else '')}")
+        lines.append(f"waiting_since: {stamp}")
+        lines.append(f"first_waiting_since: {stamp}")
+        lines.append("waiting_spell_count: 1")
+    elif state in ("done", "cancelled"):
+        lines.append(f"completed: {stamp}")
     lines.append("---")
     lines.append("")
     lines.append(f"# {title}")

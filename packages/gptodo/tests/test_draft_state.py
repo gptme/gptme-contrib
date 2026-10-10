@@ -190,3 +190,59 @@ def test_add_accepts_draft_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     tasks = load_tasks(tmp_path / "tasks")
     assert len(tasks) == 1
     assert tasks[0].metadata["state"] == "draft"
+
+
+def _add(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *args: str):
+    (tmp_path / "tasks").mkdir(exist_ok=True)
+    (tmp_path / "gptme.toml").write_text('[agent]\nname = "Bob"\n')
+    monkeypatch.chdir(tmp_path)
+    return CliRunner().invoke(cli, ["add", "Initial state task", *args])
+
+
+def test_add_waiting_requires_waiting_for(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _add(tmp_path, monkeypatch, "--state", "waiting")
+    assert result.exit_code != 0
+    assert "--waiting-for" in result.output
+    assert not list((tmp_path / "tasks").glob("*.md"))
+
+
+def test_add_waiting_records_waiting_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _add(tmp_path, monkeypatch, "--state", "waiting", "--waiting-for", "Erik: review")
+    assert result.exit_code == 0, result.output
+    meta = load_tasks(tmp_path / "tasks")[0].metadata
+    assert meta["state"] == "waiting"
+    assert meta["waiting_for"] == "Erik: review"
+    assert meta["waiting_since"] == meta["first_waiting_since"]
+    assert meta["waiting_since"] == meta["created"]
+    assert meta["waiting_spell_count"] == 1
+
+
+@pytest.mark.parametrize("waiting_for", ["x", "", "   "])
+def test_add_waiting_for_rejected_without_waiting_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, waiting_for: str
+) -> None:
+    result = _add(tmp_path, monkeypatch, "--state", "todo", "--waiting-for", waiting_for)
+    assert result.exit_code == 2
+    assert "--waiting-for is only valid with --state waiting" in result.output
+    assert not list((tmp_path / "tasks").glob("*.md"))
+
+
+@pytest.mark.parametrize("state", ["done", "cancelled"])
+def test_add_terminal_stamps_completed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    result = _add(tmp_path, monkeypatch, "--state", state)
+    assert result.exit_code == 0, result.output
+    meta = load_tasks(tmp_path / "tasks")[0].metadata
+    assert meta["state"] == state
+    assert meta["completed"] == meta["created"]
+
+
+def test_add_normalizes_deprecated_alias(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _add(tmp_path, monkeypatch, "--state", "paused")
+    assert result.exit_code == 0, result.output
+    meta = load_tasks(tmp_path / "tasks")[0].metadata
+    assert meta["state"] == "backlog"
+    assert "completed" not in meta
