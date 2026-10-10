@@ -349,3 +349,38 @@ def test_newer_green_run_of_same_workflow_clears_failure() -> None:
     assert result.returncode == 0, result.stderr
     assert "gptme-cloud: Passing" in result.stdout
     assert "Failing" not in result.stdout
+
+
+def _pending(name: str, sha: str, status: str = "queued") -> dict:
+    return {
+        "conclusion": "",
+        "status": status,
+        "url": f"https://example.test/run/{name}-{sha}",
+        "name": name,
+        "headSha": sha,
+        "event": "push",
+    }
+
+
+def test_several_queued_runs_fall_back_to_newest_completed() -> None:
+    """A backed-up runner queue leaves more than one run pending; the status
+    must come from the newest completed run, not from .[1] (aw-server-rust
+    2026-10-10 printed "In progress (no previous run)")."""
+    runs = [
+        _pending("Lint", "abc1234"),
+        _pending("Build", "abc1234"),
+        _pending("Build", "oldsha00", status="in_progress"),
+        _run("Build", "success", "oldsha00", "https://example.test/run/build-old"),
+        _run("Lint", "success", "oldsha00", "https://example.test/run/lint-old"),
+    ]
+    result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Passing (run in progress)" in result.stdout
+    assert "no previous run" not in result.stdout
+
+
+def test_only_pending_runs_still_report_no_previous_run() -> None:
+    runs = [_pending("Lint", "abc1234"), _pending("Build", "abc1234")]
+    result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: In progress (no previous run)" in result.stdout

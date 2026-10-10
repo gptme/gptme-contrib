@@ -269,22 +269,23 @@ check_repo() {
         run_json="$failing_json"
     fi
 
-    local conclusion status in_progress=""
+    local conclusion status in_progress="" idx=0
     conclusion=$(echo "$run_json" | jq -r '.[0].conclusion // ""')
     status=$(echo "$run_json" | jq -r '.[0].status // ""')
 
-    # If latest run is in-progress, use the previous run's conclusion instead
+    # If the latest run is in-progress, report the newest COMPLETED run instead.
+    # Not simply .[1]: a backed-up runner queue leaves several runs queued at
+    # once (ActivityWatch/aw-server-rust 2026-10-10: Build+Lint queued on three
+    # pushes for 90 min), and .[1] being queued too printed
+    # "In progress (no previous run)" despite completed runs further down.
     if [ -z "$conclusion" ] && [[ "$status" =~ ^(in_progress|queued|waiting|pending|requested)$ ]]; then
         in_progress=1
-        conclusion=$(echo "$run_json" | jq -r '.[1].conclusion // ""' 2>/dev/null)
+        idx=$(echo "$run_json" | jq '[.[] | (.conclusion // "") != ""] | index(true) // 0')
+        conclusion=$(echo "$run_json" | jq -r ".[$idx].conclusion // \"\"")
     fi
 
     local suffix=""
     [ -n "$in_progress" ] && suffix=" (run in progress)"
-
-    # Determine index of the run we're reporting on (1 if latest is in-progress, else 0)
-    local idx=0
-    [ -n "$in_progress" ] && idx=1
 
     # Stale-SHA detection: if the reported run was on a commit that is no longer HEAD
     # (e.g. because path filters skipped CI on newer commits), annotate the output so
