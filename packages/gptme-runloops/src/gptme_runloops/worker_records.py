@@ -527,11 +527,63 @@ def normalize_oid(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
-def normalize_pr_snapshot(payload: Any) -> dict[str, str]:
-    """Normalize a ``gh pr view --json state,headRefOid,mergeCommit`` payload.
+def _review_disposition_snapshot(payload: dict[str, Any]) -> dict[str, str]:
+    """Observe dispositions only for the current head's standing findings.
 
-    Also preserves ``unresolvedThreads`` when the caller has enriched the
-    payload with it (see :func:`capture_pr_snapshot_json`).
+    Pin the count to the finding set, so a replacement review at the same head
+    cannot look like adjudication of the previous review. Missing or malformed
+    markers remain unobserved, never an invented zero.
+    """
+    head = normalize_oid(payload.get("headRefOid"))
+    comments = payload.get("comments")
+    if not head or not isinstance(comments, list):
+        return {}
+    state = None
+    for comment in comments:
+        if not isinstance(comment, dict) or not isinstance(comment.get("body"), str):
+            continue
+        for line in comment["body"].splitlines():
+            match = re.fullmatch(r"<!-- bob-ai-review (\{.*\}) -->", line)
+            if match:
+                try:
+                    state = json.loads(match.group(1))
+                except ValueError:
+                    state = None
+    if not isinstance(state, dict):
+        return {}
+    sha = normalize_oid(state.get("sha"))
+    findings = state.get("findings")
+    dispositions = state.get("dispositions", {})
+    if (
+        not sha
+        or not head.startswith(sha)
+        or not isinstance(findings, list)
+        or not isinstance(dispositions, dict)
+    ):
+        return {}
+    fps: set[str] = set()
+    for finding in findings:
+        if not isinstance(finding, dict):
+            return {}
+        fp = finding.get("fp")
+        if not isinstance(fp, str) or not fp:
+            return {}
+        fps.add(fp)
+    identity = hashlib.sha256(json.dumps(sorted(fps)).encode()).hexdigest()
+    return {
+        "aiReviewFindingSet": identity,
+        "aiReviewDispositions": str(
+            sum(isinstance(dispositions.get(fp), dict) for fp in fps)
+        ),
+    }
+
+
+def normalize_pr_snapshot(payload: Any) -> dict[str, str]:
+    """Normalize PR state, threads, and current-head review dispositions.
+
+    Comments supply the standing AI-review marker; only its finding-set
+    identity and disposition count survive normalization. Also preserves
+    enriched fields when parsing a captured before snapshot.
 
     Mirrors worker.sh:389-399: non-dict payloads → ``{}``; ``mergeCommit``
     may be the gh object form (``{"oid": ...}``) or a bare value; state is
@@ -552,6 +604,13 @@ def normalize_pr_snapshot(payload: Any) -> dict[str, str]:
     threads = _parse_thread_count(payload.get("unresolvedThreads"))
     if threads is not None:
         snapshot["unresolvedThreads"] = str(threads)
+    snapshot.update(_review_disposition_snapshot(payload))
+    # Capture is serialized for the before side; retain its normalized fields.
+    count = _parse_thread_count(payload.get("aiReviewDispositions"))
+    identity = payload.get("aiReviewFindingSet")
+    if count is not None and isinstance(identity, str) and identity:
+        snapshot["aiReviewDispositions"] = str(count)
+        snapshot["aiReviewFindingSet"] = identity
     return snapshot
 
 
@@ -626,6 +685,14 @@ def apply_pr_state_diff(
         payload["pr_merge_commit_after"] = after["mergeCommit"]
     if after.get("unresolvedThreads") is not None:
         payload["pr_unresolved_threads_after"] = after["unresolvedThreads"]
+
+    for side, snapshot in (("before", before), ("after", after)):
+        if snapshot.get("aiReviewDispositions") is not None:
+            payload[f"pr_ai_review_dispositions_{side}"] = snapshot[
+                "aiReviewDispositions"
+            ]
+        if snapshot.get("aiReviewFindingSet"):
+            payload[f"pr_ai_review_finding_set_{side}"] = snapshot["aiReviewFindingSet"]
 
     if before_head and after_head and before_head != after_head:
         deliverables.append(after_head)
@@ -744,7 +811,7 @@ def fetch_pr_snapshot(
             "--repo",
             repo,
             "--json",
-            "state,headRefOid,mergeCommit",
+            "state,headRefOid,mergeCommit,comments",
         ],
         cwd=str(cwd),
         capture_output=True,
@@ -1378,6 +1445,7 @@ def derive_effect_signal(
     - PR state transitioned    → merged/closed              → ``observed``
     - merge commit appeared    → merged                     → ``observed``
     - unresolved threads fell  → an adjudication landed     → ``observed``
+    - current-head dispositions rose for the same findings → ``observed``
     - delivery outcome handled → a reply was posted         → ``observed``
     - ``orphan_no_delivery``   → session ended with no reply → ``none``
     - before/after both known and identical → nothing moved → ``none``
@@ -1437,6 +1505,28 @@ def derive_effect_signal(
     if before_threads is not None and after_threads is not None:
         if after_threads < before_threads:
             return EFFECT_OBSERVED
+
+    # A disposition edits the existing marker, often without a new comment or
+    # review-thread resolution. Compare only the same head and finding set;
+    # old suppressed findings and replacement reviews are not adjudication.
+    before_dispositions = _parse_thread_count(
+        payload.get("pr_ai_review_dispositions_before")
+    )
+    after_dispositions = _parse_thread_count(
+        payload.get("pr_ai_review_dispositions_after")
+    )
+    before_findings = payload.get("pr_ai_review_finding_set_before")
+    after_findings = payload.get("pr_ai_review_finding_set_after")
+    if (
+        before_head
+        and before_head == after_head
+        and before_findings
+        and before_findings == after_findings
+        and before_dispositions is not None
+        and after_dispositions is not None
+        and after_dispositions > before_dispositions
+    ):
+        return EFFECT_OBSERVED
 
     # Nothing moved — but only call that "none" when we actually observed
     # both sides of at least one signal.
