@@ -215,6 +215,7 @@ def test_add_waiting_records_waiting_history(
     assert meta["state"] == "waiting"
     assert meta["waiting_for"] == "Erik: review"
     assert meta["waiting_since"] == meta["first_waiting_since"]
+    assert meta["waiting_since"] == meta["created"]
     assert meta["waiting_spell_count"] == 1
 
 
@@ -236,7 +237,7 @@ def test_add_terminal_stamps_completed(
     assert result.exit_code == 0, result.output
     meta = load_tasks(tmp_path / "tasks")[0].metadata
     assert meta["state"] == state
-    assert meta.get("completed")
+    assert meta["completed"] == meta["created"]
 
 
 def test_add_normalizes_deprecated_alias(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

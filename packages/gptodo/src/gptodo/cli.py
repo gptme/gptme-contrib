@@ -5678,7 +5678,7 @@ def add(
     lines.append(f"assigned_to: {frontmatter_data['assigned_to']}")
     if "tags" in frontmatter_data:
         lines.append(f"tags: {json.dumps(frontmatter_data['tags'])}")
-    stamp = now.isoformat(timespec="seconds")
+    stamp = now.isoformat()
     if state == "waiting":
         lines.append(f"waiting_for: {json.dumps(waiting_for.strip() if waiting_for else '')}")
         lines.append(f"waiting_since: {stamp}")
