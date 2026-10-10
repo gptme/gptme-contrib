@@ -718,6 +718,96 @@ def fetch_unresolved_thread_count(
     return total
 
 
+def _parse_github_ts(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def viewer_activity_since(
+    repo: str,
+    number: int | str,
+    since_iso: str,
+    *,
+    cwd: str | Path,
+    timeout: float = 20,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> bool | None:
+    """Did the authenticated gh user comment on or review the PR since *since_iso*?
+
+    ``True``/``False`` when observed, ``None`` when unobservable (gh error,
+    unparseable output, bad input). Read-only: one GraphQL query, no posting
+    and no local state. Scans the last 50 comments and reviews; a busier
+    window can only under-report, so the failure mode is ``none``, never a
+    fabricated ``observed``.
+    """
+    since = _parse_github_ts(since_iso)
+    owner, _, name = str(repo).partition("/")
+    if since is None or not owner or not name:
+        return None
+    try:
+        number_int = int(number)
+    except (ValueError, TypeError):
+        return None
+    query = (
+        "query($owner:String!,$name:String!,$number:Int!){"
+        "viewer{login}"
+        "repository(owner:$owner,name:$name){"
+        "pullRequest(number:$number){"
+        "comments(last:50){nodes{author{login}createdAt}}"
+        "reviews(last:50){nodes{author{login}submittedAt}}}}}"
+    )
+    cmd = [
+        "gh",
+        "api",
+        "graphql",
+        "-f",
+        f"query={query}",
+        "-F",
+        f"owner={owner}",
+        "-F",
+        f"name={name}",
+        "-F",
+        f"number={number_int}",
+    ]
+    try:
+        result = runner(
+            cmd,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout)["data"]
+        viewer = str(data["viewer"]["login"] or "").lower()
+        pr = data["repository"]["pullRequest"]
+        events = [(n, "createdAt") for n in pr["comments"]["nodes"]]
+        events += [(n, "submittedAt") for n in pr["reviews"]["nodes"]]
+    except Exception:
+        return None
+    if not viewer:
+        return None
+    for node, ts_field in events:
+        if not isinstance(node, dict):
+            continue
+        author = str((node.get("author") or {}).get("login") or "").lower()
+        when = _parse_github_ts(node.get(ts_field))
+        if author == viewer and when is not None and when >= since:
+            return True
+    return False
+
+
 def fetch_pr_snapshot(
     repo: str,
     number: int | str,
