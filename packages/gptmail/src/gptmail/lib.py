@@ -601,7 +601,9 @@ class AgentEmail:
                 return True
         return False
 
-    def _is_allowlisted_recipient(self, recipient: str) -> bool:
+    def _is_allowlisted_recipient(
+        self, recipient: str, *, env_allowlist: str | None = None
+    ) -> bool:
         """Check if recipient is allowlisted for outbound send.
 
         Fail-closed: empty or unparseable recipients are blocked.
@@ -623,7 +625,8 @@ class AgentEmail:
         Returns:
             True if the recipient is in the allowlist, False otherwise.
         """
-        env_allowlist = os.getenv("EMAIL_SEND_ALLOWLIST", "")
+        if env_allowlist is None:
+            env_allowlist = os.getenv("EMAIL_SEND_ALLOWLIST", "")
         if env_allowlist == "*":
             return True
         elif env_allowlist:
@@ -930,7 +933,8 @@ class AgentEmail:
             if not recipient:
                 raise ValueError("No recipient found in email headers")
 
-            if not self._is_allowlisted_recipient(recipient):
+            env_allowlist_at_send = os.getenv("EMAIL_SEND_ALLOWLIST", "")
+            if not self._is_allowlisted_recipient(recipient, env_allowlist=env_allowlist_at_send):
                 raise ValueError(
                     f"Recipient '{recipient}' is not in the send allowlist. "
                     "Set EMAIL_SEND_ALLOWLIST=* to allow all, or provide a "
@@ -1076,6 +1080,27 @@ class AgentEmail:
 
         # Move markdown file to sent folder (only after successful sending)
         draft_path.rename(sent_path)
+
+        # Append send audit metadata so allowlist bypasses leave a forensic trace.
+        # Records the allowlist state at send time — "wildcard" if EMAIL_SEND_ALLOWLIST=*,
+        # the entry count if explicit, or "default" if env var was unset.
+        if env_allowlist_at_send == "*":
+            allowlist_summary = "wildcard"
+        elif env_allowlist_at_send:
+            _entries = [e.strip() for e in env_allowlist_at_send.split(",") if e.strip()]
+            allowlist_summary = str(len(_entries))
+        else:
+            allowlist_summary = "default"
+        _sent_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        audit_line = f"\n<!-- send-audit: allowlist={allowlist_summary} sent_at={_sent_at} -->\n"
+        try:
+            # Do not recreate a metadata-only file if archive() moved the message.
+            with open(sent_path, "r+", encoding="utf-8") as _af:
+                _af.seek(0, os.SEEK_END)
+                _af.write(audit_line)
+        except OSError as e:
+            # Delivery already succeeded; preserve reply bookkeeping even if auditing fails.
+            logger.warning("Failed to write send-audit for %s: %s", sent_path, e)
 
         # If this is a reply, mark the original message as replied to
         headers, _ = self._markdown_to_email(content)
