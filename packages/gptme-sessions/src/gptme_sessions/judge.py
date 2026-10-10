@@ -34,7 +34,7 @@ from .store import SessionStore
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_JUDGE_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_JUDGE_MODEL = "openrouter/anthropic/claude-haiku-5.5"
 CONFIG_PATHS = (
     Path.home() / ".config" / "gptme" / "config.toml",
     Path.home() / ".config" / "gptme" / "config.local.toml",

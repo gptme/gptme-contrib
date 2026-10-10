@@ -3059,7 +3059,7 @@ def post_session_cmd(
     default=None,
     help="Judge model ID. Anthropic IDs (claude-*, anthropic/*) use the anthropic SDK; "
     "other provider-prefixed IDs (openrouter/..., openai-subscription/..., lmstudio/...) "
-    "route via gptme.llm.reply. Default: claude-haiku-4-5-20251001.",
+    "route via gptme.llm.reply. Default: openrouter/anthropic/claude-haiku-5.5.",
 )
 @click.option(
     "--update-store",
