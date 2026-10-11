@@ -910,7 +910,9 @@ def _judge_via_anthropic_direct(
             max_tokens=150,
             system=JUDGE_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
-            temperature=effective_temperature,
+            # Anthropic 1.x removed the named SDK parameter; retain the
+            # legacy judge policy through the supported request-body escape hatch.
+            extra_body={"temperature": effective_temperature},
         )
         text = getattr(response.content[0], "text", "").strip()
     except Exception as exc:
