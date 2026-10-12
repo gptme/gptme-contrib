@@ -564,6 +564,239 @@ def test_check_result_rejects_negative_counts():
         check_install_size.CheckResult(False, 0, 0, 0, resolution_failures=-1)
 
 
+def test_get_transitive_deps_of_git_packages():
+    """_get_transitive_deps_of_git_packages parses uv.lock and returns direct dep names."""
+    import check_install_size
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        lock_path = Path(tmpdir) / "uv.lock"
+        lock_path.write_text(
+            """
+[[package]]
+name = "gptme"
+version = "0.32.1"
+source = { git = "https://github.com/gptme/gptme.git?branch=master#abc123" }
+dependencies = [
+    { name = "anthropic" },
+    { name = "click" },
+]
+
+[[package]]
+name = "anthropic"
+version = "0.120.2"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "click"
+version = "8.1.0"
+source = { registry = "https://pypi.org/simple" }
+""",
+            encoding="utf-8",
+        )
+
+        deps = check_install_size._get_transitive_deps_of_git_packages(
+            lock_path, {"gptme"}
+        )
+
+    assert deps == {"anthropic", "click"}
+
+
+def test_get_transitive_deps_of_git_packages_missing_lock():
+    """_get_transitive_deps_of_git_packages returns empty set when lock file missing."""
+    import check_install_size
+
+    deps = check_install_size._get_transitive_deps_of_git_packages(
+        Path("/nonexistent/uv.lock"), {"gptme"}
+    )
+    assert deps == set()
+
+
+def test_get_transitive_deps_of_git_packages_unknown_pkg():
+    """_get_transitive_deps_of_git_packages returns empty set when package not in lock."""
+    import check_install_size
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        lock_path = Path(tmpdir) / "uv.lock"
+        lock_path.write_text(
+            '[[package]]\nname = "other"\nversion = "1.0"\nsource = { registry = "https://pypi.org/simple" }\n',
+            encoding="utf-8",
+        )
+        deps = check_install_size._get_transitive_deps_of_git_packages(
+            lock_path, {"gptme"}
+        )
+    assert deps == set()
+
+
+def test_get_transitive_deps_of_git_packages_collects_transitives():
+    """_get_transitive_deps_of_git_packages follows the dep graph recursively."""
+    import check_install_size
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        lock_path = Path(tmpdir) / "uv.lock"
+        # git pkg → client → transport (two-hop transitive)
+        lock_path.write_text(
+            """
+[[package]]
+name = "mypkg"
+version = "1.0"
+source = { git = "https://github.com/example/mypkg.git#abc" }
+dependencies = [{ name = "client" }]
+
+[[package]]
+name = "client"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [{ name = "transport" }]
+
+[[package]]
+name = "transport"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+""",
+            encoding="utf-8",
+        )
+        deps = check_install_size._get_transitive_deps_of_git_packages(
+            lock_path, {"mypkg"}
+        )
+
+    # Both client (direct) and transport (transitive) must be unpinned.
+    assert "client" in deps
+    assert "transport" in deps
+    # The git package itself is not in the result.
+    assert "mypkg" not in deps
+
+
+def test_measure_install_size_unpins_git_dep_constraints():
+    """When git+ lines are dropped, their direct deps are un-pinned in requirements."""
+    import check_install_size
+
+    # Simulate uv export returning requirements with a git+ dep and its pinned dep
+    file_size = 10 * 1024 * 1024
+    seen_req_contents: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock()
+        result.returncode = 0
+        result.stderr = ""
+        if "venv" in cmd:
+            venv_path = Path(cmd[-1])
+            _make_fake_venv(venv_path, file_size)
+            (venv_path / "bin").mkdir(exist_ok=True)
+            (venv_path / "bin" / "python").touch()
+            result.stdout = ""
+        elif "export" in cmd:
+            # Simulates a package with a git dep (gptme) + its pinned transitive dep
+            result.stdout = (
+                "gptme @ git+https://github.com/gptme/gptme.git@abc123\n"
+                "anthropic==0.120.2\n"
+                "click==8.1.0\n"
+            )
+        elif "install" in cmd:
+            # Capture the requirements file content written to disk
+            req_idx = cmd.index("-r") + 1 if "-r" in cmd else None
+            if req_idx:
+                seen_req_contents.append(Path(cmd[req_idx]).read_text())
+            result.stdout = ""
+        elif "du" in cmd:
+            result.stdout = f"{file_size}\t{cmd[-1]}\n"
+        else:
+            result.stdout = ""
+        return result
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create a fake uv.lock showing gptme's direct deps
+        lock_path = Path(tmpdir) / "uv.lock"
+        lock_path.write_text(
+            """
+[[package]]
+name = "gptme"
+version = "0.32.1"
+source = { git = "https://github.com/gptme/gptme.git?branch=master#abc123" }
+dependencies = [
+    { name = "anthropic" },
+]
+""",
+            encoding="utf-8",
+        )
+        # package_path.parent.parent must be tmpdir so uv.lock is found there
+        pkg_dir = Path(tmpdir) / "packages" / "gptme-voice"
+        pkg_dir.mkdir(parents=True)
+
+        with patch.object(subprocess, "run", side_effect=fake_run):
+            size = check_install_size.measure_install_size(pkg_dir, "gptme-voice")
+
+    assert isinstance(size, float), f"expected float, got {size!r}"
+    assert seen_req_contents, "expected requirements file to be written"
+    req_content = seen_req_contents[0]
+    # git+ line must be absent
+    assert "git+" not in req_content
+    # Let the replacement package declare anthropic; do not force a stale root.
+    assert "anthropic" not in req_content
+    # click was NOT a dep of gptme in the lock, so its pin stays
+    assert "click==8.1.0" in req_content
+
+
+def test_measure_install_size_preserves_env_markers():
+    """Removing git deps must not alter retained requirements' markers."""
+    import check_install_size
+
+    file_size = 10 * 1024 * 1024
+    seen_req_contents: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock()
+        result.returncode = 0
+        result.stderr = ""
+        if "venv" in cmd:
+            venv_path = Path(cmd[-1])
+            _make_fake_venv(venv_path, file_size)
+            (venv_path / "bin").mkdir(exist_ok=True)
+            (venv_path / "bin" / "python").touch()
+            result.stdout = ""
+        elif "export" in cmd:
+            # pywin32 is a Windows-only dep of the git package
+            result.stdout = (
+                "mypkg @ git+https://github.com/example/mypkg.git@abc\n"
+                "pywin32==308 ; sys_platform == 'win32'\n"
+                "requests==2.31.0 ; sys_platform == 'linux'\n"
+            )
+        elif "install" in cmd:
+            req_idx = cmd.index("-r") + 1 if "-r" in cmd else None
+            if req_idx:
+                seen_req_contents.append(Path(cmd[req_idx]).read_text())
+            result.stdout = ""
+        elif "du" in cmd:
+            result.stdout = f"{file_size}\t{cmd[-1]}\n"
+        else:
+            result.stdout = ""
+        return result
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        lock_path = Path(tmpdir) / "uv.lock"
+        lock_path.write_text(
+            """
+[[package]]
+name = "mypkg"
+version = "1.0"
+source = { git = "https://github.com/example/mypkg.git#abc" }
+dependencies = [{ name = "pywin32" }]
+""",
+            encoding="utf-8",
+        )
+        pkg_dir = Path(tmpdir) / "packages" / "consumer"
+        pkg_dir.mkdir(parents=True)
+
+        with patch.object(subprocess, "run", side_effect=fake_run):
+            size = check_install_size.measure_install_size(pkg_dir, "consumer")
+
+    assert isinstance(size, float)
+    assert seen_req_contents, "expected requirements file"
+    req_content = seen_req_contents[0]
+    # No bare Windows dependency remains; retained markers stay intact.
+    assert "pywin32" not in req_content
+    assert req_content == "requests==2.31.0 ; sys_platform == 'linux'\n"
+
+
 def test_is_resolution_failure_detects_uv_error():
     """_is_resolution_failure should recognise uv's 'no solution found' output."""
     import check_install_size
@@ -675,3 +908,499 @@ def test_print_failure_summary_no_match_fallback(capsys):
     assert "invalid budget configuration" not in out
     assert "failed to install" not in out
     assert "exceeded" not in out
+
+
+def test_transitive_deps_union_duplicate_locked_versions(tmp_path):
+    import check_install_size
+
+    lock_path = tmp_path / "uv.lock"
+    lock_path.write_text("""
+[[package]]
+name = "mypkg"
+dependencies = [{ name = "client", version = "1.0" }]
+[[package]]
+name = "client"
+version = "1.0"
+dependencies = [{ name = "transport" }]
+[[package]]
+name = "client"
+version = "2.0"
+dependencies = []
+[[package]]
+name = "transport"
+version = "1.0"
+""")
+    assert check_install_size._get_transitive_deps_of_git_packages(
+        lock_path, {"mypkg"}
+    ) == {"client", "transport"}
+
+
+def test_measure_install_size_retains_explicit_artifact_source(tmp_path):
+    import check_install_size
+
+    artifact = (
+        "transport @ https://example.com/transport-1.0.whl ; python_version >= '3.11'"
+    )
+    (tmp_path / "uv.lock").write_text("""
+[[package]]
+name = "mypkg"
+dependencies = [{ name = "transport" }]
+""")
+    pkg_dir = tmp_path / "packages" / "consumer"
+    pkg_dir.mkdir(parents=True)
+    requirements = []
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock(returncode=0, stderr="", stdout="")
+        if "venv" in cmd:
+            venv = Path(cmd[-1])
+            _make_fake_venv(venv, 1024)
+            (venv / "bin").mkdir(exist_ok=True)
+            (venv / "bin" / "python").touch()
+        elif "export" in cmd:
+            result.stdout = (
+                "mypkg @ git+https://example.com/mypkg.git@abc\n" + artifact + "\n"
+            )
+        elif "install" in cmd:
+            requirements.append(Path(cmd[cmd.index("-r") + 1]).read_text())
+        elif "du" in cmd:
+            result.stdout = f"1024\t{cmd[-1]}\n"
+        return result
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        assert isinstance(
+            check_install_size.measure_install_size(pkg_dir, "consumer"), float
+        )
+    assert requirements == [artifact + "\n"]
+
+
+def test_transitive_deps_include_optional_edges_and_extras_roots(tmp_path):
+    import check_install_size
+
+    lock_path = tmp_path / "uv.lock"
+    lock_path.write_text("""
+[[package]]
+name = "mypkg"
+[package.optional-dependencies]
+cli = [{ name = "client" }]
+[[package]]
+name = "client"
+dependencies = [{ name = "transport" }]
+""")
+    assert check_install_size._get_transitive_deps_of_git_packages(
+        lock_path, {"mypkg[cli]"}
+    ) == {"client", "transport"}
+
+
+def test_transitive_deps_respect_locked_version_and_source(tmp_path):
+    import check_install_size
+
+    lock_path = tmp_path / "uv.lock"
+    lock_path.write_text("""
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/mypkg.git" }
+dependencies = [{ name = "client", version = "1.0", source = { registry = "https://pypi.org/simple" } }]
+[[package]]
+name = "mypkg"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [{ name = "unrelated-root" }]
+[[package]]
+name = "client"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [{ name = "needed" }]
+[[package]]
+name = "client"
+version = "2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [{ name = "unrelated-version" }]
+[[package]]
+name = "client"
+version = "1.0"
+source = { registry = "https://private.example/simple" }
+dependencies = [{ name = "unrelated-source" }]
+""")
+    assert check_install_size._get_transitive_deps_of_git_packages(
+        lock_path, {"mypkg"}
+    ) == {"client", "needed"}
+
+
+def test_transitive_deps_skip_unrequested_extra(tmp_path):
+    import check_install_size
+
+    lock_path = tmp_path / "uv.lock"
+    lock_path.write_text("""
+[[package]]
+name = "mypkg"
+dependencies = [{ name = "base" }]
+[package.optional-dependencies]
+cli = [{ name = "client" }]
+[[package]]
+name = "client"
+dependencies = [{ name = "transport" }]
+""")
+    assert check_install_size._get_transitive_deps_of_git_packages(
+        lock_path, {"mypkg"}
+    ) == {"base"}
+
+
+def test_measure_install_size_tracks_consumer_selected_extras(tmp_path):
+    import check_install_size
+
+    (tmp_path / "uv.lock").write_text("""
+[[package]]
+name = "consumer"
+dependencies = [{ name = "bridge" }, { name = "unrelated" }]
+[[package]]
+name = "bridge"
+dependencies = [{ name = "mypkg", extra = ["cli"] }]
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/mypkg.git" }
+[package.optional-dependencies]
+cli = [{ name = "client", extra = ["http"] }]
+unused = [{ name = "unrelated" }]
+[[package]]
+name = "client"
+[package.optional-dependencies]
+http = [{ name = "transport" }]
+""")
+    pkg_dir = tmp_path / "packages" / "consumer"
+    pkg_dir.mkdir(parents=True)
+    requirements = []
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock(returncode=0, stderr="", stdout="")
+        if "venv" in cmd:
+            venv = Path(cmd[-1])
+            _make_fake_venv(venv, 1024)
+            (venv / "bin").mkdir(exist_ok=True)
+            (venv / "bin" / "python").touch()
+        elif "export" in cmd:
+            # uv export does not retain extras in the flattened git requirement.
+            result.stdout = (
+                "mypkg @ git+https://example.com/mypkg.git@abc\n"
+                "client==1.0\ntransport==1.0\nunrelated==1.0\n"
+            )
+        elif "install" in cmd:
+            requirements.append(Path(cmd[cmd.index("-r") + 1]).read_text())
+        elif "du" in cmd:
+            result.stdout = f"1024\t{cmd[-1]}\n"
+        return result
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        assert isinstance(
+            check_install_size.measure_install_size(pkg_dir, "consumer"), float
+        )
+    assert requirements == ["unrelated==1.0\n"]
+
+
+def test_measure_install_size_preserves_independent_locked_version(tmp_path):
+    """Only the version reached from the git root loses its exported pin."""
+    import check_install_size
+
+    (tmp_path / "uv.lock").write_text("""
+[[package]]
+name = "consumer"
+dependencies = [{ name = "mypkg" }, { name = "client", version = "2.0", marker = "sys_platform == 'linux'" }]
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/mypkg.git" }
+dependencies = [{ name = "client", version = "1.0", marker = "sys_platform == 'win32'" }]
+[[package]]
+name = "client"
+version = "1.0"
+[[package]]
+name = "client"
+version = "2.0"
+""")
+    pkg_dir = tmp_path / "packages" / "consumer"
+    pkg_dir.mkdir(parents=True)
+    requirements = []
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock(returncode=0, stderr="", stdout="")
+        if "venv" in cmd:
+            venv = Path(cmd[-1])
+            _make_fake_venv(venv, 1024)
+            (venv / "bin").mkdir(exist_ok=True)
+            (venv / "bin" / "python").touch()
+        elif "export" in cmd:
+            result.stdout = (
+                "mypkg @ git+https://example.com/mypkg.git@abc\n"
+                "client==1.0 ; sys_platform == 'win32'\n"
+                "client==2.0 ; sys_platform == 'linux'\n"
+            )
+        elif "install" in cmd:
+            requirements.append(Path(cmd[cmd.index("-r") + 1]).read_text())
+        elif "du" in cmd:
+            result.stdout = f"1024\t{cmd[-1]}\n"
+        return result
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        assert isinstance(
+            check_install_size.measure_install_size(pkg_dir, "consumer"), float
+        )
+    assert requirements == ["client==2.0 ; sys_platform == 'linux'\n"]
+
+
+def test_git_dependency_versions_retain_non_pypi_registry_pins(tmp_path):
+    import check_install_size
+
+    lock_path = tmp_path / "uv.lock"
+    lock_path.write_text("""
+[[package]]
+name = "consumer-app"
+dependencies = [{ name = "mypkg", extra = ["cli"] }]
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/mypkg.git" }
+[package.optional-dependencies]
+cli = [{ name = "torch" }, { name = "client" }]
+[[package]]
+name = "torch"
+version = "2.6.0+cpu"
+source = { registry = "https://download.pytorch.org/whl/cpu" }
+[[package]]
+name = "client"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+""")
+    assert check_install_size._get_git_dependency_versions(
+        lock_path, {"mypkg"}, "consumer.app"
+    ) == {"client": {"1.0"}, "torch": set()}
+
+
+def test_git_dependency_versions_exclude_unselected_roots_and_source_collisions(
+    tmp_path,
+):
+    import check_install_size
+
+    lock_path = tmp_path / "uv.lock"
+    lock_path.write_text("""
+[[package]]
+name = "consumer"
+dependencies = [{ name = "mypkg", source = { git = "https://example.com/a.git" } }]
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/a.git" }
+dependencies = [{ name = "client", version = "1.0", source = { registry = "https://pypi.org/simple" } }]
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/b.git" }
+dependencies = [{ name = "unrelated" }]
+[[package]]
+name = "client"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+[[package]]
+name = "client"
+version = "1.0"
+source = { registry = "https://private.example/simple" }
+[[package]]
+name = "unrelated"
+version = "2.0"
+""")
+    assert check_install_size._get_git_dependency_versions(
+        lock_path, {"mypkg"}, "consumer"
+    ) == {"client": set()}
+    # The source collision is protected even without consumer provenance; root
+    # selection is a separate safeguard and must not mask that protection.
+    assert check_install_size._get_git_dependency_versions(lock_path, {"mypkg"}) == {
+        "client": set(),
+        "unrelated": {"2.0"},
+    }
+
+
+def test_measure_install_size_retains_same_version_private_registry_pin(tmp_path):
+    import check_install_size
+
+    (tmp_path / "uv.lock").write_text("""
+[[package]]
+name = "consumer"
+dependencies = [{ name = "mypkg" }]
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/mypkg.git" }
+dependencies = [
+    { name = "client", version = "1.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux'" },
+    { name = "client", version = "1.0", source = { registry = "https://private.example/simple" }, marker = "sys_platform == 'win32'" },
+    { name = "public-only", version = "1.0" },
+]
+[[package]]
+name = "client"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+[[package]]
+name = "client"
+version = "1.0"
+source = { registry = "https://private.example/simple" }
+[[package]]
+name = "public-only"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+""")
+    pkg_dir = tmp_path / "packages" / "consumer"
+    pkg_dir.mkdir(parents=True)
+    requirements = []
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock(returncode=0, stderr="", stdout="")
+        if "venv" in cmd:
+            venv = Path(cmd[-1])
+            _make_fake_venv(venv, 1024)
+            (venv / "bin").mkdir(exist_ok=True)
+            (venv / "bin" / "python").touch()
+        elif "export" in cmd:
+            result.stdout = (
+                "mypkg @ git+https://example.com/mypkg.git@abc\n"
+                "client==1.0 ; sys_platform == 'linux'\n"
+                "client==1.0 ; sys_platform == 'win32'\n"
+                "public-only==1.0\n"
+            )
+        elif "install" in cmd:
+            requirements.append(Path(cmd[cmd.index("-r") + 1]).read_text())
+        elif "du" in cmd:
+            result.stdout = f"1024\t{cmd[-1]}\n"
+        return result
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        assert isinstance(
+            check_install_size.measure_install_size(pkg_dir, "consumer"), float
+        )
+    assert requirements == [
+        "client==1.0 ; sys_platform == 'linux'\nclient==1.0 ; sys_platform == 'win32'\n"
+    ]
+
+
+def test_transitive_deps_include_independently_selected_descendant_extra(tmp_path):
+    import check_install_size
+
+    lock_path = tmp_path / "uv.lock"
+    lock_path.write_text("""
+[[package]]
+name = "consumer"
+dependencies = [{ name = "mypkg" }, { name = "client", extra = ["http"] }]
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/mypkg.git" }
+dependencies = [{ name = "client" }]
+[[package]]
+name = "client"
+[package.optional-dependencies]
+http = [{ name = "transport" }]
+""")
+    assert check_install_size._get_transitive_deps_of_git_packages(
+        lock_path, {"mypkg"}, "consumer"
+    ) == {"client", "transport"}
+
+
+def test_measure_install_size_allows_obsolete_git_dependencies_to_disappear(tmp_path):
+    """Run uv's offline resolver: obsolete roots must not force a conflict."""
+    import shutil
+    import zipfile
+
+    import check_install_size
+    import pytest
+
+    if not shutil.which("uv"):
+        pytest.skip("uv is required for the offline resolver regression")
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    for name, version, dependencies in [
+        ("mypkg", "2.0", ["shared>=2"]),
+        ("old_client", "1.0", ["shared<2"]),
+        ("shared", "1.0", []),
+        ("shared", "2.0", []),
+        ("independent", "1.0", ["shared>=1,<3"]),
+    ]:
+        dist_info = f"{name}-{version}.dist-info"
+        with zipfile.ZipFile(
+            wheels / f"{name}-{version}-py3-none-any.whl", "w"
+        ) as wheel:
+            wheel.writestr(
+                f"{dist_info}/METADATA",
+                f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+                + "".join(f"Requires-Dist: {dep}\n" for dep in dependencies),
+            )
+            wheel.writestr(
+                f"{dist_info}/WHEEL",
+                "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+            )
+            wheel.writestr(f"{dist_info}/RECORD", "")
+    (tmp_path / "uv.lock").write_text("""
+[[package]]
+name = "consumer"
+dependencies = [{ name = "mypkg" }, { name = "independent" }]
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/mypkg.git" }
+dependencies = [{ name = "old-client" }]
+[[package]]
+name = "old-client"
+version = "1.0"
+dependencies = [{ name = "shared" }]
+[[package]]
+name = "shared"
+version = "1.0"
+[[package]]
+name = "independent"
+version = "1.0"
+dependencies = [{ name = "shared" }]
+""")
+    pkg_dir = tmp_path / "packages" / "consumer"
+    pkg_dir.mkdir(parents=True)
+    real_run = subprocess.run
+    resolutions = []
+
+    def fake_run(cmd, **kwargs):
+        if "venv" in cmd:
+            venv = Path(cmd[-1])
+            (venv / "bin").mkdir(parents=True)
+            (venv / "bin" / "python").touch()
+        if "export" in cmd:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "mypkg @ git+https://example.com/mypkg.git@abc\n"
+                "old-client==1.0\nshared==1.0\nindependent==1.0\n",
+                "",
+            )
+        if "install" in cmd:
+            requirements = Path(cmd[cmd.index("-r") + 1])
+            # The consumer independently declares these requirements. Resolve them
+            # together with the checker's transformed export, without network/builds.
+            combined = tmp_path / "combined.txt"
+            combined.write_text(requirements.read_text() + "mypkg==2.0\n")
+            result = real_run(
+                [
+                    "uv",
+                    "pip",
+                    "compile",
+                    "--offline",
+                    "--no-index",
+                    "--no-config",
+                    "--find-links",
+                    str(wheels),
+                    str(combined),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            resolutions.append(result)
+            return result
+        if "du" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, f"1024\t{cmd[-1]}\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        size = check_install_size.measure_install_size(pkg_dir, "consumer")
+    assert resolutions, "expected uv resolver to run"
+    assert resolutions[0].returncode == 0, resolutions[0].stderr
+    assert isinstance(size, float)
+    resolved = resolutions[0].stdout
+    assert "old-client" not in resolved
+    assert "shared==2.0" in resolved
+    assert "independent==1.0" in resolved

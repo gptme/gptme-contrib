@@ -11,6 +11,7 @@ in gptme-contrib#1416.
 """
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -177,6 +178,158 @@ def _is_resolution_failure(stderr: str) -> bool:
     return "no solution found" in lower or ("resolv" in lower and "error" in lower)
 
 
+def _normalize_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "_", name.lower())
+
+
+def _get_transitive_deps_of_git_packages(
+    lock_path: Path, git_pkg_names: set[str], consumer_name: str | None = None
+) -> set[str]:
+    """Return the names in the version-aware git dependency closure."""
+    return set(_get_git_dependency_versions(lock_path, git_pkg_names, consumer_name))
+
+
+def _get_git_dependency_versions(
+    lock_path: Path, git_pkg_names: set[str], consumer_name: str | None = None
+) -> dict[str, set[str | None]]:
+    """Return transitive dependency versions of the given git-sourced packages in uv.lock.
+
+    When git+ lines are dropped from an exported requirements.txt, the lock-pinned
+    versions of their deps can conflict with the PyPI-resolved version of the same
+    package.  Callers use this to un-pin those deps so uv can re-resolve them
+    alongside the PyPI version.
+
+    This collects the full transitive closure, not only direct deps: if the PyPI
+    release of a direct dep requires a newer version of one of its own deps, stale
+    transitive pins would still prevent resolution.
+    """
+    if not git_pkg_names or not lock_path.exists():
+        return {}
+    try:
+        with open(lock_path, "rb") as f:
+            lock_data = tomllib.load(f)
+    except Exception:
+        return {}
+
+    # Keep locked package entries distinct: merging by name follows edges from
+    # unrelated versions/sources and can un-pin independent consumer requirements.
+    packages = lock_data.get("package", [])
+    by_name: dict[str, list[int]] = {}
+    for index, pkg in enumerate(packages):
+        name = _normalize_name(pkg.get("name", ""))
+        by_name.setdefault(name, []).append(index)
+
+    def matching_entries(dep: dict) -> Iterator[int]:
+        name = _normalize_name(dep["name"])
+        for index in by_name.get(name, []):
+            candidate = packages[index]
+            if "version" in dep and candidate.get("version") != dep["version"]:
+                continue
+            if "source" in dep and candidate.get("source") != dep["source"]:
+                continue
+            yield index
+
+    def dependencies(index: int, extras: frozenset[str]) -> list[dict]:
+        pkg = packages[index]
+        edges = list(pkg.get("dependencies", []))
+        for extra, extra_deps in pkg.get("optional-dependencies", {}).items():
+            if _normalize_name(extra) in extras:
+                edges.extend(extra_deps)
+        return edges
+
+    # uv export flattens extras away. Recover their selection from the consumer's
+    # locked graph, not from whether a dependency happens to appear in the export:
+    # an independent consumer requirement may share an unused extra's dependency.
+    selected: dict[int, set[str]] = {}
+    if consumer_name:
+        pending: list[tuple[int, frozenset[str]]] = [
+            (index, frozenset())
+            for index in by_name.get(_normalize_name(consumer_name), [])
+        ]
+        seen: set[tuple[int, frozenset[str]]] = set()
+        while pending:
+            index, extras = pending.pop()
+            if (index, extras) in seen:
+                continue
+            seen.add((index, extras))
+            selected.setdefault(index, set()).update(extras)
+            for dep in dependencies(index, extras):
+                dep_extras = frozenset(_normalize_name(e) for e in dep.get("extra", []))
+                pending.extend((i, dep_extras) for i in matching_entries(dep))
+
+    roots: set[str] = set()
+    queue: list[tuple[int, frozenset[str]]] = []
+    for requirement in git_pkg_names:
+        name, _, extra_text = requirement.partition("[")
+        name = _normalize_name(name)
+        roots.add(name)
+        explicit_extras = {
+            _normalize_name(e.strip())
+            for e in extra_text.rstrip("]").split(",")
+            if e.strip()
+        }
+        for index in by_name.get(name, []):
+            if consumer_name and _normalize_name(consumer_name) in by_name:
+                if index not in selected:
+                    continue
+            if not packages[index].get("source") or "git" in packages[index]["source"]:
+                queue.append(
+                    (index, frozenset(explicit_extras | selected.get(index, set())))
+                )
+    visited: set[tuple[int, frozenset[str]]] = set()
+    deps: dict[str, set[str | None]] = {}
+    while queue:
+        current, extras = queue.pop()
+        if (current, extras) in visited:
+            continue
+        visited.add((current, extras))
+        for dep in dependencies(current, extras):
+            name = _normalize_name(dep["name"])
+            entries = list(matching_entries(dep))
+            versions = deps.setdefault(name, set())
+            if entries:
+                # Do not relax alternate-registry pins into unrestricted index
+                # lookups: unsafe-best-match could replace CPU/private artifacts.
+                versions.update(
+                    packages[index].get("version")
+                    for index in entries
+                    if packages[index]
+                    .get("source", {})
+                    .get("registry", "https://pypi.org/simple")
+                    .rstrip("/")
+                    == "https://pypi.org/simple"
+                )
+            else:
+                # In incomplete locks, retain an explicit edge selector if present.
+                versions.add(dep.get("version"))
+            dep_extras = frozenset(_normalize_name(e) for e in dep.get("extra", []))
+            queue.extend(
+                (index, dep_extras | frozenset(selected.get(index, set())))
+                for index in entries
+            )
+
+    # Exported exact pins do not encode registry identity. If an alternate
+    # registry has the same name/version, retain that version on every platform
+    # rather than relaxing a private artifact through a public namesake. Missing
+    # version selectors (None) cannot safely bypass this ambiguity either.
+    for name, versions in deps.items():
+        protected_versions = {
+            packages[index].get("version")
+            for index in by_name.get(name, [])
+            if packages[index]
+            .get("source", {})
+            .get("registry", "https://pypi.org/simple")
+            .rstrip("/")
+            != "https://pypi.org/simple"
+        }
+        if protected_versions:
+            versions.discard(None)
+            versions.difference_update(protected_versions)
+
+    # Return only the deps, not the git packages themselves.
+    return {name: versions for name, versions in deps.items() if name not in roots}
+
+
 def measure_install_size(
     package_path: Path, package_name: str
 ) -> float | Literal["resolution_failure"] | None:
@@ -253,11 +406,60 @@ def measure_install_size(
                 # the package's pyproject.toml (read via workspace sources) references
                 # the same dep at @master. Dropping git+ lines lets uv resolve those
                 # deps from the package's own declarations + workspace sources.
-                req_lines = [
-                    line
-                    for line in export_result.stdout.splitlines()
-                    if " @ git+" not in line and not line.strip().startswith("git+")
-                ]
+                #
+                # When a git dep is dropped, its own lock-pinned version constraints
+                # stay in the requirements.txt. If the PyPI release of that git package
+                # has different constraints (e.g. gptme git needs anthropic^0.120 while
+                # gptme 0.34.0 on PyPI needs anthropic>=1.8), the install fails with an
+                # unsatisfiable constraint. Remove affected exact-pin lines entirely:
+                # bare requirements would keep obsolete deps as mandatory roots.
+                # The consumer and retained requirements still declare any shared
+                # deps they need, so uv can resolve those against the PyPI release.
+                all_raw_lines = export_result.stdout.splitlines()
+                dropped_git_names = {
+                    line.split(" @ ")[0].strip()
+                    for line in all_raw_lines
+                    if " @ git+" in line
+                }
+                git_dep_versions: dict[str, set[str | None]] = {}
+                if dropped_git_names:
+                    lock_path = package_path.parent.parent / "uv.lock"
+                    git_dep_versions = _get_git_dependency_versions(
+                        lock_path, dropped_git_names, package_name
+                    )
+
+                req_lines = []
+                for line in all_raw_lines:
+                    if " @ git+" in line or line.strip().startswith("git+"):
+                        continue  # drop the git source pin
+                    if git_dep_versions:
+                        # Ignore markers only while matching exact pins. Retained
+                        # requirements are emitted verbatim, including their markers.
+                        constraint_part = line.strip().split(" ; ", 1)[0]
+                        # Explicit artifact sources must not be replaced with index lookups.
+                        if " @" in constraint_part:
+                            req_lines.append(line)
+                            continue
+                        # Extract the package name from the constraint part
+                        # (handles "name==version", "name>=version", "name @ url", etc.)
+                        pkg_name = _normalize_name(
+                            constraint_part.split("==")[0]
+                            .split(">=")[0]
+                            .split("<=")[0]
+                            .split("!=")[0]
+                            .split(" @")[0]
+                            .strip()
+                        )
+                        versions = git_dep_versions.get(pkg_name, set())
+                        _, separator, pinned_version = constraint_part.partition("==")
+                        if separator and (
+                            None in versions or pinned_version.strip() in versions
+                        ):
+                            # Do not force an obsolete git-only dependency to remain
+                            # installed. Independent declarations still pull in shared
+                            # dependencies, with their own constraints and markers.
+                            continue
+                    req_lines.append(line)
                 req_file = tmpdir / "requirements.txt"
                 req_file.write_text("\n".join(req_lines) + "\n")
                 install_cmd = [
