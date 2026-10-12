@@ -140,6 +140,16 @@ def test_combined_types_concatenate_in_order() -> None:
     )
 
 
+def test_contributor_ci_failure_prompt_is_relay_only() -> None:
+    rendered = build_investigate(["contributor_ci_failure"], BOB_PARAMS)
+
+    assert "Contributor CI Failure Relay" in rendered
+    assert "failing test/check and the shortest" in rendered
+    assert "Do not checkout, edit, commit, or push" in rendered
+    assert "post one concise PR comment" in rendered
+    assert "already relays the same failure" in rendered
+
+
 def test_greptile_types_delegate_to_step2_templates() -> None:
     assert build_investigate(["reviewer_needs_fix"], BOB_PARAMS) == render_instruction(
         InstructionKind.REVIEWER_NEEDS_FIX, BOB_PARAMS.to_prompt_context()

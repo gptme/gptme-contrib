@@ -180,6 +180,7 @@ PR_STATE_TYPES: frozenset[str] = frozenset({"pr_update", "merge_ready"})
 PR_OBSERVE_TYPES: frozenset[str] = PR_STATE_TYPES | frozenset(
     {
         "ci_failure",
+        "contributor_ci_failure",
         "greptile_convergence_adjudication",
         "merge_conflict",
         "pr_changes_requested_stale",
@@ -231,7 +232,11 @@ THREAD_DELIVERABLE_TYPES: frozenset[str] = frozenset(
 # 2026-10-10: comment at 01:38, `none` at 01:40, second LLM session at 02:43).
 # merge_ready stays out on purpose: a comment is not a merge (#3531).
 COMMENT_DELIVERABLE_TYPES: frozenset[str] = frozenset(
-    {"greptile_convergence_adjudication", "pr_never_checked"}
+    {
+        "contributor_ci_failure",
+        "greptile_convergence_adjudication",
+        "pr_never_checked",
+    }
 )
 
 # CC stream-json trajectory floor (worker.sh:205) and grok floor (worker.sh:218).
@@ -614,11 +619,11 @@ def issue_coordination_key(
 ) -> str | None:
     """``pm_issue_coordination_key_for_item`` (lib.sh:150-166).
 
-    Only assigned_issue/pr_update items with a positive all-digits number
-    get a ``github:REPO#NUM`` key; everything else returns ``None``
-    (master-CI synthetic run ids are excluded by type).
+    Only thread-mutating handoffs with a positive all-digits number get a
+    ``github:REPO#NUM`` key; everything else returns ``None`` (master-CI
+    synthetic run ids are excluded by type).
     """
-    if not ({"assigned_issue", "pr_update"} & set(types)):
+    if not ({"assigned_issue", "contributor_ci_failure", "pr_update"} & set(types)):
         return None
     if not repo or number is None:
         return None
