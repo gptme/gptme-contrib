@@ -177,6 +177,33 @@ def _is_resolution_failure(stderr: str) -> bool:
     return "no solution found" in lower or ("resolv" in lower and "error" in lower)
 
 
+def _get_direct_deps_of_git_packages(
+    lock_path: Path, git_pkg_names: set[str]
+) -> set[str]:
+    """Return the direct dependency names of the given git-sourced packages in uv.lock.
+
+    When git+ lines are dropped from an exported requirements.txt, the lock-pinned
+    versions of their deps can conflict with the PyPI-resolved version of the same
+    package.  Callers use this to un-pin those deps so uv can re-resolve them
+    alongside the PyPI version.
+    """
+    if not git_pkg_names or not lock_path.exists():
+        return set()
+    try:
+        with open(lock_path, "rb") as f:
+            lock_data = tomllib.load(f)
+    except Exception:
+        return set()
+
+    normalized = {n.lower().replace("-", "_") for n in git_pkg_names}
+    deps: set[str] = set()
+    for pkg in lock_data.get("package", []):
+        if pkg.get("name", "").lower().replace("-", "_") in normalized:
+            for dep in pkg.get("dependencies", []):
+                deps.add(dep["name"])
+    return deps
+
+
 def measure_install_size(
     package_path: Path, package_name: str
 ) -> float | Literal["resolution_failure"] | None:
@@ -253,11 +280,55 @@ def measure_install_size(
                 # the package's pyproject.toml (read via workspace sources) references
                 # the same dep at @master. Dropping git+ lines lets uv resolve those
                 # deps from the package's own declarations + workspace sources.
-                req_lines = [
-                    line
-                    for line in export_result.stdout.splitlines()
-                    if " @ git+" not in line and not line.strip().startswith("git+")
-                ]
+                #
+                # When a git dep is dropped, its own lock-pinned version constraints
+                # stay in the requirements.txt. If the PyPI release of that git package
+                # has different constraints (e.g. gptme git needs anthropic^0.120 while
+                # gptme 0.34.0 on PyPI needs anthropic>=1.8), the install fails with an
+                # unsatisfiable constraint. To fix this, also un-pin the direct deps of
+                # the dropped git packages so uv can resolve them fresh alongside the
+                # PyPI-resolved version.
+                all_raw_lines = export_result.stdout.splitlines()
+                dropped_git_names = {
+                    line.split(" @ ")[0].strip()
+                    for line in all_raw_lines
+                    if " @ git+" in line
+                }
+                git_dep_names: set[str] = set()
+                if dropped_git_names:
+                    lock_path = package_path.parent.parent / "uv.lock"
+                    git_dep_names = _get_direct_deps_of_git_packages(
+                        lock_path, dropped_git_names
+                    )
+                    git_dep_names_norm = {
+                        n.lower().replace("-", "_") for n in git_dep_names
+                    }
+                else:
+                    git_dep_names_norm = set()
+
+                req_lines = []
+                for line in all_raw_lines:
+                    if " @ git+" in line or line.strip().startswith("git+"):
+                        continue  # drop the git source pin
+                    if git_dep_names_norm:
+                        # Extract the package name from the requirement line
+                        # (handles "name==version", "name>=version", "name @ url", etc.)
+                        bare = line.strip()
+                        pkg_name = (
+                            bare.split("==")[0]
+                            .split(">=")[0]
+                            .split("<=")[0]
+                            .split("!=")[0]
+                            .split(" @")[0]
+                            .strip()
+                            .lower()
+                            .replace("-", "_")
+                        )
+                        if pkg_name in git_dep_names_norm:
+                            # Un-pin: keep only the package name so uv resolves fresh
+                            req_lines.append(pkg_name.replace("_", "-"))
+                            continue
+                    req_lines.append(line)
                 req_file = tmpdir / "requirements.txt"
                 req_file.write_text("\n".join(req_lines) + "\n")
                 install_cmd = [
