@@ -893,16 +893,6 @@ def _judge_via_anthropic_direct(
         logger.warning("No Anthropic API key found; direct judge unavailable")
         return None
 
-    # Extended-thinking models require temperature=1.0; guard against future
-    # DEFAULT_JUDGE_MODEL changes that would otherwise cause an API 400.
-    effective_temperature = 1.0 if _is_extended_thinking_model(model) else temperature
-    if effective_temperature != temperature:
-        logger.debug(
-            "Extended-thinking model %s requires temperature=1.0; overriding %.2f",
-            model,
-            temperature,
-        )
-
     try:
         client = anthropic.Anthropic(api_key=key)
         response = client.messages.create(
@@ -910,9 +900,6 @@ def _judge_via_anthropic_direct(
             max_tokens=150,
             system=JUDGE_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
-            # Anthropic 1.x removed the named SDK parameter; retain the
-            # legacy judge policy through the supported request-body escape hatch.
-            extra_body={"temperature": effective_temperature},
         )
         text = getattr(response.content[0], "text", "").strip()
     except Exception as exc:
