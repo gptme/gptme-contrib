@@ -992,3 +992,37 @@ dependencies = [{ name = "transport" }]
     assert check_install_size._get_transitive_deps_of_git_packages(
         lock_path, {"mypkg[cli]"}
     ) == {"client", "transport"}
+
+
+def test_transitive_deps_respect_locked_version_and_source(tmp_path):
+    import check_install_size
+
+    lock_path = tmp_path / "uv.lock"
+    lock_path.write_text("""
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/mypkg.git" }
+dependencies = [{ name = "client", version = "1.0", source = { registry = "https://pypi.org/simple" } }]
+[[package]]
+name = "mypkg"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [{ name = "unrelated-root" }]
+[[package]]
+name = "client"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [{ name = "needed" }]
+[[package]]
+name = "client"
+version = "2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [{ name = "unrelated-version" }]
+[[package]]
+name = "client"
+version = "1.0"
+source = { registry = "https://private.example/simple" }
+dependencies = [{ name = "unrelated-source" }]
+""")
+    assert check_install_size._get_transitive_deps_of_git_packages(
+        lock_path, {"mypkg"}
+    ) == {"client", "needed"}
