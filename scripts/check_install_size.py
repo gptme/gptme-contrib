@@ -177,15 +177,19 @@ def _is_resolution_failure(stderr: str) -> bool:
     return "no solution found" in lower or ("resolv" in lower and "error" in lower)
 
 
-def _get_direct_deps_of_git_packages(
+def _get_transitive_deps_of_git_packages(
     lock_path: Path, git_pkg_names: set[str]
 ) -> set[str]:
-    """Return the direct dependency names of the given git-sourced packages in uv.lock.
+    """Return all transitive dependency names of the given git-sourced packages in uv.lock.
 
     When git+ lines are dropped from an exported requirements.txt, the lock-pinned
     versions of their deps can conflict with the PyPI-resolved version of the same
     package.  Callers use this to un-pin those deps so uv can re-resolve them
     alongside the PyPI version.
+
+    This collects the full transitive closure, not only direct deps: if the PyPI
+    release of a direct dep requires a newer version of one of its own deps, stale
+    transitive pins would still prevent resolution.
     """
     if not git_pkg_names or not lock_path.exists():
         return set()
@@ -195,13 +199,29 @@ def _get_direct_deps_of_git_packages(
     except Exception:
         return set()
 
-    normalized = {n.lower().replace("-", "_") for n in git_pkg_names}
-    deps: set[str] = set()
+    # Build normalised-name → direct-dep-names map for the whole lock.
+    dep_map: dict[str, set[str]] = {}
     for pkg in lock_data.get("package", []):
-        if pkg.get("name", "").lower().replace("-", "_") in normalized:
-            for dep in pkg.get("dependencies", []):
-                deps.add(dep["name"])
-    return deps
+        name = pkg.get("name", "").lower().replace("-", "_")
+        dep_map[name] = {
+            d["name"].lower().replace("-", "_") for d in pkg.get("dependencies", [])
+        }
+
+    # BFS from the git package roots to collect every reachable dep.
+    roots = {n.lower().replace("-", "_") for n in git_pkg_names}
+    visited: set[str] = set()
+    queue = list(roots)
+    while queue:
+        current = queue.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        for dep in dep_map.get(current, set()):
+            if dep not in visited:
+                queue.append(dep)
+
+    # Return only the deps, not the git packages themselves.
+    return visited - roots
 
 
 def measure_install_size(
@@ -294,28 +314,36 @@ def measure_install_size(
                     for line in all_raw_lines
                     if " @ git+" in line
                 }
-                git_dep_names: set[str] = set()
+                git_dep_names_norm: set[str] = set()
                 if dropped_git_names:
                     lock_path = package_path.parent.parent / "uv.lock"
-                    git_dep_names = _get_direct_deps_of_git_packages(
-                        lock_path, dropped_git_names
-                    )
                     git_dep_names_norm = {
-                        n.lower().replace("-", "_") for n in git_dep_names
+                        n.lower().replace("-", "_")
+                        for n in _get_transitive_deps_of_git_packages(
+                            lock_path, dropped_git_names
+                        )
                     }
-                else:
-                    git_dep_names_norm = set()
 
                 req_lines = []
                 for line in all_raw_lines:
                     if " @ git+" in line or line.strip().startswith("git+"):
                         continue  # drop the git source pin
                     if git_dep_names_norm:
-                        # Extract the package name from the requirement line
-                        # (handles "name==version", "name>=version", "name @ url", etc.)
+                        # Separate the environment marker from the version constraint.
+                        # A requirement line may look like:
+                        #   pywin32==308 ; sys_platform == 'win32'
+                        # We must preserve the marker when un-pinning so the dep stays
+                        # platform-conditional rather than becoming unconditional.
                         bare = line.strip()
+                        if " ; " in bare:
+                            constraint_part, marker_suffix = bare.split(" ; ", 1)
+                            marker_suffix = " ; " + marker_suffix
+                        else:
+                            constraint_part, marker_suffix = bare, ""
+                        # Extract the package name from the constraint part
+                        # (handles "name==version", "name>=version", "name @ url", etc.)
                         pkg_name = (
-                            bare.split("==")[0]
+                            constraint_part.split("==")[0]
                             .split(">=")[0]
                             .split("<=")[0]
                             .split("!=")[0]
@@ -325,8 +353,9 @@ def measure_install_size(
                             .replace("-", "_")
                         )
                         if pkg_name in git_dep_names_norm:
-                            # Un-pin: keep only the package name so uv resolves fresh
-                            req_lines.append(pkg_name.replace("_", "-"))
+                            # Un-pin: keep only the package name (+ marker) so uv
+                            # resolves the version fresh alongside the PyPI release.
+                            req_lines.append(pkg_name.replace("_", "-") + marker_suffix)
                             continue
                     req_lines.append(line)
                 req_file = tmpdir / "requirements.txt"

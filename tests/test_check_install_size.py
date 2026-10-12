@@ -564,8 +564,8 @@ def test_check_result_rejects_negative_counts():
         check_install_size.CheckResult(False, 0, 0, 0, resolution_failures=-1)
 
 
-def test_get_direct_deps_of_git_packages():
-    """_get_direct_deps_of_git_packages parses uv.lock and returns direct dep names."""
+def test_get_transitive_deps_of_git_packages():
+    """_get_transitive_deps_of_git_packages parses uv.lock and returns direct dep names."""
     import check_install_size
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -594,23 +594,25 @@ source = { registry = "https://pypi.org/simple" }
             encoding="utf-8",
         )
 
-        deps = check_install_size._get_direct_deps_of_git_packages(lock_path, {"gptme"})
+        deps = check_install_size._get_transitive_deps_of_git_packages(
+            lock_path, {"gptme"}
+        )
 
     assert deps == {"anthropic", "click"}
 
 
-def test_get_direct_deps_of_git_packages_missing_lock():
-    """_get_direct_deps_of_git_packages returns empty set when lock file missing."""
+def test_get_transitive_deps_of_git_packages_missing_lock():
+    """_get_transitive_deps_of_git_packages returns empty set when lock file missing."""
     import check_install_size
 
-    deps = check_install_size._get_direct_deps_of_git_packages(
+    deps = check_install_size._get_transitive_deps_of_git_packages(
         Path("/nonexistent/uv.lock"), {"gptme"}
     )
     assert deps == set()
 
 
-def test_get_direct_deps_of_git_packages_unknown_pkg():
-    """_get_direct_deps_of_git_packages returns empty set when package not in lock."""
+def test_get_transitive_deps_of_git_packages_unknown_pkg():
+    """_get_transitive_deps_of_git_packages returns empty set when package not in lock."""
     import check_install_size
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -619,8 +621,49 @@ def test_get_direct_deps_of_git_packages_unknown_pkg():
             '[[package]]\nname = "other"\nversion = "1.0"\nsource = { registry = "https://pypi.org/simple" }\n',
             encoding="utf-8",
         )
-        deps = check_install_size._get_direct_deps_of_git_packages(lock_path, {"gptme"})
+        deps = check_install_size._get_transitive_deps_of_git_packages(
+            lock_path, {"gptme"}
+        )
     assert deps == set()
+
+
+def test_get_transitive_deps_of_git_packages_collects_transitives():
+    """_get_transitive_deps_of_git_packages follows the dep graph recursively."""
+    import check_install_size
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        lock_path = Path(tmpdir) / "uv.lock"
+        # git pkg → client → transport (two-hop transitive)
+        lock_path.write_text(
+            """
+[[package]]
+name = "mypkg"
+version = "1.0"
+source = { git = "https://github.com/example/mypkg.git#abc" }
+dependencies = [{ name = "client" }]
+
+[[package]]
+name = "client"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [{ name = "transport" }]
+
+[[package]]
+name = "transport"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+""",
+            encoding="utf-8",
+        )
+        deps = check_install_size._get_transitive_deps_of_git_packages(
+            lock_path, {"mypkg"}
+        )
+
+    # Both client (direct) and transport (transitive) must be unpinned.
+    assert "client" in deps
+    assert "transport" in deps
+    # The git package itself is not in the result.
+    assert "mypkg" not in deps
 
 
 def test_measure_install_size_unpins_git_dep_constraints():
@@ -692,6 +735,68 @@ dependencies = [
     assert "anthropic" in req_content
     # click was NOT a dep of gptme in the lock, so its pin stays
     assert "click==8.1.0" in req_content
+
+
+def test_measure_install_size_preserves_env_markers():
+    """Un-pinned deps must keep their environment markers (; sys_platform etc.)."""
+    import check_install_size
+
+    file_size = 10 * 1024 * 1024
+    seen_req_contents: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock()
+        result.returncode = 0
+        result.stderr = ""
+        if "venv" in cmd:
+            venv_path = Path(cmd[-1])
+            _make_fake_venv(venv_path, file_size)
+            (venv_path / "bin").mkdir(exist_ok=True)
+            (venv_path / "bin" / "python").touch()
+            result.stdout = ""
+        elif "export" in cmd:
+            # pywin32 is a Windows-only dep of the git package
+            result.stdout = (
+                "mypkg @ git+https://github.com/example/mypkg.git@abc\n"
+                "pywin32==308 ; sys_platform == 'win32'\n"
+                "requests==2.31.0\n"
+            )
+        elif "install" in cmd:
+            req_idx = cmd.index("-r") + 1 if "-r" in cmd else None
+            if req_idx:
+                seen_req_contents.append(Path(cmd[req_idx]).read_text())
+            result.stdout = ""
+        elif "du" in cmd:
+            result.stdout = f"{file_size}\t{cmd[-1]}\n"
+        else:
+            result.stdout = ""
+        return result
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        lock_path = Path(tmpdir) / "uv.lock"
+        lock_path.write_text(
+            """
+[[package]]
+name = "mypkg"
+version = "1.0"
+source = { git = "https://github.com/example/mypkg.git#abc" }
+dependencies = [{ name = "pywin32" }]
+""",
+            encoding="utf-8",
+        )
+        pkg_dir = Path(tmpdir) / "packages" / "consumer"
+        pkg_dir.mkdir(parents=True)
+
+        with patch.object(subprocess, "run", side_effect=fake_run):
+            size = check_install_size.measure_install_size(pkg_dir, "consumer")
+
+    assert isinstance(size, float)
+    assert seen_req_contents, "expected requirements file"
+    req_content = seen_req_contents[0]
+    # Version pin must be removed, but the platform marker must stay
+    assert "pywin32==308" not in req_content
+    assert "pywin32" in req_content
+    assert "sys_platform == 'win32'" in req_content
 
 
 def test_is_resolution_failure_detects_uv_error():
