@@ -730,15 +730,14 @@ dependencies = [
     req_content = seen_req_contents[0]
     # git+ line must be absent
     assert "git+" not in req_content
-    # anthropic pin must be dropped (only bare name remains)
-    assert "anthropic==0.120.2" not in req_content
-    assert "anthropic" in req_content
+    # Let the replacement package declare anthropic; do not force a stale root.
+    assert "anthropic" not in req_content
     # click was NOT a dep of gptme in the lock, so its pin stays
     assert "click==8.1.0" in req_content
 
 
 def test_measure_install_size_preserves_env_markers():
-    """Un-pinned deps must keep their environment markers (; sys_platform etc.)."""
+    """Removing git deps must not alter retained requirements' markers."""
     import check_install_size
 
     file_size = 10 * 1024 * 1024
@@ -759,7 +758,7 @@ def test_measure_install_size_preserves_env_markers():
             result.stdout = (
                 "mypkg @ git+https://github.com/example/mypkg.git@abc\n"
                 "pywin32==308 ; sys_platform == 'win32'\n"
-                "requests==2.31.0\n"
+                "requests==2.31.0 ; sys_platform == 'linux'\n"
             )
         elif "install" in cmd:
             req_idx = cmd.index("-r") + 1 if "-r" in cmd else None
@@ -793,10 +792,9 @@ dependencies = [{ name = "pywin32" }]
     assert isinstance(size, float)
     assert seen_req_contents, "expected requirements file"
     req_content = seen_req_contents[0]
-    # Version pin must be removed, but the platform marker must stay
-    assert "pywin32==308" not in req_content
-    assert "pywin32" in req_content
-    assert "sys_platform == 'win32'" in req_content
+    # No bare Windows dependency remains; retained markers stay intact.
+    assert "pywin32" not in req_content
+    assert req_content == "requests==2.31.0 ; sys_platform == 'linux'\n"
 
 
 def test_is_resolution_failure_detects_uv_error():
@@ -1095,7 +1093,7 @@ http = [{ name = "transport" }]
         assert isinstance(
             check_install_size.measure_install_size(pkg_dir, "consumer"), float
         )
-    assert requirements == ["client\ntransport\nunrelated==1.0\n"]
+    assert requirements == ["unrelated==1.0\n"]
 
 
 def test_measure_install_size_preserves_independent_locked_version(tmp_path):
@@ -1144,9 +1142,7 @@ version = "2.0"
         assert isinstance(
             check_install_size.measure_install_size(pkg_dir, "consumer"), float
         )
-    assert requirements == [
-        "client ; sys_platform == 'win32'\nclient==2.0 ; sys_platform == 'linux'\n"
-    ]
+    assert requirements == ["client==2.0 ; sys_platform == 'linux'\n"]
 
 
 def test_git_dependency_versions_retain_non_pypi_registry_pins(tmp_path):
@@ -1274,8 +1270,7 @@ source = { registry = "https://pypi.org/simple" }
             check_install_size.measure_install_size(pkg_dir, "consumer"), float
         )
     assert requirements == [
-        "client==1.0 ; sys_platform == 'linux'\n"
-        "client==1.0 ; sys_platform == 'win32'\npublic-only\n"
+        "client==1.0 ; sys_platform == 'linux'\nclient==1.0 ; sys_platform == 'win32'\n"
     ]
 
 
@@ -1299,3 +1294,113 @@ http = [{ name = "transport" }]
     assert check_install_size._get_transitive_deps_of_git_packages(
         lock_path, {"mypkg"}, "consumer"
     ) == {"client", "transport"}
+
+
+def test_measure_install_size_allows_obsolete_git_dependencies_to_disappear(tmp_path):
+    """Run uv's offline resolver: obsolete roots must not force a conflict."""
+    import shutil
+    import zipfile
+
+    import check_install_size
+    import pytest
+
+    if not shutil.which("uv"):
+        pytest.skip("uv is required for the offline resolver regression")
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    for name, version, dependencies in [
+        ("mypkg", "2.0", ["shared>=2"]),
+        ("old_client", "1.0", ["shared<2"]),
+        ("shared", "1.0", []),
+        ("shared", "2.0", []),
+        ("independent", "1.0", ["shared>=1,<3"]),
+    ]:
+        dist_info = f"{name}-{version}.dist-info"
+        with zipfile.ZipFile(
+            wheels / f"{name}-{version}-py3-none-any.whl", "w"
+        ) as wheel:
+            wheel.writestr(
+                f"{dist_info}/METADATA",
+                f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+                + "".join(f"Requires-Dist: {dep}\n" for dep in dependencies),
+            )
+            wheel.writestr(
+                f"{dist_info}/WHEEL",
+                "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+            )
+            wheel.writestr(f"{dist_info}/RECORD", "")
+    (tmp_path / "uv.lock").write_text("""
+[[package]]
+name = "consumer"
+dependencies = [{ name = "mypkg" }, { name = "independent" }]
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/mypkg.git" }
+dependencies = [{ name = "old-client" }]
+[[package]]
+name = "old-client"
+version = "1.0"
+dependencies = [{ name = "shared" }]
+[[package]]
+name = "shared"
+version = "1.0"
+[[package]]
+name = "independent"
+version = "1.0"
+dependencies = [{ name = "shared" }]
+""")
+    pkg_dir = tmp_path / "packages" / "consumer"
+    pkg_dir.mkdir(parents=True)
+    real_run = subprocess.run
+    resolutions = []
+
+    def fake_run(cmd, **kwargs):
+        if "venv" in cmd:
+            venv = Path(cmd[-1])
+            (venv / "bin").mkdir(parents=True)
+            (venv / "bin" / "python").touch()
+        if "export" in cmd:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "mypkg @ git+https://example.com/mypkg.git@abc\n"
+                "old-client==1.0\nshared==1.0\nindependent==1.0\n",
+                "",
+            )
+        if "install" in cmd:
+            requirements = Path(cmd[cmd.index("-r") + 1])
+            # The consumer independently declares these requirements. Resolve them
+            # together with the checker's transformed export, without network/builds.
+            combined = tmp_path / "combined.txt"
+            combined.write_text(requirements.read_text() + "mypkg==2.0\n")
+            result = real_run(
+                [
+                    "uv",
+                    "pip",
+                    "compile",
+                    "--offline",
+                    "--no-index",
+                    "--no-config",
+                    "--find-links",
+                    str(wheels),
+                    str(combined),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            resolutions.append(result)
+            return result
+        if "du" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, f"1024\t{cmd[-1]}\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        size = check_install_size.measure_install_size(pkg_dir, "consumer")
+    assert resolutions, "expected uv resolver to run"
+    assert resolutions[0].returncode == 0, resolutions[0].stderr
+    assert isinstance(size, float)
+    resolved = resolutions[0].stdout
+    assert "old-client" not in resolved
+    assert "shared==2.0" in resolved
+    assert "independent==1.0" in resolved

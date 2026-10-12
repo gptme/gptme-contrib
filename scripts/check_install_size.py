@@ -411,9 +411,10 @@ def measure_install_size(
                 # stay in the requirements.txt. If the PyPI release of that git package
                 # has different constraints (e.g. gptme git needs anthropic^0.120 while
                 # gptme 0.34.0 on PyPI needs anthropic>=1.8), the install fails with an
-                # unsatisfiable constraint. To fix this, also un-pin the direct deps of
-                # the dropped git packages so uv can resolve them fresh alongside the
-                # PyPI-resolved version.
+                # unsatisfiable constraint. Remove affected exact-pin lines entirely:
+                # bare requirements would keep obsolete deps as mandatory roots.
+                # The consumer and retained requirements still declare any shared
+                # deps they need, so uv can resolve those against the PyPI release.
                 all_raw_lines = export_result.stdout.splitlines()
                 dropped_git_names = {
                     line.split(" @ ")[0].strip()
@@ -432,17 +433,9 @@ def measure_install_size(
                     if " @ git+" in line or line.strip().startswith("git+"):
                         continue  # drop the git source pin
                     if git_dep_versions:
-                        # Separate the environment marker from the version constraint.
-                        # A requirement line may look like:
-                        #   pywin32==308 ; sys_platform == 'win32'
-                        # We must preserve the marker when un-pinning so the dep stays
-                        # platform-conditional rather than becoming unconditional.
-                        bare = line.strip()
-                        if " ; " in bare:
-                            constraint_part, marker_suffix = bare.split(" ; ", 1)
-                            marker_suffix = " ; " + marker_suffix
-                        else:
-                            constraint_part, marker_suffix = bare, ""
+                        # Ignore markers only while matching exact pins. Retained
+                        # requirements are emitted verbatim, including their markers.
+                        constraint_part = line.strip().split(" ; ", 1)[0]
                         # Explicit artifact sources must not be replaced with index lookups.
                         if " @" in constraint_part:
                             req_lines.append(line)
@@ -462,9 +455,9 @@ def measure_install_size(
                         if separator and (
                             None in versions or pinned_version.strip() in versions
                         ):
-                            # Un-pin: keep only the package name (+ marker) so uv
-                            # resolves the version fresh alongside the PyPI release.
-                            req_lines.append(pkg_name.replace("_", "-") + marker_suffix)
+                            # Do not force an obsolete git-only dependency to remain
+                            # installed. Independent declarations still pull in shared
+                            # dependencies, with their own constraints and markers.
                             continue
                     req_lines.append(line)
                 req_file = tmpdir / "requirements.txt"
