@@ -81,6 +81,23 @@ class TestJudgeSession:
         assert result["reason"] == "Good work"
         assert result["model"] == DEFAULT_JUDGE_MODEL
 
+    @pytest.mark.parametrize("temperature", [0.0, 0.3, 0.8])
+    def test_anthropic_temperature_is_explicitly_ignored(
+        self, temperature: float, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """SDK 1.x compatibility must not silently promise sampling control."""
+        mock_anthropic = MagicMock()
+        mock_anthropic.Anthropic.return_value.messages.create.return_value.content = [
+            MagicMock(text='{"score": 0.75, "reason": "Good work"}')
+        ]
+        with patch.dict("sys.modules", {"anthropic": mock_anthropic}):
+            result = judge_session("test session text", api_key="fake-key", temperature=temperature)
+        assert result is not None
+        kwargs = mock_anthropic.Anthropic.return_value.messages.create.call_args.kwargs
+        assert "temperature" not in kwargs
+        assert "extra_body" not in kwargs
+        assert "temperature is ignored by the Anthropic-direct judge" in caplog.text
+
     def test_prompt_template_wellformed(self) -> None:
         """Verify that the prompt template and system prompt are well-formed."""
         prompt = JUDGE_PROMPT_TEMPLATE.format(

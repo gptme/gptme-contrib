@@ -881,7 +881,11 @@ def _judge_via_anthropic_direct(
     api_key: str | None,
     temperature: float = 0.3,
 ) -> dict | None:
-    """Call the judge via the direct Anthropic SDK (legacy path)."""
+    """Call the judge via the direct Anthropic SDK (legacy path).
+
+    ``temperature`` is retained for call-site compatibility but ignored:
+    Anthropic SDK 1.x removed sampling controls from the Messages API.
+    """
     try:
         import anthropic
     except ImportError:
@@ -892,6 +896,12 @@ def _judge_via_anthropic_direct(
     if not key:
         logger.warning("No Anthropic API key found; direct judge unavailable")
         return None
+
+    logger.warning(
+        "temperature is ignored by the Anthropic-direct judge (requested %.2f); "
+        "Anthropic SDK 1.x uses provider-default sampling",
+        temperature,
+    )
 
     try:
         client = anthropic.Anthropic(api_key=key)
@@ -912,10 +922,9 @@ def _judge_via_anthropic_direct(
 def _judge_via_gptme(prompt: str, *, model: str) -> dict | None:
     """Call the judge via ``gptme.llm.reply`` for non-Anthropic-direct models.
 
-    Temperature is not explicitly set here — gptme.llm.reply defaults to the
-    model API default (typically 1.0 for Claude), which already provides
-    sufficient variance. The caller's ``temperature`` param is applied by
-    the anthropic-direct path only.
+    Temperature is not explicitly set here — gptme.llm.reply uses the
+    model API default. The caller's ``temperature`` param is retained for
+    compatibility and is not applied by either judge path.
     """
     try:
         from gptme.init import init as init_gptme
@@ -1003,9 +1012,11 @@ def judge_session(
             ``## Subagent Usage`` block is injected and the judge is asked to
             return a separate ``delegation`` annotation (not a score term).
             Pass ``None`` (default) to omit the block and the annotation.
-        temperature: Sampling temperature for the judge model (default 0.3).
-            Higher values increase score variance; 0.0 produces near-constant
-            scores that undermine calibration.
+        temperature: Legacy sampling parameter (default 0.3), retained for
+            call-site compatibility but ignored by both judge paths.
+            Anthropic SDK 1.x removed sampling controls; the direct path logs
+            a warning and uses provider-default sampling. The gptme path
+            also uses provider-default sampling.
 
     Returns:
         Dict with keys ``score`` (float), ``reason`` (str), ``model`` (str),
