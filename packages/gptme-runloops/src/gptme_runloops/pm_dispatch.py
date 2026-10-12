@@ -36,6 +36,7 @@ except ImportError:  # pragma: no cover - non-POSIX platforms
 SLOW_LANE_TYPES: set[str] = {
     "pr_update",
     "pr_never_checked",
+    "contributor_ci_failure",
     "ci_failure",
     "master_ci_failure",
     "merge_conflict",
@@ -594,12 +595,12 @@ def classify_item_work_type(types: list[str], repo: str | None = None) -> str:
         return "greptile-convergence"
     if "merge_conflict" in types_set:
         return "merge-conflict"
-    if types_set & {"pr_update", "pr_never_checked"}:
+    if types_set & {"pr_update", "pr_never_checked", "contributor_ci_failure"}:
         # pr_never_checked never routes to automated-pr-review: approving a held
         # workflow run requires a human click, which an automated review pass cannot do.
         if (
             "pr_update" in types_set
-            and "pr_never_checked" not in types_set
+            and not {"pr_never_checked", "contributor_ci_failure"} & types_set
             and repo
             and repo in _automated_pr_review_allowlist()
         ):

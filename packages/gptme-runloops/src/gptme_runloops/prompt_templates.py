@@ -690,6 +690,7 @@ class ItemPromptKind(Enum):
 
     PR_UPDATE = "pr_update"
     CI_FAILURE = "ci_failure"
+    CONTRIBUTOR_CI_FAILURE = "contributor_ci_failure"
     ASSIGNED_ISSUE = "assigned_issue"
     TWITTER_MENTION = "twitter_mention"
     FORUM_MENTION = "forum_mention"
@@ -883,6 +884,26 @@ Also check master branch CI health:
 gh run list --repo {repo} --branch master --limit 3 --json name,conclusion,createdAt,url \\
   --jq '.[] | select(.conclusion == "failure") | {name, conclusion, createdAt, url}'
 ```
+"""
+
+_CONTRIBUTOR_CI_FAILURE_ARM = """
+### Contributor CI Failure Relay
+```bash
+# Identify the failed checks and read their logs or annotations.
+gh pr checks {number} --repo {repo}
+gh pr checks {number} --repo {repo} --json name,state,link \
+  --jq '.[] | select(.state == "FAILURE")'
+
+# Check whether {agent_name} already relayed this failure on the current head.
+gh pr view {number} --repo {repo} --json headRefOid,comments \
+  --jq '{{head: .headRefOid, own_comments: [.comments[] | select(.author.login == "{author}") | {{at: .createdAt, body: .body}}]}}'
+```
+
+This is an outside contributor's branch. **Do not checkout, edit, commit, or push
+to it.** Read enough CI output to name the failing test/check and the shortest
+specific fix. Then post one concise PR comment with that pointer. If an existing
+{agent_name} comment already relays the same failure for the current head, exit
+without posting again.
 """
 
 _ASSIGNED_ISSUE_ARM = """
@@ -1204,6 +1225,7 @@ report' against your session.
 _ITEM_ARMS: dict[ItemPromptKind, str] = {
     ItemPromptKind.PR_UPDATE: _PR_UPDATE_ARM,
     ItemPromptKind.CI_FAILURE: _CI_FAILURE_ARM,
+    ItemPromptKind.CONTRIBUTOR_CI_FAILURE: _CONTRIBUTOR_CI_FAILURE_ARM,
     ItemPromptKind.ASSIGNED_ISSUE: _ASSIGNED_ISSUE_ARM,
     ItemPromptKind.TWITTER_MENTION: _TWITTER_MENTION_ARM,
     ItemPromptKind.FORUM_MENTION: _FORUM_MENTION_ARM,

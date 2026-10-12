@@ -243,6 +243,7 @@ def test_timeout_tiers(types, has_fix, expected, tmp_path) -> None:
     [
         (["pr_update"], "o/r", 12, "github:o/r#12"),
         (["assigned_issue"], "o/r", "7", "github:o/r#7"),
+        (["contributor_ci_failure"], "o/r", 12, "github:o/r#12"),
         (["merge_ready"], "o/r", 12, None),  # not in the claimable types
         (["master_ci_failure"], "o/r", 999, None),
         (["pr_update"], "o/r", 0, None),  # non-positive
@@ -2452,7 +2453,12 @@ def _unmoved_comment_deliverable_fixture(tmp_path, types):
 
 
 @pytest.mark.parametrize(
-    "types", [("greptile_convergence_adjudication",), ("pr_never_checked",)]
+    "types",
+    [
+        ("contributor_ci_failure",),
+        ("greptile_convergence_adjudication",),
+        ("pr_never_checked",),
+    ],
 )
 def test_post_session_comment_deliverable_reply_is_observed(tmp_path, types) -> None:
     """Adjudication / fork-PR sessions whose deliverable is a PR comment grade

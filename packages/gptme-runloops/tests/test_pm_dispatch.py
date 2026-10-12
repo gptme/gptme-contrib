@@ -156,6 +156,9 @@ class TestClassifyLane:
     def test_ci_failure_is_slow(self):
         assert classify_lane(["ci_failure"]) == "slow"
 
+    def test_contributor_ci_failure_is_slow(self):
+        assert classify_lane(["contributor_ci_failure"]) == "slow"
+
     def test_master_ci_failure_is_slow(self):
         assert classify_lane(["master_ci_failure"]) == "slow"
 
@@ -180,6 +183,7 @@ class TestClassifyLane:
         expected = {
             "pr_update",
             "pr_never_checked",
+            "contributor_ci_failure",
             "ci_failure",
             "master_ci_failure",
             "merge_conflict",
@@ -1604,6 +1608,9 @@ class TestClassifyItemWorkType:
 
     def test_pr_never_checked_routes_to_pr_review(self):
         assert classify_item_work_type(["pr_never_checked"]) == "pr-review"
+
+    def test_contributor_ci_failure_routes_to_pr_review(self):
+        assert classify_item_work_type(["contributor_ci_failure"]) == "pr-review"
 
     def test_pr_never_checked_not_automated_review_in_allowlisted_repo(
         self, monkeypatch
