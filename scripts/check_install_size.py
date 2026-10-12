@@ -11,6 +11,7 @@ in gptme-contrib#1416.
 """
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -177,6 +178,10 @@ def _is_resolution_failure(stderr: str) -> bool:
     return "no solution found" in lower or ("resolv" in lower and "error" in lower)
 
 
+def _normalize_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "_", name.lower())
+
+
 def _get_transitive_deps_of_git_packages(
     lock_path: Path, git_pkg_names: set[str], consumer_name: str | None = None
 ) -> set[str]:
@@ -211,11 +216,11 @@ def _get_git_dependency_versions(
     packages = lock_data.get("package", [])
     by_name: dict[str, list[int]] = {}
     for index, pkg in enumerate(packages):
-        name = pkg.get("name", "").lower().replace("-", "_")
+        name = _normalize_name(pkg.get("name", ""))
         by_name.setdefault(name, []).append(index)
 
     def matching_entries(dep: dict) -> Iterator[int]:
-        name = dep["name"].lower().replace("-", "_")
+        name = _normalize_name(dep["name"])
         for index in by_name.get(name, []):
             candidate = packages[index]
             if "version" in dep and candidate.get("version") != dep["version"]:
@@ -228,7 +233,7 @@ def _get_git_dependency_versions(
         pkg = packages[index]
         edges = list(pkg.get("dependencies", []))
         for extra, extra_deps in pkg.get("optional-dependencies", {}).items():
-            if extra.lower().replace("-", "_") in extras:
+            if _normalize_name(extra) in extras:
                 edges.extend(extra_deps)
         return edges
 
@@ -239,7 +244,7 @@ def _get_git_dependency_versions(
     if consumer_name:
         pending: list[tuple[int, frozenset[str]]] = [
             (index, frozenset())
-            for index in by_name.get(consumer_name.lower().replace("-", "_"), [])
+            for index in by_name.get(_normalize_name(consumer_name), [])
         ]
         seen: set[tuple[int, frozenset[str]]] = set()
         while pending:
@@ -249,19 +254,17 @@ def _get_git_dependency_versions(
             seen.add((index, extras))
             selected.setdefault(index, set()).update(extras)
             for dep in dependencies(index, extras):
-                dep_extras = frozenset(
-                    e.lower().replace("-", "_") for e in dep.get("extra", [])
-                )
+                dep_extras = frozenset(_normalize_name(e) for e in dep.get("extra", []))
                 pending.extend((i, dep_extras) for i in matching_entries(dep))
 
     roots: set[str] = set()
     queue: list[tuple[int, frozenset[str]]] = []
     for requirement in git_pkg_names:
         name, _, extra_text = requirement.partition("[")
-        name = name.lower().replace("-", "_")
+        name = _normalize_name(name)
         roots.add(name)
         explicit_extras = {
-            e.strip().lower().replace("-", "_")
+            _normalize_name(e.strip())
             for e in extra_text.rstrip("]").split(",")
             if e.strip()
         }
@@ -278,17 +281,25 @@ def _get_git_dependency_versions(
             continue
         visited.add((current, extras))
         for dep in dependencies(current, extras):
-            name = dep["name"].lower().replace("-", "_")
+            name = _normalize_name(dep["name"])
             entries = list(matching_entries(dep))
             versions = deps.setdefault(name, set())
             if entries:
-                versions.update(packages[index].get("version") for index in entries)
+                # Do not relax alternate-registry pins into unrestricted index
+                # lookups: unsafe-best-match could replace CPU/private artifacts.
+                versions.update(
+                    packages[index].get("version")
+                    for index in entries
+                    if packages[index]
+                    .get("source", {})
+                    .get("registry", "https://pypi.org/simple")
+                    .rstrip("/")
+                    == "https://pypi.org/simple"
+                )
             else:
                 # In incomplete locks, retain an explicit edge selector if present.
                 versions.add(dep.get("version"))
-            dep_extras = frozenset(
-                e.lower().replace("-", "_") for e in dep.get("extra", [])
-            )
+            dep_extras = frozenset(_normalize_name(e) for e in dep.get("extra", []))
             queue.extend(
                 (index, dep_extras | frozenset(selected.get(index, set())))
                 for index in entries
@@ -417,15 +428,13 @@ def measure_install_size(
                             continue
                         # Extract the package name from the constraint part
                         # (handles "name==version", "name>=version", "name @ url", etc.)
-                        pkg_name = (
+                        pkg_name = _normalize_name(
                             constraint_part.split("==")[0]
                             .split(">=")[0]
                             .split("<=")[0]
                             .split("!=")[0]
                             .split(" @")[0]
                             .strip()
-                            .lower()
-                            .replace("-", "_")
                         )
                         versions = git_dep_versions.get(pkg_name, set())
                         _, separator, pinned_version = constraint_part.partition("==")

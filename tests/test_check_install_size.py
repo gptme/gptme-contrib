@@ -1149,6 +1149,33 @@ version = "2.0"
     ]
 
 
+def test_git_dependency_versions_retain_non_pypi_registry_pins(tmp_path):
+    import check_install_size
+
+    lock_path = tmp_path / "uv.lock"
+    lock_path.write_text("""
+[[package]]
+name = "consumer-app"
+dependencies = [{ name = "mypkg", extra = ["cli"] }]
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/mypkg.git" }
+[package.optional-dependencies]
+cli = [{ name = "torch" }, { name = "client" }]
+[[package]]
+name = "torch"
+version = "2.6.0+cpu"
+source = { registry = "https://download.pytorch.org/whl/cpu" }
+[[package]]
+name = "client"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+""")
+    assert check_install_size._get_git_dependency_versions(
+        lock_path, {"mypkg"}, "consumer.app"
+    ) == {"client": {"1.0"}, "torch": set()}
+
+
 def test_transitive_deps_include_independently_selected_descendant_extra(tmp_path):
     import check_install_size
 
