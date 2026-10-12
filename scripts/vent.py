@@ -14,7 +14,6 @@ friction analysis.
 
 Usage:
     python3 scripts/vent.py "message describing friction" [--resolution-owner OWNER]
-    python3 scripts/vent.py "message" --type Type0   # deprecated, use --resolution-owner
 
 Resolution owners (axis 1 — who/what unblocks this):
     self          Solvable now with better prompting / context / reasoning
@@ -22,9 +21,6 @@ Resolution owners (axis 1 — who/what unblocks this):
     operator      Needs Erik: a decision, credential, approval, account action
     upstream      Needs a fix in a dependency Bob doesn't own
     architectural Not solvable in the current stack design
-
---type is kept as a deprecated alias (Type1->self, Type2a->tooling, Type2b->architectural).
-Type0 is Bob's extension, mapping to operator.
 
 For Axis 2 (theme/cause) see analysis-time clustering — the ledger format
 is compatible with any JSONL-capable analysis tool.
@@ -58,14 +54,6 @@ RATE_LIMIT_SECONDS = 60
 DEDUP_WINDOW_SECONDS = 600
 # State file per workspace to track last-vent timestamp
 _STATE_DIR = Path.home() / ".local" / "share" / "gptme"
-
-# Deprecated type -> resolution_owner mapping
-_DEPRECATED_TYPE_MAP = {
-    "Type0": "operator",
-    "Type1": "self",
-    "Type2a": "tooling",
-    "Type2b": "architectural",
-}
 
 
 def _detect_session_id(env: Mapping[str, str] | None = None) -> str | None:
@@ -185,7 +173,6 @@ def _is_duplicate(message: str, now: datetime) -> bool:
 def vent(
     message: str,
     resolution_owner: str | None = None,
-    friction_type: str | None = None,
     workspace: Path | None = None,
 ) -> None:
     if not message.strip():
@@ -214,23 +201,7 @@ def vent(
         )
         sys.exit(3)
 
-    # Resolve resolution_owner: prefer --resolution-owner, fall back to deprecated --type
     final_owner = resolution_owner
-    if friction_type:
-        mapped = _DEPRECATED_TYPE_MAP.get(friction_type)
-        if resolution_owner:
-            print(
-                f"vent: warning: both --resolution-owner ({resolution_owner}) and "
-                f"--type ({friction_type}) provided — using --resolution-owner.",
-                file=sys.stderr,
-            )
-        else:
-            final_owner = mapped
-            print(
-                f"vent: warning: --type is deprecated, use --resolution-owner. "
-                f"Mapped {friction_type} -> {mapped}.",
-                file=sys.stderr,
-            )
 
     entry: dict = {
         "timestamp": now.isoformat(),
@@ -239,8 +210,6 @@ def vent(
     }
     if final_owner:
         entry["resolution_owner"] = final_owner
-    if friction_type:
-        entry["type"] = friction_type
     entry["harness"] = _detect_harness()
     session_id = _detect_session_id()
     if session_id:
@@ -265,17 +234,10 @@ def main() -> None:
         help="Who or what unblocks this: self=prompting/context, tooling=config/env, "
         "operator=Erik/human, upstream=dependency fix, architectural=redesign needed",
     )
-    parser.add_argument(
-        "--type",
-        choices=["Type0", "Type1", "Type2a", "Type2b"],
-        help="[DEPRECATED] Use --resolution-owner instead. "
-        "Type1->self, Type2a->tooling, Type2b->architectural. Type0 maps -> operator.",
-    )
     args = parser.parse_args()
     vent(
         args.message,
         resolution_owner=args.resolution_owner,
-        friction_type=args.type,
     )
 
 
