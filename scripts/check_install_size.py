@@ -178,7 +178,7 @@ def _is_resolution_failure(stderr: str) -> bool:
 
 
 def _get_transitive_deps_of_git_packages(
-    lock_path: Path, git_pkg_names: set[str]
+    lock_path: Path, git_pkg_names: set[str], consumer_name: str | None = None
 ) -> set[str]:
     """Return all transitive dependency names of the given git-sourced packages in uv.lock.
 
@@ -207,36 +207,76 @@ def _get_transitive_deps_of_git_packages(
         name = pkg.get("name", "").lower().replace("-", "_")
         by_name.setdefault(name, []).append(index)
 
-    roots = {n.split("[", 1)[0].lower().replace("-", "_") for n in git_pkg_names}
-    queue = [
-        index
-        for name in roots
-        for index in by_name.get(name, [])
-        if not packages[index].get("source") or "git" in packages[index]["source"]
-    ]
-    visited: set[int] = set()
+    def matching_entries(dep: dict) -> Iterator[int]:
+        name = dep["name"].lower().replace("-", "_")
+        for index in by_name.get(name, []):
+            candidate = packages[index]
+            if "version" in dep and candidate.get("version") != dep["version"]:
+                continue
+            if "source" in dep and candidate.get("source") != dep["source"]:
+                continue
+            yield index
+
+    def dependencies(index: int, extras: frozenset[str]) -> list[dict]:
+        pkg = packages[index]
+        edges = list(pkg.get("dependencies", []))
+        for extra, extra_deps in pkg.get("optional-dependencies", {}).items():
+            if extra.lower().replace("-", "_") in extras:
+                edges.extend(extra_deps)
+        return edges
+
+    # uv export flattens extras away. Recover their selection from the consumer's
+    # locked graph, not from whether a dependency happens to appear in the export:
+    # an independent consumer requirement may share an unused extra's dependency.
+    selected: dict[int, set[str]] = {}
+    if consumer_name:
+        pending: list[tuple[int, frozenset[str]]] = [
+            (index, frozenset())
+            for index in by_name.get(consumer_name.lower().replace("-", "_"), [])
+        ]
+        seen: set[tuple[int, frozenset[str]]] = set()
+        while pending:
+            index, extras = pending.pop()
+            if (index, extras) in seen:
+                continue
+            seen.add((index, extras))
+            selected.setdefault(index, set()).update(extras)
+            for dep in dependencies(index, extras):
+                dep_extras = frozenset(
+                    e.lower().replace("-", "_") for e in dep.get("extra", [])
+                )
+                pending.extend((i, dep_extras) for i in matching_entries(dep))
+
+    roots: set[str] = set()
+    queue: list[tuple[int, frozenset[str]]] = []
+    for requirement in git_pkg_names:
+        name, _, extra_text = requirement.partition("[")
+        name = name.lower().replace("-", "_")
+        roots.add(name)
+        explicit_extras = {
+            e.strip().lower().replace("-", "_")
+            for e in extra_text.rstrip("]").split(",")
+            if e.strip()
+        }
+        for index in by_name.get(name, []):
+            if not packages[index].get("source") or "git" in packages[index]["source"]:
+                queue.append(
+                    (index, frozenset(explicit_extras | selected.get(index, set())))
+                )
+    visited: set[tuple[int, frozenset[str]]] = set()
     deps: set[str] = set()
-    # Only exported requirements are rewritten, so unused extra deps remain absent.
     while queue:
-        current = queue.pop()
-        if current in visited:
+        current, extras = queue.pop()
+        if (current, extras) in visited:
             continue
-        visited.add(current)
-        pkg = packages[current]
-        dependencies = list(pkg.get("dependencies", []))
-        for extra_deps in pkg.get("optional-dependencies", {}).values():
-            dependencies.extend(extra_deps)
-        for dep in dependencies:
+        visited.add((current, extras))
+        for dep in dependencies(current, extras):
             name = dep["name"].lower().replace("-", "_")
             deps.add(name)
-            for index in by_name.get(name, []):
-                candidate = packages[index]
-                if "version" in dep and candidate.get("version") != dep["version"]:
-                    continue
-                if "source" in dep and candidate.get("source") != dep["source"]:
-                    continue
-                if index not in visited:
-                    queue.append(index)
+            dep_extras = frozenset(
+                e.lower().replace("-", "_") for e in dep.get("extra", [])
+            )
+            queue.extend((index, dep_extras) for index in matching_entries(dep))
 
     # Return only the deps, not the git packages themselves.
     return deps - roots
@@ -338,7 +378,7 @@ def measure_install_size(
                     git_dep_names_norm = {
                         n.lower().replace("-", "_")
                         for n in _get_transitive_deps_of_git_packages(
-                            lock_path, dropped_git_names
+                            lock_path, dropped_git_names, package_name
                         )
                     }
 

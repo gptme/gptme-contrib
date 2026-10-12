@@ -1026,3 +1026,73 @@ dependencies = [{ name = "unrelated-source" }]
     assert check_install_size._get_transitive_deps_of_git_packages(
         lock_path, {"mypkg"}
     ) == {"client", "needed"}
+
+
+def test_transitive_deps_skip_unrequested_extra(tmp_path):
+    import check_install_size
+
+    lock_path = tmp_path / "uv.lock"
+    lock_path.write_text("""
+[[package]]
+name = "mypkg"
+dependencies = [{ name = "base" }]
+[package.optional-dependencies]
+cli = [{ name = "client" }]
+[[package]]
+name = "client"
+dependencies = [{ name = "transport" }]
+""")
+    assert check_install_size._get_transitive_deps_of_git_packages(
+        lock_path, {"mypkg"}
+    ) == {"base"}
+
+
+def test_measure_install_size_tracks_consumer_selected_extras(tmp_path):
+    import check_install_size
+
+    (tmp_path / "uv.lock").write_text("""
+[[package]]
+name = "consumer"
+dependencies = [{ name = "bridge" }, { name = "unrelated" }]
+[[package]]
+name = "bridge"
+dependencies = [{ name = "mypkg", extra = ["cli"] }]
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/mypkg.git" }
+[package.optional-dependencies]
+cli = [{ name = "client", extra = ["http"] }]
+unused = [{ name = "unrelated" }]
+[[package]]
+name = "client"
+[package.optional-dependencies]
+http = [{ name = "transport" }]
+""")
+    pkg_dir = tmp_path / "packages" / "consumer"
+    pkg_dir.mkdir(parents=True)
+    requirements = []
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock(returncode=0, stderr="", stdout="")
+        if "venv" in cmd:
+            venv = Path(cmd[-1])
+            _make_fake_venv(venv, 1024)
+            (venv / "bin").mkdir(exist_ok=True)
+            (venv / "bin" / "python").touch()
+        elif "export" in cmd:
+            # uv export does not retain extras in the flattened git requirement.
+            result.stdout = (
+                "mypkg @ git+https://example.com/mypkg.git@abc\n"
+                "client==1.0\ntransport==1.0\nunrelated==1.0\n"
+            )
+        elif "install" in cmd:
+            requirements.append(Path(cmd[cmd.index("-r") + 1]).read_text())
+        elif "du" in cmd:
+            result.stdout = f"1024\t{cmd[-1]}\n"
+        return result
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        assert isinstance(
+            check_install_size.measure_install_size(pkg_dir, "consumer"), float
+        )
+    assert requirements == ["client\ntransport\nunrelated==1.0\n"]
