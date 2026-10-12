@@ -203,12 +203,16 @@ def _get_transitive_deps_of_git_packages(
     dep_map: dict[str, set[str]] = {}
     for pkg in lock_data.get("package", []):
         name = pkg.get("name", "").lower().replace("-", "_")
+        dependencies = list(pkg.get("dependencies", []))
+        for extra_deps in pkg.get("optional-dependencies", {}).values():
+            dependencies.extend(extra_deps)
         dep_map.setdefault(name, set()).update(
-            d["name"].lower().replace("-", "_") for d in pkg.get("dependencies", [])
+            d["name"].lower().replace("-", "_") for d in dependencies
         )
 
     # BFS from the git package roots to collect every reachable dep.
-    roots = {n.lower().replace("-", "_") for n in git_pkg_names}
+    # Only exported requirements are rewritten, so unused extra deps remain absent.
+    roots = {n.split("[", 1)[0].lower().replace("-", "_") for n in git_pkg_names}
     visited: set[str] = set()
     queue = list(roots)
     while queue:

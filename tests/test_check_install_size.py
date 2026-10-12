@@ -974,3 +974,21 @@ dependencies = [{ name = "transport" }]
             check_install_size.measure_install_size(pkg_dir, "consumer"), float
         )
     assert requirements == [artifact + "\n"]
+
+
+def test_transitive_deps_include_optional_edges_and_extras_roots(tmp_path):
+    import check_install_size
+
+    lock_path = tmp_path / "uv.lock"
+    lock_path.write_text("""
+[[package]]
+name = "mypkg"
+[package.optional-dependencies]
+cli = [{ name = "client" }]
+[[package]]
+name = "client"
+dependencies = [{ name = "transport" }]
+""")
+    assert check_install_size._get_transitive_deps_of_git_packages(
+        lock_path, {"mypkg[cli]"}
+    ) == {"client", "transport"}
