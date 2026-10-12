@@ -114,6 +114,7 @@ from gptme_runloops.prompt_templates import (
     render_mention_constraint,
     render_preheld_claim_block,
 )
+from gptme_runloops.utils.state import atomic_write_text, locked_state_file
 from gptme_runloops.worker_records import (
     KNOWN_DELIVERY_OUTCOMES,
     append_wait_merge_gate_log,
@@ -294,6 +295,22 @@ class RunItem:
     def number_str(self) -> str:
         """The ``jq -r '.number'`` rendering (``null`` for a missing number)."""
         return "null" if self.number is None else str(self.number)
+
+    @property
+    def notification_states(self) -> tuple[dict[str, str], ...]:
+        """Immutable notification watermarks carried by this work item."""
+        raw_states = self.raw.get("notification_states")
+        if not isinstance(raw_states, list):
+            return ()
+        states: list[dict[str, str]] = []
+        for raw_state in raw_states:
+            if not isinstance(raw_state, Mapping):
+                continue
+            notif_id = str(raw_state.get("id", ""))
+            updated_at = str(raw_state.get("updated_at", ""))
+            if notif_id.isdigit() and updated_at:
+                states.append({"id": notif_id, "updated_at": updated_at})
+        return tuple(states)
 
     @classmethod
     def from_grouped_json(cls, line: str) -> RunItem:
@@ -1057,6 +1074,36 @@ def promote_item_state(
             for f in (map_file, state_file):
                 if f.is_file():
                     shutil.copy(f, state / f.name)
+
+
+def promote_carried_notification_states(
+    config: RunItemConfig,
+    item: RunItem,
+) -> None:
+    """Promote this worker's immutable notification watermarks monotonically.
+
+    Parent monitoring cycles replace the shared pending directory while workers
+    are still in flight. The carried snapshots remain owned by the dispatched
+    item and therefore survive that reset. A per-notification sidecar lock makes
+    the compare-and-write monotonic across workers finishing out of order.
+    """
+    if not item.notification_states:
+        return
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    owner = f"{item.repo}#{item.number_str}"
+    for snapshot in item.notification_states:
+        notif_id = snapshot["id"]
+        updated_at = snapshot["updated_at"]
+        state_file = config.state_dir / f"notif-{notif_id}.state"
+        with locked_state_file(state_file):
+            try:
+                current = state_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                current = ""
+            if current and current >= updated_at:
+                continue
+            atomic_write_text(state_file, updated_at)
+            atomic_write_text(state_file.with_suffix(".map"), owner)
 
 
 def promote_notification_states(config: RunItemConfig) -> None:
@@ -2762,6 +2809,7 @@ def run_post_session(
                 item.number,
                 include_master_ci="master_ci_failure" in item.types,
             )
+            promote_carried_notification_states(config, item)
     elif (
         hooks.delivery_check is not None
         and resolve_cooldown_dir(config) is not None
@@ -2816,6 +2864,7 @@ def run_post_session(
                 item.number,
                 include_master_ci="master_ci_failure" in item.types,
             )
+            promote_carried_notification_states(config, item)
     else:
         promote_item_state(
             config,
@@ -2823,6 +2872,7 @@ def run_post_session(
             item.number,
             include_master_ci="master_ci_failure" in item.types,
         )
+        promote_carried_notification_states(config, item)
 
     # 9. Observable-effect signal.
     # A clean exit is not evidence the work landed: a worker can commit a fix

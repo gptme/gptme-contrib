@@ -2598,7 +2598,12 @@ def notification_priority:
                     # survive into the grouped work file and the dispatch ledger.
                     printf '%s' "$item" | jq -c \
                         --arg detail "$_notif_reason${_actor_class:+; actor_class=$_actor_class}" \
-                        'del(.id, .updated_at, .subject_type) | .detail = $detail'
+                        '.notification_state = {
+                            id: (.id | tostring),
+                            updated_at: (.updated_at | tostring)
+                        }
+                        | del(.id, .updated_at, .subject_type)
+                        | .detail = $detail'
                     printf '%s' "$notif_updated" > "$state_file"
                     [ "$number" -gt 0 ] 2>/dev/null && printf '%s#%s' "$repo" "$number" > "$map_file"
                 fi

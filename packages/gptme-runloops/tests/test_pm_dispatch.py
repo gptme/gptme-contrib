@@ -2856,6 +2856,57 @@ class TestLaneDispatcherEnvAliases:
         assert "--setenv=AGENT_PM_BANDIT_SHADOW=1" in cmd
         assert "--setenv=BOB_PM_BANDIT_SHADOW=1" in cmd
 
+    def test_default_launcher_preserves_notification_states(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        launched_payloads: list[dict[str, Any]] = []
+
+        def fake_run(cmd, **kwargs):
+            work_arg = next(
+                arg for arg in cmd if arg.startswith("--setenv=PM_WORK_FILE=")
+            )
+            work_file = Path(work_arg.split("=", 2)[2])
+            launched_payloads.append(json.loads(work_file.read_text()))
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="", stderr=""
+            )
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+        dispatcher = LaneDispatcher(
+            slot_manager=SlotManager(
+                slot_cap=10,
+                count_running=lambda: 0,
+                count_running_lane=lambda lane: 0,
+                is_busy=lambda unit: False,
+            )
+        )
+        item = SlotItem(
+            "gptme/gptme",
+            1,
+            ["notification"],
+            "Test item",
+            notification_states=[
+                {"id": "25314090843", "updated_at": "2026-10-12T17:40:22Z"}
+            ],
+        )
+        script = tmp_path / "slot.sh"
+        script.write_text("#!/bin/bash\n")
+        script.chmod(0o755)
+
+        assert dispatcher._launch_unit(
+            "bob-pm-fast-slot-test",
+            "bob-pm-fast-slot-test",
+            "gptme-gptme-1",
+            "fast",
+            item,
+            "claude-code",
+            "sonnet",
+            str(script),
+        )
+        assert launched_payloads[0]["notification_states"] == item.notification_states
+
     def test_model_unresolved_writes_empty_not_omitted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

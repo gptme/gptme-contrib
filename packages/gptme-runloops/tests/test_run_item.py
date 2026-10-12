@@ -64,6 +64,7 @@ from gptme_runloops.run_item import (
     item_slug,
     plan_item,
     predict_cc_trajectory_path,
+    promote_carried_notification_states,
     promote_item_state,
     promote_notification_states,
     purge_pending_notif_state,
@@ -1865,10 +1866,12 @@ def test_trajectory_codex_snapshot_diff_newest_wins(tmp_path) -> None:
 # --- Post-session composition (worker.sh order, fake collaborators) ---
 
 
-def _post_session_fixture(tmp_path, *, exit_code=0, types=("pr_update",)):
+def _post_session_fixture(
+    tmp_path, *, exit_code=0, types=("pr_update",), item_kwargs=None
+):
     config = make_config(tmp_path)
     config.resolved("records_dir", "records").mkdir(parents=True, exist_ok=True)
-    item = make_item(types=list(types))
+    item = make_item(types=list(types), **(item_kwargs or {}))
     run_cmd = FakeRunCmd()
 
     def fake_post_session(**kwargs):
@@ -2143,7 +2146,12 @@ def test_post_session_clean_exit_with_unverified_delivery_does_not_consume_notif
     """A clean worker exit cannot compensate for a broken delivery check."""
     from gptme_runloops.run_item import promote_notification_states
 
-    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(tmp_path)
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path,
+        item_kwargs={
+            "notification_states": [{"id": "555", "updated_at": "2026-08-20T09:31:35Z"}]
+        },
+    )
     run_cmd.on("/fake/check-delivery.py", returncode=1, stdout="")
     run_cmd.on("/fake/gate.py", returncode=1)
     config.pending_state_dir.mkdir(parents=True)
@@ -2210,6 +2218,47 @@ def test_post_session_failed_exit_with_verified_delivery_still_promotes(
     promote_notification_states(config)
 
     assert (config.state_dir / "notif-555.state").exists()
+
+
+def test_post_session_promotes_carried_notification_snapshot_without_pending_state(
+    tmp_path, cooldown_dir
+) -> None:
+    """A second parent reset cannot erase the first worker's owned watermark."""
+    snapshot = {"id": "555", "updated_at": "2026-10-12T17:40:22Z"}
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, item_kwargs={"notification_states": [snapshot]}
+    )
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome": "handled"}')
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir()
+    (config.pending_state_dir / "notif-555.state").write_text(snapshot["updated_at"])
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    # The next parent cycle replaces pending state while this worker is in flight.
+    for pending_file in config.pending_state_dir.iterdir():
+        pending_file.unlink()
+
+    run_post_session(plan, item, outcome, config, hooks)
+
+    assert (config.state_dir / "notif-555.state").read_text() == snapshot["updated_at"]
+    assert (config.state_dir / "notif-555.map").read_text() == (
+        "gptme/gptme-contrib#1234"
+    )
+
+
+def test_carried_notification_promotion_does_not_replace_newer_watermark(
+    tmp_path,
+) -> None:
+    config = make_config(tmp_path)
+    config.state_dir.mkdir()
+    state_file = config.state_dir / "notif-555.state"
+    state_file.write_text("2026-10-12T18:00:00Z")
+    item = make_item(
+        notification_states=[{"id": "555", "updated_at": "2026-10-12T17:40:22Z"}]
+    )
+
+    promote_carried_notification_states(config, item)
+
+    assert state_file.read_text() == "2026-10-12T18:00:00Z"
 
 
 def test_post_session_unverified_delivery_without_cooldown_dir_promotes_directly(

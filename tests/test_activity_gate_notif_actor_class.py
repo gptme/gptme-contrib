@@ -418,6 +418,10 @@ def test_first_sight_self_comment_emits_with_actor_class() -> None:
         emitted = _emitted_notifications(result.stdout)
         assert len(emitted) == 1, result.stdout
         assert emitted[0]["detail"] == "author; actor_class=self"
+        assert emitted[0]["notification_state"] == {
+            "id": NOTIF_ID,
+            "updated_at": "2026-08-26T17:15:04Z",
+        }
 
 
 def test_actor_probe_failure_fails_open() -> None:

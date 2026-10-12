@@ -178,6 +178,7 @@ class SlotItem:
     title: str = ""
     url: str = ""
     detail: str = ""
+    notification_states: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -948,6 +949,7 @@ class LaneDispatcher:
                         "number": item.number,
                         "types": item.types,
                         "title": item.title,
+                        "notification_states": item.notification_states,
                     }
                 )
                 + "\n"
