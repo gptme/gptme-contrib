@@ -1176,6 +1176,109 @@ source = { registry = "https://pypi.org/simple" }
     ) == {"client": {"1.0"}, "torch": set()}
 
 
+def test_git_dependency_versions_exclude_unselected_roots_and_source_collisions(
+    tmp_path,
+):
+    import check_install_size
+
+    lock_path = tmp_path / "uv.lock"
+    lock_path.write_text("""
+[[package]]
+name = "consumer"
+dependencies = [{ name = "mypkg", source = { git = "https://example.com/a.git" } }]
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/a.git" }
+dependencies = [{ name = "client", version = "1.0", source = { registry = "https://pypi.org/simple" } }]
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/b.git" }
+dependencies = [{ name = "unrelated" }]
+[[package]]
+name = "client"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+[[package]]
+name = "client"
+version = "1.0"
+source = { registry = "https://private.example/simple" }
+[[package]]
+name = "unrelated"
+version = "2.0"
+""")
+    assert check_install_size._get_git_dependency_versions(
+        lock_path, {"mypkg"}, "consumer"
+    ) == {"client": set()}
+    # The source collision is protected even without consumer provenance; root
+    # selection is a separate safeguard and must not mask that protection.
+    assert check_install_size._get_git_dependency_versions(lock_path, {"mypkg"}) == {
+        "client": set(),
+        "unrelated": {"2.0"},
+    }
+
+
+def test_measure_install_size_retains_same_version_private_registry_pin(tmp_path):
+    import check_install_size
+
+    (tmp_path / "uv.lock").write_text("""
+[[package]]
+name = "consumer"
+dependencies = [{ name = "mypkg" }]
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/mypkg.git" }
+dependencies = [
+    { name = "client", version = "1.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux'" },
+    { name = "client", version = "1.0", source = { registry = "https://private.example/simple" }, marker = "sys_platform == 'win32'" },
+    { name = "public-only", version = "1.0" },
+]
+[[package]]
+name = "client"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+[[package]]
+name = "client"
+version = "1.0"
+source = { registry = "https://private.example/simple" }
+[[package]]
+name = "public-only"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+""")
+    pkg_dir = tmp_path / "packages" / "consumer"
+    pkg_dir.mkdir(parents=True)
+    requirements = []
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock(returncode=0, stderr="", stdout="")
+        if "venv" in cmd:
+            venv = Path(cmd[-1])
+            _make_fake_venv(venv, 1024)
+            (venv / "bin").mkdir(exist_ok=True)
+            (venv / "bin" / "python").touch()
+        elif "export" in cmd:
+            result.stdout = (
+                "mypkg @ git+https://example.com/mypkg.git@abc\n"
+                "client==1.0 ; sys_platform == 'linux'\n"
+                "client==1.0 ; sys_platform == 'win32'\n"
+                "public-only==1.0\n"
+            )
+        elif "install" in cmd:
+            requirements.append(Path(cmd[cmd.index("-r") + 1]).read_text())
+        elif "du" in cmd:
+            result.stdout = f"1024\t{cmd[-1]}\n"
+        return result
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        assert isinstance(
+            check_install_size.measure_install_size(pkg_dir, "consumer"), float
+        )
+    assert requirements == [
+        "client==1.0 ; sys_platform == 'linux'\n"
+        "client==1.0 ; sys_platform == 'win32'\npublic-only\n"
+    ]
+
+
 def test_transitive_deps_include_independently_selected_descendant_extra(tmp_path):
     import check_install_size
 

@@ -269,6 +269,9 @@ def _get_git_dependency_versions(
             if e.strip()
         }
         for index in by_name.get(name, []):
+            if consumer_name and _normalize_name(consumer_name) in by_name:
+                if index not in selected:
+                    continue
             if not packages[index].get("source") or "git" in packages[index]["source"]:
                 queue.append(
                     (index, frozenset(explicit_extras | selected.get(index, set())))
@@ -304,6 +307,24 @@ def _get_git_dependency_versions(
                 (index, dep_extras | frozenset(selected.get(index, set())))
                 for index in entries
             )
+
+    # Exported exact pins do not encode registry identity. If an alternate
+    # registry has the same name/version, retain that version on every platform
+    # rather than relaxing a private artifact through a public namesake. Missing
+    # version selectors (None) cannot safely bypass this ambiguity either.
+    for name, versions in deps.items():
+        protected_versions = {
+            packages[index].get("version")
+            for index in by_name.get(name, [])
+            if packages[index]
+            .get("source", {})
+            .get("registry", "https://pypi.org/simple")
+            .rstrip("/")
+            != "https://pypi.org/simple"
+        }
+        if protected_versions:
+            versions.discard(None)
+            versions.difference_update(protected_versions)
 
     # Return only the deps, not the git packages themselves.
     return {name: versions for name, versions in deps.items() if name not in roots}
