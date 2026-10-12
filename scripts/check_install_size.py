@@ -203,9 +203,9 @@ def _get_transitive_deps_of_git_packages(
     dep_map: dict[str, set[str]] = {}
     for pkg in lock_data.get("package", []):
         name = pkg.get("name", "").lower().replace("-", "_")
-        dep_map[name] = {
+        dep_map.setdefault(name, set()).update(
             d["name"].lower().replace("-", "_") for d in pkg.get("dependencies", [])
-        }
+        )
 
     # BFS from the git package roots to collect every reachable dep.
     roots = {n.lower().replace("-", "_") for n in git_pkg_names}
@@ -340,6 +340,10 @@ def measure_install_size(
                             marker_suffix = " ; " + marker_suffix
                         else:
                             constraint_part, marker_suffix = bare, ""
+                        # Explicit artifact sources must not be replaced with index lookups.
+                        if " @" in constraint_part:
+                            req_lines.append(line)
+                            continue
                         # Extract the package name from the constraint part
                         # (handles "name==version", "name>=version", "name @ url", etc.)
                         pkg_name = (

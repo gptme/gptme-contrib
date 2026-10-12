@@ -910,3 +910,67 @@ def test_print_failure_summary_no_match_fallback(capsys):
     assert "invalid budget configuration" not in out
     assert "failed to install" not in out
     assert "exceeded" not in out
+
+
+def test_transitive_deps_union_duplicate_locked_versions(tmp_path):
+    import check_install_size
+
+    lock_path = tmp_path / "uv.lock"
+    lock_path.write_text("""
+[[package]]
+name = "mypkg"
+dependencies = [{ name = "client", version = "1.0" }]
+[[package]]
+name = "client"
+version = "1.0"
+dependencies = [{ name = "transport" }]
+[[package]]
+name = "client"
+version = "2.0"
+dependencies = []
+[[package]]
+name = "transport"
+version = "1.0"
+""")
+    assert check_install_size._get_transitive_deps_of_git_packages(
+        lock_path, {"mypkg"}
+    ) == {"client", "transport"}
+
+
+def test_measure_install_size_retains_explicit_artifact_source(tmp_path):
+    import check_install_size
+
+    artifact = (
+        "transport @ https://example.com/transport-1.0.whl ; python_version >= '3.11'"
+    )
+    (tmp_path / "uv.lock").write_text("""
+[[package]]
+name = "mypkg"
+dependencies = [{ name = "transport" }]
+""")
+    pkg_dir = tmp_path / "packages" / "consumer"
+    pkg_dir.mkdir(parents=True)
+    requirements = []
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock(returncode=0, stderr="", stdout="")
+        if "venv" in cmd:
+            venv = Path(cmd[-1])
+            _make_fake_venv(venv, 1024)
+            (venv / "bin").mkdir(exist_ok=True)
+            (venv / "bin" / "python").touch()
+        elif "export" in cmd:
+            result.stdout = (
+                "mypkg @ git+https://example.com/mypkg.git@abc\n" + artifact + "\n"
+            )
+        elif "install" in cmd:
+            requirements.append(Path(cmd[cmd.index("-r") + 1]).read_text())
+        elif "du" in cmd:
+            result.stdout = f"1024\t{cmd[-1]}\n"
+        return result
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        assert isinstance(
+            check_install_size.measure_install_size(pkg_dir, "consumer"), float
+        )
+    assert requirements == [artifact + "\n"]
