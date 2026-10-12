@@ -1,0 +1,69 @@
+name: Lock Refresh
+
+# `uv.lock` pins `gptme` from git (see [tool.uv.sources]) while the install-size
+# check resolves it from PyPI. When the two drift apart, master goes red for every
+# package (gptme/gptme-contrib#1881). Refresh the pin on a schedule so the drift
+# shows up as a reviewable PR instead of a red master.
+
+on:
+  schedule:
+    - cron: '0 4 * * 1'  # Mondays, after the nightly test matrix (03:00)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: lock-refresh
+  cancel-in-progress: false
+
+env:
+  BRANCH: chore/lock-refresh-gptme
+  TITLE: "chore(deps): refresh gptme lock pin"
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Refresh the gptme pin
+        run: uv lock --upgrade-package gptme
+
+      - name: Open or update the refresh PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet -- uv.lock; then
+            echo "uv.lock is current; nothing to do."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$BRANCH"
+          git add uv.lock
+          git commit -m "$TITLE"
+          # The branch is bot-owned and rebuilt from master on every run.
+          git push --force origin "$BRANCH"
+
+          body="Automated \`uv lock --upgrade-package gptme\` (workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID).
+
+          The install-size check resolves \`gptme\` from PyPI while \`uv.lock\` pins it from git; refreshing keeps the two from drifting apart (#1881). Review the lock diff and merge once CI is green."
+
+          if [ -n "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr edit "$BRANCH" --title "$TITLE" --body "$body"
+          else
+            gh pr create --head "$BRANCH" --base "${{ github.event.repository.default_branch }}" \
+              --title "$TITLE" --body "$body"
+          fi
+
+          # Pushes and PRs made with GITHUB_TOKEN do not trigger workflows, but
+          # workflow_dispatch does. Run the package tests (including install-size)
+          # on the branch so they report on the PR's head commit.
+          gh workflow run test-packages.yml --ref "$BRANCH"
