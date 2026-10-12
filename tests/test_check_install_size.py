@@ -1096,3 +1096,25 @@ http = [{ name = "transport" }]
             check_install_size.measure_install_size(pkg_dir, "consumer"), float
         )
     assert requirements == ["client\ntransport\nunrelated==1.0\n"]
+
+
+def test_transitive_deps_include_independently_selected_descendant_extra(tmp_path):
+    import check_install_size
+
+    lock_path = tmp_path / "uv.lock"
+    lock_path.write_text("""
+[[package]]
+name = "consumer"
+dependencies = [{ name = "mypkg" }, { name = "client", extra = ["http"] }]
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/mypkg.git" }
+dependencies = [{ name = "client" }]
+[[package]]
+name = "client"
+[package.optional-dependencies]
+http = [{ name = "transport" }]
+""")
+    assert check_install_size._get_transitive_deps_of_git_packages(
+        lock_path, {"mypkg"}, "consumer"
+    ) == {"client", "transport"}

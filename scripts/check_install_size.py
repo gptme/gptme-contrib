@@ -276,7 +276,10 @@ def _get_transitive_deps_of_git_packages(
             dep_extras = frozenset(
                 e.lower().replace("-", "_") for e in dep.get("extra", [])
             )
-            queue.extend((index, dep_extras) for index in matching_entries(dep))
+            queue.extend(
+                (index, dep_extras | frozenset(selected.get(index, set())))
+                for index in matching_entries(dep)
+            )
 
     # Return only the deps, not the git packages themselves.
     return deps - roots
