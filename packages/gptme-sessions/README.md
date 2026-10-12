@@ -152,6 +152,12 @@ for goal alignment (0.0–1.0 plus a one-line reason) with an LLM; the default m
 Haiku via `ANTHROPIC_API_KEY`, and other provider-prefixed models route through gptme when it is
 installed. `--update-store` writes scores back to matching records.
 
+Set `GPTME_SESSIONS_JUDGE_MODEL` before starting the process to override the default
+for the judge APIs and CLI (an explicit `--model` still takes precedence). For example,
+`GPTME_SESSIONS_JUDGE_MODEL=openrouter/anthropic/claude-haiku-5.5` selects the cheaper
+OpenRouter route for short prompts. This route requires the optional `gptme` package
+and an OpenRouter key; it does not replace the Anthropic-direct default for other installs.
+
 ### Session provenance (`blame`)
 
 `blame` answers *"which AI session produced this line / commit?"* by correlating git
