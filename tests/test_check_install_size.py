@@ -1098,6 +1098,57 @@ http = [{ name = "transport" }]
     assert requirements == ["client\ntransport\nunrelated==1.0\n"]
 
 
+def test_measure_install_size_preserves_independent_locked_version(tmp_path):
+    """Only the version reached from the git root loses its exported pin."""
+    import check_install_size
+
+    (tmp_path / "uv.lock").write_text("""
+[[package]]
+name = "consumer"
+dependencies = [{ name = "mypkg" }, { name = "client", version = "2.0", marker = "sys_platform == 'linux'" }]
+[[package]]
+name = "mypkg"
+source = { git = "https://example.com/mypkg.git" }
+dependencies = [{ name = "client", version = "1.0", marker = "sys_platform == 'win32'" }]
+[[package]]
+name = "client"
+version = "1.0"
+[[package]]
+name = "client"
+version = "2.0"
+""")
+    pkg_dir = tmp_path / "packages" / "consumer"
+    pkg_dir.mkdir(parents=True)
+    requirements = []
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock(returncode=0, stderr="", stdout="")
+        if "venv" in cmd:
+            venv = Path(cmd[-1])
+            _make_fake_venv(venv, 1024)
+            (venv / "bin").mkdir(exist_ok=True)
+            (venv / "bin" / "python").touch()
+        elif "export" in cmd:
+            result.stdout = (
+                "mypkg @ git+https://example.com/mypkg.git@abc\n"
+                "client==1.0 ; sys_platform == 'win32'\n"
+                "client==2.0 ; sys_platform == 'linux'\n"
+            )
+        elif "install" in cmd:
+            requirements.append(Path(cmd[cmd.index("-r") + 1]).read_text())
+        elif "du" in cmd:
+            result.stdout = f"1024\t{cmd[-1]}\n"
+        return result
+
+    with patch.object(subprocess, "run", side_effect=fake_run):
+        assert isinstance(
+            check_install_size.measure_install_size(pkg_dir, "consumer"), float
+        )
+    assert requirements == [
+        "client ; sys_platform == 'win32'\nclient==2.0 ; sys_platform == 'linux'\n"
+    ]
+
+
 def test_transitive_deps_include_independently_selected_descendant_extra(tmp_path):
     import check_install_size
 

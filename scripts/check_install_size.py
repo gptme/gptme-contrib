@@ -180,7 +180,14 @@ def _is_resolution_failure(stderr: str) -> bool:
 def _get_transitive_deps_of_git_packages(
     lock_path: Path, git_pkg_names: set[str], consumer_name: str | None = None
 ) -> set[str]:
-    """Return all transitive dependency names of the given git-sourced packages in uv.lock.
+    """Return the names in the version-aware git dependency closure."""
+    return set(_get_git_dependency_versions(lock_path, git_pkg_names, consumer_name))
+
+
+def _get_git_dependency_versions(
+    lock_path: Path, git_pkg_names: set[str], consumer_name: str | None = None
+) -> dict[str, set[str | None]]:
+    """Return transitive dependency versions of the given git-sourced packages in uv.lock.
 
     When git+ lines are dropped from an exported requirements.txt, the lock-pinned
     versions of their deps can conflict with the PyPI-resolved version of the same
@@ -192,12 +199,12 @@ def _get_transitive_deps_of_git_packages(
     transitive pins would still prevent resolution.
     """
     if not git_pkg_names or not lock_path.exists():
-        return set()
+        return {}
     try:
         with open(lock_path, "rb") as f:
             lock_data = tomllib.load(f)
     except Exception:
-        return set()
+        return {}
 
     # Keep locked package entries distinct: merging by name follows edges from
     # unrelated versions/sources and can un-pin independent consumer requirements.
@@ -264,7 +271,7 @@ def _get_transitive_deps_of_git_packages(
                     (index, frozenset(explicit_extras | selected.get(index, set())))
                 )
     visited: set[tuple[int, frozenset[str]]] = set()
-    deps: set[str] = set()
+    deps: dict[str, set[str | None]] = {}
     while queue:
         current, extras = queue.pop()
         if (current, extras) in visited:
@@ -272,17 +279,23 @@ def _get_transitive_deps_of_git_packages(
         visited.add((current, extras))
         for dep in dependencies(current, extras):
             name = dep["name"].lower().replace("-", "_")
-            deps.add(name)
+            entries = list(matching_entries(dep))
+            versions = deps.setdefault(name, set())
+            if entries:
+                versions.update(packages[index].get("version") for index in entries)
+            else:
+                # In incomplete locks, retain an explicit edge selector if present.
+                versions.add(dep.get("version"))
             dep_extras = frozenset(
                 e.lower().replace("-", "_") for e in dep.get("extra", [])
             )
             queue.extend(
                 (index, dep_extras | frozenset(selected.get(index, set())))
-                for index in matching_entries(dep)
+                for index in entries
             )
 
     # Return only the deps, not the git packages themselves.
-    return deps - roots
+    return {name: versions for name, versions in deps.items() if name not in roots}
 
 
 def measure_install_size(
@@ -375,21 +388,18 @@ def measure_install_size(
                     for line in all_raw_lines
                     if " @ git+" in line
                 }
-                git_dep_names_norm: set[str] = set()
+                git_dep_versions: dict[str, set[str | None]] = {}
                 if dropped_git_names:
                     lock_path = package_path.parent.parent / "uv.lock"
-                    git_dep_names_norm = {
-                        n.lower().replace("-", "_")
-                        for n in _get_transitive_deps_of_git_packages(
-                            lock_path, dropped_git_names, package_name
-                        )
-                    }
+                    git_dep_versions = _get_git_dependency_versions(
+                        lock_path, dropped_git_names, package_name
+                    )
 
                 req_lines = []
                 for line in all_raw_lines:
                     if " @ git+" in line or line.strip().startswith("git+"):
                         continue  # drop the git source pin
-                    if git_dep_names_norm:
+                    if git_dep_versions:
                         # Separate the environment marker from the version constraint.
                         # A requirement line may look like:
                         #   pywin32==308 ; sys_platform == 'win32'
@@ -417,7 +427,11 @@ def measure_install_size(
                             .lower()
                             .replace("-", "_")
                         )
-                        if pkg_name in git_dep_names_norm:
+                        versions = git_dep_versions.get(pkg_name, set())
+                        _, separator, pinned_version = constraint_part.partition("==")
+                        if separator and (
+                            None in versions or pinned_version.strip() in versions
+                        ):
                             # Un-pin: keep only the package name (+ marker) so uv
                             # resolves the version fresh alongside the PyPI release.
                             req_lines.append(pkg_name.replace("_", "-") + marker_suffix)
