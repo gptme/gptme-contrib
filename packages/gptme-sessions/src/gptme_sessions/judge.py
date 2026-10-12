@@ -905,7 +905,7 @@ def _judge_via_anthropic_direct(
 
     try:
         client = anthropic.Anthropic(api_key=key)
-        response = client.messages.create(
+        response = client.messages.create(  # type: ignore[call-overload]
             model=_strip_anthropic_prefix(model),
             max_tokens=150,
             system=JUDGE_SYSTEM,
