@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from gptme_sessions.failure_capture import (
     FAILURE_REASON_AUTH,
     FAILURE_REASON_INVALID_REQUEST,
@@ -977,3 +979,40 @@ def test_error_line_regex_requires_status_code_boundaries():
     assert _ERROR_LINE_RE.search('{"http_status": 429, "quota": true}') is not None
     # A comma-separated list of statuses still matches.
     assert _ERROR_LINE_RE.search("401, 402") is not None
+
+
+def test_classify_scattered_rate_and_limit_substrings_not_rate_limit():
+    """'rate' from 'Auto-generated' + 'limit' from a gh echo is not a rate limit."""
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=106,
+        input_tokens=30536,
+        has_assistant_turn=False,
+        error_text=(
+            "Auto-generated conversation name: Backlog triage\n"
+            "gh pass-through: gh issue list --limit 200\n"
+            "ERROR Provider stream for openai-subscription/gpt-6.1-sol ended without any output"
+        ),
+    )
+    assert reason != FAILURE_REASON_RATE_LIMIT
+
+
+@pytest.mark.parametrize(
+    "error_text",
+    [
+        "Rate limit reached for requests",
+        "rate-limited by upstream",
+        "error type: rate_limit_error",
+        "RateLimit exceeded",
+        "Too Many Requests",
+    ],
+)
+def test_classify_rate_limit_phrases(error_text: str):
+    reason = classify_failure_reason(
+        exit_code=1,
+        duration_seconds=30,
+        input_tokens=100,
+        has_assistant_turn=True,
+        error_text=error_text,
+    )
+    assert reason == FAILURE_REASON_RATE_LIMIT

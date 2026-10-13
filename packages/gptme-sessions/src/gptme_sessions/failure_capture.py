@@ -47,6 +47,11 @@ _HTTP_429_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A rate-limit *phrase*. Two independent substrings are not enough: gptme's
+# "Auto-generated conversation name" plus any `gh ... --limit 200` echo would
+# satisfy `"rate" in lower and "limit" in lower` on every nonzero exit.
+_RATE_LIMIT_PHRASE_RE = re.compile(r"rate[\s_-]?limit|too many requests", re.IGNORECASE)
+
 
 # HTTP/API 402 as a status. Require a delimiter (`status: 402`, `status=402`)
 # so incidental prose like ``status 402 of the account`` cannot classify as
@@ -411,7 +416,7 @@ def classify_failure_reason(
         # genuine 429/weekly-limit body.
         if _mentions_overload(lower):
             return FAILURE_REASON_UPSTREAM_OVERLOADED
-        if "rate" in lower and "limit" in lower:
+        if _RATE_LIMIT_PHRASE_RE.search(lower):
             return FAILURE_REASON_RATE_LIMIT
         if (
             "authentication" in lower
