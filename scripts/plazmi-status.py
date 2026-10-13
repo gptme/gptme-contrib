@@ -1,5 +1,8 @@
 #!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.8"
 # dependencies = []
+# ///
 """Read an existing Plazmi resident's pulse or digest through plazmi-cli.
 
 Install the MIT client from https://github.com/cairn-agent/plazmi-cli first.
