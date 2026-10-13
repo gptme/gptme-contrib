@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 from gptme_coordination.db import CoordinationDB
-from gptme_coordination.events import PRIORITY_DEFAULTS, EventQueue, QueueStats
+from gptme_coordination.events import (
+    AGE_BOOST_CAP,
+    AGE_BOOST_RATE,
+    PRIORITY_DEFAULTS,
+    EventQueue,
+    QueueStats,
+)
 
 
 @pytest.fixture
@@ -100,6 +106,42 @@ class TestClaimAndComplete:
         assert ev.priority == 100
         assert ev.state == "claimed"
         assert ev.claimed_by == "agent-1"
+
+    def _backdate(self, queue, event_id: int, hours: float) -> None:
+        queue.db.conn.execute(
+            "UPDATE events SET created_at = datetime('now', ?) WHERE id = ?",
+            (f"-{int(hours * 60)} minutes", event_id),
+        )
+        queue.db.conn.commit()
+
+    def test_age_boost_cap_covers_priority_spread(self):
+        # A pending event must be able to overtake a fresh top-priority
+        # event within ~6 h, whatever its own baseline priority is.
+        assert AGE_BOOST_CAP > 100 - 35
+        assert 35 + min(6 * AGE_BOOST_RATE, AGE_BOOST_CAP) > 100
+
+    def test_claim_next_old_low_priority_overtakes_fresh_top_priority(self, queue):
+        old = queue.ingest("completion_followup", "probe", "old", priority=35)
+        assert old is not None and old.id is not None
+        self._backdate(queue, old.id, hours=6)
+        fresh = queue.ingest("ci_failure_pr", "github", "fresh", priority=100)
+        assert fresh is not None
+
+        ev = queue.claim_next("agent-1")
+        assert ev is not None
+        assert ev.id == old.id
+        assert ev.effective_priority > 100
+
+    def test_claim_next_recent_low_priority_does_not_overtake(self, queue):
+        recent = queue.ingest("completion_followup", "probe", "recent", priority=35)
+        assert recent is not None and recent.id is not None
+        self._backdate(queue, recent.id, hours=1)
+        fresh = queue.ingest("ci_failure_pr", "github", "fresh", priority=100)
+        assert fresh is not None
+
+        ev = queue.claim_next("agent-1")
+        assert ev is not None
+        assert ev.id == fresh.id
 
     def test_claim_next_empty_queue_returns_none(self, queue):
         assert queue.claim_next("agent-1") is None

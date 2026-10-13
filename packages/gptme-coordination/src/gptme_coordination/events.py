@@ -24,10 +24,15 @@ from gptme_coordination.db import CoordinationDB
 
 UTC = timezone.utc  # datetime.UTC was added in Python 3.11.
 
-# Default age-boost cap: events gain at most this many priority points
-# as they age (prevents very old events from monopolizing the queue).
-AGE_BOOST_CAP = 20
-AGE_BOOST_RATE = 2  # priority points per hour
+# Age boost: events gain AGE_BOOST_RATE priority points per hour, capped at
+# AGE_BOOST_CAP. Invariant: the cap must exceed the spread between the lowest
+# and highest priorities in live use (completion_followup 35 ... ci_failure 100)
+# so that any pending event overtakes a freshly ingested top-priority event
+# within ~6 h. The previous 2/h, cap 20 could lift a mention (50) only to 70,
+# below a fresh ci_failure_pr (80-100), so low-priority events starved for
+# 20-30 h under a steady CI stream (brain review 2026-10-13).
+AGE_BOOST_CAP = 70
+AGE_BOOST_RATE = 12  # priority points per hour
 
 # Default priority levels for common trigger types
 PRIORITY_DEFAULTS: dict[str, int] = {
