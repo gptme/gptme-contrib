@@ -1,0 +1,53 @@
+name: Tooling bug
+description: Report a reproducible problem with a gptme-contrib tool, script, or plugin.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Share the smallest example that reproduces the problem.
+        This issue is public: remove API keys, tokens, passwords, personal data,
+        and private paths from all commands, examples, and logs before submitting.
+  - type: input
+    id: affected-tool
+    attributes:
+      label: Affected tool
+      description: Name the package, script, or plugin, including its repository path if known.
+      placeholder: packages/gptodo or scripts/example.py
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Include the tool version or gptme-contrib commit, plus the gptme version if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include exact steps or commands, minimal input, and relevant OS/runtime details. Use dummy data and omit secrets.
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What should happen when following those steps?
+    validations:
+      required: true
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: Actual behavior
+      description: What happens instead? Include the error message if there is one, with secrets removed.
+    validations:
+      required: true
+  - type: textarea
+    id: sanitized-logs
+    attributes:
+      label: Sanitized logs (optional)
+      description: Paste only relevant excerpts. Remove API keys, tokens, passwords, personal data, and private paths first.
+      render: text
+    validations:
+      required: false
