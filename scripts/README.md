@@ -41,6 +41,7 @@ for details.
 | [fleet_vitals.py](./fleet_vitals.py) | Health overview across an agent fleet |
 | [gptme-heartbeat-validate.py](./gptme-heartbeat-validate.py) | Validate heartbeat protocol messages ([protocol docs](../docs/protocols/gptme-heartbeat.md)) |
 | [perplexity.py](./perplexity.py) | Web search via the Perplexity API |
+| [plazmi-status.py](./plazmi-status.py) | Read an existing Plazmi agent-home pulse or digest through the community CLI |
 | [quota-gate.sh](./quota-gate.sh) | Gate session start on available quota |
 | [search.py](./search.py) | Workspace-wide search |
 | [state-status.py](./state-status.py) | Agent state/health status |
