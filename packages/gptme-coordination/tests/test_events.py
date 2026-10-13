@@ -116,12 +116,17 @@ class TestClaimAndComplete:
 
     def test_age_boost_cap_covers_priority_spread(self):
         # A pending event must be able to overtake a fresh top-priority
-        # event within ~6 h, whatever its own baseline priority is.
-        assert AGE_BOOST_CAP > 100 - 35
-        assert 35 + min(6 * AGE_BOOST_RATE, AGE_BOOST_CAP) > 100
+        # event within ~6 h across the default range, including unknown types.
+        lowest = min(0, *PRIORITY_DEFAULTS.values())
+        highest = max(PRIORITY_DEFAULTS.values())
+        assert AGE_BOOST_CAP > highest - lowest
+        assert lowest + min(6 * AGE_BOOST_RATE, AGE_BOOST_CAP) > highest
 
-    def test_claim_next_old_low_priority_overtakes_fresh_top_priority(self, queue):
-        old = queue.ingest("completion_followup", "probe", "old", priority=35)
+    @pytest.mark.parametrize("priority", [0, 10, 20, 30, 35])
+    def test_claim_next_old_low_priority_overtakes_fresh_top_priority(
+        self, queue, priority
+    ):
+        old = queue.ingest("completion_followup", "probe", "old", priority=priority)
         assert old is not None and old.id is not None
         self._backdate(queue, old.id, hours=6)
         fresh = queue.ingest("ci_failure_pr", "github", "fresh", priority=100)
@@ -131,6 +136,19 @@ class TestClaimAndComplete:
         assert ev is not None
         assert ev.id == old.id
         assert ev.effective_priority > 100
+
+    def test_claim_next_old_unknown_trigger_overtakes_fresh_top_priority(self, queue):
+        old = queue.ingest("exotic_custom_type", "custom", "old")
+        assert old is not None and old.id is not None
+        assert old.priority == 0
+        self._backdate(queue, old.id, hours=6)
+        fresh = queue.ingest("ci_failure_master", "github", "fresh")
+        assert fresh is not None
+
+        ev = queue.claim_next("agent-1")
+        assert ev is not None
+        assert ev.id == old.id
+        assert ev.effective_priority > fresh.effective_priority
 
     def test_claim_next_recent_low_priority_does_not_overtake(self, queue):
         recent = queue.ingest("completion_followup", "probe", "recent", priority=35)
