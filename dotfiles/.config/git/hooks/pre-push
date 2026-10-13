@@ -268,10 +268,21 @@ if [ "$is_allowed" = false ]; then
             echo ""
             echo "This prevents accidental pushes that bypass PR review."
             echo ""
-            echo "If intentional, use: git push --no-verify"
-            echo "Otherwise, create a branch:"
-            echo "  git checkout -b feature-branch"
-            echo "  git push -u origin feature-branch"
+            local_branch="${_local_ref#refs/heads/}"
+            if [[ "$_local_ref" == refs/heads/* && "refs/heads/$local_branch" != "$remote_ref" ]]; then
+                # The trap: a feature branch tracking origin/master, where
+                # push.default=upstream maps even `git push origin BRANCH` to master.
+                echo "Local branch '$local_branch' is being pushed to ${remote_ref#refs/heads/}:"
+                echo "it tracks origin/${remote_ref#refs/heads/}. Push it under its own name:"
+                echo "  git push -u origin $local_branch:refs/heads/$local_branch"
+            else
+                echo "Create a branch and push that:"
+                echo "  git switch -c feature-branch"
+                echo "  git push -u origin feature-branch:refs/heads/feature-branch"
+            fi
+            echo ""
+            echo "Do NOT retry with --no-verify: that pushes the same commits to the"
+            echo "default branch. A deliberate direct push is an operator decision."
             exit 1
         fi
     done
