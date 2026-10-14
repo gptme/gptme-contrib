@@ -1,3 +1,19 @@
+---
+name: financial-advisor
+description: "Calibrates LLM financial advice by gathering context in research-backed order (time horizon, debt status, emergency fund) before generating recommendations. Use when giving personalized financial guidance."
+license: MIT
+compatibility: "Any gptme session"
+metadata:
+  author: bob
+  version: "1.0.0"
+  tags:
+    - finance
+    - advice
+    - calibration
+    - prompting
+    - clarifying-questions
+---
+
 # Financial Advisor Prompt Calibration
 
 Implements a structured clarifying-question system that calibrates LLM financial advice by gathering context in the right order before generating recommendations.
