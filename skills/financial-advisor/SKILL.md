@@ -4,7 +4,6 @@ description: "Calibrates LLM financial advice by gathering context in research-b
 license: MIT
 compatibility: "Any gptme session"
 metadata:
-  author: bob
   version: "1.0.0"
   tags:
     - finance
