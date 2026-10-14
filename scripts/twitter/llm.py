@@ -319,8 +319,17 @@ IMPORTANT: For the "action" field, use ONLY one of these values:
 - "ignore" - Skip this tweet, no response needed"""
 
 
-def create_response_prompt(tweet: Dict, eval_result: Dict, config: Dict) -> str:
-    """Create prompt for response generation"""
+def create_response_prompt(
+    tweet: Dict, eval_result: Dict, config: Dict, *, allow_reply: bool = True
+) -> str:
+    """Create prompt for response generation.
+
+    ``allow_reply=False`` preserves standalone output for a tweet the account
+    cannot reply to (Basic-tier reply/quote 403): the LLM is told to produce an
+    original tweet instead of a reply, so the reply/quote generation is gated
+    before the metered response call rather than discarding the whole item
+    (which would also drop its evaluation from the cache).
+    """
     # Include thread context if available
     thread_context = ""
     if tweet.get("thread_context"):
@@ -328,7 +337,19 @@ def create_response_prompt(tweet: Dict, eval_result: Dict, config: Dict) -> str:
         for i, t in enumerate(tweet["thread_context"]):
             thread_context += f"Tweet {i + 1} - @{t['author']}: {t['text']}\n"
 
+    reply_constraint = ""
+    if not allow_reply:
+        reply_constraint = (
+            "\nReply constraint (IMPORTANT):\n"
+            "The account cannot reply to or quote this tweet — the API rejects both "
+            'with 403. Set "type" to "tweet" (a standalone post), never "reply" '
+            'or "quote". Do not address or name the original author, and do not '
+            "reference the original post as something being answered. Write a "
+            "self-contained public post that adds value to the same discussion.\n"
+        )
+
     return f"""Draft a response tweet.
+{reply_constraint}
 
 Original Tweet: "{tweet["text"]}"
 Author: @{tweet["author"]}
@@ -665,9 +686,14 @@ def evaluate_tweet(tweet: Dict) -> EvaluationResponse:
 
 
 def generate_response(
-    tweet: Dict, eval_result: EvaluationResponse
+    tweet: Dict, eval_result: EvaluationResponse, *, allow_reply: bool = True
 ) -> TweetResponse | None:
-    """Generate response using LLM"""
+    """Generate response using LLM.
+
+    ``allow_reply=False`` tells the model to emit a standalone post instead of a
+    reply/quote, preserving usable output for a tweet the account cannot reply
+    to without generating a draft that post() would only quarantine.
+    """
     if eval_result.action != "respond":
         return None
 
@@ -680,7 +706,7 @@ def generate_response(
         "action": eval_result.action,
         "reasoning": eval_result.reasoning,
     }
-    prompt = create_response_prompt(tweet, eval_dict, config)
+    prompt = create_response_prompt(tweet, eval_dict, config, allow_reply=allow_reply)
 
     # Get LLM response
     model = get_default_model()
@@ -707,8 +733,15 @@ def review_draft(draft: Dict) -> ReviewResponse:
     return parse_llm_response(response.content, ReviewResponse, TaskType.REVIEW)
 
 
-def process_tweet(tweet: Dict) -> Tuple[EvaluationResponse, TweetResponse | None]:
-    """Process a tweet through evaluation and response generation"""
+def process_tweet(
+    tweet: Dict, *, allow_reply: bool = True
+) -> Tuple[EvaluationResponse, TweetResponse | None]:
+    """Process a tweet through evaluation and response generation.
+
+    Evaluation always runs; ``allow_reply`` only constrains response generation,
+    so callers can still cache the evaluation of a tweet the account cannot
+    reply to while preserving its standalone (non-reply) output.
+    """
     # Evaluate tweet
     eval_result = evaluate_tweet(tweet)
     console.print("Evaluation result:")
@@ -717,7 +750,7 @@ def process_tweet(tweet: Dict) -> Tuple[EvaluationResponse, TweetResponse | None
     # Generate response if needed
     response = None
     if eval_result.action == "respond":
-        response = generate_response(tweet, eval_result)
+        response = generate_response(tweet, eval_result, allow_reply=allow_reply)
 
     return eval_result, response
 

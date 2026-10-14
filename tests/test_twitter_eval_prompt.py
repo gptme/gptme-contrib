@@ -239,6 +239,29 @@ def test_response_prompt_defers_to_workspace_persona(
     assert "Avoid controversial topics" not in prompt
 
 
+def test_response_prompt_forbids_reply_when_not_allowed(
+    llm_module: types.ModuleType,
+) -> None:
+    """Reply-restricted tweets get a standalone-post instruction, not a reply.
+
+    The gate must be applied before the metered response call (so the reply is
+    never generated), while still letting the item produce standalone output.
+    """
+    tweet = _base_tweet("An interesting unmentioned post about local-first tools")
+    config: dict[str, Any] = {"templates": {"examples": []}}
+
+    allowed = llm_module.create_response_prompt(
+        tweet, {"action": "respond"}, config, allow_reply=True
+    )
+    blocked = llm_module.create_response_prompt(
+        tweet, {"action": "respond"}, config, allow_reply=False
+    )
+
+    assert "Reply constraint" not in allowed
+    assert "cannot reply to or quote" in blocked
+    assert '"type" to "tweet"' in blocked
+
+
 def test_openrouter_key_resolution_prefers_twitter_specific_key(
     llm_module: types.ModuleType,
     monkeypatch: pytest.MonkeyPatch,

@@ -1810,8 +1810,15 @@ def should_evaluate_tweet(tweet_text: str, min_length: int = 50) -> Tuple[bool, 
     return True, ""
 
 
-def is_reply_restricted(tweet, from_mentions: bool = False) -> bool:
-    """Return True if the tweet's author has restricted who can reply.
+def is_reply_restricted(
+    tweet,
+    from_mentions: bool = False,
+    *,
+    own_username: str | None = None,
+    own_user_id: int | str | None = None,
+    author_username: str | None = None,
+) -> bool:
+    """Return True if replying to this tweet would be rejected with a 403.
 
     Twitter's reply_settings field can be one of:
     - "everyone" (or None): anyone can reply
@@ -1828,13 +1835,76 @@ def is_reply_restricted(tweet, from_mentions: bool = False) -> bool:
     When from_mentions=True the tweet came from get_users_mentions, meaning Bob
     was mentioned and is therefore in the allowed-replier set for "mentionedUsers"
     tweets — those should NOT be skipped.
+
+    Independently of reply_settings, the Basic API tier rejects every reply or
+    quote with "You can only reply to or quote posts where you are mentioned or
+    are the author". Timeline tweets that do not mention ``own_username`` are
+    therefore skipped before the LLM drafts a reply that post() can only
+    quarantine. Metadata-confirmed mentions and direct replies to the account
+    are also eligible, even if the rendered text omits the handle.
+    Local author trust does not prove API engagement and does not bypass this
+    gate. When ``own_username`` is unknown the gate cannot evaluate and stays open.
     """
+    handle = own_username.lstrip("@").lower() if own_username else None
+    entities = getattr(tweet, "entities", None) or {}
+    text = str(getattr(tweet, "text", "") or "").lower()
+    mentioned = from_mentions
+    if handle:
+        # Metadata mentions and an exact-boundary rendered handle are both valid
+        # signals. Check them independently: the API always returns an
+        # ``entities.mentions`` key (often an empty list), so a gated
+        # ``else`` would never reach the text fallback for a tweet whose
+        # entities were truncated despite a literal @handle in the text.
+        # The boundary lookarounds keep @TimeToBuildBobExtra and bare handle
+        # words from counting as mentions.
+        entity_mentioned = any(
+            str(mention.get("username", "")).lower() == handle
+            for mention in (entities.get("mentions") or [])
+        )
+        text_mentioned = (
+            re.search(rf"(?<![a-z0-9_])@{re.escape(handle)}(?![a-z0-9_])", text)
+            is not None
+        )
+        mentioned = mentioned or entity_mentioned or text_mentioned
     reply_settings = getattr(tweet, "reply_settings", None)
-    if reply_settings is None:
+    if reply_settings is not None and reply_settings != "everyone":
+        if not (mentioned and reply_settings == "mentionedUsers"):
+            return True
+    if from_mentions or own_username is None:
         return False
-    if from_mentions and reply_settings == "mentionedUsers":
+    handle = own_username.lstrip("@").lower()
+    author = (author_username or "").lstrip("@").lower()
+    if author == handle:
         return False
-    return bool(reply_settings != "everyone")
+    # Replies may omit the recipient's handle from their rendered text.
+    recipient = getattr(tweet, "in_reply_to_user_id", None)
+    if own_user_id is not None and recipient is not None:
+        if str(recipient) == str(own_user_id):
+            return False
+    return not mentioned
+
+
+def reply_restriction_reason(tweet) -> str:
+    """Describe why is_reply_restricted() returned True, for skip messages."""
+    reply_settings = getattr(tweet, "reply_settings", None)
+    if reply_settings is not None and reply_settings != "everyone":
+        return f"reply_settings={reply_settings}"
+    return "not mentioned (Basic-tier reply/quote 403)"
+
+
+def _suppress_reply_response(response, reply_blocked: bool):
+    """Drop a generated reply or quote when the account cannot post one.
+
+    Reply/quote generation is gated before the response call via
+    ``allow_reply=False``; this is the defensive backstop for a model that
+    ignores the constraint (and for cache entries written before the gate). The
+    Basic-tier 403 covers quotes as well as replies, so both are dropped. A
+    standalone response (``type`` other than ``reply``/``quote``) is preserved
+    so the item can still produce output.
+    """
+    if reply_blocked and response is not None and response.type in ("reply", "quote"):
+        return None
+    return response
 
 
 def process_timeline_tweets(
@@ -1889,6 +1959,14 @@ def process_timeline_tweets(
                 other_draft = TweetDraft.load(draft_path)
                 if other_draft.in_reply_to is not None:
                     _replied_tweet_ids.add(str(other_draft.in_reply_to))
+                # Standalone responses retain their source in context rather
+                # than in_reply_to. Use it across polls and status transitions.
+                original_tweet = (other_draft.context or {}).get("original_tweet")
+                if (
+                    isinstance(original_tweet, dict)
+                    and original_tweet.get("id") is not None
+                ):
+                    _replied_tweet_ids.add(str(original_tweet["id"]))
             except Exception:
                 continue
 
@@ -1898,6 +1976,9 @@ def process_timeline_tweets(
         console.print(f"[blue]Draft limit: {max_drafts}")
     if times:
         console.print(f"[blue]Will process {times} tweet(s)[/blue]")
+
+    me_data = getattr(cached_get_me(client, user_auth=False), "data", None)
+    own_username = getattr(me_data, "username", None)
 
     for tweet in tweets:
         tweets_processed += 1
@@ -1928,24 +2009,28 @@ def process_timeline_tweets(
                 tweets_skipped_prefilter += 1
                 continue
 
-            # Skip tweets with restricted reply_settings — replying would 403
-            if is_reply_restricted(tweet, from_mentions=from_mentions):
-                author_for_skip = user_lookup.get(tweet.author_id)
-                username_for_skip = (
-                    author_for_skip.username
-                    if author_for_skip
-                    else str(tweet.author_id)
-                )
-                reply_setting = getattr(tweet, "reply_settings", "unknown")
-                console.print(
-                    f"[dim]Skip: reply_settings={reply_setting} - @{username_for_skip}[/dim]"
-                )
-                tweets_skipped_prefilter += 1
-                continue
-
             # Get author info
             author = user_lookup.get(tweet.author_id)
             author_username = author.username if author else str(tweet.author_id)
+
+            # Determine whether the account can reply to this tweet (restricted
+            # reply_settings, or an unmentioned timeline post on the Basic tier).
+            # This gates reply/quote generation only: the tweet is still
+            # evaluated and cached, and standalone output is preserved, so a
+            # reply-restricted item is not discarded wholesale before
+            # process_tweet()/save_to_cache().
+            reply_blocked = is_reply_restricted(
+                tweet,
+                from_mentions=from_mentions,
+                own_username=own_username,
+                own_user_id=getattr(me_data, "id", None),
+                author_username=author_username,
+            )
+            if reply_blocked:
+                console.print(
+                    f"[dim]Reply-restricted ({reply_restriction_reason(tweet)}) - "
+                    f"@{author_username}; will still evaluate and may post standalone[/dim]"
+                )
 
             # Prepare tweet data for processing
             tweet_data = {
@@ -2067,7 +2152,10 @@ def process_timeline_tweets(
             else:
                 # Process tweet and cache results, including the exact context used
                 # to produce a response so later cache hits need no network read.
-                eval_result, response = process_tweet(tweet_data)
+                eval_result, response = process_tweet(
+                    tweet_data, allow_reply=not reply_blocked
+                )
+                response = _suppress_reply_response(response, reply_blocked)
                 save_to_cache(
                     tweet_id_str,
                     eval_result,
@@ -2079,6 +2167,9 @@ def process_timeline_tweets(
                 console.print(f"[blue]Evaluation: {eval_result.action.upper()}")
                 console.print(f"[blue]Relevance: {eval_result.relevance}/100")
                 console.print(f"[blue]Priority: {eval_result.priority}/100")
+
+            # Also guards cache entries written before the reply gate existed.
+            response = _suppress_reply_response(response, reply_blocked)
 
             if response:
                 # Skip error responses from failed LLM parsing
@@ -2252,8 +2343,7 @@ def process_timeline_tweets(
                         path = save_draft(draft, "new")
                         console.print(f"[green]Created draft response: {path}")
                         drafts_generated += 1
-                        if draft.in_reply_to is not None:
-                            _replied_tweet_ids.add(str(draft.in_reply_to))
+                        _replied_tweet_ids.add(tweet_id_str)
                 else:
                     console.print("[yellow]Would create draft response:")
                     console.print(f"[white]{draft.text}")
@@ -2366,6 +2456,8 @@ def monitor(
                         "public_metrics",
                         "conversation_id",
                         "reply_settings",
+                        "entities",
+                        "in_reply_to_user_id",
                     ],
                     expansions=["author_id"],
                     user_fields=["username", "public_metrics"],
@@ -2380,6 +2472,8 @@ def monitor(
                         "public_metrics",
                         "conversation_id",
                         "reply_settings",
+                        "entities",
+                        "in_reply_to_user_id",
                     ],
                     expansions=["author_id"],
                     user_fields=["username", "public_metrics"],
@@ -2564,6 +2658,8 @@ def auto(
                         "public_metrics",
                         "conversation_id",
                         "reply_settings",
+                        "entities",
+                        "in_reply_to_user_id",
                     ],
                     expansions=["author_id"],
                     user_fields=["username", "public_metrics"],
@@ -2578,6 +2674,8 @@ def auto(
                         "public_metrics",
                         "conversation_id",
                         "reply_settings",
+                        "entities",
+                        "in_reply_to_user_id",
                     ],
                     expansions=["author_id"],
                     user_fields=["username", "public_metrics"],
