@@ -720,6 +720,114 @@ def test_worker_main_encodes_provider_failures_as_protocol_fallback(
     assert result == {"version": 1, "status": "fallback", "ids": [], "reason": reason}
 
 
+def test_max_output_tokens_defaults_to_protocol_cap_and_caller_value_is_validated(
+    tmp_path: Path,
+) -> None:
+    """max_output_tokens defaults to MAX_OUTPUT_TOKENS and rejects out-of-range values."""
+    from gptme_lessons_extras.selector import MAX_OUTPUT_TOKENS, validate_request
+
+    # Omitted → default cap
+    normalized = validate_request(request())
+    assert normalized["max_output_tokens"] == MAX_OUTPUT_TOKENS
+
+    # Caller sets explicit value within range
+    normalized = validate_request(request(max_output_tokens=128))
+    assert normalized["max_output_tokens"] == 128
+
+    # Zero or negative → rejected
+    with pytest.raises(ValueError):
+        validate_request(request(max_output_tokens=0))
+
+    # Above MAX_OUTPUT_TOKENS → rejected
+    with pytest.raises(ValueError):
+        validate_request(request(max_output_tokens=MAX_OUTPUT_TOKENS + 1))
+
+
+def test_output_cap_invalidates_cached_selection(tmp_path: Path) -> None:
+    """A different cap can truncate the ID envelope; do not reuse that decision."""
+    command = worker(tmp_path, selected("commit"))
+    initial = select(
+        request(max_output_tokens=512), state_dir=tmp_path, worker_command=command
+    )
+    cached = select(
+        request(max_output_tokens=512, event_kind="tool"), state_dir=tmp_path
+    )
+    changed = select(
+        request(max_output_tokens=128, event_kind="tool"), state_dir=tmp_path
+    )
+    assert cached["cached"] is True
+    assert cached["fingerprint"] == initial["fingerprint"]
+    assert changed["cached"] is False
+    assert changed["reason"] == "cache_miss"
+    assert changed["fingerprint"] != initial["fingerprint"]
+
+
+@pytest.mark.usefixtures("compatible_core_parser")
+@pytest.mark.parametrize("cap", [128, 512])
+def test_worker_passes_max_output_tokens_to_config_when_supported(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    cap: int,
+) -> None:
+    """Exercise the adapter with a supporting config, even on older core installs."""
+    from dataclasses import dataclass
+
+    import gptme.context.selector.config as core_config
+    from gptme.context.selector.llm_based import LLMSelector
+    from gptme_lessons_extras import _selector_worker
+
+    @dataclass
+    class SupportingConfig(core_config.ContextSelectorConfig):
+        max_tokens: int = 512
+
+    captured_max_tokens: list[int] = []
+
+    def offline_select(
+        self: Any, query: str, items: list[Any], limit: int
+    ) -> list[Any]:
+        captured_max_tokens.append(self.config.max_tokens)
+        return [item for item in items if item.identifier == "commit"]
+
+    monkeypatch.setattr(core_config, "ContextSelectorConfig", SupportingConfig)
+    monkeypatch.setattr(LLMSelector, "select", offline_select)
+    _worker_stdin(monkeypatch, request(max_output_tokens=cap))
+    _selector_worker.main()
+    assert captured_max_tokens == [cap]
+    assert json.loads(capsys.readouterr().out) == {
+        "version": 1,
+        "status": "selected",
+        "ids": ["commit"],
+    }
+
+
+@pytest.mark.usefixtures("compatible_core_parser")
+def test_worker_forwards_output_cap_to_reply_when_core_supports_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Integration boundary: supporting core must pass the cap to a fake provider."""
+    from types import SimpleNamespace
+
+    import gptme.llm
+    from gptme.context.selector.config import ContextSelectorConfig
+    from gptme_lessons_extras._selector_worker import select_with_core
+    from gptme_lessons_extras.selector import validate_request
+
+    if not hasattr(ContextSelectorConfig(), "max_tokens"):
+        pytest.skip("installed gptme does not support ContextSelectorConfig.max_tokens")
+
+    calls: list[dict[str, Any]] = []
+
+    def offline_reply(**kwargs: Any) -> SimpleNamespace:
+        calls.append(kwargs)
+        return SimpleNamespace(content="<selected>commit</selected>")
+
+    monkeypatch.setattr(gptme.llm, "reply", offline_reply)
+    result = select_with_core(validate_request(request(max_output_tokens=128)))
+    assert result == {"version": 1, "status": "selected", "ids": ["commit"]}
+    assert len(calls) == 1
+    assert calls[0]["max_tokens"] == 128
+
+
 def test_no_candidates_empty_decision_is_cached_for_later_tool_event(
     tmp_path: Path,
 ) -> None:
