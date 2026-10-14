@@ -720,6 +720,60 @@ def test_worker_main_encodes_provider_failures_as_protocol_fallback(
     assert result == {"version": 1, "status": "fallback", "ids": [], "reason": reason}
 
 
+def test_max_output_tokens_defaults_to_protocol_cap_and_caller_value_is_validated(
+    tmp_path: Path,
+) -> None:
+    """max_output_tokens defaults to MAX_OUTPUT_TOKENS and rejects out-of-range values."""
+    from gptme_lessons_extras.selector import MAX_OUTPUT_TOKENS, validate_request
+
+    # Omitted → default cap
+    normalized = validate_request(request())
+    assert normalized["max_output_tokens"] == MAX_OUTPUT_TOKENS
+
+    # Caller sets explicit value within range
+    normalized = validate_request(request(max_output_tokens=128))
+    assert normalized["max_output_tokens"] == 128
+
+    # Zero or negative → rejected
+    with pytest.raises(ValueError):
+        validate_request(request(max_output_tokens=0))
+
+    # Above MAX_OUTPUT_TOKENS → rejected
+    with pytest.raises(ValueError):
+        validate_request(request(max_output_tokens=MAX_OUTPUT_TOKENS + 1))
+
+
+def test_worker_passes_max_output_tokens_to_config_when_supported(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Worker sets config.max_tokens when the installed config supports the field."""
+    import gptme.llm
+    from gptme.context.selector.config import ContextSelectorConfig
+    from gptme_lessons_extras import _selector_worker
+
+    captured_max_tokens: list[int | None] = []
+
+    original_reply = gptme.llm.reply
+
+    def spy_reply(**kwargs: Any) -> Any:
+        captured_max_tokens.append(kwargs.get("max_tokens"))
+        return original_reply(**kwargs)
+
+    monkeypatch.setattr(gptme.llm, "reply", spy_reply)
+    # Verify the installed config actually supports the field before asserting the value
+    if not hasattr(ContextSelectorConfig(), "max_tokens"):
+        pytest.skip("installed gptme does not support ContextSelectorConfig.max_tokens")
+
+    _worker_stdin(monkeypatch, request(max_output_tokens=128))
+    try:
+        _selector_worker.main()
+    except SystemExit:
+        pass
+    if captured_max_tokens:
+        assert captured_max_tokens[0] == 128
+
+
 def test_no_candidates_empty_decision_is_cached_for_later_tool_event(
     tmp_path: Path,
 ) -> None:

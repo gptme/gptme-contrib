@@ -23,6 +23,9 @@ MAX_REQUEST_BYTES = 1_048_576
 MAX_CANDIDATES = 200
 MAX_CALLS = 10
 MAX_TIMEOUT = 30.0
+# Advisory responses are short (ID list only); cap at a generous but explicit
+# budget that fits any reasonable lesson-name enumeration (~5 × 80-char IDs).
+MAX_OUTPUT_TOKENS = 512
 
 
 def _text(value: Any, *, empty: bool = False) -> str:
@@ -90,6 +93,13 @@ def validate_request(value: Any) -> dict[str, Any]:
     ][: result["max_results"]]
     model = value.get("model")
     result["model"] = None if model is None else _text(model)
+    max_output = value.get("max_output_tokens")
+    if max_output is None:
+        result["max_output_tokens"] = MAX_OUTPUT_TOKENS
+    else:
+        result["max_output_tokens"] = _integer(max_output, MAX_OUTPUT_TOKENS)
+        if result["max_output_tokens"] < 1:
+            raise ValueError("max_output_tokens must be at least 1")
     result["max_calls_per_session"] = _integer(
         value.get("max_calls_per_session", 0), MAX_CALLS
     )

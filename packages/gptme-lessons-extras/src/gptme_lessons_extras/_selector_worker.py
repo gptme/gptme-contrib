@@ -15,9 +15,12 @@ def select_with_core(request: dict[str, Any]) -> dict[str, Any]:
     from gptme.context.selector.config import ContextSelectorConfig
     from gptme.context.selector.llm_based import LLMSelector
 
-    selector = LLMSelector(
-        ContextSelectorConfig(strategy="llm", llm_model=request["model"])
-    )
+    config = ContextSelectorConfig(strategy="llm", llm_model=request["model"])
+    # Apply caller-supplied output cap when the installed config supports it.
+    max_output = request.get("max_output_tokens")
+    if max_output is not None and hasattr(config, "max_tokens"):
+        config.max_tokens = max_output
+    selector = LLMSelector(config)
     # gptme/gptme#4282 changes malformed envelopes from [] to ValueError.
     # Older installs must not silently treat provider errors as explicit none.
     try:
