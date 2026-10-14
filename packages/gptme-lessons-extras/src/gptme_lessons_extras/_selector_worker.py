@@ -47,6 +47,22 @@ def select_with_core(request: dict[str, Any]) -> dict[str, Any]:
             "reason": "unsupported_core",
         }
 
+    # Core request bounds do not cover independent calls inside generation hooks.
+    # The owned worker must have no enabled generation hooks before selection.
+    from gptme.hooks import HookType, get_hooks
+
+    if any(
+        hook.enabled
+        for kind in (HookType.GENERATION_PRE, HookType.GENERATION_POST)
+        for hook in get_hooks(kind)
+    ):
+        return {
+            "version": VERSION,
+            "status": "fallback",
+            "ids": [],
+            "reason": "generation_hooks_present",
+        }
+
     @dataclass
     class AdvisoryItem(ContextItem):
         item_id: str

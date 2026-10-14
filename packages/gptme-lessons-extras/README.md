@@ -104,6 +104,9 @@ serialized provider input before sending. These bounds constrain requests; they
 do not authorize spend or establish a dollar ceiling. Strict bounded calls require
 an explicit `anthropic/` or `openrouter/` model supported by the core; unsupported
 routes fall back without a provider call.
+The worker also refuses enabled `GENERATION_PRE` or `GENERATION_POST` hooks with
+`generation_hooks_present` before selection: independent work performed by hooks
+is outside the core's request budget. Disabled hooks do not block selection.
 
 `session_start` and `user_prompt` may make a call. `tool` can only read a valid
 cached decision; a miss falls back without spending. Successful explicit none
