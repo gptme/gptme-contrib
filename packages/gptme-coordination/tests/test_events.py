@@ -161,6 +161,16 @@ class TestClaimAndComplete:
         assert ev is not None
         assert ev.id == fresh.id
 
+    def test_age_boost_is_capped(self, queue):
+        # An event aged well past cap/rate hours must not exceed priority + AGE_BOOST_CAP.
+        old = queue.ingest("completion_followup", "probe", "old", priority=0)
+        assert old is not None and old.id is not None
+        # 12h >> 105/18 ≈ 5.83h; without the cap this would be 0 + 18*12 = 216.
+        self._backdate(queue, old.id, hours=12)
+        ev = queue.claim_next("agent-1")
+        assert ev is not None
+        assert ev.effective_priority == 0 + AGE_BOOST_CAP
+
     def test_claim_next_empty_queue_returns_none(self, queue):
         assert queue.claim_next("agent-1") is None
 
