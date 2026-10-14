@@ -15,6 +15,9 @@ dependencies = [
     "gptme>=0.1.0",
 ]
 
+[project.scripts]
+lesson-select = "gptme_lessons_extras.selector:main"
+
 [project.optional-dependencies]
 dev = [
     "mypy>=1.0.0",
