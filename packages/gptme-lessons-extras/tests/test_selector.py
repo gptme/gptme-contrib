@@ -743,35 +743,89 @@ def test_max_output_tokens_defaults_to_protocol_cap_and_caller_value_is_validate
         validate_request(request(max_output_tokens=MAX_OUTPUT_TOKENS + 1))
 
 
+def test_output_cap_invalidates_cached_selection(tmp_path: Path) -> None:
+    """A different cap can truncate the ID envelope; do not reuse that decision."""
+    command = worker(tmp_path, selected("commit"))
+    initial = select(
+        request(max_output_tokens=512), state_dir=tmp_path, worker_command=command
+    )
+    cached = select(
+        request(max_output_tokens=512, event_kind="tool"), state_dir=tmp_path
+    )
+    changed = select(
+        request(max_output_tokens=128, event_kind="tool"), state_dir=tmp_path
+    )
+    assert cached["cached"] is True
+    assert cached["fingerprint"] == initial["fingerprint"]
+    assert changed["cached"] is False
+    assert changed["reason"] == "cache_miss"
+    assert changed["fingerprint"] != initial["fingerprint"]
+
+
+@pytest.mark.usefixtures("compatible_core_parser")
+@pytest.mark.parametrize("cap", [128, 512])
 def test_worker_passes_max_output_tokens_to_config_when_supported(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    cap: int,
 ) -> None:
-    """Worker sets config.max_tokens when the installed config supports the field."""
-    import gptme.llm
-    from gptme.context.selector.config import ContextSelectorConfig
+    """Exercise the adapter with a supporting config, even on older core installs."""
+    from dataclasses import dataclass
+
+    import gptme.context.selector.config as core_config
+    from gptme.context.selector.llm_based import LLMSelector
     from gptme_lessons_extras import _selector_worker
 
-    captured_max_tokens: list[int | None] = []
+    @dataclass
+    class SupportingConfig(core_config.ContextSelectorConfig):
+        max_tokens: int = 512
 
-    original_reply = gptme.llm.reply
+    captured_max_tokens: list[int] = []
 
-    def spy_reply(**kwargs: Any) -> Any:
-        captured_max_tokens.append(kwargs.get("max_tokens"))
-        return original_reply(**kwargs)
+    def offline_select(
+        self: Any, query: str, items: list[Any], limit: int
+    ) -> list[Any]:
+        captured_max_tokens.append(self.config.max_tokens)
+        return [item for item in items if item.identifier == "commit"]
 
-    monkeypatch.setattr(gptme.llm, "reply", spy_reply)
-    # Verify the installed config actually supports the field before asserting the value
+    monkeypatch.setattr(core_config, "ContextSelectorConfig", SupportingConfig)
+    monkeypatch.setattr(LLMSelector, "select", offline_select)
+    _worker_stdin(monkeypatch, request(max_output_tokens=cap))
+    _selector_worker.main()
+    assert captured_max_tokens == [cap]
+    assert json.loads(capsys.readouterr().out) == {
+        "version": 1,
+        "status": "selected",
+        "ids": ["commit"],
+    }
+
+
+@pytest.mark.usefixtures("compatible_core_parser")
+def test_worker_forwards_output_cap_to_reply_when_core_supports_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Integration boundary: supporting core must pass the cap to a fake provider."""
+    from types import SimpleNamespace
+
+    import gptme.llm
+    from gptme.context.selector.config import ContextSelectorConfig
+    from gptme_lessons_extras._selector_worker import select_with_core
+    from gptme_lessons_extras.selector import validate_request
+
     if not hasattr(ContextSelectorConfig(), "max_tokens"):
         pytest.skip("installed gptme does not support ContextSelectorConfig.max_tokens")
 
-    _worker_stdin(monkeypatch, request(max_output_tokens=128))
-    try:
-        _selector_worker.main()
-    except SystemExit:
-        pass
-    if captured_max_tokens:
-        assert captured_max_tokens[0] == 128
+    calls: list[dict[str, Any]] = []
+
+    def offline_reply(**kwargs: Any) -> SimpleNamespace:
+        calls.append(kwargs)
+        return SimpleNamespace(content="<selected>commit</selected>")
+
+    monkeypatch.setattr(gptme.llm, "reply", offline_reply)
+    result = select_with_core(validate_request(request(max_output_tokens=128)))
+    assert result == {"version": 1, "status": "selected", "ids": ["commit"]}
+    assert len(calls) == 1
+    assert calls[0]["max_tokens"] == 128
 
 
 def test_no_candidates_empty_decision_is_cached_for_later_tool_event(
