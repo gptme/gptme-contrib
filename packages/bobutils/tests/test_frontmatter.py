@@ -48,3 +48,16 @@ def test_empty_frontmatter():
     fm, body = split_frontmatter(text)
     assert fm == ""
     assert body == "Body only."
+
+
+def test_indented_dashes_in_block_scalar_do_not_close_fence():
+    """An indented '---' inside a YAML block scalar must not close the fence.
+
+    A bare '---' at zero-indent IS a YAML document separator and cannot appear
+    as a legal value in valid frontmatter. Indented occurrences ('  ---') are
+    not equal to '---' so the line-by-line check correctly ignores them.
+    """
+    text = "---\nprobe: |\n  ---\n  more\n---\nBody."
+    fm, body = split_frontmatter(text)
+    assert "  ---" in fm
+    assert body == "Body."
