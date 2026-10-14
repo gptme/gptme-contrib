@@ -264,10 +264,10 @@ def test_two_waiting_entries_produce_spell_count_two(tmp_path: Path, monkeypatch
     assert unpark.exit_code == 0, f"un-park failed: {unpark.output}"
     unparked = load_tasks(tasks_dir)[0]
     assert unpark.exit_code == 0
-    # Un-parking does NOT clear waiting_since, which is why the spell counter
-    # keys off the prior state instead of treating a missing waiting_since as
-    # the "new spell" signal — that would miss every re-park of this shape.
-    assert "waiting_since" in unparked.metadata
+    # Un-parking clears the current blocker; the spell counter keys off the
+    # prior state, not waiting_since, and cumulative history survives.
+    assert "waiting_since" not in unparked.metadata
+    assert unparked.metadata["first_waiting_since"] == first_stamp
     assert unparked.metadata["waiting_spell_count"] == 1
 
     second = runner.invoke(
@@ -322,3 +322,85 @@ def test_cumulative_waiting_fields_are_known_frontmatter(tmp_path: Path) -> None
 
     assert "first_waiting_since" in KNOWN_FRONTMATTER_FIELDS
     assert "waiting_spell_count" in KNOWN_FRONTMATTER_FIELDS
+
+
+HUMAN_WAITING_TASK = """\
+---
+state: waiting
+created: 2026-06-01T00:00:00+00:00
+waiting_for: upstream PR merge
+waiting_since: 2026-06-02T00:00:00+00:00
+wait_kind: external
+recheck_after: 2026-06-20T00:00:00+00:00
+wait: 2026-06-15
+probe: gh pr view 1 --json state
+first_waiting_since: 2026-06-02T00:00:00+00:00
+---
+# Human-Gated Waiting Task
+"""
+
+
+def test_manual_release_from_waiting_clears_current_blocker(tmp_path: Path, monkeypatch) -> None:
+    """`--set state todo` on a waiting task drops the human blocker fields.
+
+    A leftover waiting_for on a todo task reads as a live blocker, so the task
+    stays hidden from ready selection. wait:, probe: and cumulative history stay.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(HUMAN_WAITING_TASK)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "state", "todo"])
+    assert result.exit_code == 0, f"edit failed: {result.output}"
+
+    meta = load_tasks(tasks_dir)[0].metadata
+    assert meta["state"] == "todo"
+    for field in ("waiting_for", "waiting_since", "wait_kind", "recheck_after"):
+        assert field not in meta, f"{field} should be cleared on release"
+    assert "wait" in meta
+    assert "probe" in meta
+    assert "first_waiting_since" in meta
+
+
+def test_release_from_waiting_keeps_explicitly_set_fields(tmp_path: Path, monkeypatch) -> None:
+    """A field set in the same edit wins over the release cleanup."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(HUMAN_WAITING_TASK)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "edit",
+            "my-task",
+            "--set",
+            "state",
+            "todo",
+            "--set",
+            "wait_kind",
+            "machine",
+        ],
+    )
+    assert result.exit_code == 0, f"edit failed: {result.output}"
+
+    meta = load_tasks(tasks_dir)[0].metadata
+    assert meta["state"] == "todo"
+    assert meta["wait_kind"] == "machine"
+    assert "waiting_for" not in meta
+
+
+def test_non_state_edit_on_waiting_task_keeps_blocker(tmp_path: Path, monkeypatch) -> None:
+    """Editing another field on a waiting task leaves its blocker untouched."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(HUMAN_WAITING_TASK)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "priority", "high"])
+    assert result.exit_code == 0, f"edit failed: {result.output}"
+
+    meta = load_tasks(tasks_dir)[0].metadata
+    assert meta["waiting_for"] == "upstream PR merge"
+    assert meta["wait_kind"] == "external"

@@ -298,6 +298,15 @@ def transform_post(
         post.metadata.pop("waiting_for", None)
         post.metadata.pop("waiting_since", None)
         post.metadata.pop("wait_kind", None)
+    # A manual release out of waiting (`--set state todo`) clears the human
+    # blocker too: a leftover waiting_for keeps the released task hidden from
+    # ready selection exactly like the recurrence case above. Fields this edit
+    # sets explicitly win; wait: and probe: stay (date and provenance).
+    if _prior_state == "waiting" and post.metadata.get("state") != "waiting":
+        _explicit = {field for op, field, _value in changes if op == "set"}
+        for _blocker_field in ("waiting_for", "waiting_since", "wait_kind", "recheck_after"):
+            if _blocker_field not in _explicit:
+                post.metadata.pop(_blocker_field, None)
     # Auto-set waiting_since only when THIS edit explicitly sets state to waiting
     # AND waiting_for is either already present or being set in the same edit.
     # Guarding on waiting_for prevents an injected waiting_since from triggering
