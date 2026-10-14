@@ -960,8 +960,9 @@ def test_reply_restricted_tweet_still_evaluated_and_cached(
     assert str(gate_calls[0]["own_user_id"]) == "999"
 
 
+@pytest.mark.parametrize("status", ["new", "approved", "review", "posted", "rejected"])
 def test_reply_restricted_tweet_standalone_response_still_drafted(
-    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
 ) -> None:
     """A standalone (non-reply) response survives the reply gate."""
     _set_status_dirs(workflow_module, tmp_path)
@@ -1016,11 +1017,11 @@ def test_reply_restricted_tweet_standalone_response_still_drafted(
     monkeypatch.setattr(workflow_module, "is_trusted_user", lambda username: False)
 
     drafts_generated = workflow_module.process_timeline_tweets(
-        [tweet],
+        [tweet, tweet],
         [user],
         source="home timeline",
         client=object(),
-        times=1,
+        times=2,
         dry_run=False,
         max_drafts=10,
     )
@@ -1032,6 +1033,30 @@ def test_reply_restricted_tweet_standalone_response_still_drafted(
     assert draft.type == "tweet"
     assert draft.in_reply_to is None
     assert draft.text == "A standalone take."
+
+    # Cached responses must not be replayed after a draft has been saved.
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: True)
+
+    def unexpected_cache_load(*args: Any) -> Any:
+        pytest.fail("Already-drafted source should be skipped before cache replay")
+
+    monkeypatch.setattr(workflow_module, "load_from_cache", unexpected_cache_load)
+
+    # Deduplication must survive a new poll and movement out of new/.
+    if status != "new":
+        new_paths[0].rename(workflow_module.TWEETS_DIR / status / new_paths[0].name)
+    assert (
+        workflow_module.process_timeline_tweets(
+            [tweet],
+            [user],
+            source="home timeline",
+            client=object(),
+            times=1,
+            dry_run=False,
+            max_drafts=10,
+        )
+        == 0
+    )
 
 
 @pytest.mark.parametrize("response_type", ["reply", "quote"])
@@ -1760,7 +1785,7 @@ def test_is_reply_restricted_from_mentions_skips_mention_gate(
     )
 
 
-def test_is_reply_restricted_trusted_author_exempt_from_mention_gate(
+def test_is_reply_restricted_trusted_author_requires_engagement(
     workflow_module: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spec = importlib.util.spec_from_file_location(
@@ -1773,6 +1798,13 @@ def test_is_reply_restricted_trusted_author_exempt_from_mention_gate(
         workflow_module, "is_trusted_user", trusted_users.is_trusted_user
     )
     tweet = SimpleNamespace(reply_settings="everyone", text="shipped a thing")
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="ErikBjare"
+        )
+        is True
+    )
+    tweet.entities = {"mentions": [{"username": "TimeToBuildBob"}]}
     assert (
         workflow_module.is_reply_restricted(
             tweet, own_username="TimeToBuildBob", author_username="ErikBjare"

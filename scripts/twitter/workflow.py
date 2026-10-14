@@ -1842,9 +1842,8 @@ def is_reply_restricted(
     therefore skipped before the LLM drafts a reply that post() can only
     quarantine. Metadata-confirmed mentions and direct replies to the account
     are also eligible, even if the rendered text omits the handle.
-    Trusted authors are exempt: X also accepts replies where the author has
-    "otherwise engaged" the account, and post() still quarantines a residual
-    403. When ``own_username`` is unknown the gate cannot evaluate and stays open.
+    Local author trust does not prove API engagement and does not bypass this
+    gate. When ``own_username`` is unknown the gate cannot evaluate and stays open.
     """
     handle = own_username.lstrip("@").lower() if own_username else None
     entities = getattr(tweet, "entities", None) or {}
@@ -1876,8 +1875,6 @@ def is_reply_restricted(
     handle = own_username.lstrip("@").lower()
     author = (author_username or "").lstrip("@").lower()
     if author == handle:
-        return False
-    if author and is_trusted_user(author):
         return False
     # Replies may omit the recipient's handle from their rendered text.
     recipient = getattr(tweet, "in_reply_to_user_id", None)
@@ -1962,6 +1959,14 @@ def process_timeline_tweets(
                 other_draft = TweetDraft.load(draft_path)
                 if other_draft.in_reply_to is not None:
                     _replied_tweet_ids.add(str(other_draft.in_reply_to))
+                # Standalone responses retain their source in context rather
+                # than in_reply_to. Use it across polls and status transitions.
+                original_tweet = (other_draft.context or {}).get("original_tweet")
+                if (
+                    isinstance(original_tweet, dict)
+                    and original_tweet.get("id") is not None
+                ):
+                    _replied_tweet_ids.add(str(original_tweet["id"]))
             except Exception:
                 continue
 
@@ -2338,8 +2343,7 @@ def process_timeline_tweets(
                         path = save_draft(draft, "new")
                         console.print(f"[green]Created draft response: {path}")
                         drafts_generated += 1
-                        if draft.in_reply_to is not None:
-                            _replied_tweet_ids.add(str(draft.in_reply_to))
+                        _replied_tweet_ids.add(tweet_id_str)
                 else:
                     console.print("[yellow]Would create draft response:")
                     console.print(f"[white]{draft.text}")
