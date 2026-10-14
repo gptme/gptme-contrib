@@ -914,20 +914,27 @@ def test_reply_restricted_tweet_still_evaluated_and_cached(
 
     calls: list[dict[str, Any]] = []
     cache_calls: list[Any] = []
+    gate_calls: list[dict[str, Any]] = []
 
     def fake_process_tweet(data: Any, **kwargs: Any) -> Any:
         calls.append(kwargs)
         return SimpleNamespace(action="ignore", relevance=1, priority=1), None
 
+    def fake_gate(tweet: Any, *args: Any, **kwargs: Any) -> bool:
+        gate_calls.append(kwargs)
+        return True
+
     monkeypatch.setattr(
         workflow_module,
         "cached_get_me",
-        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="999")),
+        lambda *a, **k: SimpleNamespace(
+            data=SimpleNamespace(id="999", username="TimeToBuildBob")
+        ),
     )
     monkeypatch.setattr(
         workflow_module, "should_evaluate_tweet", lambda *a, **k: (True, "")
     )
-    monkeypatch.setattr(workflow_module, "is_reply_restricted", lambda *a, **k: True)
+    monkeypatch.setattr(workflow_module, "is_reply_restricted", fake_gate)
     monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: False)
     monkeypatch.setattr(workflow_module, "process_tweet", fake_process_tweet)
     monkeypatch.setattr(
@@ -947,6 +954,10 @@ def test_reply_restricted_tweet_still_evaluated_and_cached(
     assert calls == [{"allow_reply": False}]
     assert cache_calls, "evaluation must still be written to the cache"
     assert drafts_generated == 0
+    # The gate must be driven by the resolved account identity, not a stub.
+    assert gate_calls
+    assert gate_calls[0]["own_username"] == "TimeToBuildBob"
+    assert str(gate_calls[0]["own_user_id"]) == "999"
 
 
 def test_reply_restricted_tweet_standalone_response_still_drafted(
@@ -1023,10 +1034,17 @@ def test_reply_restricted_tweet_standalone_response_still_drafted(
     assert draft.text == "A standalone take."
 
 
+@pytest.mark.parametrize("response_type", ["reply", "quote"])
 def test_reply_restricted_reply_response_suppressed_and_cached(
-    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    workflow_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    response_type: str,
 ) -> None:
-    """A model that ignores the standalone constraint must not create a reply draft."""
+    """A model that ignores the standalone constraint must not create a reply/quote draft.
+
+    The Basic-tier 403 covers quotes as well as replies.
+    """
     _set_status_dirs(workflow_module, tmp_path)
 
     tweet = SimpleNamespace(
@@ -1061,8 +1079,8 @@ def test_reply_restricted_reply_response_suppressed_and_cached(
         lambda *a, **k: (
             SimpleNamespace(action="respond", relevance=100, priority=100),
             SimpleNamespace(
-                text="A reply that would 403.",
-                type="reply",
+                text="A response that would 403.",
+                type=response_type,
                 thread_needed=False,
                 follow_up=None,
             ),
@@ -1682,6 +1700,47 @@ def test_is_reply_restricted_mentioned_in_text_is_open(
             tweet, own_username="TimeToBuildBob", author_username="someone"
         )
         is False
+    )
+
+
+def test_is_reply_restricted_text_mention_with_empty_entities_mentions_is_open(
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty entities.mentions list must not hide a literal @handle in the text.
+
+    The timeline API always returns an ``entities`` dict with a (possibly empty)
+    ``mentions`` key, so a metadata-only branch would never reach the text
+    fallback and would wrongly block a tweet that does mention the account.
+    """
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda username: False)
+    tweet = SimpleNamespace(
+        reply_settings="everyone",
+        text="cc @timetobuildbob what do you think?",
+        entities={"mentions": []},
+    )
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="someone"
+        )
+        is False
+    )
+
+
+def test_is_reply_restricted_handle_prefix_is_not_a_mention_with_empty_entities(
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The text fallback keeps its exact-boundary guard even with entities present."""
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda username: False)
+    tweet = SimpleNamespace(
+        reply_settings="everyone",
+        text="cc @TimeToBuildBobExtra what do you think?",
+        entities={"mentions": []},
+    )
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="someone"
+        )
+        is True
     )
 
 

@@ -1851,17 +1851,22 @@ def is_reply_restricted(
     text = str(getattr(tweet, "text", "") or "").lower()
     mentioned = from_mentions
     if handle:
-        if "mentions" in entities:
-            mentioned = mentioned or any(
-                str(mention.get("username", "")).lower() == handle
-                for mention in entities["mentions"]
-            )
-        else:
-            mentioned = (
-                mentioned
-                or re.search(rf"(?<![a-z0-9_])@{re.escape(handle)}(?![a-z0-9_])", text)
-                is not None
-            )
+        # Metadata mentions and an exact-boundary rendered handle are both valid
+        # signals. Check them independently: the API always returns an
+        # ``entities.mentions`` key (often an empty list), so a gated
+        # ``else`` would never reach the text fallback for a tweet whose
+        # entities were truncated despite a literal @handle in the text.
+        # The boundary lookarounds keep @TimeToBuildBobExtra and bare handle
+        # words from counting as mentions.
+        entity_mentioned = any(
+            str(mention.get("username", "")).lower() == handle
+            for mention in (entities.get("mentions") or [])
+        )
+        text_mentioned = (
+            re.search(rf"(?<![a-z0-9_])@{re.escape(handle)}(?![a-z0-9_])", text)
+            is not None
+        )
+        mentioned = mentioned or entity_mentioned or text_mentioned
     reply_settings = getattr(tweet, "reply_settings", None)
     if reply_settings is not None and reply_settings != "everyone":
         if not (mentioned and reply_settings == "mentionedUsers"):
@@ -1891,15 +1896,16 @@ def reply_restriction_reason(tweet) -> str:
 
 
 def _suppress_reply_response(response, reply_blocked: bool):
-    """Drop a generated reply when the account cannot reply to the tweet.
+    """Drop a generated reply or quote when the account cannot post one.
 
     Reply/quote generation is gated before the response call via
     ``allow_reply=False``; this is the defensive backstop for a model that
-    ignores the constraint (and for cache entries written before the gate). A
-    standalone response (``type != "reply"``) is preserved so the item can still
-    produce output.
+    ignores the constraint (and for cache entries written before the gate). The
+    Basic-tier 403 covers quotes as well as replies, so both are dropped. A
+    standalone response (``type`` other than ``reply``/``quote``) is preserved
+    so the item can still produce output.
     """
-    if reply_blocked and response is not None and response.type == "reply":
+    if reply_blocked and response is not None and response.type in ("reply", "quote"):
         return None
     return response
 
