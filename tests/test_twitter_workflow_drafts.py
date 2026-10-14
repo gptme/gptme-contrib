@@ -887,6 +887,253 @@ def test_trusted_user_autopost_keeps_transient_failure_retryable(
     assert list(workflow_module.REJECTED_DIR.glob("*.yml")) == []
 
 
+def test_reply_restricted_tweet_still_evaluated_and_cached(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reply-restricted tweet is evaluated and cached, not discarded wholesale.
+
+    Regression for the P1 finding on gptme/gptme-contrib#1893: the Basic-tier
+    gate must not drop the item before process_tweet()/save_to_cache(), otherwise
+    surface-interesting.py and the evaluation cache lose those items.
+    """
+    _set_status_dirs(workflow_module, tmp_path)
+
+    tweet = SimpleNamespace(
+        id="4242",
+        author_id="7",
+        text="An interesting unmentioned tweet long enough to pass the prefilter.",
+        created_at=datetime.now(timezone.utc),
+        public_metrics={},
+        conversation_id=None,
+    )
+    user = SimpleNamespace(
+        id="7",
+        username="someone",
+        public_metrics={"followers_count": 1},
+    )
+
+    calls: list[dict[str, Any]] = []
+    cache_calls: list[Any] = []
+    gate_calls: list[dict[str, Any]] = []
+
+    def fake_process_tweet(data: Any, **kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(action="ignore", relevance=1, priority=1), None
+
+    def fake_gate(tweet: Any, *args: Any, **kwargs: Any) -> bool:
+        gate_calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(
+            data=SimpleNamespace(id="999", username="TimeToBuildBob")
+        ),
+    )
+    monkeypatch.setattr(
+        workflow_module, "should_evaluate_tweet", lambda *a, **k: (True, "")
+    )
+    monkeypatch.setattr(workflow_module, "is_reply_restricted", fake_gate)
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: False)
+    monkeypatch.setattr(workflow_module, "process_tweet", fake_process_tweet)
+    monkeypatch.setattr(
+        workflow_module, "save_to_cache", lambda *a, **k: cache_calls.append(a)
+    )
+
+    drafts_generated = workflow_module.process_timeline_tweets(
+        [tweet],
+        [user],
+        source="home timeline",
+        client=object(),
+        times=1,
+        dry_run=False,
+        max_drafts=10,
+    )
+
+    assert calls == [{"allow_reply": False}]
+    assert cache_calls, "evaluation must still be written to the cache"
+    assert drafts_generated == 0
+    # The gate must be driven by the resolved account identity, not a stub.
+    assert gate_calls
+    assert gate_calls[0]["own_username"] == "TimeToBuildBob"
+    assert str(gate_calls[0]["own_user_id"]) == "999"
+
+
+@pytest.mark.parametrize("status", ["new", "approved", "review", "posted", "rejected"])
+def test_reply_restricted_tweet_standalone_response_still_drafted(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """A standalone (non-reply) response survives the reply gate."""
+    _set_status_dirs(workflow_module, tmp_path)
+
+    tweet = SimpleNamespace(
+        id="4242",
+        author_id="7",
+        text="An interesting unmentioned tweet long enough to pass the prefilter.",
+        created_at=datetime.now(timezone.utc),
+        public_metrics={},
+        conversation_id=None,
+    )
+    user = SimpleNamespace(
+        id="7",
+        username="someone",
+        public_metrics={"followers_count": 1},
+    )
+
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="999")),
+    )
+    monkeypatch.setattr(
+        workflow_module, "should_evaluate_tweet", lambda *a, **k: (True, "")
+    )
+    monkeypatch.setattr(workflow_module, "is_reply_restricted", lambda *a, **k: True)
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: False)
+
+    @dataclass
+    class EvalResult:
+        action: str
+        relevance: int
+        priority: int
+
+    @dataclass
+    class Response:
+        text: str
+        type: str
+        thread_needed: bool
+        follow_up: str | None
+
+    monkeypatch.setattr(
+        workflow_module,
+        "process_tweet",
+        lambda *a, **k: (
+            EvalResult("respond", 100, 100),
+            Response("A standalone take.", "tweet", False, None),
+        ),
+    )
+    monkeypatch.setattr(workflow_module, "save_to_cache", lambda *a, **k: None)
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda username: False)
+
+    drafts_generated = workflow_module.process_timeline_tweets(
+        [tweet, tweet],
+        [user],
+        source="home timeline",
+        client=object(),
+        times=2,
+        dry_run=False,
+        max_drafts=10,
+    )
+
+    new_paths = list(workflow_module.NEW_DIR.glob("*.yml"))
+    assert drafts_generated == 1
+    assert len(new_paths) == 1
+    draft = workflow_module.TweetDraft.load(new_paths[0])
+    assert draft.type == "tweet"
+    assert draft.in_reply_to is None
+    assert draft.text == "A standalone take."
+
+    # Cached responses must not be replayed after a draft has been saved.
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: True)
+
+    def unexpected_cache_load(*args: Any) -> Any:
+        pytest.fail("Already-drafted source should be skipped before cache replay")
+
+    monkeypatch.setattr(workflow_module, "load_from_cache", unexpected_cache_load)
+
+    # Deduplication must survive a new poll and movement out of new/.
+    if status != "new":
+        new_paths[0].rename(workflow_module.TWEETS_DIR / status / new_paths[0].name)
+    assert (
+        workflow_module.process_timeline_tweets(
+            [tweet],
+            [user],
+            source="home timeline",
+            client=object(),
+            times=1,
+            dry_run=False,
+            max_drafts=10,
+        )
+        == 0
+    )
+
+
+@pytest.mark.parametrize("response_type", ["reply", "quote"])
+def test_reply_restricted_reply_response_suppressed_and_cached(
+    workflow_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    response_type: str,
+) -> None:
+    """A model that ignores the standalone constraint must not create a reply/quote draft.
+
+    The Basic-tier 403 covers quotes as well as replies.
+    """
+    _set_status_dirs(workflow_module, tmp_path)
+
+    tweet = SimpleNamespace(
+        id="4242",
+        author_id="7",
+        text="An interesting unmentioned tweet long enough to pass the prefilter.",
+        created_at=datetime.now(timezone.utc),
+        public_metrics={},
+        conversation_id=None,
+    )
+    user = SimpleNamespace(
+        id="7",
+        username="someone",
+        public_metrics={"followers_count": 1},
+    )
+
+    cache_calls: list[Any] = []
+
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="999")),
+    )
+    monkeypatch.setattr(
+        workflow_module, "should_evaluate_tweet", lambda *a, **k: (True, "")
+    )
+    monkeypatch.setattr(workflow_module, "is_reply_restricted", lambda *a, **k: True)
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: False)
+    monkeypatch.setattr(
+        workflow_module,
+        "process_tweet",
+        lambda *a, **k: (
+            SimpleNamespace(action="respond", relevance=100, priority=100),
+            SimpleNamespace(
+                text="A response that would 403.",
+                type=response_type,
+                thread_needed=False,
+                follow_up=None,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        workflow_module, "save_to_cache", lambda *a, **k: cache_calls.append(a)
+    )
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda username: False)
+
+    drafts_generated = workflow_module.process_timeline_tweets(
+        [tweet],
+        [user],
+        source="home timeline",
+        client=object(),
+        times=1,
+        dry_run=False,
+        max_drafts=10,
+    )
+
+    assert drafts_generated == 0
+    assert list(workflow_module.NEW_DIR.glob("*.yml")) == []
+    assert list(workflow_module.REJECTED_DIR.glob("*.yml")) == []
+    # The evaluation is still cached; only the undeliverable reply is dropped.
+    assert cache_calls
+    assert cache_calls[0][2] is None
+
+
 def test_process_cached_tweet_skips_conversation_read(
     workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1353,7 +1600,10 @@ def test_process_new_tweet_fetches_thread_by_tweet_id(
     monkeypatch.setattr(
         workflow_module,
         "process_tweet",
-        lambda data: (SimpleNamespace(action="ignore", relevance=1, priority=1), None),
+        lambda data, **k: (
+            SimpleNamespace(action="ignore", relevance=1, priority=1),
+            None,
+        ),
     )
     monkeypatch.setattr(workflow_module, "save_to_cache", lambda *a, **k: None)
 
@@ -1447,6 +1697,196 @@ def test_is_reply_restricted_following(workflow_module: Any) -> None:
 def test_is_reply_restricted_mentioned_users(workflow_module: Any) -> None:
     tweet = SimpleNamespace(reply_settings="mentionedUsers")
     assert workflow_module.is_reply_restricted(tweet) is True
+
+
+def test_is_reply_restricted_unmentioned_timeline_tweet_basic_tier(
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda username: False)
+    tweet = SimpleNamespace(reply_settings="everyone", text="WSJ just reported this.")
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="rohanpaul_ai"
+        )
+        is True
+    )
+    assert "not mentioned" in workflow_module.reply_restriction_reason(tweet)
+
+
+def test_is_reply_restricted_mentioned_in_text_is_open(
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda username: False)
+    tweet = SimpleNamespace(
+        reply_settings="everyone", text="cc @timetobuildbob what do you think?"
+    )
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="someone"
+        )
+        is False
+    )
+
+
+def test_is_reply_restricted_text_mention_with_empty_entities_mentions_is_open(
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty entities.mentions list must not hide a literal @handle in the text.
+
+    The timeline API always returns an ``entities`` dict with a (possibly empty)
+    ``mentions`` key, so a metadata-only branch would never reach the text
+    fallback and would wrongly block a tweet that does mention the account.
+    """
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda username: False)
+    tweet = SimpleNamespace(
+        reply_settings="everyone",
+        text="cc @timetobuildbob what do you think?",
+        entities={"mentions": []},
+    )
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="someone"
+        )
+        is False
+    )
+
+
+def test_is_reply_restricted_handle_prefix_is_not_a_mention_with_empty_entities(
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The text fallback keeps its exact-boundary guard even with entities present."""
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda username: False)
+    tweet = SimpleNamespace(
+        reply_settings="everyone",
+        text="cc @TimeToBuildBobExtra what do you think?",
+        entities={"mentions": []},
+    )
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="someone"
+        )
+        is True
+    )
+
+
+def test_is_reply_restricted_from_mentions_skips_mention_gate(
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda username: False)
+    tweet = SimpleNamespace(reply_settings="everyone", text="no handle here")
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet,
+            from_mentions=True,
+            own_username="TimeToBuildBob",
+            author_username="someone",
+        )
+        is False
+    )
+
+
+def test_is_reply_restricted_trusted_author_requires_engagement(
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "trusted_users_under_test", REPO_ROOT / "scripts/twitter/trusted_users.py"
+    )
+    assert spec and spec.loader
+    trusted_users = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(trusted_users)
+    monkeypatch.setattr(
+        workflow_module, "is_trusted_user", trusted_users.is_trusted_user
+    )
+    tweet = SimpleNamespace(reply_settings="everyone", text="shipped a thing")
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="ErikBjare"
+        )
+        is True
+    )
+    tweet.entities = {"mentions": [{"username": "TimeToBuildBob"}]}
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="ErikBjare"
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"in_reply_to_user_id": "42"},
+        {"entities": {"mentions": [{"username": "TimeToBuildBob"}]}},
+    ],
+)
+def test_is_reply_restricted_metadata_confirmed_engagement(
+    workflow_module: Any, metadata: dict[str, Any]
+) -> None:
+    tweet = SimpleNamespace(reply_settings="everyone", text="thanks!", **metadata)
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet,
+            own_username="TimeToBuildBob",
+            own_user_id=42,
+            author_username="someone",
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize("text", ["cc @TimeToBuildBobExtra", "TimeToBuildBob is cool"])
+def test_is_reply_restricted_handle_is_not_a_mention(
+    workflow_module: Any, text: str
+) -> None:
+    tweet = SimpleNamespace(reply_settings="everyone", text=text)
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="someone"
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"entities": {"mentions": [{"username": "TimeToBuildBob"}]}},
+        {"text": "hi @TimeToBuildBob"},
+    ],
+)
+def test_mentioned_users_allows_confirmed_timeline_mention(
+    workflow_module: Any, metadata: dict[str, Any]
+) -> None:
+    tweet = SimpleNamespace(reply_settings="mentionedUsers", **metadata)
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="someone"
+        )
+        is False
+    )
+
+
+def test_is_reply_restricted_unknown_own_username_stays_open(
+    workflow_module: Any,
+) -> None:
+    tweet = SimpleNamespace(reply_settings="everyone", text="no handle here")
+    assert (
+        workflow_module.is_reply_restricted(tweet, author_username="someone") is False
+    )
+
+
+def test_restricted_reply_settings_still_win_over_mention(
+    workflow_module: Any,
+) -> None:
+    tweet = SimpleNamespace(reply_settings="following", text="hi @timetobuildbob")
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="someone"
+        )
+        is True
+    )
+    assert workflow_module.reply_restriction_reason(tweet) == "reply_settings=following"
 
 
 def test_is_reply_restricted_mentioned_users_from_mentions(
