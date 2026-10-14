@@ -270,10 +270,15 @@ if [ "$is_allowed" = false ]; then
             echo ""
             local_branch="${_local_ref#refs/heads/}"
             if [[ "$_local_ref" == refs/heads/* && "refs/heads/$local_branch" != "$remote_ref" ]]; then
-                # The trap: a feature branch tracking origin/master, where
-                # push.default=upstream maps even `git push origin BRANCH` to master.
-                echo "Local branch '$local_branch' is being pushed to ${remote_ref#refs/heads/}:"
-                echo "it tracks origin/${remote_ref#refs/heads/}. Push it under its own name:"
+                # A differently-named local branch is heading to master/main.
+                # Check whether this is the push.default=upstream tracking trap.
+                tracked_remote=$(git config "branch.${local_branch}.remote" 2>/dev/null || true)
+                tracked_merge=$(git config "branch.${local_branch}.merge" 2>/dev/null || true)
+                echo "Local branch '$local_branch' is being pushed to ${remote_ref#refs/heads/}."
+                if [[ "$tracked_remote" == "origin" && "$tracked_merge" == "$remote_ref" ]]; then
+                    echo "It tracks origin/${remote_ref#refs/heads/} — likely due to push.default=upstream."
+                fi
+                echo "Push it under its own name instead:"
                 echo "  git push -u origin $local_branch:refs/heads/$local_branch"
             else
                 echo "Create a branch and push that:"

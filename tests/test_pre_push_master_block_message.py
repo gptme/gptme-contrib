@@ -51,6 +51,7 @@ def _run_hook(repo: Path, stdin: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_feature_branch_to_master_names_the_trap(tmp_path: Path) -> None:
+    """Without upstream tracking configured, only the generic refspec is shown."""
     repo, head = _repo(tmp_path)
     proc = _run_hook(
         repo, f"refs/heads/fix/thing {head} refs/heads/master {'0' * 40}\n"
@@ -60,6 +61,24 @@ def test_feature_branch_to_master_names_the_trap(tmp_path: Path) -> None:
     assert "Direct push to refs/heads/master blocked" in out
     assert "git push -u origin fix/thing:refs/heads/fix/thing" in out
     assert "If intentional, use: git push --no-verify" not in out
+    assert "Do NOT retry with --no-verify" in out
+    # Without actual tracking, the hook must NOT claim "it tracks origin/master".
+    assert "It tracks origin/master" not in out
+
+
+def test_feature_branch_with_tracking_names_the_upstream(tmp_path: Path) -> None:
+    """When the branch actually tracks origin/master, the message says so."""
+    repo, head = _repo(tmp_path)
+    # Configure the feature branch to track origin/master (the real incident shape).
+    _git(repo, "config", "branch.fix/thing.remote", "origin")
+    _git(repo, "config", "branch.fix/thing.merge", "refs/heads/master")
+    proc = _run_hook(
+        repo, f"refs/heads/fix/thing {head} refs/heads/master {'0' * 40}\n"
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, out
+    assert "It tracks origin/master" in out
+    assert "git push -u origin fix/thing:refs/heads/fix/thing" in out
     assert "Do NOT retry with --no-verify" in out
 
 
