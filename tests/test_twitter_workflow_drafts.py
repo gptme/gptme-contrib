@@ -1550,6 +1550,25 @@ def test_is_reply_restricted_handle_is_not_a_mention(
     )
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"entities": {"mentions": [{"username": "TimeToBuildBob"}]}},
+        {"text": "hi @TimeToBuildBob"},
+    ],
+)
+def test_mentioned_users_allows_confirmed_timeline_mention(
+    workflow_module: Any, metadata: dict[str, Any]
+) -> None:
+    tweet = SimpleNamespace(reply_settings="mentionedUsers", **metadata)
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="someone"
+        )
+        is False
+    )
+
+
 def test_is_reply_restricted_unknown_own_username_stays_open(
     workflow_module: Any,
 ) -> None:

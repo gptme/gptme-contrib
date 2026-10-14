@@ -1846,9 +1846,25 @@ def is_reply_restricted(
     "otherwise engaged" the account, and post() still quarantines a residual
     403. When ``own_username`` is unknown the gate cannot evaluate and stays open.
     """
+    handle = own_username.lstrip("@").lower() if own_username else None
+    entities = getattr(tweet, "entities", None) or {}
+    text = str(getattr(tweet, "text", "") or "").lower()
+    mentioned = from_mentions
+    if handle:
+        if "mentions" in entities:
+            mentioned = mentioned or any(
+                str(mention.get("username", "")).lower() == handle
+                for mention in entities["mentions"]
+            )
+        else:
+            mentioned = (
+                mentioned
+                or re.search(rf"(?<![a-z0-9_])@{re.escape(handle)}(?![a-z0-9_])", text)
+                is not None
+            )
     reply_settings = getattr(tweet, "reply_settings", None)
     if reply_settings is not None and reply_settings != "everyone":
-        if not (from_mentions and reply_settings == "mentionedUsers"):
+        if not (mentioned and reply_settings == "mentionedUsers"):
             return True
     if from_mentions or own_username is None:
         return False
@@ -1863,14 +1879,7 @@ def is_reply_restricted(
     if own_user_id is not None and recipient is not None:
         if str(recipient) == str(own_user_id):
             return False
-    entities = getattr(tweet, "entities", None) or {}
-    if "mentions" in entities:
-        return not any(
-            str(mention.get("username", "")).lower() == handle
-            for mention in entities["mentions"]
-        )
-    text = str(getattr(tweet, "text", "") or "").lower()
-    return re.search(rf"(?<![a-z0-9_])@{re.escape(handle)}(?![a-z0-9_])", text) is None
+    return not mentioned
 
 
 def reply_restriction_reason(tweet) -> str:
