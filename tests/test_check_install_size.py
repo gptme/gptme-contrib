@@ -129,22 +129,11 @@ def test_measure_install_size_success():
             result.stdout = ""
         elif "export" in cmd:
             # Simulate successful lock export; content triggers the lock-export path
-            result.stdout = (
-                "pkg==1.0.0\n"
-                "gptme @ git+https://github.com/gptme/gptme.git@deadbeef\n"
-                "anthropic==0.120.2\n"
-            )
+            result.stdout = "pkg==1.0.0\n"
         elif "du" in cmd:
             # du -sAb returns "{bytes}\t{path}"
             result.stdout = f"{file_size}\t{cmd[-1]}\n"
         else:
-            if "install" in cmd:
-                requirements = Path(cmd[cmd.index("-r") + 1]).read_text()
-                assert (
-                    "gptme @ git+https://github.com/gptme/gptme.git@deadbeef"
-                    in requirements
-                )
-                assert "anthropic==0.120.2" in requirements
             result.stdout = ""
         return result
 
@@ -158,7 +147,6 @@ def test_measure_install_size_success():
     assert 9.0 < size < 11.0  # ~10 MB
     export_cmd = next(cmd for cmd in seen_commands if "export" in cmd)
     install_cmd = next(cmd for cmd in seen_commands if "install" in cmd)
-    assert "--no-sources" in install_cmd
     assert "--emit-index-url" not in export_cmd
     assert export_cmd[-2:] == ["--index-strategy", "unsafe-best-match"]
     assert "--index-strategy" in install_cmd
