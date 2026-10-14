@@ -708,3 +708,20 @@ def test_worker_main_encodes_provider_failures_as_protocol_fallback(
     _selector_worker.main()
     result = json.loads(capsys.readouterr().out)
     assert result == {"version": 1, "status": "fallback", "ids": [], "reason": reason}
+
+
+def test_no_candidates_empty_decision_is_cached_for_later_tool_event(
+    tmp_path: Path,
+) -> None:
+    """An empty catalog short-circuit must satisfy the cacheable-none contract."""
+    # No worker needed: no candidates short-circuits before the provider call.
+    initial = select(request(candidates=[]), state_dir=tmp_path, worker_command=None)
+    assert initial["status"] == "empty"
+    assert initial["reason"] == "no_candidates"
+    assert initial["cached"] is False
+
+    cached = select(request(candidates=[], event_kind="tool"), state_dir=tmp_path)
+    assert cached["status"] == "empty"
+    assert cached["ids"] == []
+    assert cached["cached"] is True
+    assert cached["fingerprint"] == initial["fingerprint"]

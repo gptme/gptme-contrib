@@ -258,6 +258,20 @@ def select(
         if normalized["event_kind"] == "tool":
             return fallback("cache_miss")
         if not normalized["candidates"] or not normalized["max_results"]:
+            # A successful explicit none is cacheable (README): persist it so a
+            # later tool event with the same fingerprint resolves consistently.
+            decision = {
+                "version": VERSION,
+                "status": "empty",
+                "ids": [],
+                "reason": "no_candidates",
+            }
+            limit_database_wait()
+            connection.execute(
+                "INSERT OR REPLACE INTO decisions VALUES (?, ?, ?, ?)",
+                (*identity, cache_key, json.dumps(decision)),
+            )
+            connection.commit()
             return finish("empty", [], "no_candidates")
         if not normalized["model"]:
             return fallback("missing_model")
