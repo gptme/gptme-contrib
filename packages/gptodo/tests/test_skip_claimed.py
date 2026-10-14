@@ -117,6 +117,7 @@ class TestGetClaimedTaskIds:
 
     def test_excludes_own_agent_claims(self, tmp_path: Path, monkeypatch) -> None:
         db_path = tmp_path / "state" / "coordination" / "coord.db"
+        monkeypatch.delenv("CASCADE_COORDINATION_AGENT", raising=False)
         monkeypatch.setenv("AGENT_ID", "me")
         write_coord_db(
             db_path,
