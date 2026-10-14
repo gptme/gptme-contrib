@@ -222,6 +222,20 @@ def select(
         normalized = validate_request(request)
     except (ValueError, TypeError, OverflowError):
         return fallback("invalid_request")
+    # Generation hooks execute outside the cost allowance. Check in the parent
+    # process where the hook registry is populated; the worker subprocess sees
+    # an empty registry and cannot perform this check reliably.
+    try:
+        from gptme.hooks import HookType, get_hooks
+
+        if any(
+            hook.enabled
+            for kind in (HookType.GENERATION_PRE, HookType.GENERATION_POST)
+            for hook in get_hooks(kind)
+        ):
+            return fallback("generation_hooks_present")
+    except ImportError:
+        pass
     cache_key = fingerprint(normalized)
     deadline = start + normalized["timeout_seconds"]
     identity = (normalized["runtime"], normalized["session_id"])

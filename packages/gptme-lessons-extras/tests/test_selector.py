@@ -947,60 +947,39 @@ def test_input_byte_limit_invalidates_cached_selection(tmp_path: Path) -> None:
     assert changed["fingerprint"] != initial["fingerprint"]
 
 
-@pytest.mark.usefixtures("compatible_core_parser")
 @pytest.mark.parametrize("hook_type", ["GENERATION_PRE", "GENERATION_POST"])
-def test_worker_refuses_enabled_generation_hooks_before_selection(
-    monkeypatch: pytest.MonkeyPatch, hook_type: str
+def test_select_refuses_enabled_generation_hooks_in_parent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hook_type: str
 ) -> None:
+    """Hook check must fire in the parent process, before the worker subprocess."""
     from types import SimpleNamespace
 
     import gptme.hooks
-    import gptme.llm
-    from gptme.context.selector.llm_based import LLMSelector
-    from gptme_lessons_extras._selector_worker import select_with_core
-    from gptme_lessons_extras.selector import validate_request
 
     def get_hooks(kind: Any) -> list[Any]:
         if kind == getattr(gptme.hooks.HookType, hook_type):
             return [SimpleNamespace(enabled=True)]
         return []
 
-    def forbidden(*args: Any, **kwargs: Any) -> None:
-        pytest.fail("generation hooks must be refused before selection/provider")
-
     monkeypatch.setattr(gptme.hooks, "get_hooks", get_hooks)
-    monkeypatch.setattr(LLMSelector, "select", forbidden)
-    monkeypatch.setattr(gptme.llm, "reply", forbidden)
-    result = select_with_core(validate_request(request()))
-    assert result == {
-        "version": 1,
-        "status": "fallback",
-        "ids": [],
-        "reason": "generation_hooks_present",
-    }
+    # Use a valid worker command; it must never be called when hooks are present.
+    command = worker(tmp_path, selected("commit"))
+    result = select(request(), state_dir=tmp_path, worker_command=command)
+    assert result["status"] == "fallback"
+    assert result["reason"] == "generation_hooks_present"
 
 
-@pytest.mark.usefixtures("compatible_core_parser")
-def test_worker_ignores_disabled_generation_hooks(
-    monkeypatch: pytest.MonkeyPatch,
+def test_select_ignores_disabled_generation_hooks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from types import SimpleNamespace
 
     import gptme.hooks
-    import gptme.llm
-    from gptme_lessons_extras._selector_worker import select_with_core
-    from gptme_lessons_extras.selector import validate_request
 
     monkeypatch.setattr(
         gptme.hooks, "get_hooks", lambda kind: [SimpleNamespace(enabled=False)]
     )
-    monkeypatch.setattr(
-        gptme.llm,
-        "reply",
-        lambda **kwargs: SimpleNamespace(content="<selected>commit</selected>"),
-    )
-    assert select_with_core(validate_request(request())) == {
-        "version": 1,
-        "status": "selected",
-        "ids": ["commit"],
-    }
+    command = worker(tmp_path, selected("commit"))
+    result = select(request(), state_dir=tmp_path, worker_command=command)
+    assert result["status"] == "selected"
+    assert "commit" in result["ids"]
