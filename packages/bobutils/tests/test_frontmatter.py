@@ -61,3 +61,19 @@ def test_indented_dashes_in_block_scalar_do_not_close_fence():
     fm, body = split_frontmatter(text)
     assert "  ---" in fm
     assert body == "Body."
+
+
+def test_crlf_line_endings_parse_cleanly():
+    """Files written on Windows (CRLF) must parse identically to LF files."""
+    text = "---\r\ntitle: Hello\r\n---\r\n\r\nBody text."
+    fm, body = split_frontmatter(text)
+    assert fm == "title: Hello\n"
+    assert body == "\nBody text."
+
+
+def test_utf8_bom_prefix_is_stripped():
+    """A UTF-8 BOM before the opening fence must not cause a parse failure."""
+    text = "﻿---\ntitle: Hello\n---\nBody."
+    fm, body = split_frontmatter(text)
+    assert fm == "title: Hello\n"
+    assert body == "Body."

@@ -34,6 +34,10 @@ def split_frontmatter(text: str) -> tuple[str, str]:
         ValueError: if the text does not start with ``---\\n`` or if no
             closing ``---`` fence line is found.
     """
+    # Normalize CRLF so Windows checkouts and git autocrlf=true files parse cleanly.
+    # Also strip a leading UTF-8 BOM if present.
+    text = text.lstrip("﻿").replace("\r\n", "\n").replace("\r", "\n")
+
     if not text.startswith(_OPEN_FENCE):
         raise ValueError("text does not begin with a frontmatter fence (---\\n)")
 
