@@ -220,10 +220,14 @@ def select(
 
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
+        database_path = state_dir / "selector.sqlite3"
         connection = sqlite3.connect(
-            state_dir / "selector.sqlite3",
+            database_path,
             timeout=min(normalized["timeout_seconds"], 1.0),
         )
+        # Session ids and fingerprints are treated as private (receipts.jsonl is
+        # 0o600); keep the cache/state DB from inheriting a permissive umask.
+        os.chmod(database_path, 0o600)
         for statement in (
             """CREATE TABLE IF NOT EXISTS sessions (
                 runtime TEXT, session_id TEXT, calls INTEGER NOT NULL,

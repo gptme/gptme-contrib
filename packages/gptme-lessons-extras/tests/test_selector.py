@@ -119,6 +119,16 @@ def test_receipts_distinguish_selection_from_cache_without_logging_query(
     assert "Commit only owned paths." not in raw
 
 
+def test_state_database_is_not_world_readable(tmp_path: Path) -> None:
+    command = worker(tmp_path, selected("review"))
+    previous_umask = os.umask(0o022)
+    try:
+        select(request(), state_dir=tmp_path, worker_command=command)
+    finally:
+        os.umask(previous_umask)
+    assert os.stat(tmp_path / "selector.sqlite3").st_mode & 0o777 == 0o600
+
+
 @pytest.mark.parametrize(
     "response",
     [
