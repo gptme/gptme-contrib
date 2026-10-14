@@ -138,7 +138,10 @@ def validate_result(value: Any, request: dict[str, Any]) -> dict[str, Any]:
     else:
         ids = ids[: request["max_results"]]
         status = "selected" if ids else "empty"
-    reason = value.get("reason", "selected" if ids else "empty")
+    reason = value.get(
+        "reason",
+        "fallback" if status == "fallback" else ("selected" if ids else "empty"),
+    )
     return {"version": VERSION, "status": status, "ids": ids, "reason": _text(reason)}
 
 

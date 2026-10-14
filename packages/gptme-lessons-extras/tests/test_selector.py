@@ -174,6 +174,20 @@ def test_worker_declared_fallback_cannot_choose_ineligible_content(
     assert result["calls_used"] == 1
 
 
+def test_fallback_without_reason_is_not_labelled_selected(tmp_path: Path) -> None:
+    result = select(
+        request(),
+        state_dir=tmp_path,
+        worker_command=worker(
+            tmp_path,
+            {"version": 1, "status": "fallback", "ids": []},
+        ),
+    )
+    assert result["status"] == "fallback"
+    assert result["ids"] == ["test", "commit"]
+    assert result["reason"] == "fallback"
+
+
 def test_failed_provider_decision_is_not_cached(tmp_path: Path) -> None:
     command = worker(tmp_path, "broken")
     failed = select(request(), state_dir=tmp_path, worker_command=command)
