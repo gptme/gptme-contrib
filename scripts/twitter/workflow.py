@@ -1815,6 +1815,7 @@ def is_reply_restricted(
     from_mentions: bool = False,
     *,
     own_username: str | None = None,
+    own_user_id: int | str | None = None,
     author_username: str | None = None,
 ) -> bool:
     """Return True if replying to this tweet would be rejected with a 403.
@@ -1839,7 +1840,8 @@ def is_reply_restricted(
     quote with "You can only reply to or quote posts where you are mentioned or
     are the author". Timeline tweets that do not mention ``own_username`` are
     therefore skipped before the LLM drafts a reply that post() can only
-    quarantine (tweets/rejected/ accumulated 141 such drafts, 2026-05 → 2026-10).
+    quarantine. Metadata-confirmed mentions and direct replies to the account
+    are also eligible, even if the rendered text omits the handle.
     Trusted authors are exempt: X also accepts replies where the author has
     "otherwise engaged" the account, and post() still quarantines a residual
     403. When ``own_username`` is unknown the gate cannot evaluate and stays open.
@@ -1856,8 +1858,19 @@ def is_reply_restricted(
         return False
     if author and is_trusted_user(author):
         return False
+    # Replies may omit the recipient's handle from their rendered text.
+    recipient = getattr(tweet, "in_reply_to_user_id", None)
+    if own_user_id is not None and recipient is not None:
+        if str(recipient) == str(own_user_id):
+            return False
+    entities = getattr(tweet, "entities", None) or {}
+    if "mentions" in entities:
+        return not any(
+            str(mention.get("username", "")).lower() == handle
+            for mention in entities["mentions"]
+        )
     text = str(getattr(tweet, "text", "") or "").lower()
-    return f"@{handle}" not in text
+    return re.search(rf"(?<![a-z0-9_])@{re.escape(handle)}(?![a-z0-9_])", text) is None
 
 
 def reply_restriction_reason(tweet) -> str:
@@ -1966,12 +1979,13 @@ def process_timeline_tweets(
             author = user_lookup.get(tweet.author_id)
             author_username = author.username if author else str(tweet.author_id)
 
-            # Skip tweets Bob cannot reply to (restricted reply_settings, or an
+            # Skip tweets the account cannot reply to (restricted reply_settings, or an
             # unmentioned timeline post on the Basic tier) — replying would 403
             if is_reply_restricted(
                 tweet,
                 from_mentions=from_mentions,
                 own_username=own_username,
+                own_user_id=getattr(me_data, "id", None),
                 author_username=author_username,
             ):
                 console.print(
@@ -2399,6 +2413,8 @@ def monitor(
                         "public_metrics",
                         "conversation_id",
                         "reply_settings",
+                        "entities",
+                        "in_reply_to_user_id",
                     ],
                     expansions=["author_id"],
                     user_fields=["username", "public_metrics"],
@@ -2413,6 +2429,8 @@ def monitor(
                         "public_metrics",
                         "conversation_id",
                         "reply_settings",
+                        "entities",
+                        "in_reply_to_user_id",
                     ],
                     expansions=["author_id"],
                     user_fields=["username", "public_metrics"],
@@ -2597,6 +2615,8 @@ def auto(
                         "public_metrics",
                         "conversation_id",
                         "reply_settings",
+                        "entities",
+                        "in_reply_to_user_id",
                     ],
                     expansions=["author_id"],
                     user_fields=["username", "public_metrics"],
@@ -2611,6 +2631,8 @@ def auto(
                         "public_metrics",
                         "conversation_id",
                         "reply_settings",
+                        "entities",
+                        "in_reply_to_user_id",
                     ],
                     expansions=["author_id"],
                     user_fields=["username", "public_metrics"],

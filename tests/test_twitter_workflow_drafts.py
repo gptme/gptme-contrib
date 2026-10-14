@@ -1497,8 +1497,14 @@ def test_is_reply_restricted_from_mentions_skips_mention_gate(
 def test_is_reply_restricted_trusted_author_exempt_from_mention_gate(
     workflow_module: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "trusted_users_under_test", REPO_ROOT / "scripts/twitter/trusted_users.py"
+    )
+    assert spec and spec.loader
+    trusted_users = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(trusted_users)
     monkeypatch.setattr(
-        workflow_module, "is_trusted_user", lambda username: username == "erikbjare"
+        workflow_module, "is_trusted_user", trusted_users.is_trusted_user
     )
     tweet = SimpleNamespace(reply_settings="everyone", text="shipped a thing")
     assert (
@@ -1506,6 +1512,41 @@ def test_is_reply_restricted_trusted_author_exempt_from_mention_gate(
             tweet, own_username="TimeToBuildBob", author_username="ErikBjare"
         )
         is False
+    )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"in_reply_to_user_id": "42"},
+        {"entities": {"mentions": [{"username": "TimeToBuildBob"}]}},
+    ],
+)
+def test_is_reply_restricted_metadata_confirmed_engagement(
+    workflow_module: Any, metadata: dict[str, Any]
+) -> None:
+    tweet = SimpleNamespace(reply_settings="everyone", text="thanks!", **metadata)
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet,
+            own_username="TimeToBuildBob",
+            own_user_id=42,
+            author_username="someone",
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize("text", ["cc @TimeToBuildBobExtra", "TimeToBuildBob is cool"])
+def test_is_reply_restricted_handle_is_not_a_mention(
+    workflow_module: Any, text: str
+) -> None:
+    tweet = SimpleNamespace(reply_settings="everyone", text=text)
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="someone"
+        )
+        is True
     )
 
 
