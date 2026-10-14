@@ -1053,10 +1053,14 @@ def test_set_state_todo_on_recurrence_gate_drops_waiting_for(
     ), "leftover generated waiting_for on todo must not be a human blocker"
 
 
-def test_set_state_todo_preserves_human_waiting_for(
+def test_set_state_todo_clears_human_waiting_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """State-only todo must not strip a human waiting_for suffix."""
+    """Releasing to todo clears a human waiting_for too, not just a generated one.
+
+    Matcher exactness for the suffixed string is covered by
+    test_generated_recurrence_waiting_for_is_exact_string.
+    """
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
     write_task(
@@ -1078,7 +1082,9 @@ def test_set_state_todo_preserves_human_waiting_for(
 
     post = fm.load(tasks_dir / "human-gate-task.md")
     assert post.metadata["state"] == "todo"
-    assert "confirm with Bob" in str(post.metadata.get("waiting_for", ""))
+    assert "waiting_for" not in post.metadata
+    assert "waiting_since" not in post.metadata
+    assert post.metadata["wait"]
 
 
 def test_generated_recurrence_waiting_for_is_exact_string() -> None:
@@ -1229,10 +1235,9 @@ def test_set_wait_does_not_rewrite_inner_paren_recurrence_waiting_for(
 
     post = fm.load(tasks_dir / "recur-gate-task.md")
     assert str(post.metadata["wait"]).startswith(new_wait)
-    assert post.metadata.get("waiting_for") == human_wf, (
-        "inner-paren human waiting_for must be preserved; "
-        f"got {post.metadata.get('waiting_for')!r}"
-    )
+    assert (
+        post.metadata.get("waiting_for") == human_wf
+    ), f"inner-paren human waiting_for must be preserved; got {post.metadata.get('waiting_for')!r}"
 
 
 def test_set_wait_after_wait_none_staying_waiting_restores_recurrence_gate(
