@@ -16,10 +16,22 @@ def select_with_core(request: dict[str, Any]) -> dict[str, Any]:
     from gptme.context.selector.llm_based import LLMSelector
 
     config = ContextSelectorConfig(strategy="llm", llm_model=request["model"])
-    # Apply caller-supplied output cap when the installed config supports it.
-    max_output = request.get("max_output_tokens")
-    if max_output is not None and hasattr(config, "max_tokens"):
-        config.max_tokens = max_output
+    # A partially upgraded core can silently discard bounds. Require the whole
+    # contract before invoking selection or any provider code.
+    bounds = {
+        "max_tokens": request["max_output_tokens"],
+        "max_input_bytes": request["max_input_bytes"],
+        "max_provider_requests": 1,
+    }
+    if not all(hasattr(config, field) for field in bounds):
+        return {
+            "version": VERSION,
+            "status": "fallback",
+            "ids": [],
+            "reason": "unsupported_core",
+        }
+    for field, value in bounds.items():
+        setattr(config, field, value)
     selector = LLMSelector(config)
     # gptme/gptme#4282 changes malformed envelopes from [] to ValueError.
     # Older installs must not silently treat provider errors as explicit none.

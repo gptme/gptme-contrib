@@ -8,6 +8,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,7 @@ def request(**overrides: Any) -> dict[str, Any]:
         ],
         "fallback_ids": ["test", "commit"],
         "max_results": 2,
-        "model": "offline-test-model",
+        "model": "anthropic/offline-test-model",
         "timeout_seconds": 2.0,
         "max_calls_per_session": 8,
     }
@@ -551,12 +552,21 @@ def test_json_cli_transport_has_offline_deterministic_fallback(
 
 @pytest.fixture
 def compatible_core_parser(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Supply #4282's malformed-envelope signal without replacing core.select.
+    """Supply parser/capability signals without replacing core.select.
 
     The installed gptme can predate that fix. These are adapter/provider-boundary
     tests, not a replacement for core's own exhaustive parser regression suite.
     """
+    import gptme.context.selector.config as core_config
     from gptme.context.selector.llm_based import LLMSelector
+
+    @dataclass
+    class SupportingConfig(core_config.ContextSelectorConfig):
+        max_tokens: int = 512
+        max_input_bytes: int = 65536
+        max_provider_requests: int = 1
+
+    monkeypatch.setattr(core_config, "ContextSelectorConfig", SupportingConfig)
 
     installed_parser = LLMSelector._parse_response
 
@@ -625,7 +635,7 @@ def test_worker_uses_core_provider_stack_and_normalizes_advisory_decision(
     result = select_with_core(validate_request(request()))
     assert result == {"version": 1, "status": status, "ids": ids}
     assert len(calls) == 1
-    assert calls[0]["model"] == "offline-test-model"
+    assert calls[0]["model"] == "anthropic/offline-test-model"
     assert calls[0]["workspace"] is None
     messages = calls[0]["messages"]
     assert any("Commit only owned paths." in message.content for message in messages)
@@ -770,8 +780,6 @@ def test_worker_passes_max_output_tokens_to_config_when_supported(
     cap: int,
 ) -> None:
     """Exercise the adapter with a supporting config, even on older core installs."""
-    from dataclasses import dataclass
-
     import gptme.context.selector.config as core_config
     from gptme.context.selector.llm_based import LLMSelector
     from gptme_lessons_extras import _selector_worker
@@ -779,20 +787,28 @@ def test_worker_passes_max_output_tokens_to_config_when_supported(
     @dataclass
     class SupportingConfig(core_config.ContextSelectorConfig):
         max_tokens: int = 512
+        max_input_bytes: int = 65536
+        max_provider_requests: int = 1
 
-    captured_max_tokens: list[int] = []
+    captured_bounds: list[tuple[int, int, int]] = []
 
     def offline_select(
         self: Any, query: str, items: list[Any], limit: int
     ) -> list[Any]:
-        captured_max_tokens.append(self.config.max_tokens)
+        captured_bounds.append(
+            (
+                self.config.max_tokens,
+                self.config.max_input_bytes,
+                self.config.max_provider_requests,
+            )
+        )
         return [item for item in items if item.identifier == "commit"]
 
     monkeypatch.setattr(core_config, "ContextSelectorConfig", SupportingConfig)
     monkeypatch.setattr(LLMSelector, "select", offline_select)
-    _worker_stdin(monkeypatch, request(max_output_tokens=cap))
+    _worker_stdin(monkeypatch, request(max_output_tokens=cap, max_input_bytes=4096))
     _selector_worker.main()
-    assert captured_max_tokens == [cap]
+    assert captured_bounds == [(cap, 4096, 1)]
     assert json.loads(capsys.readouterr().out) == {
         "version": 1,
         "status": "selected",
@@ -800,8 +816,7 @@ def test_worker_passes_max_output_tokens_to_config_when_supported(
     }
 
 
-@pytest.mark.usefixtures("compatible_core_parser")
-def test_worker_forwards_output_cap_to_reply_when_core_supports_it(
+def test_worker_forwards_all_bounds_to_reply_when_core_supports_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Integration boundary: supporting core must pass the cap to a fake provider."""
@@ -812,8 +827,11 @@ def test_worker_forwards_output_cap_to_reply_when_core_supports_it(
     from gptme_lessons_extras._selector_worker import select_with_core
     from gptme_lessons_extras.selector import validate_request
 
-    if not hasattr(ContextSelectorConfig(), "max_tokens"):
-        pytest.skip("installed gptme does not support ContextSelectorConfig.max_tokens")
+    if not all(
+        hasattr(ContextSelectorConfig(), field)
+        for field in ("max_tokens", "max_input_bytes", "max_provider_requests")
+    ):
+        pytest.skip("installed gptme does not support all selector cost bounds")
 
     calls: list[dict[str, Any]] = []
 
@@ -822,10 +840,14 @@ def test_worker_forwards_output_cap_to_reply_when_core_supports_it(
         return SimpleNamespace(content="<selected>commit</selected>")
 
     monkeypatch.setattr(gptme.llm, "reply", offline_reply)
-    result = select_with_core(validate_request(request(max_output_tokens=128)))
+    result = select_with_core(
+        validate_request(request(max_output_tokens=128, max_input_bytes=4096))
+    )
     assert result == {"version": 1, "status": "selected", "ids": ["commit"]}
     assert len(calls) == 1
     assert calls[0]["max_tokens"] == 128
+    assert calls[0]["max_input_bytes"] == 4096
+    assert calls[0]["max_provider_requests"] == 1
 
 
 def test_no_candidates_empty_decision_is_cached_for_later_tool_event(
@@ -843,3 +865,83 @@ def test_no_candidates_empty_decision_is_cached_for_later_tool_event(
     assert cached["ids"] == []
     assert cached["cached"] is True
     assert cached["fingerprint"] == initial["fingerprint"]
+
+
+@pytest.mark.parametrize(
+    "supported",
+    [
+        (),
+        ("max_tokens",),
+        ("max_tokens", "max_input_bytes"),
+        ("max_tokens", "max_provider_requests"),
+        ("max_input_bytes", "max_provider_requests"),
+    ],
+)
+def test_worker_rejects_missing_core_cost_capabilities_before_selection(
+    monkeypatch: pytest.MonkeyPatch, supported: tuple[str, ...]
+) -> None:
+    from types import SimpleNamespace
+
+    import gptme.context.selector.config as core_config
+    import gptme.llm
+    from gptme.context.selector.llm_based import LLMSelector
+    from gptme_lessons_extras._selector_worker import select_with_core
+    from gptme_lessons_extras.selector import validate_request
+
+    def old_config(**kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(**kwargs, **dict.fromkeys(supported, None))
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("missing core bounds must reject before select or provider")
+
+    def strict_parser(self: Any, response: str) -> list[str]:
+        raise ValueError("malformed selection envelope")
+
+    monkeypatch.setattr(core_config, "ContextSelectorConfig", old_config)
+    monkeypatch.setattr(LLMSelector, "_parse_response", strict_parser)
+    monkeypatch.setattr(LLMSelector, "select", forbidden)
+    monkeypatch.setattr(gptme.llm, "reply", forbidden)
+    result = select_with_core(validate_request(request()))
+    assert result == {
+        "version": 1,
+        "status": "fallback",
+        "ids": [],
+        "reason": "unsupported_core",
+    }
+
+
+def test_input_byte_limit_defaults_and_validates_without_provider_calls(
+    tmp_path: Path,
+) -> None:
+    from gptme_lessons_extras.selector import validate_request
+
+    assert validate_request(request())["max_input_bytes"] == 65536
+    assert validate_request(request(max_input_bytes=2048))["max_input_bytes"] == 2048
+    marker = tmp_path / "called"
+    command = worker(
+        tmp_path, selected("commit"), body=f"open({str(marker)!r}, 'w').write('called')"
+    )
+    for cap in (0, -1, 65537, True, "4096", 1.5, None):
+        result = select(
+            request(max_input_bytes=cap), state_dir=tmp_path, worker_command=command
+        )
+        assert result["reason"] == "invalid_request"
+        assert result["calls_used"] == 0
+    assert not marker.exists()
+
+
+def test_input_byte_limit_invalidates_cached_selection(tmp_path: Path) -> None:
+    command = worker(tmp_path, selected("commit"))
+    initial = select(
+        request(max_input_bytes=65536), state_dir=tmp_path, worker_command=command
+    )
+    cached = select(
+        request(max_input_bytes=65536, event_kind="tool"), state_dir=tmp_path
+    )
+    changed = select(
+        request(max_input_bytes=4096, event_kind="tool"), state_dir=tmp_path
+    )
+    assert cached["cached"] is True
+    assert cached["fingerprint"] == initial["fingerprint"]
+    assert changed["reason"] == "cache_miss"
+    assert changed["fingerprint"] != initial["fingerprint"]
