@@ -1449,6 +1449,88 @@ def test_is_reply_restricted_mentioned_users(workflow_module: Any) -> None:
     assert workflow_module.is_reply_restricted(tweet) is True
 
 
+def test_is_reply_restricted_unmentioned_timeline_tweet_basic_tier(
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda username: False)
+    tweet = SimpleNamespace(reply_settings="everyone", text="WSJ just reported this.")
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="rohanpaul_ai"
+        )
+        is True
+    )
+    assert "not mentioned" in workflow_module.reply_restriction_reason(tweet)
+
+
+def test_is_reply_restricted_mentioned_in_text_is_open(
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda username: False)
+    tweet = SimpleNamespace(
+        reply_settings="everyone", text="cc @timetobuildbob what do you think?"
+    )
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="someone"
+        )
+        is False
+    )
+
+
+def test_is_reply_restricted_from_mentions_skips_mention_gate(
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda username: False)
+    tweet = SimpleNamespace(reply_settings="everyone", text="no handle here")
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet,
+            from_mentions=True,
+            own_username="TimeToBuildBob",
+            author_username="someone",
+        )
+        is False
+    )
+
+
+def test_is_reply_restricted_trusted_author_exempt_from_mention_gate(
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        workflow_module, "is_trusted_user", lambda username: username == "erikbjare"
+    )
+    tweet = SimpleNamespace(reply_settings="everyone", text="shipped a thing")
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="ErikBjare"
+        )
+        is False
+    )
+
+
+def test_is_reply_restricted_unknown_own_username_stays_open(
+    workflow_module: Any,
+) -> None:
+    tweet = SimpleNamespace(reply_settings="everyone", text="no handle here")
+    assert (
+        workflow_module.is_reply_restricted(tweet, author_username="someone") is False
+    )
+
+
+def test_restricted_reply_settings_still_win_over_mention(
+    workflow_module: Any,
+) -> None:
+    tweet = SimpleNamespace(reply_settings="following", text="hi @timetobuildbob")
+    assert (
+        workflow_module.is_reply_restricted(
+            tweet, own_username="TimeToBuildBob", author_username="someone"
+        )
+        is True
+    )
+    assert workflow_module.reply_restriction_reason(tweet) == "reply_settings=following"
+
+
 def test_is_reply_restricted_mentioned_users_from_mentions(
     workflow_module: Any,
 ) -> None:

@@ -1810,8 +1810,14 @@ def should_evaluate_tweet(tweet_text: str, min_length: int = 50) -> Tuple[bool, 
     return True, ""
 
 
-def is_reply_restricted(tweet, from_mentions: bool = False) -> bool:
-    """Return True if the tweet's author has restricted who can reply.
+def is_reply_restricted(
+    tweet,
+    from_mentions: bool = False,
+    *,
+    own_username: str | None = None,
+    author_username: str | None = None,
+) -> bool:
+    """Return True if replying to this tweet would be rejected with a 403.
 
     Twitter's reply_settings field can be one of:
     - "everyone" (or None): anyone can reply
@@ -1828,13 +1834,38 @@ def is_reply_restricted(tweet, from_mentions: bool = False) -> bool:
     When from_mentions=True the tweet came from get_users_mentions, meaning Bob
     was mentioned and is therefore in the allowed-replier set for "mentionedUsers"
     tweets — those should NOT be skipped.
+
+    Independently of reply_settings, the Basic API tier rejects every reply or
+    quote with "You can only reply to or quote posts where you are mentioned or
+    are the author". Timeline tweets that do not mention ``own_username`` are
+    therefore skipped before the LLM drafts a reply that post() can only
+    quarantine (tweets/rejected/ accumulated 141 such drafts, 2026-05 → 2026-10).
+    Trusted authors are exempt: X also accepts replies where the author has
+    "otherwise engaged" the account, and post() still quarantines a residual
+    403. When ``own_username`` is unknown the gate cannot evaluate and stays open.
     """
     reply_settings = getattr(tweet, "reply_settings", None)
-    if reply_settings is None:
+    if reply_settings is not None and reply_settings != "everyone":
+        if not (from_mentions and reply_settings == "mentionedUsers"):
+            return True
+    if from_mentions or own_username is None:
         return False
-    if from_mentions and reply_settings == "mentionedUsers":
+    handle = own_username.lstrip("@").lower()
+    author = (author_username or "").lstrip("@").lower()
+    if author == handle:
         return False
-    return bool(reply_settings != "everyone")
+    if author and is_trusted_user(author):
+        return False
+    text = str(getattr(tweet, "text", "") or "").lower()
+    return f"@{handle}" not in text
+
+
+def reply_restriction_reason(tweet) -> str:
+    """Describe why is_reply_restricted() returned True, for skip messages."""
+    reply_settings = getattr(tweet, "reply_settings", None)
+    if reply_settings is not None and reply_settings != "everyone":
+        return f"reply_settings={reply_settings}"
+    return "not mentioned (Basic-tier reply/quote 403)"
 
 
 def process_timeline_tweets(
@@ -1899,6 +1930,9 @@ def process_timeline_tweets(
     if times:
         console.print(f"[blue]Will process {times} tweet(s)[/blue]")
 
+    me_data = getattr(cached_get_me(client, user_auth=False), "data", None)
+    own_username = getattr(me_data, "username", None)
+
     for tweet in tweets:
         tweets_processed += 1
         try:
@@ -1928,24 +1962,23 @@ def process_timeline_tweets(
                 tweets_skipped_prefilter += 1
                 continue
 
-            # Skip tweets with restricted reply_settings — replying would 403
-            if is_reply_restricted(tweet, from_mentions=from_mentions):
-                author_for_skip = user_lookup.get(tweet.author_id)
-                username_for_skip = (
-                    author_for_skip.username
-                    if author_for_skip
-                    else str(tweet.author_id)
-                )
-                reply_setting = getattr(tweet, "reply_settings", "unknown")
-                console.print(
-                    f"[dim]Skip: reply_settings={reply_setting} - @{username_for_skip}[/dim]"
-                )
-                tweets_skipped_prefilter += 1
-                continue
-
             # Get author info
             author = user_lookup.get(tweet.author_id)
             author_username = author.username if author else str(tweet.author_id)
+
+            # Skip tweets Bob cannot reply to (restricted reply_settings, or an
+            # unmentioned timeline post on the Basic tier) — replying would 403
+            if is_reply_restricted(
+                tweet,
+                from_mentions=from_mentions,
+                own_username=own_username,
+                author_username=author_username,
+            ):
+                console.print(
+                    f"[dim]Skip: {reply_restriction_reason(tweet)} - @{author_username}[/dim]"
+                )
+                tweets_skipped_prefilter += 1
+                continue
 
             # Prepare tweet data for processing
             tweet_data = {
