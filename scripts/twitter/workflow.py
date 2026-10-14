@@ -1890,6 +1890,20 @@ def reply_restriction_reason(tweet) -> str:
     return "not mentioned (Basic-tier reply/quote 403)"
 
 
+def _suppress_reply_response(response, reply_blocked: bool):
+    """Drop a generated reply when the account cannot reply to the tweet.
+
+    Reply/quote generation is gated before the response call via
+    ``allow_reply=False``; this is the defensive backstop for a model that
+    ignores the constraint (and for cache entries written before the gate). A
+    standalone response (``type != "reply"``) is preserved so the item can still
+    produce output.
+    """
+    if reply_blocked and response is not None and response.type == "reply":
+        return None
+    return response
+
+
 def process_timeline_tweets(
     tweets,
     users,
@@ -1988,20 +2002,24 @@ def process_timeline_tweets(
             author = user_lookup.get(tweet.author_id)
             author_username = author.username if author else str(tweet.author_id)
 
-            # Skip tweets the account cannot reply to (restricted reply_settings, or an
-            # unmentioned timeline post on the Basic tier) — replying would 403
-            if is_reply_restricted(
+            # Determine whether the account can reply to this tweet (restricted
+            # reply_settings, or an unmentioned timeline post on the Basic tier).
+            # This gates reply/quote generation only: the tweet is still
+            # evaluated and cached, and standalone output is preserved, so a
+            # reply-restricted item is not discarded wholesale before
+            # process_tweet()/save_to_cache().
+            reply_blocked = is_reply_restricted(
                 tweet,
                 from_mentions=from_mentions,
                 own_username=own_username,
                 own_user_id=getattr(me_data, "id", None),
                 author_username=author_username,
-            ):
+            )
+            if reply_blocked:
                 console.print(
-                    f"[dim]Skip: {reply_restriction_reason(tweet)} - @{author_username}[/dim]"
+                    f"[dim]Reply-restricted ({reply_restriction_reason(tweet)}) - "
+                    f"@{author_username}; will still evaluate and may post standalone[/dim]"
                 )
-                tweets_skipped_prefilter += 1
-                continue
 
             # Prepare tweet data for processing
             tweet_data = {
@@ -2123,7 +2141,10 @@ def process_timeline_tweets(
             else:
                 # Process tweet and cache results, including the exact context used
                 # to produce a response so later cache hits need no network read.
-                eval_result, response = process_tweet(tweet_data)
+                eval_result, response = process_tweet(
+                    tweet_data, allow_reply=not reply_blocked
+                )
+                response = _suppress_reply_response(response, reply_blocked)
                 save_to_cache(
                     tweet_id_str,
                     eval_result,
@@ -2135,6 +2156,9 @@ def process_timeline_tweets(
                 console.print(f"[blue]Evaluation: {eval_result.action.upper()}")
                 console.print(f"[blue]Relevance: {eval_result.relevance}/100")
                 console.print(f"[blue]Priority: {eval_result.priority}/100")
+
+            # Also guards cache entries written before the reply gate existed.
+            response = _suppress_reply_response(response, reply_blocked)
 
             if response:
                 # Skip error responses from failed LLM parsing

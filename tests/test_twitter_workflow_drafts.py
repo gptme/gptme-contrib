@@ -887,6 +887,210 @@ def test_trusted_user_autopost_keeps_transient_failure_retryable(
     assert list(workflow_module.REJECTED_DIR.glob("*.yml")) == []
 
 
+def test_reply_restricted_tweet_still_evaluated_and_cached(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reply-restricted tweet is evaluated and cached, not discarded wholesale.
+
+    Regression for the P1 finding on gptme/gptme-contrib#1893: the Basic-tier
+    gate must not drop the item before process_tweet()/save_to_cache(), otherwise
+    surface-interesting.py and the evaluation cache lose those items.
+    """
+    _set_status_dirs(workflow_module, tmp_path)
+
+    tweet = SimpleNamespace(
+        id="4242",
+        author_id="7",
+        text="An interesting unmentioned tweet long enough to pass the prefilter.",
+        created_at=datetime.now(timezone.utc),
+        public_metrics={},
+        conversation_id=None,
+    )
+    user = SimpleNamespace(
+        id="7",
+        username="someone",
+        public_metrics={"followers_count": 1},
+    )
+
+    calls: list[dict[str, Any]] = []
+    cache_calls: list[Any] = []
+
+    def fake_process_tweet(data: Any, **kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(action="ignore", relevance=1, priority=1), None
+
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="999")),
+    )
+    monkeypatch.setattr(
+        workflow_module, "should_evaluate_tweet", lambda *a, **k: (True, "")
+    )
+    monkeypatch.setattr(workflow_module, "is_reply_restricted", lambda *a, **k: True)
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: False)
+    monkeypatch.setattr(workflow_module, "process_tweet", fake_process_tweet)
+    monkeypatch.setattr(
+        workflow_module, "save_to_cache", lambda *a, **k: cache_calls.append(a)
+    )
+
+    drafts_generated = workflow_module.process_timeline_tweets(
+        [tweet],
+        [user],
+        source="home timeline",
+        client=object(),
+        times=1,
+        dry_run=False,
+        max_drafts=10,
+    )
+
+    assert calls == [{"allow_reply": False}]
+    assert cache_calls, "evaluation must still be written to the cache"
+    assert drafts_generated == 0
+
+
+def test_reply_restricted_tweet_standalone_response_still_drafted(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standalone (non-reply) response survives the reply gate."""
+    _set_status_dirs(workflow_module, tmp_path)
+
+    tweet = SimpleNamespace(
+        id="4242",
+        author_id="7",
+        text="An interesting unmentioned tweet long enough to pass the prefilter.",
+        created_at=datetime.now(timezone.utc),
+        public_metrics={},
+        conversation_id=None,
+    )
+    user = SimpleNamespace(
+        id="7",
+        username="someone",
+        public_metrics={"followers_count": 1},
+    )
+
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="999")),
+    )
+    monkeypatch.setattr(
+        workflow_module, "should_evaluate_tweet", lambda *a, **k: (True, "")
+    )
+    monkeypatch.setattr(workflow_module, "is_reply_restricted", lambda *a, **k: True)
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: False)
+
+    @dataclass
+    class EvalResult:
+        action: str
+        relevance: int
+        priority: int
+
+    @dataclass
+    class Response:
+        text: str
+        type: str
+        thread_needed: bool
+        follow_up: str | None
+
+    monkeypatch.setattr(
+        workflow_module,
+        "process_tweet",
+        lambda *a, **k: (
+            EvalResult("respond", 100, 100),
+            Response("A standalone take.", "tweet", False, None),
+        ),
+    )
+    monkeypatch.setattr(workflow_module, "save_to_cache", lambda *a, **k: None)
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda username: False)
+
+    drafts_generated = workflow_module.process_timeline_tweets(
+        [tweet],
+        [user],
+        source="home timeline",
+        client=object(),
+        times=1,
+        dry_run=False,
+        max_drafts=10,
+    )
+
+    new_paths = list(workflow_module.NEW_DIR.glob("*.yml"))
+    assert drafts_generated == 1
+    assert len(new_paths) == 1
+    draft = workflow_module.TweetDraft.load(new_paths[0])
+    assert draft.type == "tweet"
+    assert draft.in_reply_to is None
+    assert draft.text == "A standalone take."
+
+
+def test_reply_restricted_reply_response_suppressed_and_cached(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model that ignores the standalone constraint must not create a reply draft."""
+    _set_status_dirs(workflow_module, tmp_path)
+
+    tweet = SimpleNamespace(
+        id="4242",
+        author_id="7",
+        text="An interesting unmentioned tweet long enough to pass the prefilter.",
+        created_at=datetime.now(timezone.utc),
+        public_metrics={},
+        conversation_id=None,
+    )
+    user = SimpleNamespace(
+        id="7",
+        username="someone",
+        public_metrics={"followers_count": 1},
+    )
+
+    cache_calls: list[Any] = []
+
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="999")),
+    )
+    monkeypatch.setattr(
+        workflow_module, "should_evaluate_tweet", lambda *a, **k: (True, "")
+    )
+    monkeypatch.setattr(workflow_module, "is_reply_restricted", lambda *a, **k: True)
+    monkeypatch.setattr(workflow_module, "is_tweet_cached", lambda *a, **k: False)
+    monkeypatch.setattr(
+        workflow_module,
+        "process_tweet",
+        lambda *a, **k: (
+            SimpleNamespace(action="respond", relevance=100, priority=100),
+            SimpleNamespace(
+                text="A reply that would 403.",
+                type="reply",
+                thread_needed=False,
+                follow_up=None,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        workflow_module, "save_to_cache", lambda *a, **k: cache_calls.append(a)
+    )
+    monkeypatch.setattr(workflow_module, "is_trusted_user", lambda username: False)
+
+    drafts_generated = workflow_module.process_timeline_tweets(
+        [tweet],
+        [user],
+        source="home timeline",
+        client=object(),
+        times=1,
+        dry_run=False,
+        max_drafts=10,
+    )
+
+    assert drafts_generated == 0
+    assert list(workflow_module.NEW_DIR.glob("*.yml")) == []
+    assert list(workflow_module.REJECTED_DIR.glob("*.yml")) == []
+    # The evaluation is still cached; only the undeliverable reply is dropped.
+    assert cache_calls
+    assert cache_calls[0][2] is None
+
+
 def test_process_cached_tweet_skips_conversation_read(
     workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1353,7 +1557,10 @@ def test_process_new_tweet_fetches_thread_by_tweet_id(
     monkeypatch.setattr(
         workflow_module,
         "process_tweet",
-        lambda data: (SimpleNamespace(action="ignore", relevance=1, priority=1), None),
+        lambda data, **k: (
+            SimpleNamespace(action="ignore", relevance=1, priority=1),
+            None,
+        ),
     )
     monkeypatch.setattr(workflow_module, "save_to_cache", lambda *a, **k: None)
 
