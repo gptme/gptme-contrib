@@ -231,6 +231,11 @@ mkdir -p ~/.git-templates
 git config --global init.templateDir ~/.git-templates
 echo -e "${GREEN}✓${NC} Set init.templateDir to ~/.git-templates"
 
+# Use 'simple' push.default so a branch without a matching remote name fails loudly
+# instead of silently pushing to whatever upstream the branch tracks.
+git config --global push.default simple
+echo -e "${GREEN}✓${NC} Set push.default to simple"
+
 echo ""
 echo -e "${GREEN}✅ Dotfiles installed successfully!${NC}"
 echo ""
