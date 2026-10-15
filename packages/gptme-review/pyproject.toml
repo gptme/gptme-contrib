@@ -1,0 +1,22 @@
+[project]
+name = "gptme-review"
+version = "0.1.0"
+description = "Self-hosted AI PR reviewer engine (lifted from ErikBjare/bob)"
+requires-python = ">=3.11"
+dependencies = [
+    "bobutils",
+    "gptme-block-registry",
+    "gptme-contrib-lib",
+]
+
+[tool.uv.sources]
+bobutils = { workspace = true }
+gptme-block-registry = { workspace = true }
+gptme-contrib-lib = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gptme_review"]
