@@ -4971,6 +4971,10 @@ class ReviewConfig:
         args.extend(["--passes", str(self.passes)])
         if self.until_dry:
             args.append("--until-dry")
+            # until_dry is single-pass (passes=1, no consensus); subscription
+            # validation requires min_agreement <= passes, so emit 1 explicitly
+            # instead of relying on the argparse default of CONSENSUS_MIN_AGREEMENT.
+            args.extend(["--min-agreement", "1"])
         else:
             args.extend(["--min-agreement", str(self.min_agreement)])
         return args
