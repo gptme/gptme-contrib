@@ -54,3 +54,20 @@ def test_package_commit_root_requires_checkout_marker(tmp_path):
     installed = checkout / ".venv/lib/python3.13/site-packages/gptme_review"
     installed.mkdir(parents=True)
     assert gptme_review._package_checkout(installed / "__init__.py") is None
+
+
+def test_files_api_diff_is_readable_by_diff_consumers():
+    import json
+
+    def run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=json.dumps(
+                {"filename": "src/a.py", "patch": "@@ -1 +1 @@\n-old\n+new"}
+            ),
+        )
+
+    diff = core.fetch_pr_diff_via_files_api("owner/repo", 1, run=run)
+    assert core.changed_paths(diff) == ["src/a.py"]
+    assert core.commentable_lines(diff) == {"src/a.py": {1}}

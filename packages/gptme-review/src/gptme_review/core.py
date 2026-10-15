@@ -1712,7 +1712,9 @@ def fetch_pr_diff_via_files_api(
         patch = entry.get("patch")
         if not path or not patch:
             continue
-        blocks.append(f"diff --git a/{path} b/{path}\n{patch}")
+        blocks.append(
+            f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{patch}"
+        )
     return "\n".join(blocks)
 
 
