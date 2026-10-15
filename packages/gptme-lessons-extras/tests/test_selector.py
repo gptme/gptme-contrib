@@ -939,17 +939,23 @@ def test_worker_rejects_partial_dataclass_core_cost_fields(
     all_fields = {"max_tokens", "max_input_bytes", "max_provider_requests"}
     present = all_fields - missing
 
-    # Build a real dataclass with only the present subset of fields.
+    # Do not inherit installed config fields: a newer core already declares all
+    # bounds, which would make this fixture fully supported rather than partial.
     field_defaults = {
         "max_tokens": 512,
         "max_input_bytes": 65536,
         "max_provider_requests": 1,
     }
-    ns: dict[str, Any] = {"__annotations__": {f: int for f in present}}
+    ns: dict[str, Any] = {
+        "__annotations__": {
+            "strategy": str,
+            "llm_model": str,
+            **{f: int for f in present},
+        }
+    }
     ns.update({f: field_defaults[f] for f in present})
-    PartialConfig = dataclass(
-        type("PartialConfig", (core_config.ContextSelectorConfig,), ns)
-    )
+    PartialConfig = dataclass(type("PartialConfig", (), ns))
+    assert set(PartialConfig.__dataclass_fields__) & all_fields == present
 
     def forbidden(*args: Any, **kwargs: Any) -> None:
         pytest.fail("partial dataclass bounds must reject before select or provider")
