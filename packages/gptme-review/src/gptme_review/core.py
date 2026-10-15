@@ -4381,12 +4381,12 @@ def build_agent_context(repo: str, diff: str, checkout: Path | None) -> str:
         remaining = _AGENT_CONTEXT_MAX_CHARS
         omitted: list[str] = []
         for path in files:
-            full = checkout / path
-            if not full.is_file():
-                continue
             try:
+                full = (checkout / path).resolve()
+                if not full.is_relative_to(checkout.resolve()) or not full.is_file():
+                    continue
                 text = full.read_text(errors="replace")
-            except OSError:
+            except (OSError, RuntimeError):
                 continue
             heading = f"### Current contents of `{path}`\n\n```\n"
             suffix = "\n```\n"

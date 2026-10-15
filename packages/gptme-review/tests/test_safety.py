@@ -71,3 +71,21 @@ def test_files_api_diff_is_readable_by_diff_consumers():
     diff = core.fetch_pr_diff_via_files_api("owner/repo", 1, run=run)
     assert core.changed_paths(diff) == ["src/a.py"]
     assert core.commentable_lines(diff) == {"src/a.py": {1}}
+
+
+def test_preload_does_not_follow_symlink_outside_checkout(monkeypatch, tmp_path):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    secret = tmp_path / "outside.txt"
+    secret.write_text("PRIVATE_OUTSIDE_CHECKOUT")
+    (checkout / "linked.py").symlink_to(secret)
+    monkeypatch.setattr(
+        core.subprocess,
+        "run",
+        lambda *a, **kw: subprocess.CompletedProcess(a, 0, stdout=""),
+    )
+    context = core.build_agent_context(
+        "owner/repo", "+++ b/linked.py\n@@ -0,0 +1 @@\n+x", checkout
+    )
+    assert "PRIVATE_OUTSIDE_CHECKOUT" not in context
+    assert "### Current contents of `linked.py`" not in context
