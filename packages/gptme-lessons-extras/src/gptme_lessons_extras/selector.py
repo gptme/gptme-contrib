@@ -26,6 +26,7 @@ MAX_TIMEOUT = 30.0
 # Advisory responses are short (ID list only); cap at a generous but explicit
 # budget that fits any reasonable lesson-name enumeration (~5 × 80-char IDs).
 MAX_OUTPUT_TOKENS = 512
+MAX_INPUT_BYTES = 65_536
 
 
 def _text(value: Any, *, empty: bool = False) -> str:
@@ -100,6 +101,11 @@ def validate_request(value: Any) -> dict[str, Any]:
         result["max_output_tokens"] = _integer(max_output, MAX_OUTPUT_TOKENS)
         if result["max_output_tokens"] < 1:
             raise ValueError("max_output_tokens must be at least 1")
+    result["max_input_bytes"] = _integer(
+        value.get("max_input_bytes", MAX_INPUT_BYTES), MAX_INPUT_BYTES
+    )
+    if result["max_input_bytes"] < 1:
+        raise ValueError("max_input_bytes must be at least 1")
     result["max_calls_per_session"] = _integer(
         value.get("max_calls_per_session", 0), MAX_CALLS
     )
@@ -216,6 +222,20 @@ def select(
         normalized = validate_request(request)
     except (ValueError, TypeError, OverflowError):
         return fallback("invalid_request")
+    # Generation hooks execute outside the cost allowance. Check in the parent
+    # process where the hook registry is populated; the worker subprocess sees
+    # an empty registry and cannot perform this check reliably.
+    try:
+        from gptme.hooks import HookType, get_hooks
+
+        if any(
+            hook.enabled
+            for kind in (HookType.GENERATION_PRE, HookType.GENERATION_POST)
+            for hook in get_hooks(kind)
+        ):
+            return fallback("generation_hooks_present")
+    except ImportError:
+        pass
     cache_key = fingerprint(normalized)
     deadline = start + normalized["timeout_seconds"]
     identity = (normalized["runtime"], normalized["session_id"])

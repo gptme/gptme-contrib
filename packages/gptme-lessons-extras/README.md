@@ -96,19 +96,35 @@ The default directory is `$XDG_STATE_HOME/gptme/lesson-selector` (or
 `~/.local/state/gptme/lesson-selector`). A state failure returns deterministic
 fallback without a provider call. No API key or default model is added here.
 
+Each worker attempt permits at most **one actual provider request**, including
+SDK retries and provider fallback. `max_output_tokens` defaults to 512 and accepts
+integers from 1 to 512. `max_input_bytes` defaults to 65,536 and accepts integers
+from 1 to 65,536. The core enforces that byte cap on the rendered input and the
+serialized provider input before sending. These bounds constrain requests; they
+do not authorize spend or establish a dollar ceiling. Strict bounded calls require
+an explicit `anthropic/` or `openrouter/` model supported by the core; unsupported
+routes fall back without a provider call.
+The worker also refuses enabled `GENERATION_PRE` or `GENERATION_POST` hooks with
+`generation_hooks_present` before selection: independent work performed by hooks
+is outside the core's request budget. Disabled hooks do not block selection.
+
 `session_start` and `user_prompt` may make a call. `tool` can only read a valid
 cached decision; a miss falls back without spending. Successful explicit none
 is cacheable; failures are not. Fingerprints bind the entire eligible catalog
 (IDs, descriptions, metadata and order), query, caller context fingerprint,
-policy version, model, cap and budget; event kind and remaining timeout do not
+policy version, model, input/output caps and budget; event kind and remaining timeout do not
 invalidate them. Cache/budget entries are namespaced by runtime and session.
 
 Each call runs the existing gptme `LLMSelector` in an owned subprocess. The
 remaining deadline (maximum 30 seconds) kills and reaps that subprocess on
-timeout. Inputs are limited to 1 MiB and 200 candidates. Old gptme versions whose
-parser cannot distinguish malformed output from explicit none fall back with
-`unsupported_core` **before contacting a provider**; this requires the parser
-fix in [gptme/gptme#4282](https://github.com/gptme/gptme/pull/4282). Missing
+timeout. Protocol inputs are limited to 1 MiB and 200 candidates; the stricter
+provider-input cap above includes the rendered prompt overhead. Old gptme versions
+whose parser cannot distinguish malformed output from explicit none, or whose
+`ContextSelectorConfig` lacks any of `max_tokens`, `max_input_bytes`, and
+`max_provider_requests`, fall back with `unsupported_core` **before selection or
+contacting a provider**. Parser compatibility requires the fix in
+[gptme/gptme#4282](https://github.com/gptme/gptme/pull/4282); parser compatibility
+alone does not establish cost-bound support. Missing
 dependencies, provider failures and invalid output also preserve fallback.
 Provider diagnostics cannot contaminate protocol stdout.
 
