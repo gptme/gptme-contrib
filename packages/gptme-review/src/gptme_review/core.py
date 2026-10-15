@@ -4392,10 +4392,13 @@ def build_agent_context(repo: str, diff: str, checkout: Path | None) -> str:
             if available <= 0:
                 omitted.append(path)
                 continue
-            truncated = len(text) > available
-            text = text[: min(available, _AGENT_CONTEXT_MAX_FILE_CHARS)]
-            if len(text) < full.stat().st_size or truncated:
-                text += "\n[… truncated; use read for the rest …]"
+            limit = min(available, _AGENT_CONTEXT_MAX_FILE_CHARS)
+            if len(text) > limit:
+                marker = "\n[… truncated; use read for the rest …]"
+                if limit <= len(marker):
+                    omitted.append(path)
+                    continue
+                text = text[: limit - len(marker)] + marker
             section = heading + text + suffix
             if len(section) > remaining:
                 omitted.append(path)
@@ -6088,85 +6091,17 @@ def _asserts_runtime_error(body: str) -> bool:
     return bool(_RUNTIME_ERROR_CLAIMS_RE.search(prose))
 
 
-def _try_execute_snippet(snippet: str, timeout: int = 5) -> tuple[bool, str]:
-    """Try to execute a code snippet and return (succeeded, output).
-
-    The snippet is executed in a restricted subprocess with:
-    - No network access (would fail anyway in subprocess)
-    - A timeout to prevent hangs
-    - Captured stdout/stderr
-
-    Returns (True, output) if execution succeeded without exception,
-    (False, error_msg) if an exception was raised.
-    """
-    try:
-        result = subprocess.run(
-            ["python3", "-c", snippet],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            # Prevent subprocess from reading from stdin or network
-            stdin=subprocess.DEVNULL,
-        )
-        # If the script raised an exception, stderr will contain the traceback
-        if result.returncode != 0:
-            return False, result.stderr or f"exit code {result.returncode}"
-        return True, result.stdout
-    except subprocess.TimeoutExpired:
-        return False, "timeout"
-    except Exception as e:
-        return False, f"execution error: {type(e).__name__}"
-
-
 def drop_unverifiable_runtime_claims(
     findings: list[dict],
 ) -> tuple[list[dict], list[dict]]:
-    """Split findings by whether their runtime error claims are reproducible.
+    """Preserve findings without executing model-generated reproduction code.
 
-    A finding that asserts a specific runtime error (e.g., "raises TypeError",
-    "always crashes") can be mechanically verified: extract the code snippet
-    and try to run it. If the claimed error does not occur, the finding is
-    either misreading the code or making a language-semantics error.
-
-    This is a **precision** gate, not a **recall** gate — it only drops findings
-    we can actively falsify. Findings without verifiable code snippets or error
-    claims are kept unchanged.
-
-    See the incident on gptme/gptme-contrib#1438: a P0 finding claimed
-    ``isinstance(x, int | float)`` raises TypeError, but PEP 604 support was
-    added in Python 3.10 (the same release that added ``X | Y`` syntax).
+    Compatibility entry point for existing review pipelines. Finding bodies
+    derive from untrusted PR content; a timeout and DEVNULL stdin do not isolate
+    filesystem, credentials, or network access. Until a real sandbox exists,
+    runtime claims remain unverified and must not be dropped based on execution.
     """
-    kept: list[dict] = []
-    dropped: list[dict] = []
-
-    for f in findings:
-        body = str(f.get("body") or "")
-
-        # Only process findings that assert a runtime error
-        if not _asserts_runtime_error(body):
-            kept.append(f)
-            continue
-
-        # Try to extract a code snippet
-        snippet = _extract_code_snippet(body)
-        if not snippet:
-            # No verifiable snippet — keep it
-            kept.append(f)
-            continue
-
-        # Try to execute the snippet
-        succeeded, output = _try_execute_snippet(snippet)
-
-        # If execution succeeded (no exception), the claimed error is false
-        if succeeded:
-            f["unverified_claim"] = "asserted runtime error did not reproduce"
-            f["snippet"] = snippet[:200]  # Store truncated snippet for debugging
-            dropped.append(f)
-        else:
-            # Execution raised an exception, the claim is verified
-            kept.append(f)
-
-    return kept, dropped
+    return list(findings), []
 
 
 def deduplicate_findings(findings: list[dict]) -> list[dict]:

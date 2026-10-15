@@ -6,8 +6,9 @@ so the gate consumers in contrib-lib share one import path with the engine.
 Public API: import from gptme_review.core directly, or use this package as
 a namespace (gptme_review.lifecycle, gptme_review.core).
 
-Package commit logging: the resolved commit SHA is printed to stderr when
-AI_REVIEW_LOG_PACKAGE_COMMIT=1 is set, so a stale submodule pin is visible.
+Package commit logging: for source/editable installs the checkout SHA is printed
+when AI_REVIEW_LOG_PACKAGE_COMMIT=1 is set. Wheel installs report it unavailable;
+a surrounding application's repository must not be mistaken for package provenance.
 """
 
 from __future__ import annotations
@@ -20,9 +21,24 @@ from pathlib import Path
 
 __version__ = importlib.metadata.version("gptme-review")
 
-_PACKAGE_ROOT = Path(__file__).resolve().parent.parent.parent.parent  # site-packages/..
 
-if os.environ.get("AI_REVIEW_LOG_PACKAGE_COMMIT"):
+def _package_checkout(source: Path) -> Path | None:
+    """Find source provenance without attributing a wheel to its host repo."""
+    for candidate in source.resolve().parents:
+        if candidate.name in {"site-packages", "dist-packages"}:
+            return None
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+_PACKAGE_ROOT = _package_checkout(Path(__file__))
+
+if os.environ.get("AI_REVIEW_LOG_PACKAGE_COMMIT") and _PACKAGE_ROOT is None:
+    print(
+        "gptme_review package commit: unavailable (no source checkout)", file=sys.stderr
+    )
+elif os.environ.get("AI_REVIEW_LOG_PACKAGE_COMMIT"):
     try:
         _sha = subprocess.check_output(
             ["git", "-C", str(_PACKAGE_ROOT), "rev-parse", "HEAD"],
