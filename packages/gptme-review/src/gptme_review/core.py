@@ -3453,6 +3453,7 @@ def openrouter_completion(
     timeout: float,
     max_tokens: int = 8_000,
     reasoning_effort: str | None = "medium",
+    no_train: bool = True,
     _usage_ctx: dict | None = None,
     deadline: ReviewDeadline | None = None,
 ) -> tuple[str, dict]:
@@ -3470,6 +3471,10 @@ def openrouter_completion(
     schema; with no schema there is nothing to fall back from, so copying it
     here would be dead code, not shared behaviour.
 
+    ``no_train`` defaults to True because this generic entry point cannot
+    determine whether its prompt contains private repository data. Callers
+    handling public data may explicitly opt out with ``no_train=False``.
+
     ``max_tokens`` must cover reasoning AND the answer: a reasoning model given
     too small a budget spends all of it thinking and returns ``finish_reason:
     "length"`` with empty content.  That case is NOT retried — the wall is our
@@ -3486,7 +3491,7 @@ def openrouter_completion(
     ignored: list[str] = []
     empty_retries = 0
     provider_reroutes = 0
-    failover_no_train = False
+    failover_no_train = no_train
     while True:
         provider_block, _ = build_provider_routing(
             model, structured=False, ignore=ignored, no_train=failover_no_train

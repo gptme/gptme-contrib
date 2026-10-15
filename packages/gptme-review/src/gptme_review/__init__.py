@@ -19,7 +19,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-__version__ = importlib.metadata.version("gptme-review")
+try:
+    __version__ = importlib.metadata.version("gptme-review")
+except importlib.metadata.PackageNotFoundError:
+    __version__ = "0.0.0+unknown"
 
 
 def _package_checkout(source: Path) -> Path | None:

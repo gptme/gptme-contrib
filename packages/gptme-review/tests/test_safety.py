@@ -89,3 +89,35 @@ def test_preload_does_not_follow_symlink_outside_checkout(monkeypatch, tmp_path)
     )
     assert "PRIVATE_OUTSIDE_CHECKOUT" not in context
     assert "### Current contents of `linked.py`" not in context
+
+
+def test_source_import_without_distribution_metadata(monkeypatch):
+    import importlib.metadata
+    import runpy
+
+    import gptme_review
+
+    def missing_version(name):
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", missing_version)
+    namespace = runpy.run_path(gptme_review.__file__)
+    assert namespace["__version__"] == "0.0.0+unknown"
+
+
+def test_unstructured_completion_defaults_to_no_training(monkeypatch):
+    sent = []
+
+    def post(payload, **kwargs):
+        sent.append(payload.copy())
+        return {
+            "choices": [{"message": {"content": "answer"}, "finish_reason": "stop"}]
+        }
+
+    monkeypatch.setattr(core, "_post_openrouter", post)
+    monkeypatch.setattr(core, "_response_usage", lambda *a, **kw: {})
+    content, _ = core.openrouter_completion(
+        "private prompt", model="example/model", api_key="test", timeout=1
+    )
+    assert content == "answer"
+    assert sent[0]["provider"]["data_collection"] == "deny"
