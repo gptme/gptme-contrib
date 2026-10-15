@@ -35,6 +35,10 @@ Skills extend gptme's lesson system by providing executable components alongside
 
 ## Available Skills
 
+- **[hold-to-talk](hold-to-talk/SKILL.md)** — experimental one-turn voice input.
+  [Reproducible demo](hold-to-talk/demo.md) with local transcription and an
+  offline gptme response; desktop device verification remains separate.
+
 ### 1. template-skill
 
 **Purpose**: Minimal skill template for creating new skills
