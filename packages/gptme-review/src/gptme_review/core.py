@@ -45,12 +45,27 @@ from typing import Literal, TypedDict
 
 from . import lifecycle
 
+
 # Brain root: set by the adapter via AI_REVIEW_REPO_ROOT so paths to brain
 # config/ and state/ resolve correctly when the package is installed in contrib.
+def _find_brain_root() -> Path:
+    """Walk up from this file to find the brain repo root (has gptme.toml + AGENTS.md).
+
+    Fallback when AI_REVIEW_REPO_ROOT is not set — e.g. during testing or when
+    the package is imported directly without going through the brain adapter.
+    parents[2] from the old scripts/ location was correct; from the new contrib
+    package location it resolves to the package dir, so we walk instead.
+    """
+    for candidate in Path(__file__).resolve().parents:
+        if (candidate / "gptme.toml").exists() and (candidate / "AGENTS.md").exists():
+            return candidate
+    return Path(__file__).resolve().parents[4]  # last-resort: guess brain root
+
+
 _REPO_ROOT = (
     Path(os.environ["AI_REVIEW_REPO_ROOT"])
     if os.environ.get("AI_REVIEW_REPO_ROOT")
-    else Path(__file__).resolve().parents[2]
+    else _find_brain_root()
 )
 
 # Add bobutils src to sys.path before the import so it resolves even when gptme
