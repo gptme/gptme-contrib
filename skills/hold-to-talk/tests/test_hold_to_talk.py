@@ -122,3 +122,61 @@ def test_audio_file_demo_reaches_answer_without_capture(tmp_path, monkeypatch, v
     assert result.exit_code == 0, result.output
     assert "Hello back." in result.output
     assert audio.exists()
+
+
+class _FakeKey:
+    space = object()
+    ctrl_l = object()
+
+
+class _FakeKeyCode:
+    @staticmethod
+    def from_char(char):
+        if len(char) != 1:
+            raise ValueError("expected a single character")
+        return ("char", char)
+
+
+class _FakeKeyboard:
+    Key = _FakeKey
+    KeyCode = _FakeKeyCode
+
+
+def fake_tts(tmp_path, monkeypatch, voice, body):
+    executable = tmp_path / "tts"
+    executable.write_text(f"#!{sys.executable}\n" + body)
+    executable.chmod(0o755)
+    monkeypatch.setattr(voice, "_tts_command", lambda: [str(executable)])
+
+
+def test_named_and_single_char_keys_resolve(voice):
+    assert voice._resolve_hold_key(_FakeKeyboard, "space") is _FakeKey.space
+    assert voice._resolve_hold_key(_FakeKeyboard, "x") == ("char", "x")
+
+
+def test_unknown_multi_char_key_raises_usage_error(voice):
+    import click
+
+    with pytest.raises(click.UsageError, match="Unknown key name"):
+        voice._resolve_hold_key(_FakeKeyboard, "ctrl_zzz")
+
+
+def test_dash_leading_answer_is_not_parsed_as_a_tts_option(
+    tmp_path, monkeypatch, voice
+):
+    args_file = tmp_path / "tts-args.json"
+    fake_tts(
+        tmp_path,
+        monkeypatch,
+        voice,
+        "import json,sys\n"
+        f"open({str(args_file)!r}, 'w').write(json.dumps(sys.argv[1:]))\n",
+    )
+    voice.speak("--not-an-option")
+    assert json.loads(args_file.read_text()) == [" --not-an-option"]
+
+
+def test_broken_tts_surfaces_a_warning(tmp_path, monkeypatch, voice, capsys):
+    fake_tts(tmp_path, monkeypatch, voice, "import sys\nsys.exit(3)\n")
+    voice.speak("hello")
+    assert "TTS command failed" in capsys.readouterr().err

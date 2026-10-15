@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -66,6 +67,23 @@ def _tts_command() -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_hold_key(keyboard_module: Any, key_name: str) -> object:
+    """Resolve a hold key: a pynput named key or a single character.
+
+    Anything else raises ``click.UsageError`` rather than letting
+    ``KeyCode.from_char`` surface a bare ``ValueError`` at startup.
+    """
+    key_obj = getattr(keyboard_module.Key, key_name, None)
+    if key_obj is None and len(key_name) == 1:
+        key_obj = keyboard_module.KeyCode.from_char(key_name)
+    if key_obj is None:
+        raise click.UsageError(
+            f"Unknown key name {key_name!r}: expected a pynput key name "
+            "(e.g. 'space', 'ctrl_l') or a single character."
+        )
+    return key_obj
+
+
 def record_while_held(key_name: str = "space") -> Path:
     """Record audio while a key is held down, return path to WAV file."""
     _require("sounddevice")
@@ -77,9 +95,7 @@ def record_while_held(key_name: str = "space") -> Path:
     chunks: list = []
     recording = threading.Event()
 
-    key_obj = getattr(keyboard.Key, key_name, None) or keyboard.KeyCode.from_char(
-        key_name
-    )
+    key_obj = _resolve_hold_key(keyboard, key_name)
 
     def on_press(k: object) -> None:
         if k == key_obj and not recording.is_set():
@@ -94,6 +110,7 @@ def record_while_held(key_name: str = "space") -> Path:
     with keyboard.Listener(on_press=on_press, on_release=on_release):
         while True:
             recording.wait()
+            chunks = []  # a press that captured nothing must not merge with the next
             with sd.InputStream(
                 samplerate=SAMPLE_RATE, channels=1, dtype="int16"
             ) as stream:
@@ -200,7 +217,15 @@ def speak(text: str) -> None:
         print(f"(no TTS) {text}")
         return
     print("🔊 Speaking…", flush=True)
-    subprocess.run(cmd + [text], check=False)
+    # A dash-leading answer would be parsed as a TTS option; leave it as text.
+    arg = f" {text}" if text.startswith("-") else text
+    result = subprocess.run(cmd + [arg], check=False)
+    if result.returncode != 0:
+        print(
+            f"⚠️  TTS command failed (exit {result.returncode}); "
+            "the response above is printed.",
+            file=sys.stderr,
+        )
 
 
 # ---------------------------------------------------------------------------
