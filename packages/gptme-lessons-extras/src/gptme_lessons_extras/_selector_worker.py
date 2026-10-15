@@ -23,7 +23,14 @@ def select_with_core(request: dict[str, Any]) -> dict[str, Any]:
         "max_input_bytes": request["max_input_bytes"],
         "max_provider_requests": 1,
     }
-    if not all(hasattr(config, field) for field in bounds):
+    # Verify bounds are declared dataclass fields on the config class, not merely
+    # settable instance attributes. hasattr() passes for any ad-hoc attribute on a
+    # SimpleNamespace or a dynamically-extended instance; checking
+    # __dataclass_fields__ ensures the config type was explicitly designed to hold
+    # these bounds. This rejects partially-upgraded cores where attributes were
+    # added to the instance (e.g. via monkey-patching) but not the class contract.
+    declared = getattr(type(config), "__dataclass_fields__", None)
+    if declared is None or not all(field in declared for field in bounds):
         return {
             "version": VERSION,
             "status": "fallback",

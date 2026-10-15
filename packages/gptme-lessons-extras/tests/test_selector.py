@@ -910,6 +910,62 @@ def test_worker_rejects_missing_core_cost_capabilities_before_selection(
     }
 
 
+@pytest.mark.parametrize(
+    "missing",
+    [
+        {"max_tokens"},
+        {"max_input_bytes"},
+        {"max_provider_requests"},
+        {"max_tokens", "max_input_bytes"},
+    ],
+)
+def test_worker_rejects_partial_dataclass_core_cost_fields(
+    monkeypatch: pytest.MonkeyPatch, missing: set[str]
+) -> None:
+    """A dataclass config with only some bound fields declared must be rejected.
+
+    Complements test_worker_rejects_missing_core_cost_capabilities_before_selection
+    (which uses SimpleNamespace). This test exercises the __dataclass_fields__ path:
+    a dataclass with partial declarations would pass a hasattr() check on an instance
+    populated via setattr, but must be rejected because the missing fields are not
+    part of the class contract.
+    """
+    import gptme.context.selector.config as core_config
+    import gptme.llm
+    from gptme.context.selector.llm_based import LLMSelector
+    from gptme_lessons_extras._selector_worker import select_with_core
+    from gptme_lessons_extras.selector import validate_request
+
+    all_fields = {"max_tokens", "max_input_bytes", "max_provider_requests"}
+    present = all_fields - missing
+
+    # Build a real dataclass with only the present subset of fields.
+    field_defaults = {
+        "max_tokens": 512,
+        "max_input_bytes": 65536,
+        "max_provider_requests": 1,
+    }
+    ns: dict[str, Any] = {"__annotations__": {f: int for f in present}}
+    ns.update({f: field_defaults[f] for f in present})
+    PartialConfig = dataclass(
+        type("PartialConfig", (core_config.ContextSelectorConfig,), ns)
+    )
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("partial dataclass bounds must reject before select or provider")
+
+    monkeypatch.setattr(core_config, "ContextSelectorConfig", PartialConfig)
+    monkeypatch.setattr(LLMSelector, "select", forbidden)
+    monkeypatch.setattr(gptme.llm, "reply", forbidden)
+    result = select_with_core(validate_request(request()))
+    assert result == {
+        "version": 1,
+        "status": "fallback",
+        "ids": [],
+        "reason": "unsupported_core",
+    }
+
+
 def test_input_byte_limit_defaults_and_validates_without_provider_calls(
     tmp_path: Path,
 ) -> None:
