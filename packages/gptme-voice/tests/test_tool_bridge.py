@@ -1253,9 +1253,14 @@ def _pid_alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     # A reaped-but-unwaited child shows up as a zombie; treat it as dead.
+    # /proc reads can raise ProcessLookupError (ESRCH) if the process dies
+    # between the exists() check and read_text() — catch it as "dead".
     stat = Path(f"/proc/{pid}/stat")
-    if stat.exists():
-        return stat.read_text().split(") ", 1)[1].split()[0] != "Z"
+    try:
+        if stat.exists():
+            return stat.read_text().split(") ", 1)[1].split()[0] != "Z"
+    except (ProcessLookupError, OSError):
+        return False
     return True
 
 
