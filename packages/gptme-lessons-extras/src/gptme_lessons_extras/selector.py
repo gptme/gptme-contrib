@@ -18,6 +18,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from gptme_lessons_extras.run_reservation import (
+    check_session_admission,
+    load_reservation,
+)
+
 VERSION = 1
 MAX_REQUEST_BYTES = 1_048_576
 MAX_CANDIDATES = 200
@@ -166,12 +171,18 @@ def select(
     *,
     state_dir: Path,
     worker_command: Sequence[str] | None = None,
+    reservation_path: Path | None = None,
 ) -> dict[str, Any]:
     """Select with a killable provider process, atomic budget and session cache.
 
     ``worker_command`` is a trusted embedding/testing seam, never a JSON field.
     Attempts count even on timeout/failure. The caller must use a stable state
     directory and session identity across invocations to preserve that ceiling.
+
+    ``reservation_path``: when set, the file must contain a valid reservation
+    JSON. A missing, invalid, exhausted, or route-changed reservation refuses
+    before any provider attempt. Pass ``None`` (default) for the existing
+    budget-only gate with no experiment-level ceiling.
     """
     start = time.monotonic()
     calls = 0
@@ -222,6 +233,18 @@ def select(
         normalized = validate_request(request)
     except (ValueError, TypeError, OverflowError):
         return fallback("invalid_request")
+    # Load and validate the experiment reservation if a path was supplied.
+    # A missing or invalid file is an unrecoverable refusal — the caller is
+    # responsible for ensuring the reservation exists before activating.
+    reservation: dict[str, Any] | None = None
+    if reservation_path is not None:
+        reservation = load_reservation(reservation_path)
+        if reservation is None:
+            return fallback("reservation_missing")
+        # Reject immediately if the request would use a different route/model
+        # than the one frozen in the reservation — any change invalidates it.
+        if normalized.get("model") != reservation["model"]:
+            return fallback("reservation_model_changed")
     # Generation hooks execute outside the cost allowance. Check in the parent
     # process where the hook registry is populated; the worker subprocess sees
     # an empty registry and cannot perform this check reliably.
@@ -311,6 +334,18 @@ def select(
             return fallback("missing_model")
         if calls >= normalized["max_calls_per_session"]:
             return fallback("budget_exhausted")
+        # Whole-experiment admission gate: check the reservation session cap
+        # atomically inside the same IMMEDIATE transaction, before incrementing
+        # calls. A denied session never reaches the worker spawn.
+        if reservation is not None:
+            reason = check_session_admission(
+                reservation,
+                connection,
+                runtime=normalized["runtime"],
+                session_id=normalized["session_id"],
+            )
+            if reason is not None:
+                return fallback(reason)
         if time.monotonic() >= deadline:
             return fallback("timeout")
         calls += 1
