@@ -1252,16 +1252,50 @@ def _pid_alive(pid: int) -> bool:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    # A reaped-but-unwaited child shows up as a zombie; treat it as dead.
-    # /proc reads can raise ProcessLookupError (ESRCH) if the process dies
-    # between the exists() check and read_text() — catch it as "dead".
-    stat = Path(f"/proc/{pid}/stat")
+    # Reading /proc/<pid>/stat races with process exit: the entry can vanish
+    # after the os.kill() check. Python 3.12 raises ProcessLookupError there,
+    # older versions raise FileNotFoundError — either way the process is gone,
+    # so a vanished /proc entry means dead. A reaped-but-unwaited child shows
+    # up as a zombie; treat it as dead too.
     try:
-        if stat.exists():
-            return stat.read_text().split(") ", 1)[1].split()[0] != "Z"
-    except (ProcessLookupError, OSError):
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except (FileNotFoundError, ProcessLookupError):
         return False
-    return True
+    return stat.split(") ", 1)[1].split()[0] != "Z"
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError, ProcessLookupError])
+def test_pid_alive_proc_entry_vanished(monkeypatch: pytest.MonkeyPatch, error) -> None:
+    monkeypatch.setattr(os, "kill", lambda *_: None)
+    monkeypatch.setattr(Path, "exists", lambda _: False)
+
+    def vanished(_path):
+        raise error()
+
+    monkeypatch.setattr(Path, "read_text", vanished)
+    assert not _pid_alive(12345)
+
+
+def test_pid_alive_does_not_hide_permission_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(os, "kill", lambda *_: None)
+
+    def denied(_path):
+        raise PermissionError()
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    with pytest.raises(PermissionError):
+        _pid_alive(12345)
+
+
+@pytest.mark.parametrize("state, expected", [("S", True), ("Z", False)])
+def test_pid_alive_proc_state(
+    monkeypatch: pytest.MonkeyPatch, state: str, expected: bool
+) -> None:
+    monkeypatch.setattr(os, "kill", lambda *_: None)
+    monkeypatch.setattr(Path, "read_text", lambda _: f"12345 (sleep) {state} 1 2 3")
+    assert _pid_alive(12345) is expected
 
 
 @pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")
