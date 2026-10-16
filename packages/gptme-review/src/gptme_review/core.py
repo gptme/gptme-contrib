@@ -5043,6 +5043,53 @@ def check_status_is_green(item: Mapping[str, object]) -> bool:
     return False  # no state at all — can't call it green
 
 
+@dataclass
+class ReviewResult:
+    """Render-ready result of a single review invocation.
+
+    All three callsites (sweep, pm-review-and-push, autonomous/local) produce
+    this object so downstream logic — gate checks, artifact writes, PR comment
+    construction — can program against one contract instead of each callsite's
+    ad-hoc intermediate dicts.
+
+    Slice 1.1 of tasks/ai-review-thin-callsites-over-shared-review-api.
+    The ``review()`` function that produces this from (diff, config) is
+    planned for slice 1.2 after the three callsites are reduced to adapters.
+    """
+
+    findings: list[dict]
+    """Normalized, severity-sorted findings from parse_review()."""
+
+    change_summary: dict
+    """Parsed change_summary block from the model output (may be empty dict)."""
+
+    score: int | None
+    """Aggregate confidence score from confidence_score(findings).
+
+    ``None`` is the abstention verdict (non-coverage summary, submodule-only
+    diff, or a fully policy-suppressed finding set) and must be treated as
+    "no verdict", never as a pass — matching confidence_score()'s return type.
+    """
+
+    blocking: bool
+    """True when at least one P0/P1 finding is not non_blocking (merge gate)."""
+
+    shortfalls: list[dict]
+    """Blocking findings with shortfall details, for PR comment construction."""
+
+    engine: str
+    """'llm' or 'agent' — the engine that produced this result."""
+
+    model: str
+    """Provider-qualified model string (e.g. 'openrouter/deepseek/...')."""
+
+    passes: int
+    """Number of review passes actually run (may be < config.passes on early dry)."""
+
+    raw_output: str = ""
+    """Raw model output; stored in the artifact for replay/debugging."""
+
+
 def is_review_only_blocker(mergeability: Mapping[str, object]) -> bool:
     """True when the ONLY thing standing between this PR and merge is our marker.
 
