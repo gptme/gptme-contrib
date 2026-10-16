@@ -1264,6 +1264,40 @@ def _pid_alive(pid: int) -> bool:
     return stat.split(") ", 1)[1].split()[0] != "Z"
 
 
+@pytest.mark.parametrize("error", [FileNotFoundError, ProcessLookupError])
+def test_pid_alive_proc_entry_vanished(monkeypatch: pytest.MonkeyPatch, error) -> None:
+    monkeypatch.setattr(os, "kill", lambda *_: None)
+    monkeypatch.setattr(Path, "exists", lambda _: False)
+
+    def vanished(_path):
+        raise error()
+
+    monkeypatch.setattr(Path, "read_text", vanished)
+    assert not _pid_alive(12345)
+
+
+def test_pid_alive_does_not_hide_permission_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(os, "kill", lambda *_: None)
+
+    def denied(_path):
+        raise PermissionError()
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    with pytest.raises(PermissionError):
+        _pid_alive(12345)
+
+
+@pytest.mark.parametrize("state, expected", [("S", True), ("Z", False)])
+def test_pid_alive_proc_state(
+    monkeypatch: pytest.MonkeyPatch, state: str, expected: bool
+) -> None:
+    monkeypatch.setattr(os, "kill", lambda *_: None)
+    monkeypatch.setattr(Path, "read_text", lambda _: f"12345 (sleep) {state} 1 2 3")
+    assert _pid_alive(12345) is expected
+
+
 @pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")
 def test_cancel_kills_subagent_descendants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
