@@ -716,6 +716,23 @@ has_actionable_update() {
     if [ "$last_actor" = "$AUTHOR" ] && printf '%s\n' "$last_body" \
         | grep -qE "$AI_REVIEW_MARKER_RE"; then
         is_ai_review=0
+        # A CLEAN pass is not inbound work. The summary marker's JSON carries
+        # `findings` (posted findings, `[{"fp","severity"}, ...]`); an explicit
+        # empty array means the reviewer found nothing. Each such comment used
+        # to trigger a `pr_update` dispatch that ended noop (gptme/gptme#4380,
+        # #4382, #4383, 2026-10-16). Fail open: only a parseable summary marker
+        # whose `findings` is an array of length 0 is treated as clean; inline
+        # `-finding` markers, unparseable JSON, or a missing `findings` key all
+        # stay actionable.
+        local summary_json
+        summary_json=$(printf '%s\n' "$last_body" \
+            | grep -E '^<!-- bob-ai-review \{.*\} -->$' | tail -n 1 \
+            | sed -e 's/^<!-- bob-ai-review //' -e 's/ -->$//')
+        if [ -n "$summary_json" ] && printf '%s' "$summary_json" \
+            | jq -e '(.findings | type) == "array" and (.findings | length) == 0' \
+                >/dev/null 2>&1; then
+            is_ai_review=1
+        fi
     fi
     # A fresh AI-review pass can be ENTIRELY invisible in pr_data: inline
     # findings are review comments (not in .comments), and GraphQL's
