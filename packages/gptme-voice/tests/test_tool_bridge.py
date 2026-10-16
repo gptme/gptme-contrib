@@ -1252,16 +1252,16 @@ def _pid_alive(pid: int) -> bool:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    # A reaped-but-unwaited child shows up as a zombie; treat it as dead.
-    # /proc reads can raise ProcessLookupError (ESRCH) if the process dies
-    # between the exists() check and read_text() — catch it as "dead".
-    stat = Path(f"/proc/{pid}/stat")
+    # Reading /proc/<pid>/stat races with process exit: the entry can vanish
+    # after the os.kill() check. Python 3.12 raises ProcessLookupError there,
+    # older versions raise FileNotFoundError — either way the process is gone,
+    # so a vanished /proc entry means dead. A reaped-but-unwaited child shows
+    # up as a zombie; treat it as dead too.
     try:
-        if stat.exists():
-            return stat.read_text().split(") ", 1)[1].split()[0] != "Z"
-    except (ProcessLookupError, OSError):
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except (FileNotFoundError, ProcessLookupError):
         return False
-    return True
+    return stat.split(") ", 1)[1].split()[0] != "Z"
 
 
 @pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")
