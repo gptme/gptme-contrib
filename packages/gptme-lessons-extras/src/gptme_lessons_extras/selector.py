@@ -180,8 +180,10 @@ def select(
     directory and session identity across invocations to preserve that ceiling.
 
     ``reservation_path``: when set, the file must contain a valid reservation
-    JSON. A missing, invalid, exhausted, or route-changed reservation refuses
-    before any provider attempt. Pass ``None`` (default) for the existing
+    JSON. A missing, invalid, exhausted, or changed reservation refuses before
+    any provider attempt — a request must use the reservation's exact model, a
+    runtime the reservation froze, and a per-session attempt bound no larger
+    than the reservation's. Pass ``None`` (default) for the existing
     budget-only gate with no experiment-level ceiling.
     """
     start = time.monotonic()
@@ -241,10 +243,21 @@ def select(
         reservation = load_reservation(reservation_path)
         if reservation is None:
             return fallback("reservation_missing")
-        # Reject immediately if the request would use a different route/model
-        # than the one frozen in the reservation — any change invalidates it.
+        # Reject immediately if the request would use a different model or
+        # runtime, or a larger per-session attempt bound, than the reservation
+        # froze — any drift invalidates the run. ``route`` is not part of the
+        # request schema (validate_request); it is fixed by the worker's
+        # provider configuration and recorded in the reservation for the
+        # activation audit, so it cannot be compared at this seam.
         if normalized.get("model") != reservation["model"]:
             return fallback("reservation_model_changed")
+        if normalized["runtime"] not in reservation["runtimes"]:
+            return fallback("reservation_runtime_changed")
+        if (
+            normalized["max_calls_per_session"]
+            > reservation["max_attempts_per_session"]
+        ):
+            return fallback("reservation_attempts_changed")
     # Generation hooks execute outside the cost allowance. Check in the parent
     # process where the hook registry is populated; the worker subprocess sees
     # an empty registry and cannot perform this check reliably.

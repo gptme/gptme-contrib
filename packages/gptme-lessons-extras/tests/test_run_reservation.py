@@ -2,8 +2,8 @@
 
 All tests use fake prices, synthetic authorization, and no-op worker commands.
 No paid API calls are made. The tests prove that:
-  - missing, invalid, exhausted, and route-changed reservations refuse before
-    the provider subprocess is spawned
+  - missing, invalid, exhausted, model/runtime/attempts-changed reservations
+    refuse before the provider subprocess is spawned
   - concurrent sessions are serialised correctly at the session cap
   - failed/timed-out worker sends count against the experiment budget
   - labeling admission accounting works independently of selection accounting
@@ -88,7 +88,7 @@ def _request(**overrides: Any) -> dict[str, Any]:
         "max_results": 1,
         "model": _FAKE_MODEL,
         "timeout_seconds": 2.0,
-        "max_calls_per_session": 8,
+        "max_calls_per_session": 2,
     }
     value.update(overrides)
     return value
@@ -97,7 +97,7 @@ def _request(**overrides: Any) -> dict[str, Any]:
 def _worker(tmp_path: Path, response: dict[str, Any]) -> list[str]:
     """Fake worker subprocess — no network calls."""
     script = tmp_path / "worker.py"
-    script.write_text("import json, sys\n" f"print({json.dumps(response)!r})\n")
+    script.write_text(f"import json, sys\nprint({json.dumps(response)!r})\n")
     return [sys.executable, str(script)]
 
 
@@ -224,6 +224,34 @@ def test_model_mismatch_refuses_before_send(tmp_path: Path) -> None:
     assert result["calls_used"] == 0
 
 
+def test_runtime_outside_reservation_refuses_before_send(tmp_path: Path) -> None:
+    res_path = tmp_path / "res.json"
+    _write_reservation(res_path, _make_reservation(runtimes=["gptme"]))
+    result = select(
+        _request(runtime="claude-code"),
+        state_dir=tmp_path / "state",
+        worker_command=_worker(tmp_path, _selected("commit")),
+        reservation_path=res_path,
+    )
+    assert result["status"] == "fallback"
+    assert result["reason"] == "reservation_runtime_changed"
+    assert result["calls_used"] == 0
+
+
+def test_attempts_exceeding_reservation_refuses_before_send(tmp_path: Path) -> None:
+    res_path = tmp_path / "res.json"
+    _write_reservation(res_path, _make_reservation(max_attempts=2))
+    result = select(
+        _request(max_calls_per_session=3),
+        state_dir=tmp_path / "state",
+        worker_command=_worker(tmp_path, _selected("commit")),
+        reservation_path=res_path,
+    )
+    assert result["status"] == "fallback"
+    assert result["reason"] == "reservation_attempts_changed"
+    assert result["calls_used"] == 0
+
+
 def test_valid_reservation_permits_selection(tmp_path: Path) -> None:
     res_path = tmp_path / "res.json"
     _write_reservation(res_path, _make_reservation())
@@ -277,7 +305,7 @@ def test_same_session_reuse_does_not_exhaust_budget(tmp_path: Path) -> None:
             worker_command=cmd,
             reservation_path=res_path,
         )
-        # Might hit per-session call cap (max_calls_per_session=8), but not exhausted
+        # Might hit the per-session call cap, but never the session cap
         assert r["reason"] != "reservation_exhausted"
 
 
