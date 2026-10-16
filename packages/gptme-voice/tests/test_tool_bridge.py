@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -1241,6 +1243,119 @@ def test_subagent_cancel_all_cancels_every_pending_task() -> None:
 
             status = await bridge.handle_function_call("subagent_status", {})
             assert status["pending_count"] == 0
+
+    asyncio.run(_exercise())
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    # A reaped-but-unwaited child shows up as a zombie; treat it as dead.
+    stat = Path(f"/proc/{pid}/stat")
+    if stat.exists():
+        return stat.read_text().split(") ", 1)[1].split()[0] != "Z"
+    return True
+
+
+@pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")
+def test_cancel_kills_subagent_descendants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancel must kill the whole tree, not just the direct ``timeout`` child.
+
+    Regression for the 2026-10-16 call: the lookup was cancelled at 27 s but the
+    wrapper's gptme kept running (and logging) afterwards.
+    """
+    pid_file = tmp_path / "grandchild.pid"
+    script = tmp_path / "fake-subagent.sh"
+    script.write_text(f"#!/bin/sh\nsleep 30 &\necho $! > {pid_file}\nwait\n")
+    script.chmod(0o755)
+    monkeypatch.delenv("GPTME_VOICE_SUBAGENT_PATH", raising=False)
+
+    async def _exercise() -> int:
+        bridge = GptmeToolBridge(
+            workspace=str(tmp_path), gptme_path=str(script), timeout=30
+        )
+        task = asyncio.create_task(bridge._execute("long task", mode="fast"))
+        for _ in range(100):
+            if pid_file.exists() and pid_file.read_text().strip():
+                break
+            await asyncio.sleep(0.05)
+        grandchild = int(pid_file.read_text().strip())
+        assert _pid_alive(grandchild)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return grandchild
+
+    grandchild = asyncio.run(_exercise())
+    for _ in range(40):
+        if not _pid_alive(grandchild):
+            break
+        time.sleep(0.05)
+    assert not _pid_alive(grandchild), "cancelled subagent left a live descendant"
+
+
+def test_cancelled_task_records_timing_receipt_and_completion() -> None:
+    """A cancelled lookup must leave evidence for the call archive and status."""
+
+    async def _exercise() -> None:
+        class _SlowProcess(_FakeProcess):
+            async def wait(self) -> int:
+                await asyncio.sleep(5)
+                return 0
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _SlowProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
+            dispatch = await bridge.handle_function_call(
+                "subagent", {"task": "check issue 1287", "mode": "fast"}
+            )
+            task_id = dispatch["task_id"]
+            await asyncio.sleep(0)
+            await bridge.handle_function_call("subagent_cancel", {"task_id": task_id})
+            status = await bridge.handle_function_call("subagent_status", {})
+
+        timings = bridge.get_timings()
+        assert len(timings) == 1
+        assert timings[0]["task_id"] == task_id
+        assert timings[0]["cancelled"] is True
+        assert timings[0]["returncode"] != 0  # never counts as a successful lookup
+        assert "total_seconds" in timings[0]["timings"]
+
+        recent = status["recent_completions"]
+        assert [r["status"] for r in recent] == ["cancelled"]
+        assert recent[0]["task_id"] == task_id
+
+    asyncio.run(_exercise())
+
+
+def test_subagent_status_reports_remaining_budget() -> None:
+    async def _exercise() -> None:
+        class _SlowProcess(_FakeProcess):
+            async def wait(self) -> int:
+                await asyncio.sleep(5)
+                return 0
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _SlowProcess(returncode=0)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
+            await bridge.handle_function_call("subagent", {"task": "a", "mode": "fast"})
+            await asyncio.sleep(0)
+            status = await bridge.handle_function_call("subagent_status", {})
+            await bridge.handle_function_call("subagent_cancel", {})
+
+        pending = status["pending"][0]
+        assert pending["budget_seconds"] == _FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS - 10
+        assert 0 < pending["remaining_seconds"] <= pending["budget_seconds"]
 
     asyncio.run(_exercise())
 
