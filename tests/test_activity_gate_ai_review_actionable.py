@@ -61,7 +61,7 @@ def _actionable(
     else:
         raise ValueError(f"unsupported activity type: {activity_type}")
 
-    pr = {"comments": comments, "latestReviews": reviews}
+    pr = {"headRefOid": HEAD, "comments": comments, "latestReviews": reviews}
     script = f"""
 set -uo pipefail
 AUTHOR={BOT}
@@ -421,6 +421,39 @@ def test_clean_ai_review_with_advisories_only_is_silenced():
 
 def test_clean_ai_review_in_latest_review_is_silenced():
     assert not _actionable(_clean_marker(), BOT, activity_type="review")
+
+
+def test_stale_clean_marker_does_not_hide_changed_head():
+    """A collaborator push leaves the old clean summary as the last comment."""
+    pr = {
+        "number": 1907,
+        "headRefOid": "deadbeef00000000000000000000000000000000",
+        "comments": [
+            {
+                "author": {"login": BOT},
+                "createdAt": "2026-10-16T01:00:00Z",
+                "body": _clean_marker(),
+            }
+        ],
+        "latestReviews": [],
+    }
+    assert _actionable_pr(pr)
+
+
+def test_clean_marker_without_sha_fails_open():
+    assert _actionable(f'{MARKER} {{"findings": []}} -->', BOT)
+
+
+def test_clean_marker_with_empty_sha_fails_open():
+    assert _actionable(f'{MARKER} {{"sha": "", "findings": []}} -->', BOT)
+
+
+def test_clean_marker_without_current_head_fails_open():
+    pr = {
+        "comments": [{"author": {"login": BOT}, "body": _clean_marker()}],
+        "latestReviews": [],
+    }
+    assert _actionable_pr(pr)
 
 
 def test_ai_review_summary_with_findings_is_actionable():
