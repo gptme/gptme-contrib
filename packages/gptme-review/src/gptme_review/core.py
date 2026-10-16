@@ -5063,11 +5063,16 @@ class ReviewResult:
     change_summary: dict
     """Parsed change_summary block from the model output (may be empty dict)."""
 
-    score: int
-    """Aggregate confidence score from confidence_score(findings)."""
+    score: int | None
+    """Aggregate confidence score from confidence_score(findings).
+
+    ``None`` is the abstention verdict (non-coverage summary, submodule-only
+    diff, or a fully policy-suppressed finding set) and must be treated as
+    "no verdict", never as a pass — matching confidence_score()'s return type.
+    """
 
     blocking: bool
-    """True when at least one P1/P2 finding is not non_blocking (merge gate)."""
+    """True when at least one P0/P1 finding is not non_blocking (merge gate)."""
 
     shortfalls: list[dict]
     """Blocking findings with shortfall details, for PR comment construction."""
