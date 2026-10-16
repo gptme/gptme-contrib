@@ -16,6 +16,7 @@ import logging
 import math
 import os
 import shutil
+import signal
 import tempfile
 import time
 from collections import deque
@@ -70,12 +71,14 @@ _KILLED_RETURNCODE = 137  # 128 + SIGKILL (timeout kill-after or OOM kill)
 # shell's 60 s budget).  Smart fallback stays 120 s — the previous hardcoded
 # Python default — so unset-env deployments do not shrink the smart budget.
 # Production systemd sets both env vars (currently 60/60); those values win.
-_FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS = (
-    int(os.environ.get("GPTME_VOICE_SUBAGENT_TIMEOUT_FAST_SECONDS", 60)) + 10
+_FAST_MODE_BUDGET_SECONDS = int(
+    os.environ.get("GPTME_VOICE_SUBAGENT_TIMEOUT_FAST_SECONDS", 60)
 )
-_SMART_MODE_SUBPROCESS_TIMEOUT_SECONDS = (
-    int(os.environ.get("GPTME_VOICE_SUBAGENT_TIMEOUT_SMART_SECONDS", 120)) + 10
+_SMART_MODE_BUDGET_SECONDS = int(
+    os.environ.get("GPTME_VOICE_SUBAGENT_TIMEOUT_SMART_SECONDS", 120)
 )
+_FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS = _FAST_MODE_BUDGET_SECONDS + 10
+_SMART_MODE_SUBPROCESS_TIMEOUT_SECONDS = _SMART_MODE_BUDGET_SECONDS + 10
 # ``timeout(1)`` is a GNU coreutils binary available on Linux but not macOS.
 # When it is missing we fall back to Python-level asyncio timeout handling.
 _TIMEOUT_BINARY_AVAILABLE = shutil.which("timeout") is not None
@@ -92,6 +95,30 @@ _RESPONSE_SUFFIX = (
     "\n\nIMPORTANT: Write your final response (concise summary of findings, "
     "suitable for reading aloud in a voice conversation) to the file: {response_file}"
 )
+
+
+def _kill_process_tree(process: "asyncio.subprocess.Process") -> None:
+    """Kill the subagent and every descendant it spawned.
+
+    The direct child is the ``timeout`` wrapper, which runs the wrapper script
+    and gptme underneath it. ``process.kill()`` alone SIGKILLs only that
+    wrapper; the descendants keep running and their answer is discarded
+    (incident: 2026-10-16 call, gptme still active 13 s after cancel).
+    The child is spawned with ``start_new_session=True``, so its pid is the
+    process group id; the getpgid check avoids signalling an unrelated group.
+    """
+    pid = getattr(process, "pid", None)
+    if isinstance(pid, int) and pid > 0:
+        try:
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, signal.SIGKILL)
+                return
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
 
 
 @dataclass
@@ -399,7 +426,9 @@ class GptmeToolBridge:
             return "starting"
         return "running"
 
-    def _log_timing_summary(self, task_id: str, entry: PendingTask) -> None:
+    def _log_timing_summary(
+        self, task_id: str, entry: PendingTask, *, cancelled: bool = False
+    ) -> None:
         timings = self._timing_breakdown(entry)
         if not timings:
             return
@@ -420,6 +449,8 @@ class GptmeToolBridge:
 
         if entry.returncode is not None:
             parts.append(f"exit={entry.returncode}")
+        if cancelled:
+            parts.append("cancelled")
 
         logger.info(
             "Task %s timings (%s, model=%s): %s",
@@ -429,9 +460,10 @@ class GptmeToolBridge:
             ", ".join(parts),
         )
 
-        self._completed_timings.append(
-            self._build_timing_record(task_id, entry, timings)
-        )
+        record = self._build_timing_record(task_id, entry, timings)
+        if cancelled:
+            record["cancelled"] = True
+        self._completed_timings.append(record)
 
     def _build_timing_record(
         self,
@@ -523,6 +555,22 @@ class GptmeToolBridge:
             )
         except asyncio.CancelledError:
             logger.info(f"Task {task_id} cancelled")
+            if pending is not None:
+                if pending.completed_at is None:
+                    pending.completed_at = time.monotonic()
+                self._log_timing_summary(task_id, pending, cancelled=True)
+                self._recent_completions.append(
+                    {
+                        "task_id": task_id,
+                        "task": task[:_MAX_TASK_PREVIEW],
+                        "status": "cancelled",
+                        "returncode": pending.returncode,
+                        "elapsed_seconds": round(
+                            pending.completed_at - pending.started_at, 1
+                        ),
+                        "output_preview": None,
+                    }
+                )
             if self.on_result:
                 await self.on_result(
                     f"Subagent task {task_id} was cancelled before it finished."
@@ -655,6 +703,7 @@ class GptmeToolBridge:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.workspace,
+                start_new_session=True,
             )
             if on_started:
                 on_started(time.monotonic())
@@ -688,7 +737,7 @@ class GptmeToolBridge:
                     ),
                 )
             except asyncio.TimeoutError:
-                process.kill()
+                _kill_process_tree(process)
                 # on_completed is never called by the subprocess path when
                 # Python's asyncio.wait_for fires, so pending.returncode stays
                 # None.  Set it explicitly so _handle_subagent_result records
@@ -711,7 +760,7 @@ class GptmeToolBridge:
                     error=error_msg,
                 )
             except asyncio.CancelledError:
-                process.kill()
+                _kill_process_tree(process)
                 raise
 
             stdout_text = "\n".join(stdout_lines).strip()
@@ -810,11 +859,18 @@ class GptmeToolBridge:
         if len(description) > _MAX_TASK_PREVIEW:
             description = description[:_MAX_TASK_PREVIEW].rstrip() + "..."
         elapsed = max(0.0, time.monotonic() - entry.started_at)
+        budget = (
+            _FAST_MODE_BUDGET_SECONDS
+            if entry.mode == "fast"
+            else _SMART_MODE_BUDGET_SECONDS
+        )
         result: dict = {
             "task_id": task_id,
             "task": description,
             "mode": entry.mode,
             "elapsed_seconds": round(elapsed, 1),
+            "budget_seconds": budget,
+            "remaining_seconds": round(max(0.0, budget - elapsed), 1),
             "stage": self._pending_stage(entry),
         }
         if entry.model:
