@@ -146,6 +146,14 @@ def test_reading_or_pushing_is_not_creation(command, gptme_pr_creation, codex_pr
     assert _prs(extract_signals_codex(codex_pr_creation)) == []
 
 
+def test_short_circuited_create_cannot_credit_prior_output(gptme_pr_creation, codex_pr_creation):
+    command = f"printf '%s\\n' '{URL}'; true || gh pr create --repo example/project"
+    gptme_pr_creation[0]["content"] = "@shell(create): " + json.dumps({"command": command})
+    codex_pr_creation[0]["payload"]["arguments"] = json.dumps({"cmd": command})
+    assert _prs(extract_signals(gptme_pr_creation)) == []
+    assert _prs(extract_signals_codex(codex_pr_creation)) == []
+
+
 def test_unmatched_results_not_credited(gptme_pr_creation, codex_pr_creation):
     gptme_pr_creation[1]["call_id"] = "other"
     codex_pr_creation[1]["payload"]["call_id"] = "other"

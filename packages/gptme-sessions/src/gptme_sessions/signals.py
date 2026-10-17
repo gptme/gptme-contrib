@@ -739,7 +739,8 @@ def _has_pr_create_command(command: str) -> bool:
     for index in range(len(tokens) - 2):
         if tokens[index : index + 3] != ["gh", "pr", "create"]:
             continue
-        if index and tokens[index - 1].strip("\n") not in ("", ";", "&&", "||", "|", "("):
+        # A successful OR-list may skip creation and print an earlier command's URL.
+        if index and tokens[index - 1].strip("\n") not in ("", ";", "&&", "|", "("):
             continue
         end = index + 3
         while end < len(tokens) and tokens[end].strip("\n") not in ("", ";", "&&", "||", "|", ")"):
