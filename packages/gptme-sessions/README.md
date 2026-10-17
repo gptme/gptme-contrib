@@ -48,6 +48,34 @@ gptme-sessions query --model opus --since 7d
 The store lives in `~/.local/share/gptme-sessions/` (override with `GPTME_SESSIONS_DIR` or
 `--sessions-dir`).
 
+## PR deliverables
+
+Gptme and Codex signal extraction emits `pull_request` deliverables for PR URLs
+returned by a matching `gh pr create` tool call, with `gh_pr_create` action evidence.
+This covers gptme's `shell` and native `gh` tools and Codex's `exec_command` and
+JS-wrapped `exec` calls. Codex shell-session polling via `write_stdin` retains the
+creation association, including a structured running-session result from custom
+`exec`. Non-empty stdin invalidates that association. Custom `exec` results require
+a parsed zero exit code before credit; `Script completed` alone confirms the JS
+wrapper finished, not that its shell command succeeded. Duplicate result URLs are
+counted once per session. A shell creation must stand alone or follow only a silent
+`cd /absolute/path` command; arbitrary preceding commands can print unrelated PR
+URLs into the same output and are conservatively excluded.
+
+Read-only `gh pr view` calls, push invitations (`/pull/new/branch`), dry runs,
+unmatched results, and explicitly failed commands are not credited as PR creation.
+Existing records need a forced signal refresh; `sync --signals` alone may skip
+records that already have an outcome:
+
+```bash
+gptme-sessions regrade --harness gptme --outcome all --since 7d
+gptme-sessions regrade --harness codex --outcome all --since 7d
+```
+
+`regrade` also refreshes other extractor-owned fields and outcomes, while preserving
+manual annotations and process-level failures. Back up the store before a broad
+historical refresh.
+
 ## Native gptme child sessions
 
 `read_session_tree()` and signal extraction resolve native gptme children from
