@@ -131,8 +131,8 @@ def to_core_dict(artifact: ReviewArtifact) -> dict:
 
     Gate-relevant artifact fields preserved:
     - ``target`` (hosted) → ``pr: {owner, repo, number}`` + ``target_kind: "hosted"``
-    - ``target`` (local) → ``pr: {}`` + ``target_kind: "local"``
-      + ``diff_fingerprint`` from the local target
+    - ``target`` (local) → ``pr: {owner, repo, number: 0}`` (repo_name split)
+      + ``target_kind: "local"`` + ``diff_fingerprint`` from the local target
     - ``merge_safety`` → ``merge_safety`` (same vocabulary)
     - ``findings`` → converted via :func:`finding_to_core_dict`
     """
@@ -153,8 +153,11 @@ def to_core_dict(artifact: ReviewArtifact) -> dict:
         target_kind = "hosted"
         diff_fingerprint = ""
     elif isinstance(target, LocalReviewTarget):
-        pr_owner = ""
-        pr_repo = target.repo_name
+        if "/" in target.repo_name:
+            pr_owner, pr_repo = target.repo_name.split("/", 1)
+        else:
+            pr_owner = ""
+            pr_repo = target.repo_name
         pr_number = 0
         target_kind = "local"
         diff_fingerprint = target.diff_fingerprint

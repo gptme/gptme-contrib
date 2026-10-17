@@ -310,13 +310,15 @@ class TestToCoreDict_Local:
         d = to_core_dict(_local_artifact())
         assert d["merge_safety"] == "needs_review"
 
-    def test_pr_owner_empty(self):
-        d = to_core_dict(_local_artifact())
-        assert d["pr"]["owner"] == ""
-
-    def test_pr_repo_from_repo_name(self):
-        d = to_core_dict(_local_artifact())
-        assert d["pr"]["repo"] == "gptme/gptme"
+    @pytest.mark.parametrize(
+        "repo_name,owner,repo",
+        [("gptme/gptme", "gptme", "gptme"), ("gptme", "", "gptme"), ("", "", "")],
+    )
+    def test_pr_coordinates_from_repo_name(self, repo_name, owner, repo):
+        artifact = _local_artifact()
+        artifact.target.repo_name = repo_name
+        d = to_core_dict(artifact)
+        assert d["pr"] == {"owner": owner, "repo": repo, "number": 0}
 
     def test_schema_version(self):
         d = to_core_dict(_local_artifact())
