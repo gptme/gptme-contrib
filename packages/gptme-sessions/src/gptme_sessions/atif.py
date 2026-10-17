@@ -5,7 +5,8 @@ Interchange Format (ATIF) v1.7 used by Pier and cross-harness RL pipelines
 (DeepSWE, Terminal-Bench).
 
 Schema reference: https://github.com/pier-ai/pier (commit 0c802fc, datacurve-pier 0.3.1)
-See also: benchmark/pier-gptme/README.md in ErikBjare/bob for the offline smoke.
+See also: the `benchmark/pier-gptme/` offline smoke for a raw-message reference
+implementation of the same grouping and linking rules.
 
 ## Conversion limits
 
