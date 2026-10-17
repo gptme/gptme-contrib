@@ -4,7 +4,11 @@ import os
 import tempfile
 from pathlib import Path
 
-from gptme_lessons_extras.validate import LessonValidator
+from gptme_lessons_extras.validate import (
+    EXCLUDED_DIRS,
+    LessonValidator,
+    validate_directory,
+)
 
 
 def _write_lesson(tmp: Path, content: str) -> Path:
@@ -1067,4 +1071,39 @@ def test_companion_link_detected_for_category_with_space():
     assert not companion_warnings, (
         "A lesson correctly linking a companion in a space-containing category dir "
         f"must not warn 'exists but not linked': {companion_warnings}"
+    )
+
+
+def test_validate_directory_skips_excluded_dirs():
+    """Files under proposed/, .candidate/, archived/, templates/ are skipped by default."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        active_dir = root / "lessons" / "workflow"
+        active_dir.mkdir(parents=True)
+        (active_dir / "good-lesson.md").write_text(_MINIMAL_LESSON.format(extra=""))
+
+        # A draft in proposed/ that lacks required fields — would fail validation
+        for excluded in EXCLUDED_DIRS:
+            d = root / "lessons" / excluded
+            d.mkdir(parents=True)
+            (d / "draft.md").write_text("# Draft\nno frontmatter\n")
+
+        _, total_without = validate_directory(root / "lessons", verbose=False)
+        _, total_with = validate_directory(
+            root / "lessons", verbose=False, include_all=True
+        )
+        # Default: only the active lesson is counted, excluded dirs are skipped
+        assert (
+            total_without == 1
+        ), f"excluded-dir drafts must not be counted; total={total_without}"
+        # include_all: active lesson + one draft per excluded dir
+        assert total_with == 1 + len(
+            EXCLUDED_DIRS
+        ), f"include_all must see all files; total={total_with}"
+
+
+def test_excluded_dirs_constant_matches_readme():
+    """EXCLUDED_DIRS contains the four directories the README's find command skips."""
+    assert EXCLUDED_DIRS == frozenset(
+        {"proposed", ".candidate", "archived", "templates"}
     )

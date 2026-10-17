@@ -841,12 +841,27 @@ def validate_lesson_file(filepath: Path, verbose: bool = False) -> bool:
     return valid
 
 
+# Directories the README find command explicitly skips.  Files under these are
+# drafts, templates, or history — not live validated lessons.
+EXCLUDED_DIRS: frozenset[str] = frozenset(
+    {"proposed", ".candidate", "archived", "templates"}
+)
+
+
 def validate_directory(
-    directory: Path, recursive: bool = True, verbose: bool = False
+    directory: Path,
+    recursive: bool = True,
+    verbose: bool = False,
+    *,
+    include_all: bool = False,
 ) -> Tuple[int, int]:
     """
     Validate all lesson files in a directory.
     Returns (valid_count, total_count).
+
+    By default, skips the directories listed in ``EXCLUDED_DIRS`` (proposed,
+    .candidate, archived, templates) to match the README's ``find`` recipe.
+    Pass ``include_all=True`` to validate every file.
     """
     pattern = "**/*.md" if recursive else "*.md"
     lesson_files = [
@@ -856,6 +871,8 @@ def validate_directory(
         and not f.name.startswith("README")
         # Skip symlinks pointing to gptme-contrib (validated separately)
         and not (f.is_symlink() and "gptme-contrib" in str(f.resolve()))
+        # Skip draft/history/template directories unless the caller opts in
+        and (include_all or not EXCLUDED_DIRS.intersection(f.parts))
     ]
 
     if not lesson_files:
@@ -894,7 +911,13 @@ def validate_directory(
     is_flag=True,
     help="Show warnings and additional details",
 )
-def main(paths: tuple[Path, ...], recursive: bool, verbose: bool):
+@click.option(
+    "--include-all",
+    is_flag=True,
+    default=False,
+    help="Validate all files including proposed/, archived/, .candidate/, templates/",
+)
+def main(paths: tuple[Path, ...], recursive: bool, verbose: bool, include_all: bool):
     """Validate lesson files."""
     # Track overall success across all paths
     all_valid = True
@@ -913,7 +936,7 @@ def main(paths: tuple[Path, ...], recursive: bool, verbose: bool):
         else:
             # Validate directory
             valid_count, total_count = validate_directory(
-                path, recursive=recursive, verbose=verbose
+                path, recursive=recursive, verbose=verbose, include_all=include_all
             )
             if valid_count != total_count:
                 all_valid = False
