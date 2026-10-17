@@ -354,8 +354,8 @@ class TestRoundTrip:
         assert "severity" in fd
         assert "status" in fd
 
-    def test_repo_slash_split(self):
-        """Single-part repo names are handled gracefully."""
+    def test_hosted_repo_requires_owner(self):
+        """A hosted target needs qualified coordinates, unlike a local display name."""
         art = ReviewArtifact(
             target=ReviewTarget(
                 repo="singlename",
@@ -370,6 +370,5 @@ class TestRoundTrip:
             summary="x",
             merge_safety=MergeSafety.unknown,
         )
-        d = to_core_dict(art)
-        assert d["pr"]["owner"] == "singlename"
-        assert d["pr"]["repo"] == ""
+        with pytest.raises(ValueError, match="owner/repo"):
+            to_core_dict(art)

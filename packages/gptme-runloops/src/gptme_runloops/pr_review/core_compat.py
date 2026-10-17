@@ -146,9 +146,9 @@ def to_core_dict(artifact: ReviewArtifact) -> dict:
     )
 
     if isinstance(target, ReviewTarget):
-        repo_parts = target.repo.split("/", 1)
-        pr_owner = repo_parts[0] if len(repo_parts) >= 1 else ""
-        pr_repo = repo_parts[1] if len(repo_parts) >= 2 else ""
+        if "/" not in target.repo:
+            raise ValueError("Hosted review target requires owner/repo coordinates")
+        pr_owner, pr_repo = target.repo.split("/", 1)
         pr_number = target.pr_number
         target_kind = "hosted"
         diff_fingerprint = ""
