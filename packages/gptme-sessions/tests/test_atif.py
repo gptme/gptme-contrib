@@ -568,3 +568,77 @@ def test_synthetic_id_does_not_collide_with_later_source_id():
     assert len(set(ids)) == 2
     assert ids[1] == "norm-1-1"
     assert step["observation"]["results"][0]["source_call_id"] == ids[1]
+
+
+# ---------------------------------------------------------------------------
+# Metrics from NormalizedMessage.usage
+# ---------------------------------------------------------------------------
+
+
+def test_metrics_from_usage_on_text_step():
+    """Per-message usage propagates to the agent step metrics block."""
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="user", content="go"),
+            NormalizedMessage(
+                role="assistant",
+                content="done",
+                usage={"input_tokens": 100, "output_tokens": 20},
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    agent_step = atif["steps"][1]
+    assert agent_step["source"] == "agent"
+    assert agent_step["metrics"] == {"input_tokens": 100, "output_tokens": 20}
+
+
+def test_metrics_from_usage_on_tool_call_step():
+    """Usage on a tool-call message populates step metrics."""
+    t = _make_transcript(
+        [
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Bash",
+                tool_input={"command": "ls"},
+                tool_call_id="c1",
+                usage={"input_tokens": 50, "output_tokens": 10},
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    step = atif["steps"][0]
+    assert step["metrics"] == {"input_tokens": 50, "output_tokens": 10}
+
+
+def test_metrics_accumulated_across_merged_tool_calls():
+    """Multiple tool calls merged into one step sum their usage."""
+    t = _make_transcript(
+        [
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Read",
+                tool_call_id="c1",
+                usage={"input_tokens": 100, "output_tokens": 5},
+            ),
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Bash",
+                tool_call_id="c2",
+                usage={"input_tokens": 0, "output_tokens": 8},
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    assert len(atif["steps"]) == 1
+    assert atif["steps"][0]["metrics"] == {"input_tokens": 100, "output_tokens": 13}
+
+
+def test_no_metrics_when_usage_absent():
+    """Steps without usage data have no metrics key."""
+    t = _make_transcript([NormalizedMessage(role="assistant", content="no usage")])
+    atif = session_transcript_to_atif(t)
+    assert "metrics" not in atif["steps"][0]

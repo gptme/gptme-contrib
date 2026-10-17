@@ -18,9 +18,11 @@ implementation of the same grouping and linking rules.
   results attach to the latest tool-owning step, or the latest text step if
   no call has opened a window. Explicit results and user/system boundaries
   close the window; a new tool call reopens it.
-- Metrics: not available in NormalizedMessage (per-step usage is not in the
-  normalized transcript format). Callers with raw records must enrich the
-  returned steps themselves; extra_agent_fields only enriches the agent block.
+- Metrics: populated from ``NormalizedMessage.usage`` when available. gptme
+  sessions carry per-message usage (input_tokens/output_tokens) in record
+  ``metadata.usage``; ``_normalize_gptme()`` extracts it. Claude Code, Codex,
+  and other harnesses may not populate it. extra_agent_fields only enriches
+  the agent block.
 - Images, attachment payloads, subagent trees, and reasoning deltas are omitted.
 - An empty-message agent step is valid per ATIF when it carries tool_calls.
 """
@@ -31,6 +33,15 @@ import json
 from typing import Any
 
 from .transcript import SessionTranscript
+
+
+def _accumulate_metrics(step: dict[str, Any], usage: dict[str, Any]) -> None:
+    """Merge per-message token counts into the step-level metrics block."""
+    cur = step.get("metrics", {})
+    step["metrics"] = {
+        "input_tokens": cur.get("input_tokens", 0) + (usage.get("input_tokens") or 0),
+        "output_tokens": cur.get("output_tokens", 0) + (usage.get("output_tokens") or 0),
+    }
 
 
 def _new_agent_step(step_id: int, content: str, timestamp: str | None) -> dict[str, Any]:
@@ -158,6 +169,8 @@ def session_transcript_to_atif(
                     "arguments": msg.tool_input or {},
                 }
             )
+            if msg.usage:
+                _accumulate_metrics(pending, msg.usage)
             # A new call opens its own implicit result window, even when text
             # or an explicitly linked result previously changed the target.
             implicit_target = pending
@@ -192,6 +205,8 @@ def session_transcript_to_atif(
                 pending = _new_pending(msg.content, msg.timestamp)
             if msg.is_reasoning:
                 pending.setdefault("extra", {})["is_reasoning"] = True
+            if msg.usage:
+                _accumulate_metrics(pending, msg.usage)
             continue
 
         # ---- User / system messages ------------------------------------
