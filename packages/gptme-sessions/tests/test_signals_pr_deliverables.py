@@ -89,7 +89,8 @@ def test_gptme_native_gh_and_shell(tool, gptme_pr_creation):
     assert _prs(extract_signals(gptme_pr_creation))[0]["evidence"]["tool_name"] == tool
 
 
-def test_codex_custom_exec(codex_pr_creation):
+@pytest.mark.parametrize("code,expected", [(0, 1), (1, 0)])
+def test_codex_custom_exec(code, expected, codex_pr_creation):
     codex_pr_creation[0]["payload"] = {
         "type": "custom_tool_call",
         "name": "exec",
@@ -98,9 +99,43 @@ def test_codex_custom_exec(codex_pr_creation):
     }
     codex_pr_creation[1]["payload"].update(
         type="custom_tool_call_output",
-        output=[{"type": "input_text", "text": f"Script completed\nOutput:\n{URL}"}],
+        output=[
+            {
+                "type": "input_text",
+                "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"
+                + json.dumps({"output": URL, "exit_code": code}),
+            }
+        ],
     )
-    assert _prs(extract_signals_codex(codex_pr_creation))[0]["value"] == URL
+    prs = _prs(extract_signals_codex(codex_pr_creation))
+    assert len(prs) == expected
+    if prs:
+        assert prs[0]["value"] == URL
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        URL,
+        f"Script completed\nOutput:\n{URL}",
+        f"Script completed\nOutput:\nProcess exited with code 1\n{URL}",
+        f"Script completed\nOutput:\nReturn code: 1\n{URL}",
+        f"Script completed\nOutput:\nexit_code=1\n{URL}",
+        f"Script completed\nOutput:\nProcess running with session ID 123\n{URL}",
+        f"Script completed\nWall time 0.1 seconds\nOutput:\n{URL}",
+    ],
+)
+def test_codex_custom_exec_requires_confirmed_success(output, codex_pr_creation):
+    codex_pr_creation[0]["payload"] = {
+        "type": "custom_tool_call",
+        "name": "exec",
+        "call_id": "create",
+        "input": 'const r = await tools.exec_command({cmd: "gh pr create --repo example/project"}); text(r.output);',
+    }
+    codex_pr_creation[1]["payload"].update(type="custom_tool_call_output", output=output)
+    signals = extract_signals_codex(codex_pr_creation)
+    assert _prs(signals) == []
+    assert signals["prs_submitted"] == []
 
 
 @pytest.mark.parametrize("command", ["gh pr view 42", "git push", "cat fixture.txt"])

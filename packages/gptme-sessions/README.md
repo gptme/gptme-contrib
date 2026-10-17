@@ -54,7 +54,9 @@ Gptme and Codex signal extraction emits `pull_request` deliverables for PR URLs
 returned by a matching `gh pr create` tool call, with `gh_pr_create` action evidence.
 This covers gptme's `shell` and native `gh` tools and Codex's `exec_command` and
 JS-wrapped `exec` calls. Codex shell-session polling via `write_stdin` retains the
-creation association. Duplicate result URLs are counted once per session.
+creation association. Custom `exec` results require a parsed zero exit code;
+`Script completed` alone confirms the JS wrapper finished, not that its shell
+command succeeded. Duplicate result URLs are counted once per session.
 
 Read-only `gh pr view` calls, push invitations (`/pull/new/branch`), dry runs,
 unmatched results, and explicitly failed commands are not credited as PR creation.

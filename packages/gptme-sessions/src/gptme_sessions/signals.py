@@ -2580,10 +2580,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                     scan_output, exit_code = _codex_output_metadata(output)
                     if exit_code is not None and exit_code != 0:
                         error_count += 1
-                    elif call_id in pr_create_calls and not re.search(
-                        r"Process running with session ID|(?:exit|exit_code)\s*[=:]\s*-?[1-9]\d*",
-                        scan_output,
-                    ):
+                    elif call_id in pr_create_calls and exit_code == 0:
                         _record_created_prs(
                             scan_output, tool_name, prs_submitted, pr_urls, detail_by_value
                         )
