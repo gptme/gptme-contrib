@@ -95,6 +95,29 @@ model    = "openrouter/deepseek/deepseek-chat-v3-0324:free"
 priority = 2
 ```
 
+## Review artifact output
+
+`review` and `review-pr` now write **canonical core v2 JSON**, both on stdout
+and with `--output`. Consumers can load it directly with
+`gptme.util.review.ReviewArtifact.from_json()`; no forge-neutral reader is needed
+for these new outputs. Local reviews use PR number zero. Unsafe or unknown
+merge verdicts still exit nonzero, even when the artifact was written successfully.
+
+The internal Python `pr_review.schema.ReviewArtifact` remains a v1 Pydantic model
+for the verifier and publisher during migration. Its `model_dump_json()` still
+serializes that internal shape; use `pr_review.core_compat.artifact_json()` or
+`save_artifact()` for the public wire format. Consumers previously using
+`schema.ReviewArtifact.model_validate_json()` on CLI output must migrate to the
+core reader (or read the v2 dictionary).
+
+V2 output retains actionable severity, finding identity (`independence_key`),
+category, open/dropped status, merge safety, target kind, and diff fingerprint.
+Run-local metadata such as summary, model, confidence, and timestamps is not in
+this wire format; the returned Python object still carries it. A confirmed
+*defect* stays `status: "open"`; core's `"confirmed"` means a verified *fix*.
+This output migration does not yet replace internal models or remove legacy
+readers and conversion tables.
+
 ## Python API
 
 ```python

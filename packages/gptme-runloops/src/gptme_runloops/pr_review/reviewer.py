@@ -18,6 +18,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .core_compat import save_artifact
 from .schema import (
     AnyReviewTarget,
     Disposition,
@@ -370,7 +371,6 @@ def run_review(
     )
 
     if output_path is not None:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(artifact.model_dump_json(indent=2), encoding="utf-8")
+        save_artifact(artifact, output_path)
 
     return artifact

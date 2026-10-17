@@ -29,6 +29,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .core_compat import save_artifact
 from .schema import (
     Disposition,
     ReviewArtifact,
@@ -483,9 +484,9 @@ def run_github_review(
             verbose=verbose,
             min_confidence=min_confidence,
         )
-        # Persist the verified artifact back to output_path if given
+        # Preserve the verified verdict before attempting forge publication.
         if output_path is not None:
-            output_path.write_text(artifact.model_dump_json(indent=2), encoding="utf-8")
+            save_artifact(artifact, output_path)
 
     posted, skipped = publish_artifact(
         artifact,

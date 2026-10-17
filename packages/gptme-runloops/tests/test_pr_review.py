@@ -1311,7 +1311,9 @@ class TestReviewPrCliCommand:
         m = re.search(r"\{.*\}", result.output, re.DOTALL)
         assert m is not None, f"No JSON in output: {result.output!r}"
         data = json.loads(m.group(0))
-        assert data["summary"] == "Looks good."
+        assert data["schema_version"] == 2
+        assert data["pr"] == {"owner": "org", "repo": "repo", "number": 42}
+        assert data["merge_safety"] == "safe"
 
     def test_unsafe_verdict_exits_nonzero(self):
         target = ReviewTarget(

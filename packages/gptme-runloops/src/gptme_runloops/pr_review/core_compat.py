@@ -19,10 +19,12 @@ Usage::
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from gptme_runloops.pr_review.schema import ReviewArtifact, ReviewFinding
+    from .schema import ReviewArtifact, ReviewFinding
 
 # ---------------------------------------------------------------------------
 # Severity mapping: runloops 5-level → core 4-level
@@ -136,7 +138,7 @@ def to_core_dict(artifact: ReviewArtifact) -> dict:
     - ``merge_safety`` → ``merge_safety`` (same vocabulary)
     - ``findings`` → converted via :func:`finding_to_core_dict`
     """
-    from gptme_runloops.pr_review.schema import LocalReviewTarget, ReviewTarget
+    from .schema import LocalReviewTarget, ReviewTarget
 
     target = artifact.target
     merge_safety_raw = (
@@ -188,3 +190,14 @@ def to_core_dict(artifact: ReviewArtifact) -> dict:
     if diff_fingerprint:
         d["diff_fingerprint"] = diff_fingerprint
     return d
+
+
+def artifact_json(artifact: ReviewArtifact) -> str:
+    """Serialize public output as canonical v2; internal models remain v1."""
+    return json.dumps(to_core_dict(artifact), indent=2)
+
+
+def save_artifact(artifact: ReviewArtifact, path: Path) -> None:
+    """Persist canonical output for both local and hosted review entry points."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(artifact_json(artifact), encoding="utf-8")
