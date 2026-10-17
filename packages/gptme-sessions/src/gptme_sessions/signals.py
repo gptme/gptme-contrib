@@ -739,8 +739,15 @@ def _has_pr_create_command(command: str) -> bool:
     for index in range(len(tokens) - 2):
         if tokens[index : index + 3] != ["gh", "pr", "create"]:
             continue
-        # A successful OR-list may skip creation and print an earlier command's URL.
-        if index and tokens[index - 1].strip("\n") not in ("", ";", "&&", "|", "("):
+        # Only a silent directory change may precede creation. Arbitrary prior
+        # commands can print existing PR URLs into the same successful result.
+        prefix = tokens[:index]
+        if prefix and not (
+            len(prefix) == 3
+            and prefix[0] == "cd"
+            and prefix[1].startswith("/")
+            and prefix[2] in (";", "&&", "\n")
+        ):
             continue
         end = index + 3
         while end < len(tokens) and tokens[end].strip("\n") not in ("", ";", "&&", "||", "|", ")"):
@@ -2587,10 +2594,27 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                     scan_output, exit_code = _codex_output_metadata(output)
                     if exit_code is not None and exit_code != 0:
                         error_count += 1
-                    elif call_id in pr_create_calls and exit_code == 0:
-                        _record_created_prs(
-                            scan_output, tool_name, prs_submitted, pr_urls, detail_by_value
-                        )
+                    elif call_id in pr_create_calls:
+                        if exit_code == 0:
+                            _record_created_prs(
+                                scan_output, tool_name, prs_submitted, pr_urls, detail_by_value
+                            )
+                        elif exit_code is None:
+                            # A single structured shell result can hand its live
+                            # session to later read-only write_stdin polls.
+                            header = _CODEX_SCRIPT_WRAPPER_HEADER_RE.match(output)
+                            if header:
+                                try:
+                                    result = json.loads(output[header.end() :])
+                                except ValueError:
+                                    result = None
+                                if (
+                                    isinstance(result, dict)
+                                    and result.get("exit_code") is None
+                                    and type(result.get("session_id")) is int
+                                    and isinstance(result.get("output"), str)
+                                ):
+                                    pr_create_sessions[str(result["session_id"])] = result["output"]
 
                     for commit_match in _COMMIT_RE.finditer(scan_output):
                         commit_hash = commit_match.group(1)

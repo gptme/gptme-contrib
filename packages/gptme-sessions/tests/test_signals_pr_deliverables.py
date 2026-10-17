@@ -146,6 +146,65 @@ def test_reading_or_pushing_is_not_creation(command, gptme_pr_creation, codex_pr
     assert _prs(extract_signals_codex(codex_pr_creation)) == []
 
 
+@pytest.mark.parametrize("separator", [";", "&&", "\n", "|"])
+def test_prior_command_output_not_credited(separator, gptme_pr_creation, codex_pr_creation):
+    command = f"gh pr view 41 --json url --jq .url {separator} gh pr create --repo example/project"
+    gptme_pr_creation[0]["content"] = "@shell(create): " + json.dumps({"command": command})
+    codex_pr_creation[0]["payload"]["arguments"] = json.dumps({"cmd": command})
+    earlier_url = "https://github.com/example/project/pull/41"
+    gptme_pr_creation[1]["content"] = f"{earlier_url}\n{URL}\n"
+    codex_pr_creation[1]["payload"]["output"] = (
+        f"Process exited with code 0\nFinal output:\n{earlier_url}\n{URL}\n"
+    )
+    assert _prs(extract_signals(gptme_pr_creation)) == []
+    assert _prs(extract_signals_codex(codex_pr_creation)) == []
+
+
+@pytest.mark.parametrize("code,expected", [(0, 1), (1, 0)])
+@pytest.mark.parametrize("partial_url", [False, True])
+@pytest.mark.parametrize("chars", ["", "\n", "gh pr view 42\n"])
+def test_custom_exec_async_polling(code, expected, partial_url, chars, codex_pr_creation):
+    codex_pr_creation[0]["payload"] = {
+        "type": "custom_tool_call",
+        "name": "exec",
+        "call_id": "create",
+        "input": 'const r = await tools.exec_command({cmd: "gh pr create --repo example/project"}); text(r);',
+    }
+    codex_pr_creation[1]["payload"].update(
+        type="custom_tool_call_output",
+        output="Script completed\nWall time 0.1 seconds\nOutput:\n"
+        + json.dumps({"output": URL if partial_url else "", "exit_code": None, "session_id": 123}),
+    )
+    assert _prs(extract_signals_codex(codex_pr_creation)) == []
+    codex_pr_creation.extend(
+        [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "write_stdin",
+                    "call_id": "poll",
+                    "arguments": json.dumps({"session_id": 123, "chars": ""}),
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "poll",
+                    "output": f"Process exited with code {code}\nFinal output:\n"
+                    + ("" if partial_url else URL),
+                },
+            },
+        ]
+    )
+    codex_pr_creation[2]["payload"]["arguments"] = json.dumps({"session_id": 123, "chars": chars})
+    prs = _prs(extract_signals_codex(codex_pr_creation))
+    assert len(prs) == (0 if chars else expected)
+    if prs:
+        assert prs[0]["value"] == URL
+
+
 def test_short_circuited_create_cannot_credit_prior_output(gptme_pr_creation, codex_pr_creation):
     command = f"printf '%s\\n' '{URL}'; true || gh pr create --repo example/project"
     gptme_pr_creation[0]["content"] = "@shell(create): " + json.dumps({"command": command})
