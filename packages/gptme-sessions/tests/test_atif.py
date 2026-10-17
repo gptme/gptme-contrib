@@ -425,3 +425,25 @@ def test_second_text_message_after_tool_calls_is_new_step():
     assert atif["steps"][0]["tool_calls"][0]["tool_call_id"] == "call-1"
     assert atif["steps"][1]["message"] == "All done"
     assert "tool_calls" not in atif["steps"][1]
+
+
+def test_text_in_tool_call_message_after_preamble_is_kept():
+    """A preamble text part plus a text-carrying tool call both survive."""
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="assistant", content="Let me check"),
+            NormalizedMessage(
+                role="assistant",
+                content="Running ls",
+                tool_name="Bash",
+                tool_input={"command": "ls"},
+                tool_call_id="call-1",
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    assert len(atif["steps"]) == 1
+    step = atif["steps"][0]
+    assert "Let me check" in step["message"]
+    assert "Running ls" in step["message"]
+    assert step["tool_calls"][0]["tool_call_id"] == "call-1"

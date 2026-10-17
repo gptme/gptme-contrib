@@ -121,6 +121,12 @@ def session_transcript_to_atif(
                 # assistant text and the call in one message, so seed the step
                 # with that text instead of discarding it.
                 pending = _new_pending(msg.content or "", msg.timestamp)
+            elif msg.content:
+                # Pending step exists (from an earlier text part of this turn);
+                # keep the text carried by the tool-call message too.
+                pending["message"] = (
+                    f"{pending['message']}\n\n{msg.content}" if pending["message"] else msg.content
+                )
             identifier = (
                 msg.tool_call_id
                 or f"norm-{pending['step_id']}-{len(pending.get('tool_calls', [])) + 1}"
