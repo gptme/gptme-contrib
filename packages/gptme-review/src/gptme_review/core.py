@@ -2922,11 +2922,15 @@ PROVIDER_POLICY: dict[str, dict] = {
         "response_format_mode": "json_object",
     },
     "deepseek/deepseek-v4.1-flash-1017": {
-        # Revision released 2026-10-16/17. Tool-call probe 2026-10-17:
+        # Dated revision released 2026-10-16/17. Tool-call probe 2026-10-17:
         # cloudflare ✅, inference-net ✅, deepinfra ✅, parasail ✅.
         # Morph excluded: serves 1017 but lacks tools in supported_parameters.
         # Pricing same tier as v4.1-flash: ~$0.30/M in, $1.20/M out.
-        # Used for reviewer bake-off ab-1007 (arms C/D).
+        # Provider order from the ab-1008 protocol: cloudflare first (confirmed
+        # serving), then inference-net, deepinfra, parasail. ab-1007 arms C/D
+        # truncated at reasoning_effort=medium (98-99% of 32K completion
+        # tokens); ab-1008 uses reasoning_effort=low. Eval context only
+        # (ErikBjare/bob#1400), not in any merge-critical chain.
         "only": ("cloudflare", "inference-net", "deepinfra", "parasail"),
         "order": ("cloudflare", "inference-net", "deepinfra", "parasail"),
         "allow_fallbacks": False,
@@ -5156,6 +5160,88 @@ class ReviewResult:
 
     raw_output: str = ""
     """Raw model output; stored in the artifact for replay/debugging."""
+
+
+def review(
+    target: ReviewTarget,
+    config: ReviewConfig,
+    *,
+    api_key: str | None = None,
+    timeout: float = 900.0,
+    max_tokens: int = 32_000,
+    structured: bool = True,
+    reasoning_effort: str | None = "medium",
+    until_dry_later_reasoning_effort: str | None = None,
+    note: str = "",
+) -> ReviewResult:
+    """Run the shared LLM review path against a resolved target/config pair.
+
+    This is the forge-neutral execution surface for the thin-callsites task:
+    callers provide an already-resolved target plus policy config, and this
+    function owns prompt construction, fan-out execution, summary parsing, and
+    merge-gate derivation. Publication and transport-specific adapters stay in
+    the callsites.
+
+    Subscription/panel execution still lives in the caller adapters for now.
+    Until those routes are lifted into the shared package, this function fails
+    closed on non-OpenRouter models instead of guessing at a transport.
+    """
+
+    owner, sep, repo_name = target.repo.partition("/")
+    if not sep or not owner or not repo_name:
+        raise ReviewError(f"ReviewTarget.repo must be OWNER/REPO, got {target.repo!r}")
+
+    model = config.route.llm_model if config.route is not None else DEFAULT_MODEL
+    if not model.startswith("openrouter/"):
+        raise ReviewError(
+            f"shared review() does not yet support non-OpenRouter model {model!r}"
+        )
+
+    resolved_key = api_key if api_key is not None else review_api_key()
+    if not resolved_key:
+        raise ReviewError("no OpenRouter review API key available")
+
+    review_findings, usage = fanout_llm_review(
+        owner=owner,
+        repo=repo_name,
+        pr_number=target.number,
+        pr_title=target.title,
+        pr_body=target.body,
+        diff=target.diff,
+        file_contents=dict(target.file_contents),
+        model=model,
+        api_key=resolved_key,
+        timeout=timeout,
+        max_tokens=max_tokens,
+        structured=structured,
+        aspects=select_aspects(target.diff, repo=target.repo),
+        passes=config.passes,
+        min_agreement=config.min_agreement,
+        note="\n\n".join(
+            part for part in (note.strip(), target.extra_context or "") if part
+        ),
+        until_dry=config.until_dry,
+        until_dry_max=config.until_dry_max,
+        reasoning_effort=reasoning_effort,
+        until_dry_later_reasoning_effort=until_dry_later_reasoning_effort,
+    )
+
+    findings, _summary_only = partition_posting_findings(review_findings)
+    shortfalls = blocking_shortfall(findings)
+    raw_output = usage.get("raw_output")
+    answered_passes = usage.get("consensus_passes")
+    _cs = usage.get("change_summary")
+    return ReviewResult(
+        findings=findings,
+        change_summary=_cs if isinstance(_cs, dict) else {},
+        score=confidence_score(findings),
+        blocking=bool(shortfalls),
+        shortfalls=shortfalls,
+        engine="llm",
+        model=model,
+        passes=answered_passes if isinstance(answered_passes, int) else config.passes,
+        raw_output=raw_output if isinstance(raw_output, str) else "",
+    )
 
 
 def is_review_only_blocker(mergeability: Mapping[str, object]) -> bool:
