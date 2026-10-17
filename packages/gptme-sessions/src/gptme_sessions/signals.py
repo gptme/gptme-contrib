@@ -875,7 +875,13 @@ def extract_signals(msgs: list[dict]) -> dict:
             if pr_tool and not re.search(r"(?:Return code:|exit code[: ]+)\s*-?[1-9]\d*", content):
                 # Ignore the echoed command (which may contain a URL in --body).
                 result_body = content.split("\n\n", 1)[-1]
-                _record_created_prs(result_body, pr_tool, prs_submitted, pr_urls, detail_by_value)
+                if not re.search(
+                    r"(?im)^\s*(?:error\b|failed\b)|a pull request .*already exists",
+                    result_body,
+                ):
+                    _record_created_prs(
+                        result_body, pr_tool, prs_submitted, pr_urls, detail_by_value
+                    )
 
             # Summarizer-fired detection: the trimmer plugin replaces evicted
             # tool outputs with a system message starting with this marker.

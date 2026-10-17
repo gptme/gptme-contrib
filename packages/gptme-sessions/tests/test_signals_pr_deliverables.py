@@ -247,6 +247,17 @@ def test_unexecuted_create_cannot_authorize_output(command, gptme_pr_creation, c
     assert _prs(extract_signals_codex(codex_pr_creation)) == []
 
 
+@pytest.mark.parametrize("tool", ["gh", "shell"])
+def test_gptme_existing_pr_error_not_creation(tool, gptme_pr_creation):
+    gptme_pr_creation[0]["content"] = f"@{tool}(create): " + json.dumps(
+        {"command": "pr create" if tool == "gh" else "gh pr create"}
+    )
+    gptme_pr_creation[1]["content"] = f"error: a pull request already exists for main\n{URL}\n"
+    signals = extract_signals(gptme_pr_creation)
+    assert _prs(signals) == []
+    assert signals["prs_submitted"] == []
+
+
 def test_negative_gptme_exit(gptme_pr_creation):
     gptme_pr_creation[1]["content"] += "\nReturn code: -9\n"
     assert _prs(extract_signals(gptme_pr_creation)) == []
