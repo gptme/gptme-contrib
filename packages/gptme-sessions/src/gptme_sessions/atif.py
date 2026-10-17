@@ -79,10 +79,13 @@ def session_transcript_to_atif(
         steps.append(pending)
         pending = None
 
-    def _new_pending(content: str, timestamp: str | None) -> dict[str, Any]:
+    def _new_pending(
+        content: str, timestamp: str | None, *, update_implicit: bool = True
+    ) -> dict[str, Any]:
         nonlocal implicit_target
         step = _new_agent_step(len(steps) + 1, content, timestamp)
-        implicit_target = step
+        if update_implicit:
+            implicit_target = step
         return step
 
     for msg in transcript.messages:
@@ -157,8 +160,10 @@ def session_transcript_to_atif(
                     pending = _new_pending(msg.content, msg.timestamp)
             elif pending is not None and pending.get("tool_calls"):
                 # Tool calls already accumulated: flush, then start a new text step.
+                # Do NOT update implicit_target: unlinked results for calls in the
+                # flushed step must still attach to it, not to this text-only step.
                 _flush_pending()
-                pending = _new_pending(msg.content, msg.timestamp)
+                pending = _new_pending(msg.content, msg.timestamp, update_implicit=False)
             else:
                 pending = _new_pending(msg.content, msg.timestamp)
             if msg.is_reasoning:

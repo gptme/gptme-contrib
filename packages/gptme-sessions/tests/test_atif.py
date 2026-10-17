@@ -427,6 +427,41 @@ def test_second_text_message_after_tool_calls_is_new_step():
     assert "tool_calls" not in atif["steps"][1]
 
 
+def test_unlinked_result_attaches_to_tool_call_step_not_subsequent_text_step():
+    """Implicit target must keep pointing to the step with the unlinked tool call
+    even after a subsequent text-only agent step is created from the same turn."""
+    t = _make_transcript(
+        [
+            # Step A: tool call with no ID
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Read",
+                tool_input={"file_path": "x.py"},
+                tool_call_id=None,
+            ),
+            # Step B: text-only message after tool call — flushes A, creates B
+            NormalizedMessage(role="assistant", content="All done"),
+            # Result for the call in A — must attach to A, not B
+            NormalizedMessage(
+                role="tool_result",
+                content="file content",
+                tool_result="file content",
+                tool_call_id=None,
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    assert len(atif["steps"]) == 2
+    step_a = atif["steps"][0]
+    step_b = atif["steps"][1]
+    assert step_a["tool_calls"][0]["tool_call_id"].startswith("norm-")
+    # Result must be on step A, not step B
+    assert "observation" in step_a
+    assert step_a["observation"]["results"][0]["content"] == "file content"
+    assert "observation" not in step_b
+
+
 def test_text_in_tool_call_message_after_preamble_is_kept():
     """A preamble text part plus a text-carrying tool call both survive."""
     t = _make_transcript(
