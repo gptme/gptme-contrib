@@ -20,6 +20,12 @@ def target():
     )
 
 
+@pytest.fixture(autouse=True)
+def public_repo_policy(monkeypatch):
+    # Tests exercise dispatch and forwarding, not authenticated forge discovery.
+    monkeypatch.setattr(core, "repo_is_sensitive", lambda repo: False)
+
+
 @pytest.fixture
 def config():
     return core.ReviewConfig(passes=1, min_agreement=1, until_dry=False, route=None)
@@ -56,7 +62,7 @@ def test_single_pass_preserves_transport_and_usage_contract(
 
     assert seen["prompt"] == target.build_prompt()
     assert seen["deadline"] is deadline
-    assert seen["no_train"] is core.repo_is_sensitive(target.repo)
+    assert seen["no_train"] is False
     assert seen["_usage_ctx"] == {
         "consumer": "sweep",
         "repo_pr": "owner/project#42",
@@ -189,3 +195,16 @@ def test_expired_job_deadline_prevents_any_wire_request(
         core.review(
             target, config, api_key="test-key", fanout=fanout, deadline=deadline
         )
+
+
+def test_direct_request_preserves_sensitive_repo_routing(monkeypatch, target, config):
+    seen = []
+    monkeypatch.setattr(core, "repo_is_sensitive", lambda repo: True)
+
+    def transport(prompt, **kwargs):
+        seen.append(kwargs["no_train"])
+        return [], {}
+
+    monkeypatch.setattr(core, "openrouter_review", transport)
+    core.review(target, config, api_key="test-key", fanout=False)
+    assert seen == [True]
