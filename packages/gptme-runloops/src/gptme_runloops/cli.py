@@ -10,6 +10,7 @@ import click
 
 from gptme_runloops.autonomous import AutonomousRun
 from gptme_runloops.email import EmailRun
+from gptme_runloops.pr_review.core_compat import artifact_json
 from gptme_runloops.pr_review.schema import MergeSafety
 from gptme_runloops.project_monitoring import ProjectMonitoringRun
 from gptme_runloops.team import TeamRun
@@ -515,7 +516,7 @@ def review(
     if output_path:
         click.echo(f"Artifact written to {output_path}", err=True)
     else:
-        click.echo(artifact.model_dump_json(indent=2))
+        click.echo(artifact_json(artifact))
 
     # Summary to stderr
     n = len(artifact.findings)
@@ -629,7 +630,7 @@ def review_pr(
     if output_path:
         click.echo(f"Artifact written to {output_path}", err=True)
     else:
-        click.echo(artifact.model_dump_json(indent=2))
+        click.echo(artifact_json(artifact))
 
     n = len(artifact.findings)
     if shadow:
