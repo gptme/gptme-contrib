@@ -13,11 +13,14 @@ implementation of the same grouping and linking rules.
 - Tool call grouping: consecutive tool-call NormalizedMessages from the same
   assistant turn are merged onto one ATIF step. Text + tools from the same turn
   are merged when the text comes immediately before the tool calls.
-- Call ID linking: tool_call_id is authoritative; unlinked results (no call ID)
-  attach implicitly to the most recent agent step.
+- Call ID linking: tool_call_id is authoritative; duplicate call IDs raise
+  ValueError rather than guessing which invocation owns a result. Unlinked
+  results attach to the latest tool-owning step, or the latest text step if
+  no call has opened a window. Explicit results and user/system boundaries
+  close the window; a new tool call reopens it.
 - Metrics: not available in NormalizedMessage (per-step usage is not in the
-  normalized transcript format). Callers with access to raw trajectory records
-  may set extra_steps_metadata to inject them.
+  normalized transcript format). Callers with raw records must enrich the
+  returned steps themselves; extra_agent_fields only enriches the agent block.
 - Images, attachment payloads, subagent trees, and reasoning deltas are omitted.
 - An empty-message agent step is valid per ATIF when it carries tool_calls.
 """
@@ -59,8 +62,16 @@ def session_transcript_to_atif(
     -------
     dict
         ATIF v1.7 envelope ready for ``json.dumps``.
+
+    Raises
+    ------
+    ValueError
+        Two tool invocations share a source call ID, making result ownership
+        ambiguous. Source IDs must be unique within the transcript.
     """
     steps: list[dict[str, Any]] = []
+    # Reserve source IDs so generated IDs cannot collide with a later call.
+    source_call_ids = {msg.tool_call_id for msg in transcript.messages if msg.tool_call_id}
     # Maps tool_call_id → the ATIF step dict that owns that call.
     call_steps: dict[str, dict[str, Any]] = {}
     # The step (pending or already emitted) that accepts the next unlinked tool
@@ -130,12 +141,16 @@ def session_transcript_to_atif(
                 pending["message"] = (
                     f"{pending['message']}\n\n{msg.content}" if pending["message"] else msg.content
                 )
-            identifier = (
-                msg.tool_call_id
-                or f"norm-{pending['step_id']}-{len(pending.get('tool_calls', [])) + 1}"
-            )
-            if identifier not in call_steps:
-                call_steps[identifier] = pending
+            identifier = msg.tool_call_id
+            if not identifier:
+                suffix = len(pending.get("tool_calls", [])) + 1
+                identifier = f"norm-{pending['step_id']}-{suffix}"
+                while identifier in source_call_ids or identifier in call_steps:
+                    suffix += 1
+                    identifier = f"norm-{pending['step_id']}-{suffix}"
+            if identifier in call_steps:
+                raise ValueError(f"Duplicate tool_call_id: {identifier}")
+            call_steps[identifier] = pending
             pending.setdefault("tool_calls", []).append(
                 {
                     "tool_call_id": identifier,
@@ -143,6 +158,9 @@ def session_transcript_to_atif(
                     "arguments": msg.tool_input or {},
                 }
             )
+            # A new call opens its own implicit result window, even when text
+            # or an explicitly linked result previously changed the target.
+            implicit_target = pending
             continue
 
         # ---- Plain text assistant message -------------------------------
@@ -156,8 +174,14 @@ def session_transcript_to_atif(
                         pending["timestamp"] = msg.timestamp
                 else:
                     # Second text message before any tool call — flush and restart.
+                    # Preserve an earlier tool-owning target across text-only steps.
                     _flush_pending()
-                    pending = _new_pending(msg.content, msg.timestamp)
+                    pending = _new_pending(
+                        msg.content,
+                        msg.timestamp,
+                        update_implicit=implicit_target is None
+                        or not implicit_target.get("tool_calls"),
+                    )
             elif pending is not None and pending.get("tool_calls"):
                 # Tool calls already accumulated: flush, then start a new text step.
                 # Do NOT update implicit_target: unlinked results for calls in the

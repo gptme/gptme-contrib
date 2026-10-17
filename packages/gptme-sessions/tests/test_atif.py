@@ -482,3 +482,89 @@ def test_text_in_tool_call_message_after_preamble_is_kept():
     assert "Let me check" in step["message"]
     assert "Running ls" in step["message"]
     assert step["tool_calls"][0]["tool_call_id"] == "call-1"
+
+
+def test_new_tool_call_reopens_implicit_window_after_explicit_result():
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="assistant", content="", tool_name="Read", tool_call_id="a"),
+            NormalizedMessage(role="tool_result", content="first", tool_call_id="a"),
+            NormalizedMessage(role="assistant", content="", tool_name="Read"),
+            NormalizedMessage(role="tool_result", content="second"),
+        ]
+    )
+    step = session_transcript_to_atif(t)["steps"][0]
+    assert [r["content"] for r in step["observation"]["results"]] == ["first", "second"]
+
+
+def test_new_tool_call_refreshes_implicit_target_after_text():
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="assistant", content="", tool_name="Read"),
+            NormalizedMessage(role="assistant", content="Next call"),
+            NormalizedMessage(role="assistant", content="", tool_name="Bash"),
+            NormalizedMessage(role="tool_result", content="second call output"),
+        ]
+    )
+    first, second = session_transcript_to_atif(t)["steps"]
+    assert "observation" not in first
+    assert second["observation"]["results"][0]["content"] == "second call output"
+
+
+def test_multiple_text_steps_do_not_steal_unlinked_tool_result():
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="assistant", content="", tool_name="Read"),
+            NormalizedMessage(role="assistant", content="First text"),
+            NormalizedMessage(role="assistant", content="Second text"),
+            NormalizedMessage(role="tool_result", content="call output"),
+        ]
+    )
+    first, *text_steps = session_transcript_to_atif(t)["steps"]
+    assert first["observation"]["results"][0]["content"] == "call output"
+    assert all("observation" not in step for step in text_steps)
+
+
+def test_duplicate_call_id_in_same_step_is_rejected():
+    import pytest
+
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="assistant", content="", tool_name="Read", tool_call_id="x"),
+            NormalizedMessage(role="assistant", content="", tool_name="Bash", tool_call_id="x"),
+        ]
+    )
+    with pytest.raises(ValueError, match="Duplicate tool_call_id: x"):
+        session_transcript_to_atif(t)
+
+
+def test_duplicate_call_id_across_steps_is_rejected():
+    import pytest
+
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="assistant", content="", tool_name="Read", tool_call_id="x"),
+            NormalizedMessage(role="user", content="retry"),
+            NormalizedMessage(role="assistant", content="", tool_name="Bash", tool_call_id="x"),
+            NormalizedMessage(role="tool_result", content="retry output", tool_call_id="x"),
+        ]
+    )
+    with pytest.raises(ValueError, match="Duplicate tool_call_id: x"):
+        session_transcript_to_atif(t)
+
+
+def test_synthetic_id_does_not_collide_with_later_source_id():
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="assistant", content="", tool_name="Read"),
+            NormalizedMessage(
+                role="assistant", content="", tool_name="Bash", tool_call_id="norm-1-1"
+            ),
+            NormalizedMessage(role="tool_result", content="explicit", tool_call_id="norm-1-1"),
+        ]
+    )
+    step = session_transcript_to_atif(t)["steps"][0]
+    ids = [call["tool_call_id"] for call in step["tool_calls"]]
+    assert len(set(ids)) == 2
+    assert ids[1] == "norm-1-1"
+    assert step["observation"]["results"][0]["source_call_id"] == ids[1]
