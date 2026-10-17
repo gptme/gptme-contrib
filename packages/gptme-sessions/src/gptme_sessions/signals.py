@@ -21,6 +21,7 @@ import glob as _glob
 import json
 import os
 import re
+import shlex
 import subprocess
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -720,6 +721,59 @@ def _resolve_merge_shas(pr_merges: list[str], pr_context: dict[int, str]) -> lis
     return shas
 
 
+def _has_pr_create_command(command: str) -> bool:
+    """Conservatively recognize creation as the final shell command.
+
+    Heredocs and mixed-command output cannot establish which command produced
+    a URL. Prefer missing ambiguous evidence to crediting a read-only lookup.
+    """
+    if "<<" in command:
+        return False
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()\n")
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    for index in range(len(tokens) - 2):
+        if tokens[index : index + 3] != ["gh", "pr", "create"]:
+            continue
+        if index and tokens[index - 1].strip("\n") not in ("", ";", "&&", "||", "|", "("):
+            continue
+        end = index + 3
+        while end < len(tokens) and tokens[end].strip("\n") not in ("", ";", "&&", "||", "|", ")"):
+            end += 1
+        if "--dry-run" not in tokens[index:end] and all(
+            not token.strip(";\n") for token in tokens[end:]
+        ):
+            return True
+    return False
+
+
+def _record_created_prs(
+    output: str,
+    tool_name: str,
+    prs_submitted: list[str],
+    pr_urls: list[str],
+    detail_by_value: dict[str, dict[str, object]],
+) -> None:
+    """Record URL-only success lines, not URLs quoted in errors or PR bodies."""
+    for line in output.splitlines():
+        match = _PR_CREATE_URL_REPO_RE.fullmatch(line.strip())
+        if match is None or match.group(0) in pr_urls:
+            continue
+        pr_urls.append(match.group(0))
+        prs_submitted.append(f"PR #{match.group(2)}")
+        _record_deliverable_detail(
+            detail_by_value,
+            value=match.group(0),
+            kind="pull_request",
+            provenance_class="session_committed",
+            evidence={"source": "trajectory", "tool_name": tool_name, "action": "gh_pr_create"},
+        )
+
+
 def extract_signals(msgs: list[dict]) -> dict:
     """Extract productivity signals from parsed gptme trajectory messages.
 
@@ -739,6 +793,9 @@ def extract_signals(msgs: list[dict]) -> dict:
     steps = 0  # number of assistant turns that yielded to await tool results
     detail_by_value: dict[str, dict[str, object]] = {}
     summarizer_fired = False
+    pr_create_calls: dict[str, str] = {}
+    prs_submitted: list[str] = []
+    pr_urls: list[str] = []
 
     # Track recent (tool, path) pairs for retry detection
     recent_sigs: list[str] = []
@@ -770,6 +827,18 @@ def extract_signals(msgs: list[dict]) -> dict:
                 if not m:
                     continue
                 tool, _call_id, args_str = m.group(1), m.group(2), m.group(3)
+                if tool in ("shell", "gh"):
+                    try:
+                        args = json.loads(args_str)
+                    except (ValueError, TypeError):
+                        args = {}
+                    if isinstance(args, dict):
+                        command = args.get("command", "")
+                        if isinstance(command, str):
+                            if tool == "gh":
+                                command = "gh " + command
+                            if _has_pr_create_command(command):
+                                pr_create_calls[_call_id] = tool
                 tool_calls[tool] = tool_calls.get(tool, 0) + 1
                 step_has_tool = True
 
@@ -800,8 +869,13 @@ def extract_signals(msgs: list[dict]) -> dict:
             if step_has_tool:
                 steps += 1
 
-        elif role == "system" and ts_str:
+        elif role == "system" and (ts_str or msg.get("call_id")):
             content_stripped = content.strip()
+            pr_tool = pr_create_calls.get(msg.get("call_id", ""))
+            if pr_tool and not re.search(r"(?:Return code:|exit code[: ]+)\s*-?[1-9]\d*", content):
+                # Ignore the echoed command (which may contain a URL in --body).
+                result_body = content.split("\n\n", 1)[-1]
+                _record_created_prs(result_body, pr_tool, prs_submitted, pr_urls, detail_by_value)
 
             # Summarizer-fired detection: the trimmer plugin replaces evicted
             # tool outputs with a system message starting with this marker.
@@ -837,8 +911,8 @@ def extract_signals(msgs: list[dict]) -> dict:
     if len(timestamps) >= 2:
         duration_s = int((max(timestamps) - min(timestamps)).total_seconds())
 
-    # Combine deliverables: git commits + distinct file writes
-    deliverables = list(dict.fromkeys(git_commits + file_writes))
+    # Combine deliverables: git commits + distinct file writes + created PRs
+    deliverables = list(dict.fromkeys(git_commits + file_writes + pr_urls))
     deliverable_details = _ordered_deliverable_details(deliverables, detail_by_value)
     retry_count = len(retry_candidates)
 
@@ -854,6 +928,7 @@ def extract_signals(msgs: list[dict]) -> dict:
         "deliverables": deliverables,
         "deliverable_details": deliverable_details,
         "summarizer_fired": summarizer_fired,
+        "prs_submitted": prs_submitted,
         "reasoning_effort": _dominant_value(reasoning_efforts),
     }
 
@@ -2293,6 +2368,11 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
 
     # Track function_call ids for matching with their outputs
     call_id_to_name: dict[str, str] = {}
+    pr_create_calls: set[str] = set()
+    pr_create_sessions: dict[str, str] = {}
+    pr_poll_sessions: dict[str, str] = {}
+    prs_submitted: list[str] = []
+    pr_urls: list[str] = []
 
     # Steps count turns (bounded by turn_context records), not individual tool calls.
     # When no turn_context is present, all function_calls fall into one implicit turn.
@@ -2356,6 +2436,22 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                     if call_id:
                         call_id_to_name[call_id] = tool
 
+                    if tool == "write_stdin":
+                        args = payload.get("arguments", "")
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except ValueError:
+                                args = {}
+                        if isinstance(args, dict):
+                            session_id = str(args.get("session_id"))
+                            if session_id in pr_create_sessions:
+                                if args.get("chars", ""):
+                                    pr_create_sessions.pop(session_id)
+                                else:
+                                    pr_create_calls.add(call_id)
+                                    pr_poll_sessions[call_id] = session_id
+
                     # Detect file writes from exec_command arguments
                     if tool == "exec_command":
                         args = payload.get("arguments", "")
@@ -2366,6 +2462,8 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                                 pass
                         if isinstance(args, dict):
                             cmd = args.get("cmd") or ""
+                            if isinstance(cmd, str) and _has_pr_create_command(cmd):
+                                pr_create_calls.add(call_id)
                             _detect_codex_shell_file_writes(
                                 cmd,
                                 tool_name="exec_command",
@@ -2393,13 +2491,17 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                 exec_input = payload.get("input", "") or ""
                 if isinstance(exec_input, str):
                     for cmd_match in re.finditer(
-                        r'tools\.exec_command\s*\(\s*[^)]*?"cmd"\s*:\s*("(?:[^"\\]|\\.)*")',
+                        r'tools\.exec_command\s*\(\s*[^)]*?(?:"cmd"|\bcmd)\s*:\s*("(?:[^"\\]|\\.)*")',
                         exec_input,
                     ):
                         try:
                             cmd = json.loads(cmd_match.group(1))
                         except (json.JSONDecodeError, ValueError):
                             continue
+                        if exec_input.count("tools.exec_command") == 1 and _has_pr_create_command(
+                            cmd
+                        ):
+                            pr_create_calls.add(call_id)
                         _detect_codex_shell_file_writes(
                             cmd,
                             tool_name="exec",
@@ -2419,10 +2521,29 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                 # nests the actual command result as escaped JSON.
                 scan_output, exit_code = _codex_output_metadata(
                     output,
-                    allow_legacy_exec_command=(tool_name == "exec_command"),
+                    allow_legacy_exec_command=(tool_name in ("exec_command", "write_stdin")),
                 )
                 if exit_code is not None and exit_code != 0:
                     error_count += 1
+                if call_id in pr_create_calls:
+                    poll_session_id = pr_poll_sessions.get(call_id)
+                    previous = (
+                        pr_create_sessions.get(poll_session_id, "") if poll_session_id else ""
+                    )
+                    running = re.search(r"Process running with session ID (\d+)", output)
+                    if running:
+                        pr_create_sessions[running.group(1)] = previous + "\n" + scan_output
+                    else:
+                        if poll_session_id:
+                            pr_create_sessions.pop(poll_session_id, None)
+                        if exit_code == 0:
+                            _record_created_prs(
+                                previous + "\n" + scan_output,
+                                tool_name,
+                                prs_submitted,
+                                pr_urls,
+                                detail_by_value,
+                            )
 
                 # Git commit detection from shell output. Codex uses a persistent
                 # shell session: an initial exec_command spawns the shell, and
@@ -2459,6 +2580,13 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
                     scan_output, exit_code = _codex_output_metadata(output)
                     if exit_code is not None and exit_code != 0:
                         error_count += 1
+                    elif call_id in pr_create_calls and not re.search(
+                        r"Process running with session ID|(?:exit|exit_code)\s*[=:]\s*-?[1-9]\d*",
+                        scan_output,
+                    ):
+                        _record_created_prs(
+                            scan_output, tool_name, prs_submitted, pr_urls, detail_by_value
+                        )
 
                     for commit_match in _COMMIT_RE.finditer(scan_output):
                         commit_hash = commit_match.group(1)
@@ -2509,7 +2637,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
     if len(timestamps) >= 2:
         duration_s = int((max(timestamps) - min(timestamps)).total_seconds())
 
-    deliverables = list(dict.fromkeys(git_commits + file_writes))
+    deliverables = list(dict.fromkeys(git_commits + file_writes + pr_urls))
     deliverable_details = _ordered_deliverable_details(deliverables, detail_by_value)
     return {
         "tool_calls": tool_calls,
@@ -2522,6 +2650,7 @@ def extract_signals_codex(msgs: list[dict]) -> dict:
         "retry_count": len(retry_candidates),
         "deliverables": deliverables,
         "deliverable_details": deliverable_details,
+        "prs_submitted": prs_submitted,
         "reasoning_effort": _codex_reasoning_effort(msgs),
     }
 
