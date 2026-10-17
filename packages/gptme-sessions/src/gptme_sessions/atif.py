@@ -117,8 +117,10 @@ def session_transcript_to_atif(
         # ---- Tool-call assistant message --------------------------------
         if role == "assistant" and msg.tool_name:
             if pending is None:
-                # Start a new agent turn (no prior text part).
-                pending = _new_pending("", msg.timestamp)
+                # Start a new agent turn. Native tool-call formats emit the
+                # assistant text and the call in one message, so seed the step
+                # with that text instead of discarding it.
+                pending = _new_pending(msg.content or "", msg.timestamp)
             identifier = (
                 msg.tool_call_id
                 or f"norm-{pending['step_id']}-{len(pending.get('tool_calls', [])) + 1}"

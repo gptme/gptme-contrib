@@ -122,6 +122,26 @@ def test_tool_call_emits_agent_step_with_tool_calls():
     ]
 
 
+def test_text_embedded_in_tool_call_message_is_preserved():
+    """Native formats emit assistant text and the call in one message."""
+    t = _make_transcript(
+        [
+            NormalizedMessage(
+                role="assistant",
+                content="I'll run ls",
+                tool_name="Bash",
+                tool_input={"command": "ls"},
+                tool_call_id="call-1",
+            )
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    assert len(atif["steps"]) == 1
+    step = atif["steps"][0]
+    assert step["message"] == "I'll run ls"
+    assert step["tool_calls"][0]["tool_call_id"] == "call-1"
+
+
 def test_text_then_tool_call_merge_into_one_step():
     """Text message immediately followed by a tool call merges into one step."""
     t = _make_transcript(
