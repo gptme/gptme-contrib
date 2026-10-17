@@ -5201,6 +5201,11 @@ def review(
     if not resolved_key:
         raise ReviewError("no OpenRouter review API key available")
 
+    # fanout_llm_review / openrouter_review expect the bare OpenRouter model
+    # id: the payload uses it verbatim and provider_policy() keys on it, so a
+    # "openrouter/"-prefixed id silently bypasses the pinned provider routing.
+    model = model.removeprefix("openrouter/")
+
     review_findings, usage = fanout_llm_review(
         owner=owner,
         repo=repo_name,

@@ -175,7 +175,9 @@ def test_review_runs_shared_llm_pipeline(monkeypatch: pytest.MonkeyPatch):
         "pr_body": "Expected behavior",
         "diff": DIFF,
         "file_contents": {"a.py": "new\n"},
-        "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+        # bare OpenRouter id: review() strips the route prefix so the payload
+        # model matches PROVIDER_POLICY keys instead of bypassing the pin
+        "model": "deepseek/deepseek-v4-flash-0731",
         "api_key": "test-key",
         "timeout": 900.0,
         "max_tokens": 32_000,
@@ -195,7 +197,7 @@ def test_review_runs_shared_llm_pipeline(monkeypatch: pytest.MonkeyPatch):
     assert result.blocking is True
     assert result.shortfalls
     assert result.engine == "llm"
-    assert result.model == "openrouter/deepseek/deepseek-v4-flash-0731"
+    assert result.model == "deepseek/deepseek-v4-flash-0731"
     assert result.passes == 2
     assert result.raw_output == "raw reviewer output"
 
