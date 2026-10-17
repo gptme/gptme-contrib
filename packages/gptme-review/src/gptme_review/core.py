@@ -41,6 +41,7 @@ from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatch
 from functools import cache
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal, TypedDict
 
 from . import lifecycle
@@ -4959,6 +4960,62 @@ try:
     DEFAULT_MODEL = resolve_review_route().llm_model
 except Exception:
     DEFAULT_MODEL = "openrouter/deepseek/deepseek-v4-flash-0731"
+
+
+@dataclass(frozen=True)
+class ReviewTarget:
+    """Resolved input for the shared review engine, independent of forge I/O.
+
+    Adapters supply the exact diff and post-image context they resolved. This
+    is an in-memory request, not a replacement for runloops' artifact identity
+    models. ``repo`` is a display/policy namespace (owner/name); ``number=0``
+    denotes a local review without a hosted request. ``checkout`` is optional
+    context for an agent engine, never permission to fetch or publish.
+
+    Revision metadata is carried through, not resolved or verified here.
+    ``base_sha`` is the diff's resolved base, not necessarily the base branch
+    tip; leave unknown anchors unset. Uncommitted inputs have no immutable
+    ``head_sha``. A head alone does not identify scoped or transformed bytes:
+    ``diff_fingerprint`` hashes the exact supplied diff, not a reconstructed
+    commit range. It does not attest file context or authorize publication.
+    """
+
+    repo: str
+    diff: str
+    number: int = 0
+    title: str = ""
+    body: str = ""
+    file_contents: Mapping[str, str] = field(default_factory=dict)
+    extra_context: str | None = None
+    base_sha: str | None = None
+    head_sha: str | None = None
+    checkout: Path | None = None
+
+    def __post_init__(self) -> None:
+        # Freeze a private snapshot: a frozen dataclass alone would still let
+        # its adapter mutate the prompt by changing the original dictionary.
+        object.__setattr__(
+            self, "file_contents", MappingProxyType(dict(self.file_contents))
+        )
+
+    @property
+    def diff_fingerprint(self) -> str:
+        """SHA256 of the supplied UTF-8 diff, including whitespace."""
+        return hashlib.sha256(self.diff.encode("utf-8")).hexdigest()
+
+    def build_prompt(self) -> str:
+        """Delegate to the existing prompt contract, including its safety gates."""
+        owner, _, name = self.repo.partition("/")
+        return build_review_prompt(
+            owner=owner,
+            repo=name,
+            pr_number=self.number,
+            pr_title=self.title,
+            pr_body=self.body,
+            diff=self.diff,
+            file_contents=dict(self.file_contents),
+            extra_context=self.extra_context,
+        )
 
 
 @dataclass(frozen=True)
