@@ -61,7 +61,7 @@ def _actionable(
     else:
         raise ValueError(f"unsupported activity type: {activity_type}")
 
-    pr = {"comments": comments, "latestReviews": reviews}
+    pr = {"headRefOid": HEAD, "comments": comments, "latestReviews": reviews}
     script = f"""
 set -uo pipefail
 AUTHOR={BOT}
@@ -394,3 +394,123 @@ def test_older_inline_finding_is_silenced():
         }
     )
     assert not _actionable_pr(_pr_3669_shape(), repo="gptme/gptme", gh_stdout=inline)
+
+
+# --- 2026-10-16: clean AI-review passes are not inbound work ---------------
+#
+# gptme/gptme#4380/#4382/#4383: every clean pass (summary marker with an
+# empty findings[]) dispatched a pr_update PM session that ended noop. Only
+# passes carrying findings are actionable. Fail open on anything ambiguous.
+
+
+def _clean_marker(extra: str = "") -> str:
+    return (
+        "## AI code review\n\nNo issues found.\n\n"
+        f'{MARKER} {{"sha": "7bb89e6c544c", "score": 5, "findings": []{extra}}} -->'
+    )
+
+
+def test_clean_ai_review_summary_is_silenced():
+    assert not _actionable(_clean_marker(), BOT)
+
+
+def test_clean_ai_review_with_advisories_only_is_silenced():
+    extra = ', "advisories": [{"fp": "abc", "severity": "P3"}]'
+    assert not _actionable(_clean_marker(extra), BOT)
+
+
+def test_clean_ai_review_in_latest_review_is_silenced():
+    assert not _actionable(_clean_marker(), BOT, activity_type="review")
+
+
+def test_stale_clean_marker_does_not_hide_changed_head():
+    """A collaborator push leaves the old clean summary as the last comment."""
+    pr = {
+        "number": 1907,
+        "headRefOid": "deadbeef00000000000000000000000000000000",
+        "comments": [
+            {
+                "author": {"login": BOT},
+                "createdAt": "2026-10-16T01:00:00Z",
+                "body": _clean_marker(),
+            }
+        ],
+        "latestReviews": [],
+    }
+    assert _actionable_pr(pr)
+
+
+def test_clean_marker_without_sha_fails_open():
+    assert _actionable(f'{MARKER} {{"findings": []}} -->', BOT)
+
+
+def test_clean_marker_with_empty_sha_fails_open():
+    assert _actionable(f'{MARKER} {{"sha": "", "findings": []}} -->', BOT)
+
+
+def test_clean_marker_without_current_head_fails_open():
+    pr = {
+        "comments": [{"author": {"login": BOT}, "body": _clean_marker()}],
+        "latestReviews": [],
+    }
+    assert _actionable_pr(pr)
+
+
+def test_ai_review_summary_with_findings_is_actionable():
+    body = (
+        f'{MARKER} {{"sha": "abc", "findings": [{{"fp": "x", "severity": "P2"}}]}} -->'
+    )
+    assert _actionable(body, BOT)
+
+
+def test_ai_review_summary_without_findings_key_fails_open():
+    assert _actionable(f'{MARKER} {{"sha": "abc", "score": 5}} -->', BOT)
+
+
+def test_ai_review_summary_with_non_array_findings_fails_open():
+    assert _actionable(f'{MARKER} {{"sha": "abc", "findings": null}} -->', BOT)
+
+
+def test_clean_marker_does_not_hide_newer_inline_finding():
+    """A clean summary must not mask a newer marked inline finding (#3669 path)."""
+    pr = {
+        "number": 3669,
+        "headRefOid": HEAD,
+        "comments": [
+            {
+                "author": {"login": BOT},
+                "createdAt": "2026-08-29T14:37:34Z",
+                "body": _clean_marker(),
+            },
+        ],
+        "latestReviews": [],
+    }
+    inline = json.dumps(
+        {
+            "login": BOT,
+            "time": "2026-08-29T15:58:39Z",
+            "body": f"{MARKER}-finding -->\nP1 — real finding",
+        }
+    )
+    assert _actionable_pr(pr, repo="gptme/gptme", gh_stdout=inline)
+
+
+def test_human_comment_after_clean_ai_review_still_actionable():
+    pr = {
+        "number": 1,
+        "headRefOid": HEAD,
+        "comments": [
+            {
+                "author": {"login": BOT},
+                "createdAt": "2026-10-16T01:00:00Z",
+                "body": _clean_marker(),
+            },
+            {
+                "author": {"login": "ErikBjare"},
+                "createdAt": "2026-10-16T02:00:00Z",
+                "body": "please rebase",
+            },
+        ],
+        "latestReviews": [],
+    }
+    assert _actionable_pr(pr)
