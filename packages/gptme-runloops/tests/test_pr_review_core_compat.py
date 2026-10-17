@@ -267,6 +267,14 @@ class TestToCoreDict_Hosted:
         assert fd["file"] == "gptme/util/review.py"
         assert fd["severity"] == "error"
 
+    def test_conversion_error_propagates(self):
+        """Never return a partial artifact when a finding cannot be converted."""
+        malformed = _finding().model_copy(update={"title": object()})
+        artifact = _hosted_artifact(findings=[_finding(), malformed])
+
+        with pytest.raises(AttributeError, match="strip"):
+            to_core_dict(artifact)
+
     def test_multiple_findings(self):
         findings = [
             _finding(title="A", id="fp1", severity=Severity.critical),

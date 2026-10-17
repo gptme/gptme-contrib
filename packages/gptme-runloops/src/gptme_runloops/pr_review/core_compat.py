@@ -125,7 +125,9 @@ def to_core_dict(artifact: ReviewArtifact) -> dict:
 
     The returned dict matches ``gptme.util.review.ReviewArtifact`` with
     ``schema_version: 2`` and is directly readable by
-    ``ReviewArtifact.from_dict`` with no further translation.
+    ``ReviewArtifact.from_dict`` with no further translation. Conversion errors
+    propagate to the caller rather than returning a partial artifact with missing
+    findings.
 
     Gate-relevant artifact fields preserved:
     - ``target`` (hosted) → ``pr: {owner, repo, number}`` + ``target_kind: "hosted"``
@@ -164,15 +166,7 @@ def to_core_dict(artifact: ReviewArtifact) -> dict:
         target_kind = getattr(target, "kind", "unknown")
         diff_fingerprint = getattr(target, "diff_fingerprint", "")
 
-    findings_dicts = []
-    validation_errors = 0
-    for f in artifact.findings:
-        try:
-            findings_dicts.append(finding_to_core_dict(f))
-        except Exception:
-            validation_errors += 1
-
-    review_status = "complete" if not validation_errors else "incomplete"
+    findings_dicts = [finding_to_core_dict(f) for f in artifact.findings]
 
     d: dict = {
         "schema_version": 2,
@@ -181,9 +175,9 @@ def to_core_dict(artifact: ReviewArtifact) -> dict:
             "repo": pr_repo,
             "number": pr_number,
         },
-        "review_status": review_status,
+        "review_status": "complete",
         "merge_safety": _MERGE_SAFETY_MAP.get(merge_safety_raw, "unknown"),
-        "validation_errors": validation_errors,
+        "validation_errors": 0,
         "findings": findings_dicts,
     }
     if target_kind:
