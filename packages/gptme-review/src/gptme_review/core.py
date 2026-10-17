@@ -2920,6 +2920,17 @@ PROVIDER_POLICY: dict[str, dict] = {
         "allow_fallbacks": False,
         "response_format_mode": "json_object",
     },
+    "deepseek/deepseek-v4.1-flash-1017": {
+        # Revision released 2026-10-16/17. Tool-call probe 2026-10-17:
+        # cloudflare ✅, inference-net ✅, deepinfra ✅, parasail ✅.
+        # Morph excluded: serves 1017 but lacks tools in supported_parameters.
+        # Pricing same tier as v4.1-flash: ~$0.30/M in, $1.20/M out.
+        # Used for reviewer bake-off ab-1007 (arms C/D).
+        "only": ("cloudflare", "inference-net", "deepinfra", "parasail"),
+        "order": ("cloudflare", "inference-net", "deepinfra", "parasail"),
+        "allow_fallbacks": False,
+        "response_format_mode": "json_object",
+    },
 }
 
 
