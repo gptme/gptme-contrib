@@ -74,6 +74,7 @@ class NormalizedMessage:
     is_error: bool = False
     tool_call_id: str | None = None
     is_reasoning: bool = False
+    usage: dict | None = None
 
     def to_dict(self) -> dict:
         """Serialize to JSON-compatible dict (omits ``None`` and ``False`` values)."""
@@ -178,11 +179,13 @@ def _normalize_gptme(msgs: list[dict]) -> list[NormalizedMessage]:
             continue
         content = msg.get("content", "") or ""
         ts = _ts_str(_parse_timestamp(msg.get("timestamp", "")))
+        usage = msg.get("metadata", {}).get("usage") or None
         normalized.append(
             NormalizedMessage(
                 role=role,
                 content=content if isinstance(content, str) else json.dumps(content),
                 timestamp=ts,
+                usage=usage,
             )
         )
     return normalized

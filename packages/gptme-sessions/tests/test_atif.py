@@ -1,0 +1,644 @@
+"""Tests for ATIF v1.7 export adapter (gptme_sessions.atif)."""
+
+from __future__ import annotations
+
+from gptme_sessions.atif import session_transcript_to_atif, transcript_to_atif_json
+from gptme_sessions.transcript import NormalizedMessage, SessionTranscript
+
+TRANSCRIPT_SCHEMA_VERSION = 1
+
+
+def _make_transcript(messages: list[NormalizedMessage], **kwargs) -> SessionTranscript:
+    defaults = {
+        "schema_version": TRANSCRIPT_SCHEMA_VERSION,
+        "session_id": "test-session",
+        "harness": "gptme",
+        "trajectory_path": "/dev/null",
+        "model": "claude-sonnet-4-6",
+    }
+    defaults.update(kwargs)
+    return SessionTranscript(messages=messages, **defaults)
+
+
+# ---------------------------------------------------------------------------
+# Envelope shape
+# ---------------------------------------------------------------------------
+
+
+def test_envelope_keys():
+    t = _make_transcript([NormalizedMessage(role="user", content="hi")])
+    atif = session_transcript_to_atif(t)
+    assert atif["schema_version"] == "ATIF-v1.7"
+    assert atif["session_id"] == "test-session"
+    assert atif["agent"]["name"] == "gptme"
+    assert atif["agent"]["version"] == "claude-sonnet-4-6"
+    assert isinstance(atif["steps"], list)
+    assert len(atif["steps"]) == 1
+
+
+def test_notes_field():
+    t = _make_transcript([NormalizedMessage(role="user", content="hi")])
+    atif = session_transcript_to_atif(t, notes="test note")
+    assert atif["notes"] == "test note"
+
+
+def test_no_notes_when_omitted():
+    t = _make_transcript([NormalizedMessage(role="user", content="hi")])
+    atif = session_transcript_to_atif(t)
+    assert "notes" not in atif
+
+
+def test_extra_agent_fields():
+    t = _make_transcript([NormalizedMessage(role="user", content="hi")])
+    atif = session_transcript_to_atif(t, extra_agent_fields={"tool_format": "native"})
+    assert atif["agent"]["tool_format"] == "native"
+
+
+def test_json_serializable():
+    t = _make_transcript([NormalizedMessage(role="user", content="hi")])
+    json_str = transcript_to_atif_json(t)
+    assert '"ATIF-v1.7"' in json_str
+
+
+# ---------------------------------------------------------------------------
+# Step source mapping
+# ---------------------------------------------------------------------------
+
+
+def test_user_maps_to_user_source():
+    t = _make_transcript([NormalizedMessage(role="user", content="hello")])
+    atif = session_transcript_to_atif(t)
+    assert atif["steps"][0]["source"] == "user"
+    assert atif["steps"][0]["message"] == "hello"
+
+
+def test_system_maps_to_system_source():
+    t = _make_transcript([NormalizedMessage(role="system", content="constraints")])
+    atif = session_transcript_to_atif(t)
+    assert atif["steps"][0]["source"] == "system"
+
+
+def test_assistant_maps_to_agent_source():
+    t = _make_transcript([NormalizedMessage(role="assistant", content="done")])
+    atif = session_transcript_to_atif(t)
+    assert atif["steps"][0]["source"] == "agent"
+
+
+def test_step_ids_are_sequential():
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="user", content="go"),
+            NormalizedMessage(role="assistant", content="ok"),
+            NormalizedMessage(role="system", content="info"),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    assert [s["step_id"] for s in atif["steps"]] == [1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# Tool call grouping
+# ---------------------------------------------------------------------------
+
+
+def test_tool_call_emits_agent_step_with_tool_calls():
+    t = _make_transcript(
+        [
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Bash",
+                tool_input={"command": "ls"},
+                tool_call_id="call-1",
+            )
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    assert len(atif["steps"]) == 1
+    step = atif["steps"][0]
+    assert step["source"] == "agent"
+    assert step["tool_calls"] == [
+        {"tool_call_id": "call-1", "function_name": "Bash", "arguments": {"command": "ls"}}
+    ]
+
+
+def test_text_embedded_in_tool_call_message_is_preserved():
+    """Native formats emit assistant text and the call in one message."""
+    t = _make_transcript(
+        [
+            NormalizedMessage(
+                role="assistant",
+                content="I'll run ls",
+                tool_name="Bash",
+                tool_input={"command": "ls"},
+                tool_call_id="call-1",
+            )
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    assert len(atif["steps"]) == 1
+    step = atif["steps"][0]
+    assert step["message"] == "I'll run ls"
+    assert step["tool_calls"][0]["tool_call_id"] == "call-1"
+
+
+def test_text_then_tool_call_merge_into_one_step():
+    """Text message immediately followed by a tool call merges into one step."""
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="assistant", content="I'll run ls"),
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Bash",
+                tool_input={"command": "ls"},
+                tool_call_id="call-1",
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    assert len(atif["steps"]) == 1
+    step = atif["steps"][0]
+    assert step["message"] == "I'll run ls"
+    assert len(step["tool_calls"]) == 1
+    assert step["tool_calls"][0]["tool_call_id"] == "call-1"
+
+
+def test_multiple_tool_calls_in_one_turn():
+    t = _make_transcript(
+        [
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Read",
+                tool_input={"file_path": "a.py"},
+                tool_call_id="call-a",
+            ),
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Read",
+                tool_input={"file_path": "b.py"},
+                tool_call_id="call-b",
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    assert len(atif["steps"]) == 1
+    step = atif["steps"][0]
+    assert [tc["tool_call_id"] for tc in step["tool_calls"]] == ["call-a", "call-b"]
+
+
+def test_tool_call_after_user_starts_new_step():
+    """A tool call following a user message must be a new step."""
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="user", content="run ls"),
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Bash",
+                tool_input={"command": "ls"},
+                tool_call_id="call-1",
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    assert len(atif["steps"]) == 2
+    assert atif["steps"][0]["source"] == "user"
+    assert atif["steps"][1]["source"] == "agent"
+
+
+# ---------------------------------------------------------------------------
+# Tool results
+# ---------------------------------------------------------------------------
+
+
+def test_tool_result_links_by_call_id():
+    t = _make_transcript(
+        [
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Bash",
+                tool_input={"command": "ls"},
+                tool_call_id="call-1",
+            ),
+            NormalizedMessage(
+                role="tool_result",
+                content="file.py",
+                tool_result="file.py",
+                tool_call_id="call-1",
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    assert len(atif["steps"]) == 1
+    obs = atif["steps"][0]["observation"]["results"]
+    assert len(obs) == 1
+    assert obs[0]["source_call_id"] == "call-1"
+    assert obs[0]["content"] == "file.py"
+
+
+def test_unlinked_result_attaches_to_last_agent_step():
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="assistant", content="done"),
+            NormalizedMessage(
+                role="tool_result",
+                content="output",
+                tool_result="output",
+                tool_call_id=None,
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    assert len(atif["steps"]) == 1
+    obs = atif["steps"][0]["observation"]["results"]
+    assert obs[0]["content"] == "output"
+    assert "source_call_id" not in obs[0]
+
+
+def test_tool_result_without_owner_is_skipped():
+    """A tool result with no prior agent step is silently dropped (no crash)."""
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="user", content="hi"),
+            NormalizedMessage(
+                role="tool_result",
+                content="orphan",
+                tool_result="orphan",
+                tool_call_id=None,
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    # Only the user step survives; the orphan result is dropped.
+    assert len(atif["steps"]) == 1
+    assert atif["steps"][0]["source"] == "user"
+
+
+def test_error_tool_result_sets_extra_flag():
+    t = _make_transcript(
+        [
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Bash",
+                tool_input={"command": "bad"},
+                tool_call_id="call-1",
+            ),
+            NormalizedMessage(
+                role="tool_result",
+                content="error: not found",
+                tool_result="error: not found",
+                tool_call_id="call-1",
+                is_error=True,
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    obs = atif["steps"][0]["observation"]["results"][0]
+    assert obs["extra"]["is_error"] is True
+
+
+def test_explicit_result_closes_implicit_window():
+    """After an explicit call-ID result, a subsequent unlinked result gets no owner."""
+    t = _make_transcript(
+        [
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Bash",
+                tool_input={"command": "ls"},
+                tool_call_id="call-1",
+            ),
+            NormalizedMessage(
+                role="tool_result",
+                content="ok",
+                tool_result="ok",
+                tool_call_id="call-1",
+            ),
+            # Orphan — arrives after the explicit result closed the window
+            NormalizedMessage(
+                role="tool_result",
+                content="orphan",
+                tool_result="orphan",
+                tool_call_id=None,
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    obs = atif["steps"][0]["observation"]["results"]
+    assert len(obs) == 1
+    assert obs[0]["content"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Timestamps
+# ---------------------------------------------------------------------------
+
+
+def test_timestamp_propagated():
+    t = _make_transcript(
+        [NormalizedMessage(role="user", content="hi", timestamp="2026-01-01T00:00:00Z")]
+    )
+    atif = session_transcript_to_atif(t)
+    assert atif["steps"][0]["timestamp"] == "2026-01-01T00:00:00Z"
+
+
+def test_no_timestamp_key_when_absent():
+    t = _make_transcript([NormalizedMessage(role="user", content="hi", timestamp=None)])
+    atif = session_transcript_to_atif(t)
+    assert "timestamp" not in atif["steps"][0]
+
+
+# ---------------------------------------------------------------------------
+# Edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_empty_messages_gives_empty_steps():
+    t = _make_transcript([])
+    atif = session_transcript_to_atif(t)
+    assert atif["steps"] == []
+
+
+def test_synthetic_call_id_when_no_tool_call_id():
+    """A tool call with no tool_call_id gets a synthetic identifier."""
+    t = _make_transcript(
+        [
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Read",
+                tool_input={"file_path": "x.py"},
+                tool_call_id=None,
+            ),
+            NormalizedMessage(
+                role="tool_result",
+                content="content",
+                tool_result="content",
+                tool_call_id=None,
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    # Tool call should have been generated with a synthetic ID
+    tc = atif["steps"][0]["tool_calls"][0]
+    assert tc["tool_call_id"].startswith("norm-")
+    # Result attaches implicitly (no call_id)
+    obs = atif["steps"][0]["observation"]["results"]
+    assert obs[0]["content"] == "content"
+
+
+def test_reasoning_message_sets_extra_flag():
+    t = _make_transcript(
+        [NormalizedMessage(role="assistant", content="thinking...", is_reasoning=True)]
+    )
+    atif = session_transcript_to_atif(t)
+    assert atif["steps"][0].get("extra", {}).get("is_reasoning") is True
+
+
+def test_no_model_in_agent_when_transcript_has_none():
+    t = _make_transcript([NormalizedMessage(role="user", content="hi")], model=None)
+    atif = session_transcript_to_atif(t)
+    assert "version" not in atif["agent"]
+
+
+def test_second_text_message_after_tool_calls_is_new_step():
+    """A text-only agent message after tool calls (e.g. follow-up) is a new step."""
+    t = _make_transcript(
+        [
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Bash",
+                tool_input={"command": "ls"},
+                tool_call_id="call-1",
+            ),
+            NormalizedMessage(role="assistant", content="All done"),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    assert len(atif["steps"]) == 2
+    assert atif["steps"][0]["tool_calls"][0]["tool_call_id"] == "call-1"
+    assert atif["steps"][1]["message"] == "All done"
+    assert "tool_calls" not in atif["steps"][1]
+
+
+def test_unlinked_result_attaches_to_tool_call_step_not_subsequent_text_step():
+    """Implicit target must keep pointing to the step with the unlinked tool call
+    even after a subsequent text-only agent step is created from the same turn."""
+    t = _make_transcript(
+        [
+            # Step A: tool call with no ID
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Read",
+                tool_input={"file_path": "x.py"},
+                tool_call_id=None,
+            ),
+            # Step B: text-only message after tool call — flushes A, creates B
+            NormalizedMessage(role="assistant", content="All done"),
+            # Result for the call in A — must attach to A, not B
+            NormalizedMessage(
+                role="tool_result",
+                content="file content",
+                tool_result="file content",
+                tool_call_id=None,
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    assert len(atif["steps"]) == 2
+    step_a = atif["steps"][0]
+    step_b = atif["steps"][1]
+    assert step_a["tool_calls"][0]["tool_call_id"].startswith("norm-")
+    # Result must be on step A, not step B
+    assert "observation" in step_a
+    assert step_a["observation"]["results"][0]["content"] == "file content"
+    assert "observation" not in step_b
+
+
+def test_text_in_tool_call_message_after_preamble_is_kept():
+    """A preamble text part plus a text-carrying tool call both survive."""
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="assistant", content="Let me check"),
+            NormalizedMessage(
+                role="assistant",
+                content="Running ls",
+                tool_name="Bash",
+                tool_input={"command": "ls"},
+                tool_call_id="call-1",
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    assert len(atif["steps"]) == 1
+    step = atif["steps"][0]
+    assert "Let me check" in step["message"]
+    assert "Running ls" in step["message"]
+    assert step["tool_calls"][0]["tool_call_id"] == "call-1"
+
+
+def test_new_tool_call_reopens_implicit_window_after_explicit_result():
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="assistant", content="", tool_name="Read", tool_call_id="a"),
+            NormalizedMessage(role="tool_result", content="first", tool_call_id="a"),
+            NormalizedMessage(role="assistant", content="", tool_name="Read"),
+            NormalizedMessage(role="tool_result", content="second"),
+        ]
+    )
+    step = session_transcript_to_atif(t)["steps"][0]
+    assert [r["content"] for r in step["observation"]["results"]] == ["first", "second"]
+
+
+def test_new_tool_call_refreshes_implicit_target_after_text():
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="assistant", content="", tool_name="Read"),
+            NormalizedMessage(role="assistant", content="Next call"),
+            NormalizedMessage(role="assistant", content="", tool_name="Bash"),
+            NormalizedMessage(role="tool_result", content="second call output"),
+        ]
+    )
+    first, second = session_transcript_to_atif(t)["steps"]
+    assert "observation" not in first
+    assert second["observation"]["results"][0]["content"] == "second call output"
+
+
+def test_multiple_text_steps_do_not_steal_unlinked_tool_result():
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="assistant", content="", tool_name="Read"),
+            NormalizedMessage(role="assistant", content="First text"),
+            NormalizedMessage(role="assistant", content="Second text"),
+            NormalizedMessage(role="tool_result", content="call output"),
+        ]
+    )
+    first, *text_steps = session_transcript_to_atif(t)["steps"]
+    assert first["observation"]["results"][0]["content"] == "call output"
+    assert all("observation" not in step for step in text_steps)
+
+
+def test_duplicate_call_id_in_same_step_is_rejected():
+    import pytest
+
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="assistant", content="", tool_name="Read", tool_call_id="x"),
+            NormalizedMessage(role="assistant", content="", tool_name="Bash", tool_call_id="x"),
+        ]
+    )
+    with pytest.raises(ValueError, match="Duplicate tool_call_id: x"):
+        session_transcript_to_atif(t)
+
+
+def test_duplicate_call_id_across_steps_is_rejected():
+    import pytest
+
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="assistant", content="", tool_name="Read", tool_call_id="x"),
+            NormalizedMessage(role="user", content="retry"),
+            NormalizedMessage(role="assistant", content="", tool_name="Bash", tool_call_id="x"),
+            NormalizedMessage(role="tool_result", content="retry output", tool_call_id="x"),
+        ]
+    )
+    with pytest.raises(ValueError, match="Duplicate tool_call_id: x"):
+        session_transcript_to_atif(t)
+
+
+def test_synthetic_id_does_not_collide_with_later_source_id():
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="assistant", content="", tool_name="Read"),
+            NormalizedMessage(
+                role="assistant", content="", tool_name="Bash", tool_call_id="norm-1-1"
+            ),
+            NormalizedMessage(role="tool_result", content="explicit", tool_call_id="norm-1-1"),
+        ]
+    )
+    step = session_transcript_to_atif(t)["steps"][0]
+    ids = [call["tool_call_id"] for call in step["tool_calls"]]
+    assert len(set(ids)) == 2
+    assert ids[1] == "norm-1-1"
+    assert step["observation"]["results"][0]["source_call_id"] == ids[1]
+
+
+# ---------------------------------------------------------------------------
+# Metrics from NormalizedMessage.usage
+# ---------------------------------------------------------------------------
+
+
+def test_metrics_from_usage_on_text_step():
+    """Per-message usage propagates to the agent step metrics block."""
+    t = _make_transcript(
+        [
+            NormalizedMessage(role="user", content="go"),
+            NormalizedMessage(
+                role="assistant",
+                content="done",
+                usage={"input_tokens": 100, "output_tokens": 20},
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    agent_step = atif["steps"][1]
+    assert agent_step["source"] == "agent"
+    assert agent_step["metrics"] == {"input_tokens": 100, "output_tokens": 20}
+
+
+def test_metrics_from_usage_on_tool_call_step():
+    """Usage on a tool-call message populates step metrics."""
+    t = _make_transcript(
+        [
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Bash",
+                tool_input={"command": "ls"},
+                tool_call_id="c1",
+                usage={"input_tokens": 50, "output_tokens": 10},
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    step = atif["steps"][0]
+    assert step["metrics"] == {"input_tokens": 50, "output_tokens": 10}
+
+
+def test_metrics_accumulated_across_merged_tool_calls():
+    """Multiple tool calls merged into one step sum their usage."""
+    t = _make_transcript(
+        [
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Read",
+                tool_call_id="c1",
+                usage={"input_tokens": 100, "output_tokens": 5},
+            ),
+            NormalizedMessage(
+                role="assistant",
+                content="",
+                tool_name="Bash",
+                tool_call_id="c2",
+                usage={"input_tokens": 0, "output_tokens": 8},
+            ),
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    assert len(atif["steps"]) == 1
+    assert atif["steps"][0]["metrics"] == {"input_tokens": 100, "output_tokens": 13}
+
+
+def test_no_metrics_when_usage_absent():
+    """Steps without usage data have no metrics key."""
+    t = _make_transcript([NormalizedMessage(role="assistant", content="no usage")])
+    atif = session_transcript_to_atif(t)
+    assert "metrics" not in atif["steps"][0]
