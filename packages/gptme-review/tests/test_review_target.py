@@ -190,6 +190,8 @@ def test_review_runs_shared_llm_pipeline(monkeypatch: pytest.MonkeyPatch):
         "until_dry_max": core.UNTIL_DRY_MAX_PASSES,
         "reasoning_effort": "medium",
         "until_dry_later_reasoning_effort": None,
+        "usage_context": None,
+        "deadline": None,
     }
     assert [f["body"] for f in result.findings] == ["Broken state transition"]
     assert result.change_summary == {"summary": "Fix behavior", "files": []}

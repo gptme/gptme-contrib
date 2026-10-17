@@ -5124,9 +5124,8 @@ class ReviewResult:
     construction — can program against one contract instead of each callsite's
     ad-hoc intermediate dicts.
 
-    Slice 1.1 of tasks/ai-review-thin-callsites-over-shared-review-api.
-    The ``review()`` function that produces this from (diff, config) is
-    planned for slice 1.2 after the three callsites are reduced to adapters.
+    Produced by ``review(target, config)``. Execution evidence is retained for
+    adapters to render honest consensus, cost, and advisory-only artifacts.
     """
 
     findings: list[dict]
@@ -5144,7 +5143,11 @@ class ReviewResult:
     """
 
     blocking: bool
-    """True when at least one P0/P1 finding is not non_blocking (merge gate)."""
+    """True when at least one P0/P1 finding is not non_blocking (merge gate).
+
+    This is an engine-level assessment, not publication/merge authorization:
+    adapters still apply exact-head coverage, soundness and disposition policy.
+    """
 
     shortfalls: list[dict]
     """Blocking findings with shortfall details, for PR comment construction."""
@@ -5153,13 +5156,19 @@ class ReviewResult:
     """'llm' or 'agent' — the engine that produced this result."""
 
     model: str
-    """Provider-qualified model string (e.g. 'openrouter/deepseek/...')."""
+    """Transport model ID (bare OpenRouter ID for the LLM execution path)."""
 
     passes: int
     """Number of review passes actually run (may be < config.passes on early dry)."""
 
     raw_output: str = ""
     """Raw model output; stored in the artifact for replay/debugging."""
+
+    usage: dict = field(default_factory=dict)
+    """Full execution evidence, including degraded consensus and pass failures."""
+
+    summary_only_findings: list[dict] = field(default_factory=list)
+    """Advisories excluded from the scored findings, retained for rendering."""
 
 
 def review(
@@ -5173,6 +5182,9 @@ def review(
     reasoning_effort: str | None = "medium",
     until_dry_later_reasoning_effort: str | None = None,
     note: str = "",
+    fanout: bool = True,
+    usage_context: Mapping[str, object] | None = None,
+    deadline: ReviewDeadline | None = None,
 ) -> ReviewResult:
     """Run the shared LLM review path against a resolved target/config pair.
 
@@ -5181,6 +5193,12 @@ def review(
     function owns prompt construction, fan-out execution, summary parsing, and
     merge-gate derivation. Publication and transport-specific adapters stay in
     the callsites.
+
+    ``fanout=False`` preserves an unnarrowed single-pass prompt (or general
+    consensus/until-dry waves when requested by config); the default retains
+    aspect fan-out. ``deadline`` is the caller's existing job-wide budget,
+    never a fresh per-call allowance. Usage and summary-only findings survive
+    in the result so adapters need not reconstruct lost execution evidence.
 
     Subscription/panel execution still lives in the caller adapters for now.
     Until those routes are lifted into the shared package, this function fails
@@ -5206,32 +5224,68 @@ def review(
     # "openrouter/"-prefixed id silently bypasses the pinned provider routing.
     model = model.removeprefix("openrouter/")
 
-    review_findings, usage = fanout_llm_review(
-        owner=owner,
-        repo=repo_name,
-        pr_number=target.number,
-        pr_title=target.title,
-        pr_body=target.body,
-        diff=target.diff,
-        file_contents=dict(target.file_contents),
-        model=model,
-        api_key=resolved_key,
-        timeout=timeout,
-        max_tokens=max_tokens,
-        structured=structured,
-        aspects=select_aspects(target.diff, repo=target.repo),
-        passes=config.passes,
-        min_agreement=config.min_agreement,
-        note="\n\n".join(
-            part for part in (note.strip(), target.extra_context or "") if part
-        ),
-        until_dry=config.until_dry,
-        until_dry_max=config.until_dry_max,
-        reasoning_effort=reasoning_effort,
-        until_dry_later_reasoning_effort=until_dry_later_reasoning_effort,
+    extra_context = "\n\n".join(
+        part for part in (note.strip(), target.extra_context or "") if part
     )
+    if fanout or config.passes > 1 or config.until_dry:
+        review_findings, usage = fanout_llm_review(
+            owner=owner,
+            repo=repo_name,
+            pr_number=target.number,
+            pr_title=target.title,
+            pr_body=target.body,
+            diff=target.diff,
+            file_contents=dict(target.file_contents),
+            model=model,
+            api_key=resolved_key,
+            timeout=timeout,
+            max_tokens=max_tokens,
+            structured=structured,
+            aspects=(
+                select_aspects(target.diff, repo=target.repo)
+                if fanout
+                else {"general": ""}
+            ),
+            passes=config.passes,
+            min_agreement=config.min_agreement,
+            note=extra_context,
+            until_dry=config.until_dry,
+            until_dry_max=config.until_dry_max,
+            reasoning_effort=reasoning_effort,
+            until_dry_later_reasoning_effort=until_dry_later_reasoning_effort,
+            usage_context=usage_context,
+            deadline=deadline,
+        )
+    else:
+        prompt = build_review_prompt(
+            owner=owner,
+            repo=repo_name,
+            pr_number=target.number,
+            pr_title=target.title,
+            pr_body=target.body,
+            diff=target.diff,
+            file_contents=dict(target.file_contents),
+            extra_context=extra_context or None,
+        )
+        review_findings, usage = openrouter_review(
+            prompt,
+            model=model,
+            api_key=resolved_key,
+            timeout=timeout,
+            max_tokens=max_tokens,
+            structured=structured,
+            reasoning_effort=reasoning_effort,
+            no_train=repo_is_sensitive(target.repo),
+            _usage_ctx={
+                "consumer": "sweep",
+                "repo_pr": f"{target.repo}#{target.number}",
+                "mode": "review",
+                **(usage_context or {}),
+            },
+            deadline=deadline,
+        )
 
-    findings, _summary_only = partition_posting_findings(review_findings)
+    findings, summary_only = partition_posting_findings(review_findings)
     shortfalls = blocking_shortfall(findings)
     raw_output = usage.get("raw_output")
     answered_passes = usage.get("consensus_passes")
@@ -5246,6 +5300,8 @@ def review(
         model=model,
         passes=answered_passes if isinstance(answered_passes, int) else config.passes,
         raw_output=raw_output if isinstance(raw_output, str) else "",
+        usage=usage,
+        summary_only_findings=summary_only,
     )
 
 
@@ -6981,7 +7037,7 @@ def _fanout_until_dry(
     pr_body: str,
     diff: str,
     file_contents: dict[str, str] | None,
-    usage_context: Mapping[str, int] | None,
+    usage_context: Mapping[str, object] | None,
     model: str,
     api_key: str,
     timeout: float,
@@ -7124,7 +7180,7 @@ def fanout_llm_review(
     until_dry_max: int | None = None,
     reasoning_effort: str | None = None,
     until_dry_later_reasoning_effort: str | None = None,
-    usage_context: Mapping[str, int] | None = None,
+    usage_context: Mapping[str, object] | None = None,
     deadline: ReviewDeadline | None = None,
 ) -> tuple[list[dict], dict]:
     """Run parallel aspect-specialised LLM passes and merge findings.
