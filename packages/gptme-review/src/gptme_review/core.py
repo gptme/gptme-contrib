@@ -5217,7 +5217,10 @@ def finalize_review(
     out-of-scope observations (abstaining when nothing remains), whereas the
     sweep discloses them as informational evidence about unchanged code without
     erasing a valid verdict over the changed files. Never guess that distinction
-    from an empty findings list. Sweep-specific existence checks, round caps,
+    from an empty findings list. A finding with no ``file`` (a PR-level
+    observation) is out-of-scope under both policies, matching
+    ``drop_out_of_scope_findings`` and its documented sweep/local callers — it
+    is not treated as touching every file. Sweep-specific existence checks, round caps,
     static preflight and live-thread reconciliation remain adapter obligations;
     they can change findings and require recomputing the final published score.
     """

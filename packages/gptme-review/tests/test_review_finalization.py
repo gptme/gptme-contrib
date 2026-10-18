@@ -156,6 +156,26 @@ def test_soundness_annotation_does_not_mutate_input():
     assert invalid == before
 
 
+@pytest.mark.parametrize("policy,score", [("suppress", None), ("informational", 5)])
+def test_pr_level_findings_follow_existing_out_of_scope_policy(policy, score):
+    """A finding with no file is out-of-scope in BOTH existing adapters.
+
+    ``drop_out_of_scope_findings`` routes an empty ``file`` to out-of-scope
+    (its SUPPRESSION_REASONS note names "an observation about the PR as a
+    whole"), and both the sweep and the local artifact call it before scoring
+    (``ai-review.py`` and ``ai-review-local.py``). This test pins that
+    characterized behaviour so the shared API cannot drift from it, and so the
+    disposition is explicit rather than an accident of ``"" not in
+    touched_files``.
+    """
+    observation = finding(file="")
+    result = finalize([observation], out_of_scope_policy=policy)
+    assert result.findings == []
+    assert result.out_of_scope_findings == [observation]
+    assert result.score == score
+    assert not result.blocking
+
+
 @pytest.mark.parametrize("findings", [[], [finding()]])
 def test_non_coverage_is_review_error_even_when_findings_exist(findings):
     with pytest.raises(core.ReviewError, match="could not read the input"):
