@@ -710,3 +710,69 @@ def test_no_metrics_when_usage_absent():
     t = _make_transcript([NormalizedMessage(role="assistant", content="no usage")])
     atif = session_transcript_to_atif(t)
     assert "metrics" not in atif["steps"][0]
+
+
+# ---------------------------------------------------------------------------
+# Integration: real gptme conversation.jsonl -> read_transcript -> ATIF
+# ---------------------------------------------------------------------------
+
+
+def test_real_gptme_jsonl_exports_atif_valid_envelope(tmp_path):
+    """The schema bugs shipped because tests built transcripts by hand.
+
+    This goes through the real file boundary (``read_transcript``) so a future
+    field-name drift in gptme normalization or the adapter is caught here.
+    """
+    import json
+
+    from gptme_sessions.transcript import read_transcript
+
+    records = [
+        {"role": "system", "content": "You are gptme.", "timestamp": "2026-10-17T23:00:00+00:00"},
+        {"role": "user", "content": "write it", "timestamp": "2026-10-17T23:00:01+00:00"},
+        {
+            "role": "assistant",
+            "content": '@save(c1): {"path": "a.py", "content": "print(1)"}',
+            "timestamp": "2026-10-17T23:00:02+00:00",
+            "metadata": {
+                "usage": {
+                    "input_tokens": 1499,
+                    "output_tokens": 246,
+                    "cache_read_tokens": 4224,
+                    "cache_creation_tokens": 0,
+                }
+            },
+        },
+        {"role": "system", "content": "Saved to a.py", "timestamp": "2026-10-17T23:00:03+00:00"},
+    ]
+    path = tmp_path / "conversation.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    atif = session_transcript_to_atif(
+        read_transcript(path), extra_agent_fields={"version": "0.35.1"}
+    )
+
+    # Agent block: ATIF v1.7 requires both fields.
+    assert atif["agent"]["name"] == "gptme"
+    assert atif["agent"]["version"] == "0.35.1"
+
+    # Every emitted metric key must be one ATIF's extra="forbid" model accepts.
+    atif_metric_keys = {
+        "prompt_tokens",
+        "completion_tokens",
+        "cached_tokens",
+        "cost_usd",
+        "prompt_token_ids",
+        "completion_token_ids",
+        "logprobs",
+        "extra",
+    }
+    metrics = [s["metrics"] for s in atif["steps"] if s.get("metrics")]
+    assert metrics, "usage in the source records must survive the conversion"
+    for block in metrics:
+        assert set(block) <= atif_metric_keys
+    assert metrics[0]["prompt_tokens"] == 1499 + 4224
+    assert metrics[0]["cached_tokens"] == 4224
+
+    # Step ids stay sequential from 1 (ATIF validator requirement).
+    assert [s["step_id"] for s in atif["steps"]] == list(range(1, len(atif["steps"]) + 1))
