@@ -848,7 +848,9 @@ def normalize_letta(
     ``NormalizedMessage`` equivalent, and mapping them onto ``user`` would
     misreport environment output as human input.  Their timestamps still count
     toward ``started_at``/``last_activity``.  Records with an unrecognized role
-    are skipped for the same reason.
+    are skipped for the same reason, as are empty records (``user``/``system``/
+    ``reasoning`` without content, and ``tool`` without content or a
+    ``tool_call_id``).
     """
     meta = next((r for r in records if r.get("role") == "meta"), {})
     harness: str = meta.get("source") or "unknown"
@@ -869,14 +871,16 @@ def normalize_letta(
             continue
 
         if role == "reasoning":
-            messages.append(
-                NormalizedMessage(
-                    role="assistant",
-                    content=rec.get("content") or "",
-                    is_reasoning=True,
-                    timestamp=ts,
+            content = rec.get("content") or ""
+            if content:
+                messages.append(
+                    NormalizedMessage(
+                        role="assistant",
+                        content=content,
+                        is_reasoning=True,
+                        timestamp=ts,
+                    )
                 )
-            )
 
         elif role == "assistant":
             tool_calls = rec.get("tool_calls") or []
@@ -912,17 +916,22 @@ def normalize_letta(
                     )
 
         elif role == "tool":
-            ok = rec.get("ok")
-            messages.append(
-                NormalizedMessage(
-                    role="tool_result",
-                    content=rec.get("content") or "",
-                    tool_result=rec.get("content") or "",
-                    tool_call_id=rec.get("tool_call_id") or None,
-                    is_error=(not ok) if ok is not None else False,
-                    timestamp=ts,
+            content = rec.get("content") or ""
+            tool_call_id = rec.get("tool_call_id") or None
+            # An empty tool record carries neither a result nor a link; emitting
+            # it would show up downstream as a blank activity entry.
+            if content or tool_call_id:
+                ok = rec.get("ok")
+                messages.append(
+                    NormalizedMessage(
+                        role="tool_result",
+                        content=content,
+                        tool_result=content,
+                        tool_call_id=tool_call_id,
+                        is_error=(not ok) if ok is not None else False,
+                        timestamp=ts,
+                    )
                 )
-            )
 
         elif role in ("user", "system"):
             content = rec.get("content") or ""

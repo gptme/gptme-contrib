@@ -160,6 +160,23 @@ def test_meta_record_not_emitted_as_message():
     assert len(t.messages) == 0
 
 
+def test_empty_reasoning_record_skipped():
+    records = [{"role": "reasoning", "content": "", "timestamp": "2026-01-01T00:00:00.000Z"}]
+    t = normalize_letta(records)
+    assert len(t.messages) == 0
+
+
+def test_empty_tool_record_skipped_but_keeps_timestamp():
+    records = [
+        {"role": "tool", "timestamp": "2026-01-01T00:00:00.000Z"},
+        {"role": "user", "content": "hi", "timestamp": "2026-01-01T00:00:05.000Z"},
+    ]
+    t = normalize_letta(records)
+    assert [m.role for m in t.messages] == ["user"]
+    assert t.started_at == "2026-01-01T00:00:00+00:00"
+    assert t.last_activity == "2026-01-01T00:00:05+00:00"
+
+
 # ---------------------------------------------------------------------------
 # Tool call mapping
 # ---------------------------------------------------------------------------
@@ -262,6 +279,21 @@ def test_tool_result_not_ok():
     ]
     t = normalize_letta(records)
     assert t.messages[0].is_error is True
+
+
+def test_tool_result_with_id_but_no_content_kept():
+    records = [
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "",
+            "timestamp": "2026-01-01T00:00:00.000Z",
+        }
+    ]
+    t = normalize_letta(records)
+    assert len(t.messages) == 1
+    assert t.messages[0].tool_call_id == "c1"
+    assert t.messages[0].content == ""
 
 
 def test_tool_result_missing_ok_defaults_false():
