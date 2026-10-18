@@ -388,6 +388,14 @@ class TestNormalizeGptme:
         ]
         assert sum(m.usage is not None for m in norm) == 1
 
+    def test_tool_syntax_inside_arguments_not_an_extra_call(self):
+        content = "@save(s1): " + json.dumps(
+            {"path": "example.txt", "content": "<tool-use><shell>ls</shell></tool-use>"}
+        )
+        norm = _normalize_gptme([{"role": "assistant", "content": content}])
+        assert [m.tool_name for m in norm if m.tool_name] == ["save"]
+        assert norm[0].tool_input["content"] == "<tool-use><shell>ls</shell></tool-use>"
+
     def test_unknown_lang_tag_not_a_tool(self):
         """Fenced blocks with unknown lang tags (e.g. json, yaml) are NOT tool calls."""
         records = [

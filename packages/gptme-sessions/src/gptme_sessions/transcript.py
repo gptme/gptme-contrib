@@ -354,8 +354,16 @@ def _parse_gptme_toolcalls(content: str) -> list[dict[str, Any]]:
             }
         )
 
-    results.sort(key=lambda x: x["start"] if x["start"] is not None else len(content))
-    return results
+    results.sort(key=lambda x: x["start"])
+    # Inner syntax belongs to the enclosing call's arguments, not the trace.
+    outer_calls: list[dict[str, Any]] = []
+    end = 0
+    for call in results:
+        if call["start"] < end:
+            continue
+        outer_calls.append(call)
+        end = call["end"]
+    return outer_calls
 
 
 def _normalize_gptme(msgs: list[dict]) -> list[NormalizedMessage]:
