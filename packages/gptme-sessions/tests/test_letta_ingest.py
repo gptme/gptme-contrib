@@ -182,6 +182,30 @@ def test_tool_call_fields():
     assert msg.tool_call_id == "call-1"
 
 
+def test_multiple_tool_calls_keep_all_calls_and_result_links():
+    records = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "a", "name": "bash", "args": '{"cmd": "ls"}'},
+                {"id": "b", "name": "read", "args": '{"path": "/foo"}'},
+            ],
+            "timestamp": "2026-01-01T00:00:00Z",
+        },
+        {"role": "tool", "tool_call_id": "a", "content": "foo"},
+        {"role": "tool", "tool_call_id": "b", "content": "contents"},
+    ]
+    transcript = normalize_letta(records)
+    calls = [m for m in transcript.messages if m.role == "assistant"]
+    results = [m for m in transcript.messages if m.role == "tool_result"]
+    assert [m.tool_call_id for m in calls] == ["a", "b"]
+    assert [m.tool_name for m in calls] == ["bash", "read"]
+    assert [m.tool_input for m in calls] == [{"cmd": "ls"}, {"path": "/foo"}]
+    assert [m.timestamp for m in calls] == ["2026-01-01T00:00:00+00:00"] * 2
+    assert [m.tool_call_id for m in results] == [m.tool_call_id for m in calls]
+
+
 def test_tool_call_args_dict_passthrough():
     records = [
         {

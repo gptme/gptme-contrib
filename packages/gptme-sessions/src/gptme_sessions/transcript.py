@@ -813,8 +813,8 @@ def normalize_letta(
 
     This is the reverse of :func:`.letta.session_transcript_to_letta`.  A
     Letta trajectory is a flat list of dicts; the first record has
-    ``role == "meta"`` and carries session metadata.  All subsequent records
-    map 1-to-1 to :class:`NormalizedMessage` instances.
+    ``role == "meta"`` and carries session metadata.  Supported message records
+    map to :class:`NormalizedMessage` instances, one per tool call when present.
 
     Parameters
     ----------
@@ -832,16 +832,16 @@ def normalize_letta(
     -------
     SessionTranscript
         Normalized transcript.  ``harness`` is set from the ``meta`` record's
-        ``source`` field (``"unknown"`` when absent).  ``model``, ``project``,
-        and timestamps are populated from the earliest/latest valid timestamp
+        ``source`` field (``"unknown"`` when absent).  ``model`` and ``project``
+        come from metadata; session bounds use the earliest/latest valid timestamp
         across all records.  ``usage`` is always ``None`` because
         the Letta format omits token metrics by design.
 
     Notes
     -----
-    Tool-call records: a Letta ``assistant`` record with ``tool_calls`` carries
-    exactly one call per record (the Letta adapter emits one message per tool
-    call).  ``args`` is a JSON-encoded string in the Letta format; it is
+    Tool-call records: each call in a Letta ``assistant`` record's ``tool_calls``
+    becomes a separate message, preserving call order and result-link IDs.
+    ``args`` is a JSON-encoded string in the Letta format; it is
     decoded to a dict here.  Malformed JSON is replaced with ``{"_raw": args}``.
 
     ``observation`` records (environment feedback) are skipped: they have no
@@ -881,30 +881,29 @@ def normalize_letta(
         elif role == "assistant":
             tool_calls = rec.get("tool_calls") or []
             if tool_calls:
-                # One tool call per Letta assistant record (flat format).
-                tc = tool_calls[0]
-                raw_args = tc.get("args")
-                if isinstance(raw_args, str):
-                    try:
-                        tool_input: dict = json.loads(raw_args)
-                        if not isinstance(tool_input, dict):
+                for tc in tool_calls:
+                    raw_args = tc.get("args")
+                    if isinstance(raw_args, str):
+                        try:
+                            tool_input: dict = json.loads(raw_args)
+                            if not isinstance(tool_input, dict):
+                                tool_input = {"_raw": raw_args}
+                        except (json.JSONDecodeError, ValueError):
                             tool_input = {"_raw": raw_args}
-                    except (json.JSONDecodeError, ValueError):
-                        tool_input = {"_raw": raw_args}
-                elif isinstance(raw_args, dict):
-                    tool_input = raw_args
-                else:
-                    tool_input = {}
-                messages.append(
-                    NormalizedMessage(
-                        role="assistant",
-                        content=rec.get("content") or "",
-                        tool_name=tc.get("name") or "",
-                        tool_input=tool_input,
-                        tool_call_id=tc.get("id") or None,
-                        timestamp=ts,
+                    elif isinstance(raw_args, dict):
+                        tool_input = raw_args
+                    else:
+                        tool_input = {}
+                    messages.append(
+                        NormalizedMessage(
+                            role="assistant",
+                            content=rec.get("content") or "",
+                            tool_name=tc.get("name") or "",
+                            tool_input=tool_input,
+                            tool_call_id=tc.get("id") or None,
+                            timestamp=ts,
+                        )
                     )
-                )
             else:
                 content = rec.get("content") or ""
                 if content:
