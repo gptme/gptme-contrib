@@ -833,8 +833,8 @@ def normalize_letta(
     SessionTranscript
         Normalized transcript.  ``harness`` is set from the ``meta`` record's
         ``source`` field (``"unknown"`` when absent).  ``model``, ``project``,
-        and timestamps are populated when present in the meta record or the
-        first/last timestamped message.  ``usage`` is always ``None`` because
+        and timestamps are populated from the earliest/latest valid timestamp
+        across all records.  ``usage`` is always ``None`` because
         the Letta format omits token metrics by design.
 
     Notes
@@ -856,16 +856,14 @@ def normalize_letta(
     model: str | None = meta.get("model") or None
 
     messages: list[NormalizedMessage] = []
-    first_ts: str | None = None
-    last_ts: str | None = None
+    timestamps: list[datetime] = []
 
     for rec in records:
         role = rec.get("role")
-        ts: str | None = rec.get("timestamp") or None
-        if ts:
-            if first_ts is None:
-                first_ts = ts
-            last_ts = ts
+        parsed_ts = _parse_timestamp(rec.get("timestamp") or "")
+        ts = _ts_str(parsed_ts)
+        if parsed_ts is not None:
+            timestamps.append(parsed_ts)
 
         if role == "meta":
             continue
@@ -939,8 +937,8 @@ def normalize_letta(
         trajectory_path=trajectory_path,
         project=project,
         model=model,
-        started_at=first_ts,
-        last_activity=last_ts,
+        started_at=_ts_str(min(timestamps)) if timestamps else None,
+        last_activity=_ts_str(max(timestamps)) if timestamps else None,
         capabilities=["view_transcript"] if messages else [],
         messages=messages,
     )

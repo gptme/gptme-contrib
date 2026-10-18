@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from gptme_sessions.letta import session_transcript_to_letta
 from gptme_sessions.transcript import (
+    TRANSCRIPT_SCHEMA_VERSION,
     NormalizedMessage,
     SessionTranscript,
     normalize_letta,
 )
-
-TRANSCRIPT_SCHEMA_VERSION = 1
 
 
 def _make_transcript(messages: list[NormalizedMessage], **kwargs) -> SessionTranscript:
@@ -68,8 +67,26 @@ def test_timestamps_populated():
         {"role": "assistant", "content": "b", "timestamp": "2026-01-01T00:01:00.000Z"},
     ]
     t = normalize_letta(records)
-    assert t.started_at == "2026-01-01T00:00:00.000Z"
-    assert t.last_activity == "2026-01-01T00:01:00.000Z"
+    assert t.started_at == "2026-01-01T00:00:00+00:00"
+    assert t.last_activity == "2026-01-01T00:01:00+00:00"
+
+
+def test_timestamp_bounds_use_parsed_extrema_without_reordering_messages():
+    records = [
+        {"role": "user", "content": "later", "timestamp": "2026-01-01T00:30:00Z"},
+        {"role": "assistant", "content": "earlier", "timestamp": "2026-01-01T01:00:00+02:00"},
+        {"role": "observation", "content": "last", "timestamp": "2026-01-01T01:00:00"},
+        {"role": "user", "content": "invalid", "timestamp": "not-a-timestamp"},
+    ]
+    transcript = normalize_letta(records)
+    assert transcript.started_at == "2026-01-01T01:00:00+02:00"
+    assert transcript.last_activity == "2026-01-01T01:00:00+00:00"
+    assert [m.content for m in transcript.messages] == ["later", "earlier", "invalid"]
+    assert [m.timestamp for m in transcript.messages] == [
+        "2026-01-01T00:30:00+00:00",
+        "2026-01-01T01:00:00+02:00",
+        None,
+    ]
 
 
 def test_capabilities_set_when_messages_present():
@@ -82,6 +99,15 @@ def test_capabilities_empty_when_no_messages():
     records = [{"role": "meta", "source": "gptme"}]
     t = normalize_letta(records)
     assert t.capabilities == []
+    assert t.started_at is None
+    assert t.last_activity is None
+
+
+def test_invalid_timestamp_does_not_set_bounds():
+    t = normalize_letta([{"role": "user", "content": "hi", "timestamp": "invalid"}])
+    assert t.started_at is None
+    assert t.last_activity is None
+    assert t.messages[0].timestamp is None
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +269,7 @@ def test_round_trip_user_assistant():
     )
     records, diagnostics = session_transcript_to_letta(original)
     recovered = normalize_letta(records, session_id=original.session_id)
+    assert recovered.schema_version == original.schema_version == TRANSCRIPT_SCHEMA_VERSION
     assert recovered.harness == original.harness
     assert recovered.model == original.model
     assert recovered.project == original.project
@@ -325,5 +352,5 @@ def test_observation_records_are_skipped_but_keep_timestamps():
     ]
     transcript = normalize_letta(records)
     assert [m.role for m in transcript.messages] == ["user"]
-    assert transcript.started_at == "2026-01-01T00:00:00.000Z"
-    assert transcript.last_activity == "2026-01-01T00:05:00.000Z"
+    assert transcript.started_at == "2026-01-01T00:00:00+00:00"
+    assert transcript.last_activity == "2026-01-01T00:05:00+00:00"
