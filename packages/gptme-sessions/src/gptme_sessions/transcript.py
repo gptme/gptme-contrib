@@ -813,8 +813,8 @@ def normalize_letta(
 
     This is the reverse of :func:`.letta.session_transcript_to_letta`.  A
     Letta trajectory is a flat list of dicts; the first record has
-    ``role == "meta"`` and carries session metadata.  All subsequent records
-    map 1-to-1 to :class:`NormalizedMessage` instances.
+    ``role == "meta"`` and carries session metadata.  Supported message records
+    map to :class:`NormalizedMessage` instances, one per tool call when present.
 
     Parameters
     ----------
@@ -832,23 +832,27 @@ def normalize_letta(
     -------
     SessionTranscript
         Normalized transcript.  ``harness`` is set from the ``meta`` record's
-        ``source`` field (``"unknown"`` when absent).  ``model``, ``project``,
-        and timestamps are populated when present in the meta record or the
-        first/last timestamped message.  ``usage`` is always ``None`` because
+        ``source`` field (``"unknown"`` when absent).  ``model`` and ``project``
+        come from metadata; session bounds use the earliest/latest valid timestamp
+        across all records.  ``usage`` is always ``None`` because
         the Letta format omits token metrics by design.
 
     Notes
     -----
-    Tool-call records: a Letta ``assistant`` record with ``tool_calls`` carries
-    exactly one call per record (the Letta adapter emits one message per tool
-    call).  ``args`` is a JSON-encoded string in the Letta format; it is
+    Tool-call records: each call in a Letta ``assistant`` record's ``tool_calls``
+    becomes a separate message, preserving call order and result-link IDs.  Any
+    text content on that record is emitted once as its own assistant message
+    before the calls, so it is not repeated per call.
+    ``args`` is a JSON-encoded string in the Letta format; it is
     decoded to a dict here.  Malformed JSON is replaced with ``{"_raw": args}``.
 
     ``observation`` records (environment feedback) are skipped: they have no
     ``NormalizedMessage`` equivalent, and mapping them onto ``user`` would
     misreport environment output as human input.  Their timestamps still count
     toward ``started_at``/``last_activity``.  Records with an unrecognized role
-    are skipped for the same reason.
+    are skipped for the same reason, as are empty records (``user``/``system``/
+    ``reasoning`` without content, and ``tool`` without content or a
+    ``tool_call_id``).
     """
     meta = next((r for r in records if r.get("role") == "meta"), {})
     harness: str = meta.get("source") or "unknown"
@@ -856,57 +860,64 @@ def normalize_letta(
     model: str | None = meta.get("model") or None
 
     messages: list[NormalizedMessage] = []
-    first_ts: str | None = None
-    last_ts: str | None = None
+    timestamps: list[datetime] = []
 
     for rec in records:
         role = rec.get("role")
-        ts: str | None = rec.get("timestamp") or None
-        if ts:
-            if first_ts is None:
-                first_ts = ts
-            last_ts = ts
+        parsed_ts = _parse_timestamp(rec.get("timestamp") or "")
+        ts = _ts_str(parsed_ts)
+        if parsed_ts is not None:
+            timestamps.append(parsed_ts)
 
         if role == "meta":
             continue
 
         if role == "reasoning":
-            messages.append(
-                NormalizedMessage(
-                    role="assistant",
-                    content=rec.get("content") or "",
-                    is_reasoning=True,
-                    timestamp=ts,
+            content = rec.get("content") or ""
+            if content:
+                messages.append(
+                    NormalizedMessage(
+                        role="assistant",
+                        content=content,
+                        is_reasoning=True,
+                        timestamp=ts,
+                    )
                 )
-            )
 
         elif role == "assistant":
             tool_calls = rec.get("tool_calls") or []
             if tool_calls:
-                # One tool call per Letta assistant record (flat format).
-                tc = tool_calls[0]
-                raw_args = tc.get("args")
-                if isinstance(raw_args, str):
-                    try:
-                        tool_input: dict = json.loads(raw_args)
-                        if not isinstance(tool_input, dict):
-                            tool_input = {"_raw": raw_args}
-                    except (json.JSONDecodeError, ValueError):
-                        tool_input = {"_raw": raw_args}
-                elif isinstance(raw_args, dict):
-                    tool_input = raw_args
-                else:
-                    tool_input = {}
-                messages.append(
-                    NormalizedMessage(
-                        role="assistant",
-                        content=rec.get("content") or "",
-                        tool_name=tc.get("name") or "",
-                        tool_input=tool_input,
-                        tool_call_id=tc.get("id") or None,
-                        timestamp=ts,
+                # Emit the text turn once, before the calls (matching
+                # ``_normalize_cc``); repeating it on every call message would
+                # duplicate the same text per tool call.
+                content = rec.get("content") or ""
+                if content:
+                    messages.append(
+                        NormalizedMessage(role="assistant", content=content, timestamp=ts)
                     )
-                )
+                for tc in tool_calls:
+                    raw_args = tc.get("args")
+                    if isinstance(raw_args, str):
+                        try:
+                            tool_input: dict = json.loads(raw_args)
+                            if not isinstance(tool_input, dict):
+                                tool_input = {"_raw": raw_args}
+                        except (json.JSONDecodeError, ValueError):
+                            tool_input = {"_raw": raw_args}
+                    elif isinstance(raw_args, dict):
+                        tool_input = raw_args
+                    else:
+                        tool_input = {}
+                    messages.append(
+                        NormalizedMessage(
+                            role="assistant",
+                            content="",
+                            tool_name=tc.get("name") or "",
+                            tool_input=tool_input,
+                            tool_call_id=tc.get("id") or None,
+                            timestamp=ts,
+                        )
+                    )
             else:
                 content = rec.get("content") or ""
                 if content:
@@ -915,17 +926,22 @@ def normalize_letta(
                     )
 
         elif role == "tool":
-            ok = rec.get("ok")
-            messages.append(
-                NormalizedMessage(
-                    role="tool_result",
-                    content=rec.get("content") or "",
-                    tool_result=rec.get("content") or "",
-                    tool_call_id=rec.get("tool_call_id") or None,
-                    is_error=(not ok) if ok is not None else False,
-                    timestamp=ts,
+            content = rec.get("content") or ""
+            tool_call_id = rec.get("tool_call_id") or None
+            # An empty tool record carries neither a result nor a link; emitting
+            # it would show up downstream as a blank activity entry.
+            if content or tool_call_id:
+                ok = rec.get("ok")
+                messages.append(
+                    NormalizedMessage(
+                        role="tool_result",
+                        content=content,
+                        tool_result=content,
+                        tool_call_id=tool_call_id,
+                        is_error=(not ok) if ok is not None else False,
+                        timestamp=ts,
+                    )
                 )
-            )
 
         elif role in ("user", "system"):
             content = rec.get("content") or ""
@@ -939,8 +955,8 @@ def normalize_letta(
         trajectory_path=trajectory_path,
         project=project,
         model=model,
-        started_at=first_ts,
-        last_activity=last_ts,
+        started_at=_ts_str(min(timestamps)) if timestamps else None,
+        last_activity=_ts_str(max(timestamps)) if timestamps else None,
         capabilities=["view_transcript"] if messages else [],
         messages=messages,
     )
