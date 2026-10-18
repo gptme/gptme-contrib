@@ -13,169 +13,95 @@ description: "Always read ALL review sources without truncation using jq for com
 # Read PR Reviews Comprehensively
 
 ## Rule
-Always read ALL review sources without truncation using jq for compact output, and reply to individual review comment threads when acknowledging fixes.
+Read every page and the full body of discussion comments, review summaries, and
+inline comments before acting. Reply in the relevant threads after verifying
+fixes; post a completion summary only after those replies succeed.
 
 ## Context
-When investigating, responding to, or working on pull requests in any GitHub repository.
+When investigating or addressing pull-request feedback. This reading workflow
+does not authorize posting or merging; follow the workspace's authorization and
+coordination rules before writes.
 
 ## Detection
-Observable signals you need comprehensive PR review reading:
-- Maintainer saying "You didn't address the comments I left in my review"
-- Missing inline review comments that aren't shown in basic PR view
-- Only reading `gh pr view --comments` but missing review-specific feedback
-- **Using `| head -n 50` or similar truncation on review output**
-- Reading only 3-5 comments when there are 15+ review comments
-- Posting a general PR comment instead of replying to specific threads
-- Context bloat from verbose `gh api` output
+- Maintainer says feedback was missed despite reading `gh pr view --comments`.
+- A read command uses `head`, slices `.body`, or omits REST pagination.
+- A general summary claims completion without replies to actionable threads.
+- Background replies use bare `wait`, hiding individual command failures.
 
 ## Pattern
-**CRITICAL: Never truncate review output!** Use jq for compact, context-efficient output.
 
-### Step 1: Read ALL Review Sources (with jq for efficiency)
-```shell
-PR_NUMBER=134
+### 1. Read all sources
+
+Select useful fields to reduce metadata, keeping every body intact:
+
+```bash
 REPO="gptme/gptme-contrib"
+PR_NUMBER=134
 
-# Basic info
-gh pr view $PR_NUMBER --repo $REPO
+gh pr view "$PR_NUMBER" --repo "$REPO"
 
-# General comments (don't use | head!)
-gh pr view $PR_NUMBER --repo $REPO --comments
+# General discussion (PRs use the issue-comments endpoint).
+gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" \
+  --jq '.[] | {id, user: .user.login, body}'
 
-# All reviews (compact with jq)
-gh api repos/$REPO/pulls/$PR_NUMBER/reviews \
-  --jq '.[] | {user: .user.login, state: .state, body: .body}'
+# Review summaries and the commit each review assessed.
+gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews?per_page=100" \
+  --jq '.[] | {id, user: .user.login, state, commit_id, body}'
 
-# ALL inline review comments (compact with jq - context efficient!)
-gh api repos/$REPO/pulls/$PR_NUMBER/comments \
-  --jq '.[] | {id: .id, path: .path, user: .user.login, body: (.body | split("\n")[0:3] | join(" "))}'
+# Inline comments, including reply relationships and original locations.
+gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/comments?per_page=100" \
+  --jq '.[] | {id, in_reply_to_id, path, line, original_line, user: .user.login, body}'
 ```
 
-**Why jq?** Raw `gh api` output includes ~50 fields per comment (timestamps, URLs, reactions, etc.). The jq filter extracts only what's needed, reducing context usage by ~80% while preserving actionable information.
+`per_page=100` alone is not pagination. Check each command's exit status; a failed
+later page leaves an incomplete read. If the tool truncates the output, save it
+to a file and read bounded sections until every comment is inspected. First-line
+or three-line previews are indexes, never evidence that feedback was read.
 
-**Note:** For thread resolution status, GraphQL queries can filter unresolved threads (used by gptme's `gh pr view` tool internally). The REST API examples above are simpler and cover most use cases.
+REST inline comments do not report thread resolution state. When that matters,
+query GraphQL `reviewThreads` with pagination and inspect `isResolved` separately.
+A reply is not proof that a thread is resolved.
 
-### Step 2: Acknowledge Each Thread + Post Summary (same toolcall!)
-**Don't just post a general PR comment!** Reply to each review thread, THEN post summary - all in one shell block:
+### 2. Act, then reply with evidence
 
-```shell
-# Batch multiple replies in one shell block (efficient!)
-# Use --jq to suppress verbose response output
-gh api repos/$REPO/pulls/$PR_NUMBER/comments/2678822180/replies \
-  -f body="✅ Fixed in commit 3389211" --jq '.id' &
-gh api repos/$REPO/pulls/$PR_NUMBER/comments/2678822196/replies \
-  -f body="⚠️ Not addressing: edge case, low priority" --jq '.id' &
-gh api repos/$REPO/pulls/$PR_NUMBER/comments/2678822210/replies \
-  -f body="✅ Fixed in commit 5ebce81" --jq '.id' &
-wait
+Fix and verify the issues before composing replies. Re-read the thread before
+posting so a concurrent session's reply is not duplicated. Reply to each
+unaddressed actionable thread, with a commit reference or a reason for deferring.
 
-# Then post summary comment (same shell block - signals completion)
-gh pr comment $PR_NUMBER --repo $REPO --body "## ✅ All Review Comments Addressed
+For the reply endpoint, use the top-level review comment ID: the selected
+comment's `in_reply_to_id` when present, otherwise its `id`. Replies to replies
+are unsupported. These are REST numeric comment IDs, not GraphQL thread IDs.
 
-Replied to all review threads individually. See thread replies for details.
+Run writes sequentially with failure checking. For one thread and a prepared
+summary file (repeat the reply command for additional threads before the summary):
 
-- Issue A: Fixed in abc123
-- Issue B: Not addressing (rationale)"
+```bash
+(
+  set -eu
+  # Set these to the selected thread and an existing, reviewed summary file.
+  : "${REPO:?}" "${PR_NUMBER:?}" "${TOP_LEVEL_COMMENT_ID:?}" "${SUMMARY_FILE:?}"
+  gh api "repos/$REPO/pulls/$PR_NUMBER/comments/$TOP_LEVEL_COMMENT_ID/replies" \
+    -f body='Fixed in commit abc123; the regression test now passes.' --jq '.id'
+  gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "$SUMMARY_FILE"
+)
 ```
 
-## Anti-Patterns
-
-**❌ WRONG: Truncating output**
-```shell
-gh pr view 134 --comments | head -50  # Misses most comments!
-gh api .../comments | head -100       # Truncates review feedback!
-```
-
-**❌ WRONG: Raw gh api output (context bloat)**
-```shell
-gh api repos/$REPO/pulls/$PR_NUMBER/comments  # 50+ fields per comment!
-```
-
-**❌ WRONG: General PR comment only**
-```shell
-# This doesn't close individual review threads
-gh pr comment 134 --body "Fixed all issues"
-```
-
-**❌ WRONG: Separate toolcalls for replies and summary**
-```shell
-# First toolcall - replies
-gh api .../comments/123/replies -f body="Fixed"
-```
-```shell
-# Second toolcall - summary (BAD: should be same block!)
-gh pr comment 134 --body "All done"
-```
-
-**✅ CORRECT: Read → Act → Reply workflow**
-
-The workflow has three distinct toolcall boundaries (NOT a single command sequence):
-
-**Read**: Get all comments
-```shell
-gh api repos/$REPO/pulls/$PR_NUMBER/comments \
-  --jq '.[] | {id, path, user: .user.login, body: (.body | split("\n")[0])}'
-```
-
-**Act**: Fix the issues (separate toolcalls)
-This means using shell tool to make commits - may take multiple toolcalls across files.
-
-**Reply**: Batch all replies + summary in one block
-Only AFTER fixing issues, post replies and summary together:
-```shell
-gh api repos/$REPO/pulls/$PR_NUMBER/comments/<id1>/replies -f body="✅ Fixed in abc123" --jq '.id' &
-gh api repos/$REPO/pulls/$PR_NUMBER/comments/<id2>/replies -f body="✅ Fixed in abc123" --jq '.id' &
-wait
-
-# Summary comment (plain text, not markdown table)
-gh pr comment $PR_NUMBER --body "## All Review Comments Addressed
-
-- Issue 1: Fixed in abc123
-- Issue 2: Fixed in abc123
-- Issue 3: Not addressing (rationale)"
-```
-
-**Why batch replies + summary?** Review comment thread replies have poor visibility - they're collapsed by default. The summary comment ensures the reviewer sees everything addressed. Keep Phase 3 in one toolcall to prevent partial completion.
-
-## jq Quick Reference for PR Reviews
-
-```text
-Compact comment list:
-  --jq '.[] | {id, path, user: .user.login, body}'
-
-First line of body only:
-  --jq '.[] | {id, body: (.body | split("\n")[0])}'
-
-Suppress POST response:
-  --jq '.id'
-
-Count comments:
-  --jq 'length'
-
-Filter by user:
-  --jq '.[] | select(.user.login == "ErikBjare")'
-
-Unresolved threads only:
-  GraphQL with: select(.isResolved == false)
-```
+A single tool call is not a transaction. Bare `wait` can return success when a
+background reply failed, even with `set -e`. If a later write fails, earlier
+replies remain posted: re-read before retrying and send only the missing replies.
+Do not claim all feedback is addressed while requests remain deferred or open.
 
 ## Outcome
-Following this pattern results in:
-- **Complete feedback**: See ALL review comments, not just first few
-- **Context efficiency**: jq filters reduce token usage by ~80%
-- **Professional response**: Address everything maintainer requested
-- **Thread closure**: Individual replies signal threads ready to resolve
-- **No re-reviews needed**: Get it right the first time
-
-Benefits:
-- Catch ALL inline comments (not just first 3-5)
-- Signal to reviewer which threads are addressed
-- Prevent context bloat from verbose API output
-- Clear audit trail of what was fixed
+Full feedback survives compact formatting, long discussions are read completely,
+and the summary accurately reflects successful thread replies and verified work.
 
 ## Related
-- [Read Full GitHub Context](./read-full-github-context.md) - Issues and basic PR comments
-- [GitHub Issue Engagement](../social/github-issue-engagement.md) - Issue handling
+- [Read Full GitHub Context](./read-full-github-context.md)
+- [GitHub Issue Engagement](../social/github-issue-engagement.md)
+- [GitHub CLI pagination](https://cli.github.com/manual/gh_api)
+- [Review comment reply API](https://docs.github.com/en/rest/pulls/comments#create-a-reply-for-a-review-comment)
 
 ## Origin
-2026-01-10 PR #134: Identified failure mode where agent only read ~3 review comments due to output truncation and posted general PR comment instead of replying to individual review threads. Erik requested upstreaming with jq patterns for context efficiency.
+2026-01-10, gptme/gptme-contrib#134: only a few review comments were read and a
+general reply replaced thread-specific follow-through. The 2026-10-18 review
+corrected body-truncating examples, missing pagination, and unchecked writes.
