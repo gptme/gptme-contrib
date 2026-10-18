@@ -122,6 +122,17 @@ with CoordinationDB() as db:
         q.complete(event.id, result="success")
 ```
 
+### Claim denial diagnostics
+
+`claim()` retains its `WorkClaim | None` return contract. After a denial,
+`manager.last_denial` contains a `WorkClaimDenial` (from
+`gptme_coordination.work`) with `reason`, the attempted `claimer`, and `prior`,
+the blocking `WorkClaim` snapshot captured under the claim transaction.
+Reasons are `contention` or policy-neutral `completed-check`; wrappers may
+refine the latter for their own completed-task policies. Every claim attempt
+clears the previous snapshot. Dry-run denials expose the same diagnostics
+without writing anything. The shared core does not persist a telemetry ledger.
+
 ### Authenticated identity (optional)
 
 `WorkClaimManager.claim(..., secret=...)` and `MessageBus.send(..., secret=...)`
