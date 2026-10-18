@@ -80,6 +80,37 @@ def test_author_rejections_retain_evidence_and_do_not_grant_clean_score():
     assert rejection == before
 
 
+def test_resolution_is_not_an_author_rejection():
+    bug = finding()
+    resolved = {
+        "entry": core.suppression_entry(bug, why="resolved"),
+        "reason": "thread resolved",
+        "at": "2026-10-18",
+    }
+    dismissed = {
+        "entry": core.suppression_entry(bug, why="dismissed"),
+        "reason": "Rejected: the counter is intentionally 2",
+        "at": "2026-10-18",
+    }
+
+    # Resolution is a claim, not evidence: the finding survives and still blocks.
+    result = finalize(
+        [bug], out_of_scope_policy="informational", author_rejections=[resolved]
+    )
+    assert result.findings == [bug]
+    assert result.rejected_findings == []
+    assert result.score == 3
+    assert result.blocking
+
+    # An explicit rejection is still honored.
+    result = finalize(
+        [bug], out_of_scope_policy="informational", author_rejections=[dismissed]
+    )
+    assert result.findings == []
+    assert len(result.rejected_findings) == 1
+    assert result.score is None
+
+
 def test_matching_retains_fuzzy_reworded_author_rejections():
     original = finding()
     reworded = {**original, "body": original["body"] + " This corrupts the result."}

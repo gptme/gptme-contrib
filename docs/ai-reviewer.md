@@ -61,8 +61,10 @@ A summary disclaiming input coverage raises `ReviewError`, never a clean score.
 when only out-of-scope observations remain; `informational` preserves the sweep's
 verdict over changed files while disclosing observations about unchanged files.
 Author rejections preserve fingerprint-or-same-defect matching and cannot turn
-an otherwise empty result into 5/5. Invalid soundness claims (such as misquotes)
-are distinct from policy-suppressed evidence.
+an otherwise empty result into 5/5. A `why="resolved"` entry is never honored —
+resolution is a claim, not evidence, matching `filter_suppressed` — so only an
+explicit rejection can dispose of a finding. Invalid soundness claims (such as
+misquotes) are distinct from policy-suppressed evidence.
 
 This is not publication authorization. Forge adapters still own path-existence
 probes, shard completeness, round caps, static preflight, exact-head checks,

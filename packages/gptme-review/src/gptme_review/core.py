@@ -5220,7 +5220,12 @@ def finalize_review(
     from an empty findings list. A finding with no ``file`` (a PR-level
     observation) is out-of-scope under both policies, matching
     ``drop_out_of_scope_findings`` and its documented sweep/local callers — it
-    is not treated as touching every file. Sweep-specific existence checks, round caps,
+    is not treated as touching every file. An ``author_rejections`` row whose
+    ``entry["why"]`` is ``"resolved"`` is never honored: resolution is a claim,
+    not evidence (see ``filter_suppressed``), so it must not hide a finding
+    from the posted result or raise the score. Only explicit rejections
+    (``why="dismissed"`` or an unlabelled rejection) dispose of a finding.
+    Sweep-specific existence checks, round caps,
     static preflight and live-thread reconciliation remain adapter obligations;
     they can change findings and require recomputing the final published score.
     """
@@ -5264,6 +5269,7 @@ def finalize_review(
                 row
                 for row in author_rejections
                 if isinstance(entry := row.get("entry"), Mapping)
+                and entry.get("why") != "resolved"
                 and matches_entry(finding, entry)
             ),
             None,
