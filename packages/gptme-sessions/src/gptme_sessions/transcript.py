@@ -172,8 +172,11 @@ def _ts_str(ts: datetime | None) -> str | None:
 # ---------------------------------------------------------------------------
 
 # Native "tool" format:  @tool_name(call_id): {json}
+# The tool name is bounded to one line rather than a word class: MCP tools are
+# registered as ``server/tool name`` and gptme's own parser accepts any
+# non-newline name before the call-ID suffix (``gptme.tools.base.toolcall_re``).
 _NATIVE_TOOL_RE = re.compile(
-    r"^@([\w.]+)\(([\w\-:.]+)\):\s*(\{)",
+    r"^@([^\r\n]+?)\(([\w\-:.]+)\):\s*(\{)",
     re.MULTILINE,
 )
 

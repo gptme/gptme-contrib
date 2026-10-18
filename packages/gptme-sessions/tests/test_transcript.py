@@ -248,6 +248,22 @@ class TestNormalizeGptme:
         assert len(results) == 1
         assert results[0].tool_call_id == "abc123"
 
+    def test_native_format_mcp_tool_name(self):
+        """MCP tool names (``server/tool name``) parse like any other native call."""
+        records = [
+            {
+                "role": "assistant",
+                "content": '@github/search issues(call_abc): {"query": "bug"}',
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+        ]
+        norm = _normalize_gptme(records)
+        tool_msgs = [m for m in norm if m.tool_name]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_name == "github/search issues"
+        assert tool_msgs[0].tool_call_id == "call_abc"
+        assert tool_msgs[0].tool_input == {"query": "bug"}
+
     def test_native_syntax_inside_plain_fence_is_not_a_call(self):
         """Native @tool syntax quoted in a non-tool fence is example text.
 
