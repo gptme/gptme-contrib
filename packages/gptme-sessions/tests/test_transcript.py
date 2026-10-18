@@ -205,19 +205,267 @@ class TestNormalizeGptme:
         assert len(norm) == 3
         assert norm[0].role == "user"
         assert norm[1].role == "assistant"
-        assert norm[2].role == "system"
+        # system message that follows a tool call becomes tool_result
+        assert norm[2].role == "tool_result"
 
     def test_content_preserved(self, gptme_jsonl: Path):
         records = [json.loads(line) for line in gptme_jsonl.read_text().strip().splitlines()]
         norm = _normalize_gptme(records)
         assert "Hello" in norm[0].content
-        assert "test.py" in norm[1].content
+        # native tool call: the path is in tool_input, not content
+        assert norm[1].tool_name == "save"
+        assert norm[1].tool_input is not None
+        assert norm[1].tool_input.get("path") == "test.py"
 
     def test_timestamp_preserved(self, gptme_jsonl: Path):
         records = [json.loads(line) for line in gptme_jsonl.read_text().strip().splitlines()]
         norm = _normalize_gptme(records)
         assert norm[0].timestamp is not None
         assert "2026-03-01" in norm[0].timestamp
+
+    def test_native_format(self):
+        """@tool(id): {json} format emits tool_name/tool_input/tool_call_id."""
+        records = [
+            {
+                "role": "assistant",
+                "content": '@shell(abc123): {"command": "ls -la"}',
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+            {
+                "role": "system",
+                "content": "total 0",
+                "call_id": "abc123",
+                "timestamp": "2026-03-01T10:00:01+00:00",
+            },
+        ]
+        norm = _normalize_gptme(records)
+        tool_msgs = [m for m in norm if m.tool_name]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_name == "shell"
+        assert tool_msgs[0].tool_input == {"command": "ls -la"}
+        assert tool_msgs[0].tool_call_id == "abc123"
+        results = [m for m in norm if m.role == "tool_result"]
+        assert len(results) == 1
+        assert results[0].tool_call_id == "abc123"
+
+    def test_native_format_mcp_tool_name(self):
+        """MCP tool names (``server/tool name``) parse like any other native call."""
+        records = [
+            {
+                "role": "assistant",
+                "content": '@github/search issues(call_abc): {"query": "bug"}',
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+        ]
+        norm = _normalize_gptme(records)
+        tool_msgs = [m for m in norm if m.tool_name]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_name == "github/search issues"
+        assert tool_msgs[0].tool_call_id == "call_abc"
+        assert tool_msgs[0].tool_input == {"query": "bug"}
+
+    def test_native_syntax_inside_plain_fence_is_not_a_call(self):
+        """Native @tool syntax quoted in a non-tool fence is example text.
+
+        gptme's own parser skips tool-call syntax inside fenced blocks; a
+        ```txt example must not be exported as an invocation with a call ID.
+        """
+        records = [
+            {
+                "role": "assistant",
+                "content": (
+                    "For example:\n```txt\n"
+                    '@shell(abc123): {"command": "ls -la"}\n'
+                    "```\nThat is the syntax."
+                ),
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+        ]
+        norm = _normalize_gptme(records)
+        assert [m for m in norm if m.tool_name] == []
+        assert any("For example:" in m.content for m in norm)
+        assert any("That is the syntax." in m.content for m in norm)
+
+    def test_markdown_format(self):
+        """Fenced code blocks with known lang tags emit tool_name/tool_input."""
+        records = [
+            {
+                "role": "assistant",
+                "content": "Here's the output:\n```shell\nls -la\n```",
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+            {
+                "role": "system",
+                "content": "total 0",
+                "timestamp": "2026-03-01T10:00:01+00:00",
+            },
+        ]
+        norm = _normalize_gptme(records)
+        tool_msgs = [m for m in norm if m.tool_name]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_name == "shell"
+        assert "ls -la" in (tool_msgs[0].tool_input or {}).get("content", "")
+        assert tool_msgs[0].tool_call_id is None
+        results = [m for m in norm if m.role == "tool_result"]
+        assert len(results) == 1
+
+    def test_markdown_bash_alias(self):
+        """```bash maps to tool_name='shell'."""
+        records = [
+            {
+                "role": "assistant",
+                "content": "```bash\necho hello\n```",
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+        ]
+        norm = _normalize_gptme(records)
+        tool_msgs = [m for m in norm if m.tool_name]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_name == "shell"
+
+    def test_markdown_python_alias(self):
+        """```python maps to tool_name='ipython'."""
+        records = [
+            {
+                "role": "assistant",
+                "content": "```python\nprint('hi')\n```",
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+        ]
+        norm = _normalize_gptme(records)
+        tool_msgs = [m for m in norm if m.tool_name]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_name == "ipython"
+
+    def test_markdown_save_with_path(self):
+        """```save path/to/file.py extracts path into tool_input."""
+        records = [
+            {
+                "role": "assistant",
+                "content": "```save hello.py\nprint('hello')\n```",
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+        ]
+        norm = _normalize_gptme(records)
+        tool_msgs = [m for m in norm if m.tool_name]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_name == "save"
+        assert tool_msgs[0].tool_input == {"path": "hello.py", "content": "print('hello')"}
+
+    def test_xml_format(self):
+        """<tool-use><name>body</name></tool-use> emits tool_name/tool_input."""
+        records = [
+            {
+                "role": "assistant",
+                "content": "<tool-use><shell>printf 'hello'</shell></tool-use>",
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+            {
+                "role": "system",
+                "content": "hello",
+                "timestamp": "2026-03-01T10:00:01+00:00",
+            },
+        ]
+        norm = _normalize_gptme(records)
+        tool_msgs = [m for m in norm if m.tool_name]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_name == "shell"
+        assert "printf" in (tool_msgs[0].tool_input or {}).get("content", "")
+        results = [m for m in norm if m.role == "tool_result"]
+        assert len(results) == 1
+
+    def test_function_calls_multiple_invokes(self):
+        """Each invoke keeps its own arguments, without leaking wrapper prose."""
+        norm = _normalize_gptme(
+            [
+                {
+                    "role": "assistant",
+                    "content": (
+                        'Before <function_calls><invoke name="read">A</invoke>'
+                        '<invoke name="shell">B</invoke></function_calls> after'
+                    ),
+                }
+            ]
+        )
+        calls = [m for m in norm if m.tool_name]
+        assert [m.tool_name for m in calls] == ["read", "shell"]
+        assert [m.tool_input for m in calls] == [{"content": "A"}, {"content": "B"}]
+        assert [m.content for m in norm if not m.tool_name] == ["Before", "after"]
+
+    def test_system_without_tool_window_stays_system(self):
+        """system messages not following a tool call keep role='system'."""
+        records = [
+            {
+                "role": "user",
+                "content": "Hello",
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+            {
+                "role": "system",
+                "content": "A system prompt",
+                "timestamp": "2026-03-01T10:00:01+00:00",
+            },
+        ]
+        norm = _normalize_gptme(records)
+        assert len(norm) == 2
+        assert norm[1].role == "system"
+
+    def test_text_before_tool_call_preserved(self):
+        """Text before a tool call is emitted as a separate assistant message."""
+        records = [
+            {
+                "role": "assistant",
+                "content": "Let me check:\n```shell\nls\n```",
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+        ]
+        norm = _normalize_gptme(records)
+        text_msgs = [m for m in norm if m.role == "assistant" and not m.tool_name and m.content]
+        assert len(text_msgs) == 1
+        assert "Let me check" in text_msgs[0].content
+
+    def test_text_between_and_after_tool_calls_preserved(self):
+        """Splitting tool calls must not discard surrounding assistant prose."""
+        norm = _normalize_gptme(
+            [
+                {
+                    "role": "assistant",
+                    "content": 'Before\n```shell\nls\n```\nBetween\n@shell(s2): {"command": "pwd"}\nAfter',
+                    "metadata": {"usage": {"input_tokens": 10}},
+                }
+            ]
+        )
+        assert [m.content if not m.tool_name else m.tool_name for m in norm] == [
+            "Before",
+            "shell",
+            "Between",
+            "shell",
+            "After",
+        ]
+        assert sum(m.usage is not None for m in norm) == 1
+
+    def test_tool_syntax_inside_arguments_not_an_extra_call(self):
+        content = "@save(s1): " + json.dumps(
+            {"path": "example.txt", "content": "<tool-use><shell>ls</shell></tool-use>"}
+        )
+        norm = _normalize_gptme([{"role": "assistant", "content": content}])
+        assert [m.tool_name for m in norm if m.tool_name] == ["save"]
+        assert norm[0].tool_input["content"] == "<tool-use><shell>ls</shell></tool-use>"
+
+    def test_unknown_lang_tag_not_a_tool(self):
+        """Fenced blocks with unknown lang tags (e.g. json, yaml) are NOT tool calls."""
+        records = [
+            {
+                "role": "assistant",
+                "content": '```json\n{"key": "value"}\n```',
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+        ]
+        norm = _normalize_gptme(records)
+        tool_msgs = [m for m in norm if m.tool_name]
+        assert len(tool_msgs) == 0
+        assert norm[0].role == "assistant"
+        assert "json" in norm[0].content
 
 
 class TestNormalizeCc:

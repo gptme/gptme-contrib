@@ -778,17 +778,17 @@ def test_real_gptme_jsonl_exports_atif_valid_envelope(tmp_path):
     assert [s["step_id"] for s in atif["steps"]] == list(range(1, len(atif["steps"]) + 1))
 
 
-def test_gptme_markdown_codeblock_content_preserved_in_message(tmp_path):
-    """Markdown-fence tool calls in gptme content are not yet parsed into tool_calls.
+def test_gptme_prose_preserved_alongside_markdown_tool_call(tmp_path):
+    """Prose around a markdown-fence tool call survives into the ATIF step.
 
     gptme uses two formats for tool calls in conversation.jsonl content strings:
     - AT-format: ``@tool(id): {json}``
     - Markdown codeblock: ````lang\\ncontent\\n````
 
-    _normalize_gptme does not (yet) extract tool calls from message content, so
-    both formats end up as raw text in the ATIF step's ``message`` field.  This
-    test documents that behaviour so a future parser that handles only one format
-    silently erasing the other would be caught here.
+    A parser that handles one format must not silently erase the other, and
+    neither may drop the surrounding assistant prose. This test pins the
+    markdown path end-to-end: the prose stays in ``message`` and the fenced
+    block becomes a ``tool_calls`` entry rather than raw text.
     """
     import json
 
@@ -819,20 +819,176 @@ def test_gptme_markdown_codeblock_content_preserved_in_message(tmp_path):
     agent_steps = [s for s in atif["steps"] if s["source"] == "agent"]
     assert len(agent_steps) >= 1, "at least one agent step must be emitted"
 
-    # The markdown codeblock must survive verbatim — fences and content. A
-    # substring-only check (``"ls" in message``) would still pass if a parser
-    # stripped the fence markers, which is the exact regression this test guards.
-    expected_message = "Listing files.\n\n```bash\nls\n```"
+    # Prose survives; the fence markers themselves are consumed by the parser.
     step_messages = [s.get("message", "") for s in agent_steps]
-    assert expected_message in step_messages, (
-        "markdown codeblock was not preserved verbatim in the ATIF agent step "
-        f"message; got {step_messages!r}"
+    assert (
+        "Listing files." in step_messages
+    ), f"assistant prose was dropped from the ATIF step message; got {step_messages!r}"
+
+    # The markdown fence is a tool call, not raw text.
+    tool_steps = [s for s in agent_steps if s.get("tool_calls")]
+    assert tool_steps, "markdown fenced block must be parsed into a tool call"
+    tc = tool_steps[0]["tool_calls"][0]
+    assert tc["function_name"] == "shell"  # bash -> shell canonicalization
+    assert "ls" in tc["arguments"].get("content", "")
+
+
+# gptme end-to-end: _normalize_gptme -> session_transcript_to_atif
+# ---------------------------------------------------------------------------
+
+
+def _gptme_to_atif(records: list) -> dict:
+    """Helper: normalize gptme records and convert to ATIF."""
+    from gptme_sessions.transcript import _normalize_gptme, SessionTranscript
+
+    msgs = _normalize_gptme(records)
+    t = SessionTranscript(
+        schema_version=TRANSCRIPT_SCHEMA_VERSION,
+        session_id="gptme-e2e",
+        harness="gptme",
+        trajectory_path="/dev/null",
+        model="gptme/0.35.1",
+        messages=msgs,
+    )
+    return session_transcript_to_atif(t)
+
+
+def test_gptme_injected_context_is_not_a_tool_result():
+    """Harness context after a tool-calling turn must not become a result.
+
+    gptme appends ``<system_info>`` / ``<system_warning>`` / ``<budget:…>``
+    records to a step, and in the native tool loop it stamps a ``call_id`` onto
+    every system record in that turn. Neither makes them tool output.
+    """
+    from gptme_sessions.transcript import _normalize_gptme
+
+    msgs = _normalize_gptme(
+        [
+            {
+                "role": "assistant",
+                "content": "```shell\nls -la\n```",
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+            {
+                "role": "system",
+                "content": "Ran allowlisted command: `ls -la`\n```stdout\ntotal 0\n```",
+                "timestamp": "2026-03-01T10:00:01+00:00",
+            },
+            {
+                "role": "system",
+                "content": "<system_info>The time is now 10:00. Time elapsed: 1min</system_info>",
+                "timestamp": "2026-03-01T10:00:02+00:00",
+            },
+            {
+                "role": "system",
+                "content": "<system_warning>Token usage: 10/200</system_warning>",
+                "call_id": "toolu_abc",
+                "timestamp": "2026-03-01T10:00:03+00:00",
+            },
+            {
+                "role": "system",
+                "content": "<budget:token_budget>200000</budget:token_budget>",
+                "call_id": "toolu_abc",
+                "timestamp": "2026-03-01T10:00:04+00:00",
+            },
+        ]
     )
 
-    # Current limitation: _normalize_gptme does not parse content into tool_calls.
-    # Assert no tool_calls so a partial parser that handles only one format is caught.
-    for step in agent_steps:
-        assert not step.get("tool_calls"), (
-            "gptme native content parsing unexpectedly produced tool_calls — "
-            "update both AT-format and markdown codeblock tests together"
-        )
+    assert msgs[1].role == "tool_result"  # the real output still links
+    assert msgs[2].role == "system"
+    assert msgs[3].role == "system"
+    assert msgs[4].role == "system"
+    # Injected context never claims a call ID, so it cannot be linked later.
+    assert all(m.tool_call_id is None for m in msgs[2:])
+
+
+def test_gptme_native_tool_call_in_atif():
+    """@tool(id): {json} format produces tool_calls with linked observation."""
+    atif = _gptme_to_atif(
+        [
+            {
+                "role": "assistant",
+                "content": '@shell(s1): {"command": "ls"}',
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+            {
+                "role": "system",
+                "content": "file.py",
+                "call_id": "s1",
+                "timestamp": "2026-03-01T10:00:01+00:00",
+            },
+        ]
+    )
+    agent_steps = [s for s in atif["steps"] if s["source"] == "agent"]
+    assert len(agent_steps) == 1
+    step = agent_steps[0]
+    assert len(step["tool_calls"]) == 1
+    assert step["tool_calls"][0]["tool_call_id"] == "s1"
+    assert step["tool_calls"][0]["function_name"] == "shell"
+    assert step["tool_calls"][0]["arguments"] == {"command": "ls"}
+    assert len(step["observation"]["results"]) == 1
+    assert step["observation"]["results"][0]["source_call_id"] == "s1"
+    assert step["observation"]["results"][0]["content"] == "file.py"
+
+
+def test_gptme_markdown_tool_call_in_atif():
+    """Markdown fenced code blocks produce tool_calls with implicit observation."""
+    atif = _gptme_to_atif(
+        [
+            {
+                "role": "assistant",
+                "content": "```shell\necho hello\n```",
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+            {
+                "role": "system",
+                "content": "hello",
+                "timestamp": "2026-03-01T10:00:01+00:00",
+            },
+        ]
+    )
+    agent_steps = [s for s in atif["steps"] if s["source"] == "agent"]
+    assert len(agent_steps) == 1
+    step = agent_steps[0]
+    assert len(step["tool_calls"]) == 1
+    tc = step["tool_calls"][0]
+    assert tc["function_name"] == "shell"
+    assert "echo hello" in tc["arguments"].get("content", "")
+    assert "observation" in step
+
+
+def test_gptme_xml_tool_call_in_atif():
+    """<tool-use> XML format produces tool_calls."""
+    atif = _gptme_to_atif(
+        [
+            {
+                "role": "assistant",
+                "content": "<tool-use><shell>printf hi</shell></tool-use>",
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+            {
+                "role": "system",
+                "content": "hi",
+                "timestamp": "2026-03-01T10:00:01+00:00",
+            },
+        ]
+    )
+    agent_steps = [s for s in atif["steps"] if s["source"] == "agent"]
+    assert len(agent_steps) == 1
+    step = agent_steps[0]
+    assert len(step["tool_calls"]) == 1
+    assert step["tool_calls"][0]["function_name"] == "shell"
+    assert "observation" in step
+
+
+def test_gptme_no_tool_calls_in_plain_conversation():
+    """A conversation without tool calls produces zero tool_calls in ATIF."""
+    atif = _gptme_to_atif(
+        [
+            {"role": "user", "content": "Hi", "timestamp": "2026-03-01T10:00:00+00:00"},
+            {"role": "assistant", "content": "Hello!", "timestamp": "2026-03-01T10:01:00+00:00"},
+        ]
+    )
+    agent_steps = [s for s in atif["steps"] if s["source"] == "agent"]
+    assert len(agent_steps) == 1
+    assert "tool_calls" not in agent_steps[0]
