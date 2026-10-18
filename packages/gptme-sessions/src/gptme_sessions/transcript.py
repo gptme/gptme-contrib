@@ -210,10 +210,8 @@ _XML_TOOLUSE_RE = re.compile(
 )
 
 # gptme Anthropic-style XML: <function_calls><invoke name="…">…</invoke></function_calls>
-_FUNCTION_CALLS_RE = re.compile(
-    r"<function_calls>\s*<invoke\s+name=\"([\w-]+)\">(.*?)</invoke>\s*</function_calls>",
-    re.DOTALL,
-)
+_FUNCTION_CALLS_RE = re.compile(r"<function_calls>(.*?)</function_calls>", re.DOTALL)
+_INVOKE_RE = re.compile(r'<invoke\s+name="([\w-]+)">(.*?)</invoke>', re.DOTALL)
 
 # Markdown lang tags that map to a different canonical tool name.
 _LANG_TO_TOOL: dict[str, str] = {
@@ -366,22 +364,28 @@ def _parse_gptme_toolcalls(content: str) -> list[dict[str, Any]]:
         )
 
     # --- XML <function_calls> (Anthropic-style used by some gptme sessions) ---
-    for m in _FUNCTION_CALLS_RE.finditer(content):
-        tool_name = m.group(1)
-        body = m.group(2).strip()
-        # Extract simple <param>value</param> pairs inside invoke body
-        params: dict[str, Any] = {}
-        for pm in re.finditer(r"<([\w]+)>(.*?)</\1>", body, re.DOTALL):
-            params[pm.group(1)] = pm.group(2).strip()
-        results.append(
-            {
-                "tool_name": tool_name,
-                "tool_input": params or {"content": body},
-                "call_id": None,
-                "start": m.start(),
-                "end": m.end(),
-            }
-        )
+    for wrapper in _FUNCTION_CALLS_RE.finditer(content):
+        invokes = list(_INVOKE_RE.finditer(wrapper.group(1)))
+        for index, m in enumerate(invokes):
+            tool_name = m.group(1)
+            body = m.group(2).strip()
+            # Extract simple <param>value</param> pairs inside invoke body
+            params: dict[str, Any] = {}
+            for pm in re.finditer(r"<([\w]+)>(.*?)</\1>", body, re.DOTALL):
+                params[pm.group(1)] = pm.group(2).strip()
+            results.append(
+                {
+                    "tool_name": tool_name,
+                    "tool_input": params or {"content": body},
+                    "call_id": None,
+                    # Consume wrapper tags with the first/last call so they
+                    # do not become assistant prose during normalization.
+                    "start": wrapper.start() if index == 0 else wrapper.start(1) + m.start(),
+                    "end": (
+                        wrapper.end() if index == len(invokes) - 1 else wrapper.start(1) + m.end()
+                    ),
+                }
+            )
 
     results.sort(key=lambda x: x["start"])
     # Inner syntax belongs to the enclosing call's arguments, not the trace.

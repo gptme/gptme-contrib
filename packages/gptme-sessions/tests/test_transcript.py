@@ -374,6 +374,24 @@ class TestNormalizeGptme:
         results = [m for m in norm if m.role == "tool_result"]
         assert len(results) == 1
 
+    def test_function_calls_multiple_invokes(self):
+        """Each invoke keeps its own arguments, without leaking wrapper prose."""
+        norm = _normalize_gptme(
+            [
+                {
+                    "role": "assistant",
+                    "content": (
+                        'Before <function_calls><invoke name="read">A</invoke>'
+                        '<invoke name="shell">B</invoke></function_calls> after'
+                    ),
+                }
+            ]
+        )
+        calls = [m for m in norm if m.tool_name]
+        assert [m.tool_name for m in calls] == ["read", "shell"]
+        assert [m.tool_input for m in calls] == [{"content": "A"}, {"content": "B"}]
+        assert [m.content for m in norm if not m.tool_name] == ["Before", "after"]
+
     def test_system_without_tool_window_stays_system(self):
         """system messages not following a tool call keep role='system'."""
         records = [
