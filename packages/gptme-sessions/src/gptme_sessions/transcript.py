@@ -799,6 +799,154 @@ def _normalize_grok(msgs: list[dict]) -> list[NormalizedMessage]:
 
 
 # ---------------------------------------------------------------------------
+# Letta trajectory-v1 ingest
+# ---------------------------------------------------------------------------
+
+
+def normalize_letta(
+    records: list[dict],
+    *,
+    session_id: str | None = None,
+    trajectory_path: str = "<letta-ingest>",
+) -> SessionTranscript:
+    """Parse a Letta trajectory-v1 record list into a SessionTranscript.
+
+    This is the reverse of :func:`.letta.session_transcript_to_letta`.  A
+    Letta trajectory is a flat list of dicts; the first record has
+    ``role == "meta"`` and carries session metadata.  All subsequent records
+    map 1-to-1 to :class:`NormalizedMessage` instances.
+
+    Parameters
+    ----------
+    records:
+        Letta trajectory-v1 records, e.g. the output of
+        ``session_transcript_to_letta()`` or a record list from
+        Letta's ``normalizeTranscript()``.
+    session_id:
+        Opaque session identifier.  Defaults to ``"letta-ingest"`` when
+        ``None``.
+    trajectory_path:
+        Source path to embed in the transcript (informational only).
+
+    Returns
+    -------
+    SessionTranscript
+        Normalized transcript.  ``harness`` is set from the ``meta`` record's
+        ``source`` field (``"unknown"`` when absent).  ``model``, ``project``,
+        and timestamps are populated when present in the meta record or the
+        first/last timestamped message.  ``usage`` is always ``None`` because
+        the Letta format omits token metrics by design.
+
+    Notes
+    -----
+    Tool-call records: a Letta ``assistant`` record with ``tool_calls`` carries
+    exactly one call per record (the Letta adapter emits one message per tool
+    call).  ``args`` is a JSON-encoded string in the Letta format; it is
+    decoded to a dict here.  Malformed JSON is replaced with ``{"_raw": args}``.
+
+    ``observation`` records (environment feedback) are skipped: they have no
+    ``NormalizedMessage`` equivalent, and mapping them onto ``user`` would
+    misreport environment output as human input.  Their timestamps still count
+    toward ``started_at``/``last_activity``.  Records with an unrecognized role
+    are skipped for the same reason.
+    """
+    meta = next((r for r in records if r.get("role") == "meta"), {})
+    harness: str = meta.get("source") or "unknown"
+    project: str | None = meta.get("cwd") or None
+    model: str | None = meta.get("model") or None
+
+    messages: list[NormalizedMessage] = []
+    first_ts: str | None = None
+    last_ts: str | None = None
+
+    for rec in records:
+        role = rec.get("role")
+        ts: str | None = rec.get("timestamp") or None
+        if ts:
+            if first_ts is None:
+                first_ts = ts
+            last_ts = ts
+
+        if role == "meta":
+            continue
+
+        if role == "reasoning":
+            messages.append(
+                NormalizedMessage(
+                    role="assistant",
+                    content=rec.get("content") or "",
+                    is_reasoning=True,
+                    timestamp=ts,
+                )
+            )
+
+        elif role == "assistant":
+            tool_calls = rec.get("tool_calls") or []
+            if tool_calls:
+                # One tool call per Letta assistant record (flat format).
+                tc = tool_calls[0]
+                raw_args = tc.get("args")
+                if isinstance(raw_args, str):
+                    try:
+                        tool_input: dict = json.loads(raw_args)
+                        if not isinstance(tool_input, dict):
+                            tool_input = {"_raw": raw_args}
+                    except (json.JSONDecodeError, ValueError):
+                        tool_input = {"_raw": raw_args}
+                elif isinstance(raw_args, dict):
+                    tool_input = raw_args
+                else:
+                    tool_input = {}
+                messages.append(
+                    NormalizedMessage(
+                        role="assistant",
+                        content=rec.get("content") or "",
+                        tool_name=tc.get("name") or "",
+                        tool_input=tool_input,
+                        tool_call_id=tc.get("id") or None,
+                        timestamp=ts,
+                    )
+                )
+            else:
+                content = rec.get("content") or ""
+                if content:
+                    messages.append(
+                        NormalizedMessage(role="assistant", content=content, timestamp=ts)
+                    )
+
+        elif role == "tool":
+            ok = rec.get("ok")
+            messages.append(
+                NormalizedMessage(
+                    role="tool_result",
+                    content=rec.get("content") or "",
+                    tool_result=rec.get("content") or "",
+                    tool_call_id=rec.get("tool_call_id") or None,
+                    is_error=(not ok) if ok is not None else False,
+                    timestamp=ts,
+                )
+            )
+
+        elif role in ("user", "system"):
+            content = rec.get("content") or ""
+            if content:
+                messages.append(NormalizedMessage(role=role, content=content, timestamp=ts))
+
+    return SessionTranscript(
+        schema_version=TRANSCRIPT_SCHEMA_VERSION,
+        session_id=session_id or "letta-ingest",
+        harness=harness,
+        trajectory_path=trajectory_path,
+        project=project,
+        model=model,
+        started_at=first_ts,
+        last_activity=last_ts,
+        capabilities=["view_transcript"] if messages else [],
+        messages=messages,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
