@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from gptme_sessions.atif import session_transcript_to_atif
 from gptme_sessions.transcript import (
     NormalizedMessage,
     TRANSCRIPT_SCHEMA_VERSION,
@@ -202,22 +203,147 @@ class TestNormalizeGptme:
     def test_basic_roles(self, gptme_jsonl: Path):
         records = [json.loads(line) for line in gptme_jsonl.read_text().strip().splitlines()]
         norm = _normalize_gptme(records)
+        # user + assistant tool call + tool_result (system → tool_result after a call)
         assert len(norm) == 3
         assert norm[0].role == "user"
         assert norm[1].role == "assistant"
-        assert norm[2].role == "system"
+        assert norm[2].role == "tool_result"
 
     def test_content_preserved(self, gptme_jsonl: Path):
         records = [json.loads(line) for line in gptme_jsonl.read_text().strip().splitlines()]
         norm = _normalize_gptme(records)
         assert "Hello" in norm[0].content
-        assert "test.py" in norm[1].content
+        # tool call message carries the structured input, not raw text
+        assert norm[1].tool_input is not None
+        assert "test.py" in norm[1].tool_input.get("path", "")
 
     def test_timestamp_preserved(self, gptme_jsonl: Path):
         records = [json.loads(line) for line in gptme_jsonl.read_text().strip().splitlines()]
         norm = _normalize_gptme(records)
         assert norm[0].timestamp is not None
         assert "2026-03-01" in norm[0].timestamp
+
+    def test_at_format_tool_call_parsed(self, gptme_jsonl: Path):
+        records = [json.loads(line) for line in gptme_jsonl.read_text().strip().splitlines()]
+        norm = _normalize_gptme(records)
+        tool_msgs = [m for m in norm if m.tool_name]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_name == "save"
+        assert tool_msgs[0].tool_call_id == "c1"
+        assert tool_msgs[0].tool_input == {"path": "test.py", "content": "# test"}
+
+    def test_at_format_system_becomes_tool_result(self, gptme_jsonl: Path):
+        records = [json.loads(line) for line in gptme_jsonl.read_text().strip().splitlines()]
+        norm = _normalize_gptme(records)
+        results = [m for m in norm if m.role == "tool_result"]
+        assert len(results) == 1
+        assert results[0].tool_result == "File saved to test.py"
+        assert results[0].tool_call_id == "c1"
+
+    def test_at_format_call_result_linked_via_call_id(self, gptme_jsonl: Path):
+        """tool_call_id on call and result must match for ATIF source_call_id linking."""
+        records = [json.loads(line) for line in gptme_jsonl.read_text().strip().splitlines()]
+        norm = _normalize_gptme(records)
+        call = next(m for m in norm if m.tool_name)
+        result = next(m for m in norm if m.role == "tool_result")
+        assert call.tool_call_id == result.tool_call_id == "c1"
+
+    def test_noise_system_stays_system(self):
+        records = [
+            {"role": "assistant", "content": '@shell(s1): {"command": "ls"}'},
+            {"role": "system", "content": "<system_warning>Low context</system_warning>"},
+            {"role": "system", "content": "Shell exit 0"},
+        ]
+        norm = _normalize_gptme(records)
+        sys_msgs = [m for m in norm if m.role == "system"]
+        result_msgs = [m for m in norm if m.role == "tool_result"]
+        assert len(sys_msgs) == 1
+        assert "<system_warning>" in sys_msgs[0].content
+        # The non-noise system message after the noise one is the result
+        assert len(result_msgs) == 1
+        assert result_msgs[0].content == "Shell exit 0"
+
+    def test_pinned_system_stays_system(self):
+        records = [
+            {"role": "system", "content": "You are a helpful assistant.", "pinned": True},
+            {"role": "assistant", "content": '@shell(s2): {"command": "pwd"}'},
+            {"role": "system", "content": "/home/user"},
+        ]
+        norm = _normalize_gptme(records)
+        sys_msgs = [m for m in norm if m.role == "system"]
+        result_msgs = [m for m in norm if m.role == "tool_result"]
+        assert len(sys_msgs) == 1
+        assert "helpful assistant" in sys_msgs[0].content
+        assert len(result_msgs) == 1
+        assert result_msgs[0].content == "/home/user"
+
+    def test_unlinked_system_stays_system(self):
+        """A system message with no preceding tool call stays as system."""
+        records = [
+            {"role": "system", "content": "Workspace initialized."},
+        ]
+        norm = _normalize_gptme(records)
+        assert norm[0].role == "system"
+
+    def test_markdown_codeblock_tool_call(self):
+        records = [
+            {"role": "assistant", "content": "Running a command.\n\n```bash\nls -la\n```"},
+            {"role": "system", "content": "total 8"},
+        ]
+        norm = _normalize_gptme(records)
+        tool_msgs = [m for m in norm if m.tool_name]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_name == "bash"
+        assert tool_msgs[0].tool_input == {"content": "ls -la"}
+        assert tool_msgs[0].tool_call_id is None
+        result_msgs = [m for m in norm if m.role == "tool_result"]
+        assert len(result_msgs) == 1
+        assert result_msgs[0].content == "total 8"
+
+    def test_xml_tool_call(self):
+        records = [
+            {
+                "role": "assistant",
+                "content": "I'll run this:\n<tool-use>\n<bash>echo hello</bash>\n</tool-use>",
+            },
+            {"role": "system", "content": "hello"},
+        ]
+        norm = _normalize_gptme(records)
+        tool_msgs = [m for m in norm if m.tool_name]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_name == "bash"
+        assert tool_msgs[0].tool_input == {"content": "echo hello"}
+        result_msgs = [m for m in norm if m.role == "tool_result"]
+        assert len(result_msgs) == 1
+
+    def test_text_before_at_call_preserved(self):
+        records = [
+            {
+                "role": "assistant",
+                "content": 'Writing the file now.\n\n@save(x1): {"path": "a.py", "content": "x"}',
+            },
+            {"role": "system", "content": "Saved."},
+        ]
+        norm = _normalize_gptme(records)
+        text_msgs = [m for m in norm if m.role == "assistant" and not m.tool_name and m.content]
+        assert len(text_msgs) == 1
+        assert "Writing" in text_msgs[0].content
+        tool_msgs = [m for m in norm if m.tool_name]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].tool_call_id == "x1"
+
+    def test_usage_on_assistant_turn(self):
+        records = [
+            {
+                "role": "assistant",
+                "content": '@shell(u1): {"command": "ls"}',
+                "metadata": {"usage": {"input_tokens": 10, "output_tokens": 5}},
+            }
+        ]
+        norm = _normalize_gptme(records)
+        tool_msgs = [m for m in norm if m.tool_name]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].usage == {"input_tokens": 10, "output_tokens": 5}
 
 
 class TestNormalizeCc:
@@ -582,3 +708,96 @@ class TestTranscriptCli:
         data = json.loads(result.output)
         assert data["harness"] == "claude-code"
         assert data["model"] == "claude-opus-4-6"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: gptme session → ATIF export
+# ---------------------------------------------------------------------------
+
+
+class TestGptmeAtifExport:
+    """Verify that a gptme session with tool use exports to ATIF with tool
+    structure intact — tool_calls and linked observation.results."""
+
+    @pytest.fixture
+    def gptme_tool_session(self, tmp_path: Path) -> Path:
+        """A minimal gptme conversation with one AT-format call and its result."""
+        records = [
+            {
+                "role": "user",
+                "content": "List the files.",
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+            {
+                "role": "assistant",
+                "content": 'Listing files.\n\n@shell(call-abc123): {"command": "ls"}',
+                "timestamp": "2026-03-01T10:01:00+00:00",
+                "metadata": {"usage": {"input_tokens": 20, "output_tokens": 8}},
+            },
+            {
+                "role": "system",
+                "content": "file1.py\nfile2.py",
+                "timestamp": "2026-03-01T10:01:05+00:00",
+            },
+        ]
+        path = tmp_path / "conversation.jsonl"
+        path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+        return path
+
+    def test_tool_calls_present_in_atif_step(self, gptme_tool_session: Path):
+        transcript = read_transcript(gptme_tool_session)
+        atif = session_transcript_to_atif(transcript)
+        agent_steps = [s for s in atif["steps"] if s["source"] == "agent"]
+        assert len(agent_steps) >= 1
+        step_with_calls = next((s for s in agent_steps if s.get("tool_calls")), None)
+        assert step_with_calls is not None, "Expected at least one ATIF step with tool_calls"
+
+    def test_tool_call_function_name_and_arguments(self, gptme_tool_session: Path):
+        transcript = read_transcript(gptme_tool_session)
+        atif = session_transcript_to_atif(transcript)
+        agent_step = next(s for s in atif["steps"] if s.get("tool_calls"))
+        tc = agent_step["tool_calls"][0]
+        assert tc["function_name"] == "shell"
+        assert tc["arguments"] == {"command": "ls"}
+        assert tc["tool_call_id"] == "call-abc123"
+
+    def test_observation_results_present(self, gptme_tool_session: Path):
+        transcript = read_transcript(gptme_tool_session)
+        atif = session_transcript_to_atif(transcript)
+        agent_step = next(s for s in atif["steps"] if s.get("tool_calls"))
+        assert "observation" in agent_step
+        results = agent_step["observation"]["results"]
+        assert len(results) >= 1
+
+    def test_source_call_id_links_call_to_result(self, gptme_tool_session: Path):
+        """source_call_id in observation must match the tool_call_id on the call."""
+        transcript = read_transcript(gptme_tool_session)
+        atif = session_transcript_to_atif(transcript)
+        agent_step = next(s for s in atif["steps"] if s.get("tool_calls"))
+        tc_id = agent_step["tool_calls"][0]["tool_call_id"]
+        result = agent_step["observation"]["results"][0]
+        assert result["source_call_id"] == tc_id == "call-abc123"
+        assert "file1.py" in result["content"]
+
+    def test_metrics_populated_from_usage(self, gptme_tool_session: Path):
+        transcript = read_transcript(gptme_tool_session)
+        atif = session_transcript_to_atif(transcript)
+        agent_step = next(s for s in atif["steps"] if s.get("tool_calls"))
+        assert agent_step.get("metrics", {}).get("input_tokens") == 20
+        assert agent_step.get("metrics", {}).get("output_tokens") == 8
+
+    def test_zero_tool_calls_before_fix_is_now_nonzero(self, gptme_tool_session: Path):
+        """Regression: before this fix the step had 0 tool_calls."""
+        transcript = read_transcript(gptme_tool_session)
+        atif = session_transcript_to_atif(transcript)
+        total_tool_calls = sum(len(s.get("tool_calls", [])) for s in atif["steps"])
+        assert total_tool_calls > 0
+
+    def test_zero_observations_before_fix_is_now_nonzero(self, gptme_tool_session: Path):
+        """Regression: before this fix there were 0 observation blocks."""
+        transcript = read_transcript(gptme_tool_session)
+        atif = session_transcript_to_atif(transcript)
+        total_observations = sum(
+            len(s.get("observation", {}).get("results", [])) for s in atif["steps"]
+        )
+        assert total_observations > 0

@@ -12,6 +12,7 @@ Schema version: 1 (increment when breaking changes are made to the output shape)
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -166,28 +167,166 @@ def _ts_str(ts: datetime | None) -> str | None:
     return ts.isoformat()
 
 
+# System message content prefixes that indicate injected context, not tool
+# results (lessons, warnings, budget notices).  Mirrors spans._GPTME_NOISE_PREFIXES.
+_GPTME_NOISE_PREFIXES = (
+    "<system_warning>",
+    "<system_info>",
+    "<workspace-agents-warning>",
+    "<budget:",
+    "# Relevant Lessons",
+    "Shellcheck found potential issues",
+)
+
+
+def _gptme_is_noise(content: str) -> bool:
+    return any(content.startswith(p) for p in _GPTME_NOISE_PREFIXES)
+
+
+def _parse_gptme_tool_calls(
+    content: str,
+) -> tuple[str, list[tuple[str, str | None, dict]]]:
+    """Split a gptme assistant message into (text, tool_calls).
+
+    Returns the text before the first tool call and a list of
+    (tool_name, call_id_or_None, tool_input_dict) tuples.
+
+    Three formats are tried in order:
+    1. AT / "tool" format:  ``@tool_name(call_id): {json}``
+    2. Markdown codeblock:  triple-backtick lang blocks
+    3. XML:                 ``<tool-use><name>body</name></tool-use>``
+                            ``<function_calls><invoke name="n">body</invoke></function_calls>``
+    """
+    # 1. AT format: split on @tool( boundaries to handle multi-line JSON args.
+    blocks = re.split(r"(?=\n@[\w.]+\()", "\n" + content)
+    at_calls: list[tuple[str, str | None, dict]] = []
+    text_blocks: list[str] = []
+    for block in blocks:
+        m = re.match(r"\n@([\w.]+)\(([^)]+)\):\s*(.*)", block, re.DOTALL)
+        if not m:
+            text_blocks.append(block)
+        else:
+            tool_name = m.group(1)
+            call_id: str | None = m.group(2)
+            args_str = m.group(3).strip()
+            try:
+                tool_input: dict = json.loads(args_str) if args_str.startswith("{") else {}
+            except (json.JSONDecodeError, ValueError):
+                tool_input = {"raw": args_str} if args_str else {}
+            if not isinstance(tool_input, dict):
+                tool_input = {"raw": args_str}
+            at_calls.append((tool_name, call_id, tool_input))
+    if at_calls:
+        text = "".join(text_blocks).lstrip("\n").strip()
+        return text, at_calls
+
+    # 2. Markdown codeblock format: ```lang\ncontent\n```
+    md_calls: list[tuple[str, str | None, dict]] = []
+    for m in re.finditer(r"^```(\w+)[^\n]*\n(.*?)^```", content, re.MULTILINE | re.DOTALL):
+        lang = m.group(1)
+        block_content = m.group(2).rstrip("\n")
+        md_calls.append((lang, None, {"content": block_content}))
+    if md_calls:
+        text = re.sub(r"^```\w+[^\n]*\n.*?^```\n?", "", content, flags=re.MULTILINE | re.DOTALL)
+        return text.strip(), md_calls
+
+    # 3. XML format: <tool-use><name>body</name></tool-use>
+    xml_calls: list[tuple[str, str | None, dict]] = []
+    xml_text = content
+    for outer_m in re.finditer(r"<tool-use>(.*?)</tool-use>", content, re.DOTALL):
+        inner_m = re.search(r"<(\w+)>(.*?)</\1>", outer_m.group(1), re.DOTALL)
+        if inner_m:
+            xml_calls.append((inner_m.group(1), None, {"content": inner_m.group(2).strip()}))
+    for outer_m in re.finditer(r"<function_calls>(.*?)</function_calls>", content, re.DOTALL):
+        for inv_m in re.finditer(
+            r'<invoke\s+name="([^"]+)">(.*?)</invoke>', outer_m.group(1), re.DOTALL
+        ):
+            xml_calls.append((inv_m.group(1), None, {"content": inv_m.group(2).strip()}))
+    if xml_calls:
+        xml_text = re.sub(r"<tool-use>.*?</tool-use>", "", content, flags=re.DOTALL)
+        xml_text = re.sub(r"<function_calls>.*?</function_calls>", "", xml_text, flags=re.DOTALL)
+        return xml_text.strip(), xml_calls
+
+    return content, []
+
+
 def _normalize_gptme(msgs: list[dict]) -> list[NormalizedMessage]:
     """Normalize gptme conversation.jsonl messages.
 
     gptme format: each record has top-level ``role``, ``content``, ``timestamp``.
     Role values: ``"user"``, ``"assistant"``, ``"system"``.
+
+    Tool calls are parsed from assistant content in three formats:
+    AT (``@tool(id): {json}``), markdown codeblocks, and XML ``<tool-use>``.
+    System messages that follow a tool call (and are not noise/pinned) are
+    re-tagged as ``tool_result`` and FIFO-paired with the preceding call so
+    that the ATIF adapter can link them and populate ``observation.results``.
     """
     normalized: list[NormalizedMessage] = []
+    # FIFO queue of call_ids for pending tool invocations awaiting their result.
+    pending_call_ids: list[str | None] = []
+
     for msg in msgs:
         role = msg.get("role", "")
         if role not in ("user", "assistant", "system"):
             continue
-        content = msg.get("content", "") or ""
+        raw_content = msg.get("content", "") or ""
+        content = raw_content if isinstance(raw_content, str) else json.dumps(raw_content)
         ts = _ts_str(_parse_timestamp(msg.get("timestamp", "")))
         usage = msg.get("metadata", {}).get("usage") or None
-        normalized.append(
-            NormalizedMessage(
-                role=role,
-                content=content if isinstance(content, str) else json.dumps(content),
-                timestamp=ts,
-                usage=usage,
-            )
-        )
+
+        if role == "user":
+            normalized.append(NormalizedMessage(role="user", content=content, timestamp=ts))
+
+        elif role == "assistant":
+            text_part, tool_calls = _parse_gptme_tool_calls(content)
+            usage_placed = False
+            if text_part:
+                normalized.append(
+                    NormalizedMessage(
+                        role="assistant",
+                        content=text_part,
+                        timestamp=ts,
+                        usage=usage,
+                    )
+                )
+                usage_placed = True
+            for tool_name, call_id, tool_input in tool_calls:
+                normalized.append(
+                    NormalizedMessage(
+                        role="assistant",
+                        content="",
+                        timestamp=ts,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        tool_call_id=call_id,
+                        usage=usage if not usage_placed else None,
+                    )
+                )
+                usage_placed = True
+                pending_call_ids.append(call_id)
+            if not text_part and not tool_calls:
+                normalized.append(
+                    NormalizedMessage(role="assistant", content=content, timestamp=ts, usage=usage)
+                )
+
+        else:  # system
+            if msg.get("pinned") or _gptme_is_noise(content):
+                normalized.append(NormalizedMessage(role="system", content=content, timestamp=ts))
+            elif pending_call_ids:
+                call_id = pending_call_ids.pop(0)
+                normalized.append(
+                    NormalizedMessage(
+                        role="tool_result",
+                        content=content,
+                        timestamp=ts,
+                        tool_result=content,
+                        tool_call_id=call_id,
+                    )
+                )
+            else:
+                normalized.append(NormalizedMessage(role="system", content=content, timestamp=ts))
+
     return normalized
 
 
