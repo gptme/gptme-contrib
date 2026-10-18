@@ -368,6 +368,26 @@ class TestNormalizeGptme:
         assert len(text_msgs) == 1
         assert "Let me check" in text_msgs[0].content
 
+    def test_text_between_and_after_tool_calls_preserved(self):
+        """Splitting tool calls must not discard surrounding assistant prose."""
+        norm = _normalize_gptme(
+            [
+                {
+                    "role": "assistant",
+                    "content": 'Before\n```shell\nls\n```\nBetween\n@shell(s2): {"command": "pwd"}\nAfter',
+                    "metadata": {"usage": {"input_tokens": 10}},
+                }
+            ]
+        )
+        assert [m.content if not m.tool_name else m.tool_name for m in norm] == [
+            "Before",
+            "shell",
+            "Between",
+            "shell",
+            "After",
+        ]
+        assert sum(m.usage is not None for m in norm) == 1
+
     def test_unknown_lang_tag_not_a_tool(self):
         """Fenced blocks with unknown lang tags (e.g. json, yaml) are NOT tool calls."""
         records = [

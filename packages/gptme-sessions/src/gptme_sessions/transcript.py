@@ -255,7 +255,7 @@ def _parse_gptme_toolcalls(content: str) -> list[dict[str, Any]]:
     * **XML** (``<tool-use>`` or ``<function_calls>``) — call IDs are ``None``.
 
     Returns a list of dicts sorted by start position, each with keys:
-    ``tool_name``, ``tool_input``, ``call_id``, ``start``.
+    ``tool_name``, ``tool_input``, ``call_id``, ``start``, ``end``.
 
     Note: ``benchmark/pier-gptme/scripts/eval/pier_gptme.py`` implements the
     same three-format parsing by importing ``gptme.tools.base.ToolUse``.  That
@@ -284,7 +284,13 @@ def _parse_gptme_toolcalls(content: str) -> list[dict[str, Any]]:
             search_from = m.end()
             continue
         results.append(
-            {"tool_name": tool_name, "tool_input": kwargs, "call_id": call_id, "start": m.start()}
+            {
+                "tool_name": tool_name,
+                "tool_input": kwargs,
+                "call_id": call_id,
+                "start": m.start(),
+                "end": json_end,
+            }
         )
         search_from = json_end
 
@@ -307,7 +313,13 @@ def _parse_gptme_toolcalls(content: str) -> list[dict[str, Any]]:
             extra_args = lang_tag.split()[1:]
             tool_input = {"args": extra_args, "content": body} if extra_args else {"content": body}
         results.append(
-            {"tool_name": tool_name, "tool_input": tool_input, "call_id": None, "start": m.start()}
+            {
+                "tool_name": tool_name,
+                "tool_input": tool_input,
+                "call_id": None,
+                "start": m.start(),
+                "end": m.end(),
+            }
         )
 
     # --- XML <tool-use> ---
@@ -320,6 +332,7 @@ def _parse_gptme_toolcalls(content: str) -> list[dict[str, Any]]:
                 "tool_input": {"content": body},
                 "call_id": None,
                 "start": m.start(),
+                "end": m.end(),
             }
         )
 
@@ -337,6 +350,7 @@ def _parse_gptme_toolcalls(content: str) -> list[dict[str, Any]]:
                 "tool_input": params or {"content": body},
                 "call_id": None,
                 "start": m.start(),
+                "end": m.end(),
             }
         )
 
@@ -408,16 +422,19 @@ def _normalize_gptme(msgs: list[dict]) -> list[NormalizedMessage]:
             )
             continue
 
-        # Emit text portion that appears before the first tool call.
-        first_start: int | None = tool_calls[0]["start"]
-        text_before = content[:first_start].strip() if first_start is not None else ""
-        if text_before:
-            normalized.append(
-                NormalizedMessage(role="assistant", content=text_before, timestamp=ts, usage=usage)
-            )
-
-        # Emit one NormalizedMessage per tool call.
-        for i, tc in enumerate(tool_calls):
+        # Preserve prose before, between, and after tool calls, carrying usage
+        # only once even when the original message expands into several turns.
+        cursor = 0
+        pending_usage = usage
+        for tc in tool_calls:
+            text = content[cursor : tc["start"]].strip()
+            if text:
+                normalized.append(
+                    NormalizedMessage(
+                        role="assistant", content=text, timestamp=ts, usage=pending_usage
+                    )
+                )
+                pending_usage = None
             normalized.append(
                 NormalizedMessage(
                     role="assistant",
@@ -426,11 +443,14 @@ def _normalize_gptme(msgs: list[dict]) -> list[NormalizedMessage]:
                     tool_name=tc["tool_name"],
                     tool_input=tc["tool_input"],
                     tool_call_id=tc["call_id"],
-                    # Carry usage on the first tool-call message if there was no
-                    # preceding text; avoids double-counting.
-                    usage=usage if (i == 0 and not text_before) else None,
+                    usage=pending_usage,
                 )
             )
+            pending_usage = None
+            cursor = tc["end"]
+        text = content[cursor:].strip()
+        if text:
+            normalized.append(NormalizedMessage(role="assistant", content=text, timestamp=ts))
 
         implicit_tool_window = True
 
