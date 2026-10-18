@@ -843,6 +843,12 @@ def normalize_letta(
     exactly one call per record (the Letta adapter emits one message per tool
     call).  ``args`` is a JSON-encoded string in the Letta format; it is
     decoded to a dict here.  Malformed JSON is replaced with ``{"_raw": args}``.
+
+    ``observation`` records (environment feedback) are skipped: they have no
+    ``NormalizedMessage`` equivalent, and mapping them onto ``user`` would
+    misreport environment output as human input.  Their timestamps still count
+    toward ``started_at``/``last_activity``.  Records with an unrecognized role
+    are skipped for the same reason.
     """
     meta = next((r for r in records if r.get("role") == "meta"), {})
     harness: str = meta.get("source") or "unknown"

@@ -306,3 +306,24 @@ def test_round_trip_reasoning():
     reasoning = [m for m in recovered.messages if m.is_reasoning]
     assert len(reasoning) == 1
     assert reasoning[0].content == "thinking step"
+
+
+def test_observation_records_are_skipped_but_keep_timestamps():
+    """Schema-valid ``observation`` records have no NormalizedMessage equivalent.
+
+    They must not be mapped onto ``user`` (that would report environment
+    feedback as human input), but their timestamps still bound the transcript.
+    """
+    records = [
+        {"role": "meta", "source": "letta"},
+        {"role": "user", "content": "go", "timestamp": "2026-01-01T00:00:00.000Z"},
+        {
+            "role": "observation",
+            "content": "sandbox is warm",
+            "timestamp": "2026-01-01T00:05:00.000Z",
+        },
+    ]
+    transcript = normalize_letta(records)
+    assert [m.role for m in transcript.messages] == ["user"]
+    assert transcript.started_at == "2026-01-01T00:00:00.000Z"
+    assert transcript.last_activity == "2026-01-01T00:05:00.000Z"
