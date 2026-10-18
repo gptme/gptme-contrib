@@ -31,7 +31,8 @@ def test_envelope_keys():
     assert atif["schema_version"] == "ATIF-v1.7"
     assert atif["session_id"] == "test-session"
     assert atif["agent"]["name"] == "gptme"
-    assert atif["agent"]["version"] == "claude-sonnet-4-6"
+    assert atif["agent"]["model_name"] == "claude-sonnet-4-6"
+    assert atif["agent"]["version"] == "unknown"
     assert isinstance(atif["steps"], list)
     assert len(atif["steps"]) == 1
 
@@ -400,10 +401,19 @@ def test_reasoning_message_sets_extra_flag():
     assert atif["steps"][0].get("extra", {}).get("is_reasoning") is True
 
 
-def test_no_model_in_agent_when_transcript_has_none():
+def test_agent_version_is_required_even_without_model():
+    """ATIF v1.7 requires agent.version; a missing model must not drop it."""
     t = _make_transcript([NormalizedMessage(role="user", content="hi")], model=None)
     atif = session_transcript_to_atif(t)
-    assert "version" not in atif["agent"]
+    assert atif["agent"]["version"] == "unknown"
+    assert "model_name" not in atif["agent"]
+
+
+def test_extra_agent_fields_override_version():
+    t = _make_transcript([NormalizedMessage(role="user", content="hi")])
+    atif = session_transcript_to_atif(t, extra_agent_fields={"version": "0.35.1"})
+    assert atif["agent"]["version"] == "0.35.1"
+    assert atif["agent"]["model_name"] == "claude-sonnet-4-6"
 
 
 def test_second_text_message_after_tool_calls_is_new_step():
@@ -590,7 +600,7 @@ def test_metrics_from_usage_on_text_step():
     atif = session_transcript_to_atif(t)
     agent_step = atif["steps"][1]
     assert agent_step["source"] == "agent"
-    assert agent_step["metrics"] == {"input_tokens": 100, "output_tokens": 20}
+    assert agent_step["metrics"] == {"prompt_tokens": 100, "completion_tokens": 20}
 
 
 def test_metrics_from_usage_on_tool_call_step():
@@ -609,7 +619,7 @@ def test_metrics_from_usage_on_tool_call_step():
     )
     atif = session_transcript_to_atif(t)
     step = atif["steps"][0]
-    assert step["metrics"] == {"input_tokens": 50, "output_tokens": 10}
+    assert step["metrics"] == {"prompt_tokens": 50, "completion_tokens": 10}
 
 
 def test_metrics_accumulated_across_merged_tool_calls():
@@ -634,7 +644,65 @@ def test_metrics_accumulated_across_merged_tool_calls():
     )
     atif = session_transcript_to_atif(t)
     assert len(atif["steps"]) == 1
-    assert atif["steps"][0]["metrics"] == {"input_tokens": 100, "output_tokens": 13}
+    assert atif["steps"][0]["metrics"] == {"prompt_tokens": 100, "completion_tokens": 13}
+
+
+def test_cache_tokens_fold_into_prompt_tokens():
+    """ATIF prompt_tokens is the total including cached; gptme excludes it."""
+    t = _make_transcript(
+        [
+            NormalizedMessage(
+                role="assistant",
+                content="done",
+                usage={
+                    "input_tokens": 1499,
+                    "output_tokens": 246,
+                    "cache_read_tokens": 4224,
+                    "cache_creation_tokens": 0,
+                },
+            )
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    assert atif["steps"][0]["metrics"] == {
+        "prompt_tokens": 5723,
+        "completion_tokens": 246,
+        "cached_tokens": 4224,
+    }
+
+
+def test_metrics_keys_are_atif_names_only():
+    """ATIF ``Metrics`` is extra=forbid; harness-native key names invalidate it."""
+    allowed = {
+        "prompt_tokens",
+        "completion_tokens",
+        "cached_tokens",
+        "cost_usd",
+        "prompt_token_ids",
+        "completion_token_ids",
+        "logprobs",
+        "extra",
+    }
+    t = _make_transcript(
+        [
+            NormalizedMessage(
+                role="assistant",
+                content="done",
+                usage={
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_read_tokens": 7,
+                    "cache_creation_tokens": 1,
+                    "reasoning_tokens": 3,
+                    "cost": 0.002,
+                },
+            )
+        ]
+    )
+    atif = session_transcript_to_atif(t)
+    metrics = atif["steps"][0]["metrics"]
+    assert set(metrics) <= allowed
+    assert metrics["cost_usd"] == 0.002
 
 
 def test_no_metrics_when_usage_absent():
@@ -642,3 +710,69 @@ def test_no_metrics_when_usage_absent():
     t = _make_transcript([NormalizedMessage(role="assistant", content="no usage")])
     atif = session_transcript_to_atif(t)
     assert "metrics" not in atif["steps"][0]
+
+
+# ---------------------------------------------------------------------------
+# Integration: real gptme conversation.jsonl -> read_transcript -> ATIF
+# ---------------------------------------------------------------------------
+
+
+def test_real_gptme_jsonl_exports_atif_valid_envelope(tmp_path):
+    """The schema bugs shipped because tests built transcripts by hand.
+
+    This goes through the real file boundary (``read_transcript``) so a future
+    field-name drift in gptme normalization or the adapter is caught here.
+    """
+    import json
+
+    from gptme_sessions.transcript import read_transcript
+
+    records = [
+        {"role": "system", "content": "You are gptme.", "timestamp": "2026-10-17T23:00:00+00:00"},
+        {"role": "user", "content": "write it", "timestamp": "2026-10-17T23:00:01+00:00"},
+        {
+            "role": "assistant",
+            "content": '@save(c1): {"path": "a.py", "content": "print(1)"}',
+            "timestamp": "2026-10-17T23:00:02+00:00",
+            "metadata": {
+                "usage": {
+                    "input_tokens": 1499,
+                    "output_tokens": 246,
+                    "cache_read_tokens": 4224,
+                    "cache_creation_tokens": 0,
+                }
+            },
+        },
+        {"role": "system", "content": "Saved to a.py", "timestamp": "2026-10-17T23:00:03+00:00"},
+    ]
+    path = tmp_path / "conversation.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    atif = session_transcript_to_atif(
+        read_transcript(path), extra_agent_fields={"version": "0.35.1"}
+    )
+
+    # Agent block: ATIF v1.7 requires both fields.
+    assert atif["agent"]["name"] == "gptme"
+    assert atif["agent"]["version"] == "0.35.1"
+
+    # Every emitted metric key must be one ATIF's extra="forbid" model accepts.
+    atif_metric_keys = {
+        "prompt_tokens",
+        "completion_tokens",
+        "cached_tokens",
+        "cost_usd",
+        "prompt_token_ids",
+        "completion_token_ids",
+        "logprobs",
+        "extra",
+    }
+    metrics = [s["metrics"] for s in atif["steps"] if s.get("metrics")]
+    assert metrics, "usage in the source records must survive the conversion"
+    for block in metrics:
+        assert set(block) <= atif_metric_keys
+    assert metrics[0]["prompt_tokens"] == 1499 + 4224
+    assert metrics[0]["cached_tokens"] == 4224
+
+    # Step ids stay sequential from 1 (ATIF validator requirement).
+    assert [s["step_id"] for s in atif["steps"]] == list(range(1, len(atif["steps"]) + 1))
