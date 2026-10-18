@@ -5171,6 +5171,143 @@ class ReviewResult:
     """Advisories excluded from the scored findings, retained for rendering."""
 
 
+@dataclass
+class FinalizedReview:
+    """Policy-assessed findings; not authorization to publish or merge.
+
+    Forge adapters must still verify the exact head, coverage of all shards,
+    live thread identities and disposition, and consensus before publication.
+    Keep the evidence groups so a caller cannot silently launder a policy drop
+    into a clean verdict. ``out_of_scope_policy`` controls scoring only; the
+    observations must remain visible in the caller's artifact/disclosure.
+    """
+
+    findings: list[dict]
+    summary_only_findings: list[dict]
+    out_of_scope_findings: list[dict]
+    rejected_findings: list[dict]
+    dropped: dict[str, list[dict]]
+    score: int | None
+    shortfalls: list[dict]
+
+    @property
+    def blocking(self) -> bool:
+        return bool(self.shortfalls)
+
+
+def finalize_review(
+    findings: Sequence[dict],
+    *,
+    change_summary: Mapping[str, object],
+    fully_preloaded_paths: set[str],
+    file_contents: Mapping[str, str],
+    touched_files: set[str],
+    out_of_scope_policy: Literal["suppress", "informational"],
+    author_rejections: Sequence[Mapping[str, object]] = (),
+    submodule_only: bool = False,
+) -> FinalizedReview:
+    """Apply shared soundness, scope and author-rejection policy in order.
+
+    Pass *both* engine finding partitions (or the unpartitioned subscription
+    result). Coverage means complete files, not merely paths with excerpts.
+    A summary disclaiming input coverage raises ``ReviewError`` before any
+    evidence is scored. No I/O, inference, ledger reads or forge writes occur.
+
+    The policy argument is required: local artifacts historically suppress
+    out-of-scope observations (abstaining when nothing remains), whereas the
+    sweep discloses them as informational evidence about unchanged code without
+    erasing a valid verdict over the changed files. Never guess that distinction
+    from an empty findings list. A finding with no ``file`` (a PR-level
+    observation) is out-of-scope under both policies, matching
+    ``drop_out_of_scope_findings`` and its documented sweep/local callers — it
+    is not treated as touching every file. An ``author_rejections`` row whose
+    ``entry["why"]`` is ``"resolved"`` is never honored: resolution is a claim,
+    not evidence (see ``filter_suppressed``), so it must not hide a finding
+    from the posted result or raise the score. Only explicit rejections
+    (``why="dismissed"`` or an unlabelled rejection) dispose of a finding.
+    Sweep-specific existence checks, round caps,
+    static preflight and live-thread reconciliation remain adapter obligations;
+    they can change findings and require recomputing the final published score.
+    """
+    if out_of_scope_policy not in {"suppress", "informational"}:
+        raise ValueError("out_of_scope_policy must be suppress or informational")
+    non_coverage = summary_disclaims_coverage(str(change_summary.get("summary") or ""))
+    if non_coverage:
+        raise ReviewError(
+            f"summary claims it could not read the input ({non_coverage!r}) "
+            "— treating as unreviewable"
+        )
+
+    kept = [dict(finding) for finding in findings]
+    dropped: dict[str, list[dict]] = {}
+    kept, dropped["unverified_absence"] = drop_unverified_absence_findings(
+        kept, fully_preloaded_paths
+    )
+    kept, dropped["misquoted"] = drop_misquoted_findings(kept, dict(file_contents))
+    for name, gate in (
+        ("self_disclaiming", drop_self_disclaiming_findings),
+        ("coverage_nits", drop_coverage_nit_findings),
+        ("self_graded_nits", drop_self_graded_nit_findings),
+        ("test_isolation_nits", drop_test_isolation_nit_findings),
+        ("friendly_error_nits", drop_friendly_error_nit_findings),
+        ("unverified_runtime", drop_unverifiable_runtime_claims),
+    ):
+        kept, dropped[name] = gate(kept)
+
+    out_of_scope: list[dict] = []
+    in_scope: list[dict] = []
+    for finding in kept:
+        (in_scope if finding.get("file", "") in touched_files else out_of_scope).append(
+            finding
+        )
+
+    kept = []
+    rejected: list[dict] = []
+    for finding in in_scope:
+        hit = next(
+            (
+                row
+                for row in author_rejections
+                if isinstance(entry := row.get("entry"), Mapping)
+                and entry.get("why") != "resolved"
+                and matches_entry(finding, entry)
+            ),
+            None,
+        )
+        if hit is None:
+            kept.append(finding)
+        else:
+            rejected.append(
+                {
+                    **finding,
+                    "author_rejected": {
+                        "reason": hit.get("reason") or "",
+                        "at": hit.get("at"),
+                    },
+                }
+            )
+    posted, advisory = partition_posting_findings(kept)
+    suppressed = len(rejected)
+    if out_of_scope_policy == "suppress":
+        suppressed += len(out_of_scope)
+    return FinalizedReview(
+        findings=posted,
+        summary_only_findings=advisory,
+        out_of_scope_findings=out_of_scope,
+        rejected_findings=rejected,
+        dropped=dropped,
+        score=confidence_score(
+            posted,
+            submodule_only=submodule_only,
+            suppressed=suppressed,
+            informational=len(out_of_scope)
+            if out_of_scope_policy == "informational"
+            else 0,
+        ),
+        shortfalls=[dict(row) for row in blocking_shortfall(posted)],
+    )
+
+
 def review(
     target: ReviewTarget,
     config: ReviewConfig,
