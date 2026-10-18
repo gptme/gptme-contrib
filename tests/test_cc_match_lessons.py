@@ -250,8 +250,12 @@ def test_main_applies_skill_cap_after_dropout(hook, tmp_path, monkeypatch):
     monkeypatch.setattr(hook, "detect_session_category", lambda: None)
     monkeypatch.setattr(hook, "filter_by_harness", lambda items, harness: items)
     monkeypatch.setattr(hook, "filter_by_session_category", lambda items, cat: items)
+    monkeypatch.setattr(hook, "filter_by_repo", lambda items, repo: items)
     monkeypatch.setattr(hook, "get_already_injected", lambda sid, tp=None: set())
     monkeypatch.setattr(hook, "score_lessons", lambda *a, **k: list(lessons))
+    # Keep the test hermetic: real score_memories reads the workspace and may
+    # inject memory hits when gptme happens to be importable.
+    monkeypatch.setattr(hook, "score_memories", lambda *a, **k: [])
     monkeypatch.setattr(
         hook,
         "get_predicted_lessons",

@@ -1888,6 +1888,7 @@ def select_advisory_lessons(
             )
             raw = bytearray()
             deadline = time.monotonic() + timeout + 0.25
+            timed_out = False
             try:
                 assert process.stdout is not None
                 with process.stdout, selectors.DefaultSelector() as poller:
@@ -1895,6 +1896,7 @@ def select_advisory_lessons(
                     while True:
                         remaining = deadline - time.monotonic()
                         if remaining <= 0 or not poller.select(remaining):
+                            timed_out = True
                             raise TimeoutError("selector deadline exceeded")
                         chunk = os.read(process.stdout.fileno(), 65536)
                         if not chunk:
@@ -1904,7 +1906,11 @@ def select_advisory_lessons(
                             raise ValueError("selector output too large")
                     process.wait(timeout=max(0.001, deadline - time.monotonic()))
             finally:
-                if process.returncode is None:
+                # Kill the whole group on timeout even when the direct child has
+                # already exited: a grandchild can inherit the stdout pipe and
+                # keep this read loop blocked until the deadline. Leaving it
+                # running would stall every subsequent invocation.
+                if process.returncode is None or timed_out:
                     try:
                         os.killpg(process.pid, signal.SIGKILL)
                     except ProcessLookupError:
@@ -2026,13 +2032,6 @@ def main():
     # --- Scan and match lessons and keyworded memories ---
     workspace = get_workspace()
     lesson_dirs = load_lesson_dirs(workspace)
-    if event_type == "PreToolUse":
-        # Arm now, not only after a successful injection. Empty-injection is
-        # the common case; without this the cooldown never fires and every
-        # tool call re-scans at full price.
-        state = load_session_state(session_id)
-        state["last_pretool"] = time.time()
-        save_session_state(session_id, state)
     lessons = scan_lessons(lesson_dirs)
     lessons = filter_by_harness(lessons, detect_harness())
     session_cat = detect_session_category()
@@ -2068,6 +2067,15 @@ def main():
         if match.get("is_memory"):
             existing_match["is_memory"] = True
     raw_matches = list(unique_matches.values())[:max_results]
+    if event_type == "PreToolUse":
+        # Arm the cooldown only once the scan/match work has completed. Empty
+        # injection is the common case, so arm before the no-match early exit
+        # (otherwise the cooldown never fires and every tool call re-scans at
+        # full price). Arming after the work — not before it — means a hook
+        # timeout cannot suppress the next invocation for the cooldown window.
+        state = load_session_state(session_id)
+        state["last_pretool"] = time.time()
+        save_session_state(session_id, state)
     if not raw_matches:
         emit_empty(event_type, session_id, "no_match")
         sys.exit(0)
@@ -2192,12 +2200,15 @@ if __name__ == "__main__":
     except TimeoutError:
         # Degrade to empty rather than letting the harness discard a partial
         # JSON payload. emit_empty is fail-open: no injection is better than
-        # a hung hook.
+        # a hung hook. Recover the event type from the cached stdin read at
+        # startup: main() consumes that cache rather than sys.stdin, so it is
+        # still readable here. A PreToolUse timeout must emit no payload, not
+        # a UserPromptSubmit-shaped one.
         event = "UserPromptSubmit"
         try:
-            # main() may have already consumed stdin; default is fine.
-            event = "UserPromptSubmit"
-        except Exception:
+            cached_input = _STDIN_CACHE or ""
+            event = json.loads(cached_input).get("hook_event_name") or event
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
             pass
         emit_empty(event)
         sys.exit(0)
