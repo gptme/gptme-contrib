@@ -840,7 +840,9 @@ def normalize_letta(
     Notes
     -----
     Tool-call records: each call in a Letta ``assistant`` record's ``tool_calls``
-    becomes a separate message, preserving call order and result-link IDs.
+    becomes a separate message, preserving call order and result-link IDs.  Any
+    text content on that record is emitted once as its own assistant message
+    before the calls, so it is not repeated per call.
     ``args`` is a JSON-encoded string in the Letta format; it is
     decoded to a dict here.  Malformed JSON is replaced with ``{"_raw": args}``.
 
@@ -885,6 +887,14 @@ def normalize_letta(
         elif role == "assistant":
             tool_calls = rec.get("tool_calls") or []
             if tool_calls:
+                # Emit the text turn once, before the calls (matching
+                # ``_normalize_cc``); repeating it on every call message would
+                # duplicate the same text per tool call.
+                content = rec.get("content") or ""
+                if content:
+                    messages.append(
+                        NormalizedMessage(role="assistant", content=content, timestamp=ts)
+                    )
                 for tc in tool_calls:
                     raw_args = tc.get("args")
                     if isinstance(raw_args, str):
@@ -901,7 +911,7 @@ def normalize_letta(
                     messages.append(
                         NormalizedMessage(
                             role="assistant",
-                            content=rec.get("content") or "",
+                            content="",
                             tool_name=tc.get("name") or "",
                             tool_input=tool_input,
                             tool_call_id=tc.get("id") or None,

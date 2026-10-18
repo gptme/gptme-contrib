@@ -223,6 +223,23 @@ def test_multiple_tool_calls_keep_all_calls_and_result_links():
     assert [m.tool_call_id for m in results] == [m.tool_call_id for m in calls]
 
 
+def test_text_content_not_duplicated_across_multiple_tool_calls():
+    records = [
+        {
+            "role": "assistant",
+            "content": "thinking",
+            "tool_calls": [
+                {"id": "a", "name": "bash", "args": '{"cmd": "ls"}'},
+                {"id": "b", "name": "read", "args": '{"path": "/foo"}'},
+            ],
+            "timestamp": "2026-01-01T00:00:00Z",
+        }
+    ]
+    transcript = normalize_letta(records)
+    assert [m.content for m in transcript.messages] == ["thinking", "", ""]
+    assert [m.tool_call_id for m in transcript.messages] == [None, "a", "b"]
+
+
 def test_tool_call_args_dict_passthrough():
     records = [
         {
