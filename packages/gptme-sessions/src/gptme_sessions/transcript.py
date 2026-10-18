@@ -12,10 +12,11 @@ Schema version: 1 (increment when breaking changes are made to the output shape)
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from .discovery import (
     extract_project,
@@ -166,28 +167,273 @@ def _ts_str(ts: datetime | None) -> str | None:
     return ts.isoformat()
 
 
+# ---------------------------------------------------------------------------
+# gptme tool-call parsers (inline — no gptme dependency)
+# ---------------------------------------------------------------------------
+
+# Native "tool" format:  @tool_name(call_id): {json}
+_NATIVE_TOOL_RE = re.compile(
+    r"^@([\w.]+)\(([\w\-:.]+)\):\s*(\{)",
+    re.MULTILINE,
+)
+
+# Markdown fenced code block.  Group 1 = fence, 2 = lang tag, 3 = body.
+# The lang tag may contain spaces (e.g. "save path/to/file.py").
+_FENCE_RE = re.compile(
+    r"^(`{3,})([\w][\w .\-/]*)?\n(.*?)\n\1[ \t]*$",
+    re.DOTALL | re.MULTILINE,
+)
+
+# gptme XML format: <tool-use><tool_name>body</tool_name></tool-use>
+_XML_TOOLUSE_RE = re.compile(
+    r"<tool-use>\s*<([\w-]+)>(.*?)</\1>\s*</tool-use>",
+    re.DOTALL,
+)
+
+# gptme Anthropic-style XML: <function_calls><invoke name="…">…</invoke></function_calls>
+_FUNCTION_CALLS_RE = re.compile(
+    r"<function_calls>\s*<invoke\s+name=\"([\w-]+)\">(.*?)</invoke>\s*</function_calls>",
+    re.DOTALL,
+)
+
+# Markdown lang tags that map to a different canonical tool name.
+_LANG_TO_TOOL: dict[str, str] = {
+    "bash": "shell",
+    "sh": "shell",
+    "python": "ipython",
+}
+
+# First-word lang tags that are known gptme tools.  Others are ignored.
+_KNOWN_TOOL_LANGS: frozenset[str] = frozenset(
+    {
+        "shell",
+        "bash",
+        "sh",
+        "python",
+        "ipython",
+        "save",
+        "append",
+        "patch",
+        "computer",
+        "browser",
+        "read",
+        "gptme_tool",
+    }
+)
+
+
+def _find_json_end(s: str, start: int) -> int | None:
+    """Find the end of a JSON object at s[start:] by brace counting."""
+    stack = 0
+    in_string = False
+    escape = False
+    for i, c in enumerate(s[start:], start):
+        if escape:
+            escape = False
+            continue
+        if c == "\\":
+            escape = True
+        elif c == '"' and not escape:
+            in_string = not in_string
+        elif not in_string:
+            if c == "{":
+                stack += 1
+            elif c == "}":
+                stack -= 1
+                if stack == 0:
+                    return i + 1
+    return None
+
+
+def _parse_gptme_toolcalls(content: str) -> list[dict[str, Any]]:
+    """Parse tool calls from a gptme assistant message.
+
+    Handles three formats:
+
+    * **Native** (``@tool(id): {json}``) — has explicit call IDs.
+    * **Markdown** (fenced code blocks) — call IDs are ``None``.
+    * **XML** (``<tool-use>`` or ``<function_calls>``) — call IDs are ``None``.
+
+    Returns a list of dicts sorted by start position, each with keys:
+    ``tool_name``, ``tool_input``, ``call_id``, ``start``.
+
+    Note: ``benchmark/pier-gptme/scripts/eval/pier_gptme.py`` implements the
+    same three-format parsing by importing ``gptme.tools.base.ToolUse``.  That
+    path requires a gptme install and is an offline smoke harness; this
+    implementation is inline (no gptme dependency) and is used at runtime by
+    the gptme-sessions ATIF adapter.
+    """
+    results: list[dict[str, Any]] = []
+
+    # --- Native @tool(id): {json} ---
+    search_from = 0
+    while m := _NATIVE_TOOL_RE.search(content, search_from):
+        tool_name = m.group(1)
+        call_id = m.group(2)
+        json_start = m.end() - 1  # the '{' captured in group 3
+        json_end = _find_json_end(content, json_start)
+        if json_end is None:
+            search_from = m.end()
+            continue
+        try:
+            kwargs: dict[str, Any] = json.loads(content[json_start:json_end])
+        except (json.JSONDecodeError, ValueError):
+            search_from = m.end()
+            continue
+        if not isinstance(kwargs, dict):
+            search_from = m.end()
+            continue
+        results.append(
+            {"tool_name": tool_name, "tool_input": kwargs, "call_id": call_id, "start": m.start()}
+        )
+        search_from = json_end
+
+    # --- Markdown fenced code blocks ---
+    for m in _FENCE_RE.finditer(content):
+        lang_tag = (m.group(2) or "").strip()
+        if not lang_tag:
+            continue
+        lang_first = lang_tag.split()[0].lower()
+        if lang_first not in _KNOWN_TOOL_LANGS:
+            continue
+        tool_name = _LANG_TO_TOOL.get(lang_first, lang_first)
+        body = m.group(3) or ""
+        if tool_name in ("save", "append", "patch"):
+            path = lang_tag[len(lang_first) :].strip()
+            tool_input: dict[str, Any] = (
+                {"path": path, "content": body} if path else {"content": body}
+            )
+        else:
+            extra_args = lang_tag.split()[1:]
+            tool_input = {"args": extra_args, "content": body} if extra_args else {"content": body}
+        results.append(
+            {"tool_name": tool_name, "tool_input": tool_input, "call_id": None, "start": m.start()}
+        )
+
+    # --- XML <tool-use> ---
+    for m in _XML_TOOLUSE_RE.finditer(content):
+        tool_name = m.group(1)
+        body = m.group(2).strip()
+        results.append(
+            {
+                "tool_name": tool_name,
+                "tool_input": {"content": body},
+                "call_id": None,
+                "start": m.start(),
+            }
+        )
+
+    # --- XML <function_calls> (Anthropic-style used by some gptme sessions) ---
+    for m in _FUNCTION_CALLS_RE.finditer(content):
+        tool_name = m.group(1)
+        body = m.group(2).strip()
+        # Extract simple <param>value</param> pairs inside invoke body
+        params: dict[str, Any] = {}
+        for pm in re.finditer(r"<([\w]+)>(.*?)</\1>", body, re.DOTALL):
+            params[pm.group(1)] = pm.group(2).strip()
+        results.append(
+            {
+                "tool_name": tool_name,
+                "tool_input": params or {"content": body},
+                "call_id": None,
+                "start": m.start(),
+            }
+        )
+
+    results.sort(key=lambda x: x["start"] if x["start"] is not None else len(content))
+    return results
+
+
 def _normalize_gptme(msgs: list[dict]) -> list[NormalizedMessage]:
     """Normalize gptme conversation.jsonl messages.
 
     gptme format: each record has top-level ``role``, ``content``, ``timestamp``.
     Role values: ``"user"``, ``"assistant"``, ``"system"``.
+
+    Tool calls are embedded in assistant ``content`` in three formats:
+
+    * **Markdown** fenced code blocks: `` ```shell\\nls -la\\n``` ``
+    * **XML**: ``<tool-use><shell>ls -la</shell></tool-use>``
+    * **Native** (@tool format): ``@shell(abc123): {"command": "ls -la"}``
+
+    Tool results (``system`` records) are emitted as ``role="tool_result"``
+    when ``call_id`` is set on the record (native format) or when the record
+    immediately follows an assistant message that contained tool calls (implicit
+    window). Unlinked results remain unlinked (``tool_call_id=None``); they are
+    never guessed.
     """
     normalized: list[NormalizedMessage] = []
+    implicit_tool_window = False  # True after an assistant step with tool calls
+
     for msg in msgs:
         role = msg.get("role", "")
         if role not in ("user", "assistant", "system"):
             continue
         content = msg.get("content", "") or ""
+        if not isinstance(content, str):
+            content = json.dumps(content)
         ts = _ts_str(_parse_timestamp(msg.get("timestamp", "")))
         usage = msg.get("metadata", {}).get("usage") or None
-        normalized.append(
-            NormalizedMessage(
-                role=role,
-                content=content if isinstance(content, str) else json.dumps(content),
-                timestamp=ts,
-                usage=usage,
+        call_id: str | None = msg.get("call_id") or None  # set on system msgs (native fmt)
+
+        if role == "system":
+            if call_id or implicit_tool_window:
+                normalized.append(
+                    NormalizedMessage(
+                        role="tool_result",
+                        content=content,
+                        timestamp=ts,
+                        tool_result=content,
+                        tool_call_id=call_id,
+                    )
+                )
+                if call_id:
+                    # An explicit call-ID result closes the implicit window.
+                    implicit_tool_window = False
+            else:
+                normalized.append(NormalizedMessage(role="system", content=content, timestamp=ts))
+            continue
+
+        implicit_tool_window = False
+
+        if role == "user":
+            normalized.append(NormalizedMessage(role="user", content=content, timestamp=ts))
+            continue
+
+        # role == "assistant": parse embedded tool calls
+        tool_calls = _parse_gptme_toolcalls(content)
+        if not tool_calls:
+            normalized.append(
+                NormalizedMessage(role="assistant", content=content, timestamp=ts, usage=usage)
             )
-        )
+            continue
+
+        # Emit text portion that appears before the first tool call.
+        first_start: int | None = tool_calls[0]["start"]
+        text_before = content[:first_start].strip() if first_start is not None else ""
+        if text_before:
+            normalized.append(
+                NormalizedMessage(role="assistant", content=text_before, timestamp=ts, usage=usage)
+            )
+
+        # Emit one NormalizedMessage per tool call.
+        for i, tc in enumerate(tool_calls):
+            normalized.append(
+                NormalizedMessage(
+                    role="assistant",
+                    content="",
+                    timestamp=ts,
+                    tool_name=tc["tool_name"],
+                    tool_input=tc["tool_input"],
+                    tool_call_id=tc["call_id"],
+                    # Carry usage on the first tool-call message if there was no
+                    # preceding text; avoids double-counting.
+                    usage=usage if (i == 0 and not text_before) else None,
+                )
+            )
+
+        implicit_tool_window = True
+
     return normalized
 
 
