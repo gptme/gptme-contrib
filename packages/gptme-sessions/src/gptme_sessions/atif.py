@@ -25,11 +25,16 @@ implementation of the same grouping and linking rules.
   the agent block.
 - Images, attachment payloads, subagent trees, and reasoning deltas are omitted.
 - An empty-message agent step is valid per ATIF when it carries tool_calls.
-- gptme ``conversation.jsonl`` normalization does not yet parse tool calls out
-  of message content, so a gptme transcript yields text-only steps with no
-  ``tool_calls``/``observation``. The envelope validates, but tool structure is
-  lost; use the raw-message converter in ``benchmark/pier-gptme/`` when tool
-  fidelity matters.
+- gptme tool calls are parsed out of message content by
+  ``_normalize_gptme()``: native ``@tool(call_id): {json}`` (call IDs kept and
+  linked), markdown fenced blocks, and both XML forms. Native syntax quoted
+  inside a plain fenced block is example text and is not parsed. Tool results
+  become ``role="tool_result"`` and link by the record's ``call_id``; a result
+  with no call ID stays unlinked rather than guessed.
+- What remains unparsed from gptme content: subagent trees and attachment
+  payloads (see above). Use the raw-message converter in
+  ``benchmark/pier-gptme/`` only if you need its harness-specific behaviour;
+  this path no longer loses tool structure.
 """
 
 from __future__ import annotations
