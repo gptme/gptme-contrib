@@ -63,6 +63,19 @@ class WorkClaim:
 
 
 @dataclass(frozen=True)
+class WorkClaimDenial:
+    """Attempted claimer and blocking row at a serialized claim decision.
+
+    ``completed-check`` is policy-neutral: workspace wrappers can refine it
+    into freshness/once-ever classes. ``claim()`` still returns None.
+    """
+
+    reason: str
+    claimer: str
+    prior: WorkClaim
+
+
+@dataclass(frozen=True)
 class WorkReopenWarning:
     """Advisory warning for reopening task work owned in the coordination DB."""
 
@@ -152,6 +165,7 @@ class WorkClaimManager:
         self.db = db
         self.default_ttl_minutes = default_ttl_minutes
         self.on_completed_check = on_completed_check
+        self.last_denial: WorkClaimDenial | None = None
         # Ensure work table exists
         self.db.conn.executescript(WORK_SCHEMA)
         self._migrate_work_schema()
@@ -234,6 +248,7 @@ class WorkClaimManager:
         predicted claim without persisting it.
         Uses CAS to ensure exactly one winner under concurrent access.
         """
+        self.last_denial = None
         ttl = ttl_minutes or self.default_ttl_minutes
         conn = self.db.conn
 
@@ -252,7 +267,7 @@ class WorkClaimManager:
                 "%Y-%m-%d %H:%M:%S"
             )
             row = conn.execute(
-                "SELECT claimer, expires_at, status, epoch, hmac FROM work WHERE task_id = ?",
+                "SELECT * FROM work WHERE task_id = ?",
                 (task_id,),
             ).fetchone()
 
@@ -278,6 +293,9 @@ class WorkClaimManager:
                 # Allow reclaiming if no check or check passes
                 check = self.on_completed_check
                 if check is not None and not check(task_id, str(self.db.db_path)):
+                    self.last_denial = WorkClaimDenial(
+                        "completed-check", agent_id, _row_to_work_claim(row)
+                    )
                     conn.execute("ROLLBACK")
                     return None
 
@@ -353,6 +371,9 @@ class WorkClaimManager:
                     (agent_id, expires_str, metadata, hmac_val, task_id),
                 )
                 if conn.execute("SELECT changes()").fetchone()[0] == 0:
+                    self.last_denial = WorkClaimDenial(
+                        "contention", agent_id, _row_to_work_claim(row)
+                    )
                     conn.execute("ROLLBACK")
                     return None
             elif row["status"] == "claimed" and row["claimer"] == agent_id:
@@ -386,6 +407,9 @@ class WorkClaimManager:
                 )
             else:
                 # Held by another agent and not expired
+                self.last_denial = WorkClaimDenial(
+                    "contention", agent_id, _row_to_work_claim(row)
+                )
                 conn.execute("ROLLBACK")
                 return None
 
