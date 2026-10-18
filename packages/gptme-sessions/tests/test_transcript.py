@@ -783,8 +783,10 @@ class TestGptmeAtifExport:
         transcript = read_transcript(gptme_tool_session)
         atif = session_transcript_to_atif(transcript)
         agent_step = next(s for s in atif["steps"] if s.get("tool_calls"))
-        assert agent_step.get("metrics", {}).get("input_tokens") == 20
-        assert agent_step.get("metrics", {}).get("output_tokens") == 8
+        # ATIF v1.7 metric names (#1921): prompt_tokens is the total including
+        # cache reads, completion_tokens the generated tokens.
+        assert agent_step.get("metrics", {}).get("prompt_tokens") == 20
+        assert agent_step.get("metrics", {}).get("completion_tokens") == 8
 
     def test_zero_tool_calls_before_fix_is_now_nonzero(self, gptme_tool_session: Path):
         """Regression: before this fix the step had 0 tool_calls."""
