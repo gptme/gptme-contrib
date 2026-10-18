@@ -821,9 +821,9 @@ def test_gptme_prose_preserved_alongside_markdown_tool_call(tmp_path):
 
     # Prose survives; the fence markers themselves are consumed by the parser.
     step_messages = [s.get("message", "") for s in agent_steps]
-    assert "Listing files." in step_messages, (
-        f"assistant prose was dropped from the ATIF step message; got {step_messages!r}"
-    )
+    assert (
+        "Listing files." in step_messages
+    ), f"assistant prose was dropped from the ATIF step message; got {step_messages!r}"
 
     # The markdown fence is a tool call, not raw text.
     tool_steps = [s for s in agent_steps if s.get("tool_calls")]
