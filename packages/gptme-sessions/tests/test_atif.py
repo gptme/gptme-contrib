@@ -853,6 +853,55 @@ def _gptme_to_atif(records: list) -> dict:
     return session_transcript_to_atif(t)
 
 
+def test_gptme_injected_context_is_not_a_tool_result():
+    """Harness context after a tool-calling turn must not become a result.
+
+    gptme appends ``<system_info>`` / ``<system_warning>`` / ``<budget:…>``
+    records to a step, and in the native tool loop it stamps a ``call_id`` onto
+    every system record in that turn. Neither makes them tool output.
+    """
+    from gptme_sessions.transcript import _normalize_gptme
+
+    msgs = _normalize_gptme(
+        [
+            {
+                "role": "assistant",
+                "content": "```shell\nls -la\n```",
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+            {
+                "role": "system",
+                "content": "Ran allowlisted command: `ls -la`\n```stdout\ntotal 0\n```",
+                "timestamp": "2026-03-01T10:00:01+00:00",
+            },
+            {
+                "role": "system",
+                "content": "<system_info>The time is now 10:00. Time elapsed: 1min</system_info>",
+                "timestamp": "2026-03-01T10:00:02+00:00",
+            },
+            {
+                "role": "system",
+                "content": "<system_warning>Token usage: 10/200</system_warning>",
+                "call_id": "toolu_abc",
+                "timestamp": "2026-03-01T10:00:03+00:00",
+            },
+            {
+                "role": "system",
+                "content": "<budget:token_budget>200000</budget:token_budget>",
+                "call_id": "toolu_abc",
+                "timestamp": "2026-03-01T10:00:04+00:00",
+            },
+        ]
+    )
+
+    assert msgs[1].role == "tool_result"  # the real output still links
+    assert msgs[2].role == "system"
+    assert msgs[3].role == "system"
+    assert msgs[4].role == "system"
+    # Injected context never claims a call ID, so it cannot be linked later.
+    assert all(m.tool_call_id is None for m in msgs[2:])
+
+
 def test_gptme_native_tool_call_in_atif():
     """@tool(id): {json} format produces tool_calls with linked observation."""
     atif = _gptme_to_atif(

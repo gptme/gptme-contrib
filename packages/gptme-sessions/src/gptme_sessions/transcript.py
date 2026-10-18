@@ -187,6 +187,22 @@ _FENCE_RE = re.compile(
     re.DOTALL | re.MULTILINE,
 )
 
+# Harness-injected context blocks. gptme appends these as ``system`` records
+# that are *not* tool results (token budget, elapsed time, workspace events,
+# agent instructions). They trail a tool-calling turn, so an unlinked implicit
+# result must exclude them or they get exported as fabricated tool results.
+_INJECTED_CONTEXT_RE = re.compile(
+    r"^<(?:budget:[\w-]+|system_info|system-info|system_warning"
+    r"|workspace-agent[\w-]*|agent-instructions[\w-]*|agent-workspace[\w-]*"
+    r"|role|current-date)[\s>/]"
+)
+
+
+def _is_injected_context(content: str) -> bool:
+    """True for harness context blocks, which are never tool results."""
+    return bool(_INJECTED_CONTEXT_RE.match(content.lstrip()))
+
+
 # gptme XML format: <tool-use><tool_name>body</tool_name></tool-use>
 _XML_TOOLUSE_RE = re.compile(
     r"<tool-use>\s*<([\w-]+)>(.*?)</\1>\s*</tool-use>",
@@ -394,8 +410,10 @@ def _normalize_gptme(msgs: list[dict]) -> list[NormalizedMessage]:
     Tool results (``system`` records) are emitted as ``role="tool_result"``
     when ``call_id`` is set on the record (native format) or when the record
     immediately follows an assistant message that contained tool calls (implicit
-    window). Unlinked results remain unlinked (``tool_call_id=None``); they are
-    never guessed.
+    window). Harness-injected context (``<system_info>``, ``<system_warning>``,
+    ``<budget:…>``, ``<workspace-agent-*>``, ``<agent-instructions>``) is never
+    a result and stays ``role="system"``. Unlinked results remain unlinked
+    (``tool_call_id=None``); they are never guessed.
     """
     normalized: list[NormalizedMessage] = []
     implicit_tool_window = False  # True after an assistant step with tool calls
@@ -412,7 +430,9 @@ def _normalize_gptme(msgs: list[dict]) -> list[NormalizedMessage]:
         call_id: str | None = msg.get("call_id") or None  # set on system msgs (native fmt)
 
         if role == "system":
-            if call_id or implicit_tool_window:
+            # Injected context is never a result, even when gptme's native tool
+            # loop stamped a call ID onto every system record in the turn.
+            if not _is_injected_context(content) and (call_id or implicit_tool_window):
                 normalized.append(
                     NormalizedMessage(
                         role="tool_result",
