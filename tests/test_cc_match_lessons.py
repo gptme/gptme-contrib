@@ -189,36 +189,6 @@ def test_score_lessons_respects_max(hook, tmp_path):
     assert len(results) <= 3
 
 
-def test_injection_dial_is_opt_in_and_control_is_unchanged(hook):
-    dial = hook.resolve_injection_dial("session-a", "")
-
-    assert dial["enabled"] is False
-    assert dial["arm"] == "control"
-    assert dial["assignment"] == "disabled"
-    assert dial["prompt_skill_cap"] is None
-    assert dial["pretool_skill_cap"] is None
-    assert dial["skill_bm25_min_z"] is None
-
-
-def test_injection_dial_random_assignment_is_stable_per_session(hook):
-    first = hook.resolve_injection_dial("session-a", "random")
-    second = hook.resolve_injection_dial("session-a", "1")
-
-    assert first == second
-    assert first["enabled"] is True
-    assert first["assignment"] == "random"
-    assert first["arm"] in {"control", "treatment"}
-
-
-@pytest.mark.parametrize("arm", ["control", "treatment"])
-def test_injection_dial_supports_forced_arms(hook, arm):
-    dial = hook.resolve_injection_dial("session-a", arm)
-
-    assert dial["enabled"] is True
-    assert dial["arm"] == arm
-    assert dial["assignment"] == "forced"
-
-
 def test_skill_cap_preserves_lessons_and_exempt_skills(hook, monkeypatch):
     monkeypatch.setattr(
         hook,
@@ -237,39 +207,6 @@ def test_skill_cap_preserves_lessons_and_exempt_skills(hook, monkeypatch):
 
     assert [item["path"] for item in kept_matches] == ["lesson", "skill-a", "guard"]
     assert kept_predicted == []
-
-
-def test_treatment_bm25_threshold_only_tightens_skills(hook, monkeypatch):
-    lessons = []
-    for index in range(100):
-        is_skill = index < 2
-        lessons.append(
-            {
-                "path": f"{'skill' if is_skill else 'lesson'}-{index}",
-                "title": f"Candidate {index}",
-                "keywords": [],
-                "patterns": [],
-                "skill_name": None,
-                "is_skill": is_skill,
-            }
-        )
-    monkeypatch.setattr(hook, "_bm25_score", lambda *_: 100.0)
-    monkeypatch.setattr(hook, "_bm25_zscores", lambda scores: [4.5] * len(scores))
-    monkeypatch.setattr(hook, "_classify_lesson", lambda path: ("unknown", 1))
-    bm25_index = {"corpus": [[str(index)] for index in range(len(lessons))]}
-
-    result = hook.score_lessons(
-        lessons,
-        "query",
-        max_results=len(lessons),
-        bm25_index=bm25_index,
-        skill_bm25_min_z=5.0,
-    )
-
-    paths = [item["path"] for item in result]
-    assert "skill-0" not in paths
-    assert "skill-1" not in paths
-    assert "lesson-2" in paths
 
 
 # --- session state ---
@@ -291,70 +228,6 @@ def test_session_state_empty_for_new_session(hook, tmp_path, monkeypatch):
     assert state == {"injected": [], "last_pretool": 0}
 
 
-def test_injection_dial_assignment_logs_once_per_session(hook, tmp_path, monkeypatch):
-    monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "hook-state")
-    monkeypatch.setenv("LESSON_INJECTION_DIAL_LOG_DIR", str(tmp_path / "ledger"))
-    dial = hook.resolve_injection_dial("session-a", "treatment")
-
-    hook.log_injection_dial_assignment("session-a", dial, tmp_path)
-    hook.log_injection_dial_assignment("session-a", dial, tmp_path)
-
-    records: list[dict] = []
-    for path in (tmp_path / "ledger").glob("*.jsonl"):
-        records.extend(json.loads(line) for line in path.read_text().splitlines())
-    assert len(records) == 1
-    assert records[0]["session_id"] == "session-a"
-    assert records[0]["experiment"] == "skill-injection-dial-v1"
-    assert records[0]["arm"] == "treatment"
-
-
-def test_injection_dial_log_retries_after_append_failure(hook, tmp_path, monkeypatch):
-    """A failed ledger append must not poison the once-per-session marker."""
-    monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "hook-state")
-    # A regular file where the ledger directory should be makes mkdir fail.
-    blocked = tmp_path / "blocked"
-    blocked.write_text("not a directory")
-    monkeypatch.setenv("LESSON_INJECTION_DIAL_LOG_DIR", str(blocked / "ledger"))
-    dial = hook.resolve_injection_dial("session-b", "treatment")
-
-    hook.log_injection_dial_assignment("session-b", dial, tmp_path)
-    marker = hook._dial_marker_file("session-b")
-    assert not marker.exists(), "marker must be cleared so the write is retried"
-
-    good = tmp_path / "ledger"
-    monkeypatch.setenv("LESSON_INJECTION_DIAL_LOG_DIR", str(good))
-    hook.log_injection_dial_assignment("session-b", dial, tmp_path)
-
-    records: list[dict] = []
-    for path in good.glob("*.jsonl"):
-        records.extend(json.loads(line) for line in path.read_text().splitlines())
-    assert len(records) == 1
-    assert records[0]["session_id"] == "session-b"
-
-
-def test_injection_dial_marker_is_keyed_on_raw_session_id(hook, tmp_path, monkeypatch):
-    """Lossy-sanitized ids ('a/b' vs 'a_b') must not share a marker.
-
-    ``_state_file`` sanitizes with a lossy regex, so the old marker path let one
-    session suppress another's ledger record and break that session's arm join.
-    """
-    monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "hook-state")
-    monkeypatch.setenv("LESSON_INJECTION_DIAL_LOG_DIR", str(tmp_path / "ledger"))
-    dial = hook.resolve_injection_dial("session-a", "treatment")
-
-    # The hazard: the sanitized session-state paths are identical.
-    assert hook._state_file("a/b") == hook._state_file("a_b")
-    assert hook._dial_marker_file("a/b") != hook._dial_marker_file("a_b")
-
-    hook.log_injection_dial_assignment("a/b", dial, tmp_path)
-    hook.log_injection_dial_assignment("a_b", dial, tmp_path)
-
-    records: list[dict] = []
-    for path in (tmp_path / "ledger").glob("*.jsonl"):
-        records.extend(json.loads(line) for line in path.read_text().splitlines())
-    assert {record["session_id"] for record in records} == {"a/b", "a_b"}
-
-
 def test_main_applies_skill_cap_after_dropout(hook, tmp_path, monkeypatch):
     """A skill withheld by dropout must not consume the treatment cap budget.
 
@@ -365,12 +238,11 @@ def test_main_applies_skill_cap_after_dropout(hook, tmp_path, monkeypatch):
     import io
 
     monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "state")
-    monkeypatch.setenv("LESSON_INJECTION_DIAL_EXPERIMENT", "treatment")
     monkeypatch.setattr(hook, "get_workspace", lambda: tmp_path)
 
     lessons = [
-        {"path": "skill-a", "title": "A", "is_skill": True},
-        {"path": "skill-b", "title": "B", "is_skill": True},
+        {"path": "skill-a", "title": "A", "is_skill": True, "score": 1.0},
+        {"path": "skill-b", "title": "B", "is_skill": True, "score": 1.0},
     ]
     monkeypatch.setattr(hook, "load_lesson_dirs", lambda ws: [tmp_path])
     monkeypatch.setattr(hook, "scan_lessons", lambda dirs: lessons)
@@ -378,17 +250,18 @@ def test_main_applies_skill_cap_after_dropout(hook, tmp_path, monkeypatch):
     monkeypatch.setattr(hook, "detect_session_category", lambda: None)
     monkeypatch.setattr(hook, "filter_by_harness", lambda items, harness: items)
     monkeypatch.setattr(hook, "filter_by_session_category", lambda items, cat: items)
-    monkeypatch.setattr(hook, "_build_bm25_index", lambda items: None)
     monkeypatch.setattr(hook, "get_already_injected", lambda sid, tp=None: set())
     monkeypatch.setattr(hook, "score_lessons", lambda *a, **k: list(lessons))
     monkeypatch.setattr(
         hook,
         "get_predicted_lessons",
-        lambda *a, **k: [{"path": "skill-c", "title": "C", "is_skill": True}],
+        lambda *a, **k: [
+            {"path": "skill-c", "title": "C", "is_skill": True, "score": 1.0}
+        ],
     )
     monkeypatch.setattr(hook, "filter_held_out_lessons", lambda items, holdout: items)
 
-    def fake_dropout(matches, predicted, sid, ws):
+    def fake_dropout(matches, predicted, sid, ws, **kwargs):
         # Simulate class-aware dropout withholding skill-a this invocation.
         return [m for m in matches if m["path"] != "skill-a"], predicted
 
@@ -959,192 +832,8 @@ def test_detect_session_category_none_when_unset(hook, monkeypatch):
 
 
 # --- BM25 scoring ---
-
-
-def test_bm25_index_built_from_lessons(hook, tmp_path):
-    """_build_bm25_index returns a valid index with corpus matching lesson count."""
-    lessons_dir = tmp_path / "lessons"
-    lessons_dir.mkdir()
-    for i in range(3):
-        (lessons_dir / f"lesson{i}.md").write_text(
-            f"---\ndescription: lesson about topic {i}\nmatch:\n  keywords:\n    - kw{i}\nstatus: active\n---\n# Lesson {i}\n\nContent.\n"
-        )
-    lessons = hook.scan_lessons([lessons_dir])
-    index = hook._build_bm25_index(lessons)
-    assert len(index["corpus"]) == 3
-    assert index["N"] == 3
-    assert index["avg_dl"] > 0
-
-
-def test_bm25_score_relevant_higher_than_unrelated(hook):
-    """_bm25_score gives higher scores to relevant docs than unrelated ones."""
-    doc_relevant = ["python", "merge", "conflict", "resolution"]
-    doc_unrelated = ["javascript", "async", "promise", "then"]
-    index = {
-        "corpus": [doc_relevant, doc_unrelated],
-        "df": {
-            "python": 1,
-            "merge": 1,
-            "conflict": 1,
-            "resolution": 1,
-            "javascript": 1,
-            "async": 1,
-            "promise": 1,
-            "then": 1,
-        },
-        "N": 2,
-        "avg_dl": 4.0,
-    }
-    query = ["merge", "conflict"]
-    score_relevant = hook._bm25_score(query, doc_relevant, index)
-    score_unrelated = hook._bm25_score(query, doc_unrelated, index)
-    assert score_relevant > score_unrelated
-    assert score_unrelated == 0.0
-
-
-def test_score_lessons_with_bm25_index(hook, tmp_path):
-    """score_lessons accepts bm25_index and tags a standout semantic match.
-
-    BM25 is gated relative to the other lessons' scores, so this needs a corpus
-    with something to stand out from — a single-lesson corpus admits nothing.
-    """
-    lessons_dir = _bm25_corpus(tmp_path)
-    (lessons_dir / "lesson.md").write_text(
-        "---\ndescription: handles merge conflict resolution\nmatch:\n  keywords:\n    - merge conflict\nstatus: active\n---\n# Merge Lesson\n\nContent.\n"
-    )
-    lessons = hook.scan_lessons([lessons_dir])
-    index = hook._build_bm25_index(lessons)
-    results = hook.score_lessons(lessons, "merge conflict resolution", bm25_index=index)
-    assert results
-    # BM25 match tag should appear in matched_by
-    has_bm25 = any("bm25" in tag for tag in results[0].get("matched_by", []))
-    assert has_bm25
-
-
-def _bm25_corpus(tmp_path, n_filler: int = 30):
-    """Lesson dir with one clearly-relevant lesson plus generic filler."""
-    lessons_dir = tmp_path / "lessons"
-    lessons_dir.mkdir()
-    (lessons_dir / "target.md").write_text(
-        "---\ndescription: resolving rebase merge conflict hunks in git\n"
-        "match:\n  keywords:\n    - zzztargetkw\n"
-        "status: active\n---\n# Merge Conflict Lesson\n\nContent.\n"
-    )
-    for i in range(n_filler):
-        (lessons_dir / f"filler{i}.md").write_text(
-            f"---\ndescription: generic workspace note number {i} about running "
-            f"scripts and tools\nmatch:\n  keywords:\n    - zzzfillerkw{i}\n"
-            f"status: active\n---\n# Filler {i}\n\nContent.\n"
-        )
-    return lessons_dir
-
-
-def test_bm25_min_z_scales_with_corpus_size(hook):
-    """A fixed z-floor is unreachable on small corpora, so it must scale down."""
-    # z cannot exceed (n-1)/sqrt(n); below ~17 lessons a flat 4.0 never fires.
-    # 1-2 overlapping lessons => discriminative query, admitted on the raw floor
-    assert hook._bm25_min_z(2) == float("-inf")
-    assert hook._bm25_min_z(5) < hook._BM25_MIN_Z
-    assert hook._bm25_min_z(5) <= 0.8 * (5 - 1) / (5**0.5) + 1e-9
-    assert hook._bm25_min_z(500) == hook._BM25_MIN_Z  # large corpus: flat floor
-
-
-def test_bm25_zscores_standardize_against_nonzero_scores(hook):
-    """Zero-scoring docs get z=0; a clear outlier gets a large positive z."""
-    zs = hook._bm25_zscores([0.0, 10.0, 10.0, 10.0, 100.0])
-    assert zs[0] == 0.0
-    assert zs[4] > zs[1] > 0 or zs[1] < 0
-    assert zs[4] == max(zs)
-
-
-def test_bm25_gate_is_scale_free_across_prompt_lengths(hook, tmp_path):
-    """Padding a prompt with unrelated text must not admit more BM25 matches.
-
-    Raw BM25 grows with query length, so the previous absolute floor of 0.8
-    admitted essentially every lesson on long prompts.
-    """
-    lessons = hook.scan_lessons([_bm25_corpus(tmp_path)])
-    index = hook._build_bm25_index(lessons)
-
-    short = hook.score_lessons(
-        lessons, "rebase merge conflict hunks", max_results=50, bm25_index=index
-    )
-    padded = hook.score_lessons(
-        lessons,
-        "rebase merge conflict hunks " + "generic workspace note scripts tools " * 40,
-        max_results=50,
-        bm25_index=index,
-    )
-    assert len(padded) <= len(short)
-    # And the long prompt must not admit most of the corpus.
-    assert len(padded) < len(lessons) / 2
-
-
-def test_bm25_ranking_preserved_with_two_scoring_lessons(hook, tmp_path):
-    """With exactly two BM25-scoring lessons, both must appear and the stronger must rank first.
-
-    When n_nonzero==2, bm_min_z==-inf (both admitted on raw floor alone) and
-    z-scores are exactly ±1.  Using bm_z directly floors the weaker lesson to
-    max(-1, 0)=0 and drops it from results despite admission — that was the bug.
-    The fix uses max(bm_z, 0.5) for n==2 so the weaker lesson still contributes
-    a positive 0.5 while the stronger gets 1.0, preserving ranking.
-    """
-    lessons_dir = tmp_path / "lessons"
-    lessons_dir.mkdir()
-    # strong: many target terms → will dominate BM25 for this query
-    (lessons_dir / "strong.md").write_text(
-        "---\ndescription: rebase merge conflict resolution hunks diff\n"
-        "match:\n  keywords:\n    - zzzstrongkw\nstatus: active\n---\n# Strong\n\n"
-        "Merge conflicts in rebase sessions: hunks, diff, resolution.\n"
-    )
-    # weak: only one incidental term
-    (lessons_dir / "weak.md").write_text(
-        "---\ndescription: merge overview general\n"
-        "match:\n  keywords:\n    - zzzweakkw\nstatus: active\n---\n# Weak\n\n"
-        "General merge note.\n"
-    )
-    lessons = hook.scan_lessons([lessons_dir])
-    assert len(lessons) == 2
-
-    index = hook._build_bm25_index(lessons)
-    results = hook.score_lessons(
-        lessons,
-        "rebase merge conflict resolution hunks",
-        max_results=5,
-        bm25_index=index,
-    )
-    # Both lessons must appear: the weaker admitted match may not be dropped.
-    assert len(results) == 2, (
-        f"both lessons should appear in results, got "
-        f"{[r['path'].rsplit('/', 1)[-1] for r in results]}"
-    )
-    scores = {r["path"].rsplit("/", 1)[-1]: r["score"] for r in results}
-    assert (
-        scores["strong.md"] > scores["weak.md"]
-    ), f"strong.md should outrank weak.md but scores were {scores}"
-
-
-def test_bm25_contribution_does_not_swamp_keyword_matches(hook, tmp_path):
-    """A keyword-matching lesson must outrank a purely semantic neighbour.
-
-    Raw BM25 runs into the hundreds on long prompts; adding 0.4x the raw score
-    buried keyword/pattern matches (worth 1.0-1.5 each) in the ranking.
-    """
-    lessons_dir = _bm25_corpus(tmp_path)
-    (lessons_dir / "keyworded.md").write_text(
-        "---\ndescription: unrelated topic entirely\nmatch:\n  keywords:\n"
-        '    - "merge conflict"\nstatus: active\n---\n# Keyworded\n\nContent.\n'
-    )
-    lessons = hook.scan_lessons([lessons_dir])
-    index = hook._build_bm25_index(lessons)
-
-    prompt = "help me with a merge conflict during rebase " + "git hunks " * 50
-    results = hook.score_lessons(lessons, prompt, max_results=5, bm25_index=index)
-    assert results
-    assert "keyworded" in results[0]["path"], (
-        f"keyword match should rank first, got {results[0]['path']} "
-        f"({results[0]['matched_by']})"
-    )
+# Note: tests for _build_bm25_index, _bm25_score, _bm25_min_z, _bm25_zscores
+# belong in gptme-rag tests — those functions moved to gptme_rag.lesson_matcher.
 
 
 def test_bm25_min_raw_floor_calibration(hook):
@@ -1157,59 +846,6 @@ def test_bm25_min_raw_floor_calibration(hook):
     assert hook._BM25_MIN_RAW >= 40.0, (
         f"_BM25_MIN_RAW ({hook._BM25_MIN_RAW}) regressed below the recalibrated "
         f"floor of 40.0 — restore or re-calibrate"
-    )
-
-
-def test_bm25_corpus_scale_bypass_admits_relevant_lesson(hook, tmp_path):
-    """Small-corpus bypass must admit a relevant lesson when no score reaches the production floor.
-
-    BM25 raw scores scale with corpus size via IDF.  A small fork or per-project
-    lesson set may have scores well below 40.0 even for genuinely relevant lessons.
-    When max(bm_scores) < _BM25_MIN_RAW the corpus is operating at a different
-    IDF scale; the raw floor is bypassed and z-score alone gates admission.
-    """
-    lessons_dir = tmp_path / "lessons"
-    lessons_dir.mkdir()
-    # Two-lesson corpus: keeps IDF low so scores stay below 40.0.
-    (lessons_dir / "target.md").write_text(
-        "---\ndescription: rebase merge conflict resolution\n"
-        "match:\n  keywords:\n    - zzzuniquekw\nstatus: active\n---\n# Target\n\n"
-        "Resolving merge conflicts during git rebase: hunks, diff, resolution.\n"
-    )
-    (lessons_dir / "unrelated.md").write_text(
-        "---\ndescription: python packaging wheel build\n"
-        "match:\n  keywords:\n    - zzzotherkw\nstatus: active\n---\n# Unrelated\n\n"
-        "Python wheel packaging and build configuration.\n"
-    )
-    lessons = hook.scan_lessons([lessons_dir])
-    index = hook._build_bm25_index(lessons)
-
-    # Verify this corpus actually produces below-floor scores (the test premise).
-    scores = [
-        hook._bm25_score(
-            ["rebase", "merge", "conflict", "resolution"],
-            doc_terms,
-            index,
-        )
-        for doc_terms in index["corpus"]
-    ]
-    assert max(scores) < hook._BM25_MIN_RAW, (
-        f"test premise failed: max BM25 score {max(scores):.2f} already exceeds "
-        f"the production floor {hook._BM25_MIN_RAW} — corpus is not small enough "
-        f"to exercise the bypass"
-    )
-
-    # The relevant lesson must still be admitted via the corpus-scale bypass.
-    results = hook.score_lessons(
-        lessons,
-        "rebase merge conflict resolution",
-        max_results=5,
-        bm25_index=index,
-    )
-    matched_names = [r["path"].rsplit("/", 1)[-1] for r in results]
-    assert "target.md" in matched_names, (
-        f"relevant lesson was silently filtered by the raw floor despite "
-        f"corpus operating at a different IDF scale; results: {matched_names}"
     )
 
 

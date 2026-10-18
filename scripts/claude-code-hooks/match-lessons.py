@@ -6,45 +6,21 @@ Claude Code hook for two events:
 - PreToolUse: matches against tool input (file paths, commands, search patterns)
   AND recent transcript context (tool outputs, assistant responses)
 
-The PreToolUse transcript context means lessons fire on *what happened* (e.g.
-"merge conflicts" in Bash output → conflict-resolution lesson), not only on
-*what's being requested* in the tool call. UserPromptSubmit fires once at
-session start, so PreToolUse is the primary trigger for autonomous runs.
+Matching (scan, keyword/wildcard, session_categories, BM25) is delegated to
+``gptme_rag.lesson_matcher``. This file is the harness wrapper: workspace
+discovery, Thompson sampling, co-occurrence prediction, holdout/dropout,
+session dedup, trajectory logging, and the Claude Code I/O envelope.
+Keyworded memories use the shared ``gptme.memory.match`` API and the same
+injection bounds, without lesson BM25 or skill-name matching.
 
-Both events inject relevant lessons as additionalContext for Claude Code.
-This replicates gptme's keyword-based lesson injection for Claude Code sessions.
-
-Lesson dirs are read from gptme.toml [lessons] dirs (single source of truth).
-Matching uses the same keyword/wildcard logic as gptme's LessonMatcher.
 Already-injected lessons are tracked via a session state file to avoid duplicates.
 
 ## Installation
 
-Copy or symlink this file into your agent workspace:
-    cp match-lessons.py /path/to/workspace/.claude/hooks/match-lessons.py
+Register in `.claude/settings.json`. Prefer the workspace venv interpreter
+(this hook re-execs into `.venv/bin/python3` if invoked as system python3):
 
-Then register it in your workspace Claude Code settings
-(.claude/settings.json in the workspace root):
-
-    {
-      "hooks": {
-        "UserPromptSubmit": [{
-          "hooks": [{
-            "type": "command",
-            "command": "python3 $CLAUDE_PROJECT_DIR/.claude/hooks/match-lessons.py",
-            "timeout": 10
-          }]
-        }],
-        "PreToolUse": [{
-          "matcher": "Read|Bash|Grep|WebFetch|WebSearch",
-          "hooks": [{
-            "type": "command",
-            "command": "python3 $CLAUDE_PROJECT_DIR/.claude/hooks/match-lessons.py",
-            "timeout": 10
-          }]
-        }]
-      }
-    }
+    python3 $CLAUDE_PROJECT_DIR/.claude/hooks/match-lessons.py
 
 The hook auto-discovers your workspace root (the directory containing gptme.toml)
 and reads lesson dirs from [lessons] dirs in that config file.
@@ -53,15 +29,258 @@ State directories (Thompson sampling, predictions, trajectories) are stored
 under workspace/state/ and created automatically on first use.
 """
 
-import hashlib
+from __future__ import annotations
+
+import inspect
 import json
 import math
 import os
 import random
 import re
+import selectors
+import signal
+import subprocess
 import sys
+import tempfile
 import time
+import uuid
 from pathlib import Path
+
+# Re-exec under the workspace venv BEFORE importing gptme-rag. Claude Code
+# invokes this hook as system `python3`, which does not have gptme-rag.
+# Tests import this module (not as __main__) and already run under the venv.
+if __name__ == "__main__":
+    _reexec_flag = "MATCH_LESSONS_VENV_REEXEC"
+    if os.environ.get(_reexec_flag) != "1":
+        _here = Path(__file__).resolve()
+        _ws: Path | None = None
+        for _p in [_here.parent, *_here.parents]:
+            if (_p / "gptme.toml").exists():
+                _ws = _p
+                break
+        if _ws is None:
+            for _p in [Path.cwd(), *Path.cwd().parents]:
+                if (_p / "gptme.toml").exists():
+                    _ws = _p
+                    break
+        _venv_root = (_ws / ".venv") if _ws is not None else None
+        _venv_py = (_venv_root / "bin" / "python3") if _venv_root is not None else None
+        # Compare sys.prefix, not sys.executable: .venv/bin/python3 is often a
+        # symlink to system python3, so resolve() would skip the re-exec and
+        # the hook would run without gptme-rag on sys.path.
+        _already_in_venv = (
+            _venv_root is not None
+            and Path(sys.prefix).resolve() == _venv_root.resolve()
+        )
+        if (
+            _venv_py is not None
+            and _venv_py.is_file()
+            and os.access(_venv_py, os.X_OK)
+            and not _already_in_venv
+        ):
+            os.environ[_reexec_flag] = "1"
+            os.execv(str(_venv_py), [str(_venv_py), *sys.argv])
+
+TRIVIAL_PROBE_PROMPTS = {"hello", "hi", "ping", "pong", "test"}
+_STDIN_CACHE: str | None = None
+
+
+def _is_trivial_probe_prompt(prompt: str) -> bool:
+    normalized = " ".join(prompt.lower().split()).strip(" .!?")
+    return normalized in TRIVIAL_PROBE_PROMPTS
+
+
+def _trivial_user_prompt_event(raw: str) -> str | None:
+    try:
+        hook_input = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(hook_input, dict):
+        return None
+    event_type = str(hook_input.get("hook_event_name", "UserPromptSubmit"))
+    if event_type != "UserPromptSubmit":
+        return None
+    prompt = str(hook_input.get("prompt", "") or "")
+    return event_type if _is_trivial_probe_prompt(prompt) else None
+
+
+# --- Emission receipts -------------------------------------------------------
+# One versioned row per hook invocation that reached an output decision, written
+# AFTER the stdout write+flush succeeded. ``bytes`` is the UTF-8 length of the
+# exact final ``additionalContext`` string (0 for measured-empty outputs). Raw
+# text is never logged. Sibling file so legacy per-document consumers of
+# ``cc-session-*-lessons.jsonl`` never see aggregate rows. Emission is not proof
+# the harness delivered the context. Defined before the trivial fast path so it
+# can receipt without the heavy imports below.
+RECEIPT_VERSION = 1
+
+
+def _get_lesson_receipts_file(session_id: str) -> Path:
+    """Path of the emission-receipt JSONL: /tmp/cc-session-{id}-lessons-receipts.jsonl."""
+    tmpdir = Path(os.environ.get("TMPDIR", "/tmp"))
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)
+    return tmpdir / f"cc-session-{safe_id}-lessons-receipts.jsonl"
+
+
+def _write_emission_receipt(
+    session_id: str,
+    hook_point: str,
+    context_bytes: int,
+    outcome: str,
+    reason: str = "",
+    event_id: str | None = None,
+) -> dict | None:
+    """Append one receipt. Fail-open: a logging failure never affects the hook."""
+    try:
+        record = {
+            "record_type": "emission_receipt",
+            "receipt_version": RECEIPT_VERSION,
+            "event_id": event_id or uuid.uuid4().hex,
+            "session_id": session_id,
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "hook": hook_point,
+            "outcome": outcome,
+            "bytes": context_bytes,
+        }
+        if reason:
+            record["reason"] = reason
+        with open(_get_lesson_receipts_file(session_id), "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+        return record
+    except Exception:
+        return None  # Never fail the hook for logging
+
+
+def _emit_context(
+    event_type: str,
+    session_id: str,
+    context: str,
+    *,
+    precision_items: list[dict] | None = None,
+    intent: str = "",
+) -> None:
+    """Write the additionalContext payload, then receipt its exact byte size."""
+    result = {
+        "hookSpecificOutput": {
+            "hookEventName": event_type,
+            "additionalContext": context,
+        }
+    }
+    json.dump(result, sys.stdout)
+    sys.stdout.flush()
+    receipt = _write_emission_receipt(
+        session_id, event_type, len(context.encode("utf-8")), "emitted"
+    )
+    # Raw text is opt-in, private, and tied to this successful final receipt.
+    # Missing enrollment/intent/telemetry is unknown precision, never zero.
+    private_dir = os.environ.get("BOB_LESSON_PRECISION_DIR", "")
+    enrollment_dir = os.environ.get("BOB_LESSON_ENROLLMENT_REHEARSAL_DIR", "")
+    if private_dir and enrollment_dir and receipt and precision_items and intent:
+        try:
+            from context.lesson_precision import record_items
+
+            run_id = os.environ.get("BOB_SESSION_ID", "")
+            if str(uuid.UUID(run_id)) != run_id:
+                return
+            enrollment = json.loads(
+                (Path(enrollment_dir) / f"{run_id}.json").read_text()
+            )
+            if (
+                enrollment.get("runtime") != "claude-code"
+                or enrollment.get("run_id") != run_id
+            ):
+                return
+            record_items(
+                Path(private_dir), enrollment, receipt, intent, precision_items
+            )
+        except Exception:
+            pass  # Private measurement failure must not change hook output.
+
+
+def _emit_empty_fast(event_name: str, session_id: str | None = None) -> None:
+    if event_name == "UserPromptSubmit":
+        json.dump({"hookSpecificOutput": {"hookEventName": event_name}}, sys.stdout)
+        sys.stdout.flush()
+        if session_id:
+            _write_emission_receipt(session_id, event_name, 0, "empty", "trivial_probe")
+
+
+def _session_id_of(raw: str) -> str | None:
+    try:
+        sid = json.loads(raw).get("session_id")
+    except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+        return None
+    return sid if isinstance(sid, str) and sid else None
+
+
+if __name__ == "__main__":
+    try:
+        _STDIN_CACHE = sys.stdin.read()
+    except OSError:
+        _STDIN_CACHE = ""
+    _trivial_event = _trivial_user_prompt_event(_STDIN_CACHE)
+    if _trivial_event:
+        _emit_empty_fast(_trivial_event, _session_id_of(_STDIN_CACHE))
+        sys.exit(0)
+
+try:
+    from gptme_rag.lesson_matcher import (
+        BM25_MIN_RAW as _BM25_MIN_RAW,
+    )
+    from gptme_rag.lesson_matcher import (
+        effective_status,
+        extract_frontmatter,
+        filter_by_harness,
+        filter_by_repo,
+        filter_by_session_category,
+        keyword_to_regex,
+        match_keyword,
+        scan_lessons,
+    )
+    from gptme_rag.lesson_matcher import (
+        score_lessons as _upstream_score_lessons,
+    )
+
+    _GPTME_RAG_AVAILABLE = True
+except ImportError:  # pragma: no cover — degrade path when venv is missing
+    _GPTME_RAG_AVAILABLE = False
+    _BM25_MIN_RAW = 40.0
+
+    def effective_status(frontmatter: dict) -> str:
+        return str(
+            frontmatter.get("metadata", {}).get("status")
+            or frontmatter.get("status")
+            or "active"
+        )
+
+    def extract_frontmatter(content: str) -> tuple[dict, str]:
+        return {}, content
+
+    def filter_by_harness(lessons: list[dict], harness: str) -> list[dict]:
+        return lessons
+
+    def filter_by_session_category(
+        lessons: list[dict], category: str | None = None
+    ) -> list[dict]:
+        return lessons
+
+    def filter_by_repo(
+        lessons: list[dict], current_repo: str | None = None
+    ) -> list[dict]:
+        return lessons
+
+    def keyword_to_regex(keyword: str) -> re.Pattern[str] | None:
+        return None
+
+    def match_keyword(keyword: str, text_lower: str) -> bool:
+        return False
+
+    def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
+        return []
+
+    def _upstream_score_lessons(*_args, **_kwargs) -> list[dict]:
+        return []
+
 
 # PreToolUse throttle: minimum seconds between lesson matches
 PRETOOL_COOLDOWN_SECONDS = 15
@@ -73,146 +292,62 @@ MAX_PRETOOL_LESSONS = 3
 MAX_PROMPT_LESSONS = 5
 # Maximum predicted lessons to inject per event (on top of keyword matches)
 MAX_PREDICTED_LESSONS = 2
-# Opt-in A/B test for reducing advisory skill injection. Unset keeps the exact
-# pre-experiment behavior. Accepted values: random/1/true, control, treatment.
-INJECTION_DIAL_ENV = "LESSON_INJECTION_DIAL_EXPERIMENT"
-INJECTION_DIAL_EXPERIMENT = "skill-injection-dial-v1"
-TREATMENT_PROMPT_SKILL_CAP = 2
-TREATMENT_PRETOOL_SKILL_CAP = 1
-TREATMENT_SKILL_BM25_MIN_Z = 5.0
 # Minimum lift for a prediction to be injected (from model, but also enforced here)
 MIN_PREDICTION_LIFT = 2.0
 # Minimum TS posterior mean for predicted lessons (deprioritize known-noise lessons)
 MIN_PREDICTION_TS = 0.30
+# Hard internal budget. The harness timeout DISCARDS hook output; we must
+# finish (or degrade to empty) before that happens. 8s leaves headroom under
+# the 10s documented timeout and the 30s currently configured in settings.
+HOOK_BUDGET_SECONDS = float(os.environ.get("MATCH_LESSONS_HOOK_BUDGET", "8.0"))
 # State directory for cross-invocation dedup (in /tmp, not workspace)
 STATE_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "claude-lesson-match"
-# Directories inside lesson dirs that should never be scanned for lessons.
-# node_modules: npm packages (e.g. Playwright) ship *.agent.md skill files
-# that get injected as harmful lessons when they match on keywords.
-_SKIP_DIR_PARTS = frozenset({"node_modules", ".git", "__pycache__", ".venv"})
-_SHORT_DESCRIPTOR_TOKENS = {
-    "ai",
-    "api",
-    "ci",
-    "cli",
-    "css",
-    "gui",
-    "html",
-    "json",
-    "llm",
-    "pr",
-    "ui",
-    "ux",
-    "vm",
-    "xml",
-    "yaml",
-}
-_DESCRIPTOR_STOPWORDS = {
-    "about",
-    "after",
-    "agent",
-    "agents",
-    "and",
-    "any",
-    "are",
-    "before",
-    "build",
-    "can",
-    "code",
-    "debug",
-    "does",
-    "for",
-    "from",
-    "get",
-    "how",
-    "into",
-    "just",
-    "make",
-    "need",
-    "only",
-    "other",
-    "our",
-    "out",
-    "over",
-    "process",
-    "project",
-    "run",
-    "set",
-    "should",
-    "task",
-    "than",
-    "that",
-    "the",
-    "their",
-    "them",
-    "there",
-    "these",
-    "this",
-    "those",
-    "through",
-    "tool",
-    "tools",
-    "use",
-    "used",
-    "using",
-    "when",
-    "where",
-    "which",
-    "with",
-    "work",
-    "your",
-}
-_DESCRIPTOR_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_/-]*")
+
+# Production advisory-skill defaults after the skill-injection-dial-v1 readout.
+MAX_PROMPT_SKILLS = 2
+MAX_PRETOOL_SKILLS = 1
+SKILL_BM25_MIN_Z = 5.0
 
 
-def resolve_injection_dial(
-    session_id: str, value: str | None = None
-) -> dict[str, object]:
-    """Resolve the opt-in skill-injection experiment for one session.
+def _skill_bm25_supported() -> bool:
+    """Only pass skill thresholds when the shared matcher supports exemptions."""
+    return _GPTME_RAG_AVAILABLE and {
+        "skill_bm25_min_z",
+        "skill_bm25_exempt_paths",
+    }.issubset(inspect.signature(_upstream_score_lessons).parameters)
 
-    Random assignment is deterministic by session ID, so every hook invocation
-    in a Claude Code session uses the same arm. Unset/disabled and invalid
-    values fail closed to the historical control behavior.
-    """
-    raw = (
-        (os.environ.get(INJECTION_DIAL_ENV, "") if value is None else value)
-        .strip()
-        .lower()
+
+def _bm25_min_z_supported() -> bool:
+    """Whether the upstream score_lessons accepts the bm25_min_z override."""
+    return (
+        _GPTME_RAG_AVAILABLE
+        and "bm25_min_z" in inspect.signature(_upstream_score_lessons).parameters
     )
-    disabled = {"", "0", "false", "off", "disabled"}
-    random_values = {"1", "true", "on", "random"}
 
-    if raw in disabled:
-        enabled = False
-        arm = "control"
-        assignment = "disabled"
-    elif raw in {"control", "treatment"}:
-        enabled = True
-        arm = raw
-        assignment = "forced"
-    elif raw in random_values and session_id and session_id != "unknown":
-        enabled = True
-        digest = hashlib.sha256(
-            f"{INJECTION_DIAL_EXPERIMENT}:{session_id}".encode()
-        ).digest()
-        arm = "treatment" if digest[0] & 1 else "control"
-        assignment = "random"
-    else:
-        enabled = False
-        arm = "control"
-        assignment = "invalid" if raw not in random_values else "missing_session_id"
 
-    treatment = enabled and arm == "treatment"
-    return {
-        "schema_version": 1,
-        "experiment": INJECTION_DIAL_EXPERIMENT,
-        "enabled": enabled,
-        "arm": arm,
-        "assignment": assignment,
-        "prompt_skill_cap": TREATMENT_PROMPT_SKILL_CAP if treatment else None,
-        "pretool_skill_cap": TREATMENT_PRETOOL_SKILL_CAP if treatment else None,
-        "skill_bm25_min_z": TREATMENT_SKILL_BM25_MIN_Z if treatment else None,
-    }
+def apply_skill_cap(
+    matches: list[dict], predicted: list[dict], cap: int | None
+) -> tuple[list[dict], list[dict]]:
+    """Limit new advisory skills, never ordinary lessons, memories or guards."""
+    if cap is None:
+        return matches, predicted
+    remaining = max(cap, 0)
+
+    def keep(items: list[dict]) -> list[dict]:
+        nonlocal remaining
+        kept = []
+        for item in items:
+            advisory = (
+                item.get("is_skill") and _classify_lesson(item["path"])[0] != "exempt"
+            )
+            if not advisory:
+                kept.append(item)
+            elif remaining:
+                kept.append(item)
+                remaining -= 1
+        return kept
+
+    return keep(matches), keep(predicted)
 
 
 # --- Workspace discovery (all state paths derived from here) ---
@@ -421,416 +556,6 @@ def load_lesson_dirs(workspace: Path) -> list[Path]:
     return [workspace / d for d in dirs]
 
 
-def keyword_to_regex(keyword: str) -> "re.Pattern[str] | None":
-    """Convert a keyword (possibly with wildcards) to a compiled regex.
-
-    Same logic as gptme's _keyword_to_pattern:
-    - '*' becomes r'\\w*' (zero or more word chars)
-    - A bare '*' alone returns None (too broad)
-    """
-    keyword = keyword.strip()
-    if not keyword or keyword == "*":
-        return None
-
-    # Escape everything except *, then replace * with \w*
-    parts = keyword.split("*")
-    escaped = r"\w*".join(re.escape(p) for p in parts)
-    try:
-        return re.compile(escaped, re.IGNORECASE)
-    except re.error:
-        return None
-
-
-def match_keyword(keyword: str, text_lower: str) -> bool:
-    """Check if a keyword matches in text (with wildcard support)."""
-    pattern = keyword_to_regex(keyword)
-    if pattern is None:
-        return False
-    return bool(pattern.search(text_lower))
-
-
-def _extract_scalar_frontmatter_field(fm_str: str, field: str) -> str | None:
-    """Extract a simple top-level YAML scalar or block scalar without PyYAML."""
-    lines = fm_str.splitlines()
-    field_pattern = re.compile(rf"^{re.escape(field)}:\s*(.*)$")
-
-    for index, line in enumerate(lines):
-        match = field_pattern.match(line)
-        if not match:
-            continue
-
-        raw_value = match.group(1).strip()
-        if raw_value and raw_value[0] in "|>":
-            block_lines: list[str] = []
-            for next_line in lines[index + 1 :]:
-                if next_line and not next_line.startswith((" ", "\t")):
-                    break
-                block_lines.append(next_line)
-
-            if not block_lines:
-                return ""
-
-            indents = [
-                len(block_line) - len(block_line.lstrip(" "))
-                for block_line in block_lines
-                if block_line.strip()
-            ]
-            trim = min(indents) if indents else 0
-            normalized = [
-                block_line[trim:] if trim else block_line for block_line in block_lines
-            ]
-            text = "\n".join(normalized).strip()
-            if raw_value[0] == ">":
-                return " ".join(
-                    part.strip() for part in text.splitlines() if part.strip()
-                )
-            return text
-
-        value = raw_value
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
-        return value.strip()
-
-    return None
-
-
-def _dedupe_strings(values: list[object]) -> list[str]:
-    """Strip and deduplicate strings while preserving first-seen order."""
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        if not isinstance(value, str):
-            continue
-        cleaned = value.strip()
-        if not cleaned or cleaned in seen:
-            continue
-        seen.add(cleaned)
-        deduped.append(cleaned)
-    return deduped
-
-
-def effective_status(fm: dict) -> str:
-    """Resolve a lesson/skill lifecycle status from top-level or nested metadata.
-
-    The Agent Skills schema has no top-level ``status``, so a deprecated
-    SKILL.md can only record it as ``metadata.status``. Treat either location as
-    authoritative and let any non-active value win, so a deprecation is never
-    silently dropped.
-    """
-    candidates = [fm.get("status")]
-    metadata = fm.get("metadata")
-    if isinstance(metadata, dict):
-        candidates.append(metadata.get("status"))
-    for value in candidates:
-        if value is None:
-            continue
-        if isinstance(value, str):
-            stripped = value.strip()
-            if stripped and stripped != "active":
-                return stripped
-            continue
-        # Malformed non-string status (bool, list, int).  Fail closed: only the
-        # exact string "active" enables injection, so a `status: false` or
-        # `status: [deprecated]` typo cannot silently re-enable a deprecation.
-        return str(value)
-    return "active"
-
-
-def extract_frontmatter(content: str) -> tuple[dict[str, object], str]:
-    """Extract YAML frontmatter and body from markdown."""
-    if not content.startswith("---"):
-        return {}, content
-
-    parts = content.split("---", 2)
-    if len(parts) < 3:
-        return {}, content
-
-    fm_str = parts[1]
-    body = parts[2].strip()
-
-    # Try yaml first, fall back to regex parsing
-    try:
-        import yaml
-
-        fm_yaml = yaml.safe_load(fm_str)
-        return (fm_yaml or {}), body
-    except ImportError:
-        pass
-    except Exception:
-        pass
-
-    # Regex fallback for keywords and status
-    fm: dict[str, object] = {}
-    keywords: list[str] = []
-    inline = re.search(r"keywords:\s*\[(.*?)\]", fm_str, re.DOTALL)
-    if inline:
-        keywords = [kw.strip() for kw in re.findall(r'"([^"]+)"', inline.group(1))]
-    else:
-        keywords = [
-            kw.strip() for kw in re.findall(r'^\s*-\s*"([^"]+)"', fm_str, re.MULTILINE)
-        ]
-
-    if keywords:
-        fm["match"] = {"keywords": keywords}
-
-    # Resolve lifecycle status without PyYAML.  Two independent lookups avoid
-    # false positives from block scalars (e.g. `description: |` whose
-    # continuation lines can contain `status: deprecated` with leading
-    # whitespace and would fool a single anchored-but-not-scoped regex):
-    #
-    # 1. Top-level `status:` — must start at column 0 (no leading whitespace).
-    # 2. `metadata.status` — only within the `metadata:` block's indented body.
-    #
-    # Comment lines are stripped first; the patterns never match them because
-    # the real guard is structural (column-0 vs. metadata-block scope).
-    fm_no_comments = "\n".join(
-        line for line in fm_str.splitlines() if not line.strip().startswith("#")
-    )
-    # (1) Top-level: `^status:` with no leading whitespace.
-    # Strip surrounding quotes so `status: "active"` equals `status: active`.
-    top_statuses = [
-        s.strip("\"'")
-        for s in re.findall(r"^status:\s*(\S+)", fm_no_comments, re.MULTILINE)
-    ]
-    # (2) metadata.status: capture the indented body after `^metadata:` and
-    # search for `status:` within it.  The capture stops at the first
-    # non-indented line, so a `status:` in a sibling block scalar is not
-    # mistakenly included.
-    meta_statuses: list[str] = []
-    meta_m = re.search(
-        r"^metadata:\s*\n((?:[ \t]+\S[^\n]*\n?)*)",
-        fm_no_comments,
-        re.MULTILINE,
-    )
-    if meta_m:
-        meta_statuses = [
-            s.strip("\"'")
-            for s in re.findall(
-                r"^[ \t]+status:\s*(\S+)", meta_m.group(1), re.MULTILINE
-            )
-        ]
-    all_statuses = top_statuses + meta_statuses
-    if all_statuses:
-        non_active = [s for s in all_statuses if s != "active"]
-        fm["status"] = non_active[0] if non_active else all_statuses[0]
-
-    for field in ("name", "description", "when_to_use"):
-        value = _extract_scalar_frontmatter_field(fm_str, field)
-        if value is not None:
-            fm[field] = value
-
-    return fm, body
-
-
-def _string_list(value: object) -> list[str]:
-    """Normalize YAML string-or-list fields into a clean list."""
-    if isinstance(value, str):
-        return [item.strip() for item in value.split(",") if item.strip()]
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    return []
-
-
-def _descriptor_tokens(text: str) -> set[str]:
-    """Tokenize routing descriptors from skill name/description/tags."""
-    tokens: set[str] = set()
-    for raw in _DESCRIPTOR_TOKEN_RE.findall(text.lower()):
-        for part in re.split(r"[-_/]", raw):
-            token = part.strip()
-            if not token:
-                continue
-            if len(token) < 3 and token not in _SHORT_DESCRIPTOR_TOKENS:
-                continue
-            if token not in _DESCRIPTOR_STOPWORDS:
-                tokens.add(token)
-            # Strip trailing "s" for simple plurals, but skip false positives
-            # where the singular is implausibly short or the ending strongly
-            # suggests an irregular/non-plural form (e.g. "status", "access").
-            if (
-                token.endswith("s")
-                and len(token) > 4
-                and not token.endswith("ss")  # "class", "access", "process"
-                and not token.endswith("us")  # "status", "focus"
-                and not token.endswith("is")  # "analysis", "basis"
-            ):
-                singular = token[:-1]
-                if len(singular) >= 3 and singular not in _DESCRIPTOR_STOPWORDS:
-                    tokens.add(singular)
-    return tokens
-
-
-def _score_skill_descriptor(lesson: dict, prompt_lower: str) -> tuple[float, list[str]]:
-    """Score skill routing metadata against prompt text."""
-    if not lesson.get("is_skill"):
-        return 0.0, []
-
-    prompt_tokens = _descriptor_tokens(prompt_lower)
-    if not prompt_tokens:
-        return 0.0, []
-
-    skill_name = str(lesson.get("skill_name") or "")
-    routing_text = str(lesson.get("when_to_use") or lesson.get("description") or "")
-    tags = [str(tag).strip() for tag in lesson.get("tags") or [] if str(tag).strip()]
-
-    name_overlap = prompt_tokens & _descriptor_tokens(skill_name)
-    description_overlap = prompt_tokens & _descriptor_tokens(routing_text)
-    tag_overlap = prompt_tokens & _descriptor_tokens(" ".join(tags))
-    total_overlap = name_overlap | description_overlap | tag_overlap
-
-    if len(total_overlap) < 2:
-        return 0.0, []
-
-    score = 0.0
-    matched_by: list[str] = []
-    if name_overlap:
-        score += min(1.2, 0.6 * len(name_overlap))
-        matched_by.append(f"name:{','.join(sorted(name_overlap)[:3])}")
-    if description_overlap:
-        score += min(1.2, 0.35 * len(description_overlap))
-        matched_by.append(f"description:{','.join(sorted(description_overlap)[:4])}")
-    if tag_overlap:
-        score += min(0.9, 0.45 * len(tag_overlap))
-        matched_by.append(f"tags:{','.join(sorted(tag_overlap)[:3])}")
-    return score, matched_by
-
-
-def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
-    """Scan lesson directories for lesson files with keyword frontmatter.
-
-    Deduplication rules (first-dir-wins, matching gptme#1594 behavior):
-    1. By resolved path: handles symlinks pointing to the same file
-    2. By filename: if lessons/X/foo.md exists, gptme-contrib/lessons/X/foo.md is skipped.
-       Local workspace lessons take priority over shared contrib lessons.
-    """
-    lessons = []
-    seen_paths: set[str] = set()
-    seen_names: set[str] = set()  # filename-based dedup: first dir wins
-
-    for lesson_dir in lesson_dirs:
-        if not lesson_dir.exists():
-            continue
-        for f in sorted(lesson_dir.rglob("*.md")):
-            if f.name == "README.md":
-                continue
-
-            # Skip files inside tool/cache directories — not lesson content.
-            if _SKIP_DIR_PARTS & set(f.relative_to(lesson_dir).parts):
-                continue
-
-            # Dedup by resolved path (handles symlinks across dirs)
-            resolved = str(f.resolve())
-            if resolved in seen_paths:
-                continue
-            seen_paths.add(resolved)
-
-            # Skip archived lessons — but still register their name so that
-            # contrib copies are also suppressed (local archive wins over contrib).
-            # Use relative_to(lesson_dir) so parent path segments (e.g. a workspace
-            # living under /home/alice/archive/…) don't trigger false suppression.
-            if "archive" in f.relative_to(lesson_dir).parts:
-                if f.name != "SKILL.md":
-                    # Only suppress if no active (non-archived) copy exists in this
-                    # lesson_dir. Lexicographic sort puts archive/foo.md before foo.md
-                    # so naively registering here would suppress the active copy.
-                    active_copy = next(
-                        (
-                            p
-                            for p in lesson_dir.rglob(f.name)
-                            if "archive" not in p.relative_to(lesson_dir).parts
-                        ),
-                        None,
-                    )
-                    if active_copy is None:
-                        seen_names.add(f.name)
-                continue
-
-            # Dedup by filename (first lesson dir wins — local overrides contrib).
-            # Exception: SKILL.md files are always different skills, not duplicates.
-            if f.name != "SKILL.md" and f.name in seen_names:
-                continue
-            seen_names.add(f.name)
-
-            try:
-                content = f.read_text(encoding="utf-8")
-            except Exception:
-                continue
-
-            fm, body = extract_frontmatter(content)
-
-            if effective_status(fm) != "active":
-                continue
-
-            match_data = fm.get("match", {})
-            if isinstance(match_data, dict):
-                raw_keywords = match_data.get("keywords", [])
-                raw_patterns = match_data.get("patterns", [])
-            else:
-                raw_keywords = []
-                raw_patterns = []
-
-            if isinstance(raw_keywords, str):
-                raw_keywords = [raw_keywords]
-            keywords = _dedupe_strings(
-                [*raw_keywords, *_string_list(fm.get("keywords"))]
-            )
-
-            if isinstance(raw_patterns, str):
-                raw_patterns = [raw_patterns]
-            patterns = _dedupe_strings(
-                [*raw_patterns, *_string_list(fm.get("patterns"))]
-            )
-
-            skill_name = fm.get("name") if isinstance(fm.get("name"), str) else None
-            lesson_id = fm.get("id") if isinstance(fm.get("id"), str) else None
-            description = (
-                fm.get("description") if isinstance(fm.get("description"), str) else ""
-            )
-            when_to_use = (
-                fm.get("when_to_use") if isinstance(fm.get("when_to_use"), str) else ""
-            )
-            metadata_value = fm.get("metadata")
-            metadata = metadata_value if isinstance(metadata_value, dict) else {}
-            tags = _string_list(metadata.get("tags"))
-            harness_restrict = _string_list(metadata.get("harness"))
-
-            _raw_sc = (
-                match_data.get("session_categories") or []
-                if isinstance(match_data, dict)
-                else []
-            )
-            session_categories = _dedupe_strings(
-                [_raw_sc] if isinstance(_raw_sc, str) else _raw_sc
-            )
-
-            # Need at least some way to match
-            if not keywords and not patterns and not skill_name:
-                continue
-
-            # Extract title from first H1
-            title_match = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
-            title = title_match.group(1).strip() if title_match else f.stem
-
-            lessons.append(
-                {
-                    "path": str(f),
-                    "title": title,
-                    "id": lesson_id,
-                    "keywords": keywords,
-                    "patterns": patterns,
-                    "skill_name": skill_name,
-                    "description": description,
-                    "when_to_use": when_to_use,
-                    "tags": tags,
-                    "harness_restrict": harness_restrict,
-                    "session_categories": session_categories,
-                    "is_skill": f.name == "SKILL.md" or skill_name is not None,
-                    "body": body,
-                    "n_keywords": len(keywords),
-                }
-            )
-    return lessons
-
-
 def detect_harness() -> str:
     """Detect the current runtime harness for lesson applicability filters."""
     if os.environ.get("CLAUDECODE"):
@@ -840,21 +565,7 @@ def detect_harness() -> str:
     return "gptme"
 
 
-def filter_by_harness(lessons: list[dict], harness: str) -> list[dict]:
-    """Keep unrestricted lessons and lessons explicitly allowed for harness."""
-    filtered = []
-    for lesson in lessons:
-        restrict = lesson.get("harness_restrict") or []
-        if not restrict:
-            filtered.append(lesson)
-            continue
-        allowed = {str(value).strip() for value in restrict if str(value).strip()}
-        if harness in allowed:
-            filtered.append(lesson)
-    return filtered
-
-
-def detect_session_category() -> "str | None":
+def detect_session_category() -> str | None:
     """Detect the current session category from environment variables.
 
     Autonomous sessions set CASCADE_CATEGORY via autonomous-run.sh.
@@ -871,25 +582,6 @@ def detect_session_category() -> "str | None":
         if val:
             return val.lower()
     return None
-
-
-def filter_by_session_category(
-    lessons: list[dict], category: "str | None"
-) -> list[dict]:
-    """Keep lessons with no session_categories restriction or matching current category.
-
-    Lessons that explicitly restrict to specific session categories are filtered out
-    when running in a different category, reducing irrelevant lesson injection.
-    If category is unknown (None), only universal lessons (no restriction) pass through.
-    This prevents social/triage/research lessons from injecting when context is unavailable.
-    """
-    filtered = []
-    for lesson in lessons:
-        cats = lesson.get("session_categories") or []
-        # Keep lesson if: (1) no category restriction, or (2) category is known and matches
-        if not cats or (category and category in {c.lower() for c in cats}):
-            filtered.append(lesson)
-    return filtered
 
 
 # --- Thompson sampling ---
@@ -930,7 +622,7 @@ def load_ts_means(lesson_paths: list[str]) -> dict[str, float]:
 # --- Prediction model ---
 
 
-def load_prediction_model() -> "dict | None":
+def load_prediction_model() -> dict | None:
     """Load the co-occurrence prediction model for early lesson injection.
 
     Returns the model dict or None if not available.
@@ -1083,296 +775,143 @@ def get_predicted_lessons(
     return results
 
 
-# --- BM25 semantic scoring ---
+def _has_routing_match(matched_by: list) -> bool:
+    """True if a match carries an explicit routing signal (keyword/pattern/skill).
 
-_BM25_K1 = 1.2
-_BM25_B = 0.75
-_BM25_WEIGHT = 0.4  # additive weight for the normalized BM25 contribution
-
-# Raw BM25 scores scale with query length: a 50-token prompt tops out around 45
-# while a 3000-token prompt tops out around 1200. An absolute floor therefore
-# cannot separate "semantically relevant" from "shares a few common words" —
-# measured on 33 real prompts, the old absolute floor of 0.8 admitted a median
-# of 475 out of 503 lessons, i.e. it never filtered anything.
-#
-# Instead, gate on how far a lesson stands out from the background distribution
-# of *this* query's scores (z = (score - mean) / stdev over nonzero scores).
-# That is scale-free, and it makes "inject nothing" the common case for long
-# generic prompts (which match everything weakly, so nothing stands out) while
-# still admitting the one or two lessons a short focused prompt is really about.
-#
-# 2026-08-05 recalibration: measured BM25 scores on 9,025 real injections (CC hook,
-# 2026-08-05) showed raw scores 3.92–1397.22 (median 60.80). BM25-only injections
-# accounted for 79% of output and dominated the spurious set (precision 0.28 strict).
-# New floor (40) filters bottom ~30% of scores, targeting ~50%+ precision restoration.
-_BM25_MIN_Z = 4.0  # minimum z-score over the per-query score distribution
-_BM25_MIN_RAW = 40.0  # absolute floor (P~30 on 2026-08-05 data), guards degenerate tiny-corpus cases
-# A z-score over n samples cannot exceed (n-1)/sqrt(n), so a fixed z=4 is
-# unreachable below ~17 scoring lessons — which would silently disable the
-# semantic layer for small corpora (forks, per-project lesson sets). Scale the
-# requirement to what is attainable for the corpus actually being scored.
-_BM25_STANDOUT_FRACTION = 0.8
-
-
-def _build_bm25_index(lessons: list[dict]) -> dict:
-    """Build BM25 index over lesson descriptions, titles, and keywords.
-
-    Used to semantically score lessons against match text, complementing
-    keyword matching with soft semantic overlap detection.
+    Descriptor-overlap and BM25 matches are prefixed ``name:``/``description:``/
+    ``tags:``/``bm25:``; a raw keyword string, ``pattern:``, or ``skill:`` entry
+    means the prompt explicitly invoked the lesson. Used to gate keyword-only
+    skills so generic descriptor/BM25 overlap cannot inject them.
     """
-    corpus: list[list[str]] = []
-    for lesson in lessons:
-        doc = " ".join(
-            [
-                lesson.get("description") or "",
-                lesson.get("title") or "",
-                " ".join(lesson.get("keywords") or []),
-                lesson.get("when_to_use") or "",
-            ]
+    return any(
+        not m.startswith(("name:", "description:", "tags:", "bm25:"))
+        for m in matched_by
+    )
+
+
+def _is_keywords_only_skill(path: str) -> bool:
+    """True if the skill opts into keyword-only routing (``match.keywords_only``).
+
+    Reads the file's frontmatter on demand (only called for descriptor/BM25-only
+    matches, which are rare) so the flag takes effect without a gptme-rag bump.
+    """
+    try:
+        content = Path(path).read_text(encoding="utf-8")
+        fm, _ = extract_frontmatter(content)
+        match_data = fm.get("match", {})
+        return (
+            bool(match_data.get("keywords_only"))
+            if isinstance(match_data, dict)
+            else False
         )
-        corpus.append(re.findall(r"[a-z0-9]+", doc.lower()))
-
-    N = len(corpus)
-    avg_dl = sum(len(d) for d in corpus) / max(N, 1)
-    df: dict[str, int] = {}
-    for doc_tokens in corpus:  # renamed: avoids shadowing the str `doc` defined above
-        for term in set(doc_tokens):
-            df[term] = df.get(term, 0) + 1
-
-    return {"corpus": corpus, "df": df, "N": N, "avg_dl": avg_dl}
-
-
-def _bm25_score(query_terms: list[str], doc_terms: list[str], index: dict) -> float:
-    """Compute BM25 score for query_terms against a document's term list."""
-    k1, b = _BM25_K1, _BM25_B
-    N, avg_dl = index["N"], index["avg_dl"]
-    dl = len(doc_terms)
-    if not dl or not query_terms:
-        return 0.0
-
-    tf: dict[str, int] = {}
-    for term in doc_terms:
-        tf[term] = tf.get(term, 0) + 1
-
-    df = index["df"]
-    score = 0.0
-    for term in query_terms:
-        if term not in tf:
-            continue
-        tf_td = tf[term]
-        df_t = df.get(term, 0)
-        idf = math.log((N - df_t + 0.5) / (df_t + 0.5) + 1)
-        tf_norm = (tf_td * (k1 + 1)) / (tf_td + k1 * (1 - b + b * dl / max(avg_dl, 1)))
-        score += idf * tf_norm
-
-    return score
-
-
-def _bm25_min_z(n_nonzero: int, ceiling: float = _BM25_MIN_Z) -> float:
-    """Minimum z-score a lesson must reach to count as a semantic match.
-
-    When only one or two lessons overlap the query at all, the query is highly
-    discriminative and those matches are admitted on the raw floor alone — the
-    failure mode this gate exists to stop is the opposite one, where hundreds of
-    lessons share a few common words and none of them is really about the query.
-    """
-    if n_nonzero < 3:
-        return -math.inf
-    max_attainable = (n_nonzero - 1) / math.sqrt(n_nonzero)
-    return min(ceiling, _BM25_STANDOUT_FRACTION * max_attainable)
-
-
-def _bm25_zscores(scores: list[float]) -> list[float]:
-    """Standardize raw BM25 scores against the nonzero score distribution.
-
-    Returns one z-score per input score. Lessons that scored 0 (no term overlap
-    at all) get 0.0. If fewer than two lessons score nonzero, or the spread is
-    degenerate, every z is 0.0 — nothing can "stand out" from a background of
-    one, so the caller admits nothing.
-    """
-    nonzero = [s for s in scores if s > 0]
-    if len(nonzero) < 2:
-        return [0.0] * len(scores)
-    mean = sum(nonzero) / len(nonzero)
-    var = sum((s - mean) ** 2 for s in nonzero) / len(nonzero)
-    sd = math.sqrt(var)
-    if sd <= 0:
-        return [0.0] * len(scores)
-    return [(s - mean) / sd if s > 0 else 0.0 for s in scores]
+    except Exception:
+        return False
 
 
 def score_lessons(
     lessons: list[dict],
     prompt: str,
     max_results: int = 5,
-    bm25_index: "dict | None" = None,
-    skill_bm25_min_z: "float | None" = None,
+    bm25_index: dict | None = None,
+    *,
+    use_bm25: bool | None = None,
+    bm25_min_z: float | None = None,
+    skill_bm25_min_z: float | None = None,
 ) -> list[dict]:
-    """Match lessons against prompt text. Returns scored results.
+    """Match lessons via gptme-rag, then apply Bob Thompson-sampling re-rank.
 
-    Scoring: keyword/pattern matches + BM25 semantic overlap + Thompson sampling posterior mean boost.
-    TS re-ranks by adding TS_WEIGHT * posterior_mean to keyword scores.
-    Lessons without TS data get the default 0.5 (neutral prior).
-    BM25 adds semantic scoring over description/title/keywords when an index is provided.
+    ``bm25_index`` is accepted for backward compatibility with the pre-wrapper
+    API. Upstream builds its own BM25 index; passing a dict (or omitting the
+    argument) enables BM25. Pass ``use_bm25=False`` to disable it.
+
+    TS is applied *before* the top-k cut so a high posterior can promote a
+    lesson that would otherwise fall just outside ``max_results``.
+
+    Bob-local gate: a skill that opts into ``match.keywords_only`` is only
+    injected when the prompt carries an explicit routing signal (keyword,
+    pattern, or skill-name match). Generic descriptor/BM25 overlap alone no
+    longer injects it — this fixes marketing-tweet-announce firing on every
+    long prompt that mentions tweet/marketing/launch in passing.
     """
-    prompt_lower = prompt.lower()
-    query_terms = re.findall(r"[a-z0-9]+", prompt_lower) if bm25_index else []
-    results = []
-
-    # BM25 is gated relative to this query's own score distribution, so all
-    # scores have to be computed before any single lesson can be judged.
-    bm_scores: list[float] = []
-    bm_zs: list[float] = []
-    bm_min_z = math.inf
-    skill_bm_min_z = math.inf
-    bm_n_nonzero = 0
-    if bm25_index is not None and query_terms:
-        bm_scores = [
-            _bm25_score(query_terms, doc_terms, bm25_index)
-            for doc_terms in bm25_index["corpus"]
-        ]
-        bm_zs = _bm25_zscores(bm_scores)
-        bm_n_nonzero = sum(1 for s in bm_scores if s > 0)
-        bm_min_z = _bm25_min_z(bm_n_nonzero)
-        skill_bm_min_z = _bm25_min_z(
-            bm_n_nonzero,
-            skill_bm25_min_z if skill_bm25_min_z is not None else _BM25_MIN_Z,
-        )
-
-    for i, lesson in enumerate(lessons):
-        score = 0.0
-        matched_by: list[str] = []
-
-        # Keyword matching (with wildcard support)
-        for kw in lesson["keywords"]:
-            if match_keyword(kw, prompt_lower):
-                score += 1.0
-                matched_by.append(kw)
-
-        # Pattern matching (full regex)
-        for pat in lesson["patterns"]:
-            try:
-                if re.search(pat, prompt_lower):
-                    score += 1.0
-                    matched_by.append(f"pattern:{pat[:30]}")
-            except re.error:
-                pass
-
-        # Skill name matching
-        if lesson.get("skill_name"):
-            name_lower = lesson["skill_name"].lower()
-            for variant in [name_lower, name_lower.replace("-", " ")]:
-                if variant in prompt_lower:
-                    score += 1.5
-                    matched_by.append(f"skill:{lesson['skill_name']}")
-                    break
-
-        descriptor_score, descriptor_matches = _score_skill_descriptor(
-            lesson, prompt_lower
-        )
-        if descriptor_score > 0:
-            score += descriptor_score
-            matched_by.extend(descriptor_matches)
-
-        # BM25 semantic scoring (soft matching over description + title + keywords).
-        # The contribution is the z-score, not the raw score: raw BM25 runs into
-        # the hundreds on long prompts and would otherwise drown out keyword,
-        # pattern, and descriptor matches (which are worth 1.0-1.5 each).
-        if bm_scores:
-            bm_score = bm_scores[i]
-            bm_z = bm_zs[i]
-            # For n<3 the query is highly discriminative — ANY overlap with the
-            # query is informative — so bypass the raw floor (still require >0
-            # to exclude completely unrelated lessons).  For n≥3 the z-gate
-            # is the primary filter and the raw floor guards against spurious
-            # weak-overlap false positives that can slip through noisy z-scores.
-            # Also bypass the raw floor when the corpus-peak score falls below
-            # it: that signals a different IDF scale (small fork, per-project
-            # lesson set) where the production-calibrated 40.0 is unattainable.
-            # In that case z-score alone gates admission.
-            small_corpus = bm_n_nonzero < 3
-            corpus_below_floor = max(bm_scores) < _BM25_MIN_RAW
-            lesson_bm_min_z = (
-                skill_bm_min_z
-                if skill_bm25_min_z is not None
-                and lesson.get("is_skill")
-                and _classify_lesson(lesson.get("path", ""))[0] != "exempt"
-                else bm_min_z
-            )
-            if bm_z >= lesson_bm_min_z and (
-                bm_score >= _BM25_MIN_RAW
-                or ((small_corpus or corpus_below_floor) and bm_score > 0)
-            ):
-                # Contribution is the z-score so ranking is preserved in
-                # normal corpora (n≥3).  Two edge cases need special handling:
-                # • n<2: _bm25_zscores returns 0.0 for all scores (degenerate);
-                #   floor to 1.0 so the lone hit still contributes.
-                # • n==2: bm_min_z==-inf admits both; z-scores are ±1.
-                #   Using z directly floors the weaker to max(-1,0)=0, dropping
-                #   it despite admission.  Floor to 0.5 so both contribute
-                #   positively while ranking is still preserved (1.0 > 0.5).
-                if bm_n_nonzero >= 3:
-                    bm_contribution = bm_z
-                elif bm_n_nonzero == 2:
-                    bm_contribution = max(bm_z, 0.5)
-                else:
-                    bm_contribution = 1.0
-                score += _BM25_WEIGHT * max(bm_contribution, 0.0)
-                matched_by.append(f"bm25:{bm_score:.2f}")
-
-        if score > 0:
-            results.append({**lesson, "score": score, "matched_by": matched_by})
-
-    # Apply Thompson sampling re-ranking (always apply neutral prior for consistency).
-    # If ts_means is empty (no bandit state yet) every lesson gets +0.5, keeping
-    # relative order.  Once partial data exists the guard would produce non-monotonic
-    # ranking — lessons without data would lose the +0.5 boost while lessons with data
-    # gain it, making early bandit accumulation perturb rankings unpredictably.
+    if not _GPTME_RAG_AVAILABLE:
+        return []
+    if use_bm25 is None:
+        use_bm25 = True
+    cap = max(max_results, len(lessons))
+    skill_kwargs = {}
+    if skill_bm25_min_z is not None and _skill_bm25_supported():
+        skill_kwargs = {
+            "skill_bm25_min_z": skill_bm25_min_z,
+            "skill_bm25_exempt_paths": {
+                lesson["path"]
+                for lesson in lessons
+                if lesson.get("is_skill")
+                and _classify_lesson(lesson["path"])[0] == "exempt"
+            },
+        }
+    corpus_kwargs: dict = {}
+    if bm25_min_z is not None and _bm25_min_z_supported():
+        corpus_kwargs["bm25_min_z"] = bm25_min_z
+    results: list[dict] = _upstream_score_lessons(
+        lessons,
+        prompt,
+        max_results=cap,
+        use_bm25=use_bm25,
+        **skill_kwargs,
+        **corpus_kwargs,
+    )
+    results = [
+        r
+        for r in results
+        if _has_routing_match(r.get("matched_by", []))
+        or not _is_keywords_only_skill(r["path"])
+    ]
     if results:
         ts_means = load_ts_means([r["path"] for r in results])
         for r in results:
-            ts_mean = ts_means.get(r["path"], 0.5)  # 0.5 = neutral prior
+            ts_mean = ts_means.get(r["path"], 0.5)
             r["score"] += TS_WEIGHT * ts_mean
             r["ts_score"] = ts_mean
-
-    results.sort(key=lambda x: -x["score"])
+        results.sort(key=lambda x: -x["score"])
     return results[:max_results]
 
 
-def apply_skill_cap(
-    matches: list[dict], predicted: list[dict], cap: int | None
-) -> tuple[list[dict], list[dict]]:
-    """Cap advisory skills across matched and predicted pools.
+def score_memories(
+    workspace: Path,
+    text: str,
+    max_results: int,
+    *,
+    project_workspace: Path | None = None,
+) -> list[dict]:
+    """Adapt shared keyword memory matches to the hook's injection envelope."""
+    try:
+        from gptme.memory import MemoryStore
+        from gptme.memory.match import match_memories
+    except ImportError:
+        # Older gptme installs still support the existing lesson-only hook.
+        return []
 
-    Ordinary lessons and policy-manifest ``exempt`` entries never consume the
-    cap and are never removed by this experiment. Matches keep priority over
-    co-occurrence predictions, matching the hook's existing output order.
-
-    Call this AFTER ``_apply_lesson_dropout_multi``: a skill that dropout later
-    withholds must not consume cap budget, or the event can end up injecting
-    fewer skills than the cap allows (the withheld item's slot is not refilled).
-    """
-    if cap is None:
-        return matches, predicted
-
-    remaining = max(cap, 0)
-
-    def _filter(items: list[dict]) -> list[dict]:
-        nonlocal remaining
-        kept: list[dict] = []
-        for item in items:
-            is_advisory_skill = (
-                item.get("is_skill")
-                and _classify_lesson(item.get("path", ""))[0] != "exempt"
-            )
-            if not is_advisory_skill:
-                kept.append(item)
-            elif remaining > 0:
-                kept.append(item)
-                remaining -= 1
-        return kept
-
-    return _filter(matches), _filter(predicted)
+    # The hook lives in the agent brain, while Claude may be working in another
+    # project. Preserve project precedence and include the brain as agent scope.
+    env = {
+        **os.environ,
+        "GPTME_AGENT_WORKSPACE": os.environ.get("GPTME_AGENT_WORKSPACE")
+        or str(workspace),
+    }
+    store = MemoryStore.from_workspace(project_workspace or workspace, env=env)
+    return [
+        {
+            "path": str(hit.entry.path.resolve()),
+            "title": hit.entry.index_title,
+            "description": hit.entry.description,
+            "body": hit.entry.body,
+            "score": hit.score,
+            "matched_by": hit.matched_by,
+            "is_memory": True,
+        }
+        for hit in match_memories(store, text, limit=max_results)
+        if hit.entry.path is not None
+    ]
 
 
 # --- Holdout filtering (A/B testing) ---
@@ -1454,9 +993,6 @@ def _get_dropout_epsilon() -> float:
         epsilon = float(raw)
     except ValueError:
         return 0.0
-    # Treat non-finite values (inf, -inf, nan) as unset — matching
-    # _get_dropout_epsilon_validated_core's handling so that a mis-set env var
-    # (e.g. LESSON_DROPOUT_EPSILON=inf) does not silently enable 100% dropout.
     if not math.isfinite(epsilon) or epsilon <= 0.0:
         return 0.0
     return min(epsilon, 1.0)
@@ -1476,8 +1012,6 @@ def _get_dropout_epsilon_validated_core() -> float:
         epsilon = float(raw)
     except ValueError:
         return 0.05
-    # float() accepts NaN and infinities, but neither is a probability.
-    # Treat non-finite values as unset instead of clamping infinity to 1.0.
     if not math.isfinite(epsilon):
         return 0.05
     return min(max(epsilon, 0.0), 1.0)
@@ -1487,18 +1021,20 @@ def _get_dropout_epsilon_for_class(policy_class: str, global_epsilon: float) -> 
     """Return the effective dropout probability for a given policy class.
 
     - exempt: always 0.0 (never withheld, regardless of global_epsilon)
-    - validated_core: min(global_epsilon, LESSON_DROPOUT_EPSILON_VALIDATED_CORE)
-      (default 0.05), but only once the global switch (LESSON_DROPOUT_EPSILON) is > 0.
-      Bounded by global_epsilon so the per-class differential can only reduce
-      dropout relative to the global setting, never exceed it.
+    - validated_core: min(LESSON_DROPOUT_EPSILON_VALIDATED_CORE, global_epsilon)
     - holdout / unknown: global_epsilon (LESSON_DROPOUT_EPSILON)
+
+    When global_epsilon=0 the dropout system is off; validated_core is also 0.0
+    so that the global switch is a clean disable, not a class-level one.
+    validated_core epsilon is bounded by global_epsilon so a gentle global rate
+    cannot withhold validated_core lessons at a higher rate than ordinary ones.
     """
     if policy_class == "exempt":
         return 0.0
     if global_epsilon <= 0.0:
         return 0.0
     if policy_class == "validated_core":
-        return min(global_epsilon, _get_dropout_epsilon_validated_core())
+        return min(_get_dropout_epsilon_validated_core(), global_epsilon)
     return global_epsilon
 
 
@@ -1508,26 +1044,74 @@ def _get_dropout_log_dir(workspace: Path) -> Path:
     return Path(raw) if raw else workspace / "state" / "lesson-dropout"
 
 
+def _assignment_origin(lesson: dict) -> str:
+    """Return the candidate origin for an assignment receipt.
+
+    ``predicted`` is any co-occurrence candidate; everything else is a direct
+    keyword/pattern/semantic match. Origin is recorded at roll time so later
+    formatting cannot erase how the candidate entered the pool.
+    """
+    if lesson.get("predicted") is True:
+        return "predicted"
+    matched_by = lesson.get("matched_by") or []
+    if isinstance(matched_by, list) and any(
+        isinstance(token, str) and token.startswith("predicted") for token in matched_by
+    ):
+        return "predicted"
+    return "keyword"
+
+
+def _assignment_lesson_record(lesson: dict, *, effective_epsilon: float) -> dict:
+    """Compact per-lesson assignment fields shared by both dropout arms."""
+    origin = _assignment_origin(lesson)
+    return {
+        "path": lesson.get("path", ""),
+        "title": lesson.get("title", ""),
+        "effective_epsilon": effective_epsilon,
+        "origin": origin,
+        "predicted": origin == "predicted",
+    }
+
+
+def _enrich_assignment_arm(lessons: list[dict], *, assignment_id: str) -> list[dict]:
+    """Attach policy class/version and the shared assignment identity."""
+    enriched: list[dict] = []
+    for lesson in lessons:
+        policy_class, policy_version = _classify_lesson(lesson.get("path", ""))
+        record = dict(lesson)
+        record["policy_class"] = policy_class
+        record["policy_version"] = policy_version
+        record["assignment_id"] = assignment_id
+        enriched.append(record)
+    return enriched
+
+
 def _log_dropout(
-    session_id: str, epsilon: float, withheld: list[dict], workspace: Path
+    session_id: str,
+    epsilon: float,
+    withheld: list[dict],
+    workspace: Path,
+    *,
+    kept: list[dict] | None = None,
+    event_type: str | None = None,
+    assignment_id: str | None = None,
 ) -> None:
     """Append a dropout record for causal LOO analysis. Failures are swallowed.
 
-    Stage 1 shadow logging: includes policy_class and policy_version per lesson
-    for cross-runtime parity validation.
+    Both arms are logged here, before formatting/dedup. Extra fields are
+    additive so legacy withheld-only readers keep working.
     """
     try:
         log_dir = _get_dropout_log_dir(workspace)
         log_dir.mkdir(parents=True, exist_ok=True)
 
-        # Enrich withheld lessons with policy classification
-        enriched_withheld = []
-        for lesson in withheld:
-            policy_class, policy_version = _classify_lesson(lesson.get("path", ""))
-            enriched = dict(lesson)
-            enriched["policy_class"] = policy_class
-            enriched["policy_version"] = policy_version
-            enriched_withheld.append(enriched)
+        assignment_id = assignment_id or str(uuid.uuid4())
+        enriched_withheld = _enrich_assignment_arm(
+            withheld, assignment_id=assignment_id
+        )
+        enriched_matched = _enrich_assignment_arm(
+            kept or [], assignment_id=assignment_id
+        )
 
         # Get policy manifest version from the manifest itself
         manifest = _load_policy_manifest()
@@ -1538,8 +1122,12 @@ def _log_dropout(
             "session_id": session_id,
             "epsilon": epsilon,
             "policy_version": manifest_version,
+            "assignment_id": assignment_id,
             "withheld": enriched_withheld,
+            "matched": enriched_matched,
         }
+        if event_type:
+            record["event"] = event_type
         with open(log_dir / f"{session_id}.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
     except Exception:
@@ -1562,14 +1150,6 @@ def _apply_lesson_dropout(
     if epsilon <= 0.0 or not lessons:
         return lessons
 
-    # When the manifest is unavailable (the "*" sentinel is active), classification
-    # is unreliable — lessons that would be "exempt" in a real manifest are
-    # indistinguishable from "holdout" and could be dropped. Skip dropout entirely
-    # to preserve the PR's guarantee that exempt lessons are never withheld.
-    manifest = _load_policy_manifest()
-    if "*" in manifest.get("holdout_population", []):
-        return lessons
-
     kept: list[dict] = []
     for lesson in lessons:
         policy_class, _ = _classify_lesson(lesson.get("path", ""))
@@ -1587,12 +1167,14 @@ def _apply_lesson_dropout_multi(
     predicted: list[dict],
     session_id: str,
     workspace: Path,
+    *,
+    event_type: str | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Apply class-aware dropout to both matches and predicted, logging ONE unified record.
 
     Processes both pools together so that the analysis script receives a
-    single JSONL record per hook invocation containing all withheld lessons,
-    not two split records with partial withheld lists.
+    single JSONL record per hook invocation containing both assignment arms,
+    not two split records and not a keep arm that waits for formatting.
 
     Class-aware epsilons (all require global LESSON_DROPOUT_EPSILON > 0 to activate):
     - exempt: 0.0 (never withheld regardless of global epsilon)
@@ -1607,37 +1189,44 @@ def _apply_lesson_dropout_multi(
     if epsilon <= 0.0:
         return matches, predicted
 
-    # When the manifest is unavailable (the "*" sentinel is active), classification
-    # is unreliable — lessons that would be "exempt" in a real manifest are
-    # indistinguishable from "holdout" and could be dropped. Skip dropout entirely
-    # to preserve the guarantee that exempt lessons are never withheld.
+    # Guard: if the policy manifest is unavailable or broken, _classify_lesson
+    # returns the "*" sentinel (all lessons as "holdout").  Classification is
+    # unreliable in this state — we cannot guarantee that exempt lessons are
+    # preserved, so skip dropout entirely to fail safe.
     manifest = _load_policy_manifest()
     if "*" in manifest.get("holdout_population", []):
+        _log_dropout(session_id, epsilon, [], workspace, kept=[], event_type=event_type)
         return matches, predicted
 
     withheld: list[dict] = []
+    kept_records: list[dict] = []
+    assignment_id = str(uuid.uuid4())
 
     def _do_dropout(lessons: list[dict]) -> list[dict]:
         kept: list[dict] = []
         for lesson in lessons:
             policy_class, _ = _classify_lesson(lesson.get("path", ""))
             eff_epsilon = _get_dropout_epsilon_for_class(policy_class, epsilon)
+            entry = _assignment_lesson_record(lesson, effective_epsilon=eff_epsilon)
             if eff_epsilon > 0.0 and random.random() < eff_epsilon:
-                withheld.append(
-                    {
-                        "path": lesson["path"],
-                        "title": lesson.get("title", ""),
-                        "effective_epsilon": eff_epsilon,
-                    }
-                )
+                withheld.append(entry)
             else:
+                kept_records.append(entry)
                 kept.append(lesson)
         return kept
 
     kept_matches = _do_dropout(matches)
     kept_predicted = _do_dropout(predicted)
 
-    _log_dropout(session_id, epsilon, withheld, workspace)
+    _log_dropout(
+        session_id,
+        epsilon,
+        withheld,
+        workspace,
+        kept=kept_records,
+        event_type=event_type,
+        assignment_id=assignment_id,
+    )
     return kept_matches, kept_predicted
 
 
@@ -1650,19 +1239,6 @@ def _state_file(session_id: str) -> Path:
     # Sanitize session_id for filesystem
     safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)
     return STATE_DIR / f"{safe_id}.json"
-
-
-def _dial_marker_file(session_id: str) -> Path:
-    """Marker path for the once-per-session injection-dial ledger record.
-
-    Keyed on a hash of the RAW session id, not on ``_state_file``'s sanitized
-    name. Sanitization is lossy (``a/b`` and ``a_b`` collide), so a shared
-    marker path would let one session suppress another's ledger record and
-    break the arm-join for that session.
-    """
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
-    return STATE_DIR / f"{digest}.injection-dial"
 
 
 def load_session_state(session_id: str) -> dict:
@@ -1687,54 +1263,6 @@ def save_session_state(session_id: str, state: dict) -> None:
         tmp.replace(sf)  # atomic on POSIX; avoids partial reads under concurrent hooks
     except Exception:
         pass
-
-
-def log_injection_dial_assignment(
-    session_id: str, dial: dict[str, object], workspace: Path
-) -> None:
-    """Append one durable arm-assignment record per enabled session.
-
-    The session-keyed record is the join surface for context-spend and outcome
-    analyses. A /tmp marker prevents every PreToolUse invocation from emitting
-    the same assignment again. Logging is best-effort and never blocks a hook.
-    """
-    if not dial.get("enabled"):
-        return
-
-    marker = _dial_marker_file(session_id)
-    try:
-        with marker.open("x", encoding="utf-8") as f:
-            f.write(str(dial.get("arm", "control")))
-    except FileExistsError:
-        return
-    except Exception:
-        return
-
-    try:
-        raw_log_dir = os.environ.get("LESSON_INJECTION_DIAL_LOG_DIR", "").strip()
-        log_dir = (
-            Path(raw_log_dir)
-            if raw_log_dir
-            else workspace / "state" / "lesson-injection-dial"
-        )
-        log_dir.mkdir(parents=True, exist_ok=True)
-        record = {
-            "ts": time.time(),
-            "session_id": session_id,
-            "harness": "claude-code",
-            **dial,
-        }
-        with open(
-            log_dir / f"{time.strftime('%Y-%m-%d')}.jsonl", "a", encoding="utf-8"
-        ) as f:
-            f.write(json.dumps(record, sort_keys=True) + "\n")
-    except Exception:
-        # Do not poison the once-per-session marker on a failed append: remove it
-        # so the next hook invocation retries the durable ledger write.
-        try:
-            marker.unlink()
-        except OSError:
-            pass
 
 
 def get_already_injected(
@@ -1896,8 +1424,13 @@ def extract_recent_transcript_text(
 # --- Output helpers ---
 
 
-def emit_empty(event_name: str) -> None:
-    """Emit empty hook output (no context to inject)."""
+def emit_empty(
+    event_name: str, session_id: str | None = None, reason: str = ""
+) -> None:
+    """Emit empty hook output (no context to inject).
+
+    With ``session_id``, also records a measured-zero emission receipt.
+    """
     # For PreToolUse, exit 0 with no output is cleanest — doesn't interfere
     # with permissions. For UserPromptSubmit, we emit the standard structure.
     if event_name == "UserPromptSubmit":
@@ -1905,6 +1438,9 @@ def emit_empty(event_name: str) -> None:
             {"hookSpecificOutput": {"hookEventName": event_name}},
             sys.stdout,
         )
+        sys.stdout.flush()
+    if session_id:
+        _write_emission_receipt(session_id, event_name, 0, "empty", reason)
 
 
 def _is_skill_path(path: str) -> bool:
@@ -1949,9 +1485,6 @@ def format_lessons(
     for m in matches:
         if m["path"] in already_injected:
             continue
-        # Don't inject keyword count metadata alongside content — it leaks
-        # matching internals and contributes to self-referential corpus matches
-        # when analysis tools grep session transcripts (gptme-contrib#341)
         parts.extend(_render_lesson(m, event_type))
 
     # Add predicted lessons (from co-occurrence model)
@@ -2107,7 +1640,10 @@ def _log_lesson_events(
                 match_type = "pattern"
             elif "bm25:" in first_match:
                 match_type = "semantic"
-            elif "descriptor:" in first_match:
+            elif "descriptor:" in first_match or first_match.startswith(
+                ("name:", "description:", "tags:")
+            ):
+                # Skill descriptor-overlap matches (upstream _score_skill_descriptor)
                 match_type = "descriptor"
             else:
                 # Default to keyword for simple matches
@@ -2153,10 +1689,274 @@ def _log_lesson_events(
         pass  # Never fail the hook for logging
 
 
+def _arm_hook_budget(seconds: float) -> None:
+    """Hard wall-clock budget. A timed-out hook's stdout is discarded."""
+    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
+        return
+
+    def _handler(_signum, _frame):
+        raise TimeoutError("match-lessons hook budget exceeded")
+
+    signal.signal(signal.SIGALRM, _handler)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+
+
+def _disarm_hook_budget() -> None:
+    if hasattr(signal, "setitimer"):
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+
+
+def _selector_settings() -> dict:
+    """Only global user configuration may authorize selector execution/spend."""
+    try:
+        from gptme.config import load_user_config
+
+        return load_user_config().env
+    except Exception:
+        return {}
+
+
+def _selector_exempt(item: dict, guards: set[str]) -> bool:
+    """Canonical protected-item policy for selection and final precision evidence."""
+    path = Path(str(item["path"]).lower())
+    return bool(
+        item.get("is_memory")
+        or item.get("always_apply")
+        or item.get("alwaysApply")
+        or str(item.get("priority", "")).lower() == "critical"
+        or _classify_lesson(item["path"])[0] == "exempt"
+        or any(
+            guard in (str(path), path.name, path.stem, path.parent.name)
+            or str(path).endswith("/" + guard.lstrip("./"))
+            for guard in guards
+        )
+    )
+
+
+_SELECTOR_EXPERIMENT = "shared-lesson-selector-v1"
+_SELECTOR_LIVE_SUFFIX = ".live.json"
+
+
+def _check_enrollment_admission(enrollment_dir: str, run_id: str) -> bool:
+    """Return True only if this session is an authorized treatment arm.
+
+    Controls, rehearsal arms, and unenrolled sessions always return False so
+    the shared service is never called — zero calls even when global selector
+    settings are configured.  Reads two immutable files written by
+    shared_lesson_enrollment.py; never modifies state.
+    """
+    try:
+        if str(uuid.UUID(run_id)) != run_id:
+            return False
+        directory = Path(enrollment_dir)
+        enrollment_path = directory / f"{run_id}.json"
+        if not enrollment_path.exists():
+            return False
+        enrollment = json.loads(enrollment_path.read_text())
+        if (
+            enrollment.get("experiment") != _SELECTOR_EXPERIMENT
+            or enrollment.get("run_id") != run_id
+            or enrollment.get("arm") != "treatment"
+        ):
+            return False  # controls always skip the service
+        live_path = directory / f"{run_id}{_SELECTOR_LIVE_SUFFIX}"
+        if not live_path.exists():
+            return False
+        live_auth = json.loads(live_path.read_text())
+        return (
+            live_auth.get("experiment") == _SELECTOR_EXPERIMENT
+            and live_auth.get("run_id") == run_id
+            and live_auth.get("arm") == "treatment"
+            and live_auth.get("selection_authorized") is True
+        )
+    except Exception:
+        return False
+
+
+def select_advisory_lessons(
+    matches: list[dict], predicted: list[dict], hook_input: dict
+) -> tuple[list[dict], list[dict]]:
+    """Opt-in transport to the shared selector; preserve guards and memories."""
+    settings = _selector_settings()
+    command_json = settings.get("LESSONS_SELECTOR_COMMAND", "")
+    guards = {
+        item.strip().lower().replace("\\", "/")
+        for item in settings.get("LESSONS_SELECTOR_GUARDS", "").split(",")
+        if item.strip()
+    }
+    if not command_json or not guards or os.name != "posix":
+        return matches, predicted
+    session_id = hook_input.get("session_id")
+    if not isinstance(session_id, str) or not session_id or session_id == "unknown":
+        return matches, predicted
+
+    # Gate: only authorized treatment arms reach the shared service.
+    # Controls and rehearsal/unenrolled sessions use the deterministic matcher
+    # and make zero selection calls even when global selector settings exist.
+    _run_id = os.environ.get("BOB_SESSION_ID", "")
+    _enrollment_dir = os.environ.get("BOB_LESSON_ENROLLMENT_REHEARSAL_DIR", "")
+    if not _check_enrollment_admission(_enrollment_dir, _run_id):
+        return matches, predicted
+
+    advisory = {
+        item["path"]: item
+        for item in matches + predicted
+        if not _selector_exempt(item, guards)
+    }
+    if not advisory:
+        return matches, predicted
+    try:
+        command = json.loads(command_json)
+        if (
+            not isinstance(command, list)
+            or not command
+            or not all(isinstance(arg, str) and arg for arg in command)
+        ):
+            return matches, predicted
+        timeout = float(settings.get("LESSONS_SELECTOR_TIMEOUT", "2"))
+        if not math.isfinite(timeout) or not 0 < timeout <= min(
+            30, HOOK_BUDGET_SECONDS / 2
+        ):
+            return matches, predicted
+        max_calls = int(settings.get("LESSONS_SELECTOR_MAX_CALLS", "0"))
+        model = settings.get("LESSONS_SELECTOR_MODEL")
+        if not model or not 0 < max_calls <= 10:
+            return matches, predicted
+        state = load_session_state(session_id)
+        prompt_event = hook_input.get("hook_event_name") == "UserPromptSubmit"
+        query = (
+            hook_input.get("prompt", "")
+            if prompt_event
+            else state.get("selector_query", "")
+        )
+        if not isinstance(query, str) or not query.strip():
+            return matches, predicted
+        if prompt_event:
+            state["selector_query"] = query
+            save_session_state(session_id, state)
+        request = {
+            "version": 1,
+            "runtime": "claude-code",
+            "session_id": session_id,
+            "event_kind": "user_prompt" if prompt_event else "tool",
+            "query": query,
+            "context_fingerprint": json.dumps(
+                {
+                    "workspace": str(get_workspace()),
+                    "repo": os.environ.get("GPTME_CURRENT_REPO", ""),
+                    "category": detect_session_category(),
+                },
+                sort_keys=True,
+            ),
+            "policy_version": json.dumps(
+                {
+                    "adapter": 1,
+                    "guards": sorted(guards),
+                    "manifest": _load_policy_manifest().get("version", 1),
+                }
+            ),
+            "candidates": [
+                {
+                    "id": path,
+                    "description": item.get("description") or item.get("title", ""),
+                    "metadata": {
+                        "keywords": item.get("keywords", []),
+                        "tags": item.get("tags", []),
+                    },
+                }
+                for path, item in advisory.items()
+            ],
+            "fallback_ids": list(advisory),
+            "max_results": 3,
+            "model": model,
+            "max_calls_per_session": max_calls,
+            "timeout_seconds": timeout,
+        }
+        payload = json.dumps(request).encode()
+        if len(payload) > 1_048_576:
+            return matches, predicted
+        # Bound both elapsed time and bytes while draining the CLI output.
+        with tempfile.TemporaryFile() as source:
+            source.write(payload)
+            source.seek(0)
+            process = subprocess.Popen(
+                command,
+                stdin=source,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            raw = bytearray()
+            deadline = time.monotonic() + timeout + 0.25
+            try:
+                assert process.stdout is not None
+                with process.stdout, selectors.DefaultSelector() as poller:
+                    poller.register(process.stdout, selectors.EVENT_READ)
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0 or not poller.select(remaining):
+                            raise TimeoutError("selector deadline exceeded")
+                        chunk = os.read(process.stdout.fileno(), 65536)
+                        if not chunk:
+                            break
+                        raw.extend(chunk)
+                        if len(raw) > 1_048_576:
+                            raise ValueError("selector output too large")
+                    process.wait(timeout=max(0.001, deadline - time.monotonic()))
+            finally:
+                if process.returncode is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait()
+            if process.returncode:
+                return matches, predicted
+            result = json.loads(raw)
+        if (
+            not isinstance(result, dict)
+            or type(result.get("version")) is not int
+            or result["version"] != 1
+        ):
+            return matches, predicted
+        status, ids = result.get("status"), result.get("ids")
+        if status not in ("selected", "empty") or not isinstance(ids, list):
+            return matches, predicted
+        if any(not isinstance(item, str) or item not in advisory for item in ids):
+            return matches, predicted
+        if (status == "empty" and ids) or (status == "selected" and not ids):
+            return matches, predicted
+        selected = set(dict.fromkeys(ids))
+        if len(selected) != len(ids) or len(selected) > request["max_results"]:
+            return matches, predicted
+        return (
+            [
+                item
+                for item in matches
+                if item["path"] not in advisory or item["path"] in selected
+            ],
+            [
+                item
+                for item in predicted
+                if item["path"] not in advisory or item["path"] in selected
+            ],
+        )
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        RecursionError,
+        subprocess.TimeoutExpired,
+        TimeoutError,
+    ):
+        return matches, predicted
+
+
 def main():
     # Read hook input from stdin
     try:
-        hook_input = json.loads(sys.stdin.read())
+        raw_input = _STDIN_CACHE if _STDIN_CACHE is not None else sys.stdin.read()
+        hook_input = json.loads(raw_input)
     except (json.JSONDecodeError, Exception):
         sys.exit(0)
 
@@ -2164,6 +1964,15 @@ def main():
     event_type = hook_input.get("hook_event_name", "UserPromptSubmit")
     session_id = hook_input.get("session_id", "unknown")
     transcript_path = hook_input.get("transcript_path")
+    # Preserve user intent before all early returns (including no-match).
+    private_dir = os.environ.get("BOB_LESSON_PRECISION_DIR", "")
+    if private_dir and event_type == "UserPromptSubmit":
+        try:
+            from context.lesson_precision import save_intent
+
+            save_intent(Path(private_dir), session_id, hook_input.get("prompt", ""))
+        except Exception:
+            pass  # Missing private evidence never changes matching/output.
 
     # --- Build match text based on event type ---
     if event_type == "UserPromptSubmit":
@@ -2175,11 +1984,13 @@ def main():
         state = load_session_state(session_id)
         elapsed = time.time() - state.get("last_pretool", 0)
         if elapsed < PRETOOL_COOLDOWN_SECONDS:
+            emit_empty(event_type, session_id, "cooldown")
             sys.exit(0)
 
         tool_name = hook_input.get("tool_name", "")
         tool_input = hook_input.get("tool_input", {})
         if not isinstance(tool_input, dict):
+            emit_empty(event_type, session_id, "invalid_tool_input")
             sys.exit(0)
 
         tool_match_text = build_pretool_match_text(tool_name, tool_input)
@@ -2209,39 +2020,56 @@ def main():
     )
 
     if not match_text.strip():
-        emit_empty(event_type)
+        emit_empty(event_type, session_id, "empty_match_text")
         sys.exit(0)
 
-    # --- Scan and match lessons ---
+    # --- Scan and match lessons and keyworded memories ---
     workspace = get_workspace()
-    injection_dial = resolve_injection_dial(session_id)
-    log_injection_dial_assignment(session_id, injection_dial, workspace)
     lesson_dirs = load_lesson_dirs(workspace)
+    if event_type == "PreToolUse":
+        # Arm now, not only after a successful injection. Empty-injection is
+        # the common case; without this the cooldown never fires and every
+        # tool call re-scans at full price.
+        state = load_session_state(session_id)
+        state["last_pretool"] = time.time()
+        save_session_state(session_id, state)
     lessons = scan_lessons(lesson_dirs)
     lessons = filter_by_harness(lessons, detect_harness())
     session_cat = detect_session_category()
     lessons = filter_by_session_category(lessons, session_cat)
-    bm25_index = _build_bm25_index(lessons) if lessons else None
+    current_repo = os.environ.get("GPTME_CURRENT_REPO") or None
+    lessons = filter_by_repo(lessons, current_repo)
     holdout_lessons = parse_holdout_lessons_env()
 
-    if not lessons:
-        emit_empty(event_type)
-        sys.exit(0)
-
-    skill_bm25_min_z = injection_dial.get("skill_bm25_min_z")
+    score_kwargs: dict = {"skill_bm25_min_z": SKILL_BM25_MIN_Z}
+    # Corpus has grown ~2× since z=4.0 was calibrated (450→930 lessons).
+    # Raise the gate to suppress weak BM25-only matches (precision regression fix).
+    score_kwargs["bm25_min_z"] = 6.0
     raw_matches = score_lessons(
-        lessons,
-        match_text,
-        max_results=max_results,
-        bm25_index=bm25_index,
-        skill_bm25_min_z=(
-            float(skill_bm25_min_z)
-            if isinstance(skill_bm25_min_z, int | float)
-            else None
-        ),
+        lessons, match_text, max_results=max_results, **score_kwargs
     )
+    project_cwd = hook_input.get("cwd")
+    project_workspace = (
+        Path(project_cwd)
+        if isinstance(project_cwd, str) and Path(project_cwd).is_absolute()
+        else Path.cwd()
+    )
+    raw_matches.extend(
+        score_memories(
+            workspace, match_text, max_results, project_workspace=project_workspace
+        )
+    )
+    raw_matches.sort(key=lambda match: -match["score"])
+    # A configured lesson directory can also expose a memory's physical file.
+    # Keep one candidate across both sources before applying the shared cap.
+    unique_matches: dict[Path, dict] = {}
+    for match in raw_matches:
+        existing_match = unique_matches.setdefault(Path(match["path"]).resolve(), match)
+        if match.get("is_memory"):
+            existing_match["is_memory"] = True
+    raw_matches = list(unique_matches.values())[:max_results]
     if not raw_matches:
-        emit_empty(event_type)
+        emit_empty(event_type, session_id, "no_match")
         sys.exit(0)
 
     # --- Dedup: skip already-injected lessons ---
@@ -2255,41 +2083,34 @@ def main():
         matched_paths, already_injected, lessons, MAX_PREDICTED_LESSONS
     )
 
-    # Drop matches that can never render (already injected this session) before
-    # the skill cap consumes budget, and filter holdouts first too. The cap is a
-    # limit on *newly injected* skills; letting an already-injected or held-out
-    # skill spend `remaining` would suppress a skill that could still render.
-    matches = [m for m in raw_matches if m["path"] not in already_injected]
-    predicted = [p for p in predicted if p["path"] not in already_injected]
-
     # --- Holdout filtering (A/B testing via HOLDOUT_LESSONS env var) ---
-    matches = filter_held_out_lessons(matches, holdout_lessons)
+    matches = filter_held_out_lessons(raw_matches, holdout_lessons)
     predicted = filter_held_out_lessons(predicted, holdout_lessons)
 
+    matches, predicted = select_advisory_lessons(matches, predicted, hook_input)
+
     # --- Randomized dropout for causal LOO (mirrors gptme/lessons/auto_include.py) ---
-    # Run dropout BEFORE the skill cap: a skill that dropout withholds must not
-    # consume cap budget, otherwise the event can inject fewer skills than the
-    # cap allows (the withheld skill's slot is never refilled).
+    # Log both arms here, before format_lessons / already-injected filtering.
     matches, predicted = _apply_lesson_dropout_multi(
-        matches, predicted, session_id, workspace
+        matches, predicted, session_id, workspace, event_type=event_type
     )
 
-    skill_cap = injection_dial.get(
-        "prompt_skill_cap" if event_type == "UserPromptSubmit" else "pretool_skill_cap"
+    skill_cap = (
+        MAX_PROMPT_SKILLS if event_type == "UserPromptSubmit" else MAX_PRETOOL_SKILLS
     )
-    matches, predicted = apply_skill_cap(
-        matches,
-        predicted,
-        int(skill_cap) if isinstance(skill_cap, int) else None,
-    )
+    matches = [m for m in matches if m["path"] not in already_injected]
+    predicted = [p for p in predicted if p["path"] not in already_injected]
+    matches, predicted = apply_skill_cap(matches, predicted, skill_cap)
 
     # --- Log structured lesson events for efficacy measurement (Phase 1a) ---
     _log_lesson_events(session_id, event_type, matches, predicted, already_injected)
 
-    context = format_lessons(matches, already_injected, predicted, event_type)
+    context = format_lessons(
+        matches, already_injected, predicted, event_type=event_type
+    )
 
     if not context:
-        emit_empty(event_type)
+        emit_empty(event_type, session_id, "all_suppressed")
         sys.exit(0)
 
     # --- Update session state ---
@@ -2325,15 +2146,60 @@ def main():
     )
 
     # --- Emit result ---
-    result = {
-        "hookSpecificOutput": {
-            "hookEventName": event_type,
-            "additionalContext": context,
+    # Both control and treatment capture only post-dedup/dropout/cap items.
+    # Latest user intent is retained before output; tool literals are not intent.
+    precision_items = None
+    intent = ""
+    if os.environ.get("BOB_LESSON_PRECISION_DIR"):
+        try:
+            from context.lesson_precision import load_intent
+
+            intent = load_intent(
+                Path(os.environ["BOB_LESSON_PRECISION_DIR"]), session_id
+            )
+        except Exception:
+            intent = ""
+        guards = {
+            item.strip().lower().replace("\\", "/")
+            for item in _selector_settings()
+            .get("LESSONS_SELECTOR_GUARDS", "")
+            .split(",")
+            if item.strip()
         }
-    }
-    json.dump(result, sys.stdout)
+        # Missing protected-set configuration leaves precision unknown.
+        if guards:
+            precision_items = [
+                {
+                    "item_id": item["path"],
+                    "text": "\n".join(
+                        _render_lesson(item, event_type, predicted=is_predicted)
+                    ),
+                }
+                for items, is_predicted in ((matches, False), (predicted, True))
+                for item in items
+                if not _selector_exempt(item, guards)
+            ]
+    _emit_context(
+        event_type, session_id, context, precision_items=precision_items, intent=intent
+    )
     sys.exit(0)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        _arm_hook_budget(HOOK_BUDGET_SECONDS)
+        main()
+    except TimeoutError:
+        # Degrade to empty rather than letting the harness discard a partial
+        # JSON payload. emit_empty is fail-open: no injection is better than
+        # a hung hook.
+        event = "UserPromptSubmit"
+        try:
+            # main() may have already consumed stdin; default is fine.
+            event = "UserPromptSubmit"
+        except Exception:
+            pass
+        emit_empty(event)
+        sys.exit(0)
+    finally:
+        _disarm_hook_budget()
