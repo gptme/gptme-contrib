@@ -819,11 +819,15 @@ def test_gptme_markdown_codeblock_content_preserved_in_message(tmp_path):
     agent_steps = [s for s in atif["steps"] if s["source"] == "agent"]
     assert len(agent_steps) >= 1, "at least one agent step must be emitted"
 
-    # The markdown codeblock content must survive in the step message — not be dropped.
-    step_messages = " ".join(s.get("message", "") for s in agent_steps)
-    assert (
-        "```bash" in step_messages or "ls" in step_messages
-    ), "markdown codeblock content was silently dropped from ATIF step message"
+    # The markdown codeblock must survive verbatim — fences and content. A
+    # substring-only check (``"ls" in message``) would still pass if a parser
+    # stripped the fence markers, which is the exact regression this test guards.
+    expected_message = "Listing files.\n\n```bash\nls\n```"
+    step_messages = [s.get("message", "") for s in agent_steps]
+    assert expected_message in step_messages, (
+        "markdown codeblock was not preserved verbatim in the ATIF agent step "
+        f"message; got {step_messages!r}"
+    )
 
     # Current limitation: _normalize_gptme does not parse content into tool_calls.
     # Assert no tool_calls so a partial parser that handles only one format is caught.
