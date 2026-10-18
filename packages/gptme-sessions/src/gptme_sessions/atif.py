@@ -25,6 +25,11 @@ implementation of the same grouping and linking rules.
   the agent block.
 - Images, attachment payloads, subagent trees, and reasoning deltas are omitted.
 - An empty-message agent step is valid per ATIF when it carries tool_calls.
+- gptme ``conversation.jsonl`` normalization does not yet parse tool calls out
+  of message content, so a gptme transcript yields text-only steps with no
+  ``tool_calls``/``observation``. The envelope validates, but tool structure is
+  lost; use the raw-message converter in ``benchmark/pier-gptme/`` when tool
+  fidelity matters.
 """
 
 from __future__ import annotations
@@ -36,12 +41,44 @@ from .transcript import SessionTranscript
 
 
 def _accumulate_metrics(step: dict[str, Any], usage: dict[str, Any]) -> None:
-    """Merge per-message token counts into the step-level metrics block."""
+    """Merge per-message token counts into the step-level metrics block.
+
+    Field names follow ATIF v1.7 ``Metrics`` (``prompt_tokens``,
+    ``completion_tokens``, ``cached_tokens``, ``cost_usd``); the model is
+    ``extra="forbid"``, so harness-native names like ``input_tokens`` would
+    make the whole trajectory fail ``Trajectory.model_validate``.
+
+    gptme reports ``input_tokens`` *excluding* cache reads, while ATIF defines
+    ``prompt_tokens`` as the total including cached and non-cached. Cache
+    counters are therefore folded into ``prompt_tokens`` and also reported
+    separately as ``cached_tokens``. Absent keys stay absent — missing usage is
+    unknown, not zero.
+    """
     cur = step.get("metrics", {})
-    step["metrics"] = {
-        "input_tokens": cur.get("input_tokens", 0) + (usage.get("input_tokens") or 0),
-        "output_tokens": cur.get("output_tokens", 0) + (usage.get("output_tokens") or 0),
-    }
+
+    def _num(key: str) -> int:
+        return int(cur.get(key) or 0)
+
+    prompt = _num("prompt_tokens") + int(usage.get("input_tokens") or 0)
+    prompt += int(usage.get("cache_read_tokens") or 0)
+    prompt += int(usage.get("cache_creation_tokens") or 0)
+    completion = _num("completion_tokens") + int(usage.get("output_tokens") or 0)
+    cached = _num("cached_tokens") + int(usage.get("cache_read_tokens") or 0)
+
+    metrics: dict[str, Any] = {}
+    if prompt:
+        metrics["prompt_tokens"] = prompt
+    if completion:
+        metrics["completion_tokens"] = completion
+    if cached:
+        metrics["cached_tokens"] = cached
+    cost = usage.get("cost")
+    if cost is None:
+        cost = usage.get("cost_usd")
+    if cost is not None:
+        metrics["cost_usd"] = float(cur.get("cost_usd") or 0.0) + float(cost)
+    if metrics:
+        step["metrics"] = metrics
 
 
 def _new_agent_step(step_id: int, content: str, timestamp: str | None) -> dict[str, Any]:
@@ -227,9 +264,15 @@ def session_transcript_to_atif(
     # Flush any pending agent turn at end of transcript.
     _flush_pending()
 
-    agent: dict[str, Any] = {"name": transcript.harness or "unknown"}
+    # ATIF v1.7 `Agent` requires both `name` and `version`, and keeps the LLM
+    # identity in `model_name`. Putting the model string in `version` (the old
+    # behaviour) both dropped the model field and made consumers comparing
+    # agent versions see a model id. `version` is the harness version, which a
+    # transcript does not always carry; callers pass it via extra_agent_fields
+    # (e.g. {"version": "0.35.1"}), otherwise "unknown" keeps the envelope valid.
+    agent: dict[str, Any] = {"name": transcript.harness or "unknown", "version": "unknown"}
     if transcript.model:
-        agent["version"] = transcript.model
+        agent["model_name"] = transcript.model
     if extra_agent_fields:
         agent.update(extra_agent_fields)
 
