@@ -776,3 +776,59 @@ def test_real_gptme_jsonl_exports_atif_valid_envelope(tmp_path):
 
     # Step ids stay sequential from 1 (ATIF validator requirement).
     assert [s["step_id"] for s in atif["steps"]] == list(range(1, len(atif["steps"]) + 1))
+
+
+def test_gptme_markdown_codeblock_content_preserved_in_message(tmp_path):
+    """Markdown-fence tool calls in gptme content are not yet parsed into tool_calls.
+
+    gptme uses two formats for tool calls in conversation.jsonl content strings:
+    - AT-format: ``@tool(id): {json}``
+    - Markdown codeblock: ````lang\\ncontent\\n````
+
+    _normalize_gptme does not (yet) extract tool calls from message content, so
+    both formats end up as raw text in the ATIF step's ``message`` field.  This
+    test documents that behaviour so a future parser that handles only one format
+    silently erasing the other would be caught here.
+    """
+    import json
+
+    from gptme_sessions.transcript import read_transcript
+
+    records = [
+        {"role": "system", "content": "You are gptme.", "timestamp": "2026-10-18T00:00:00+00:00"},
+        {"role": "user", "content": "list files", "timestamp": "2026-10-18T00:00:01+00:00"},
+        {
+            "role": "assistant",
+            "content": "Listing files.\n\n```bash\nls\n```",
+            "timestamp": "2026-10-18T00:00:02+00:00",
+            "metadata": {"usage": {"input_tokens": 10, "output_tokens": 6}},
+        },
+        {
+            "role": "system",
+            "content": "file1.py\nfile2.py",
+            "timestamp": "2026-10-18T00:00:03+00:00",
+        },
+    ]
+    path = tmp_path / "conversation.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    atif = session_transcript_to_atif(
+        read_transcript(path), extra_agent_fields={"version": "0.35.1"}
+    )
+
+    agent_steps = [s for s in atif["steps"] if s["source"] == "agent"]
+    assert len(agent_steps) >= 1, "at least one agent step must be emitted"
+
+    # The markdown codeblock content must survive in the step message — not be dropped.
+    step_messages = " ".join(s.get("message", "") for s in agent_steps)
+    assert (
+        "```bash" in step_messages or "ls" in step_messages
+    ), "markdown codeblock content was silently dropped from ATIF step message"
+
+    # Current limitation: _normalize_gptme does not parse content into tool_calls.
+    # Assert no tool_calls so a partial parser that handles only one format is caught.
+    for step in agent_steps:
+        assert not step.get("tool_calls"), (
+            "gptme native content parsing unexpectedly produced tool_calls — "
+            "update both AT-format and markdown codeblock tests together"
+        )
