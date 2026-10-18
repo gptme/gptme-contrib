@@ -265,9 +265,19 @@ def _parse_gptme_toolcalls(content: str) -> list[dict[str, Any]]:
     """
     results: list[dict[str, Any]] = []
 
+    # Every fenced block, including ones that are not tool calls. Native
+    # ``@tool(id): {...}`` syntax inside a fence is example text (docs, quoted
+    # transcripts), not an invocation — gptme's own parser skips these ranges
+    # too. Without this, a ```txt example would be exported as a real call.
+    fence_ranges = [(m.start(), m.end()) for m in _FENCE_RE.finditer(content)]
+
     # --- Native @tool(id): {json} ---
     search_from = 0
     while m := _NATIVE_TOOL_RE.search(content, search_from):
+        enclosing = next((end for start, end in fence_ranges if start <= m.start() < end), None)
+        if enclosing is not None:
+            search_from = enclosing
+            continue
         tool_name = m.group(1)
         call_id = m.group(2)
         json_start = m.end() - 1  # the '{' captured in group 3

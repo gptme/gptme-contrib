@@ -248,6 +248,28 @@ class TestNormalizeGptme:
         assert len(results) == 1
         assert results[0].tool_call_id == "abc123"
 
+    def test_native_syntax_inside_plain_fence_is_not_a_call(self):
+        """Native @tool syntax quoted in a non-tool fence is example text.
+
+        gptme's own parser skips tool-call syntax inside fenced blocks; a
+        ```txt example must not be exported as an invocation with a call ID.
+        """
+        records = [
+            {
+                "role": "assistant",
+                "content": (
+                    "For example:\n```txt\n"
+                    '@shell(abc123): {"command": "ls -la"}\n'
+                    "```\nThat is the syntax."
+                ),
+                "timestamp": "2026-03-01T10:00:00+00:00",
+            },
+        ]
+        norm = _normalize_gptme(records)
+        assert [m for m in norm if m.tool_name] == []
+        assert any("For example:" in m.content for m in norm)
+        assert any("That is the syntax." in m.content for m in norm)
+
     def test_markdown_format(self):
         """Fenced code blocks with known lang tags emit tool_name/tool_input."""
         records = [
