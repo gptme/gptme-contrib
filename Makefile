@@ -1,4 +1,4 @@
-.PHONY: help test typecheck test-packages test-changed-packages typecheck-packages test-plugins test-integration test-unit check-names list-packages list-plugins
+.PHONY: help test typecheck typecheck-scripts test-packages test-changed-packages typecheck-packages test-plugins test-integration test-unit check-names list-packages list-plugins
 
 # Plugins not yet CI-ready (tests exist but weren't validated before dynamic discovery)
 # TODO: Fix these tests and remove from exclude list - see GitHub issue tracking
