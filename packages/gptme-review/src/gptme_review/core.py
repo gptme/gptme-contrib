@@ -2194,6 +2194,37 @@ def _response_usage(
     return usage
 
 
+# ---------------------------------------------------------------------------
+# Per-finding provenance — which model, in which pass, through which lens
+# ---------------------------------------------------------------------------
+# HOST-stamped: the transport and the dispatching job know the triple, so the
+# model's own output never gets a vote. ``pass`` numbers the pass WITHIN one
+# fan-out wave (the unit consensus applies to); until-dry waves each restart at
+# pass 1 and keep cross-wave identity on ``until_dry_wave`` rather than invent a
+# pass number no job ran.
+
+
+def stamp_finding_provenance(
+    findings: Iterable[dict], *, model: str, pass_num: int, aspect: str
+) -> None:
+    """Overwrite provenance with the job's own transport metadata."""
+    for finding in findings:
+        if isinstance(finding, dict):
+            finding["provenance"] = [
+                {"model": str(model), "pass": int(pass_num), "aspect": str(aspect)}
+            ]
+
+
+def _merge_provenance(keep: dict, other: dict) -> None:
+    """Union both sources, carrying records an earlier fold already nested."""
+    merged = list(keep.get("provenance") or ())
+    for record in other.get("provenance") or ():
+        if record not in merged:
+            merged.append(record)
+    if merged:
+        keep["provenance"] = merged
+
+
 def _failure_outcome(exc: BaseException) -> str:
     message = str(exc).casefold()
     if "hard deadline" in message or "timed out" in message or "timeout" in message:
@@ -3991,6 +4022,16 @@ def openrouter_review(
             + f"head={content[:200]!r} tail={content[-200:]!r}"
         )
     findings, change_summary = parsed
+    # Stamp from the job that actually ran: `usage["model"]` is the transport
+    # model, `_usage_ctx` the pass/aspect the fan-out dispatched it as.
+    ctx = _usage_ctx or {}
+    pass_num = ctx.get("pass_num")
+    stamp_finding_provenance(
+        findings,
+        model=str(usage.get("model") or model),
+        pass_num=pass_num if isinstance(pass_num, int) else 1,
+        aspect=str(ctx.get("aspect") or "general"),
+    )
     # A TRUNCATED response cannot certify a clean review.
     #
     # `parse_review`'s last-resort branch slices from the first `{` to the last
@@ -5653,6 +5694,11 @@ def _merge_evidence(keep: dict, other: dict, *, prefer_richer: bool = False) -> 
     for key in (keep.get("independence_key"), other.get("independence_key")):
         if key and key not in merged_keys:
             merged_keys.append(key)
+    # Carry every source that found this defect, including the records an
+    # already-merged instance is itself carrying. Attribution is additive:
+    # merging two instances must not pick a winner, or the published review
+    # credits one lens for a defect three of them reported.
+    _merge_provenance(keep, other)
 
 
 def build_aspect_extra_context(aspect_name: str, aspect_instruction: str) -> str:
@@ -6883,6 +6929,12 @@ def suppression_entry(f: Mapping[str, object], *, why: str = "") -> dict:
         "line": line if isinstance(line, int) else None,
         "tokens": _fingerprint_tokens(str(f.get("body") or "")),
     }
+    entry["class"] = normalize_finding_class(f.get("class"))
+    # Additive: sources are kept whole — they scale with the jobs configured,
+    # not with marker arithmetic — and a finding with none keeps its old record.
+    provenance = f.get("provenance")
+    if isinstance(provenance, list) and provenance:
+        entry["provenance"] = list(provenance)
     if why:
         entry["why"] = why
     return entry
@@ -7188,7 +7240,11 @@ def _fanout_until_dry(
     until_dry_later_reasoning_effort: str | None,
     deadline: ReviewDeadline | None,
 ) -> tuple[list[dict], dict]:
-    """Sequential waves of ``fanout_llm_review``, stop on zero new groups."""
+    """Sequential waves of ``fanout_llm_review``, stop on zero new groups.
+
+    Provenance pass numbers are within-wave, so each wave restarts at 1 and
+    cross-wave identity stays on ``until_dry_wave``.
+    """
     cap = max(1, until_dry_max if until_dry_max is not None else UNTIL_DRY_MAX_PASSES)
     base_note = note.strip()
     accumulated: list[dict] = []
@@ -7564,6 +7620,15 @@ def fanout_llm_review(
             failures.append(f"{label}: {type(r).__name__}: {r}")
             continue
         pass_idx, name, findings, usage = r
+        # The wave owns pass numbering and lens name, so it re-stamps (replacing
+        # `openrouter_review`'s record, not appending). A failed job never
+        # reaches this branch, so a dead or rejected job is never credited.
+        stamp_finding_provenance(
+            findings,
+            model=str(usage.get("model") or model),
+            pass_num=pass_idx + 1,
+            aspect=name,
+        )
         for f in findings:
             f.setdefault("aspect", name)
             # Tag each finding with its independence key: (model, aspect).
