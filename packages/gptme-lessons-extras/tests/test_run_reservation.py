@@ -330,7 +330,12 @@ def test_timeout_worker_counts_against_budget(tmp_path: Path) -> None:
     _write_reservation(res_path, _make_reservation(max_sessions=10))
     state = tmp_path / "state"
     result = select(
-        _request(timeout_seconds=0.05),  # tiny timeout
+        # The budget is measured from the call's start, so it also covers
+        # first-call setup; importing gptme.hooks alone is ~45 ms cold. A
+        # 50 ms budget therefore expires before the call is reserved, which is
+        # a different path than the one under test. One second leaves setup
+        # ample room and still times out on the 10 s worker below.
+        _request(timeout_seconds=1.0),
         state_dir=state,
         worker_command=_timeout_worker(tmp_path),
         reservation_path=res_path,
