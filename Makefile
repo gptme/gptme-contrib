@@ -1,4 +1,4 @@
-.PHONY: help test typecheck test-packages test-changed-packages typecheck-packages test-plugins test-integration test-unit check-names list-packages list-plugins
+.PHONY: help test typecheck typecheck-scripts test-packages test-changed-packages typecheck-packages test-plugins test-integration test-unit check-names list-packages list-plugins
 
 # Plugins not yet CI-ready (tests exist but weren't validated before dynamic discovery)
 # TODO: Fix these tests and remove from exclude list - see GitHub issue tracking
@@ -37,7 +37,22 @@ test-unit:  ## Run unit tests (tests/ excluding tests/integration/)
 		--ignore=tests/integration/ \
 		-v
 
-typecheck: typecheck-packages  ## Run all type checks
+typecheck: typecheck-packages typecheck-scripts  ## Run all type checks
+
+# Hook scripts are consumed by the brain repo through symlinks and typechecked
+# there with gptme-rag importable. Without this target, a signature drift in an
+# import fallback (gptme/gptme-contrib#1934) lands green here and turns the
+# brain's scheduled typecheck red.
+typecheck-scripts:  ## Run mypy for harness hook scripts
+	@# --no-sync: the hook imports gptme_rag and gptme, which are workspace
+	@# members rather than root dependencies. Requires `uv sync --all-packages`
+	@# first (CI does this); a bare `uv run` would sync the root env without them
+	@# and report false import-not-found errors.
+	@echo "Running typecheck for scripts/claude-code-hooks..."
+	@# Supply the Python <3.11 tomli fallback even on newer Python: mypy checks
+	@# that import too. Do not suppress missing imports globally: unresolved
+	@# gptme_rag/gptme must fail rather than silently skip signature checking.
+	@uv run --no-sync --with mypy --with tomli python -m mypy --config-file scripts/claude-code-hooks/mypy.ini scripts/claude-code-hooks/ --no-incremental
 
 # ============================================================
 # Package targets (dynamically discovered)
