@@ -96,3 +96,19 @@ def test_guard_in_pushed_repo_is_never_executed(tmp_path: Path) -> None:
     proc = _push(hook, repo, marker)
     assert not marker.exists(), proc.stderr
     assert proc.returncode == 0, proc.stderr
+
+
+def test_guard_outside_install_layout_is_never_executed(tmp_path: Path) -> None:
+    """A hook in <superproject>/.git/modules/<sub>/hooks must not reach the
+    superproject working tree four levels up."""
+    superproject = tmp_path / "superproject"
+    hooks = superproject / ".git" / "modules" / "sub" / "hooks"
+    shutil.copytree(HOOKS_SRC, hooks)
+    planted = superproject / "scripts" / "hooks" / "worktree-push-guard"
+    planted.parent.mkdir(parents=True)
+    planted.write_text(STUB_GUARD)
+    planted.chmod(0o755)
+    marker = tmp_path / "guard-ran"
+    proc = _push(hooks / "pre-push", _repo(tmp_path), marker)
+    assert not marker.exists(), proc.stderr
+    assert proc.returncode == 0, proc.stderr
