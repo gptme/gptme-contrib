@@ -44,7 +44,9 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Collection
 from pathlib import Path
+from typing import Any
 
 # Re-exec under the workspace venv BEFORE importing gptme-rag. Claude Code
 # invokes this hook as system `python3`, which does not have gptme-rag.
@@ -246,27 +248,25 @@ except ImportError:  # pragma: no cover — degrade path when venv is missing
     _GPTME_RAG_AVAILABLE = False
     _BM25_MIN_RAW = 40.0
 
-    def effective_status(frontmatter: dict) -> str:
-        return str(
-            frontmatter.get("metadata", {}).get("status")
-            or frontmatter.get("status")
-            or "active"
-        )
+    def effective_status(fm: dict[Any, Any]) -> str:
+        return str(fm.get("metadata", {}).get("status") or fm.get("status") or "active")
 
-    def extract_frontmatter(content: str) -> tuple[dict, str]:
+    def extract_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         return {}, content
 
-    def filter_by_harness(lessons: list[dict], harness: str) -> list[dict]:
+    def filter_by_harness(
+        lessons: list[dict[str, Any]], harness: str
+    ) -> list[dict[str, Any]]:
         return lessons
 
     def filter_by_session_category(
-        lessons: list[dict], category: str | None = None
-    ) -> list[dict]:
+        lessons: list[dict[str, Any]], category: str | None
+    ) -> list[dict[str, Any]]:
         return lessons
 
     def filter_by_repo(
-        lessons: list[dict], current_repo: str | None = None
-    ) -> list[dict]:
+        lessons: list[dict[str, Any]], current_repo: str | None
+    ) -> list[dict[str, Any]]:
         return lessons
 
     def keyword_to_regex(keyword: str) -> re.Pattern[str] | None:
@@ -275,10 +275,19 @@ except ImportError:  # pragma: no cover — degrade path when venv is missing
     def match_keyword(keyword: str, text_lower: str) -> bool:
         return False
 
-    def scan_lessons(lesson_dirs: list[Path]) -> list[dict]:
+    def scan_lessons(lesson_dirs: list[Path]) -> list[dict[str, Any]]:
         return []
 
-    def _upstream_score_lessons(*_args, **_kwargs) -> list[dict]:
+    def _upstream_score_lessons(
+        lessons: list[dict[str, Any]],
+        prompt: str,
+        max_results: int = 10,
+        *,
+        use_bm25: bool = True,
+        bm25_min_z: float | None = None,
+        skill_bm25_min_z: float | None = None,
+        skill_bm25_exempt_paths: Collection[str] = (),
+    ) -> list[dict[str, Any]]:
         return []
 
 
@@ -838,7 +847,7 @@ def score_lessons(
     if use_bm25 is None:
         use_bm25 = True
     cap = max(max_results, len(lessons))
-    skill_kwargs = {}
+    skill_kwargs: dict[str, Any] = {}
     if skill_bm25_min_z is not None and _skill_bm25_supported():
         skill_kwargs = {
             "skill_bm25_min_z": skill_bm25_min_z,
@@ -849,10 +858,10 @@ def score_lessons(
                 and _classify_lesson(lesson["path"])[0] == "exempt"
             },
         }
-    corpus_kwargs: dict = {}
+    corpus_kwargs: dict[str, Any] = {}
     if bm25_min_z is not None and _bm25_min_z_supported():
         corpus_kwargs["bm25_min_z"] = bm25_min_z
-    results: list[dict] = _upstream_score_lessons(
+    results: list[dict[str, Any]] = _upstream_score_lessons(
         lessons,
         prompt,
         max_results=cap,
