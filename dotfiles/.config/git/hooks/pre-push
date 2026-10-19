@@ -314,8 +314,15 @@ command -v git-lfs >/dev/null 2>&1 && printf '%s\n' "${STDIN_LINES[@]}" | git lf
 # cloned repository run arbitrary code with the user's privileges. `$SCRIPT_DIR`
 # may be a symlinked global hooks dir (core.hooksPath), so `readlink -f` + `git
 # -C` finds the checkout that actually owns this hook file.
+# A copied install outside any checkout (install root holding
+# dotfiles/.config/git/hooks and scripts/hooks side by side) has no git root,
+# so fall back to the same four-level walk-up the mass-delete guard uses,
+# resolved physically from the hook's own directory.
 _HOOKS_REAL="$(readlink -f "$SCRIPT_DIR" 2>/dev/null || printf '%s' "$SCRIPT_DIR")"
 _HOOK_REPO="$(git -C "$_HOOKS_REAL" rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "$_HOOK_REPO" ]; then
+    _HOOK_REPO="$(cd -P "$_HOOKS_REAL/../../../.." 2>/dev/null && pwd)" || _HOOK_REPO=""
+fi
 _GUARD=""
 if [ -n "$_HOOK_REPO" ] && [ -x "$_HOOK_REPO/scripts/hooks/worktree-push-guard" ]; then
     _GUARD="$_HOOK_REPO/scripts/hooks/worktree-push-guard"
