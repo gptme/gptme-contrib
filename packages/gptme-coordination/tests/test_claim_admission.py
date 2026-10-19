@@ -1,11 +1,25 @@
 """Workspace admission policies run under the same write lock as claim CAS."""
 
 import multiprocessing
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from gptme_coordination.db import CoordinationDB
 from gptme_coordination.work import WorkClaimDenial, WorkClaimManager
+
+
+def _is_live(prior) -> bool:
+    """A foreign claim blocks only while its TTL is unexpired.
+
+    ``status`` stays ``'claimed'`` after a claim expires: expiry only weakens
+    the CAS predicate, and the row is not rewritten until someone reclaims or
+    abandons it. Checking status alone would turn a crashed agent's stale row
+    into an indefinite lockout of the linked key.
+    """
+    if prior.expires_at is None:
+        return True
+    return prior.expires_at > datetime.now(UTC).replace(tzinfo=None)
 
 
 class LinkedWork(WorkClaimManager):
@@ -14,7 +28,8 @@ class LinkedWork(WorkClaimManager):
         for key in ("task", "issue"):
             prior = self.get(key)
             if prior and prior.status == "claimed" and prior.claimer != agent_id:
-                return WorkClaimDenial("linked-contention", agent_id, prior)
+                if _is_live(prior):
+                    return WorkClaimDenial("linked-contention", agent_id, prior)
         return None
 
 
@@ -33,6 +48,24 @@ def test_linked_admission_and_same_owner(
         assert not db.conn.in_transaction
         assert work.claim("owner", second)
         assert work.last_denial is None
+
+
+def test_expired_foreign_claim_does_not_block_linked_key(tmp_path: Path) -> None:
+    """A lapsed TTL must not turn a stale row into an indefinite linked lockout."""
+    with CoordinationDB(tmp_path / "coord.db") as db:
+        work = LinkedWork(db)
+        assert work.claim("owner", "task")
+        db.conn.execute(
+            "UPDATE work SET expires_at = datetime('now', '-1 seconds') "
+            "WHERE task_id = ?",
+            ("task",),
+        )
+        # The row still reads status='claimed' after its TTL lapses; only the
+        # CAS predicate treats it as free. Admission must agree with CAS.
+        assert work.get("task").status == "claimed"
+        assert work.claim("other", "issue")
+        assert work.last_denial is None
+        assert work.get("issue").claimer == "other"
 
 
 def test_admission_runs_for_dry_run_without_mutation(tmp_path: Path) -> None:
