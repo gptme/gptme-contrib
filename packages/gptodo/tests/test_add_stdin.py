@@ -12,7 +12,9 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from gptodo.cli import _read_piped_body, cli
+import click
+
+from gptodo.cli import _read_fd_bounded, _read_piped_body, cli
 
 
 @pytest.fixture
@@ -42,7 +44,8 @@ def test_open_empty_pipe_returns_promptly(workspace: Path) -> None:
     created = workspace / "tasks" / "task-filed-from-a-harness-pipe.md"
     assert created.exists()
     assert "## " not in created.read_text()
-    assert out.strip().splitlines()[-1] == "task-filed-from-a-harness-pipe"
+    # Rich may wrap long paths, but there must be no extra task-id line.
+    assert "".join(out.split()) == f"✓Createdtask:{created}"
 
 
 def _wait(proc: subprocess.Popen[str]) -> tuple[str, str]:
@@ -106,18 +109,86 @@ def test_read_piped_body_does_not_block_on_an_idle_open_pipe() -> None:
         os.close(write_fd)
 
 
-def test_read_piped_body_reads_a_body_from_a_pipe_that_stays_open() -> None:
-    # A writer may keep the pipe open after the body; the read must not wait
-    # for an EOF that never comes.
+def test_read_piped_body_rejects_an_incomplete_body() -> None:
+    # An idle gap is not EOF: never save a silently truncated task body.
     read_fd, write_fd = os.pipe()
     try:
         os.write(write_fd, b"## Steps\n")
         with os.fdopen(read_fd) as stream:
             started = time.monotonic()
-            assert _read_piped_body(stream, timeout=0.2) == "## Steps"
+            with pytest.raises(click.ClickException, match="--body-stdin"):
+                _read_piped_body(stream, timeout=0.2)
             assert time.monotonic() - started < 2.0
     finally:
         os.close(write_fd)
+
+
+def test_incomplete_body_does_not_create_task(workspace: Path) -> None:
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "gptodo", "add", "Incomplete"],
+        cwd=workspace,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write("first chunk\n")
+        proc.stdin.flush()
+        _, err = _wait(proc)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.communicate()
+    assert proc.returncode != 0
+    assert "--body-stdin" in err
+    assert not list((workspace / "tasks").glob("*.md"))
+
+
+def test_explicit_stdin_waits_for_delayed_and_slow_body(workspace: Path) -> None:
+    import threading
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "gptodo", "add", "Slow body", "--body-stdin"],
+        cwd=workspace,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    def write_body() -> None:
+        assert proc.stdin is not None
+        time.sleep(1)
+        proc.stdin.write("first chunk\n")
+        proc.stdin.flush()
+        time.sleep(0.8)
+        proc.stdin.write("last chunk\n")
+        proc.stdin.close()
+
+    writer = threading.Thread(target=write_body, daemon=True)
+    writer.start()
+    try:
+        _, err = _wait(proc)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        writer.join(timeout=3)
+    assert proc.returncode == 0, err
+    body = (workspace / "tasks" / "slow-body.md").read_text()
+    assert "first chunk\nlast chunk" in body
+
+
+def test_read_cap_rejects_incomplete_body() -> None:
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, b"partial")
+        with pytest.raises(click.ClickException, match="--body-stdin"):
+            _read_fd_bounded(read_fd, timeout=1, idle=1, cap=0.1)
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
 
 
 def test_cli_runner_input_still_becomes_body(workspace: Path) -> None:

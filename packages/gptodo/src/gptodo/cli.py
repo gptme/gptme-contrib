@@ -5581,6 +5581,11 @@ def list_all_locks(cleanup: bool, output_json: bool):
     default=None,
     help="What/who blocks the task (required with --state waiting)",
 )
+@click.option(
+    "--body-stdin",
+    is_flag=True,
+    help="Read the complete body from stdin until EOF (including slow producers).",
+)
 def add(
     title: str,
     priority: str,
@@ -5589,13 +5594,16 @@ def add(
     state: str,
     task_type: str,
     waiting_for: str | None,
+    body_stdin: bool,
 ):
     """Create a new task from title and optional stdin body.
 
     The task filename is generated from the title by converting to lowercase
     and replacing non-alphanumeric characters with hyphens.
 
-    If stdin is provided (piped), it becomes the task body.
+    Piped stdin is detected with a short deadline. An idle, empty pipe is
+    treated as no body; an incomplete body fails without creating a task.
+    Use --body-stdin to wait until EOF for delayed or slow producers.
 
     Examples:
         # Simple task
@@ -5662,7 +5670,7 @@ def add(
         if tag_list:
             frontmatter_data["tags"] = tag_list
 
-    body = _read_piped_body(sys.stdin)
+    body = sys.stdin.read().strip() if body_stdin else _read_piped_body(sys.stdin)
 
     # Build file content
     lines = ["---"]
@@ -5696,9 +5704,6 @@ def add(
     filepath.write_text(content)
 
     console.print(f"[green]✓ Created task:[/] {filepath}")
-    # Machine-readable id on its own line: the slug is truncated to 50 chars
-    # and may carry a timestamp suffix, so callers should not re-derive it.
-    click.echo(filepath.stem)
 
 
 def _read_piped_body(stream: Any, timeout: float = 0.5) -> str:
@@ -5708,8 +5713,8 @@ def _read_piped_body(stream: Any, timeout: float = 0.5) -> str:
     and systemd units hand every child a pipe that never reaches EOF, and a
     bare ``sys.stdin.read()`` then blocks forever. Read the fd in a daemon
     thread instead: no data within ``timeout`` means "no body", and once data
-    arrives the reader stops at EOF or after a short idle gap, so a writer
-    that never closes the pipe cannot block the command either. Streams
+    arrives the reader requires EOF before the idle/cap deadline, otherwise
+    it raises instead of returning a partial body. Streams
     without a file descriptor (test runners) fall back to a plain read, which
     is finite there.
     """
@@ -5733,19 +5738,22 @@ def _read_fd_bounded(fd: int, timeout: float, idle: float = 0.2, cap: float = 5.
     import time
 
     chunks: list[bytes] = []
-    state = {"done": False, "last": time.monotonic()}
+    done = threading.Event()
+    last = time.monotonic()
+    errors: list[OSError] = []
     lock = threading.Lock()
 
     def _read() -> None:
+        nonlocal last
         try:
             while chunk := os.read(fd, 65536):
                 with lock:
                     chunks.append(chunk)
-                    state["last"] = time.monotonic()
-        except OSError:
-            pass
+                    last = time.monotonic()
+        except OSError as exc:
+            errors.append(exc)
         finally:
-            state["done"] = True
+            done.set()
 
     thread = threading.Thread(target=_read, daemon=True)
     thread.start()
@@ -5753,15 +5761,22 @@ def _read_fd_bounded(fd: int, timeout: float, idle: float = 0.2, cap: float = 5.
     while True:
         thread.join(0.02)
         with lock:
-            if state["done"]:
+            if done.is_set():
                 break
-            idle_for = time.monotonic() - state["last"]
+            idle_for = time.monotonic() - last
         elapsed = time.monotonic() - start
         if elapsed >= cap:
             break
         if elapsed >= timeout and idle_for >= idle:
             break
     with lock:
+        if errors:
+            raise click.ClickException(f"Could not read stdin: {errors[0]}")
+        if chunks and not done.is_set():
+            raise click.ClickException(
+                "Stdin body did not reach EOF; no task was created. "
+                "Use --body-stdin to wait for the complete body."
+            )
         return b"".join(chunks).decode(errors="replace").strip()
 
 
