@@ -195,3 +195,34 @@ def test_cli_runner_input_still_becomes_body(workspace: Path) -> None:
     result = CliRunner().invoke(cli, ["add", "Runner task"], input="body line\n")
     assert result.exit_code == 0, result.output
     assert "body line" in (workspace / "tasks" / "runner-task.md").read_text()
+
+
+def test_read_piped_body_without_fileno_handles_bytes_stream() -> None:
+    # Click's CliRunner._make_input wraps bytes input in io.BytesIO; the
+    # fallback must decode, never embed the bytes repr as the body.
+    assert _read_piped_body(io.BytesIO(b"hello")) == "hello"
+
+
+def test_unpublished_first_byte_is_not_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A body whose first byte is already in the kernel buffer when the
+    # empty-detection check fires, but which the reader thread has not yet
+    # published under the lock, must surface as an explicit --body-stdin
+    # error, never as an empty body. Force the race: the reader thread is
+    # still inside its first (slowed) read when the deadline hits.
+    import gptodo.cli as cli_module
+
+    real_read = os.read
+
+    def slow_read(fd: int, n: int) -> bytes:
+        time.sleep(0.3)
+        return real_read(fd, n)
+
+    monkeypatch.setattr(cli_module.os, "read", slow_read)
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, b"## Steps\n")
+        with os.fdopen(read_fd) as stream:
+            with pytest.raises(click.ClickException, match="--body-stdin"):
+                _read_piped_body(stream, timeout=0.2)
+    finally:
+        os.close(write_fd)

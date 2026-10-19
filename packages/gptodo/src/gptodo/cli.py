@@ -5723,7 +5723,10 @@ def _read_piped_body(stream: Any, timeout: float = 0.5) -> str:
     try:
         fd = stream.fileno()
     except (OSError, ValueError, AttributeError):
-        return str(stream.read()).strip()
+        data = stream.read()
+        if isinstance(data, bytes):
+            data = data.decode(errors="replace")
+        return str(data).strip()
     return _read_fd_bounded(fd, timeout)
 
 
@@ -5768,7 +5771,23 @@ def _read_fd_bounded(fd: int, timeout: float, idle: float = 0.2, cap: float = 5.
         if elapsed >= cap:
             break
         if elapsed >= timeout and idle_for >= idle:
-            break
+            if chunks:
+                break
+            # Guard against a scheduling race: the reader thread may have
+            # read the first bytes without publishing them under the lock
+            # yet. Only treat the pipe as empty when select confirms no
+            # data (and no EOF) is waiting; otherwise keep reading so a
+            # late first byte becomes an explicit --body-stdin error
+            # instead of a silently dropped body.
+            import select
+
+            try:
+                readable, _, _ = select.select([fd], [], [], 0)
+            except (OSError, ValueError):
+                break
+            if not readable:
+                break
+            continue
     with lock:
         if errors:
             raise click.ClickException(f"Could not read stdin: {errors[0]}")
