@@ -91,6 +91,25 @@ def test_read_piped_body_falls_back_when_select_unsupported(
         assert _read_piped_body(stream) == "body"
 
 
+def test_read_piped_body_select_unsupported_does_not_block_on_open_pipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The Windows fallback must not reintroduce the hang for a pipe that never
+    # reaches EOF.
+    import select
+
+    def _raise(*args: object, **kwargs: object) -> None:
+        raise OSError("select() only accepts sockets on Windows")
+
+    monkeypatch.setattr(select, "select", _raise)
+    read_fd, write_fd = os.pipe()
+    try:
+        with os.fdopen(read_fd) as stream:
+            assert _read_piped_body(stream, timeout=0.2) == ""
+    finally:
+        os.close(write_fd)
+
+
 def test_cli_runner_input_still_becomes_body(workspace: Path) -> None:
     result = CliRunner().invoke(cli, ["add", "Runner task"], input="body line\n")
     assert result.exit_code == 0, result.output

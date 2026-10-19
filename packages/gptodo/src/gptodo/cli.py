@@ -5722,13 +5722,40 @@ def _read_piped_body(stream: Any, timeout: float = 0.5) -> str:
     try:
         ready, _, _ = select.select([fd], [], [], timeout)
     except (OSError, ValueError):
-        # ``select()`` only accepts sockets on Windows, so a piped body would
-        # otherwise be dropped silently. Keep the historical blocking read on
-        # platforms where the readiness check is unavailable.
-        return str(stream.read()).strip()
+        # ``select()`` only accepts sockets on Windows, so readiness cannot be
+        # checked there. Read in a daemon thread so a body still arrives while a
+        # pipe that never reaches EOF cannot block the command.
+        return _read_with_timeout(stream, timeout)
     if not ready:
         return ""
     return str(stream.read()).strip()
+
+
+def _read_with_timeout(stream: Any, timeout: float) -> str:
+    """Read the stream's fd in a daemon thread, returning "" if nothing arrives.
+
+    Reads the raw fd rather than the stream so a reader still blocked at the
+    deadline cannot hold the stream's buffer lock (``close()`` would then wait
+    on it forever).
+    """
+    import threading
+
+    fd = stream.fileno()
+    chunks: list[bytes] = []
+
+    def _read() -> None:
+        try:
+            while chunk := os.read(fd, 65536):
+                chunks.append(chunk)
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=_read, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        return ""
+    return b"".join(chunks).decode(errors="replace").strip()
 
 
 # =============================================================================
