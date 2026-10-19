@@ -44,8 +44,12 @@ typecheck: typecheck-packages typecheck-scripts  ## Run all type checks
 # import fallback (gptme/gptme-contrib#1934) lands green here and turns the
 # brain's scheduled typecheck red.
 typecheck-scripts:  ## Run mypy for harness hook scripts
+	@# --no-sync: the hook imports gptme_rag and gptme, which are workspace
+	@# members rather than root dependencies. Requires `uv sync --all-packages`
+	@# first (CI does this); a bare `uv run` would sync the root env without them
+	@# and report false import-not-found errors.
 	@echo "Running typecheck for scripts/claude-code-hooks..."
-	@uv run --with mypy mypy scripts/claude-code-hooks/ --no-incremental
+	@uv run --no-sync --with mypy mypy scripts/claude-code-hooks/ --no-incremental
 
 # ============================================================
 # Package targets (dynamically discovered)
