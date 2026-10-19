@@ -233,6 +233,7 @@ jobs:
       - name: Run typecheck
         run: |
           make typecheck-packages
+          make typecheck-scripts
 
   # Check install sizes don't exceed budgets (prevents silent regressions like #1416)
   install-size:
