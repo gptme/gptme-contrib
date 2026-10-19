@@ -5731,12 +5731,14 @@ def _read_piped_body(stream: Any, timeout: float = 0.5) -> str:
     return str(stream.read()).strip()
 
 
-def _read_with_timeout(stream: Any, timeout: float) -> str:
+def _read_with_timeout(stream: Any, timeout: float, grace: float = 5.0) -> str:
     """Read the stream's fd in a daemon thread, returning "" if nothing arrives.
 
     Reads the raw fd rather than the stream so a reader still blocked at the
     deadline cannot hold the stream's buffer lock (``close()`` would then wait
-    on it forever).
+    on it forever). An idle stream yields "" after ``timeout``; once data has
+    arrived the reader gets ``grace`` extra seconds so a large body is not
+    truncated.
     """
     import threading
 
@@ -5753,8 +5755,9 @@ def _read_with_timeout(stream: Any, timeout: float) -> str:
     thread = threading.Thread(target=_read, daemon=True)
     thread.start()
     thread.join(timeout)
-    if thread.is_alive():
+    if not chunks:
         return ""
+    thread.join(grace)
     return b"".join(chunks).decode(errors="replace").strip()
 
 

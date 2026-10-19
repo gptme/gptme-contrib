@@ -91,6 +91,28 @@ def test_read_piped_body_falls_back_when_select_unsupported(
         assert _read_piped_body(stream) == "body"
 
 
+def test_read_piped_body_select_unsupported_reads_a_full_pipe_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import select
+
+    def _raise(*args: object, **kwargs: object) -> None:
+        raise OSError("select() only accepts sockets on Windows")
+
+    monkeypatch.setattr(select, "select", _raise)
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, b"line one\nline two\n")
+        os.close(write_fd)
+        with os.fdopen(read_fd) as stream:
+            assert _read_piped_body(stream, timeout=0.2) == "line one\nline two"
+    finally:
+        try:
+            os.close(write_fd)
+        except OSError:
+            pass
+
+
 def test_read_piped_body_select_unsupported_does_not_block_on_open_pipe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
