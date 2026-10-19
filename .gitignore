@@ -17,6 +17,10 @@ scripts/*/.tokens.json
 scripts/.env
 *.oauth-state
 *.tokens.json
+# Per-agent identity allowlist written by dotfiles/install.sh. It carries a
+# machine-specific git identity and must never be committed from a checkout
+# whose ~/.config is symlinked into this tree.
+dotfiles/.config/git/allowed-identities.conf
 
 .venv/
 venv/
