@@ -27,7 +27,7 @@ try:
 except ImportError:
     # Fallback: define StatusProvider as a Protocol if not available in gptme
     @runtime_checkable
-    class StatusProvider(Protocol):
+    class StatusProvider(Protocol):  # type: ignore[no-redef]
         """Protocol for status providers."""
 
         name: str
@@ -367,4 +367,4 @@ class BobStatusProvider:
 
 def make_provider() -> StatusProvider:
     """Factory function registered as the ``bob`` entry point."""
-    return BobStatusProvider()  # type: ignore[return-value]
+    return BobStatusProvider()

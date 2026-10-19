@@ -5473,7 +5473,7 @@ def review(
         change_summary=_cs if isinstance(_cs, dict) else {},
         score=confidence_score(findings),
         blocking=bool(shortfalls),
-        shortfalls=shortfalls,
+        shortfalls=[dict(s) for s in shortfalls],
         engine="llm",
         model=model,
         passes=answered_passes if isinstance(answered_passes, int) else config.passes,
