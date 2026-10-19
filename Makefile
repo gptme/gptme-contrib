@@ -37,7 +37,15 @@ test-unit:  ## Run unit tests (tests/ excluding tests/integration/)
 		--ignore=tests/integration/ \
 		-v
 
-typecheck: typecheck-packages  ## Run all type checks
+typecheck: typecheck-packages typecheck-scripts  ## Run all type checks
+
+# Hook scripts are consumed by the brain repo through symlinks and typechecked
+# there with gptme-rag importable. Without this target, a signature drift in an
+# import fallback (gptme/gptme-contrib#1934) lands green here and turns the
+# brain's scheduled typecheck red.
+typecheck-scripts:  ## Run mypy for harness hook scripts
+	@echo "Running typecheck for scripts/claude-code-hooks..."
+	@uv run --with mypy mypy scripts/claude-code-hooks/ --no-incremental
 
 # ============================================================
 # Package targets (dynamically discovered)
