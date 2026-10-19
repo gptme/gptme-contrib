@@ -5706,10 +5706,12 @@ def _read_piped_body(stream: Any, timeout: float = 0.5) -> str:
 
     A non-tty stdin is not proof that a body was piped: harness tool pipes
     and systemd units hand every child a pipe that never reaches EOF, and a
-    bare ``sys.stdin.read()`` then blocks forever. Only read when the pipe
-    has data within ``timeout`` seconds (shell heredocs and ``echo |`` are
-    written before we get here). Streams without a file descriptor (test
-    runners) fall back to a plain read, which is finite there.
+    bare ``sys.stdin.read()`` then blocks forever. Read the fd in a daemon
+    thread instead: no data within ``timeout`` means "no body", and once data
+    arrives the reader stops at EOF or after a short idle gap, so a writer
+    that never closes the pipe cannot block the command either. Streams
+    without a file descriptor (test runners) fall back to a plain read, which
+    is finite there.
     """
     if stream is None or stream.isatty():
         return ""
@@ -5717,48 +5719,50 @@ def _read_piped_body(stream: Any, timeout: float = 0.5) -> str:
         fd = stream.fileno()
     except (OSError, ValueError, AttributeError):
         return str(stream.read()).strip()
-    import select
-
-    try:
-        ready, _, _ = select.select([fd], [], [], timeout)
-    except (OSError, ValueError):
-        # ``select()`` only accepts sockets on Windows, so readiness cannot be
-        # checked there. Read in a daemon thread so a body still arrives while a
-        # pipe that never reaches EOF cannot block the command.
-        return _read_with_timeout(stream, timeout)
-    if not ready:
-        return ""
-    return str(stream.read()).strip()
+    return _read_fd_bounded(fd, timeout)
 
 
-def _read_with_timeout(stream: Any, timeout: float, grace: float = 5.0) -> str:
-    """Read the stream's fd in a daemon thread, returning "" if nothing arrives.
+def _read_fd_bounded(fd: int, timeout: float, idle: float = 0.2, cap: float = 5.0) -> str:
+    """Read ``fd`` until EOF, an idle gap, or ``cap`` seconds.
 
-    Reads the raw fd rather than the stream so a reader still blocked at the
+    Reads the raw fd rather than the stream so a reader still blocked at a
     deadline cannot hold the stream's buffer lock (``close()`` would then wait
-    on it forever). An idle stream yields "" after ``timeout``; once data has
-    arrived the reader gets ``grace`` extra seconds so a large body is not
-    truncated.
+    on it forever). Returns "" when nothing arrives within ``timeout``.
     """
     import threading
+    import time
 
-    fd = stream.fileno()
     chunks: list[bytes] = []
+    state = {"done": False, "last": time.monotonic()}
+    lock = threading.Lock()
 
     def _read() -> None:
         try:
             while chunk := os.read(fd, 65536):
-                chunks.append(chunk)
+                with lock:
+                    chunks.append(chunk)
+                    state["last"] = time.monotonic()
         except OSError:
             pass
+        finally:
+            state["done"] = True
 
     thread = threading.Thread(target=_read, daemon=True)
     thread.start()
-    thread.join(timeout)
-    if not chunks:
-        return ""
-    thread.join(grace)
-    return b"".join(chunks).decode(errors="replace").strip()
+    start = time.monotonic()
+    while True:
+        thread.join(0.02)
+        with lock:
+            if state["done"]:
+                break
+            idle_for = time.monotonic() - state["last"]
+        elapsed = time.monotonic() - start
+        if elapsed >= cap:
+            break
+        if elapsed >= timeout and idle_for >= idle:
+            break
+    with lock:
+        return b"".join(chunks).decode(errors="replace").strip()
 
 
 # =============================================================================

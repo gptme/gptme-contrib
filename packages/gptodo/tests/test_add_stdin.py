@@ -6,6 +6,7 @@ import io
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -74,32 +75,14 @@ def test_read_piped_body_dev_null_is_empty() -> None:
         assert _read_piped_body(devnull) == ""
 
 
-def test_read_piped_body_falls_back_when_select_unsupported(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Windows ``select()`` only accepts sockets; a piped body must still be read
-    # instead of being silently dropped.
-    import select
-
-    def _raise(*args: object, **kwargs: object) -> None:
-        raise OSError("select() only accepts sockets on Windows")
-
-    monkeypatch.setattr(select, "select", _raise)
+def test_read_piped_body_reads_a_regular_file(tmp_path: Path) -> None:
     body_path = tmp_path / "body.txt"
     body_path.write_text("body\n")
     with open(body_path) as stream:
         assert _read_piped_body(stream) == "body"
 
 
-def test_read_piped_body_select_unsupported_reads_a_full_pipe_body(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import select
-
-    def _raise(*args: object, **kwargs: object) -> None:
-        raise OSError("select() only accepts sockets on Windows")
-
-    monkeypatch.setattr(select, "select", _raise)
+def test_read_piped_body_reads_a_full_pipe_body() -> None:
     read_fd, write_fd = os.pipe()
     try:
         os.write(write_fd, b"line one\nline two\n")
@@ -113,21 +96,26 @@ def test_read_piped_body_select_unsupported_reads_a_full_pipe_body(
             pass
 
 
-def test_read_piped_body_select_unsupported_does_not_block_on_open_pipe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The Windows fallback must not reintroduce the hang for a pipe that never
-    # reaches EOF.
-    import select
-
-    def _raise(*args: object, **kwargs: object) -> None:
-        raise OSError("select() only accepts sockets on Windows")
-
-    monkeypatch.setattr(select, "select", _raise)
+def test_read_piped_body_does_not_block_on_an_idle_open_pipe() -> None:
+    # The harness shape: a pipe that never receives data and never reaches EOF.
     read_fd, write_fd = os.pipe()
     try:
         with os.fdopen(read_fd) as stream:
             assert _read_piped_body(stream, timeout=0.2) == ""
+    finally:
+        os.close(write_fd)
+
+
+def test_read_piped_body_reads_a_body_from_a_pipe_that_stays_open() -> None:
+    # A writer may keep the pipe open after the body; the read must not wait
+    # for an EOF that never comes.
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, b"## Steps\n")
+        with os.fdopen(read_fd) as stream:
+            started = time.monotonic()
+            assert _read_piped_body(stream, timeout=0.2) == "## Steps"
+            assert time.monotonic() - started < 2.0
     finally:
         os.close(write_fd)
 
