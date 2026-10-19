@@ -5662,12 +5662,7 @@ def add(
         if tag_list:
             frontmatter_data["tags"] = tag_list
 
-    # Check for stdin input (body)
-    body = ""
-    # Check if stdin has data (non-blocking check)
-    if not sys.stdin.isatty():
-        # stdin is piped, read it
-        body = sys.stdin.read().strip()
+    body = _read_piped_body(sys.stdin)
 
     # Build file content
     lines = ["---"]
@@ -5701,6 +5696,36 @@ def add(
     filepath.write_text(content)
 
     console.print(f"[green]✓ Created task:[/] {filepath}")
+    # Machine-readable id on its own line: the slug is truncated to 50 chars
+    # and may carry a timestamp suffix, so callers should not re-derive it.
+    click.echo(filepath.stem)
+
+
+def _read_piped_body(stream: Any, timeout: float = 0.5) -> str:
+    """Return a piped stdin body, or "" when nothing is waiting to be read.
+
+    A non-tty stdin is not proof that a body was piped: harness tool pipes
+    and systemd units hand every child a pipe that never reaches EOF, and a
+    bare ``sys.stdin.read()`` then blocks forever. Only read when the pipe
+    has data within ``timeout`` seconds (shell heredocs and ``echo |`` are
+    written before we get here). Streams without a file descriptor (test
+    runners) fall back to a plain read, which is finite there.
+    """
+    if stream is None or stream.isatty():
+        return ""
+    try:
+        fd = stream.fileno()
+    except (OSError, ValueError, AttributeError):
+        return str(stream.read()).strip()
+    import select
+
+    try:
+        ready, _, _ = select.select([fd], [], [], timeout)
+    except (OSError, ValueError):
+        return ""
+    if not ready:
+        return ""
+    return str(stream.read()).strip()
 
 
 # =============================================================================
