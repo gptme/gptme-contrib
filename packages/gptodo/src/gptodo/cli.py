@@ -5581,6 +5581,11 @@ def list_all_locks(cleanup: bool, output_json: bool):
     default=None,
     help="What/who blocks the task (required with --state waiting)",
 )
+@click.option(
+    "--body-stdin",
+    is_flag=True,
+    help="Read the complete body from stdin until EOF (including slow producers).",
+)
 def add(
     title: str,
     priority: str,
@@ -5589,13 +5594,16 @@ def add(
     state: str,
     task_type: str,
     waiting_for: str | None,
+    body_stdin: bool,
 ):
     """Create a new task from title and optional stdin body.
 
     The task filename is generated from the title by converting to lowercase
     and replacing non-alphanumeric characters with hyphens.
 
-    If stdin is provided (piped), it becomes the task body.
+    Piped stdin is detected with a short deadline. An idle, empty pipe is
+    treated as no body; an incomplete body fails without creating a task.
+    Use --body-stdin to wait until EOF for delayed or slow producers.
 
     Examples:
         # Simple task
@@ -5662,12 +5670,7 @@ def add(
         if tag_list:
             frontmatter_data["tags"] = tag_list
 
-    # Check for stdin input (body)
-    body = ""
-    # Check if stdin has data (non-blocking check)
-    if not sys.stdin.isatty():
-        # stdin is piped, read it
-        body = sys.stdin.read().strip()
+    body = sys.stdin.read().strip() if body_stdin else _read_piped_body(sys.stdin)
 
     # Build file content
     lines = ["---"]
@@ -5701,6 +5704,98 @@ def add(
     filepath.write_text(content)
 
     console.print(f"[green]✓ Created task:[/] {filepath}")
+
+
+def _read_piped_body(stream: Any, timeout: float = 0.5) -> str:
+    """Return a piped stdin body, or "" when nothing is waiting to be read.
+
+    A non-tty stdin is not proof that a body was piped: harness tool pipes
+    and systemd units hand every child a pipe that never reaches EOF, and a
+    bare ``sys.stdin.read()`` then blocks forever. Check fd readiness before
+    starting a daemon reader: no data within ``timeout`` means "no body".
+    Once ready, the reader requires EOF before the idle/cap deadline or raises
+    instead of returning a partial body. If readiness checks are unsupported,
+    an unfinished read also raises rather than guessing that stdin is empty. Streams
+    without a file descriptor (test runners) fall back to a plain read, which
+    is finite there.
+    """
+    if stream is None or stream.isatty():
+        return ""
+    try:
+        fd = stream.fileno()
+    except (OSError, ValueError, AttributeError):
+        data = stream.read()
+        if isinstance(data, bytes):
+            data = data.decode(errors="replace")
+        return str(data).strip()
+    return _read_fd_bounded(fd, timeout)
+
+
+def _read_fd_bounded(fd: int, timeout: float, idle: float = 0.2, cap: float = 5.0) -> str:
+    """Read ``fd`` until EOF, an idle gap, or ``cap`` seconds.
+
+    Reads the raw fd rather than the stream so a reader still blocked at a
+    deadline cannot hold the stream's buffer lock (``close()`` would then wait
+    on it forever). Returns "" when nothing arrives within ``timeout``.
+    """
+    import select
+    import threading
+    import time
+
+    # Check readiness BEFORE starting the reader: after os.read consumes a
+    # byte, select cannot see it while the thread waits to publish it.
+    try:
+        readable, _, _ = select.select([fd], [], [], timeout)
+    except (OSError, ValueError):
+        # Windows select accepts sockets only. Keep the bounded reader for
+        # finite input, but never infer an empty body from unpublished state.
+        pass
+    else:
+        if not readable:
+            return ""
+
+    chunks: list[bytes] = []
+    done = threading.Event()
+    last = time.monotonic()
+    errors: list[OSError] = []
+    lock = threading.Lock()
+
+    def _read() -> None:
+        nonlocal last
+        try:
+            while chunk := os.read(fd, 65536):
+                with lock:
+                    chunks.append(chunk)
+                    last = time.monotonic()
+        except OSError as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_read, daemon=True)
+    thread.start()
+    start = time.monotonic()
+    while True:
+        thread.join(0.02)
+        with lock:
+            if done.is_set():
+                break
+            idle_for = time.monotonic() - last
+        elapsed = time.monotonic() - start
+        if elapsed >= cap:
+            break
+        if elapsed >= timeout and idle_for >= idle:
+            break
+    with lock:
+        if errors:
+            raise click.ClickException(f"Could not read stdin: {errors[0]}")
+        if not done.is_set():
+            raise click.ClickException(
+                "Stdin body did not reach EOF; no task was created. "
+                "Use --body-stdin to wait for the complete body, or "
+                "redirect stdin from an empty file if no body is intended."
+            )
+        return b"".join(chunks).decode(errors="replace").strip()
 
 
 # =============================================================================
