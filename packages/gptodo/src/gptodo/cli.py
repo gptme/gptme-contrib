@@ -5722,7 +5722,10 @@ def _read_piped_body(stream: Any, timeout: float = 0.5) -> str:
     try:
         ready, _, _ = select.select([fd], [], [], timeout)
     except (OSError, ValueError):
-        return ""
+        # ``select()`` only accepts sockets on Windows, so a piped body would
+        # otherwise be dropped silently. Keep the historical blocking read on
+        # platforms where the readiness check is unavailable.
+        return str(stream.read()).strip()
     if not ready:
         return ""
     return str(stream.read()).strip()

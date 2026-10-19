@@ -74,6 +74,23 @@ def test_read_piped_body_dev_null_is_empty() -> None:
         assert _read_piped_body(devnull) == ""
 
 
+def test_read_piped_body_falls_back_when_select_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Windows ``select()`` only accepts sockets; a piped body must still be read
+    # instead of being silently dropped.
+    import select
+
+    def _raise(*args: object, **kwargs: object) -> None:
+        raise OSError("select() only accepts sockets on Windows")
+
+    monkeypatch.setattr(select, "select", _raise)
+    body_path = tmp_path / "body.txt"
+    body_path.write_text("body\n")
+    with open(body_path) as stream:
+        assert _read_piped_body(stream) == "body"
+
+
 def test_cli_runner_input_still_becomes_body(workspace: Path) -> None:
     result = CliRunner().invoke(cli, ["add", "Runner task"], input="body line\n")
     assert result.exit_code == 0, result.output
