@@ -5711,10 +5711,11 @@ def _read_piped_body(stream: Any, timeout: float = 0.5) -> str:
 
     A non-tty stdin is not proof that a body was piped: harness tool pipes
     and systemd units hand every child a pipe that never reaches EOF, and a
-    bare ``sys.stdin.read()`` then blocks forever. Read the fd in a daemon
-    thread instead: no data within ``timeout`` means "no body", and once data
-    arrives the reader requires EOF before the idle/cap deadline, otherwise
-    it raises instead of returning a partial body. Streams
+    bare ``sys.stdin.read()`` then blocks forever. Check fd readiness before
+    starting a daemon reader: no data within ``timeout`` means "no body".
+    Once ready, the reader requires EOF before the idle/cap deadline or raises
+    instead of returning a partial body. If readiness checks are unsupported,
+    an unfinished read also raises rather than guessing that stdin is empty. Streams
     without a file descriptor (test runners) fall back to a plain read, which
     is finite there.
     """
@@ -5737,8 +5738,21 @@ def _read_fd_bounded(fd: int, timeout: float, idle: float = 0.2, cap: float = 5.
     deadline cannot hold the stream's buffer lock (``close()`` would then wait
     on it forever). Returns "" when nothing arrives within ``timeout``.
     """
+    import select
     import threading
     import time
+
+    # Check readiness BEFORE starting the reader: after os.read consumes a
+    # byte, select cannot see it while the thread waits to publish it.
+    try:
+        readable, _, _ = select.select([fd], [], [], timeout)
+    except (OSError, ValueError):
+        # Windows select accepts sockets only. Keep the bounded reader for
+        # finite input, but never infer an empty body from unpublished state.
+        pass
+    else:
+        if not readable:
+            return ""
 
     chunks: list[bytes] = []
     done = threading.Event()
@@ -5771,30 +5785,15 @@ def _read_fd_bounded(fd: int, timeout: float, idle: float = 0.2, cap: float = 5.
         if elapsed >= cap:
             break
         if elapsed >= timeout and idle_for >= idle:
-            if chunks:
-                break
-            # Guard against a scheduling race: the reader thread may have
-            # read the first bytes without publishing them under the lock
-            # yet. Only treat the pipe as empty when select confirms no
-            # data (and no EOF) is waiting; otherwise keep reading so a
-            # late first byte becomes an explicit --body-stdin error
-            # instead of a silently dropped body.
-            import select
-
-            try:
-                readable, _, _ = select.select([fd], [], [], 0)
-            except (OSError, ValueError):
-                break
-            if not readable:
-                break
-            continue
+            break
     with lock:
         if errors:
             raise click.ClickException(f"Could not read stdin: {errors[0]}")
-        if chunks and not done.is_set():
+        if not done.is_set():
             raise click.ClickException(
                 "Stdin body did not reach EOF; no task was created. "
-                "Use --body-stdin to wait for the complete body."
+                "Use --body-stdin to wait for the complete body, or "
+                "redirect stdin from an empty file if no body is intended."
             )
         return b"".join(chunks).decode(errors="replace").strip()
 

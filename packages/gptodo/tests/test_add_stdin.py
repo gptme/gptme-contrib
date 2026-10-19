@@ -226,3 +226,72 @@ def test_unpublished_first_byte_is_not_dropped(monkeypatch: pytest.MonkeyPatch) 
                 _read_piped_body(stream, timeout=0.2)
     finally:
         os.close(write_fd)
+
+
+def test_consumed_but_unpublished_first_byte_is_not_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    real_read = os.read
+    consumed = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    read_fd, write_fd = os.pipe()
+
+    def paused_read(fd: int, n: int) -> bytes:
+        chunk = real_read(fd, n)
+        if fd == read_fd and chunk:
+            consumed.set()
+            release.wait(timeout=3)
+            finished.set()
+        return chunk
+
+    monkeypatch.setattr(os, "read", paused_read)
+    try:
+        os.write(write_fd, b"body already consumed")
+        with pytest.raises(click.ClickException, match="--body-stdin"):
+            _read_fd_bounded(read_fd, timeout=0.05, idle=0.05, cap=0.2)
+        assert consumed.is_set()
+    finally:
+        release.set()
+        os.close(write_fd)
+        if consumed.is_set():
+            assert finished.wait(timeout=3)
+        os.close(read_fd)
+
+
+def test_unsupported_readiness_rejects_unknown_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import select
+
+    def unsupported(*args: object) -> None:
+        raise OSError("select only supports sockets")
+
+    monkeypatch.setattr(select, "select", unsupported)
+    read_fd, write_fd = os.pipe()
+    try:
+        with pytest.raises(click.ClickException, match="empty file"):
+            _read_fd_bounded(read_fd, timeout=0.05, idle=0.05, cap=0.2)
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+
+def test_unsupported_readiness_still_reads_finite_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import select
+
+    def unsupported(*args: object) -> None:
+        raise OSError("select only supports sockets")
+
+    monkeypatch.setattr(select, "select", unsupported)
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, b"complete body")
+        os.close(write_fd)
+        assert _read_fd_bounded(read_fd, timeout=0.2) == "complete body"
+    finally:
+        os.close(read_fd)
