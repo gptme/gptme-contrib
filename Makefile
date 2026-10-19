@@ -49,10 +49,15 @@ typecheck-scripts:  ## Run mypy for harness hook scripts
 	@# first (CI does this); a bare `uv run` would sync the root env without them
 	@# and report false import-not-found errors.
 	@echo "Running typecheck for scripts/claude-code-hooks..."
+	@# Fail closed when the workspace is not fully synced: --ignore-missing-imports
+	@# would otherwise treat gptme_rag as absent and silently skip the very
+	@# signatures this target exists to check.
+	@uv run --no-sync python -c "import gptme_rag" || { \
+		echo "typecheck-scripts: gptme_rag not importable; run 'uv sync --all-packages' first" >&2; \
+		exit 1; }
 	@# --ignore-missing-imports: the scripts carry optional-dependency import
 	@# fallbacks (e.g. `tomli` only on Python <3.11) whose absence is handled at
-	@# runtime. gptme_rag/gptme still resolve from the synced workspace, so
-	@# signature drift is still caught.
+	@# runtime. gptme_rag resolves (checked above), so signature drift is caught.
 	@uv run --no-sync --with mypy mypy scripts/claude-code-hooks/ --no-incremental --ignore-missing-imports
 
 # ============================================================
