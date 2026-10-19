@@ -323,7 +323,16 @@ _HOOKS_REAL="$(readlink -f "$SCRIPT_DIR" 2>/dev/null || printf '%s' "$SCRIPT_DIR
 _HOOK_REPO="$(git -C "$_HOOKS_REAL" rev-parse --show-toplevel 2>/dev/null || true)"
 if [ -z "$_HOOK_REPO" ]; then
     case "$_HOOKS_REAL" in
-        */dotfiles/.config/git/hooks) _HOOK_REPO="${_HOOKS_REAL%/dotfiles/.config/git/hooks}" ;;
+        */dotfiles/.config/git/hooks)
+            _HOOK_INSTALL_ROOT="${_HOOKS_REAL%/dotfiles/.config/git/hooks}"
+            # A root inside a git directory is not an install root: a
+            # submodule gitdir at <super>/.git/modules/dotfiles/.config/git
+            # ends in the same suffix, and its parent holds no guard of ours.
+            case "$_HOOK_INSTALL_ROOT" in
+                */.git|*/.git/*) ;;
+                *) _HOOK_REPO="$_HOOK_INSTALL_ROOT" ;;
+            esac
+            ;;
     esac
 fi
 _GUARD=""
