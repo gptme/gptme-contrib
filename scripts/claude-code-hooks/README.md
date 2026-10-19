@@ -5,7 +5,12 @@ Claude Code sessions.
 
 ## `match-lessons.py` — Keyword-based Lesson Injection
 
-Replicates gptme's keyword-based lesson matching for Claude Code sessions.
+Brings gptme's lesson injection system into Claude Code sessions. Keyword
+matching and BM25 scoring are delegated to `gptme_rag.lesson_matcher`; this
+script is the Claude Code harness wrapper: workspace discovery, Thompson
+sampling, co-occurrence prediction, holdout/dropout, session dedup, and the
+`additionalContext` envelope.
+
 When you open a CC session in a gptme agent workspace, this hook automatically
 injects relevant lessons as `additionalContext` based on:
 
@@ -15,7 +20,9 @@ injects relevant lessons as `additionalContext` based on:
 
 ### Features
 
-- Keyword and wildcard matching (same logic as gptme's `LessonMatcher`)
+- Keyword and wildcard matching via `gptme_rag.lesson_matcher`
+- BM25 semantic scoring (same library used by gptme's native lesson matcher)
+- `session_categories` gating (restrict a lesson to specific session types)
 - Per-session deduplication (each lesson injected at most once per session)
 - Thompson sampling re-ranking (lessons that help more get higher priority)
 - Co-occurrence prediction (predicts lessons likely to be needed based on
@@ -101,60 +108,11 @@ Tunable constants (edit at the top of the script):
 | `MAX_PREDICTED_LESSONS` | 2 | Max co-occurrence-predicted lessons per event |
 | `TS_WEIGHT` | 1.0 | Thompson sampling re-ranking weight |
 
-#### Skill-injection A/B dial
-
-The hook includes an opt-in, session-randomized experiment for reducing
-advisory skill context. Unset is the rollback path and preserves the historical
-behavior exactly:
-
-```sh
-# 50/50 deterministic assignment by Claude Code session ID
-export LESSON_INJECTION_DIAL_EXPERIMENT=random
-
-# Reproduction/debugging overrides
-export LESSON_INJECTION_DIAL_EXPERIMENT=control
-export LESSON_INJECTION_DIAL_EXPERIMENT=treatment
-```
-
-The control arm uses the existing limits and BM25 gate. The treatment arm caps
-advisory skills at 2 for `UserPromptSubmit` and 1 for `PreToolUse`, including
-co-occurrence predictions, and raises the skill-only BM25 z-score ceiling from
-4.0 to 5.0. Ordinary lessons and policy-manifest `exempt` entries bypass both
-treatment changes, so hard guardrails are not experiment subjects. The manifest
-only indexes `lessons/` paths, so a skill stored as `skills/<name>/SKILL.md`
-cannot currently be listed as `exempt`; a skill that must never be capped should
-be expressed as a regular `lessons/` entry.
-
-Each enabled session appends one record to
-`state/lesson-injection-dial/YYYY-MM-DD.jsonl` (override the directory with
-`LESSON_INJECTION_DIAL_LOG_DIR`). The ledger is keyed by `session_id` for joins
-against transcript context spend and category-controlled outcome/LOO data:
-
-```json
-{
-  "schema_version": 1,
-  "experiment": "skill-injection-dial-v1",
-  "session_id": "...",
-  "harness": "claude-code",
-  "enabled": true,
-  "arm": "control",
-  "assignment": "random",
-  "prompt_skill_cap": null,
-  "pretool_skill_cap": null,
-  "skill_bm25_min_z": null,
-  "ts": 1790760000.0
-}
-```
-
-`assignment` is `random` for production assignment and `forced` for explicit
-arm overrides. Invalid values and a missing session ID fail closed to disabled
-control behavior and are not written to the experiment ledger.
-
 ### Requirements
 
 - Python 3.11+ (uses `tomllib` from stdlib; or `tomli` as fallback for 3.10)
+- `gptme-rag` (from `packages/gptme-rag/` in this repo, or `pip install gptme-rag`) — provides `gptme_rag.lesson_matcher`
 - Optional: `pyyaml` for YAML frontmatter parsing (falls back to regex)
-- No other dependencies — runs standalone in any Python environment
 
 ### Testing
 
