@@ -228,6 +228,17 @@ class WorkClaimManager:
 
         return self.get(task_id)  # type: ignore[return-value]
 
+    def _claim_admission(self, agent_id: str, task_id: str) -> WorkClaimDenial | None:
+        """Optional workspace policy evaluated inside the claim write transaction.
+
+        Return a denial carrying the blocking claim, or None to continue CAS.
+        Overrides may read through this manager's connection but must not commit,
+        roll back, start another transaction, or perform external side effects.
+        This runs for dry-run requests too; errors roll back and propagate rather
+        than being reported as ordinary contention. The default adds no policy.
+        """
+        return None
+
     def claim(
         self,
         agent_id: str,
@@ -254,6 +265,11 @@ class WorkClaimManager:
 
         conn.execute("BEGIN IMMEDIATE")
         try:
+            denial = self._claim_admission(agent_id, task_id)
+            if denial is not None:
+                self.last_denial = denial
+                conn.execute("ROLLBACK")
+                return None
             # Compute the expiry once and reuse it for both the HMAC and the
             # stored expires_at column. Previously these were two separate clock
             # reads (this Python computation for the HMAC, and a second
