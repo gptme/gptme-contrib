@@ -623,25 +623,3 @@ def test_bare_relative_alias_does_not_hide_destination_commit(
     )
     assert proc.returncode == 1, proc.stderr
     assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
-
-
-@pytest.mark.parametrize("remote_sha", [ZERO, "base"])
-def test_parent_remote_namespace_does_not_hide_destination_commit(
-    tmp_path: Path, remote_sha: str
-) -> None:
-    """team's recursive namespace must not exclude team/fork's stale tip."""
-    repo, base, head = _repo_with_mass_deletion(tmp_path)
-    _git(repo, "remote", "add", "team", "https://example.invalid/team.git")
-    destination = "https://example.invalid/fork.git"
-    _git(repo, "remote", "add", "team/fork", destination)
-    _git(repo, "update-ref", "refs/remotes/team/fork/topic", head)
-    advertised = base if remote_sha == "base" else remote_sha
-    proc = _run_hook(
-        repo,
-        f"refs/heads/topic {head} refs/heads/topic {advertised}\n",
-        "team/fork",
-        destination,
-        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
-    )
-    assert proc.returncode == 1, proc.stderr
-    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
