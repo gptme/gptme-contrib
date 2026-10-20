@@ -69,12 +69,15 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         # Skip branch deletions
         [ "$local_sha" = "$ZERO" ] && continue
 
-        # Determine the range of commits being pushed
+        # Determine the range of commits being pushed. Skip commits that any
+        # remote-tracking ref already contains: rebasing a fork branch onto
+        # upstream master otherwise rescans upstream's own commits, and a
+        # landed mass rename (aw-webui's JS->TS migration, 54 files) trips the
+        # guard on every fork push.
         if [ "$remote_sha" = "$ZERO" ]; then
-            # New branch: check commits not reachable from any remote branch
-            range="$local_sha --not --remotes=origin"
+            range="$local_sha --not --remotes"
         else
-            range="$remote_sha..$local_sha"
+            range="$local_sha --not $remote_sha --remotes"
         fi
 
         # O(N) protection: skip the per-commit scan when the push range is huge.

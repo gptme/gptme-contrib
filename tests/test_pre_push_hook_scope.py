@@ -194,6 +194,26 @@ def test_range_limit_above_the_range_still_scans(tmp_path: Path) -> None:
     assert proc.returncode == 1
 
 
+def test_commits_already_on_another_remote_are_not_rescanned(tmp_path: Path) -> None:
+    """A fork rebase must not re-check upstream's own landed mass deletion.
+
+    The fork's branch sits at ``base``; upstream master already contains the
+    deletion commit; the rebased branch adds one commit on top. Only that new
+    commit is ours to check.
+    """
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "update-ref", "refs/remotes/upstream/master", head)
+    tip = _commit(repo, "new.txt")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {tip} refs/heads/topic {base}\n",
+        "fork",
+        "git@github.com:me/r.git",
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
 def test_range_limit_smaller_than_range_skips(tmp_path: Path) -> None:
     """The O(N) escape hatch must keep working for a genuinely huge range."""
     repo = _init(tmp_path)
