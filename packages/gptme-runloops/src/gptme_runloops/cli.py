@@ -761,6 +761,13 @@ def select_cmd(
     help="Timeout in seconds",
 )
 @click.option(
+    "--report",
+    is_flag=True,
+    help="Also print every assistant text turn as report_text (claude-code "
+    "only). `result` stays the final message, which may just be a closing "
+    "line when the findings were written in earlier turns.",
+)
+@click.option(
     "--on-resume-failure",
     type=click.Choice(["error", "fresh"]),
     default="error",
@@ -787,13 +794,15 @@ def run_cmd(
     allowed_tools: tuple[str, ...],
     sandbox: str | None,
     timeout: int,
+    report: bool,
     on_resume_failure: str,
     fallback_prompt_file: Path | None,
 ):
     """Run ONE prompt on any backend and print the result as a JSON line.
 
     Output (stdout, one line): backend, model, session_id, result, exit_code,
-    is_error, resumed, timed_out, cost_usd (and resume_failed on fallback).
+    is_error, resumed, timed_out, cost_usd, report_text (and resume_failed on
+    fallback).
     Pass session_id back via --resume (with the same --backend/--model) to
     continue the session. Exit code 0 on success, 1 on an error result, 2 on
     usage errors (e.g. resume on a backend without resume support).
@@ -818,6 +827,7 @@ def run_cmd(
             resume=resume_id,
             allowed_tools=tools,
             sandbox=sandbox,
+            report=report,
         )
 
     try:

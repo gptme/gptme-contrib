@@ -27,6 +27,11 @@ Rules:
   permissions) and gptme ``--tools``. Codex has no allowlist, so ``allowed_tools``
   raises ``ValueError`` there; use ``sandbox`` (``read-only`` / ``workspace-write`` /
   ``danger-full-access``, default ``workspace-write``) instead.
+- ``report=True`` (claude-code only) also returns every assistant text turn in
+  ``report_text``; ``result`` stays the final message. ``--output-format json``
+  keeps only the last message, so a delegated run that writes its findings and
+  then closes with "report above" would otherwise lose them. Other backends
+  raise ``ValueError``.
 - ``model`` is the model the backend reports having used (claude-code
   ``modelUsage``, gptme message metadata), else the requested one, else ``None``
   (backend default). Pass it back with ``resume`` to stay on the same model.
@@ -70,6 +75,9 @@ class RunOnceResult:
     # the resume id). Callers use it to tell "session never ran" from "ran and
     # reported an error", so a fallback never re-runs a session's side effects.
     agent_output: bool = True
+    # All assistant text turns joined (claude-code, only when ``report=True``);
+    # ``None`` when not requested or when the run produced no text turn.
+    report_text: str | None = None
 
     @property
     def is_error(self) -> bool:
@@ -139,6 +147,31 @@ def _claude_main_model(model_usage: dict[str, Any]) -> str | None:
     )
 
 
+def _parse_stream_json(stdout: str) -> tuple[dict[str, Any], list[str]]:
+    """Split ``--output-format stream-json`` NDJSON into the final ``result``
+    event (same keys as ``--output-format json``) and the assistant text turns.
+    Tool-use, thinking and system payloads are not text blocks, so they drop out.
+    """
+    out: dict[str, Any] = {}
+    texts: list[str] = []
+    for line in stdout.splitlines():
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("type") == "assistant":
+            for block in (ev.get("message") or {}).get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = (block.get("text") or "").strip()
+                    if text:
+                        texts.append(text)
+        elif ev.get("type") == "result":
+            out = ev
+    return out, texts
+
+
 def claude_code_run_once(
     prompt: str,
     workspace: Path,
@@ -149,10 +182,20 @@ def claude_code_run_once(
     allowed_tools: list[str] | None = None,
     sandbox: str | None = None,
     env: dict[str, str] | None = None,
+    report: bool = False,
 ) -> RunOnceResult:
     if sandbox:
         raise ValueError("claude-code: sandbox is not supported; use allowed_tools")
-    cmd = ["claude", "-p", prompt, "--output-format", "json"]
+    # stream-json under -p requires --verbose.
+    cmd = ["claude", "-p", prompt]
+    cmd += (
+        ["--output-format", "stream-json", "--verbose"]
+        if report
+        else [
+            "--output-format",
+            "json",
+        ]
+    )
     if resume:
         cmd += ["--resume", resume]
     if model:
@@ -164,10 +207,14 @@ def claude_code_run_once(
     r = _run(cmd, workspace, timeout, env)
     if r is None:
         return _timeout_result("claude-code", model, resume, resume, timeout)
-    try:
-        out = json.loads(r.stdout) if r.stdout.strip() else {}
-    except json.JSONDecodeError:
-        out = {}
+    texts: list[str] = []
+    if report:
+        out, texts = _parse_stream_json(r.stdout)
+    else:
+        try:
+            out = json.loads(r.stdout) if r.stdout.strip() else {}
+        except json.JSONDecodeError:
+            out = {}
     text = out.get("result") or ""
     failed = r.returncode != 0 or bool(out.get("is_error")) or not text
     return RunOnceResult(
@@ -179,6 +226,7 @@ def claude_code_run_once(
         resumed=bool(resume),
         cost_usd=out.get("total_cost_usd"),
         agent_output=bool(text),
+        report_text="\n\n".join(texts) if texts else None,
     )
 
 
