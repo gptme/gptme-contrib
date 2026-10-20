@@ -97,11 +97,18 @@ if [ -n "$_GUARD_SCRIPT" ]; then
     while IFS= read -r _r; do
         # Skip by name
         [ "$_r" = "$PUSH_REMOTE_NAME" ] && continue
-        # Skip URL aliases of the push destination
+        # Skip URL aliases of the push destination and remotes that FETCH from
+        # the same repository. Tracking refs describe what was fetched, not
+        # where pushes land. A remote whose fetch URL matches the destination
+        # can have a stale tracking ref pointing to a destructive commit we are
+        # about to re-push — the same bypass the dest-tracking-ref fix closed.
         if [ -n "$_dest_push_identity" ]; then
             _r_push_url="$(git remote get-url --push "$_r" 2>/dev/null || true)"
-            _r_identity="$(_canonical_remote_url "$_r_push_url")"
-            [ "$_r_identity" = "$_dest_push_identity" ] && continue
+            _r_push_identity="$(_canonical_remote_url "$_r_push_url")"
+            [ "$_r_push_identity" = "$_dest_push_identity" ] && continue
+            _r_fetch_url="$(git remote get-url "$_r" 2>/dev/null || true)"
+            _r_fetch_identity="$(_canonical_remote_url "$_r_fetch_url")"
+            [ "$_r_fetch_identity" = "$_dest_push_identity" ] && continue
         fi
         _other_remotes="$_other_remotes --remotes=${_r}"
     done < <(git remote 2>/dev/null)

@@ -259,6 +259,35 @@ def test_stale_dest_tracking_ref_does_not_bypass_guard_on_new_branch(
     assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
 
 
+def test_backup_remote_fetching_same_repo_is_not_excluded(tmp_path: Path) -> None:
+    """A remote that fetches from the destination must not hide destructive commits.
+
+    The exclusion list is built from push URLs, but tracking refs describe what
+    was *fetched*. A 'backup' remote configured to fetch from the same repository
+    as origin but push to a different forge can retain a stale tracking ref
+    pointing to a destructive commit. That ref must not exclude the commit from
+    the scan when we push to origin.
+    """
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    origin_url = _git(repo, "remote", "get-url", "origin").strip()
+    # backup fetches from the same place as origin (same URL) but pushes elsewhere.
+    _git(repo, "remote", "set-url", "backup", origin_url)
+    _git(repo, "remote", "set-url", "--push", "backup", str(tmp_path / "backup.git"))
+    # Stale tracking ref on backup pointing to the deletion commit.
+    _git(repo, "update-ref", "refs/remotes/backup/topic", head)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {base}\n",
+        "origin",
+        origin_url,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, (
+        "guard should fire: backup's stale ref points to the deletion commit "
+        f"but must not exclude it\nstdout={proc.stdout!r}\nstderr={proc.stderr!r}"
+    )
+
+
 def test_range_limit_smaller_than_range_skips(tmp_path: Path) -> None:
     """The O(N) escape hatch must keep working for a genuinely huge range."""
     repo = _init(tmp_path)
