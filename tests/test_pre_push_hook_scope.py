@@ -593,7 +593,7 @@ def test_relative_remote_url_matches_absolute_destination(tmp_path: Path) -> Non
     proc = _run_hook(
         repo,
         f"refs/heads/topic {head} refs/heads/topic {base}\n",
-        "origin",
+        dest_abs,
         dest_abs,
         env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
     )
@@ -601,3 +601,47 @@ def test_relative_remote_url_matches_absolute_destination(tmp_path: Path) -> Non
         "Guard must fire even when origin uses a relative-path URL alias.\n"
         f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     )
+
+
+@pytest.mark.parametrize("remote_sha", [ZERO, "base"])
+def test_bare_relative_alias_does_not_hide_destination_commit(
+    tmp_path: Path, remote_sha: str
+) -> None:
+    """A plain relative path is a local URL too, even without ./ or ../."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = str(repo / "destination.git")
+    _git(repo, "remote", "set-url", "origin", destination)
+    _git(repo, "remote", "set-url", "backup", "destination.git")
+    _git(repo, "update-ref", "refs/remotes/backup/topic", head)
+    advertised = base if remote_sha == "base" else remote_sha
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {advertised}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("remote_sha", [ZERO, "base"])
+def test_parent_remote_namespace_does_not_hide_destination_commit(
+    tmp_path: Path, remote_sha: str
+) -> None:
+    """team's recursive namespace must not exclude team/fork's stale tip."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "remote", "add", "team", "https://example.invalid/team.git")
+    destination = "https://example.invalid/fork.git"
+    _git(repo, "remote", "add", "team/fork", destination)
+    _git(repo, "update-ref", "refs/remotes/team/fork/topic", head)
+    advertised = base if remote_sha == "base" else remote_sha
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {advertised}\n",
+        "team/fork",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr

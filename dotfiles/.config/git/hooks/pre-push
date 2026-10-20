@@ -39,11 +39,12 @@ PUSH_REMOTE_NAME="${1:-}"
 # return a non-empty but distinct string, so callers fail closed.
 _canonical_remote_url() {
     local url="$1"
-    # Resolve relative filesystem paths (./… or ../…) so they compare equal to
-    # their absolute equivalents.  realpath -m normalises without requiring the
-    # path to exist (GNU coreutils; falls back gracefully on non-GNU systems).
+    # Git also accepts bare relative paths (repo.git). Keep filesystem identity
+    # separate from network URL normalization: local paths are case-sensitive.
     case "$url" in
-        ./*|../*) url="$(realpath -m -- "$url" 2>/dev/null)" || url="$1" ;;
+        "") return ;;
+        *://*|*:*) ;;
+        *) realpath -m -- "$url" 2>/dev/null || printf '%s\n' "$url"; return ;;
     esac
     printf '%s\n' "$url" | sed -E \
         -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://([^@/]+@)?##' \
@@ -95,7 +96,8 @@ if [ -n "$_GUARD_SCRIPT" ]; then
     # Use argv[2] (the URL git supplies) as the identity source: it works even
     # when the caller pushes to a bare URL instead of a configured remote name
     # (in which case git remote get-url would fail).
-    _other_remotes=""
+    _other_remote_prefixes=()
+    _protected_ref_prefixes=()
     _dest_push_url="${2:-}"
     if [ -z "$_dest_push_url" ] && [ -n "$PUSH_REMOTE_NAME" ]; then
         _dest_push_url="$(git remote get-url --push "$PUSH_REMOTE_NAME" 2>/dev/null || true)"
@@ -113,6 +115,7 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         # so URL aliases below do not override it even if they appear first.
         if [ "$_r" = "$PUSH_REMOTE_NAME" ]; then
             _dest_name_matched="true"
+            _protected_ref_prefixes+=("refs/remotes/${_r}/")
             continue
         fi
         # Skip URL aliases of the push destination and remotes that FETCH from
@@ -127,14 +130,38 @@ if [ -n "$_GUARD_SCRIPT" ]; then
                 # Record the first URL alias; used for for-each-ref when pushing
                 # by bare URL (no name match). First match wins.
                 [ -z "$_dest_url_alias" ] && _dest_url_alias="$_r"
+                _protected_ref_prefixes+=("refs/remotes/${_r}/")
                 continue
             fi
             _r_fetch_url="$(git remote get-url "$_r" 2>/dev/null || true)"
             _r_fetch_identity="$(_canonical_remote_url "$_r_fetch_url")"
-            [ "$_r_fetch_identity" = "$_dest_push_identity" ] && continue
+            if [ "$_r_fetch_identity" = "$_dest_push_identity" ]; then
+                _protected_ref_prefixes+=("refs/remotes/${_r}/")
+                continue
+            fi
         fi
-        _other_remotes="$_other_remotes --remotes=${_r}"
+        _other_remote_prefixes+=("refs/remotes/${_r}/")
     done < <(git remote 2>/dev/null)
+    # --remotes=team recursively includes team/fork. Expand to explicit refs,
+    # then conservatively retain every destination/alias namespace in the scan,
+    # even when another remote's prefix overlaps it.
+    _other_remotes=""
+    while IFS= read -r _ref; do
+        _protected=false
+        for _prefix in "${_protected_ref_prefixes[@]}"; do
+            if [[ "$_ref" == "$_prefix"* ]]; then
+                _protected=true
+                break
+            fi
+        done
+        [ "$_protected" = true ] && continue
+        for _prefix in "${_other_remote_prefixes[@]}"; do
+            if [[ "$_ref" == "$_prefix"* ]]; then
+                _other_remotes="$_other_remotes $_ref"
+                break
+            fi
+        done
+    done < <(git for-each-ref --format='%(refname)' refs/remotes/ 2>/dev/null)
     # Post-loop: if PUSH_REMOTE_NAME was not matched as a configured name (bare
     # URL push), substitute the first URL alias we found — it carries tracking refs.
     # When a name match was found, keep _dest_remote_name=PUSH_REMOTE_NAME exactly.
