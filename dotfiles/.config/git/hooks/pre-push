@@ -151,7 +151,8 @@ if [ -n "$_GUARD_SCRIPT" ]; then
                 while IFS= read -r _dest_ref; do
                     [ "$_dest_ref" = "refs/remotes/${_dest_remote_name}/${_branch_name}" ] && continue
                     _dest_other_excl="$_dest_other_excl $_dest_ref"
-                done < <(git for-each-ref "refs/remotes/${_dest_remote_name}/" --format='%(refname)' 2>/dev/null)
+                done < <(git for-each-ref "refs/remotes/${_dest_remote_name}/" \
+                    --format='%(refname)' 2>/dev/null | grep -Fv '/HEAD')
             fi
             if [ -n "$_dest_other_excl" ] || [ -n "$_other_remotes" ]; then
                 # shellcheck disable=SC2086
