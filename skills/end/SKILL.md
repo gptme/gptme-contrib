@@ -56,17 +56,27 @@ one of:
 |---|---|---|
 | `BLOCKED` | unsaved work attributed to this session | **Refuse.** Go to Step 2. |
 | `CLEAN_LIGHT` | ≤2 commits, ≤10 files, no PRs/worktrees pending | Closeout → exit (Step 3+4) |
-| `CLEAN_SUBSTANTIAL` | more than that, or open PRs / warnings | Closeout → hand-off → stay alive |
+| `CLEAN_SUBSTANTIAL` | more than that, or declared PRs (`--pr`) / warnings | Closeout → hand-off → stay alive |
 
-"This session" = files/commits newer than the harness process start (from
-`/proc`), or commits carrying this session's id. Other sessions' dirt in a
-shared worktree is listed as `info`, not a blocker. Pass `--since 2h` if the
-process-start heuristic is wrong (e.g. a resumed session).
+"This session" is decided per kind of work:
+
+- **Uncommitted files**: files whose mtime is newer than the harness process
+  start (from `/proc`), or staged files. `--since 2h` overrides the start time
+  when the heuristic is wrong (e.g. a resumed session).
+- **Commits**: only commits that carry this session's id in their message, or
+  that touch a `--paths` footprint. The time window bounds the candidates; it
+  never claims a commit by itself. A sibling's commit is not yours just because
+  it landed during your session. File counts come from each attributed commit's
+  own diff.
+
+Other sessions' dirt in a shared worktree is listed as `info`, not a blocker.
 
 **Shared worktree with parallel sessions** (Bob's brain repo): siblings share
-your time window, so declare your footprint — the repo paths you touched plus
-the absolute paths of any linked worktrees you created. Only dirt/commits under
-those paths and only declared worktrees can block; the rest is info:
+your time window, so declare your footprint with `--paths` — the repo paths you
+touched plus the absolute paths of any linked worktrees you created. Declared
+paths are explicit ownership: untagged commits that touch them count, and file
+counts stay within them. Only dirt/commits under those paths and only declared
+worktrees can block; the rest is info:
 
 ```bash
 python3 "$SKILL_DIR/scripts/end-check.py" \
@@ -76,6 +86,21 @@ python3 "$SKILL_DIR/scripts/end-check.py" \
 A parallel session's fresh worktree can still show as a blocker; if
 `git -C <wt> log -1` proves it isn't yours, say so in the closeout and treat
 it as info — don't touch it.
+
+**PRs are declared, never guessed.** Pass each PR this session owns with
+`--pr`, as a `https://github.com/OWNER/REPO/pull/NUMBER` URL (repeatable).
+Each declared URL is looked up on its own, and only those are checked. A
+failing CI check or failed lookup on a declared PR warns; an unavailable
+lookup must not silently turn the session light. Without any `--pr` the check reports
+`no session-owned PRs declared` and makes no network call. Nothing is inferred
+from the account's open PRs or the time window, so a sibling's PR is never
+listed. A PR opened before the session started still counts if you declare it
+(resumed work). `--no-prs` skips the PR check entirely.
+
+```bash
+python3 "$SKILL_DIR/scripts/end-check.py" \
+  --paths scripts/foo.py --pr https://github.com/gptme/gptme-contrib/pull/1954
+```
 
 Also do the **judgment checks** the script can't:
 
