@@ -135,7 +135,7 @@ if [ -n "$_GUARD_SCRIPT" ]; then
             # an exclusion from the destination's OTHER tracking refs (to scope
             # the range to new commits efficiently) but skip this branch's own
             # tracking ref — it may be stale and could hide a destructive commit.
-            _branch_name="${local_ref#refs/heads/}"
+            _branch_name="${remote_ref#refs/heads/}"
             _dest_other_excl=""
             if [ -n "$PUSH_REMOTE_NAME" ]; then
                 while IFS= read -r _dest_ref; do
