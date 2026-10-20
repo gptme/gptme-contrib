@@ -408,7 +408,11 @@ def check_commits(rep: Report, scope: list[str] | None = None) -> None:
         # No session id available — can't distinguish our commits from siblings'.
         # Attribute nothing rather than blocking a session that did no work.
         subjects = []
-        # Keep shas for files_changed calculation (still needed for the verdict)
+        shas = []  # also clear shas; don't compute files_changed from sibling commits
+    # else: sid known, no tagged commits → keep the time-window attribution.
+    # Commits without a session tag are still attributed to this session when the
+    # session id is known (the common case in repos that don't embed ids in bodies).
+    # Sibling attribution via --paths is the documented mitigation for shared worktrees.
     rep.commits = subjects
     if shas:
         rc, out = git(["diff", "--shortstat", f"{shas[-1]}^", shas[0]], rep.root)
@@ -601,7 +605,13 @@ def check_journal(rep: Report) -> None:
         )
 
 
-def check_prs(rep: Report, timeout: int = 20) -> None:
+def check_prs(rep: Report, timeout: int = 20, has_footprint: bool = False) -> None:
+    # Without explicit commit evidence or a declared path footprint, every PR
+    # opened today by the shared account would be attributed to this session.
+    # Skip the attribution check; don't influence the verdict.
+    if not rep.commits and not has_footprint:
+        rep.add(Check("prs", "info", "no commit evidence — PR attribution skipped"))
+        return
     if not shutil.which("gh"):
         rep.add(Check("prs", "info", "gh not installed — PR check skipped"))
         return
@@ -829,7 +839,7 @@ def main(argv: list[str] | None = None) -> int:
     check_worktrees(rep, declared_worktrees, footprint_given=bool(args.paths))
     check_journal(rep)
     if not args.no_prs:
-        check_prs(rep)
+        check_prs(rep, has_footprint=bool(args.paths))
     decide(rep, args.light_commits, args.light_files)
 
     if args.json:

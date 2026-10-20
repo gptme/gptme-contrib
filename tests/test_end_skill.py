@@ -358,6 +358,30 @@ def test_no_session_id_recent_commit_not_attributed(
     assert rep["commits"] == [], "without session_id, no commits should be attributed"
 
 
+def test_no_session_id_files_changed_not_inflated(repo: Path):
+    """P3: without a session id, files_changed must not be inflated by sibling commits.
+
+    The old code cleared subjects (commits) but left shas intact when no session id
+    was present, so files_changed was still computed from the full time-window set.
+    A session with no attributed commits could return CLEAN_SUBSTANTIAL due to a
+    sibling's large commit happening to share the time window.
+    """
+    # A large commit in the time window (from "another session" or pre-session).
+    for i in range(5):
+        (repo / f"big{i}.txt").write_text(f"{i}\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "feat: big commit by sibling")
+    _git(repo, "push", "-q")
+    env = _env_without_cc_session()
+    rc, rep = run_check(repo, "--since", "1h", env=env)
+    assert rc == 0, rep
+    assert rep["commits"] == [], "without session_id, no commits should be attributed"
+    assert rep["files_changed"] == 0, "files_changed must be 0 when shas are cleared"
+    assert (
+        rep["verdict"] == "CLEAN_LIGHT"
+    ), "should be CLEAN_LIGHT, not CLEAN_SUBSTANTIAL"
+
+
 def test_root_commit_files_changed_counted(tmp_path: Path):
     """P2: a session whose only commit is the root commit must have files_changed > 0."""
     origin = tmp_path / "origin.git"
