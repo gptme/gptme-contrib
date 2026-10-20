@@ -121,20 +121,37 @@ _no_new_commit_since_our_last_trigger() {
     #
     # Fail-OPEN to 1 (allow) when there's no in-cycle trigger or head can't be read, so a
     # transient API failure never permanently suppresses a legitimate re-review.
+    #
+    # Head evidence: when our in-cycle trigger carries a head marker, compare it with the
+    # live REST head (the same read the review decision uses). Equal → nothing pushed
+    # since that trigger → suppress. Different → the head moved → allow. Commit dates are
+    # only the legacy fallback (marker-less triggers), and only when the commit list
+    # describes the same head as REST; a lagging list can only look OLDER, which would
+    # wrongly suppress a new head.
     local review_cutoff="${1:-}"
-    local head_date last_trigger_date
+    local head_sha last_trigger last_trigger_date trig_sha
     local cycle_filter=""
     if [ -n "$review_cutoff" ]; then
         cycle_filter="| select(.created_at > \"$review_cutoff\")"
     fi
-    # A stale cached commit list can only make head_date OLDER, i.e. suppress —
-    # the safe direction — so the shared short-TTL cache is fine here.
-    head_date=$(_pr_commit_info \
-        | jq -r '.dates | sort | last // ""' 2>/dev/null) || head_date=""
-    last_trigger_date=$(_issue_comments_json \
-        | jq -r "[.[][] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\"))) $cycle_filter | .created_at] | sort | last // \"\"" 2>/dev/null) || last_trigger_date=""
+    last_trigger=$(_issue_comments_json \
+        | jq -c "[.[][] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\"))) $cycle_filter] | sort_by(.created_at) | last // {}" 2>/dev/null) || last_trigger="{}"
+    last_trigger_date=$(printf '%s' "$last_trigger" | jq -r '.created_at // ""' 2>/dev/null) || last_trigger_date=""
     [ -z "$last_trigger_date" ] && return 1   # no in-cycle trigger → allow (nothing to gate against)
-    [ -z "$head_date" ] && return 1           # can't read head → allow (fail-open)
+    head_sha=$(_current_head_sha) || return 1 # can't read head → allow (fail-open)
+    trig_sha=$(printf '%s' "$last_trigger" | _marker_sha_from_body) || trig_sha=""
+    if [ -n "$trig_sha" ] && [ -n "$head_sha" ]; then
+        # Same head as our trigger → nothing pushed since (suppress); otherwise the head moved.
+        if [ "$trig_sha" = "$head_sha" ]; then return 0; fi
+        return 1
+    fi
+    local commit_info head_date
+    commit_info=$(_pr_commit_info)
+    if _commit_info_disagrees_with_head "$commit_info"; then
+        return 1   # commit dates describe a different head → cannot prove nothing new
+    fi
+    head_date=$(printf '%s' "$commit_info" | jq -r '.dates | sort | last // ""' 2>/dev/null) || head_date=""
+    [ -z "$head_date" ] && return 1           # can't read dates → allow (fail-open)
     if _timestamp_gt "$head_date" "$last_trigger_date" 2>/dev/null; then
         return 1   # a commit landed AFTER our in-cycle trigger → re-review is legitimate
     fi
@@ -176,7 +193,8 @@ _ISSUE_COMMENTS_ERROR_FILE="${TMPDIR:-/tmp}/greptile-issue-comments-error-$$"
 _PR_REVIEWS_CACHE_FILE="${TMPDIR:-/tmp}/greptile-pr-reviews-$$.json"
 _ACTIVITY_CACHE_FILE="${TMPDIR:-/tmp}/greptile-activity-$$.json"
 _COMMIT_INFO_LIVE_FILE="${TMPDIR:-/tmp}/greptile-commit-info-$$.json"
-trap 'rm -f "$_REVIEW_CACHE_FILE" "$_ISSUE_COMMENTS_CACHE_FILE" "$_ISSUE_COMMENTS_ERROR_FILE" "$_PR_REVIEWS_CACHE_FILE" "$_ACTIVITY_CACHE_FILE" "$_COMMIT_INFO_LIVE_FILE"' EXIT
+_REST_HEAD_CACHE_FILE="${TMPDIR:-/tmp}/greptile-rest-head-$$.txt"
+trap 'rm -f "$_REVIEW_CACHE_FILE" "$_ISSUE_COMMENTS_CACHE_FILE" "$_ISSUE_COMMENTS_ERROR_FILE" "$_PR_REVIEWS_CACHE_FILE" "$_ACTIVITY_CACHE_FILE" "$_COMMIT_INFO_LIVE_FILE" "$_REST_HEAD_CACHE_FILE"' EXIT
 
 # Shared hash for per-PR state files (lock + trigger timestamp).
 # Used across trigger and _our_trigger_status to coordinate without the GitHub API.
@@ -247,10 +265,10 @@ _pr_reviews_json() {
 #      same PR several times within seconds. The cache lives next to the other
 #      per-PR state files in TMPDIR (override: GREPTILE_HELPER_CACHE_DIR).
 #
-# Pass "fresh" to bypass the cross-process cache. A live read is memoized for the
-# rest of this process, so "fresh" costs at most one extra query per run. Callers
-# must only trust cached data in the direction where staleness suppresses a
-# trigger; see _needs_re_review.
+# A live read is memoized for the rest of this process. This info can lag the real
+# head, so it is never the head authority: head decisions use _current_head_sha
+# (REST). Its dates are trusted only when their head agrees with that read; see
+# _commit_info_disagrees_with_head.
 GREPTILE_COMMITS_CACHE_TTL="${GREPTILE_COMMITS_CACHE_TTL:-120}"
 _COMMIT_INFO_CACHE_DIR="${GREPTILE_HELPER_CACHE_DIR:-${TMPDIR:-/tmp}/greptile-helper-cache}"
 _COMMIT_INFO_CACHE_FILE="$_COMMIT_INFO_CACHE_DIR/pr-commits-${_PR_HASH}.json"
@@ -282,7 +300,7 @@ _fetch_pr_commit_info() {
         return 0
     fi
     # Fallback: REST (same data, but paginated and billed to the core budget).
-    head=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha // ""' 2>/dev/null) || head=""
+    head=$(_current_head_sha 2>/dev/null) || head=""
     out=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/commits" 2>/dev/null \
         | jq -cs --arg head "$head" '{head_sha: $head, dates: [.[][] | .commit.committer.date]}' \
         2>/dev/null) || out=""
@@ -294,12 +312,12 @@ _fetch_pr_commit_info() {
 }
 _pr_commit_info() {
     trap - EXIT
-    local mode="${1:-}" age info tmp
+    local age info tmp
     if [ -f "$_COMMIT_INFO_LIVE_FILE" ]; then
         cat "$_COMMIT_INFO_LIVE_FILE"
         return
     fi
-    if [ "$mode" != "fresh" ] && [ "$GREPTILE_COMMITS_CACHE_TTL" -gt 0 ] 2>/dev/null \
+    if [ "$GREPTILE_COMMITS_CACHE_TTL" -gt 0 ] 2>/dev/null \
         && [ -s "$_COMMIT_INFO_CACHE_FILE" ]; then
         age=$(_file_age_seconds "$_COMMIT_INFO_CACHE_FILE") || age=""
         if [ -n "$age" ] && [ "$age" -ge 0 ] && [ "$age" -lt "$GREPTILE_COMMITS_CACHE_TTL" ]; then
@@ -322,6 +340,48 @@ _pr_commit_info() {
         # as they did when the raw REST call failed (empty head / no dates).
         echo '{"head_sha": "", "dates": []}'
     fi
+}
+
+# --- Helper: live PR head SHA from REST (one read per process, failures included) ---
+# Prints the head SHA and returns 0 when the read succeeded. Returns 1, printing
+# nothing, when the REST read FAILED. An empty SHA on a successful read is a
+# legitimate answer (partial PR data), not an error.
+#
+# This is the authority for every head decision: the review comparison, trigger
+# markers and the no-new-commit guard. The GraphQL/cached commit info can lag the
+# real head, so it must never decide what the head is. `gh pr view` is GraphQL-
+# backed, hence the explicit REST endpoint.
+#
+# Memoized through a temp file because callers use $() subshells. The negative
+# result is memoized too, so a process makes at most one REST head request.
+_current_head_sha() {
+    trap - EXIT
+    local state head
+    if [ ! -f "$_REST_HEAD_CACHE_FILE" ]; then
+        if head=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha // ""' 2>/dev/null); then
+            printf 'ok %s\n' "$head" > "$_REST_HEAD_CACHE_FILE"
+        else
+            echo 'error' > "$_REST_HEAD_CACHE_FILE"
+        fi
+    fi
+    state=$(cat "$_REST_HEAD_CACHE_FILE" 2>/dev/null) || state=""
+    case "$state" in
+        "ok "*) printf '%s\n' "${state#ok }"; return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# True (0) when a commit-info payload ($1 from _pr_commit_info) describes a different
+# head than the live REST head. Its dates are then stale evidence and must not
+# suppress a re-review. Unknown on either side is not a disagreement, so the legacy
+# date behaviour is kept when REST legitimately reports no SHA or the commit read
+# failed. Takes the payload so callers fetch it once: a failed fetch is not memoized.
+_commit_info_disagrees_with_head() {
+    local rest_head info_head
+    rest_head=$(_current_head_sha) || return 1
+    [ -n "$rest_head" ] || return 1
+    info_head=$(printf '%s' "$1" | jq -r '.head_sha // ""' 2>/dev/null) || return 1
+    [ -n "$info_head" ] && [ "$info_head" != "$rest_head" ]
 }
 
 _greptile_activity_times() {
@@ -514,7 +574,7 @@ _greptile_summary_reviewed_sha() {
 # FALLBACK (date-based): when neither the footer nor a PR-review object names
 # a commit, fall back to the original committer.date heuristic.
 _needs_re_review() {
-    local reviewed_sha head_sha info reviewed_at new_commits
+    local reviewed_sha head_sha info reviewed_at new_commits commit_info
     # Footer first: same provenance as self-merge-check.py. Without this the
     # two tools deadlock when a thread-reply review stamps HEAD (helper says
     # current) while the summary still names the previous commit (gate says
@@ -531,14 +591,12 @@ _needs_re_review() {
     fi
 
     if [ -n "$reviewed_sha" ]; then
-        # Always confirm the head with a live read before acting on the
-        # comparison. The cached head may be up to GREPTILE_COMMITS_CACHE_TTL
-        # old, and a stale cache cuts both ways: it can wrongly say
-        # "re-review needed", but it can also wrongly MATCH reviewed_sha and
-        # suppress a legitimate trigger for a just-pushed head (observed on
-        # gptme/gptme#4226, 2026-10-07 — fix pushed, trigger skipped until the
-        # cache entry was cleared by hand).
-        head_sha=$(_pr_commit_info fresh | jq -r '.head_sha // ""' 2>/dev/null) || head_sha=""
+        # The head comes from the REST read, never the cached or GraphQL commit info.
+        # Those can lag the real head: a stale cache (gptme/gptme#4226, 2026-10-07)
+        # or a successful but lagging GraphQL response can match
+        # reviewed_sha and suppress a legitimate re-review for a just-pushed head.
+        # A failed read returns 3 (no verdict). Callers gate on it before this point.
+        head_sha=$(_current_head_sha) || return 3
         if [ -n "$head_sha" ]; then
             if [ "$reviewed_sha" = "$head_sha" ]; then
                 return 1  # Formal PR review is on the current head — no re-review needed.
@@ -589,7 +647,13 @@ _needs_re_review() {
     if [ -z "$reviewed_at" ]; then
         return 1
     fi
-    new_commits=$(_pr_commit_info \
+    # Stale commit dates for a head REST no longer shows cannot prove "no new commits":
+    # re-review (the trigger guards below still apply).
+    commit_info=$(_pr_commit_info)
+    if _commit_info_disagrees_with_head "$commit_info"; then
+        return 0
+    fi
+    new_commits=$(printf '%s' "$commit_info" \
         | jq "[.dates[] | select(. > \"$reviewed_at\")] | length" \
         2>/dev/null) || new_commits="0"
     [ "${new_commits:-0}" -gt 0 ]
@@ -783,6 +847,13 @@ case "${1:-}" in
 check)
     # Check if safe to trigger
     if _has_greptile_review; then
+        # Every head decision needs the REST head. If that read failed, report an API
+        # error (exit 3 = skip) rather than a verdict or a trigger. Run the
+        # helper in a subshell: its trap reset must not clear parent cleanup.
+        if ! ( _current_head_sha >/dev/null ); then
+            echo "  [greptile] Could not read PR head for $REPO#$PR_NUMBER via REST. Skipping." >&2
+            exit 3
+        fi
         # Already reviewed — check if re-review is needed (new commits since review)
         if _needs_re_review; then
             # Hard lifetime ceiling: if hit, skip just like "no new commits" (exit 2)
@@ -835,6 +906,12 @@ trigger)
     # FD 9 held (lock) until script exits
 
     if _has_greptile_review; then
+        # REST head unreadable → refuse to trigger (no verdict, no post). The lock is held,
+        # so no concurrent session is racing us for this PR either.
+        if ! ( _current_head_sha >/dev/null ); then
+            echo "  [greptile] Could not read PR head for $REPO#$PR_NUMBER via REST. Not triggering."
+            exit 3
+        fi
         if _needs_re_review; then
             # Hard total-trigger ceiling (does NOT reset per review cycle). A PR that keeps
             # accruing commits → re-reviews can otherwise be triggered forever. Past this cap,
@@ -879,7 +956,7 @@ trigger)
             # (SHA equality instead of committer.date heuristics — see gptme#2987).
             # If the head can't be read, post a plain trigger: the marker is an
             # optimization, and _needs_re_review treats marker-less triggers as legacy.
-            _head_sha=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha // ""' 2>/dev/null) || _head_sha=""
+            _head_sha=$(_current_head_sha) || _head_sha=""
             _trigger_body="@greptileai review"
             if [ -n "$_head_sha" ]; then
                 _trigger_body="$_trigger_body
@@ -993,8 +1070,13 @@ trigger)
         exit 0
     fi
 
+    # Do not spend the one-time fallback or its local intent guard on unknown
+    # head transport. Retry on a later cycle, just as for re-review failures.
+    if ! _head_sha=$(_current_head_sha); then
+        echo "  [greptile] Could not read PR head for $REPO#$PR_NUMBER via REST. Not triggering."
+        exit 3
+    fi
     echo "  [greptile] No auto-review on $REPO#$PR_NUMBER after ${_age_mins}m (grace ${_initial_grace}m) — triggering initial review..."
-    _head_sha=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha // ""' 2>/dev/null) || _head_sha=""
     _trigger_body="@greptileai review"
     if [ -n "$_head_sha" ]; then
         _trigger_body="$_trigger_body
@@ -1032,6 +1114,12 @@ trigger)
 
 status)
     if _has_greptile_review; then
+        # REST head unreadable → "error", never an authoritative already-reviewed.
+        if ! ( _current_head_sha >/dev/null ); then
+            echo "  [greptile] Could not read PR head for $REPO#$PR_NUMBER via REST." >&2
+            echo "error"
+            exit 0
+        fi
         if _needs_re_review; then
             # Hard lifetime ceiling: report "backoff" so callers/dashboards see the true state
             # — unless the post-recovery bonus applies, in which case this is
