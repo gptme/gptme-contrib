@@ -216,7 +216,15 @@ def claude_code_run_once(
         except json.JSONDecodeError:
             out = {}
     text = out.get("result") or ""
-    failed = r.returncode != 0 or bool(out.get("is_error")) or not text
+    has_output = bool(text.strip())
+    # Older CLI payloads omit subtype; an explicit non-success must not be
+    # accepted just because the process exited zero and included partial text.
+    failed = (
+        r.returncode != 0
+        or bool(out.get("is_error"))
+        or out.get("subtype", "success") != "success"
+        or not has_output
+    )
     return RunOnceResult(
         backend="claude-code",
         model=_claude_main_model(out.get("modelUsage") or {}) or model,
@@ -225,7 +233,7 @@ def claude_code_run_once(
         exit_code=(r.returncode or 1) if failed else 0,
         resumed=bool(resume),
         cost_usd=out.get("total_cost_usd"),
-        agent_output=bool(text),
+        agent_output=has_output,
         report_text="\n\n".join(texts) if texts else None,
     )
 

@@ -180,6 +180,66 @@ def test_claude_rejects_sandbox():
         ClaudeCodeExecutor().run_once("hi", WS, 60, sandbox="read-only")
 
 
+@pytest.mark.parametrize(
+    "subtype",
+    [
+        "error_during_execution",
+        "error_max_turns",
+        "error_max_budget_usd",
+        "error_max_structured_output_retries",
+        "unknown_future_subtype",
+    ],
+)
+@pytest.mark.parametrize("report", [False, True])
+def test_claude_explicit_non_success_preserves_partial_output(subtype, report):
+    payload = {"subtype": subtype, "result": "Partial work"}
+    stdout = (
+        _cc_stream(_assistant(_text("partial report")), _result_event(**payload))
+        if report
+        else _cc_json(**payload)
+    )
+    with patch.object(ro.subprocess, "run", return_value=_proc(stdout)):
+        r = ClaudeCodeExecutor().run_once("more", WS, 60, resume=SID, report=report)
+    assert r.report_text == ("partial report" if report else None)
+    assert r.is_error and r.exit_code == 1
+    assert r.result == "Partial work" and r.agent_output
+    assert r.session_id == SID and r.resumed
+    assert r.model == "claude-opus-4-8" and r.cost_usd == 0.12
+
+
+@pytest.mark.parametrize("text", ["", " ", "\n\t"])
+@pytest.mark.parametrize("report", [False, True])
+def test_claude_blank_result_is_not_success(text, report):
+    payload = {"subtype": "success", "result": text}
+    stdout = (
+        _cc_stream(_assistant(_text("partial report")), _result_event(**payload))
+        if report
+        else _cc_json(**payload)
+    )
+    with patch.object(ro.subprocess, "run", return_value=_proc(stdout)):
+        r = ClaudeCodeExecutor().run_once("hi", WS, 60, report=report)
+    assert r.report_text == ("partial report" if report else None)
+    assert r.is_error and not r.agent_output
+    assert r.session_id == SID
+
+
+@pytest.mark.parametrize("subtype", ["success", None])
+@pytest.mark.parametrize("report", [False, True])
+def test_claude_success_and_legacy_result(subtype, report):
+    payload = {} if subtype is None else {"subtype": subtype}
+    payload["result"] = "  done\n"
+    stdout = (
+        _cc_stream(_assistant(_text("full report")), _result_event(**payload))
+        if report
+        else _cc_json(**payload)
+    )
+    with patch.object(ro.subprocess, "run", return_value=_proc(stdout)):
+        r = ClaudeCodeExecutor().run_once("hi", WS, 60, report=report)
+    assert r.report_text == ("full report" if report else None)
+    assert not r.is_error and r.agent_output
+    assert r.result == "  done\n"  # Validation must not rewrite useful output.
+
+
 # --- codex ---
 
 
