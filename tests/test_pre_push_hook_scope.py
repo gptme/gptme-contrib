@@ -482,3 +482,48 @@ def test_force_reset_guard_runs_when_origin_pushurl_matches_fetchurl(
     )
     assert FORCE_RESET_ERROR in proc.stderr, proc.stderr
     assert proc.returncode == 1
+
+
+def test_single_remote_new_branch_scopes_range_by_other_dest_refs(
+    tmp_path: Path,
+) -> None:
+    """New-branch push in a single-remote clone must scope the range to new commits.
+
+    Scenario: only origin is configured; origin/master already contains the base
+    commit. A new topic branch has one mass-deletion commit on top. Without scoping,
+    the range is all local history (2 commits > limit 1) and the guard skips the
+    scan. With the fix, origin/master excludes the base commit so the range is just
+    the deletion (1 commit, not > 1), the guard runs, and the push is blocked.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "remote", "add", "origin", str(tmp_path / "nonexistent.git"))
+
+    # Seed files so the deletion commit exceeds the threshold.
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (repo / name).write_text("x\n")
+    _git(repo, "add", "a.txt", "b.txt", "c.txt")
+    _git(repo, "commit", "--no-verify", "-qm", "seed")
+    base = _git(repo, "rev-parse", "HEAD")
+    # origin/master already published the seed commit.
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+
+    # New topic branch: one mass-deletion on top of base.
+    _git(repo, "rm", "-q", "a.txt", "b.txt", "c.txt")
+    _git(repo, "commit", "--no-verify", "-qm", "delete everything")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    # Limit 1: scoped range is just the deletion (1 commit, not > 1) → guard runs.
+    # Without fix the range is all local history (2 commits > 1) → guard skips.
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "origin",
+        "git@github.com:me/r.git",
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "1", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
