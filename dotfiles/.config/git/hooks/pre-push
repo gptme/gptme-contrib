@@ -99,14 +99,13 @@ if [ -n "$_GUARD_SCRIPT" ]; then
     # (if any) whose push URL matches the destination so the new-branch path
     # can use it for for-each-ref range scoping.
     _dest_remote_name="$PUSH_REMOTE_NAME"
-    _dest_remote_name_locked="false"  # true once a name match locks the choice
+    _dest_name_matched="false"   # true when PUSH_REMOTE_NAME matched a configured name
+    _dest_url_alias=""           # first URL alias (used only when no name match)
     while IFS= read -r _r; do
-        # Skip by name — and lock _dest_remote_name so URL aliases below cannot
-        # override it. Without the lock, two remotes with the same URL (e.g. origin
-        # and upstream) would cause the last one processed to win, even though the
-        # configured destination name is the authoritative choice.
+        # Skip by name — record that we found the configured destination remote
+        # so URL aliases below do not override it even if they appear first.
         if [ "$_r" = "$PUSH_REMOTE_NAME" ]; then
-            _dest_remote_name_locked="true"
+            _dest_name_matched="true"
             continue
         fi
         # Skip URL aliases of the push destination and remotes that FETCH from
@@ -118,13 +117,9 @@ if [ -n "$_GUARD_SCRIPT" ]; then
             _r_push_url="$(git remote get-url --push "$_r" 2>/dev/null || true)"
             _r_push_identity="$(_canonical_remote_url "$_r_push_url")"
             if [ "$_r_push_identity" = "$_dest_push_identity" ]; then
-                # Resolve the first URL alias when pushing by bare URL (not locked).
-                # First match wins — later aliases with no tracking refs must not
-                # override a good earlier choice.
-                if [ "$_dest_remote_name_locked" = "false" ] && \
-                   [ "$_dest_remote_name" = "$PUSH_REMOTE_NAME" ]; then
-                    _dest_remote_name="$_r"
-                fi
+                # Record the first URL alias; used for for-each-ref when pushing
+                # by bare URL (no name match). First match wins.
+                [ -z "$_dest_url_alias" ] && _dest_url_alias="$_r"
                 continue
             fi
             _r_fetch_url="$(git remote get-url "$_r" 2>/dev/null || true)"
@@ -133,6 +128,12 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         fi
         _other_remotes="$_other_remotes --remotes=${_r}"
     done < <(git remote 2>/dev/null)
+    # Post-loop: if PUSH_REMOTE_NAME was not matched as a configured name (bare
+    # URL push), substitute the first URL alias we found — it carries tracking refs.
+    # When a name match was found, keep _dest_remote_name=PUSH_REMOTE_NAME exactly.
+    if [ "$_dest_name_matched" = "false" ] && [ -n "$_dest_url_alias" ]; then
+        _dest_remote_name="$_dest_url_alias"
+    fi
 
     for line in "${STDIN_LINES[@]}"; do
         read -r local_ref local_sha remote_ref remote_sha <<< "$line"
