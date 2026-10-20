@@ -61,7 +61,9 @@ Backends without resume support (grok-build) fail with a usage error rather than
 starting fresh. A rejected resume id is an error unless `--on-resume-failure fresh` opts into a
 new session (optionally with `--fallback-prompt-file` to carry context over). Tool restriction is
 backend-native: `--allowed-tool` (claude-code `--allowedTools`, gptme `--tools`) or `--sandbox`
-(codex). Other options: `--prompt-file`, `--timeout` (default 1800 s); `--backend` defaults to
+(codex). `--report` (claude-code only) adds `report_text`, every assistant text turn joined: `result`
+is only the final message, which a delegated run can reduce to a closing line ("report above").
+Other options: `--prompt-file`, `--timeout` (default 1800 s); `--backend` defaults to
 `$AGENT_BACKEND`, else `gptme`. Exit code is 0 on success, 1 on an error result, 2 on usage errors.
 
 ## Commands

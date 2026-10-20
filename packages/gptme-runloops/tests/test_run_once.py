@@ -97,6 +97,84 @@ def test_claude_strips_nesting_env(monkeypatch):
     assert run.call_args.kwargs["stdin"] == subprocess.DEVNULL
 
 
+def _cc_stream(*events: dict) -> str:
+    return "\n".join(json.dumps(e) for e in events)
+
+
+def _assistant(*blocks: dict) -> dict:
+    return {"type": "assistant", "message": {"content": list(blocks)}}
+
+
+def _text(t: str) -> dict:
+    return {"type": "text", "text": t}
+
+
+def _result_event(**over) -> dict:
+    return {**json.loads(_cc_json()), "type": "result", **over}
+
+
+def test_claude_report_joins_every_assistant_text_turn():
+    stdout = _cc_stream(
+        {"type": "system", "subtype": "init"},
+        _assistant(_text("Candidates: A, B, C.")),
+        _assistant({"type": "thinking", "thinking": "hmm"}, {"type": "tool_use"}),
+        {"type": "user", "message": {"content": [{"type": "tool_result"}]}},
+        _assistant(_text("  Analysis of A.  "), _text("")),
+        _assistant(_text("Report above.")),
+        _result_event(result="Report above."),
+    )
+    with patch.object(ro.subprocess, "run", return_value=_proc(stdout)) as run:
+        r = ClaudeCodeExecutor().run_once("hi", WS, 60, resume=SID, report=True)
+    argv = _argv(run)
+    assert argv[argv.index("--output-format") + 1] == "stream-json"
+    assert "--verbose" in argv  # required for stream-json under -p
+    assert argv[argv.index("--resume") + 1] == SID
+    assert r.report_text == "Candidates: A, B, C.\n\nAnalysis of A.\n\nReport above."
+    assert r.result == "Report above."  # final-message contract unchanged
+    assert r.session_id == SID and r.cost_usd == 0.12 and r.resumed is True
+    assert r.model == "claude-opus-4-8" and not r.is_error and r.agent_output
+    assert r.to_dict()["report_text"] == r.report_text
+
+
+def test_claude_report_defaults_off():
+    with patch.object(ro.subprocess, "run", return_value=_proc(_cc_json())) as run:
+        r = ClaudeCodeExecutor().run_once("hi", WS, 60)
+    argv = _argv(run)
+    assert argv[argv.index("--output-format") + 1] == "json"
+    assert "--verbose" not in argv
+    assert r.report_text is None
+
+
+def test_claude_report_without_text_turns_is_none():
+    stdout = _cc_stream(_assistant({"type": "tool_use"}), _result_event())
+    with patch.object(ro.subprocess, "run", return_value=_proc(stdout)):
+        r = ClaudeCodeExecutor().run_once("hi", WS, 60, report=True)
+    assert r.report_text is None and r.result == "done"
+
+
+def test_claude_report_failure_keeps_error_semantics():
+    stdout = _cc_stream(
+        _assistant(_text("partial")), _result_event(result="", is_error=True)
+    )
+    with patch.object(ro.subprocess, "run", return_value=_proc(stdout, "boom", 1)):
+        r = ClaudeCodeExecutor().run_once("hi", WS, 60, report=True)
+    assert r.is_error and not r.agent_output
+    assert r.report_text == "partial"
+
+
+def test_claude_report_tolerates_garbage_lines():
+    stdout = "not json\n[1]\n" + _cc_stream(_assistant(_text("ok")), _result_event())
+    with patch.object(ro.subprocess, "run", return_value=_proc(stdout)):
+        r = ClaudeCodeExecutor().run_once("hi", WS, 60, report=True)
+    assert r.report_text == "ok" and r.result == "done"
+
+
+def test_report_rejected_on_other_backends():
+    for ex in (CodexExecutor(), GptmeExecutor()):
+        with pytest.raises(ValueError, match="report"):
+            ex.run_once("hi", WS, 60, report=True)
+
+
 def test_claude_rejects_sandbox():
     with pytest.raises(ValueError):
         ClaudeCodeExecutor().run_once("hi", WS, 60, sandbox="read-only")
@@ -292,6 +370,7 @@ def test_cli_run_prints_json_and_passes_options():
     kw = once.call_args.kwargs
     assert kw["model"] == "opus" and kw["allowed_tools"] == ["Read", "Edit"]
     assert kw["resume"] is None
+    assert kw["report"] is False
 
 
 def test_cli_resume_failure_errors_by_default():
@@ -395,3 +474,11 @@ def test_codex_model_falls_back_to_config(tmp_path, monkeypatch):
     with patch.object(ro.subprocess, "run", side_effect=_codex_side_effect(SID, "ok")):
         r = CodexExecutor().run_once("x", WS, 60)
     assert r.model == "gpt-9"
+
+
+def test_cli_report_flag_prints_report_text():
+    r = RunOnceResult("claude-code", None, SID, "done", 0, report_text="a\n\nb")
+    res, once = _cli(["--backend", "claude-code", "--report", "p"], [r])
+    assert res.exit_code == 0, res.output
+    assert once.call_args.kwargs["report"] is True
+    assert json.loads(res.output)["report_text"] == "a\n\nb"

@@ -98,6 +98,7 @@ class Executor(ABC):
         allowed_tools: list[str] | None = None,
         sandbox: str | None = None,
         env: dict[str, str] | None = None,
+        report: bool = False,
     ) -> RunOnceResult:
         """Run one prompt, capturing the final message, model and session id.
 
@@ -111,6 +112,8 @@ class Executor(ABC):
                 ``--allowedTools`` patterns, gptme ``--tools`` names).
             sandbox: Sandbox mode where the backend has one (codex).
             env: Additional environment variables.
+            report: Also return every assistant text turn as ``report_text``
+                (claude-code only; ``result`` stays the final message).
 
         Raises:
             ResumeNotSupportedError: ``resume`` on a backend that cannot resume.
@@ -122,6 +125,9 @@ class Executor(ABC):
         fn = RUN_ONCE.get(self.name)
         if fn is None:
             raise NotImplementedError(f"{self.name}: run_once is not supported")
+        if report and self.name != "claude-code":
+            raise ValueError(f"{self.name}: report is only supported on claude-code")
+        extra = {"report": True} if report else {}
         return fn(
             prompt,
             workspace,
@@ -131,6 +137,7 @@ class Executor(ABC):
             allowed_tools=allowed_tools,
             sandbox=sandbox,
             env=env,
+            **extra,
         )
 
     def is_available(self) -> bool:
