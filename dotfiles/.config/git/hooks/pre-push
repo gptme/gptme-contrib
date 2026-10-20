@@ -143,9 +143,15 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         # can have a stale tracking ref pointing to a destructive commit we are
         # about to re-push — the same bypass the dest-tracking-ref fix closed.
         if [ -n "$_dest_push_identity" ]; then
-            _r_push_url="$(git remote get-url --push "$_r" 2>/dev/null || true)"
-            _r_push_identity="$(_canonical_remote_url "$_r_push_url")"
-            if [ "$_r_push_identity" = "$_dest_push_identity" ]; then
+            _r_push_matches=false
+            while IFS= read -r _r_push_url; do
+                _r_push_identity="$(_canonical_remote_url "$_r_push_url")"
+                if [ "$_r_push_identity" = "$_dest_push_identity" ]; then
+                    _r_push_matches=true
+                    break
+                fi
+            done < <(git remote get-url --push --all "$_r" 2>/dev/null)
+            if [ "$_r_push_matches" = true ]; then
                 # Record the first URL alias; used for for-each-ref when pushing
                 # by bare URL (no name match). First match wins.
                 [ -z "$_dest_url_alias" ] && _dest_url_alias="$_r"
@@ -217,7 +223,7 @@ if [ -n "$_GUARD_SCRIPT" ]; then
                     [ "$_dest_ref" = "refs/remotes/${_dest_remote_name}/${_branch_name}" ] && continue
                     _dest_other_excl="$_dest_other_excl $_dest_ref"
                 done < <(git for-each-ref "refs/remotes/${_dest_remote_name}/" \
-                    --format='%(refname)' 2>/dev/null | grep -Fv '/HEAD')
+                    --format='%(refname)' 2>/dev/null | grep -Fxv "refs/remotes/${_dest_remote_name}/HEAD")
             fi
             if [ -n "$_dest_other_excl" ] || [ -n "$_other_remotes" ]; then
                 # shellcheck disable=SC2086

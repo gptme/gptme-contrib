@@ -652,3 +652,43 @@ def test_file_url_alias_does_not_hide_destination_commit(
     )
     assert proc.returncode == 1, proc.stderr
     assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("remote_sha", [ZERO, "base"])
+def test_secondary_push_url_alias_does_not_hide_destination_commit(
+    tmp_path: Path, remote_sha: str
+) -> None:
+    """Every configured push destination participates in alias protection."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = _git(repo, "remote", "get-url", "origin")
+    mirror = _git(repo, "remote", "get-url", "backup")
+    _git(repo, "remote", "set-url", "--add", "--push", "backup", mirror)
+    _git(repo, "remote", "set-url", "--add", "--push", "backup", destination)
+    _git(repo, "update-ref", "refs/remotes/backup/topic", head)
+    advertised = base if remote_sha == "base" else remote_sha
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {advertised}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+def test_head_prefixed_branch_scopes_new_branch_range(tmp_path: Path) -> None:
+    """HEAD-feature is an ordinary branch, not the remote HEAD symbolic ref."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "update-ref", "refs/remotes/origin/HEAD-feature", base)
+    destination = _git(repo, "remote", "get-url", "origin")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "1", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
