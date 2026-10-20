@@ -39,6 +39,13 @@ def _repo(tmp_path: Path) -> tuple[Path, str]:
 
 
 def _run_hook(repo: Path, stdin: str) -> subprocess.CompletedProcess[str]:
+    # The real worktree push guard runs from this checkout: keep its claims and
+    # ledger rows out of the live agent workspace.
+    env = {
+        **os.environ,
+        "COORDINATION_DB": str(repo.parent / "coord.db"),
+        "AGENT_WORKSPACE": str(repo.parent),
+    }
     return subprocess.run(
         [str(HOOK), "origin", "git@github.com:example-org/example-repo.git"],
         cwd=repo,
@@ -46,7 +53,7 @@ def _run_hook(repo: Path, stdin: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         timeout=60,
-        env=dict(os.environ),
+        env=env,
     )
 
 

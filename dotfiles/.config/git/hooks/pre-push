@@ -314,8 +314,27 @@ command -v git-lfs >/dev/null 2>&1 && printf '%s\n' "${STDIN_LINES[@]}" | git lf
 # cloned repository run arbitrary code with the user's privileges. `$SCRIPT_DIR`
 # may be a symlinked global hooks dir (core.hooksPath), so `readlink -f` + `git
 # -C` finds the checkout that actually owns this hook file.
+# A copied install outside any checkout (install root holding
+# dotfiles/.config/git/hooks and scripts/hooks side by side) has no git root.
+# Fall back to that install root, derived textually from the hook's own
+# physical path. Only that exact layout qualifies: a blind walk-up from e.g.
+# <superproject>/.git/modules/<sub>/hooks would land in a cloned working tree.
 _HOOKS_REAL="$(readlink -f "$SCRIPT_DIR" 2>/dev/null || printf '%s' "$SCRIPT_DIR")"
 _HOOK_REPO="$(git -C "$_HOOKS_REAL" rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "$_HOOK_REPO" ]; then
+    case "$_HOOKS_REAL" in
+        */dotfiles/.config/git/hooks)
+            _HOOK_INSTALL_ROOT="${_HOOKS_REAL%/dotfiles/.config/git/hooks}"
+            # A root inside a git directory is not an install root: a
+            # submodule gitdir at <super>/.git/modules/dotfiles/.config/git
+            # ends in the same suffix, and its parent holds no guard of ours.
+            case "$_HOOK_INSTALL_ROOT" in
+                */.git|*/.git/*) ;;
+                *) _HOOK_REPO="$_HOOK_INSTALL_ROOT" ;;
+            esac
+            ;;
+    esac
+fi
 _GUARD=""
 if [ -n "$_HOOK_REPO" ] && [ -x "$_HOOK_REPO/scripts/hooks/worktree-push-guard" ]; then
     _GUARD="$_HOOK_REPO/scripts/hooks/worktree-push-guard"

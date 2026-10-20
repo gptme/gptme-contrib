@@ -66,7 +66,14 @@ def _commit(repo: Path, name: str, body: str = "x\n") -> str:
 def _run_hook(
     repo: Path, stdin: str, *argv: str, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
-    full_env = {**os.environ, **(env or {})}
+    # The real worktree push guard runs from this checkout: keep its claims and
+    # ledger rows out of the live agent workspace.
+    full_env = {
+        **os.environ,
+        "COORDINATION_DB": str(repo.parent / "coord.db"),
+        "AGENT_WORKSPACE": str(repo.parent),
+        **(env or {}),
+    }
     return subprocess.run(
         [str(HOOK), *argv],
         cwd=repo,
