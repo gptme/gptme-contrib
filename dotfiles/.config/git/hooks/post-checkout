@@ -84,6 +84,18 @@ if [ -n "$_gw_git_dir" ] && [ "$_gw_git_dir" != "$_gw_common_dir" ]; then
                 done
                 echo "[git-worktree] Linked $_gw_rel entries from $_gw_base"
             fi
+            # Linked packages come from the main checkout's install. When the
+            # lockfiles differ they can lack packages this branch declares
+            # (aw-webui 2026-10-20: a July checkout missing
+            # @unicode/unicode-13.0.0 failed four Jest tests per worktree).
+            # Keep the links so hooks still run; say when tests need an install.
+            _gw_lock="$(dirname "$_gw_rel")/package-lock.json"
+            if [ -n "$(find "$_gw_target" -maxdepth 1 -type l -print -quit 2>/dev/null)" ]; then
+                if [ -f "$_gw_main_root/$_gw_lock" ] && [ -f "$_gw_wt_root/$_gw_lock" ] \
+                    && ! cmp -s "$_gw_main_root/$_gw_lock" "$_gw_wt_root/$_gw_lock"; then
+                    echo "[git-worktree] WARNING: $_gw_lock differs from $_gw_main_root; linked $_gw_rel may be stale. Before tests: rm -rf $_gw_rel && npm ci --ignore-scripts"
+                fi
+            fi
         done < <(find "$_gw_main_root" -maxdepth 3 -type d -name node_modules \
                  -not -path "*/node_modules/*" -print0 2>/dev/null)
     fi
