@@ -874,7 +874,8 @@ def test_subagent_status_lists_pending_dispatch() -> None:
             assert dispatch["status"] == "dispatched"
             task_id = dispatch["task_id"]
 
-            await asyncio.sleep(0)
+            for _ in range(5):  # the shielded spawn resolves a few ticks later
+                await asyncio.sleep(0)
 
             status = await bridge.handle_function_call("subagent_status", {})
             assert status["status"] == "ok"
@@ -1335,6 +1336,63 @@ def test_cancel_kills_subagent_descendants(
             break
         time.sleep(0.05)
     assert not _pid_alive(grandchild), "cancelled subagent left a live descendant"
+
+
+@pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")
+def test_cancel_during_spawn_kills_subagent_descendants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel while the spawn is still connecting pipes must kill the tree.
+
+    CPython's subprocess transport answers a cancel in that window with
+    ``transp.close()``, which kills only the direct child. The fake below
+    models that: it spawns the real tree, holds the await open, and on cancel
+    kills only the direct child, exactly like the stdlib path.
+    """
+    pid_file = tmp_path / "grandchild.pid"
+    script = tmp_path / "fake-subagent.sh"
+    script.write_text(f"#!/bin/sh\nsleep 30 &\necho $! > {pid_file}\nwait\n")
+    script.chmod(0o755)
+    monkeypatch.delenv("GPTME_VOICE_SUBAGENT_PATH", raising=False)
+    real_exec = asyncio.create_subprocess_exec
+
+    async def _exercise() -> int:
+        spawned = asyncio.Event()
+
+        async def _slow_connect(*args, **kwargs):
+            proc = await real_exec(*args, **kwargs)
+            try:
+                for _ in range(100):
+                    if pid_file.exists() and pid_file.read_text().strip():
+                        break
+                    await asyncio.sleep(0.05)
+                spawned.set()
+                await asyncio.sleep(0.5)
+            except asyncio.CancelledError:
+                proc.kill()  # what transp.close() does
+                raise
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _slow_connect)
+        bridge = GptmeToolBridge(
+            workspace=str(tmp_path), gptme_path=str(script), timeout=30
+        )
+        task = asyncio.create_task(bridge._execute("long task", mode="fast"))
+        await asyncio.wait_for(spawned.wait(), timeout=10)
+        grandchild = int(pid_file.read_text().strip())
+        assert _pid_alive(grandchild)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(1.0)  # let the shielded spawn finish
+        return grandchild
+
+    grandchild = asyncio.run(_exercise())
+    for _ in range(40):
+        if not _pid_alive(grandchild):
+            break
+        time.sleep(0.05)
+    assert not _pid_alive(grandchild), "cancel during spawn left a live descendant"
 
 
 def test_cancelled_task_records_timing_receipt_and_completion() -> None:

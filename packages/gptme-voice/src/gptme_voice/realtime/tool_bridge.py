@@ -121,6 +121,15 @@ def _kill_process_tree(process: "asyncio.subprocess.Process") -> None:
         pass
 
 
+def _kill_spawned_tree(
+    spawn: "asyncio.Future[asyncio.subprocess.Process]",
+) -> None:
+    """Done-callback: kill the tree of a spawn whose caller was cancelled."""
+    if spawn.cancelled() or spawn.exception() is not None:
+        return
+    _kill_process_tree(spawn.result())
+
+
 @dataclass
 class ToolResult:
     """Result from a subagent execution."""
@@ -697,14 +706,25 @@ class GptmeToolBridge:
         cmd.append(augmented_task)
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=self.workspace,
-                start_new_session=True,
+            # The child exists before the pipes are connected. A cancel in that
+            # window makes asyncio kill only the direct child, leaving the
+            # wrapper script and gptme running. Shield the spawn and kill the
+            # whole tree once it completes.
+            spawn = asyncio.ensure_future(
+                asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=self.workspace,
+                    start_new_session=True,
+                )
             )
+            try:
+                process = await asyncio.shield(spawn)
+            except asyncio.CancelledError:
+                spawn.add_done_callback(_kill_spawned_tree)
+                raise
             if on_started:
                 on_started(time.monotonic())
 
