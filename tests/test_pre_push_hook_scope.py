@@ -572,3 +572,32 @@ def test_bare_url_push_resolves_dest_remote_for_range_scoping(
     )
     assert SKIP_MESSAGE not in proc.stderr, proc.stderr
     assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
+def test_relative_remote_url_matches_absolute_destination(tmp_path: Path) -> None:
+    """Relative-URL origin is recognised as the push destination.
+
+    When origin is configured with a relative path (../nonexistent.git) and the
+    push is made to the equivalent absolute URL, the hook must treat them as the
+    same repository.  Before this fix, _canonical_remote_url left the paths
+    distinct so origin entered _other_remotes; a stale refs/remotes/origin/topic
+    at the destructive commit D was then excluded from the scan via
+    ``--remotes=origin``, silently permitting the destructive re-push.
+    """
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    # repo is at tmp_path/repo; ../nonexistent.git resolves to tmp_path/nonexistent.git
+    dest_abs = str(tmp_path / "nonexistent.git")
+    _git(repo, "remote", "set-url", "origin", "../nonexistent.git")
+    # Stale tracking ref at the destructive commit on the push destination.
+    _git(repo, "update-ref", "refs/remotes/origin/topic", head)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {base}\n",
+        "origin",
+        dest_abs,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, (
+        "Guard must fire even when origin uses a relative-path URL alias.\n"
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )

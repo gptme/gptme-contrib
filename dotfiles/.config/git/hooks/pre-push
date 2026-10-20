@@ -38,7 +38,14 @@ PUSH_REMOTE_NAME="${1:-}"
 # variants, case differences, .git suffix) compare equal.  Unknown shapes
 # return a non-empty but distinct string, so callers fail closed.
 _canonical_remote_url() {
-    printf '%s\n' "$1" | sed -E \
+    local url="$1"
+    # Resolve relative filesystem paths (./… or ../…) so they compare equal to
+    # their absolute equivalents.  realpath -m normalises without requiring the
+    # path to exist (GNU coreutils; falls back gracefully on non-GNU systems).
+    case "$url" in
+        ./*|../*) url="$(realpath -m -- "$url" 2>/dev/null)" || url="$1" ;;
+    esac
+    printf '%s\n' "$url" | sed -E \
         -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://([^@/]+@)?##' \
         -e 's#^[^/@:]+@##' \
         -e 's#^([^/:]+):(22|443)(/|$)#\1\3#' \
