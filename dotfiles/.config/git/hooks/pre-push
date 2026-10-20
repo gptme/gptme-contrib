@@ -123,9 +123,16 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         # human force-reset the remote behind this clone's back), and blindly
         # excluding it would hide the destructive commit from the scan.
         if [ "$remote_sha" = "$ZERO" ]; then
-            # New branch: no existing destination tracking ref, safe to exclude all.
-            # shellcheck disable=SC2086
-            range="$local_sha --not --remotes"
+            # New branch: no destination tracking ref from git, but the clone may
+            # retain a stale one (e.g. if the branch was deleted remotely). Exclude
+            # only OTHER remotes — not the destination's — so a stale tracking ref
+            # cannot hide a destructive commit from the scan.
+            if [ -n "$_other_remotes" ]; then
+                # shellcheck disable=SC2086
+                range="$local_sha --not${_other_remotes}"
+            else
+                range="$local_sha"
+            fi
         else
             # shellcheck disable=SC2086
             range="$local_sha --not $remote_sha${_other_remotes:+ $_other_remotes}"

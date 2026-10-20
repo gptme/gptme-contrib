@@ -235,6 +235,30 @@ def test_stale_destination_tracking_ref_does_not_bypass_guard(tmp_path: Path) ->
     assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
 
 
+def test_stale_dest_tracking_ref_does_not_bypass_guard_on_new_branch(
+    tmp_path: Path,
+) -> None:
+    """Stale destination tracking ref must not bypass the guard for a new-branch push.
+
+    Scenario: ``origin/topic`` was deleted remotely but the clone still has
+    ``refs/remotes/origin/topic`` pointing to the destructive commit. Git
+    supplies ``remote_sha=ZERO`` (new branch). The old ``--remotes`` range
+    would exclude ``origin/topic=D``, hiding D from the scan; the fix uses
+    ``_other_remotes`` (which excludes only non-destination remotes).
+    """
+    repo, _base, head = _repo_with_mass_deletion(tmp_path)
+    # Clone retains a stale tracking ref on the push destination.
+    _git(repo, "update-ref", "refs/remotes/origin/topic", head)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "origin",
+        "git@github.com:me/r.git",
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
 def test_range_limit_smaller_than_range_skips(tmp_path: Path) -> None:
     """The O(N) escape hatch must keep working for a genuinely huge range."""
     repo = _init(tmp_path)
