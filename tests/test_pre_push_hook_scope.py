@@ -623,3 +623,31 @@ def test_bare_relative_alias_does_not_hide_destination_commit(
     )
     assert proc.returncode == 1, proc.stderr
     assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("remote_sha", [ZERO, "base"])
+@pytest.mark.parametrize("file_url_destination", [False, True])
+def test_file_url_alias_does_not_hide_destination_commit(
+    tmp_path: Path, remote_sha: str, file_url_destination: bool
+) -> None:
+    """Local paths and file:// URLs must identify the same destination."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    local_path = tmp_path / "Destination.git"
+    file_url = local_path.as_uri()
+    configured, destination = (
+        (str(local_path), file_url)
+        if file_url_destination
+        else (file_url, str(local_path))
+    )
+    _git(repo, "remote", "set-url", "origin", configured)
+    _git(repo, "update-ref", "refs/remotes/origin/topic", head)
+    advertised = base if remote_sha == "base" else remote_sha
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {advertised}\n",
+        destination,
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
