@@ -214,6 +214,27 @@ def test_commits_already_on_another_remote_are_not_rescanned(tmp_path: Path) -> 
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
 
 
+def test_stale_destination_tracking_ref_does_not_bypass_guard(tmp_path: Path) -> None:
+    """A stale origin tracking ref must not let a destructive commit skip the scan.
+
+    Scenario: someone force-reset ``origin/topic`` to ``base`` (deletion's parent).
+    Our local ``refs/remotes/origin/topic`` still points to ``head`` (the deletion
+    commit). Git passes ``remote_sha=base``. The guard must scan ``head``; only the
+    destination remote's stale ref caused the problem, and we must not exclude it.
+    """
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    # Stale: our local tracking ref still points to the deletion commit.
+    _git(repo, "update-ref", "refs/remotes/origin/topic", head)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {base}\n",
+        "origin",
+        "git@github.com:me/r.git",
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
 def test_range_limit_smaller_than_range_skips(tmp_path: Path) -> None:
     """The O(N) escape hatch must keep working for a genuinely huge range."""
     repo = _init(tmp_path)
