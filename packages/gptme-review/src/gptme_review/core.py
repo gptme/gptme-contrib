@@ -3370,8 +3370,14 @@ def _request(
     timeout: float,
     _afford_retried: bool = False,
     timings: dict[str, float] | None = None,
+    min_affordable_tokens: int | None = None,
 ) -> dict:
-    """One OpenRouter call with incremental, measurement-only body timings."""
+    """One OpenRouter call with incremental, measurement-only body timings.
+
+    ``min_affordable_tokens`` raises the reservation-402 retry floor for callers
+    whose answer cannot fit a small budget. Below it the 402 propagates, so the
+    caller defers instead of spending the last credit on a truncated answer.
+    """
     if timings is None:
         timings = {}
     else:
@@ -3398,6 +3404,7 @@ def _request(
         if (
             not _afford_retried
             and affordable is not None
+            and affordable >= (min_affordable_tokens or 0)
             and isinstance(requested, int)
             and requested > affordable
         ):
@@ -3447,7 +3454,13 @@ def _request(
     return data
 
 
-def _post_openrouter(payload: dict, *, api_key: str, timeout: float) -> dict:
+def _post_openrouter(
+    payload: dict,
+    *,
+    api_key: str,
+    timeout: float,
+    min_affordable_tokens: int | None = None,
+) -> dict:
     """POST with a HARD wall-clock deadline.
 
     ``urllib``'s ``timeout`` bounds each individual socket operation, not the
@@ -3467,7 +3480,11 @@ def _post_openrouter(payload: dict, *, api_key: str, timeout: float) -> dict:
     def worker() -> None:
         try:
             box["result"] = _request(
-                payload, api_key=api_key, timeout=timeout, timings=timings
+                payload,
+                api_key=api_key,
+                timeout=timeout,
+                timings=timings,
+                min_affordable_tokens=min_affordable_tokens,
             )
         except BaseException as exc:  # noqa: BLE001 — re-raised on the caller
             box["error"] = exc
@@ -3503,6 +3520,7 @@ def openrouter_completion(
     no_train: bool = True,
     _usage_ctx: dict | None = None,
     deadline: ReviewDeadline | None = None,
+    min_affordable_tokens: int | None = None,
 ) -> tuple[str, dict]:
     """One-shot UNSTRUCTURED completion.  Returns ``(content, usage)``.
 
@@ -3526,6 +3544,12 @@ def openrouter_completion(
     too small a budget spends all of it thinking and returns ``finish_reason:
     "length"`` with empty content.  That case is NOT retried — the wall is our
     own budget, and a retry hits it again.
+
+    The same wall applies when a credit-limited key forces a smaller
+    ``max_tokens``: the default retry floor suits a short review, not every
+    answer. Pass ``min_affordable_tokens`` (often ``max_tokens`` itself) to make
+    a too-small afford-count raise the HTTP 402 instead of returning a
+    truncated, empty answer.
     """
     payload: dict = {
         "model": model,
@@ -3554,7 +3578,12 @@ def openrouter_completion(
                 if deadline is not None
                 else timeout
             )
-            data = _post_openrouter(payload, api_key=api_key, timeout=request_timeout)
+            data = _post_openrouter(
+                payload,
+                api_key=api_key,
+                timeout=request_timeout,
+                min_affordable_tokens=min_affordable_tokens,
+            )
         except ReviewError as exc:
             _log_failed_attempt(
                 exc,
