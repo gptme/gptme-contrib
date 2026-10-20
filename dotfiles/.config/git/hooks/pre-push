@@ -38,17 +38,30 @@ PUSH_REMOTE_NAME="${1:-}"
 # variants, case differences, .git suffix) compare equal.  Unknown shapes
 # return a non-empty but distinct string, so callers fail closed.
 _canonical_remote_url() {
-    local url="$1"
-    # Local file URLs share filesystem identity with plain paths. Do not strip
-    # .git or fold case as we do for network repository aliases below.
+    local url="$1" file_path="" decoded="" byte
+    # Local file URLs share filesystem identity with plain paths. Decode URL
+    # escapes once (not shell escapes), preserving case and the .git suffix.
     case "$url" in
-        file:///*) url="${url#file://}" ;;
-        file://localhost/*) url="${url#file://localhost}" ;;
+        file:///*) file_path="${url#file://}" ;;
+        file://localhost/*) file_path="${url#file://localhost}" ;;
     esac
+    if [ -n "$file_path" ]; then
+        while [[ "$file_path" =~ ^([^%]*)%([[:xdigit:]]{2})(.*)$ ]]; do
+            # NUL is not a filesystem byte and cannot be represented in Bash.
+            [ "${BASH_REMATCH[2]}" = "00" ] && { printf '%s\n' "$url"; return; }
+            printf -v byte '%b' "\\x${BASH_REMATCH[2]}"
+            decoded+="${BASH_REMATCH[1]}${byte}"
+            file_path="${BASH_REMATCH[3]}"
+        done
+        url="${decoded}${file_path}"
+        realpath -m -- "$url" 2>/dev/null || printf '%s\n' "$url"
+        return
+    fi
     # Git also accepts bare relative paths (repo.git). Keep filesystem identity
     # separate from network URL normalization: local paths are case-sensitive.
     case "$url" in
         "") return ;;
+        /*|./*|../*) realpath -m -- "$url" 2>/dev/null || printf '%s\n' "$url"; return ;;
         *://*|*:*) ;;
         *) realpath -m -- "$url" 2>/dev/null || printf '%s\n' "$url"; return ;;
     esac

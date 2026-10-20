@@ -627,12 +627,13 @@ def test_bare_relative_alias_does_not_hide_destination_commit(
 
 @pytest.mark.parametrize("remote_sha", [ZERO, "base"])
 @pytest.mark.parametrize("file_url_destination", [False, True])
+@pytest.mark.parametrize("filename", ["Destination.git", "My Repo%20:Name.git"])
 def test_file_url_alias_does_not_hide_destination_commit(
-    tmp_path: Path, remote_sha: str, file_url_destination: bool
+    tmp_path: Path, remote_sha: str, file_url_destination: bool, filename: str
 ) -> None:
     """Local paths and file:// URLs must identify the same destination."""
     repo, base, head = _repo_with_mass_deletion(tmp_path)
-    local_path = tmp_path / "Destination.git"
+    local_path = tmp_path / filename
     file_url = local_path.as_uri()
     configured, destination = (
         (str(local_path), file_url)
