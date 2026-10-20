@@ -94,6 +94,11 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         _dest_push_url="$(git remote get-url --push "$PUSH_REMOTE_NAME" 2>/dev/null || true)"
     fi
     _dest_push_identity="$(_canonical_remote_url "$_dest_push_url")"
+    # When pushing by bare URL, PUSH_REMOTE_NAME is the URL itself and
+    # refs/remotes/<url>/ does not exist. Track the configured remote name
+    # (if any) whose push URL matches the destination so the new-branch path
+    # can use it for for-each-ref range scoping.
+    _dest_remote_name="$PUSH_REMOTE_NAME"
     while IFS= read -r _r; do
         # Skip by name
         [ "$_r" = "$PUSH_REMOTE_NAME" ] && continue
@@ -105,7 +110,12 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         if [ -n "$_dest_push_identity" ]; then
             _r_push_url="$(git remote get-url --push "$_r" 2>/dev/null || true)"
             _r_push_identity="$(_canonical_remote_url "$_r_push_url")"
-            [ "$_r_push_identity" = "$_dest_push_identity" ] && continue
+            if [ "$_r_push_identity" = "$_dest_push_identity" ]; then
+                # This configured remote is an alias of the destination; resolve
+                # it so the new-branch for-each-ref lookup can find its tracking refs.
+                _dest_remote_name="$_r"
+                continue
+            fi
             _r_fetch_url="$(git remote get-url "$_r" 2>/dev/null || true)"
             _r_fetch_identity="$(_canonical_remote_url "$_r_fetch_url")"
             [ "$_r_fetch_identity" = "$_dest_push_identity" ] && continue
@@ -137,11 +147,11 @@ if [ -n "$_GUARD_SCRIPT" ]; then
             # tracking ref — it may be stale and could hide a destructive commit.
             _branch_name="${remote_ref#refs/heads/}"
             _dest_other_excl=""
-            if [ -n "$PUSH_REMOTE_NAME" ]; then
+            if [ -n "$_dest_remote_name" ]; then
                 while IFS= read -r _dest_ref; do
-                    [ "$_dest_ref" = "refs/remotes/${PUSH_REMOTE_NAME}/${_branch_name}" ] && continue
+                    [ "$_dest_ref" = "refs/remotes/${_dest_remote_name}/${_branch_name}" ] && continue
                     _dest_other_excl="$_dest_other_excl $_dest_ref"
-                done < <(git for-each-ref "refs/remotes/${PUSH_REMOTE_NAME}/" --format='%(refname)' 2>/dev/null)
+                done < <(git for-each-ref "refs/remotes/${_dest_remote_name}/" --format='%(refname)' 2>/dev/null)
             fi
             if [ -n "$_dest_other_excl" ] || [ -n "$_other_remotes" ]; then
                 # shellcheck disable=SC2086

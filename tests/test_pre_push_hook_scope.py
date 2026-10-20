@@ -527,3 +527,48 @@ def test_single_remote_new_branch_scopes_range_by_other_dest_refs(
     )
     assert SKIP_MESSAGE not in proc.stderr, proc.stderr
     assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
+def test_bare_url_push_resolves_dest_remote_for_range_scoping(
+    tmp_path: Path,
+) -> None:
+    """Pushing by bare URL must still scope the range using the matching remote's refs.
+
+    Scenario: origin's push URL is the destination. The user runs
+    `git push <origin-url> topic` (git passes the URL as argv[1], not the name
+    "origin"). origin/master already holds the base commit. Without resolving
+    the configured remote name from the URL, _dest_remote_name stays as the raw
+    URL string and for-each-ref finds nothing, leaving the range unscoped. With
+    the fix, the loop recognises that origin's push URL matches, sets
+    _dest_remote_name="origin", and uses refs/remotes/origin/* for scoping.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    origin_url = str(tmp_path / "nonexistent.git")
+    _git(repo, "remote", "add", "origin", origin_url)
+
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (repo / name).write_text("x\n")
+    _git(repo, "add", "a.txt", "b.txt", "c.txt")
+    _git(repo, "commit", "--no-verify", "-qm", "seed")
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+
+    _git(repo, "rm", "-q", "a.txt", "b.txt", "c.txt")
+    _git(repo, "commit", "--no-verify", "-qm", "delete everything")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    # Pass origin_url as argv[1] (the remote "name") and again as argv[2] (URL),
+    # simulating `git push <url> topic` with no configured remote name.
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        origin_url,  # argv[1]: URL as remote name
+        origin_url,  # argv[2]: URL
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "1", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
