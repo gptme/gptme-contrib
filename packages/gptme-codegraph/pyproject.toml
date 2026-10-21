@@ -27,11 +27,16 @@ treesitter = [
     "tree-sitter-swift>=0.7.3",
 ]
 mcp = [
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2",
+]
+test = [
+    "gptme-codegraph[treesitter,mcp]",
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.23.0",
 ]
 dev = [
+    "gptme-codegraph[test]",
     "mypy>=1.0.0",
-    "pytest>=7.0.0",
 ]
 
 [project.scripts]
