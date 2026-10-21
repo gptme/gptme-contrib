@@ -61,12 +61,14 @@ jobs:
           BEFORE: ${{ github.event.before }}
         run: |
           # Get all packages from Makefile (single source of truth)
-          make ci-list-packages-json > /tmp/all_packages.json
+          make --no-print-directory ci-list-packages-json > /tmp/all_packages_raw.txt
+          # make can emit directory chatter; the JSON array is the line starting with '['
+          grep -E '^\[' /tmp/all_packages_raw.txt | tail -1 > /tmp/all_packages.json
 
           # Surface packages excluded from the matrix, so a coverage loss is
           # visible in the log instead of silently disappearing.
           echo "Packages excluded from the CI matrix:"
-          make ci-list-excluded-packages
+          make --no-print-directory ci-list-excluded-packages
 
           # Files changed by this PR, or by this push to master. Schedule/dispatch
           # runs (and pushes we can't diff, e.g. a new branch or a force-push

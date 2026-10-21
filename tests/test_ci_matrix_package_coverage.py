@@ -19,14 +19,21 @@ PACKAGES_DIR = REPO_ROOT / "packages"
 
 def _matrix_packages() -> list[str]:
     result = subprocess.run(
-        ["make", "ci-list-packages-json"],
+        ["make", "--no-print-directory", "ci-list-packages-json"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         check=True,
     )
-    packages: list[str] = json.loads(result.stdout)
-    return packages
+    # make can emit "Entering directory" chatter on stdout, so take the last
+    # line that parses as a JSON array rather than assuming the whole output.
+    for line in reversed(result.stdout.splitlines()):
+        line = line.strip()
+        if not line.startswith("["):
+            continue
+        packages: list[str] = json.loads(line)
+        return packages
+    raise AssertionError(f"no JSON array in make output: {result.stdout!r}")
 
 
 def _packages_with_tests() -> set[str]:
