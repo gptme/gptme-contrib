@@ -385,16 +385,7 @@ def check_commits(rep: Report, scope: list[str] | None = None) -> None:
     if rc != 0:
         rep.add(Check("commits", "warn", "git log failed", [out]))
         return
-    scope_shas: set[str] = set()
-    if scope:
-        rc, scoped = git(
-            ["log", f"--since={since_iso}", "--format=%H", "-n", "200", "--", *scope],
-            rep.root,
-        )
-        if rc != 0:
-            rep.add(Check("commits", "warn", "git log failed", [scoped]))
-            return
-        scope_shas = set(scoped.split())
+
     sid = rep.harness.session_id
     owned: list[tuple[str, str]] = []
     for r in out.split("\x1e"):
@@ -404,7 +395,9 @@ def check_commits(rep: Report, scope: list[str] | None = None) -> None:
         sha, subject = parts[0].strip(), parts[1]
         body = parts[2] if len(parts) > 2 else ""
         tagged = sid is not None and sid[:8] in body
-        is_owned = sha in scope_shas if scope else tagged
+        # Scoped ownership is determined from the actual first-parent diff below.
+        # Path-limited git log can simplify away merges importing old work.
+        is_owned = bool(scope) or tagged
         if is_owned:
             owned.append((sha, subject))
     # Count unique files across each owned commit's own diff (never the
@@ -412,7 +405,8 @@ def check_commits(rep: Report, scope: list[str] | None = None) -> None:
     # --root covers the root commit; -z keeps filenames with spaces intact.
     # Merges count changes against the first parent, not every parent's history.
     files: set[str] = set()
-    for sha, _ in owned:
+    attributed: list[tuple[str, str]] = []
+    for sha, subject in owned:
         rc, names = git(
             [
                 "diff-tree",
@@ -429,14 +423,17 @@ def check_commits(rep: Report, scope: list[str] | None = None) -> None:
         if rc != 0:
             rep.add(Check("commits", "warn", "git diff-tree failed", [names]))
             return
-        files.update(n for n in names.split("\0") if n and _in_scope(n, scope))
-    rep.commits = [f"{sha[:7]} {subject}" for sha, subject in owned]
+        scoped_files = {n for n in names.split("\0") if n and _in_scope(n, scope)}
+        if not scope or scoped_files:
+            attributed.append((sha, subject))
+            files.update(scoped_files)
+    rep.commits = [f"{sha[:7]} {subject}" for sha, subject in attributed]
     rep.files_changed = len(files)
     rep.add(
         Check(
             "commits",
             "info",
-            f"{len(owned)} commit(s) attributed to this session"
+            f"{len(attributed)} commit(s) attributed to this session"
             + (" (touching --paths)" if scope else ""),
             rep.commits[:20],
         )

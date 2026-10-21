@@ -433,7 +433,8 @@ def test_paths_ownership_counts_untagged_commits_inside_scope(repo: Path):
     assert rep["files_changed"] == 3
 
 
-def test_owned_merge_counts_first_parent_changes(repo: Path):
+@pytest.mark.parametrize("scoped", [False, True])
+def test_owned_merge_counts_first_parent_changes(repo: Path, scoped: bool):
     """An owned merge of old work must not look light or count mainline siblings."""
     mainline = _git(repo, "branch", "--show-current")
     _git(repo, "checkout", "-q", "-b", "feature")
@@ -466,7 +467,8 @@ def test_owned_merge_counts_first_parent_changes(repo: Path):
     )
     _push(repo)
 
-    rc, rep = run_check(repo, "--since", "1h")
+    extra = ["--paths", "feature/"] if scoped else []
+    rc, rep = run_check(repo, "--since", "1h", *extra)
     assert rc == 0, rep
     assert len(rep["commits"]) == 1
     assert "owned merge" in rep["commits"][0]
