@@ -12,8 +12,9 @@ root ``>=3.10`` versus a ``>=3.11`` lock after gptme-review raised its floor).
 from __future__ import annotations
 
 import re
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 _LOWER_BOUND = re.compile(r">=\s*(\d+)\.(\d+)")
