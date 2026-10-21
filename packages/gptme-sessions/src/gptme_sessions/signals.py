@@ -281,6 +281,36 @@ _ISSUE_CLOSE_CMD_RE = re.compile(r"\bgh\s+issue\s+close\b")
 _GH_PR_MERGE_CMD_RE = re.compile(r"\bgh\s+pr\s+merge\b")
 
 
+def _echoed_command(content: str) -> str:
+    """Extract the echoed shell command from a gptme tool-result header.
+
+    gptme shell results start with ``Ran command: `<cmd>``` followed by a blank
+    line and the output. Returns "" when the result is not a shell result.
+    """
+    if not content.startswith("Ran command:"):
+        return ""
+    header = content.split("\n", 1)[0]
+    cmd = header[len("Ran command:") :].strip()
+    if len(cmd) >= 2 and cmd.startswith("`") and cmd.endswith("`"):
+        cmd = cmd[1:-1]
+    return cmd
+
+
+def _is_commit_command_result(
+    content: str, call_id: str | None, commit_cmd_calls: set[str]
+) -> bool:
+    """Whether a gptme shell result came from a command that creates commits.
+
+    A commit command's output is the only place the ``[branch sha] subject``
+    line can appear, so such results are safe to scan in full. Everything else
+    keeps the short window, which protects against reading a file that happens
+    to contain git-log-shaped lines.
+    """
+    if call_id and call_id in commit_cmd_calls:
+        return True
+    return bool(_COMMIT_CMD_RE.search(_echoed_command(content)))
+
+
 def _record_deliverable_detail(
     detail_by_value: dict[str, dict[str, object]],
     *,
@@ -804,6 +834,8 @@ def extract_signals(msgs: list[dict]) -> dict:
     pr_create_calls: dict[str, str] = {}
     prs_submitted: list[str] = []
     pr_urls: list[str] = []
+    # call_ids of shell tool calls whose command creates commits
+    commit_cmd_calls: set[str] = set()
 
     # Track recent (tool, path) pairs for retry detection
     recent_sigs: list[str] = []
@@ -847,6 +879,8 @@ def extract_signals(msgs: list[dict]) -> dict:
                                 command = "gh " + command
                             if _has_pr_create_command(command):
                                 pr_create_calls[_call_id] = tool
+                            if tool == "shell" and _COMMIT_CMD_RE.search(command):
+                                commit_cmd_calls.add(_call_id)
                 tool_calls[tool] = tool_calls.get(tool, 0) + 1
                 step_has_tool = True
 
@@ -907,7 +941,15 @@ def extract_signals(msgs: list[dict]) -> dict:
             # Git commit detection from shell output (finditer handles multi-commit pushes).
             # Restrict to first 500 bytes: real git output appears early; reading a file
             # that happens to contain git-log-style lines would produce false positives.
-            for commit_match in _COMMIT_RE.finditer(content[:500]):
+            # Exception: a commit command's output is the only place the commit line can
+            # appear, and a compound command (e.g. `... && git-safe-commit ...`) puts it
+            # far past that window, so those results are scanned in full.
+            scan_content = (
+                content
+                if _is_commit_command_result(content, msg.get("call_id"), commit_cmd_calls)
+                else content[:500]
+            )
+            for commit_match in _COMMIT_RE.finditer(scan_content):
                 commit_hash = commit_match.group(1)
                 commit_msg = commit_match.group(2).strip()
                 commit_value = f"{commit_msg} ({commit_hash})"

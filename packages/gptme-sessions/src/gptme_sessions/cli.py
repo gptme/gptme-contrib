@@ -2861,6 +2861,30 @@ def repair_grades(ctx: click.Context, dry_run: bool) -> None:
 # -- post-session ------------------------------------------------------------
 
 
+def _parse_commit_trailers(raw: str | None) -> dict[str, list[str]] | None:
+    """Parse the ``--commit-trailers`` JSON object.
+
+    Format matches ``session_commits.py --trailers-json``: a mapping of commit
+    SHA to the list of its ``Git-Session-Id`` trailer values.
+    """
+    if raw is None or not raw.strip():
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise click.BadParameter(f"--commit-trailers must be a JSON object: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise click.BadParameter("--commit-trailers must be a JSON object")
+    trailers: dict[str, list[str]] = {}
+    for sha, values in parsed.items():
+        if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+            raise click.BadParameter(
+                "--commit-trailers must map each commit SHA to a list of trailer values"
+            )
+        trailers[str(sha)] = list(values)
+    return trailers
+
+
 @cli.command("post-session")
 @click.option(
     "--harness",
@@ -2922,6 +2946,16 @@ def repair_grades(ctx: click.Context, dry_run: bool) -> None:
     multiple=True,
     help="Explicit deliverables (commit SHAs, PR URLs). Omit to extract from trajectory.",
 )
+@click.option(
+    "--commit-trailers",
+    "commit_trailers_raw",
+    default=None,
+    help=(
+        "JSON object mapping commit SHA -> list of Git-Session-Id trailer values "
+        "(as emitted by session_commits.py --trailers-json). Lets a commit the "
+        "trajectory extractor missed be credited to this session."
+    ),
+)
 @click.option("--journal-path", default=None, help="Path to journal entry for this session")
 @click.option("--session-id", default=None, help="Override auto-generated session ID")
 @click.option(
@@ -2972,6 +3006,7 @@ def post_session_cmd(
     start_commit: str | None,
     end_commit: str | None,
     deliverables_raw: tuple[str, ...],
+    commit_trailers_raw: str | None,
     journal_path: str | None,
     session_id: str | None,
     context_tier: str | None,
@@ -2984,6 +3019,7 @@ def post_session_cmd(
     """Record a completed session: extract signals, determine outcome, append record."""
     store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
     deliverables = list(deliverables_raw) if deliverables_raw else None
+    commit_trailers = _parse_commit_trailers(commit_trailers_raw)
     if reasoning_effort is not None:
         reasoning_effort = reasoning_effort.strip().lower() or None
         _effort_warning = check_reasoning_effort(harness, reasoning_effort)
@@ -3007,6 +3043,7 @@ def post_session_cmd(
         start_commit=start_commit,
         end_commit=end_commit,
         deliverables=deliverables,
+        commit_trailers=commit_trailers,
         journal_path=journal_path,
         session_id=session_id,
         context_tier=context_tier,
