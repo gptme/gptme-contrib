@@ -22,7 +22,15 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Text Processing :: General",
 ]
-dependencies = [
+dependencies = ["regex>=2024.11.6"]
+
+[project.urls]
+Homepage = "https://github.com/gptme/gptme-contrib"
+Repository = "https://github.com/gptme/gptme-contrib"
+Issues = "https://github.com/gptme/gptme-contrib/issues"
+
+[project.optional-dependencies]
+full = [
     "chromadb>=1.0",
     "click",
     "rich",
@@ -34,28 +42,24 @@ dependencies = [
     # onnxruntime (transitive via chromadb) dropped cp310 wheels in 1.24;
     # constrain it on 3.10 so the package stays installable there.
     "onnxruntime<1.24; python_version < '3.11'",
-    "regex>=2024.11.6",
     # 1.0 introduced pathspec.patterns.gitignore.spec.GitIgnoreSpecPattern,
     # which indexer.py imports at module scope; 0.12 has no such module.
     "pathspec>=1.0",
 ]
-
-[project.urls]
-Homepage = "https://github.com/gptme/gptme-contrib"
-Repository = "https://github.com/gptme/gptme-contrib"
-Issues = "https://github.com/gptme/gptme-contrib/issues"
-
-[project.optional-dependencies]
 dev = [
+    "gptme-rag[full]",
     "mypy>=1.0.0",
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    "tomli>=2; python_version < '3.11'",
 ]
-mcp = ["mcp>=1.0,<2.0"]
-lexical = ["scikit-learn>=1.3"]
+mcp = ["gptme-rag[full]", "mcp>=1.0,<2.0"]
+lexical = ["scikit-learn>=1.3", "tiktoken>=0.7"]
 test = [
+    "gptme-rag[full]",
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    "tomli>=2; python_version < '3.11'",
     "scikit-learn>=1.3",
 ]
 
@@ -89,4 +93,5 @@ markers = [
 ]
 
 [tool.gptme-contrib]
-max_install_mb = 1450
+# This budget measures the base lesson-matcher install, not the dense full extra.
+max_install_mb = 20
