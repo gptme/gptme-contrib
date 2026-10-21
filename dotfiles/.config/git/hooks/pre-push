@@ -230,6 +230,18 @@ if [ -n "$_GUARD_SCRIPT" ]; then
             _dest_other_excl=""
             if [ -n "$_dest_remote_name" ]; then
                 while read -r _dest_ref _dest_oid; do
+                    # for-each-ref recursively includes configured remotes such
+                    # as team/fork under team/. Their refs are not team branch
+                    # baselines, even when both remotes share a destination URL.
+                    _nested_remote=false
+                    for _prefix in "${_protected_ref_prefixes[@]}" "${_other_remote_prefixes[@]}"; do
+                        [ "$_prefix" = "refs/remotes/${_dest_remote_name}/" ] && continue
+                        if [[ "$_prefix" == "refs/remotes/${_dest_remote_name}/"* && "$_dest_ref" == "$_prefix"* ]]; then
+                            _nested_remote=true
+                            break
+                        fi
+                    done
+                    [ "$_nested_remote" = true ] && continue
                     [ "$_dest_ref" = "refs/remotes/${_dest_remote_name}/${_branch_name}" ] && continue
                     [ "$_dest_ref" = "refs/remotes/${_dest_remote_name}/HEAD" ] && continue
                     _dest_other_excl="$_dest_other_excl $_dest_oid"

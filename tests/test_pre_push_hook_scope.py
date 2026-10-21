@@ -791,3 +791,32 @@ def test_case_sensitive_push_alias_does_not_borrow_wrong_tracking_baseline(
     )
     assert proc.returncode == 1, proc.stderr
     assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("nested_alias", [False, True])
+def test_new_branch_does_not_borrow_nested_remote_baseline(
+    tmp_path: Path, nested_alias: bool
+) -> None:
+    """for-each-ref's recursive prefix is not an exact remote namespace."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = _git(repo, "remote", "get-url", "origin")
+    _git(repo, "remote", "add", "team", destination)
+    nested_url = destination if nested_alias else str(tmp_path / "nested.git")
+    _git(repo, "remote", "add", "team/fork", nested_url)
+    # A real destination baseline keeps range limiting active; the nested
+    # remote's stale topic must not hide the destructive new branch commit.
+    _git(repo, "update-ref", "refs/remotes/team/master", base)
+    _git(repo, "update-ref", "refs/remotes/team/fork/topic", head)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "team",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "1", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    # The global pass already conservatively protects all nested namespaces
+    # under the destination prefix, even when their URLs differ. The baseline
+    # pass must not reintroduce those excluded refs through recursive traversal.
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
