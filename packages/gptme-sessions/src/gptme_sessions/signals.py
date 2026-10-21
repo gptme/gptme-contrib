@@ -140,6 +140,52 @@ def _commit_subject(cmd: str) -> str | None:
     return value.replace('\\"', '"').splitlines()[0].strip() or None
 
 
+# Same as _COMMIT_SUBJECT_RE but also accepts the long forms
+# ("--message=...", "--message ..."), which the commit-command scan uses to
+# decide whether a widened match can be checked against a stated subject.
+_COMMIT_SUBJECT_LONG_RE = re.compile(
+    r"""(?:-m|--message)\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""" r"""|--message=("[^"]*"|'[^']*')"""
+)
+
+
+def _stated_commit_subjects(cmd: str) -> list[str]:
+    """Every subject a commit command states, in command order.
+
+    A command can commit more than once ("git commit -m a && git commit -m b"),
+    so all stated subjects are returned, not just the first.
+    """
+    subjects: list[str] = []
+    for match in _COMMIT_SUBJECT_LONG_RE.finditer(cmd):
+        value = next((g for g in match.groups() if g is not None), "")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        subject = value.replace('\\"', '"').splitlines()[0].strip()
+        if subject:
+            subjects.append(subject)
+    if not subjects:
+        heredoc = _COMMIT_HEREDOC_SUBJECT_RE.search(cmd)
+        if heredoc:
+            subject = heredoc.group(2).strip().splitlines()[0].strip()
+            if subject:
+                subjects.append(subject)
+    return subjects
+
+
+def _subject_matches(observed: str, expected: str) -> bool:
+    """Compare a commit-output subject with the subject the command asked for.
+
+    Git prints the commit subject verbatim after the "[branch sha] " prefix, so
+    the comparison is exact after whitespace normalization. The prefix form
+    tolerates a subject that was appended to (e.g. a hook rewriting the tail).
+    """
+
+    def norm(text: str) -> str:
+        return " ".join(text.split())
+
+    observed_n, expected_n = norm(observed), norm(expected)
+    return observed_n == expected_n or observed_n.startswith(expected_n)
+
+
 def _command_repo(cmd: str, cwd: str | None) -> str | None:
     match = _GIT_REPO_RE.search(cmd)
     if not match:
@@ -804,6 +850,9 @@ def extract_signals(msgs: list[dict]) -> dict:
     pr_create_calls: dict[str, str] = {}
     prs_submitted: list[str] = []
     pr_urls: list[str] = []
+    # call_id -> full command for shell calls that are commit commands. Used to
+    # widen the commit-output scan window for those calls only (see below).
+    commit_cmd_calls: dict[str, str] = {}
 
     # Track recent (tool, path) pairs for retry detection
     recent_sigs: list[str] = []
@@ -847,6 +896,8 @@ def extract_signals(msgs: list[dict]) -> dict:
                                 command = "gh " + command
                             if _has_pr_create_command(command):
                                 pr_create_calls[_call_id] = tool
+                            if tool == "shell" and _COMMIT_CMD_RE.search(command):
+                                commit_cmd_calls[_call_id] = command
                 tool_calls[tool] = tool_calls.get(tool, 0) + 1
                 step_has_tool = True
 
@@ -907,9 +958,35 @@ def extract_signals(msgs: list[dict]) -> dict:
             # Git commit detection from shell output (finditer handles multi-commit pushes).
             # Restrict to first 500 bytes: real git output appears early; reading a file
             # that happens to contain git-log-style lines would produce false positives.
-            for commit_match in _COMMIT_RE.finditer(content[:500]):
+            # Exception: when the paired command is a commit command, the real
+            # "[branch sha] subject" line can sit far past that window (compound
+            # commands like `tail ... && ... && git-safe-commit ...` put it
+            # thousands of bytes in). Scanning the whole result for a known
+            # commit command is safe: the bracketed form is only printed by the
+            # commit itself, and the 500-byte guard is kept for every other
+            # command.
+            # Widening the scan past the first 500 bytes is only safe when the
+            # commit command states the subject(s) it commits: the widened scan
+            # can also see lines produced by EARLIER parts of a compound command
+            # (e.g. a `cat saved-output.txt` whose file contains an old
+            # "[branch sha] subject" line), so a match outside the window is
+            # only accepted when its subject is one the command asked for.
+            # Matches inside the 500-byte window keep the original behavior
+            # (accepted as-is), so nothing detected before changes.
+            _call_id = msg.get("call_id", "")
+            _stated: list[str] = []
+            if _call_id in commit_cmd_calls:
+                _stated = _stated_commit_subjects(commit_cmd_calls[_call_id])
+            _matches = _COMMIT_RE.finditer(content if _stated else content[:500])
+            for commit_match in _matches:
                 commit_hash = commit_match.group(1)
                 commit_msg = commit_match.group(2).strip()
+                if (
+                    _stated
+                    and commit_match.start() >= 500
+                    and not any(_subject_matches(commit_msg, s) for s in _stated)
+                ):
+                    continue
                 commit_value = f"{commit_msg} ({commit_hash})"
                 git_commits.append(commit_value)
                 _record_deliverable_detail(
