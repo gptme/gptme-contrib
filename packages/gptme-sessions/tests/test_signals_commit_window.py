@@ -148,3 +148,51 @@ def test_only_stale_commit_line_is_not_credited() -> None:
     ]
     signals = extract_signals(msgs)
     assert signals["git_commits"] == []
+
+
+def test_in_window_commit_is_accepted_without_a_stated_subject() -> None:
+    """Behavior inside the 500-byte window is unchanged: a commit line is
+    credited even when the command states no subject to check it against."""
+    msgs = [
+        _msg("user", "commit it", "2026-01-01T10:00:00+00:00"),
+        _msg(
+            "assistant",
+            '@shell(call_6): {"command": "git commit -a"}',
+            "2026-01-01T10:00:01+00:00",
+        ),
+        _msg(
+            "system",
+            f"Ran command: `git commit -a`\n{_COMMIT_LINE}\n",
+            "2026-01-01T10:00:02+00:00",
+            call_id="call_6",
+        ),
+    ]
+    signals = extract_signals(msgs)
+    assert len(signals["git_commits"]) == 1
+
+
+def test_two_commits_with_two_stated_subjects_are_both_credited() -> None:
+    """A command that commits twice credits both commits: one inside the
+    window, one past it."""
+    msgs = [
+        _msg("user", "commit twice", "2026-01-01T10:00:00+00:00"),
+        _msg(
+            "assistant",
+            '@shell(call_7): {"command": "git commit -m \'docs: first\' && '
+            "git commit --allow-empty -m 'docs: second'\"}",
+            "2026-01-01T10:00:01+00:00",
+        ),
+        _msg(
+            "system",
+            "Ran command: `git commit -m 'docs: first'...`\n"
+            "[main aaaaaaa] docs: first\n"
+            f"{_PAD}\n"
+            "[main bbbbbbb] docs: second\n",
+            "2026-01-01T10:00:02+00:00",
+            call_id="call_7",
+        ),
+    ]
+    signals = extract_signals(msgs)
+    assert len(signals["git_commits"]) == 2
+    assert any("aaaaaaa" in c for c in signals["git_commits"])
+    assert any("bbbbbbb" in c for c in signals["git_commits"])

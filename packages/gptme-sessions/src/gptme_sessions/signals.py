@@ -148,18 +148,27 @@ _COMMIT_SUBJECT_LONG_RE = re.compile(
 )
 
 
-def _stated_commit_subject(cmd: str) -> str | None:
-    """The subject a commit command asks for, or None when it states none."""
-    subject = _commit_subject(cmd)
-    if subject:
-        return subject
-    match = _COMMIT_SUBJECT_LONG_RE.search(cmd)
-    if not match:
-        return None
-    value = next((g for g in match.groups() if g is not None), "")
-    if value[:1] in {'"', "'"} and value[-1:] == value[:1] and len(value) >= 2:
-        value = value[1:-1]
-    return value.replace('\\"', '"').splitlines()[0].strip() or None
+def _stated_commit_subjects(cmd: str) -> list[str]:
+    """Every subject a commit command states, in command order.
+
+    A command can commit more than once ("git commit -m a && git commit -m b"),
+    so all stated subjects are returned, not just the first.
+    """
+    subjects: list[str] = []
+    for match in _COMMIT_SUBJECT_LONG_RE.finditer(cmd):
+        value = next((g for g in match.groups() if g is not None), "")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        subject = value.replace('\\"', '"').splitlines()[0].strip()
+        if subject:
+            subjects.append(subject)
+    if not subjects:
+        heredoc = _COMMIT_HEREDOC_SUBJECT_RE.search(cmd)
+        if heredoc:
+            subject = heredoc.group(2).strip().splitlines()[0].strip()
+            if subject:
+                subjects.append(subject)
+    return subjects
 
 
 def _subject_matches(observed: str, expected: str) -> bool:
@@ -956,25 +965,27 @@ def extract_signals(msgs: list[dict]) -> dict:
             # commit command is safe: the bracketed form is only printed by the
             # commit itself, and the 500-byte guard is kept for every other
             # command.
+            # Widening the scan past the first 500 bytes is only safe when the
+            # commit command states the subject(s) it commits: the widened scan
+            # can also see lines produced by EARLIER parts of a compound command
+            # (e.g. a `cat saved-output.txt` whose file contains an old
+            # "[branch sha] subject" line), so a match outside the window is
+            # only accepted when its subject is one the command asked for.
+            # Matches inside the 500-byte window keep the original behavior
+            # (accepted as-is), so nothing detected before changes.
             _call_id = msg.get("call_id", "")
-            _scan = content[:500]
-            _expected_subject: str | None = None
+            _stated: list[str] = []
             if _call_id in commit_cmd_calls:
-                # Widen the scan only when the commit command states the subject
-                # it is committing ("-m ..."). The widened scan can see lines
-                # produced by EARLIER parts of a compound command (e.g. a
-                # `cat saved-output.txt` whose file contains an old
-                # "[branch sha] subject" line), so a match is only accepted when
-                # its subject equals the one the command asked for. Without a
-                # stated subject there is nothing to check against, so the
-                # 500-byte window is kept.
-                _expected_subject = _stated_commit_subject(commit_cmd_calls[_call_id])
-                if _expected_subject:
-                    _scan = content
-            for commit_match in _COMMIT_RE.finditer(_scan):
+                _stated = _stated_commit_subjects(commit_cmd_calls[_call_id])
+            _matches = _COMMIT_RE.finditer(content if _stated else content[:500])
+            for commit_match in _matches:
                 commit_hash = commit_match.group(1)
                 commit_msg = commit_match.group(2).strip()
-                if _expected_subject and not _subject_matches(commit_msg, _expected_subject):
+                if (
+                    _stated
+                    and commit_match.start() >= 500
+                    and not any(_subject_matches(commit_msg, s) for s in _stated)
+                ):
                     continue
                 commit_value = f"{commit_msg} ({commit_hash})"
                 git_commits.append(commit_value)
