@@ -433,6 +433,47 @@ def test_paths_ownership_counts_untagged_commits_inside_scope(repo: Path):
     assert rep["files_changed"] == 3
 
 
+def test_owned_merge_counts_first_parent_changes(repo: Path):
+    """An owned merge of old work must not look light or count mainline siblings."""
+    mainline = _git(repo, "branch", "--show-current")
+    _git(repo, "checkout", "-q", "-b", "feature")
+    _commit(
+        repo,
+        "feat: old feature",
+        [f"feature/f{i}.txt" for i in range(15)],
+        trailer=None,
+    )
+    old = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    subprocess.run(
+        ["git", *GIT_ISOLATION, "commit", "--amend", "--no-edit", "--date", old],
+        cwd=repo,
+        env={**os.environ, "GIT_COMMITTER_DATE": old, "ALLOW_GIT_IDENTITY": "1"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    _git(repo, "checkout", "-q", mainline)
+    _commit(repo, "feat: sibling mainline", ["sibling.txt"], trailer=OTHER_TRAILER)
+    _git(
+        repo,
+        "merge",
+        "--no-ff",
+        "feature",
+        "-m",
+        "feat: owned merge",
+        "-m",
+        OWN_TRAILER,
+    )
+    _push(repo)
+
+    rc, rep = run_check(repo, "--since", "1h")
+    assert rc == 0, rep
+    assert len(rep["commits"]) == 1
+    assert "owned merge" in rep["commits"][0]
+    assert rep["files_changed"] == 15
+    assert rep["verdict"] == "CLEAN_SUBSTANTIAL"
+
+
 def test_owned_root_commit_counts_its_files(tmp_path: Path):
     """P2: a session whose only commit is the root commit must have files_changed > 0."""
     origin = tmp_path / "origin.git"

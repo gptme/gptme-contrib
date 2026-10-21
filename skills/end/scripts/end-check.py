@@ -410,10 +410,20 @@ def check_commits(rep: Report, scope: list[str] | None = None) -> None:
     # Count unique files across each owned commit's own diff (never the
     # oldest-to-newest span, which would include sibling commits in between).
     # --root covers the root commit; -z keeps filenames with spaces intact.
+    # Merges count changes against the first parent, not every parent's history.
     files: set[str] = set()
     for sha, _ in owned:
         rc, names = git(
-            ["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z", sha],
+            [
+                "diff-tree",
+                "--root",
+                "--diff-merges=first-parent",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                "-z",
+                sha,
+            ],
             rep.root,
         )
         if rc != 0:
