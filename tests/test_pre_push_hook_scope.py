@@ -802,7 +802,15 @@ def test_new_branch_does_not_borrow_nested_remote_baseline(
     destination = _git(repo, "remote", "get-url", "origin")
     _git(repo, "remote", "add", "team", destination)
     nested_url = destination if nested_alias else str(tmp_path / "nested.git")
-    _git(repo, "remote", "add", "team/fork", nested_url)
+    # Newer git (2.55 on CI) refuses `remote add` for a nested name, but older
+    # git and hand-edited config still produce one; write the config directly.
+    _git(repo, "config", "remote.team/fork.url", nested_url)
+    _git(
+        repo,
+        "config",
+        "remote.team/fork.fetch",
+        "+refs/heads/*:refs/remotes/team/fork/*",
+    )
     # A real destination baseline keeps range limiting active; the nested
     # remote's stale topic must not hide the destructive new branch commit.
     _git(repo, "update-ref", "refs/remotes/team/master", base)
