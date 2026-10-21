@@ -293,3 +293,16 @@ def test_diagnostics_formats_without_info(tmp_path):
     assert "Found 1 error(s), 1 warning(s)" in result
     assert "Line 1: expected expression" in result
     assert "Line 2: unused variable" in result
+
+
+def test_execute_called_like_gptme_dispatch():
+    """gptme calls ``tool.execute(content, args, kwargs)`` with no confirm arg."""
+    result = execute(None, ["status"], None)
+    assert "Usage: lsp" not in result.content
+
+
+def test_execute_native_kwargs():
+    """A native tool call passes the declared parameters as kwargs, args is None."""
+    native = execute(None, None, {"action": "status"})
+    markdown = execute(None, ["status"], None)
+    assert native.content == markdown.content

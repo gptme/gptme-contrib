@@ -68,7 +68,7 @@ def execute(
     code: str | None,
     args: list[str] | None,
     kwargs: dict[str, str] | None,
-    confirm: ConfirmFunc,
+    confirm: ConfirmFunc | None = None,
 ) -> Message:
     """Execute a youtube block by fetching the transcript for the given video ID."""
     video_id = (code or "").strip()
