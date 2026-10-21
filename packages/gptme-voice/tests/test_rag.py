@@ -441,14 +441,19 @@ def test_is_last_hour_query_matches_only_sub_hour_phrases() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("lexical_available", [True, False])
+@pytest.mark.parametrize("window", ["today", "in the last hour"])
 async def test_recency_bucket_sort_not_applied_for_today_query(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lexical_available: bool,
+    window: str,
 ) -> None:
-    """'What did you work on today?' must not bias results toward the last hour.
+    """Keep lexical rank for today; bucket only explicit last-hour queries.
 
-    If n_results or more files were written in the last hour, the recency-bucket
-    sort would push morning work off the top-N page.  For a 'today' query the
-    plain newest-first order should be returned without any sub-hour re-sorting.
+    Without the optional lexical backend, preserve newest-first recency order.
+    Stub ranking so this contract does not depend on scikit-learn being installed
+    incidentally by another workspace member.
     """
     pytest.importorskip("gptme_rag")
     now = time.time()
@@ -461,9 +466,7 @@ async def test_recency_bucket_sort_not_applied_for_today_query(
         "# Morning\n\nDeep-dive on the RAG pipeline — six hours of work.\n",
         mtime=now - 6 * 3600,
     )
-    # Three recent files written in the last hour — more than n_results below.
-    # If the recency-bucket sort incorrectly fires for a 'today' query, it would
-    # re-rank these three ahead of the morning file, pushing it off the top-3 page.
+    # Three recent files can displace the top lexical hit if bucketing fires.
     for i, offset in enumerate([600, 900, 1200]):
         _write_journal(
             tmp_path,
@@ -473,17 +476,29 @@ async def test_recency_bucket_sort_not_applied_for_today_query(
         )
 
     rag = VoiceRag(workspace=str(tmp_path), enabled=True, search_impl=None)
-    # n_results=3: fewer than the 4 total files, so if the morning file is incorrectly
-    # sorted to position 4 by the recency-bucket sort, it will be absent from results.
-    result = await rag.search("what did you work on today", n_results=3)
+
+    def rank_documents(query, docs, n_results):
+        assert query == "training"
+        if not lexical_available:
+            raise ImportError("optional lexical backend is not installed")
+        # A relevant morning result outranks less relevant recent work.
+        return list(reversed(docs))[:n_results]
+
+    monkeypatch.setattr(rag, "_search_lexical", rank_documents)
+    result = await rag.search(f"training {window}", n_results=3)
 
     assert result["status"] == "ok"
-    sources = [item["source"] for item in result["results"]]
-    # The morning file must appear in the top-3 — plain newest-first keeps it there;
-    # an erroneous recency-bucket sort on a 'today' query would drop it to position 4.
-    assert any(
-        "morning-session.md" in s for s in sources
-    ), f"morning-session.md missing from 'today' query results; got {sources}"
+    assert result["backend"] == ("lexical" if lexical_available else "recency")
+    names = [Path(item["source"]).name for item in result["results"]]
+    if lexical_available:
+        expected = ["recent-session-2.md", "recent-session-1.md"]
+        if window == "today":
+            expected.insert(0, "morning-session.md")
+        else:
+            expected.append("recent-session-0.md")
+    else:
+        expected = [f"recent-session-{i}.md" for i in range(3)]
+    assert names == expected
 
 
 def test_voice_rag_disabled_when_gptme_rag_not_installed(

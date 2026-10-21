@@ -225,7 +225,9 @@ def _retrieve_gptme_rag(query: str, max_results: int) -> list[dict[str, Any]]:
         return results
 
     except FileNotFoundError:
-        logger.warning("gptme-rag not found - install with: pipx install gptme-rag")
+        logger.warning(
+            'gptme-rag not found - install with: pipx install "gptme-rag[full]"'
+        )
         return []
     except subprocess.TimeoutExpired:
         logger.warning("gptme-rag timed out")

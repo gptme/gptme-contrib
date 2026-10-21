@@ -27,14 +27,23 @@ How it fits with gptme:
 ## Install
 
 ```bash
-# CLI (local embeddings pull in sentence-transformers/torch — a large install)
-uv tool install "git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-rag"
+# Lesson-matching library only (regex; no torch, ChromaDB or embeddings)
+uv pip install "gptme-rag @ git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-rag"
+
+# CLI / dense retrieval (local embeddings pull in sentence-transformers/torch)
+uv tool install "gptme-rag[full] @ git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-rag"
 
 # With the MCP server and lexical (TF-IDF) extras
 uv tool install "gptme-rag[mcp,lexical] @ git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-rag"
 ```
 
-Extras: `mcp` (MCP server), `lexical` (scikit-learn TF-IDF backend).
+Extras: `full` (CLI and dense retrieval), `mcp` (MCP server, includes `full`),
+`lexical` (scikit-learn TF-IDF library plus tiktoken), `test` / `dev` (include `full`).
+Existing plain installs used to include the dense stack: select `full` explicitly when
+upgrading a CLI or `Indexer` consumer. The base installation supports the lesson-matching
+Python API, not the `gptme-rag` console command. It uses the matcher's built-in YAML subset
+parser when PyYAML is absent; install PyYAML for unrestricted YAML frontmatter. The shared
+Claude Code hook also needs `tomli` on Python 3.10 to read configured lesson directories.
 
 ## Quickstart
 

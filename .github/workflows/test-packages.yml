@@ -138,6 +138,31 @@ jobs:
         run: |
           make -C packages/${{ matrix.package }} test
 
+  # A workspace sync can mask missing dependencies with other members' installs.
+  rag-lightweight:
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.packages == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install base package outside the workspace environment
+        run: |
+          uv venv /tmp/rag-lightweight --python "${{ matrix.python-version }}"
+          uv pip install --python /tmp/rag-lightweight/bin/python ./packages/gptme-rag
+          # The harness reads TOML config on Python 3.10; this is not an ML dependency.
+          if [[ "${{ matrix.python-version }}" == "3.10" ]]; then
+            uv pip install --python /tmp/rag-lightweight/bin/python tomli
+          fi
+      - name: Verify minimal dependencies and real lesson emission
+        run: /tmp/rag-lightweight/bin/python -I packages/gptme-rag/tests/smoke_lightweight_install.py
+
   # Coverage report (combined for all packages)
   coverage:
     needs: changes

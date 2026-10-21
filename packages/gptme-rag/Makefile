@@ -2,10 +2,10 @@ export MYPY_CACHE_DIR ?= $(shell git rev-parse --show-toplevel)/.mypy_cache
 export RUFF_CACHE_DIR ?= $(shell git rev-parse --show-toplevel)/.ruff_cache
 
 test:
-	uv run pytest tests/ -v -m "not slow"
+	uv run --extra test pytest tests/ -v -m "not slow"
 
 test-all:
-	uv run pytest tests/ -v
+	uv run --extra test pytest tests/ -v
 
 typecheck:
-	uv run --with mypy mypy src/ --ignore-missing-imports
+	uv run --extra dev mypy src/ --ignore-missing-imports
