@@ -433,6 +433,27 @@ def test_paths_ownership_counts_untagged_commits_inside_scope(repo: Path):
     assert rep["files_changed"] == 3
 
 
+@pytest.mark.parametrize("scope", [".", "./", "absolute"])
+def test_repository_root_scope_counts_all_declared_work(repo: Path, scope: str):
+    """A root footprint owns every changed file, including untagged commits."""
+    _commit(
+        repo, "feat: root footprint", [f"src/f{i}.txt" for i in range(15)], trailer=None
+    )
+    _push(repo)
+    root_scope = str(repo) if scope == "absolute" else scope
+    rc, rep = run_check(repo, "--since", "1h", "--paths", root_scope)
+    assert rc == 0, rep
+    # The recent fixture root commit (README.md) also belongs to this footprint.
+    assert len(rep["commits"]) == 2
+    assert rep["files_changed"] == 16
+    assert rep["verdict"] == "CLEAN_SUBSTANTIAL"
+    # The same declared root must still enforce the journal gate.
+    (repo / "journal").mkdir()
+    rc, rep = run_check(repo, "--since", "1h", "--paths", root_scope)
+    assert rc == 2, rep
+    assert _status(rep, "journal") == "block"
+
+
 @pytest.mark.parametrize("scoped", [False, True])
 def test_owned_merge_counts_first_parent_changes(repo: Path, scoped: bool):
     """An owned merge of old work must not look light or count mainline siblings."""

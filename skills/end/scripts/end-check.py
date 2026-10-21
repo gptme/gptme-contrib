@@ -285,7 +285,8 @@ def _in_scope(rel: str, scope: list[str] | None) -> bool:
     for sp in scope:
         sp_n = sp.rstrip("/")
         if (
-            rel_n == sp_n
+            sp_n == "."
+            or rel_n == sp_n
             or rel_n.startswith(sp_n + "/")
             or sp_n.startswith(rel_n + "/")
         ):
