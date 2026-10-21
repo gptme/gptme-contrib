@@ -236,6 +236,63 @@ def find_open_issue(cfg: Config) -> dict | None:
     return None
 
 
+def find_recent_closed_issue(cfg: Config) -> dict | None:
+    """Return the most recently *closed* same-title outage issue, if any.
+
+    Used to decide whether a persisting outage should reopen the prior thread
+    (because a human closed it mid-outage) rather than mint a fresh issue.
+    """
+    res = _gh(
+        [
+            "issue",
+            "list",
+            "--repo",
+            cfg.repo or "",
+            "--state",
+            "closed",
+            "--author",
+            "@me",
+            "--search",
+            cfg.issue_title,
+            "--json",
+            "number,title,closedAt",
+            "--limit",
+            "20",
+        ]
+    )
+    if res.returncode != 0:
+        return None
+    try:
+        issues = json.loads(res.stdout or "[]")
+    except json.JSONDecodeError:
+        return None
+    matches = [
+        i for i in issues if i.get("title") == cfg.issue_title and i.get("closedAt")
+    ]
+    if not matches:
+        return None
+    return dict(max(matches, key=lambda i: i["closedAt"]))
+
+
+def _closed_during_outage(issue: dict, status: dict, now: datetime) -> bool:
+    """True if `issue` was closed while *this* outage was still ongoing.
+
+    The signal: the issue was closed more recently than the last productive
+    session (so no recovery happened between the close and now) — i.e. a human
+    closed it prematurely. When there is no productive session at all in the
+    window, any close within the window counts as mid-outage. Either way the
+    existing thread is the canonical one and should be reopened, not duplicated.
+    """
+    closed = _parse_ts(issue.get("closedAt", ""))
+    if closed is None:
+        return False
+    last_prod_raw = status.get("last_productive_at")
+    last_prod = _parse_ts(last_prod_raw) if last_prod_raw else None
+    if last_prod is not None:
+        return closed > last_prod
+    return (now - closed) <= timedelta(hours=status["window_hours"])
+
+
 def _issue_body(cfg: Config, status: dict) -> str:
     return (
         f"**Self-detected auth outage** — agent `{cfg.agent_name}`'s autonomous "
@@ -251,6 +308,15 @@ def _issue_body(cfg: Config, status: dict) -> str:
         f"why it can go silent for weeks. Fix: {cfg.reauth_cmd}. "
         f"Detector: `scripts/self-outage-check.py`.\n\n"
         f"_Auto-filed at {status['checked_at']}._"
+    )
+
+
+def _reopen_body(cfg: Config, status: dict) -> str:
+    return (
+        "**Reopening** — this issue was closed while the outage was still "
+        "ongoing (no productive session has landed since it was closed). "
+        "Re-escalating on the same thread so the alarm doesn't go silent and "
+        "so one continuous outage stays one issue.\n\n" + _issue_body(cfg, status)
     )
 
 
@@ -317,24 +383,48 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
         if cfg.repo:
             existing = find_open_issue(cfg)
             if existing is None:
-                if dry_run:
+                # A human may have closed the prior thread while the outage was
+                # still ongoing (happened live 2026-10-17: #97 closed mid-outage,
+                # #98 then minted). Reopen that thread instead of duplicating, so
+                # one continuous outage stays one issue.
+                reopen = find_recent_closed_issue(cfg)
+                if reopen is not None and _closed_during_outage(reopen, status, now):
+                    if dry_run:
+                        print(f"[dry-run] would REOPEN issue #{reopen['number']}")
+                        return
+                    _gh(["issue", "reopen", str(reopen["number"]), "--repo", cfg.repo])
+                    _gh(
+                        [
+                            "issue",
+                            "comment",
+                            str(reopen["number"]),
+                            "--repo",
+                            cfg.repo,
+                            "--body",
+                            _reopen_body(cfg, status),
+                        ]
+                    )
+                    print(f"Reopened issue #{reopen['number']} (outage still ongoing).")
+                    _supplementary_notify_pending = True
+                elif dry_run:
                     print("[dry-run] would CREATE issue:", cfg.issue_title)
                     print(_issue_body(cfg, status))
                     return
-                res = _gh(
-                    [
-                        "issue",
-                        "create",
-                        "--repo",
-                        cfg.repo,
-                        "--title",
-                        cfg.issue_title,
-                        "--body",
-                        _issue_body(cfg, status),
-                    ]
-                )
-                print(res.stdout.strip() or res.stderr.strip())
-                _supplementary_notify_pending = True
+                else:
+                    res = _gh(
+                        [
+                            "issue",
+                            "create",
+                            "--repo",
+                            cfg.repo,
+                            "--title",
+                            cfg.issue_title,
+                            "--body",
+                            _issue_body(cfg, status),
+                        ]
+                    )
+                    print(res.stdout.strip() or res.stderr.strip())
+                    _supplementary_notify_pending = True
             else:
                 updated = _parse_ts(existing.get("updatedAt", ""))
                 stale = updated is None or (now - updated) >= timedelta(

@@ -148,6 +148,101 @@ def test_escalate_writes_and_clears_alert_file(tmp_path: Path, monkeypatch) -> N
     assert not cfg.alert_file.exists()
 
 
+def test_outage_reopens_issue_closed_mid_outage(tmp_path: Path, monkeypatch) -> None:
+    # A human closed the prior thread while the outage was still ongoing. The
+    # detector should REOPEN it, not mint a duplicate (the live 2026-10-17 case).
+    calls: list[list[str]] = []
+    closed_at = (
+        NOW - timedelta(hours=5)
+    ).isoformat()  # closed after last productive (40h)
+
+    def fake_gh(args: list[str]):
+        calls.append(args)
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        if args[:2] == ["issue", "list"]:
+            if "closed" in args:
+                R.stdout = json.dumps(
+                    [
+                        {
+                            "number": 97,
+                            "title": cfg_for(tmp_path).issue_title,
+                            "closedAt": closed_at,
+                        }
+                    ]
+                )
+            else:
+                R.stdout = "[]"  # no open issue
+        return R()
+
+    monkeypatch.setattr(soc, "_gh", fake_gh)
+    cfg = cfg_for(tmp_path)
+    write_records(
+        tmp_path,
+        [rec(40, "productive")]
+        + [rec(h, "failed", "auth_failure") for h in (1, 2, 3, 4)],
+    )
+    status = assess(tmp_path)
+    assert status["outage"] is True
+    soc.escalate(cfg, status, dry_run=False, now=NOW)
+
+    assert any(a[:2] == ["issue", "reopen"] for a in calls), "should reopen the thread"
+    assert not any(a[:2] == ["issue", "create"] for a in calls), "must not duplicate"
+
+
+def test_outage_creates_new_when_closed_issue_predates_last_productive(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The only closed issue belongs to an *earlier*, resolved outage (closed
+    # before the last productive session) — so this is a genuinely new outage
+    # and we create a fresh issue rather than resurrecting the stale thread.
+    calls: list[list[str]] = []
+    closed_at = (
+        NOW - timedelta(hours=50)
+    ).isoformat()  # closed before last productive (40h)
+
+    def fake_gh(args: list[str]):
+        calls.append(args)
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = "created"
+
+        if args[:2] == ["issue", "list"]:
+            if "closed" in args:
+                R.stdout = json.dumps(
+                    [
+                        {
+                            "number": 70,
+                            "title": cfg_for(tmp_path).issue_title,
+                            "closedAt": closed_at,
+                        }
+                    ]
+                )
+            else:
+                R.stdout = "[]"
+        return R()
+
+    monkeypatch.setattr(soc, "_gh", fake_gh)
+    cfg = cfg_for(tmp_path)
+    write_records(
+        tmp_path,
+        [rec(40, "productive")]
+        + [rec(h, "failed", "auth_failure") for h in (1, 2, 3, 4)],
+    )
+    status = assess(tmp_path)
+    assert status["outage"] is True
+    soc.escalate(cfg, status, dry_run=False, now=NOW)
+
+    assert any(a[:2] == ["issue", "create"] for a in calls), "should file a fresh issue"
+    assert not any(a[:2] == ["issue", "reopen"] for a in calls), "must not reopen stale"
+
+
 def test_no_repo_skips_github_but_writes_alert(tmp_path: Path, monkeypatch) -> None:
     def boom(args: list[str]):
         raise AssertionError("gh should not be called without a repo")
