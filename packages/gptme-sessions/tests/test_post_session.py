@@ -1874,3 +1874,87 @@ def test_reclassify_helper_contract():
     adjusted, n = reclassify_bookkeeping_commits(abs_already, files, _BK_PREFIXES)
     assert n == 1
     assert adjusted["file_writes"] == ["/home/bob/bob/tasks/a.md"]
+
+
+def _invoke_post_session_cli(args: list[str], sessions_dir: Path):
+    from click.testing import CliRunner
+
+    from gptme_sessions.cli import cli
+
+    return CliRunner().invoke(cli, ["--sessions-dir", str(sessions_dir), "post-session", *args])
+
+
+def test_post_session_cli_commit_trailers_rescue_extractor_miss(tmp_path: Path):
+    """`--commit-trailers` reaches post_session so a trailer-owned SHA survives."""
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+    own_sha = "abc1234567890abcdef1234567890abcdef1234"
+    untagged_sha = "0123456789abcdef0123456789abcdef01234567"
+    trailers = tmp_path / "trailers.json"
+    trailers.write_text(json.dumps({own_sha: ["21e9"]}))
+
+    with patch.object(_post_session_mod, "extract_from_path", return_value=_noop_shaped_signals()):
+        res = _invoke_post_session_cli(
+            [
+                "--harness",
+                "gptme",
+                "--session-id",
+                "21e9",
+                "--duration",
+                "1500",
+                "--trajectory",
+                str(fake_traj),
+                "--deliverables",
+                own_sha,
+                "--deliverables",
+                untagged_sha,
+                "--commit-trailers",
+                str(trailers),
+                "--json",
+            ],
+            tmp_path,
+        )
+
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.output.strip().splitlines()[-1])["outcome"] == "productive"
+    (record,) = SessionStore(sessions_dir=tmp_path).load_all()
+    assert record.deliverables == [own_sha]
+
+
+def test_post_session_cli_without_commit_trailers_drops_ambiguous_sha(tmp_path: Path):
+    """Baseline for the rescue test: no trailers file, same inputs, still noop."""
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+    sha = "abc1234567890abcdef1234567890abcdef1234"
+
+    with patch.object(_post_session_mod, "extract_from_path", return_value=_noop_shaped_signals()):
+        res = _invoke_post_session_cli(
+            [
+                "--harness",
+                "gptme",
+                "--session-id",
+                "21e9",
+                "--duration",
+                "1500",
+                "--trajectory",
+                str(fake_traj),
+                "--deliverables",
+                sha,
+                "--json",
+            ],
+            tmp_path,
+        )
+
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.output.strip().splitlines()[-1])["outcome"] == "noop"
+
+
+@pytest.mark.parametrize("body", ["not json", "[1, 2]", '{"abc": "21e9"}'])
+def test_post_session_cli_commit_trailers_rejects_bad_shape(tmp_path: Path, body: str):
+    trailers = tmp_path / "trailers.json"
+    trailers.write_text(body)
+    res = _invoke_post_session_cli(
+        ["--harness", "gptme", "--commit-trailers", str(trailers)], tmp_path
+    )
+    assert res.exit_code != 0
+    assert "--commit-trailers" in res.output
