@@ -380,7 +380,7 @@ def check_commits(rep: Report, scope: list[str] | None = None) -> None:
         return
     since_iso = rep.since.isoformat()
     rc, out = git(
-        ["log", f"--since={since_iso}", "--format=%H%x1f%s%x1f%b%x1e", "-n", "200"],
+        ["log", f"--since={since_iso}", "--format=%H%x1f%s%x1f%b%x1e"],
         rep.root,
     )
     if rc != 0:

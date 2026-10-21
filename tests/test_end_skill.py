@@ -814,3 +814,24 @@ def test_declared_pr_lookup_failure_cannot_be_light(check, tmp_path: Path, monke
     check.decide(rep, 2, 10)
     assert rep.verdict == "CLEAN_SUBSTANTIAL"
     assert _prs_check(rep).status == "warn"
+
+
+def test_sibling_volume_does_not_hide_owned_commits(repo: Path):
+    for i in range(3):
+        _commit(repo, f"feat: own {i}", [f"mine/{i}.txt"])
+    for i in range(201):
+        _commit(repo, f"feat: sibling {i}", ["theirs/latest.txt"], OTHER_TRAILER)
+    _push(repo)
+
+    # Both attribution modes must see owned work beyond a busy sibling's tail.
+    for scope in ((), ("--paths", "mine/")):
+        rc, rep = run_check(repo, "--since", "1h", *scope)
+        assert rc == 0, rep
+        assert len(rep["commits"]) == 3, rep
+        assert rep["files_changed"] == 3
+        assert rep["verdict"] == "CLEAN_SUBSTANTIAL"
+
+    (repo / "journal").mkdir()
+    rc, rep = run_check(repo, "--since", "1h", "--paths", "mine/")
+    assert rc == 2, rep
+    assert _status(rep, "journal") == "block"
