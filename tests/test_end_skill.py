@@ -835,3 +835,22 @@ def test_sibling_volume_does_not_hide_owned_commits(repo: Path):
     rc, rep = run_check(repo, "--since", "1h", "--paths", "mine/")
     assert rc == 2, rep
     assert _status(rep, "journal") == "block"
+
+
+def test_empty_session_id_does_not_attribute_sibling_work(repo: Path):
+    for i in range(3):
+        _commit(repo, f"feat: sibling {i}", ["sibling.txt"], OTHER_TRAILER)
+    _push(repo)
+    env = {**_env_without_cc_session(), "CODEX_THREAD_ID": ""}
+
+    rc, rep = run_check(repo, "--since", "1h", env=env)
+    assert rc == 0, rep
+    assert rep["commits"] == []
+    assert rep["files_changed"] == 0
+    assert rep["verdict"] == "CLEAN_LIGHT"
+
+    (repo / "journal").mkdir()
+    rc, rep = run_check(repo, "--since", "1h", env=env)
+    assert rc == 0, rep
+    assert _status(rep, "journal") != "block"
+    assert rep["verdict"] == "CLEAN_LIGHT"

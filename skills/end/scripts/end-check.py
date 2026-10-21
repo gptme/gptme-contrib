@@ -395,7 +395,7 @@ def check_commits(rep: Report, scope: list[str] | None = None) -> None:
             continue
         sha, subject = parts[0].strip(), parts[1]
         body = parts[2] if len(parts) > 2 else ""
-        tagged = sid is not None and sid[:8] in body
+        tagged = sid is not None and bool(sid) and sid[:8] in body
         # Scoped ownership is determined from the actual first-parent diff below.
         # Path-limited git log can simplify away merges importing old work.
         is_owned = bool(scope) or tagged
