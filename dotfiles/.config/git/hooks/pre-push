@@ -146,9 +146,9 @@ if [ -n "$_GUARD_SCRIPT" ]; then
     _dest_push_identity="$(_canonical_remote_url "$_dest_push_url")"
     # When pushing by bare URL, PUSH_REMOTE_NAME is the URL itself and
     # refs/remotes/<url>/ does not exist. Track the configured remote name
-    # (if any) whose push URL matches the destination so the new-branch path
-    # can use it for for-each-ref range scoping.
-    _dest_remote_name="$PUSH_REMOTE_NAME"
+    # (if any) whose fetch AND push URLs match the destination so the new-branch
+    # path can use its tracking history for for-each-ref range scoping.
+    _dest_remote_name=""
     _dest_name_matched="false"   # true when PUSH_REMOTE_NAME matched a configured name
     _dest_url_alias=""           # first URL alias (used only when no name match)
     while IFS= read -r _r; do
@@ -156,6 +156,10 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         # so URL aliases below do not override it even if they appear first.
         if [ "$_r" = "$PUSH_REMOTE_NAME" ]; then
             _dest_name_matched="true"
+            _r_fetch_url="$(git remote get-url "$_r" 2>/dev/null || true)"
+            if [ "$(_canonical_remote_url "$_r_fetch_url")" = "$_dest_push_identity" ]; then
+                _dest_remote_name="$_r"
+            fi
             _protect_remote_refs "$_r"
             continue
         fi
@@ -174,9 +178,12 @@ if [ -n "$_GUARD_SCRIPT" ]; then
                 fi
             done < <(git remote get-url --push --all "$_r" 2>/dev/null)
             if [ "$_r_push_matches" = true ]; then
-                # Record the first URL alias; used for for-each-ref when pushing
-                # by bare URL (no name match). First match wins.
-                [ -z "$_dest_url_alias" ] && _dest_url_alias="$_r"
+                # A push alias protects refs, but only a matching FETCH
+                # endpoint can supply destination history as a baseline.
+                _r_fetch_url="$(git remote get-url "$_r" 2>/dev/null || true)"
+                if [ "$(_canonical_remote_url "$_r_fetch_url")" = "$_dest_push_identity" ]; then
+                    [ -z "$_dest_url_alias" ] && _dest_url_alias="$_r"
+                fi
                 _protect_remote_refs "$_r"
                 continue
             fi
@@ -220,7 +227,7 @@ if [ -n "$_GUARD_SCRIPT" ]; then
     done < <(git for-each-ref --format='%(refname) %(objectname)' refs/remotes/ 2>/dev/null)
     # Post-loop: if PUSH_REMOTE_NAME was not matched as a configured name (bare
     # URL push), substitute the first URL alias we found — it carries tracking refs.
-    # When a name match was found, keep _dest_remote_name=PUSH_REMOTE_NAME exactly.
+    # A named remote with a different fetch endpoint supplies no baseline.
     if [ "$_dest_name_matched" = "false" ] && [ -n "$_dest_url_alias" ]; then
         _dest_remote_name="$_dest_url_alias"
     fi
@@ -250,6 +257,28 @@ if [ -n "$_GUARD_SCRIPT" ]; then
             _branch_name="${remote_ref#refs/heads/}"
             _dest_other_excl=""
             if [ -n "$_dest_remote_name" ]; then
+                # Map the pushed source ref through each positive fetch
+                # refspec. The stale ref may be renamed locally, so comparing
+                # only refs/remotes/<remote>/<branch> is insufficient.
+                _pushed_tracking_refs=("refs/remotes/${_dest_remote_name}/${_branch_name}")
+                while IFS= read -r _spec; do
+                    [[ "$_spec" == ^* || "$_spec" != *:* ]] && continue
+                    _source="${_spec%%:*}"
+                    _source="${_source#+}"
+                    _target="${_spec#*:}"
+                    [ -z "$_target" ] && continue
+                    if [[ "$_source" == *\** ]]; then
+                        _source_prefix="${_source%%\**}"
+                        _source_suffix="${_source#*\*}"
+                        if [[ "$remote_ref" == "$_source_prefix"*"$_source_suffix" ]]; then
+                            _capture="${remote_ref#"$_source_prefix"}"
+                            _capture="${_capture%"$_source_suffix"}"
+                            _pushed_tracking_refs+=("${_target/\*/$_capture}")
+                        fi
+                    elif [ "$_source" = "$remote_ref" ]; then
+                        _pushed_tracking_refs+=("$_target")
+                    fi
+                done < <(git config --get-all "remote.${_dest_remote_name}.fetch" 2>/dev/null)
                 while read -r _dest_ref _dest_oid; do
                     # for-each-ref recursively includes configured remotes such
                     # as team/fork under team/. Their refs are not team branch
@@ -263,7 +292,14 @@ if [ -n "$_GUARD_SCRIPT" ]; then
                         fi
                     done
                     [ "$_nested_remote" = true ] && continue
-                    [ "$_dest_ref" = "refs/remotes/${_dest_remote_name}/${_branch_name}" ] && continue
+                    _pushed_tracking=false
+                    for _tracking_ref in "${_pushed_tracking_refs[@]}"; do
+                        if [ "$_dest_ref" = "$_tracking_ref" ]; then
+                            _pushed_tracking=true
+                            break
+                        fi
+                    done
+                    [ "$_pushed_tracking" = true ] && continue
                     [ "$_dest_ref" = "refs/remotes/${_dest_remote_name}/HEAD" ] && continue
                     _dest_other_excl="$_dest_other_excl $_dest_oid"
                 done < <(git for-each-ref "refs/remotes/${_dest_remote_name}/" \

@@ -572,7 +572,7 @@ def test_single_remote_new_branch_scopes_range_by_other_dest_refs(
         repo,
         f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
         "origin",
-        "git@github.com:me/r.git",
+        _git(repo, "remote", "get-url", "origin"),
         env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "1", "MASS_DELETE_THRESHOLD": "1"},
     )
     assert SKIP_MESSAGE not in proc.stderr, proc.stderr
@@ -876,6 +876,55 @@ def test_destination_custom_fetch_namespace_is_not_another_remote(
         repo,
         f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
         "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("named", [False, True])
+def test_push_only_alias_cannot_supply_new_branch_baseline(
+    tmp_path: Path, named: bool
+) -> None:
+    """Tracking history from A is not a baseline for a push to B."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = str(tmp_path / "destination.git")
+    _git(repo, "remote", "add", "alpha", str(tmp_path / "source.git"))
+    _git(repo, "config", "remote.alpha.pushurl", destination)
+    _git(repo, "update-ref", "refs/remotes/alpha/master", head)
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "alpha" if named else destination,
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("wildcard", [False, True])
+def test_renamed_fetch_tracking_ref_is_not_new_branch_baseline(
+    tmp_path: Path, wildcard: bool
+) -> None:
+    """A deleted branch's stale tracking ref can have a different local name."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = _git(repo, "remote", "get-url", "mirror")
+    spec = (
+        "+refs/heads/*:refs/remotes/mirror/cache-*"
+        if wildcard
+        else "+refs/heads/topic:refs/remotes/mirror/cache"
+    )
+    _git(repo, "config", "--replace-all", "remote.mirror.fetch", spec)
+    tracking = "cache-topic" if wildcard else "cache"
+    _git(repo, "update-ref", f"refs/remotes/mirror/{tracking}", head)
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "mirror",
         destination,
         env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
     )
