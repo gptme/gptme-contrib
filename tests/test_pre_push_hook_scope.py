@@ -828,3 +828,56 @@ def test_new_branch_does_not_borrow_nested_remote_baseline(
     assert SKIP_MESSAGE not in proc.stderr, proc.stderr
     assert proc.returncode == 1, proc.stderr
     assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("new_branch", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_absolute_ssh_alias_retains_destination_commits(
+    tmp_path: Path, new_branch: bool, reverse: bool
+) -> None:
+    """SCP absolute paths and ssh:// paths describe the same destination."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination, alias = "ssh://git@host/srv/r.git", "git@host:/srv/r.git"
+    if reverse:
+        destination, alias = alias, destination
+    _git(repo, "remote", "set-url", "origin", destination)
+    _git(repo, "remote", "set-url", "backup", alias)
+    _git(repo, "update-ref", "refs/remotes/backup/topic", head)
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("new_branch", [False, True])
+@pytest.mark.parametrize("exact", [False, True])
+def test_destination_custom_fetch_namespace_is_not_another_remote(
+    tmp_path: Path, new_branch: bool, exact: bool
+) -> None:
+    """A remote name does not establish ownership of its tracking namespace."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = _git(repo, "remote", "get-url", "origin")
+    _git(repo, "remote", "add", "cache", str(tmp_path / "cache.git"))
+    refspec = (
+        "+refs/heads/topic:refs/remotes/cache/topic"
+        if exact
+        else "+refs/heads/*:refs/remotes/cache/*"
+    )
+    _git(repo, "config", "--add", "remote.origin.fetch", refspec)
+    _git(repo, "update-ref", "refs/remotes/cache/topic", head)
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr

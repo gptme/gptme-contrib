@@ -70,7 +70,7 @@ _canonical_remote_url() {
         -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://([^@/]+@)?##' \
         -e 's#^[^/@:]+@##' \
         -e 's#^([^/:]+):(22|443)(/|$)#\1\3#' \
-        -e 's#^([^/:]+):#\1/#' \
+        -e 's#^([^/:]+):/?#\1/#' \
         -e 's#^[^/]+@##' \
         -e 's#/$##' \
         -e 's#\.git$##' | awk '
@@ -126,6 +126,19 @@ if [ -n "$_GUARD_SCRIPT" ]; then
     # (in which case git remote get-url would fail).
     _other_remote_prefixes=()
     _protected_ref_prefixes=()
+    _protected_fetch_patterns=()
+    _protect_remote_refs() {
+        local remote="$1" spec destination
+        _protected_ref_prefixes+=("refs/remotes/${remote}/")
+        # Tracking refs need not live under the remote's name. Protect every
+        # configured fetch destination too, including exact and wildcard maps.
+        # Ignore negative/source-only refspecs: neither writes a local ref.
+        while IFS= read -r spec; do
+            [[ "$spec" == ^* || "$spec" != *:* ]] && continue
+            destination="${spec#*:}"
+            [ -n "$destination" ] && _protected_fetch_patterns+=("$destination")
+        done < <(git config --get-all "remote.${remote}.fetch" 2>/dev/null)
+    }
     _dest_push_url="${2:-}"
     if [ -z "$_dest_push_url" ] && [ -n "$PUSH_REMOTE_NAME" ]; then
         _dest_push_url="$(git remote get-url --push "$PUSH_REMOTE_NAME" 2>/dev/null || true)"
@@ -143,7 +156,7 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         # so URL aliases below do not override it even if they appear first.
         if [ "$_r" = "$PUSH_REMOTE_NAME" ]; then
             _dest_name_matched="true"
-            _protected_ref_prefixes+=("refs/remotes/${_r}/")
+            _protect_remote_refs "$_r"
             continue
         fi
         # Skip URL aliases of the push destination and remotes that FETCH from
@@ -164,13 +177,13 @@ if [ -n "$_GUARD_SCRIPT" ]; then
                 # Record the first URL alias; used for for-each-ref when pushing
                 # by bare URL (no name match). First match wins.
                 [ -z "$_dest_url_alias" ] && _dest_url_alias="$_r"
-                _protected_ref_prefixes+=("refs/remotes/${_r}/")
+                _protect_remote_refs "$_r"
                 continue
             fi
             _r_fetch_url="$(git remote get-url "$_r" 2>/dev/null || true)"
             _r_fetch_identity="$(_canonical_remote_url "$_r_fetch_url")"
             if [ "$_r_fetch_identity" = "$_dest_push_identity" ]; then
-                _protected_ref_prefixes+=("refs/remotes/${_r}/")
+                _protect_remote_refs "$_r"
                 continue
             fi
         fi
@@ -185,6 +198,14 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         _protected=false
         for _prefix in "${_protected_ref_prefixes[@]}"; do
             if [[ "$_ref" == "$_prefix"* ]]; then
+                _protected=true
+                break
+            fi
+        done
+        for _pattern in "${_protected_fetch_patterns[@]}"; do
+            # The unquoted RHS deliberately interprets the refspec's wildcard.
+            # shellcheck disable=SC2053
+            if [[ "$_ref" == $_pattern ]]; then
                 _protected=true
                 break
             fi
