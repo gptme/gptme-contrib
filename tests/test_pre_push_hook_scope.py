@@ -742,3 +742,52 @@ def test_head_prefixed_branch_scopes_new_branch_range(tmp_path: Path) -> None:
     assert SKIP_MESSAGE not in proc.stderr, proc.stderr
     assert proc.returncode == 1, proc.stderr
     assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://FORGE.example/team/Repo.git", "forge.example/team/Repo"),
+        ("git@FORGE.example:team/Repo.git", "forge.example/team/Repo"),
+        ("ssh://git@FORGE.example/team/Repo.git", "forge.example/team/Repo"),
+        ("https://GITHUB.com/Team/Repo.git", "github.com/team/repo"),
+    ],
+)
+def test_network_identity_preserves_case_sensitive_repository_paths(
+    url: str, expected: str
+) -> None:
+    """Only GitHub is known to have case-insensitive repository paths."""
+    functions = HOOK.read_text().split(
+        "# Read stdin before any subprocess consumes it."
+    )[0]
+    proc = subprocess.run(
+        ["bash", "-c", functions + '\n_canonical_remote_url "$1"', "hook", url],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc.stdout.strip() == expected
+
+
+@pytest.mark.parametrize("scheme", ["https", "ssh"])
+def test_case_sensitive_push_alias_does_not_borrow_wrong_tracking_baseline(
+    tmp_path: Path, scheme: str
+) -> None:
+    """A fetch-only alias must not become the new-branch push baseline."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    prefix = "https://forge.example/" if scheme == "https" else "git@forge.example:"
+    destination = f"{prefix}team/repo.git"
+    _git(repo, "remote", "add", "alpha", destination)
+    _git(repo, "remote", "set-url", "--push", "alpha", f"{prefix}team/Repo.git")
+    _git(repo, "remote", "add", "beta", destination)
+    _git(repo, "update-ref", "refs/remotes/alpha/master", head)
+    _git(repo, "update-ref", "refs/remotes/beta/master", base)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        destination,
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr

@@ -35,7 +35,8 @@ _read_hook_conf() {
 PUSH_REMOTE_NAME="${1:-}"
 
 # Normalise a remote URL to a canonical identity string so aliases (HTTPS/SSH
-# variants, case differences, .git suffix) compare equal.  Unknown shapes
+# variants, hostname case, .git suffix) compare equal. Repository path case is
+# preserved except on GitHub, where repository names are case-insensitive. Unknown shapes
 # return a non-empty but distinct string, so callers fail closed.
 _canonical_remote_url() {
     local url="$1" file_path="" decoded="" byte
@@ -72,8 +73,16 @@ _canonical_remote_url() {
         -e 's#^([^/:]+):#\1/#' \
         -e 's#^[^/]+@##' \
         -e 's#/$##' \
-        -e 's#\.git$##' | tr '[:upper:]' '[:lower:]' | \
-        sed -e 's#^ssh\.github\.com/#github.com/#'
+        -e 's#\.git$##' | awk '
+            {
+                slash = index($0, "/")
+                host = slash ? substr($0, 1, slash - 1) : $0
+                path = slash ? substr($0, slash) : ""
+                host = tolower(host)
+                if (host == "ssh.github.com") host = "github.com"
+                if (host == "github.com") path = tolower(path)
+                print host path
+            }'
 }
 
 # Read stdin before any subprocess consumes it.
