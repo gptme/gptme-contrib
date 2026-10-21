@@ -104,6 +104,7 @@ ALLOWED_ROOT_ENTRIES = frozenset(
         ".pre-commit-config.yaml",
         ".pre-commit-hooks.yaml",
         "CONTRIBUTING.md",
+        "conftest.py",  # Shared in-process CI interpreter guard for package tests.
         "LICENSE",
         "Makefile",
         "mypy.ini",
