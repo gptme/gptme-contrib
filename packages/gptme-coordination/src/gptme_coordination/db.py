@@ -4,6 +4,7 @@ import datetime
 import os
 import sqlite3
 import subprocess
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -148,6 +149,37 @@ def resolve_coordination_db_path(
     return Path(git_root) / DEFAULT_DB_PATH
 
 
+# Switching a database to WAL mode requires exclusive access to the file.
+# When another process opens the same (possibly brand-new) database
+# concurrently, SQLite reports "database is locked" right away: the busy
+# handler is not consulted for a journal-mode change, so busy_timeout alone
+# does not help. Retry the conversion briefly instead of failing the caller.
+WAL_RETRY_TIMEOUT = 5.0
+WAL_RETRY_DELAY = 0.02
+
+
+def _enable_wal(conn: sqlite3.Connection, timeout: float = WAL_RETRY_TIMEOUT) -> None:
+    """Enable WAL mode, retrying while another process holds the file.
+
+    SQLite does not invoke the busy handler for a journal-mode change, so
+    the loser of a concurrent first-open race gets ``database is locked``
+    immediately instead of waiting for ``busy_timeout``. Retrying the
+    conversion makes the loser wait for the winner to finish.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as e:
+            message = str(e).lower()
+            if "locked" not in message and "busy" not in message:
+                raise
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(WAL_RETRY_DELAY)
+
+
 class CoordinationDB:
     """Manages the shared SQLite coordination database.
 
@@ -170,8 +202,10 @@ class CoordinationDB:
                 isolation_level=None,  # autocommit for explicit transaction control
             )
             self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA journal_mode=WAL")
+            # busy_timeout first: it covers the schema writes below, while
+            # _enable_wal handles the journal-mode conversion itself.
             self._conn.execute("PRAGMA busy_timeout=5000")
+            _enable_wal(self._conn)
             self._conn.executescript(SCHEMA)
             # Add hmac column to existing tables (migration)
             self._migrate()
