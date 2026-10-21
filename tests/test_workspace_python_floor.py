@@ -14,16 +14,17 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
-_LOWER_BOUND = re.compile(r">=\s*(\d+)\.(\d+)")
+_LOWER_BOUND = re.compile(r">=\s*(\d+)\.(\d+)(?:\.(\d+))?")
 
 
-def _lower_bound(spec: str) -> tuple[int, int]:
+def _lower_bound(spec: str) -> tuple[int, int, int]:
     match = _LOWER_BOUND.search(spec)
-    assert match, f"no >=X.Y lower bound in {spec!r}"
-    return int(match.group(1)), int(match.group(2))
+    assert match, f"no >=X.Y[.Z] lower bound in {spec!r}"
+    return int(match.group(1)), int(match.group(2)), int(match.group(3) or 0)
 
 
 def _lock_requires_python() -> str:
@@ -34,6 +35,30 @@ def _lock_requires_python() -> str:
 def _root_requires_python() -> str:
     with (ROOT / "pyproject.toml").open("rb") as handle:
         return str(tomllib.load(handle)["project"]["requires-python"])
+
+
+@pytest.mark.parametrize(
+    ("root_spec", "lock_spec", "accepted"),
+    [
+        (">=3.11", ">=3.11.12, <4.0", False),
+        (">=3.11.11", ">=3.11.12, <4.0", False),
+        (">=3.11.12", ">=3.11.12, <4.0", True),
+        (">=3.11.13", ">=3.11.12, <4.0", True),
+        (">=3.11", ">=3.11.0, <4.0", True),
+        (">=3.11.0", ">=3.11, <4.0", True),
+        (">=3.12", ">=3.11.12, <4.0", True),
+    ],
+)
+def test_python_floor_comparison_preserves_patch_versions(
+    monkeypatch: pytest.MonkeyPatch, root_spec: str, lock_spec: str, accepted: bool
+) -> None:
+    monkeypatch.setitem(globals(), "_root_requires_python", lambda: root_spec)
+    monkeypatch.setitem(globals(), "_lock_requires_python", lambda: lock_spec)
+    if accepted:
+        test_root_python_floor_matches_workspace_lock()
+    else:
+        with pytest.raises(AssertionError, match="admits a Python below"):
+            test_root_python_floor_matches_workspace_lock()
 
 
 def test_root_python_floor_matches_workspace_lock() -> None:
