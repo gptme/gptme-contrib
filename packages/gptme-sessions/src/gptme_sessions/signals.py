@@ -140,6 +140,43 @@ def _commit_subject(cmd: str) -> str | None:
     return value.replace('\\"', '"').splitlines()[0].strip() or None
 
 
+# Same as _COMMIT_SUBJECT_RE but also accepts the long forms
+# ("--message=...", "--message ..."), which the commit-command scan uses to
+# decide whether a widened match can be checked against a stated subject.
+_COMMIT_SUBJECT_LONG_RE = re.compile(
+    r"""(?:-m|--message)\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""" r"""|--message=("[^"]*"|'[^']*')"""
+)
+
+
+def _stated_commit_subject(cmd: str) -> str | None:
+    """The subject a commit command asks for, or None when it states none."""
+    subject = _commit_subject(cmd)
+    if subject:
+        return subject
+    match = _COMMIT_SUBJECT_LONG_RE.search(cmd)
+    if not match:
+        return None
+    value = next((g for g in match.groups() if g is not None), "")
+    if value[:1] in {'"', "'"} and value[-1:] == value[:1] and len(value) >= 2:
+        value = value[1:-1]
+    return value.replace('\\"', '"').splitlines()[0].strip() or None
+
+
+def _subject_matches(observed: str, expected: str) -> bool:
+    """Compare a commit-output subject with the subject the command asked for.
+
+    Git prints the commit subject verbatim after the "[branch sha] " prefix, so
+    the comparison is exact after whitespace normalization. The prefix form
+    tolerates a subject that was appended to (e.g. a hook rewriting the tail).
+    """
+
+    def norm(text: str) -> str:
+        return " ".join(text.split())
+
+    observed_n, expected_n = norm(observed), norm(expected)
+    return observed_n == expected_n or observed_n.startswith(expected_n)
+
+
 def _command_repo(cmd: str, cwd: str | None) -> str | None:
     match = _GIT_REPO_RE.search(cmd)
     if not match:
@@ -920,10 +957,25 @@ def extract_signals(msgs: list[dict]) -> dict:
             # commit itself, and the 500-byte guard is kept for every other
             # command.
             _call_id = msg.get("call_id", "")
-            _scan = content if _call_id in commit_cmd_calls else content[:500]
+            _scan = content[:500]
+            _expected_subject: str | None = None
+            if _call_id in commit_cmd_calls:
+                # Widen the scan only when the commit command states the subject
+                # it is committing ("-m ..."). The widened scan can see lines
+                # produced by EARLIER parts of a compound command (e.g. a
+                # `cat saved-output.txt` whose file contains an old
+                # "[branch sha] subject" line), so a match is only accepted when
+                # its subject equals the one the command asked for. Without a
+                # stated subject there is nothing to check against, so the
+                # 500-byte window is kept.
+                _expected_subject = _stated_commit_subject(commit_cmd_calls[_call_id])
+                if _expected_subject:
+                    _scan = content
             for commit_match in _COMMIT_RE.finditer(_scan):
                 commit_hash = commit_match.group(1)
                 commit_msg = commit_match.group(2).strip()
+                if _expected_subject and not _subject_matches(commit_msg, _expected_subject):
+                    continue
                 commit_value = f"{commit_msg} ({commit_hash})"
                 git_commits.append(commit_value)
                 _record_deliverable_detail(
