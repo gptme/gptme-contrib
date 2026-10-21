@@ -91,6 +91,18 @@ def test_execute_fallback_to_args():
         mock_api.get_transcript.assert_called_once_with("dQw4w9WgXcQ")
 
 
+def test_execute_called_like_gptme_dispatch():
+    """gptme calls ``tool.execute(content, args, kwargs)`` with no confirm arg."""
+    mock_api = MagicMock()
+    mock_api.get_transcript.return_value = [{"text": "Dispatched"}]
+
+    with patch("gptme_youtube.tools.youtube.YouTubeTranscriptApi", mock_api):
+        from gptme_youtube.tools.youtube import execute
+
+        msg = execute("dQw4w9WgXcQ", None, None)
+        assert "Dispatched" in msg.content
+
+
 def test_execute_empty_video_id():
     """Test execute returns an error when no video ID is provided."""
     from gptme_youtube.tools.youtube import execute

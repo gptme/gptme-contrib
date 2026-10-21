@@ -466,7 +466,7 @@ def execute(
     code: str | None,
     args: list[str] | None,
     kwargs: dict[str, str] | None,
-    confirm: "ConfirmFunc",
+    confirm: "ConfirmFunc | None" = None,
 ) -> Message:
     """Execute the LSP tool.
 
@@ -479,6 +479,9 @@ def execute(
         lsp status                 - Show available language servers
         lsp check                  - Run diagnostics on all changed files
     """
+    if not args and kwargs and kwargs.get("action"):
+        # Native tool calls pass the declared parameters as kwargs, not args.
+        args = [kwargs["action"], *(kwargs.get("target") or "").split()]
     if args is None or not args:
         return Message(
             "system",
