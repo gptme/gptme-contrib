@@ -36,8 +36,9 @@ fi
 # checkout. Writes INTO a linked package (a postinstall, a patch) still land in
 # the shared tree, so installers remain unwelcome here.
 #
-# If you need your own dependencies, just run the installer: it replaces this
-# directory of links with a real tree and leaves the main checkout alone. An
+# An installer still replaces this directory of links with a real tree and
+# leaves the main checkout alone, but a lockfile mismatch is not a reason to
+# run one — format/lint binaries already resolve through the links. An
 # existing real node_modules is left alone by the loop below, so a worktree that
 # has done this stays opted out across checkouts. Legacy worktrees that already
 # hold a whole-directory symlink keep it; `rm` it and re-run the hook to upgrade.
@@ -88,12 +89,14 @@ if [ -n "$_gw_git_dir" ] && [ "$_gw_git_dir" != "$_gw_common_dir" ]; then
             # lockfiles differ they can lack packages this branch declares
             # (aw-webui 2026-10-20: a July checkout missing
             # @unicode/unicode-13.0.0 failed four Jest tests per worktree).
-            # Keep the links so hooks still run; say when tests need an install.
+            # Keep the links so format/lint hooks still run. Do not invite a
+            # full npm ci: one PM slot following that sentence extracted 885 MB
+            # in 60 s onto bob-ct200 (gptme-cloud#1175, 2026-10-21).
             _gw_lock="$(dirname "$_gw_rel")/package-lock.json"
             if [ -n "$(find "$_gw_target" -maxdepth 1 -type l -print -quit 2>/dev/null)" ]; then
                 if [ -f "$_gw_main_root/$_gw_lock" ] && [ -f "$_gw_wt_root/$_gw_lock" ] \
                     && ! cmp -s "$_gw_main_root/$_gw_lock" "$_gw_wt_root/$_gw_lock"; then
-                    echo "[git-worktree] WARNING: $_gw_lock differs from $_gw_main_root; linked $_gw_rel may be stale. Before tests: rm -rf $_gw_rel && npm ci --ignore-scripts"
+                    echo "[git-worktree] WARNING: $_gw_lock differs from $_gw_main_root; linked $_gw_rel may be stale for tests. Keep the links for format/lint hooks. Do not run a full install unless a test fails for a package this lockfile added."
                 fi
             fi
         done < <(find "$_gw_main_root" -maxdepth 3 -type d -name node_modules \
