@@ -2788,6 +2788,10 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
 
     # Map toolCallId → tool name for filtering commit detection to bash only
     call_id_to_name: dict[str, str] = {}
+    # Set of toolCallIds that dispatched a commit command (git commit / git-safe-commit).
+    # When a commit command's result is processed, the full content is scanned instead of
+    # the 500-byte window — compound commands push the "[branch sha] msg" line past the window.
+    commit_cmd_call_ids: set[str] = set()
 
     for record in msgs:
         rec_type = record.get("type", "")
@@ -2811,6 +2815,18 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
                 call_id = req.get("toolCallId", "")
                 if call_id:
                     call_id_to_name[call_id] = tool
+
+                # Track bash commit commands so the result handler can scan the full output.
+                if tool == "bash" and call_id:
+                    args = req.get("arguments") or {}
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except (json.JSONDecodeError, ValueError):
+                            args = {}
+                    bash_cmd = args.get("command", "") if isinstance(args, dict) else ""
+                    if isinstance(bash_cmd, str) and _COMMIT_CMD_RE.search(bash_cmd):
+                        commit_cmd_call_ids.add(call_id)
 
                 # File write detection from edit/write tools
                 if tool in _COPILOT_WRITE_TOOLS:
@@ -2860,7 +2876,12 @@ def extract_signals_copilot(msgs: list[dict]) -> dict:
                 result = data.get("result") or {}
                 content = result.get("detailedContent", "") or result.get("content", "")
                 if isinstance(content, str):
-                    for commit_match in _COMMIT_RE.finditer(content[:500]):
+                    # Scan the full content for commit commands (compound commands push
+                    # the "[branch sha] msg" line past the 500-byte window). Keep the
+                    # 500-byte window for non-commit commands to avoid false positives
+                    # from git log --stat or similar output embedded in file reads.
+                    scan_content = content if call_id in commit_cmd_call_ids else content[:500]
+                    for commit_match in _COMMIT_RE.finditer(scan_content):
                         commit_hash = commit_match.group(1)
                         commit_msg = commit_match.group(2).strip()
                         commit_value = f"{commit_msg} ({commit_hash})"
