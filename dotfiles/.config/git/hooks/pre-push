@@ -169,9 +169,10 @@ if [ -n "$_GUARD_SCRIPT" ]; then
     done < <(git remote 2>/dev/null)
     # --remotes=team recursively includes team/fork. Expand to explicit refs,
     # then conservatively retain every destination/alias namespace in the scan,
-    # even when another remote's prefix overlaps it.
+    # even when another remote's prefix overlaps it. Snapshot object IDs in the
+    # same enumeration so a concurrent fetch/prune cannot invalidate exclusions.
     _other_remotes=""
-    while IFS= read -r _ref; do
+    while read -r _ref _oid; do
         _protected=false
         for _prefix in "${_protected_ref_prefixes[@]}"; do
             if [[ "$_ref" == "$_prefix"* ]]; then
@@ -182,11 +183,11 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         [ "$_protected" = true ] && continue
         for _prefix in "${_other_remote_prefixes[@]}"; do
             if [[ "$_ref" == "$_prefix"* ]]; then
-                _other_remotes="$_other_remotes $_ref"
+                _other_remotes="$_other_remotes $_oid"
                 break
             fi
         done
-    done < <(git for-each-ref --format='%(refname)' refs/remotes/ 2>/dev/null)
+    done < <(git for-each-ref --format='%(refname) %(objectname)' refs/remotes/ 2>/dev/null)
     # Post-loop: if PUSH_REMOTE_NAME was not matched as a configured name (bare
     # URL push), substitute the first URL alias we found — it carries tracking refs.
     # When a name match was found, keep _dest_remote_name=PUSH_REMOTE_NAME exactly.
@@ -219,11 +220,12 @@ if [ -n "$_GUARD_SCRIPT" ]; then
             _branch_name="${remote_ref#refs/heads/}"
             _dest_other_excl=""
             if [ -n "$_dest_remote_name" ]; then
-                while IFS= read -r _dest_ref; do
+                while read -r _dest_ref _dest_oid; do
                     [ "$_dest_ref" = "refs/remotes/${_dest_remote_name}/${_branch_name}" ] && continue
-                    _dest_other_excl="$_dest_other_excl $_dest_ref"
+                    [ "$_dest_ref" = "refs/remotes/${_dest_remote_name}/HEAD" ] && continue
+                    _dest_other_excl="$_dest_other_excl $_dest_oid"
                 done < <(git for-each-ref "refs/remotes/${_dest_remote_name}/" \
-                    --format='%(refname)' 2>/dev/null | grep -Fxv "refs/remotes/${_dest_remote_name}/HEAD")
+                    --format='%(refname) %(objectname)' 2>/dev/null)
             fi
             if [ -n "$_dest_other_excl" ] || [ -n "$_other_remotes" ]; then
                 # shellcheck disable=SC2086

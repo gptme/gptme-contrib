@@ -16,6 +16,7 @@ code does not actually implement.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -212,6 +213,55 @@ def test_commits_already_on_another_remote_are_not_rescanned(tmp_path: Path) -> 
         env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
     )
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
+@pytest.mark.parametrize(
+    "new_branch,remote", [(False, "upstream"), (True, "upstream"), (True, "mirror")]
+)
+def test_pruned_exclusion_ref_does_not_disable_mass_delete_scan(
+    tmp_path: Path, new_branch: bool, remote: str
+) -> None:
+    """Prune after enumeration, before rev-list, without a timing-dependent fetch."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    ref = f"refs/remotes/{remote}/main"
+    _git(repo, "update-ref", ref, base)
+    real_git = shutil.which("git")
+    assert real_git is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = for-each-ref ]; then\n'
+        '    output=$("$REAL_GIT" "$@") || exit $?\n'
+        '    case "$*" in\n'
+        '        *"$PRUNE_PREFIX"*) "$REAL_GIT" update-ref -d "$PRUNE_REF" ;;\n'
+        "    esac\n"
+        '    printf "%s\\n" "$output"\n'
+        "else\n"
+        '    exec "$REAL_GIT" "$@"\n'
+        "fi\n"
+    )
+    wrapper.chmod(0o755)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
+        "mirror",
+        _git(repo, "remote", "get-url", "mirror"),
+        env={
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "REAL_GIT": real_git,
+            "PRUNE_REF": ref,
+            "PRUNE_PREFIX": "refs/remotes/mirror/"
+            if remote == "mirror"
+            else "refs/remotes/",
+            "MASS_DELETE_COMMIT_RANGE_LIMIT": "0",
+            "MASS_DELETE_THRESHOLD": "1",
+        },
+    )
+    assert not _git(repo, "for-each-ref", "--format=%(refname)", ref)
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
 
 
 def test_stale_destination_tracking_ref_does_not_bypass_guard(tmp_path: Path) -> None:
