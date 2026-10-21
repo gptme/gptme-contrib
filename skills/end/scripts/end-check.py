@@ -285,7 +285,8 @@ def _in_scope(rel: str, scope: list[str] | None) -> bool:
     for sp in scope:
         sp_n = sp.rstrip("/")
         if (
-            rel_n == sp_n
+            sp_n == "."
+            or rel_n == sp_n
             or rel_n.startswith(sp_n + "/")
             or sp_n.startswith(rel_n + "/")
         ):
@@ -364,6 +365,12 @@ def check_dirty(rep: Report, scope: list[str] | None = None) -> None:
 
 
 def check_commits(rep: Report, scope: list[str] | None = None) -> None:
+    """Attribute commits to this session: by explicit --paths scope or by session tag.
+
+    The time window only bounds the candidate pool. It never attributes a commit
+    by itself, so a sibling's commit in a shared repo is not claimed. A known
+    session id with no matching tag claims nothing outside --paths.
+    """
     if rep.since is None:
         rep.add(
             Check(
@@ -372,59 +379,64 @@ def check_commits(rep: Report, scope: list[str] | None = None) -> None:
         )
         return
     since_iso = rep.since.isoformat()
-    log_args = [
-        "log",
-        f"--since={since_iso}",
-        "--format=%h%x1f%s%x1f%b%x1e",
-        "-n",
-        "200",
-    ]
-    if scope:
-        log_args += ["--", *scope]
-    rc, out = git(log_args, rep.root)
+    rc, out = git(
+        ["log", f"--since={since_iso}", "--format=%H%x1f%s%x1f%b%x1e"],
+        rep.root,
+    )
     if rc != 0:
         rep.add(Check("commits", "warn", "git log failed", [out]))
         return
-    subjects: list[str] = []
-    shas: list[str] = []
+
     sid = rep.harness.session_id
-    records = [r for r in out.split("\x1e") if r.strip()]
-    tagged = []
-    for r in records:
+    owned: list[tuple[str, str]] = []
+    for r in out.split("\x1e"):
         parts = r.strip("\n").split("\x1f")
         if len(parts) < 2:
             continue
-        sha, subject = parts[0], parts[1]
+        sha, subject = parts[0].strip(), parts[1]
         body = parts[2] if len(parts) > 2 else ""
-        if sid and sid[:8] in body:
-            tagged.append((sha, subject))
-        subjects.append(f"{sha} {subject}")
-        shas.append(sha)
-    # If any commit carries this session's id, trust the tag over the time window.
-    if tagged:
-        subjects = [f"{s} {j}" for s, j in tagged]
-        shas = [s for s, _ in tagged]
-    elif not sid:
-        # No session id available — can't distinguish our commits from siblings'.
-        # Attribute nothing rather than blocking a session that did no work.
-        subjects = []
-        # Keep shas for files_changed calculation (still needed for the verdict)
-    rep.commits = subjects
-    if shas:
-        rc, out = git(["diff", "--shortstat", f"{shas[-1]}^", shas[0]], rep.root)
+        tagged = sid is not None and bool(sid) and sid[:8] in body
+        # Scoped ownership is determined from the actual first-parent diff below.
+        # Path-limited git log can simplify away merges importing old work.
+        is_owned = bool(scope) or tagged
+        if is_owned:
+            owned.append((sha, subject))
+    # Count unique files across each owned commit's own diff (never the
+    # oldest-to-newest span, which would include sibling commits in between).
+    # --root covers the root commit; -z keeps filenames with spaces intact.
+    # Merges count changes against the first parent, not every parent's history.
+    files: set[str] = set()
+    attributed: list[tuple[str, str]] = []
+    for sha, subject in owned:
+        rc, names = git(
+            [
+                "diff-tree",
+                "--root",
+                "--diff-merges=first-parent",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                "-z",
+                sha,
+            ],
+            rep.root,
+        )
         if rc != 0:
-            # shas[-1] is the root commit (no parent); diff from the empty tree.
-            empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-            rc, out = git(["diff", "--shortstat", empty_tree, shas[0]], rep.root)
-        m = re.search(r"(\d+) files? changed", out) if rc == 0 else None
-        rep.files_changed = int(m.group(1)) if m else 0
+            rep.add(Check("commits", "warn", "git diff-tree failed", [names]))
+            return
+        scoped_files = {n for n in names.split("\0") if n and _in_scope(n, scope)}
+        if not scope or scoped_files:
+            attributed.append((sha, subject))
+            files.update(scoped_files)
+    rep.commits = [f"{sha[:7]} {subject}" for sha, subject in attributed]
+    rep.files_changed = len(files)
     rep.add(
         Check(
             "commits",
             "info",
-            f"{len(subjects)} commit(s) attributed to this session"
+            f"{len(attributed)} commit(s) attributed to this session"
             + (" (touching --paths)" if scope else ""),
-            subjects[:20],
+            rep.commits[:20],
         )
     )
 
@@ -601,53 +613,84 @@ def check_journal(rep: Report) -> None:
         )
 
 
-def check_prs(rep: Report, timeout: int = 20) -> None:
+PR_URL_RE = re.compile(
+    r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/(\d+)"
+)
+
+
+def pr_url(value: str) -> str:
+    """argparse type for --pr: only a GitHub pull request URL is accepted."""
+    value = value.strip()
+    if not PR_URL_RE.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            f"not a GitHub PR URL (https://github.com/OWNER/REPO/pull/NUMBER): {value!r}"
+        )
+    return value
+
+
+def check_prs(rep: Report, urls: list[str], timeout: int = 20) -> None:
+    """Check only the PRs this session declared with --pr. Nothing is inferred.
+
+    Each declared URL is looked up on its own (no account or date search), so
+    unrelated PRs are never listed. A failed or malformed lookup warns rather
+    than allowing an unchecked declared PR to produce CLEAN_LIGHT.
+    """
+    declared = list(dict.fromkeys(urls))
+    if not declared:
+        rep.add(Check("prs", "info", "no session-owned PRs declared (use --pr URL)"))
+        return
     if not shutil.which("gh"):
-        rep.add(Check("prs", "info", "gh not installed — PR check skipped"))
-        return
-    since_day = (
-        rep.since or (datetime.now(timezone.utc) - timedelta(days=1))
-    ).strftime("%Y-%m-%d")
-    try:
-        p = subprocess.run(
-            [
-                "gh",
-                "search",
-                "prs",
-                "--author=@me",
-                "--state=open",
-                f"--created=>={since_day}",
-                "--json",
-                "url,title,number,repository",
-                "--limit",
-                "20",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as e:
-        rep.add(Check("prs", "info", f"gh search failed: {e}"))
-        return
-    if p.returncode != 0:
         rep.add(
-            Check("prs", "info", "gh search failed (auth?)", [p.stderr.strip()[:200]])
+            Check("prs", "warn", "gh not installed — declared PRs unchecked", declared)
         )
         return
-    try:
-        prs = json.loads(p.stdout or "[]")
-    except json.JSONDecodeError:
-        prs = []
-    if not prs:
-        rep.add(Check("prs", "ok", "no open PRs opened since session start"))
-        return
+    prs: list[dict] = []
     red: list[str] = []
     listing: list[str] = []
-    for pr in prs[:10]:
-        url = pr.get("url", "")
-        repo = (pr.get("repository") or {}).get("nameWithOwner", "")
-        listing.append(f"{repo}#{pr.get('number')} {pr.get('title', '')} — {url}")
+    failed: list[str] = []
+    for url in declared:
+        m = PR_URL_RE.fullmatch(url)
+        if m is None:
+            failed.append(f"{url}: not a GitHub PR URL")
+            continue
+        label = f"{m.group(1)}/{m.group(2)}#{int(m.group(3))}"
+        try:
+            p = subprocess.run(
+                [
+                    "gh",
+                    "pr",
+                    "view",
+                    url,
+                    "--json",
+                    "url,title,number,headRefName",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            failed.append(f"{label}: gh pr view failed ({type(e).__name__})")
+            continue
+        if p.returncode != 0:
+            failed.append(f"{label}: gh pr view failed (auth or not found?)")
+            continue
+        try:
+            meta = json.loads(p.stdout or "{}")
+        except json.JSONDecodeError:
+            meta = None
+        if not isinstance(meta, dict):
+            failed.append(f"{label}: unexpected gh output")
+            continue
+        title = str(meta.get("title") or "")
+        pr = {
+            "url": url,
+            "number": int(m.group(3)),
+            "title": title,
+            "headRefName": str(meta.get("headRefName") or ""),
+        }
+        prs.append(pr)
+        listing.append(f"{label} {title} — {url}")
         try:
             c = subprocess.run(
                 ["gh", "pr", "checks", url],
@@ -657,17 +700,37 @@ def check_prs(rep: Report, timeout: int = 20) -> None:
                 check=False,
             )
             if c.returncode != 0 and "fail" in (c.stdout + c.stderr).lower():
-                red.append(f"{repo}#{pr.get('number')}: failing checks")
+                red.append(f"{label}: failing checks")
         except (OSError, subprocess.TimeoutExpired):
             pass
     rep.prs = prs
     if red:
         rep.add(
-            Check("prs", "warn", f"{len(red)} PR(s) with failing CI", red + listing)
+            Check(
+                "prs",
+                "warn",
+                f"{len(red)} declared PR(s) with failing CI",
+                red + listing + failed,
+            )
+        )
+    elif prs:
+        rep.add(
+            Check(
+                "prs",
+                "warn" if failed else "info",
+                f"{len(prs)} session-owned PR(s) declared"
+                + (f", {len(failed)} lookup(s) failed" if failed else ""),
+                listing + failed,
+            )
         )
     else:
         rep.add(
-            Check("prs", "info", f"{len(prs)} open PR(s) from this session", listing)
+            Check(
+                "prs",
+                "warn",
+                f"could not look up {len(failed)} declared PR(s)",
+                failed,
+            )
         )
 
 
@@ -771,6 +834,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--no-prs", action="store_true", help="skip the gh PR check")
     ap.add_argument(
+        "--pr",
+        action="append",
+        type=pr_url,
+        metavar="URL",
+        help="a PR this session owns: https://github.com/OWNER/REPO/pull/NUMBER "
+        "(repeatable). Only declared PRs are checked; nothing is inferred from the "
+        "account or the time window",
+    )
+    ap.add_argument(
         "--paths",
         nargs="+",
         metavar="PATH",
@@ -829,7 +901,7 @@ def main(argv: list[str] | None = None) -> int:
     check_worktrees(rep, declared_worktrees, footprint_given=bool(args.paths))
     check_journal(rep)
     if not args.no_prs:
-        check_prs(rep)
+        check_prs(rep, args.pr or [])
     decide(rep, args.light_commits, args.light_files)
 
     if args.json:
