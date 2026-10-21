@@ -804,6 +804,9 @@ def extract_signals(msgs: list[dict]) -> dict:
     pr_create_calls: dict[str, str] = {}
     prs_submitted: list[str] = []
     pr_urls: list[str] = []
+    # call_id -> full command for shell calls that are commit commands. Used to
+    # widen the commit-output scan window for those calls only (see below).
+    commit_cmd_calls: dict[str, str] = {}
 
     # Track recent (tool, path) pairs for retry detection
     recent_sigs: list[str] = []
@@ -847,6 +850,8 @@ def extract_signals(msgs: list[dict]) -> dict:
                                 command = "gh " + command
                             if _has_pr_create_command(command):
                                 pr_create_calls[_call_id] = tool
+                            if tool == "shell" and _COMMIT_CMD_RE.search(command):
+                                commit_cmd_calls[_call_id] = command
                 tool_calls[tool] = tool_calls.get(tool, 0) + 1
                 step_has_tool = True
 
@@ -907,7 +912,16 @@ def extract_signals(msgs: list[dict]) -> dict:
             # Git commit detection from shell output (finditer handles multi-commit pushes).
             # Restrict to first 500 bytes: real git output appears early; reading a file
             # that happens to contain git-log-style lines would produce false positives.
-            for commit_match in _COMMIT_RE.finditer(content[:500]):
+            # Exception: when the paired command is a commit command, the real
+            # "[branch sha] subject" line can sit far past that window (compound
+            # commands like `tail ... && ... && git-safe-commit ...` put it
+            # thousands of bytes in). Scanning the whole result for a known
+            # commit command is safe: the bracketed form is only printed by the
+            # commit itself, and the 500-byte guard is kept for every other
+            # command.
+            _call_id = msg.get("call_id", "")
+            _scan = content if _call_id in commit_cmd_calls else content[:500]
+            for commit_match in _COMMIT_RE.finditer(_scan):
                 commit_hash = commit_match.group(1)
                 commit_msg = commit_match.group(2).strip()
                 commit_value = f"{commit_msg} ({commit_hash})"
