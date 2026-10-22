@@ -35,12 +35,16 @@ _read_hook_conf() {
 PUSH_REMOTE_NAME="${1:-}"
 
 # Ask Git to identify existing local repositories, including worktree/.git
-# aliases and gitfiles. Nonexistent paths retain their lexical identity.
+# aliases and gitfiles. Linked worktrees share refs in their common Git directory.
+# Nonexistent paths retain their lexical identity.
 _canonical_local_repository() {
-    local path="$1" git_dir
+    local path="$1" git_dir common_dir
     if git_dir="$(git rev-parse --resolve-git-dir "$path" 2>/dev/null)" ||
        git_dir="$(git rev-parse --resolve-git-dir "$path/.git" 2>/dev/null)"; then
         path="$git_dir"
+        if common_dir="$(git --git-dir="$git_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
+            path="$common_dir"
+        fi
     fi
     realpath -m -- "$path" 2>/dev/null || printf '%s\n' "$path"
 }

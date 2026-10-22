@@ -1258,6 +1258,42 @@ def test_worktree_and_git_directory_are_same_destination(
 
 
 @pytest.mark.parametrize("new_branch", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("linked_path", ["worktree", "gitfile", "gitdir"])
+def test_linked_worktrees_are_same_destination(
+    tmp_path: Path, new_branch: bool, reverse: bool, linked_path: str
+) -> None:
+    """Shared branch refs must have one identity despite private Git directories."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = tmp_path / "destination"
+    _git(repo, "clone", "-q", str(repo), str(destination))
+    linked = tmp_path / "linked"
+    _git(destination, "worktree", "add", "-q", "--detach", str(linked))
+    alias = linked
+    if linked_path == "gitfile":
+        alias = linked / ".git"
+    elif linked_path == "gitdir":
+        alias = Path(_git(linked, "rev-parse", "--absolute-git-dir"))
+    urls = [str(destination), str(alias)]
+    if reverse:
+        urls.reverse()
+    _git(repo, "remote", "set-url", "origin", urls[0])
+    _git(repo, "remote", "set-url", "backup", urls[1])
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    _git(repo, "update-ref", "refs/remotes/backup/topic", head)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
+        "origin",
+        urls[0],
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("new_branch", [False, True])
 def test_many_exclusions_use_bounded_revision_arguments(
     tmp_path: Path, new_branch: bool
 ) -> None:
