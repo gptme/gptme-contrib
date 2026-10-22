@@ -1195,3 +1195,36 @@ def test_other_remote_symbolic_ref_cannot_hide_destination_commit(
     )
     assert proc.returncode == 1, proc.stderr
     assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("branch", ["topic&more", "nested/topic&more"])
+@pytest.mark.parametrize("range_limit", ["0", "1"])
+def test_ampersand_in_mapped_branch_cannot_hide_stale_tip(
+    tmp_path: Path, branch: str, range_limit: str
+) -> None:
+    """Fetch wildcard substitution must preserve literal branch-name ampersands."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(
+        repo,
+        "config",
+        "--replace-all",
+        "remote.origin.fetch",
+        "+refs/heads/*:refs/cache/cache-*",
+    )
+    _git(repo, "update-ref", "refs/cache/cache-master", base)
+    _git(repo, "update-ref", f"refs/cache/cache-{branch}", head)
+    destination = _git(repo, "remote", "get-url", "origin")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/{branch} {head} refs/heads/{branch} {ZERO}\n",
+        "origin",
+        destination,
+        env={
+            "MASS_DELETE_COMMIT_RANGE_LIMIT": range_limit,
+            "MASS_DELETE_THRESHOLD": "1",
+            "BASHOPTS": "patsub_replacement",
+        },
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr

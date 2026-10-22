@@ -331,7 +331,7 @@ if [ -n "$_GUARD_SCRIPT" ]; then
                         if [[ "$remote_ref" == "$_source_prefix"*"$_source_suffix" ]]; then
                             _capture="${remote_ref#"$_source_prefix"}"
                             _capture="${_capture%"$_source_suffix"}"
-                            _pushed_tracking_refs+=("${_target/\*/$_capture}")
+                            _pushed_tracking_refs+=("${_target/\*/"$_capture"}")
                         fi
                     elif [ "$_source" = "$remote_ref" ]; then
                         _pushed_tracking_refs+=("$_target")
