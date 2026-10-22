@@ -1255,3 +1255,89 @@ def test_worktree_and_git_directory_are_same_destination(
     )
     assert proc.returncode == 1, proc.stderr
     assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("new_branch", [False, True])
+def test_many_exclusions_use_bounded_revision_arguments(
+    tmp_path: Path, new_branch: bool
+) -> None:
+    """Simulate a low exec argument budget without tens of thousands of refs."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "remote", "set-url", "upstream", str(tmp_path / "upstream.git"))
+    subprocess.run(
+        ["git", "-C", str(repo), "update-ref", "--stdin"],
+        input="".join(
+            f"create refs/remotes/upstream/branch-{i} {base}\n" for i in range(100)
+        ),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    real_git = shutil.which("git")
+    assert real_git is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = rev-list ] && [ "$#" -gt 64 ]; then\n'
+        '    echo "simulated exec argument limit" >&2\n'
+        "    exit 126\n"
+        "fi\n"
+        'exec "$REAL_GIT" "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
+        "origin",
+        _git(repo, "remote", "get-url", "origin"),
+        env={
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "REAL_GIT": real_git,
+            "MASS_DELETE_COMMIT_RANGE_LIMIT": "0",
+            "MASS_DELETE_THRESHOLD": "1",
+        },
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("failure_phase", ["count", "commits"])
+def test_revision_enumeration_failure_blocks_push(
+    tmp_path: Path, failure_phase: str
+) -> None:
+    """A failed count or walk must not masquerade as a safe empty range."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    real_git = shutil.which("git")
+    assert real_git is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = rev-list ]; then\n'
+        '    if { [ "$FAILURE_PHASE" = count ] && [ "${2:-}" = --count ]; } ||\n'
+        '       { [ "$FAILURE_PHASE" = commits ] && [ "${2:-}" != --count ]; }; then\n'
+        '        echo "simulated revision failure" >&2\n'
+        "        exit 128\n"
+        "    fi\n"
+        "fi\n"
+        'exec "$REAL_GIT" "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {base}\n",
+        "origin",
+        _git(repo, "remote", "get-url", "origin"),
+        env={
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "REAL_GIT": real_git,
+            "FAILURE_PHASE": failure_phase,
+            "MASS_DELETE_COMMIT_RANGE_LIMIT": "0",
+            "MASS_DELETE_THRESHOLD": "1",
+        },
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: cannot enumerate mass-delete scan" in proc.stderr

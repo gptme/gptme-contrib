@@ -441,8 +441,17 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         case "$_range_limit" in
             '' | *[!0-9]*) _range_limit=500 ;;
         esac
-        # shellcheck disable=SC2086  # $range intentionally unquoted (may contain --not --remotes=origin)
-        _range_count=$(git rev-list --count $range 2>/dev/null || echo 0)
+        # Stream revision tokens through stdin: expanding a large tracking-ref
+        # snapshot into external argv can exceed ARG_MAX and skip the scan.
+        _range_revisions() {
+            # Only object IDs and --not occur in range; printf is a Bash builtin.
+            # shellcheck disable=SC2086
+            printf '%s\n' $range
+        }
+        if ! _range_count=$(_range_revisions | git rev-list --count --stdin); then
+            echo "PUSH BLOCKED: cannot enumerate mass-delete scan range" >&2
+            exit 1
+        fi
         if [ "$_range_limit" -ne 0 ] && [ "$_range_count" -gt "$_range_limit" ]; then
             # Never skip silently — a quiet downgrade of a safety check is its own trap.
             echo "ℹ️  pre-push: skipping per-commit mass-delete scan" >&2
@@ -453,9 +462,13 @@ if [ -n "$_GUARD_SCRIPT" ]; then
             continue
         fi
 
-        # Check each commit in the range
-        # shellcheck disable=SC2086  # $range intentionally unquoted (may contain --not --remotes=origin)
-        for commit in $(git rev-list $range 2>/dev/null); do
+        # Capture status before iterating: a failed rev-list must not look like
+        # an empty, safe range (including after a successful count).
+        if ! _range_commits=$(_range_revisions | git rev-list --stdin); then
+            echo "PUSH BLOCKED: cannot enumerate mass-delete scan commits" >&2
+            exit 1
+        fi
+        for commit in $_range_commits; do
             guard_mass_delete_commit "$commit"
         done
     done
