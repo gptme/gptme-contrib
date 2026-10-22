@@ -229,7 +229,10 @@ if [ -n "$_GUARD_SCRIPT" ]; then
     # even when another remote's prefix overlaps it. Snapshot object IDs in the
     # same enumeration so a concurrent fetch/prune cannot invalidate exclusions.
     _other_remotes=""
-    while read -r _ref _oid; do
+    while read -r _ref _oid _symref; do
+        # A symbolic alias can resolve into the protected destination namespace;
+        # its name is not evidence of independent history on another remote.
+        [ -n "$_symref" ] && continue
         _protected=false
         for _prefix in "${_protected_ref_prefixes[@]}"; do
             if [[ "$_ref" == "$_prefix"* ]]; then
@@ -263,7 +266,7 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         if [ "$_other" = true ]; then
             _other_remotes="$_other_remotes $_oid"
         fi
-    done < <(git for-each-ref --format='%(refname) %(objectname)' refs/ 2>/dev/null)
+    done < <(git for-each-ref --format='%(refname) %(objectname) %(symref)' refs/ 2>/dev/null)
     # Post-loop: if PUSH_REMOTE_NAME was not matched as a configured name (bare
     # URL push), substitute the first URL alias we found — it carries tracking refs.
     # A named remote with a different fetch endpoint supplies no baseline.
