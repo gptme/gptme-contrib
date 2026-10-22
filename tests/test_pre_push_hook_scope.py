@@ -1126,3 +1126,37 @@ def test_gitlab_ssh_https_alias_retains_destination_commits(
     )
     assert proc.returncode == 1, proc.stderr
     assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("alias_name", ["HEAD", "alias", "nested/alias"])
+@pytest.mark.parametrize("chained", [False, True])
+def test_symbolic_custom_tracking_ref_cannot_hide_pushed_branch(
+    tmp_path: Path, alias_name: str, chained: bool
+) -> None:
+    """Symbolic aliases cannot reintroduce the excluded pushed-branch tip."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(
+        repo,
+        "config",
+        "--replace-all",
+        "remote.origin.fetch",
+        "+refs/heads/*:refs/cache/*",
+    )
+    _git(repo, "update-ref", "refs/cache/master", base)
+    _git(repo, "update-ref", "refs/cache/topic", head)
+    target = "refs/cache/topic"
+    if chained:
+        _git(repo, "symbolic-ref", "refs/aliases/intermediate", target)
+        target = "refs/aliases/intermediate"
+    _git(repo, "symbolic-ref", f"refs/cache/{alias_name}", target)
+    destination = _git(repo, "remote", "get-url", "origin")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "1", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr

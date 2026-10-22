@@ -334,7 +334,11 @@ if [ -n "$_GUARD_SCRIPT" ]; then
                         _pushed_tracking_refs+=("$_target")
                     fi
                 done < <(git config --get-all "remote.${_dest_remote_name}.fetch" 2>/dev/null)
-                while read -r _dest_ref _dest_oid; do
+                while read -r _dest_ref _dest_oid _dest_symref; do
+                    # Symbolic aliases do not supply independent fetched history.
+                    # Skip all of them, including custom names and alias chains,
+                    # so they cannot reintroduce the pushed branch's stale tip.
+                    [ -n "$_dest_symref" ] && continue
                     # Fetch destinations can live outside the conventional
                     # namespace (even outside refs/remotes). Do not admit
                     # unrelated local branches or tags from the wider walk.
@@ -382,7 +386,7 @@ if [ -n "$_GUARD_SCRIPT" ]; then
                     [ "$_dest_ref" = "refs/remotes/${_dest_remote_name}/HEAD" ] && continue
                     _dest_other_excl="$_dest_other_excl $_dest_oid"
                 done < <(git for-each-ref refs/ \
-                    --format='%(refname) %(objectname)' 2>/dev/null)
+                    --format='%(refname) %(objectname) %(symref)' 2>/dev/null)
             fi
             if [ -n "$_dest_other_excl" ] || [ -n "$_other_remotes" ]; then
                 # shellcheck disable=SC2086
