@@ -66,6 +66,24 @@ _canonical_remote_url() {
         *://*|*:*) ;;
         *) realpath -m -- "$url" 2>/dev/null || printf '%s\n' "$url"; return ;;
     esac
+    # SCP paths without a leading slash are relative to the SSH user's home,
+    # unlike ssh://host/path and host:/path. GitHub's hosted repository names
+    # are the established exception shared by HTTPS and SSH spellings.
+    if [[ "$url" != *://* && "$url" =~ ^([^/:]+):([^/].*)$ ]]; then
+        local scp_authority="${BASH_REMATCH[1]}" scp_path="${BASH_REMATCH[2]}"
+        local scp_host="${scp_authority##*@}" scp_user=""
+        if [[ "$scp_authority" == *@* ]]; then
+            scp_user="${scp_authority%@*}@"
+        fi
+        case "${scp_host,,}" in
+            github.com|ssh.github.com) ;;
+            *)
+                scp_path="${scp_path%/}"
+                printf 'scp-home:%s%s/%s\n' "$scp_user" "${scp_host,,}" "${scp_path%.git}"
+                return
+                ;;
+        esac
+    fi
     printf '%s\n' "$url" | sed -E \
         -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://([^@/]+@)?##' \
         -e 's#^[^/@:]+@##' \
@@ -136,7 +154,9 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         while IFS= read -r spec; do
             [[ "$spec" == ^* || "$spec" != *:* ]] && continue
             destination="${spec#*:}"
-            [ -n "$destination" ] && _protected_fetch_patterns+=("$destination")
+            if [ -n "$destination" ]; then
+                _protected_fetch_patterns+=("$destination")
+            fi
         done < <(git config --get-all "remote.${remote}.fetch" 2>/dev/null)
     }
     _dest_push_url="${2:-}"
@@ -232,6 +252,20 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         _dest_remote_name="$_dest_url_alias"
     fi
 
+    # A different remote may fetch into the destination's conventional
+    # namespace. Such refs cannot establish destination history merely by name.
+    _non_dest_fetch_patterns=()
+    while IFS= read -r _r; do
+        [ "$_r" = "$_dest_remote_name" ] && continue
+        while IFS= read -r _spec; do
+            [[ "$_spec" == ^* || "$_spec" != *:* ]] && continue
+            _target="${_spec#*:}"
+            if [ -n "$_target" ]; then
+                _non_dest_fetch_patterns+=("$_target")
+            fi
+        done < <(git config --get-all "remote.${_r}.fetch" 2>/dev/null)
+    done < <(git remote 2>/dev/null)
+
     for line in "${STDIN_LINES[@]}"; do
         read -r local_ref local_sha remote_ref remote_sha <<< "$line"
 
@@ -292,6 +326,15 @@ if [ -n "$_GUARD_SCRIPT" ]; then
                         fi
                     done
                     [ "$_nested_remote" = true ] && continue
+                    _foreign_fetch=false
+                    for _pattern in "${_non_dest_fetch_patterns[@]}"; do
+                        # shellcheck disable=SC2053
+                        if [[ "$_dest_ref" == $_pattern ]]; then
+                            _foreign_fetch=true
+                            break
+                        fi
+                    done
+                    [ "$_foreign_fetch" = true ] && continue
                     _pushed_tracking=false
                     for _tracking_ref in "${_pushed_tracking_refs[@]}"; do
                         if [ "$_dest_ref" = "$_tracking_ref" ]; then

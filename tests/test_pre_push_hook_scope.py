@@ -748,7 +748,9 @@ def test_head_prefixed_branch_scopes_new_branch_range(tmp_path: Path) -> None:
     ("url", "expected"),
     [
         ("https://FORGE.example/team/Repo.git", "forge.example/team/Repo"),
-        ("git@FORGE.example:team/Repo.git", "forge.example/team/Repo"),
+        ("git@FORGE.example:team/Repo.git", "scp-home:git@forge.example/team/Repo"),
+        ("other@FORGE.example:team/Repo.git", "scp-home:other@forge.example/team/Repo"),
+        ("git@FORGE.example:/team/Repo.git", "forge.example/team/Repo"),
         ("ssh://git@FORGE.example/team/Repo.git", "forge.example/team/Repo"),
         ("https://GITHUB.com/Team/Repo.git", "github.com/team/repo"),
     ],
@@ -925,6 +927,71 @@ def test_renamed_fetch_tracking_ref_is_not_new_branch_baseline(
         repo,
         f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
         "mirror",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("wildcard", [False, True])
+def test_other_remote_fetch_mapping_is_not_destination_baseline(
+    tmp_path: Path, wildcard: bool
+) -> None:
+    """A fetch destination's prefix does not prove its repository of origin."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = _git(repo, "remote", "get-url", "mirror")
+    _git(repo, "remote", "add", "cache", str(tmp_path / "cache.git"))
+    spec = (
+        "+refs/heads/*:refs/remotes/mirror/cache-*"
+        if wildcard
+        else "+refs/heads/main:refs/remotes/mirror/cache-topic"
+    )
+    _git(repo, "config", "--replace-all", "remote.cache.fetch", spec)
+    _git(repo, "update-ref", "refs/remotes/mirror/cache-topic", head)
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "mirror",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+def test_empty_fetch_destination_does_not_abort_ordinary_push(tmp_path: Path) -> None:
+    """A FETCH_HEAD-only refspec must not leak false status under set -e."""
+    repo = _init(tmp_path)
+    base = _commit(repo, "seed.txt")
+    head = _commit(repo, "topic.txt")
+    _git(repo, "config", "--add", "remote.mirror.fetch", "refs/heads/main:")
+    destination = _git(repo, "remote", "get-url", "mirror")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {base}\n",
+        "mirror",
+        destination,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_ssh_home_relative_remote_is_not_root_absolute_baseline(tmp_path: Path) -> None:
+    """Protect the relative remote from the other-history exemption to isolate aliasing."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = "git@host:/repo.git"
+    _git(repo, "remote", "add", "alpha", "git@host:repo.git")
+    # A secondary push URL protects alpha's refs from the deliberate exemption
+    # for other repositories; its different fetch endpoint cannot supply history.
+    _git(repo, "config", "--add", "remote.alpha.pushurl", "git@host:repo.git")
+    _git(repo, "config", "--add", "remote.alpha.pushurl", destination)
+    _git(repo, "update-ref", "refs/remotes/alpha/master", head)
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        destination,
         destination,
         env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
     )
