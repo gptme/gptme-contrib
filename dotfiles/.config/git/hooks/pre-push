@@ -248,6 +248,10 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         # A symbolic alias can resolve into the protected destination namespace;
         # its name is not evidence of independent history on another remote.
         [ -n "$_symref" ] && continue
+        # Mirror/exact fetch mappings can target ordinary local branches and
+        # tags. Those refs may contain unpublished commits created here; a
+        # matching fetch destination does not make them remote history.
+        case "$_ref" in refs/heads/*|refs/tags/*) continue ;; esac
         _protected=false
         for _prefix in "${_protected_ref_prefixes[@]}"; do
             if [[ "$_ref" == "$_prefix"* ]]; then
@@ -357,6 +361,8 @@ if [ -n "$_GUARD_SCRIPT" ]; then
                     # Skip all of them, including custom names and alias chains,
                     # so they cannot reintroduce the pushed branch's stale tip.
                     [ -n "$_dest_symref" ] && continue
+                    # Apply the same local-ref boundary to destination baselines.
+                    case "$_dest_ref" in refs/heads/*|refs/tags/*) continue ;; esac
                     # Fetch destinations can live outside the conventional
                     # namespace (even outside refs/remotes). Do not admit
                     # unrelated local branches or tags from the wider walk.

@@ -1377,3 +1377,47 @@ def test_revision_enumeration_failure_blocks_push(
     )
     assert proc.returncode == 1, proc.stderr
     assert "PUSH BLOCKED: cannot enumerate mass-delete scan" in proc.stderr
+
+
+@pytest.mark.parametrize("new_branch", [False, True])
+@pytest.mark.parametrize("namespace", ["heads", "tags"])
+@pytest.mark.parametrize("wildcard", [False, True])
+def test_fetch_mapping_cannot_publish_local_branches_or_tags(
+    tmp_path: Path, new_branch: bool, namespace: str, wildcard: bool
+) -> None:
+    """A mirror fetch mapping is not evidence a locally writable ref was fetched."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "update-ref", f"refs/{namespace}/topic", head)
+    spec = "+refs/*:refs/*" if wildcard else f"+refs/heads/topic:refs/{namespace}/topic"
+    _git(repo, "config", "--replace-all", "remote.origin.fetch", spec)
+    destination = _git(repo, "remote", "get-url", "mirror")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
+        "mirror",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("namespace", ["heads", "tags"])
+@pytest.mark.parametrize("wildcard", [False, True])
+def test_destination_fetch_mapping_cannot_borrow_local_baseline(
+    tmp_path: Path, namespace: str, wildcard: bool
+) -> None:
+    """The new-branch baseline must reject locally writable refs too."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "update-ref", f"refs/{namespace}/local", head)
+    spec = "+refs/*:refs/*" if wildcard else f"+refs/heads/main:refs/{namespace}/local"
+    _git(repo, "config", "--replace-all", "remote.mirror.fetch", spec)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "mirror",
+        _git(repo, "remote", "get-url", "mirror"),
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
