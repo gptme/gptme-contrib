@@ -646,9 +646,6 @@ def _run_human_summary(
 
         click.echo("Generating summary with Claude Code...")
         result = summarize_github_activity_with_cc(combined_context, github_user, period_str)
-
-        click.echo(f"\n## Activity Summary: @{github_user}")
-        click.echo(f"**Period**: {period_str}\n")
     else:
         from .cc_backend import summarize_human_day_with_cc
 
@@ -656,6 +653,16 @@ def _run_human_summary(
         click.echo("Generating summary with Claude Code...")
         result = summarize_human_day_with_cc(combined_context, username, period_str)
 
+    if result.get("_cc_failed"):
+        raise click.ClickException(
+            "Summary generation failed. Check the generation logs and retry, "
+            "or use --raw to print the source data."
+        )
+
+    if github_user and period != "daily":
+        click.echo(f"\n## Activity Summary: @{github_user}")
+        click.echo(f"**Period**: {period_str}\n")
+    else:
         click.echo(f"\n## Daily Summary: {period_str}")
         if github_user:
             click.echo(f"**GitHub**: @{github_user}\n")
