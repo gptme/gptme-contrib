@@ -234,8 +234,8 @@ def test_pruned_exclusion_ref_does_not_disable_mass_delete_scan(
         "#!/bin/bash\n"
         'if [ "$1" = for-each-ref ]; then\n'
         '    output=$("$REAL_GIT" "$@") || exit $?\n'
-        '    case "$*" in\n'
-        '        *"$PRUNE_PREFIX"*) "$REAL_GIT" update-ref -d "$PRUNE_REF" ;;\n'
+        '    case "$output" in\n'
+        '        *"$PRUNE_REF "*) "$REAL_GIT" update-ref -d "$PRUNE_REF" ;;\n'
         "    esac\n"
         '    printf "%s\\n" "$output"\n'
         "else\n"
@@ -252,9 +252,6 @@ def test_pruned_exclusion_ref_does_not_disable_mass_delete_scan(
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
             "REAL_GIT": real_git,
             "PRUNE_REF": ref,
-            "PRUNE_PREFIX": "refs/remotes/mirror/"
-            if remote == "mirror"
-            else "refs/remotes/",
             "MASS_DELETE_COMMIT_RANGE_LIMIT": "0",
             "MASS_DELETE_THRESHOLD": "1",
         },
@@ -992,6 +989,110 @@ def test_ssh_home_relative_remote_is_not_root_absolute_baseline(tmp_path: Path) 
         repo,
         f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
         destination,
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("namespace", ["refs/remotes/vendor", "refs/vendor"])
+@pytest.mark.parametrize("wildcard", [False, True])
+def test_other_remote_custom_fetch_history_is_excluded(
+    tmp_path: Path, namespace: str, wildcard: bool
+) -> None:
+    """Published upstream history is exempt even outside refs/remotes/<name>."""
+    repo, base, deletion = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "remote", "set-url", "upstream", str(tmp_path / "upstream.git"))
+    source = "*" if wildcard else "master"
+    _git(
+        repo,
+        "config",
+        "--replace-all",
+        "remote.upstream.fetch",
+        f"+refs/heads/{source}:{namespace}/{source}",
+    )
+    _git(repo, "update-ref", f"{namespace}/master", deletion)
+    head = _commit(repo, "local.txt")
+    destination = _git(repo, "remote", "get-url", "origin")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {base}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "PUSH BLOCKED: commit" not in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("namespace", ["refs/remotes/cache", "refs/cache"])
+@pytest.mark.parametrize("wildcard", [False, True])
+def test_destination_custom_fetch_history_scopes_new_branch_range(
+    tmp_path: Path, namespace: str, wildcard: bool
+) -> None:
+    """Mapped destination history must scope the range before the size limit."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    source = "*" if wildcard else "master"
+    _git(
+        repo,
+        "config",
+        "--replace-all",
+        "remote.origin.fetch",
+        f"+refs/heads/{source}:{namespace}/{source}",
+    )
+    _git(repo, "update-ref", f"{namespace}/master", base)
+    destination = _git(repo, "remote", "get-url", "origin")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "1", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("new_branch", [False, True])
+def test_custom_fetch_outside_remotes_retains_stale_destination(
+    tmp_path: Path, new_branch: bool
+) -> None:
+    """Widening enumeration must not exempt mapped destination history."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(
+        repo,
+        "config",
+        "--replace-all",
+        "remote.origin.fetch",
+        "+refs/heads/*:refs/cache/*",
+    )
+    _git(repo, "update-ref", "refs/cache/topic", head)
+    _git(repo, "update-ref", "refs/cache/master", base)
+    destination = _git(repo, "remote", "get-url", "origin")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+def test_unmapped_local_refs_are_not_new_branch_baselines(tmp_path: Path) -> None:
+    """A wider ref walk cannot turn ordinary local branches/tags into history."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    _git(repo, "update-ref", "refs/tags/destructive", head)
+    _git(repo, "update-ref", "refs/cache/unowned", head)
+    destination = _git(repo, "remote", "get-url", "origin")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "origin",
         destination,
         env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
     )

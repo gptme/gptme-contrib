@@ -143,6 +143,7 @@ if [ -n "$_GUARD_SCRIPT" ]; then
     # when the caller pushes to a bare URL instead of a configured remote name
     # (in which case git remote get-url would fail).
     _other_remote_prefixes=()
+    _other_fetch_patterns=()
     _protected_ref_prefixes=()
     _protected_fetch_patterns=()
     _protect_remote_refs() {
@@ -215,6 +216,13 @@ if [ -n "$_GUARD_SCRIPT" ]; then
             fi
         fi
         _other_remote_prefixes+=("refs/remotes/${_r}/")
+        while IFS= read -r _spec; do
+            [[ "$_spec" == ^* || "$_spec" != *:* ]] && continue
+            _target="${_spec#*:}"
+            if [ -n "$_target" ]; then
+                _other_fetch_patterns+=("$_target")
+            fi
+        done < <(git config --get-all "remote.${_r}.fetch" 2>/dev/null)
     done < <(git remote 2>/dev/null)
     # --remotes=team recursively includes team/fork. Expand to explicit refs,
     # then conservatively retain every destination/alias namespace in the scan,
@@ -238,13 +246,24 @@ if [ -n "$_GUARD_SCRIPT" ]; then
             fi
         done
         [ "$_protected" = true ] && continue
+        _other=false
         for _prefix in "${_other_remote_prefixes[@]}"; do
             if [[ "$_ref" == "$_prefix"* ]]; then
-                _other_remotes="$_other_remotes $_oid"
+                _other=true
                 break
             fi
         done
-    done < <(git for-each-ref --format='%(refname) %(objectname)' refs/remotes/ 2>/dev/null)
+        for _pattern in "${_other_fetch_patterns[@]}"; do
+            # shellcheck disable=SC2053
+            if [[ "$_ref" == $_pattern ]]; then
+                _other=true
+                break
+            fi
+        done
+        if [ "$_other" = true ]; then
+            _other_remotes="$_other_remotes $_oid"
+        fi
+    done < <(git for-each-ref --format='%(refname) %(objectname)' refs/ 2>/dev/null)
     # Post-loop: if PUSH_REMOTE_NAME was not matched as a configured name (bare
     # URL push), substitute the first URL alias we found — it carries tracking refs.
     # A named remote with a different fetch endpoint supplies no baseline.
@@ -294,6 +313,7 @@ if [ -n "$_GUARD_SCRIPT" ]; then
                 # Map the pushed source ref through each positive fetch
                 # refspec. The stale ref may be renamed locally, so comparing
                 # only refs/remotes/<remote>/<branch> is insufficient.
+                _dest_fetch_patterns=()
                 _pushed_tracking_refs=("refs/remotes/${_dest_remote_name}/${_branch_name}")
                 while IFS= read -r _spec; do
                     [[ "$_spec" == ^* || "$_spec" != *:* ]] && continue
@@ -301,6 +321,7 @@ if [ -n "$_GUARD_SCRIPT" ]; then
                     _source="${_source#+}"
                     _target="${_spec#*:}"
                     [ -z "$_target" ] && continue
+                    _dest_fetch_patterns+=("$_target")
                     if [[ "$_source" == *\** ]]; then
                         _source_prefix="${_source%%\**}"
                         _source_suffix="${_source#*\*}"
@@ -314,6 +335,21 @@ if [ -n "$_GUARD_SCRIPT" ]; then
                     fi
                 done < <(git config --get-all "remote.${_dest_remote_name}.fetch" 2>/dev/null)
                 while read -r _dest_ref _dest_oid; do
+                    # Fetch destinations can live outside the conventional
+                    # namespace (even outside refs/remotes). Do not admit
+                    # unrelated local branches or tags from the wider walk.
+                    _dest_owned=false
+                    if [[ "$_dest_ref" == "refs/remotes/${_dest_remote_name}/"* ]]; then
+                        _dest_owned=true
+                    fi
+                    for _pattern in "${_dest_fetch_patterns[@]}"; do
+                        # shellcheck disable=SC2053
+                        if [[ "$_dest_ref" == $_pattern ]]; then
+                            _dest_owned=true
+                            break
+                        fi
+                    done
+                    [ "$_dest_owned" = true ] || continue
                     # for-each-ref recursively includes configured remotes such
                     # as team/fork under team/. Their refs are not team branch
                     # baselines, even when both remotes share a destination URL.
@@ -345,7 +381,7 @@ if [ -n "$_GUARD_SCRIPT" ]; then
                     [ "$_pushed_tracking" = true ] && continue
                     [ "$_dest_ref" = "refs/remotes/${_dest_remote_name}/HEAD" ] && continue
                     _dest_other_excl="$_dest_other_excl $_dest_oid"
-                done < <(git for-each-ref "refs/remotes/${_dest_remote_name}/" \
+                done < <(git for-each-ref refs/ \
                     --format='%(refname) %(objectname)' 2>/dev/null)
             fi
             if [ -n "$_dest_other_excl" ] || [ -n "$_other_remotes" ]; then
