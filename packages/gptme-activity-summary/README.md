@@ -111,6 +111,12 @@ project repos.
 | `GPTME_ACTIVITY_SUMMARY_GPTME_FALLBACK` | Set to `1` to fall back to `gptme` (via OpenRouter) when all Claude attempts fail (e.g. quota exhausted). Off by default because it sends journal content to an external model |
 | `GPTME_ACTIVITY_SUMMARY_GPTME_MODEL` | Model for the gptme fallback |
 
+`AW_SERVER` accepts an absolute `http://` or `https://` URL with a hostname and
+an optional port. If omitted, the port defaults to 80 for HTTP and 443 for
+HTTPS. An empty path or `/` is allowed. Paths, credentials, query strings,
+fragments, malformed URLs, and invalid ports are rejected; ActivityWatch data
+is then treated as unavailable.
+
 ### Backend trace retention
 
 Backend calls keep their traces; nothing is pruned automatically. The gptme
