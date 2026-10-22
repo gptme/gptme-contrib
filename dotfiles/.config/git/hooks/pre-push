@@ -34,6 +34,17 @@ _read_hook_conf() {
 # Used to skip origin-specific work when pushing to a mirror or other remote.
 PUSH_REMOTE_NAME="${1:-}"
 
+# Ask Git to identify existing local repositories, including worktree/.git
+# aliases and gitfiles. Nonexistent paths retain their lexical identity.
+_canonical_local_repository() {
+    local path="$1" git_dir
+    if git_dir="$(git rev-parse --resolve-git-dir "$path" 2>/dev/null)" ||
+       git_dir="$(git rev-parse --resolve-git-dir "$path/.git" 2>/dev/null)"; then
+        path="$git_dir"
+    fi
+    realpath -m -- "$path" 2>/dev/null || printf '%s\n' "$path"
+}
+
 # Normalise a remote URL to a canonical identity string so aliases (HTTPS/SSH
 # variants, hostname case, .git suffix) compare equal. Repository path case is
 # preserved except on GitHub, where repository names are case-insensitive. Unknown shapes
@@ -55,16 +66,16 @@ _canonical_remote_url() {
             file_path="${BASH_REMATCH[3]}"
         done
         url="${decoded}${file_path}"
-        realpath -m -- "$url" 2>/dev/null || printf '%s\n' "$url"
+        _canonical_local_repository "$url"
         return
     fi
     # Git also accepts bare relative paths (repo.git). Keep filesystem identity
     # separate from network URL normalization: local paths are case-sensitive.
     case "$url" in
         "") return ;;
-        /*|./*|../*) realpath -m -- "$url" 2>/dev/null || printf '%s\n' "$url"; return ;;
+        /*|./*|../*) _canonical_local_repository "$url"; return ;;
         *://*|*:*) ;;
-        *) realpath -m -- "$url" 2>/dev/null || printf '%s\n' "$url"; return ;;
+        *) _canonical_local_repository "$url"; return ;;
     esac
     # SCP paths without a leading slash are relative to the SSH user's home,
     # unlike ssh://host/path and host:/path. Hosted GitHub and GitLab repository

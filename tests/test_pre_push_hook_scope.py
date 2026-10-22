@@ -1228,3 +1228,30 @@ def test_ampersand_in_mapped_branch_cannot_hide_stale_tip(
     assert SKIP_MESSAGE not in proc.stderr, proc.stderr
     assert proc.returncode == 1, proc.stderr
     assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("new_branch", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_worktree_and_git_directory_are_same_destination(
+    tmp_path: Path, new_branch: bool, reverse: bool
+) -> None:
+    """A local repository's worktree and .git paths cannot hide its stale tip."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = tmp_path / "destination"
+    _git(repo, "init", "-q", str(destination))
+    urls = [str(destination), str(destination / ".git")]
+    if reverse:
+        urls.reverse()
+    _git(repo, "remote", "set-url", "origin", urls[0])
+    _git(repo, "remote", "set-url", "backup", urls[1])
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    _git(repo, "update-ref", "refs/remotes/backup/topic", head)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
+        "origin",
+        urls[0],
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
