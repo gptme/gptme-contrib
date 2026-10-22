@@ -184,3 +184,87 @@ def test_empty_period_retains_selected_host(client):
     text = aw_data.format_aw_activity_for_prompt(activity)
     assert "Host: A" in text
     assert "No window activity reported" in text
+
+
+@pytest.mark.parametrize("with_afk", [False, True])
+def test_ordinary_browser_urls_reduce_to_domains_in_raw_human_report(client, monkeypatch, with_afk):
+    from click.testing import CliRunner
+
+    import gptme_activity_summary.cc_backend as backend
+    import gptme_activity_summary.cli as cli_module
+
+    client.add("window-A", "currentwindow", "A", 3600, {"app": "Firefox"})
+    client.add("afk-B", "afkstatus", "B", 300, {"status": "not-afk"})
+    if with_afk:
+        client.add("afk-A", "afkstatus", "A", 1800, {"status": "not-afk"})
+    client.add(
+        "browser-B",
+        "web.tab.current",
+        "B",
+        3600,
+        {"url": "https://foreign.test/FOREIGN_PATH", "title": "FOREIGN_TITLE"},
+    )
+    client.add(
+        "browser-A",
+        "web.tab.current",
+        "A",
+        1200,
+        {
+            "url": "https://www.example.test/PRIVATE_PATH?key=QUERY_SENTINEL#FRAGMENT_SENTINEL",
+            "title": "TITLE_SENTINEL",
+        },
+    )
+    client.store["browser-A"].insert(
+        Event(
+            timestamp=datetime(2026, 10, 21, 9, 20, tzinfo=timezone.utc),
+            duration=timedelta(seconds=1200),
+            data={"url": "http://example.test/SECOND_PATH", "title": "SECOND_TITLE"},
+        )
+    )
+
+    def unexpected_model(*args, **kwargs):
+        pytest.fail("raw report must not invoke a model")
+
+    monkeypatch.setattr(backend, "summarize_human_day_with_cc", unexpected_model)
+    monkeypatch.setattr(backend, "summarize_github_activity_with_cc", unexpected_model)
+
+    activity = aw_data.fetch_aw_activity(DAY, DAY, hostname="A")
+    expected_seconds = 1800 if with_afk else 2400
+    assert [(domain.domain, domain.duration) for domain in activity.top_domains] == [
+        ("example.test", expected_seconds)
+    ]
+    assert activity.afk_filtered is with_afk
+    formatted = aw_data.format_aw_activity_for_prompt(activity)
+    result = CliRunner().invoke(
+        cli_module.cli,
+        ["daily", "--mode", "human", "--date", str(DAY), "--aw-host", "A", "--raw"],
+    )
+    assert result.exit_code == 0, result.output
+    for output in [formatted, result.output]:
+        assert "Top Websites" in output
+        assert "example.test" in output
+        assert "Host: A" in output
+        for private_detail in [
+            "PRIVATE_PATH",
+            "QUERY_SENTINEL",
+            "FRAGMENT_SENTINEL",
+            "TITLE_SENTINEL",
+            "SECOND_PATH",
+            "SECOND_TITLE",
+            "foreign.test",
+            "FOREIGN_PATH",
+            "FOREIGN_TITLE",
+        ]:
+            assert private_detail not in output
+    assert all('"browser-B"' not in source for source in client.queries)
+    assert all('"afk-B"' not in source for source in client.queries)
+
+
+@pytest.mark.parametrize("url", ["", "not a URL", "about:blank"])
+def test_browser_urls_without_a_domain_are_omitted(client, url):
+    client.add("window-A", "currentwindow", "A", 3600, {"app": "Firefox"})
+    client.add("browser-A", "web.tab.current", "A", 1200, {"url": url, "title": "PRIVATE_TITLE"})
+    activity = aw_data.fetch_aw_activity(DAY, DAY)
+    assert not activity.top_domains
+    assert "Top Websites" not in aw_data.format_aw_activity_for_prompt(activity)
+    assert "PRIVATE_TITLE" not in aw_data.format_aw_activity_for_prompt(activity)

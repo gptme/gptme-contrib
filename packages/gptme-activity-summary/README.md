@@ -93,6 +93,10 @@ diagnostic instead of falling back to another machine. Window, AFK, and browser
 buckets are matched to that same hostname. Host selection uses bucket metadata;
 it does not combine machines into a single timeline.
 
+Website totals derive domains from ordinary URL events with ActivityWatch's
+URL-splitting transform before grouping, with the selected host's AFK filtering
+when available.
+
 Missing or ambiguous AFK data leaves window time unfiltered and explicitly
 labelled as such. Missing or ambiguous browser data omits website totals. Multiple
 buckets of the same watcher type on the selected host are skipped with a coverage

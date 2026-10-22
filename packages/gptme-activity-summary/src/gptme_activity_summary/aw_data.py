@@ -269,6 +269,7 @@ def _fetch_browser_domains(
             'afk_events = filter_keyvals(afk_events, "status", ["not-afk"]);',
             f"web_events = query_bucket({json.dumps(web_bucket)});",
             "events = filter_period_intersect(web_events, afk_events);",
+            "events = split_url_events(events);",
             'events = merge_events_by_keys(events, ["$domain"]);',
             "events = sort_by_duration(events);",
             "RETURN = events;",
@@ -276,7 +277,8 @@ def _fetch_browser_domains(
     else:
         query = [
             f"web_events = query_bucket({json.dumps(web_bucket)});",
-            'events = merge_events_by_keys(web_events, ["$domain"]);',
+            "events = split_url_events(web_events);",
+            'events = merge_events_by_keys(events, ["$domain"]);',
             "events = sort_by_duration(events);",
             "RETURN = events;",
         ]
