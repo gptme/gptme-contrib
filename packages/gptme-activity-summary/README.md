@@ -79,15 +79,32 @@ gptme-activity-summary daily --mode human --date yesterday --github-user your-gi
 gptme-activity-summary weekly --mode human --week last --github-user your-github-username
 gptme-activity-summary monthly --mode human --month last --github-user your-github-username
 
+# Select the machine when ActivityWatch has buckets from multiple hosts
+gptme-activity-summary daily --mode human --aw-host my-laptop
+
 # Print the source data without LLM summarization
 gptme-activity-summary weekly --mode human --week last --github-user your-github-username --raw
 ```
+
+ActivityWatch reports cover one host at a time. Without `--aw-host`, the sole
+window-watcher host is selected automatically. If multiple window hosts exist,
+the report lists them and asks you to choose; an unknown host also produces a
+diagnostic instead of falling back to another machine. Window, AFK, and browser
+buckets are matched to that same hostname. Host selection uses bucket metadata;
+it does not combine machines into a single timeline.
+
+Missing or ambiguous AFK data leaves window time unfiltered and explicitly
+labelled as such. Missing or ambiguous browser data omits website totals. Multiple
+buckets of the same watcher type on the selected host are skipped with a coverage
+warning rather than merged or chosen arbitrarily. Raw reports and model inputs
+include the selected hostname and coverage warnings. A report containing only
+coverage diagnostics, with no application or GitHub activity, skips the model.
 
 ## Commands
 
 | Command | Purpose | Key options |
 |---------|---------|-------------|
-| `daily` | One day | `--date` (`YYYY-MM-DD`, `today`, `yesterday`), `--mode`, `--github-user`, `--raw`, `--repo` |
+| `daily` | One day | `--date` (`YYYY-MM-DD`, `today`, `yesterday`), `--mode`, `--github-user`, `--aw-host`, `--raw`, `--repo` |
 | `weekly` | One ISO week | `--week` (`YYYY-Www`, `current`, `last`), same as above |
 | `monthly` | One month | `--month` (`YYYY-MM`, `current`, `last`), same as above |
 | `smart` | Daily + weekly/monthly when due | `--date`, `--repo` |

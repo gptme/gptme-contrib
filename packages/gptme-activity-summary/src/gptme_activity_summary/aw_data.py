@@ -67,6 +67,9 @@ class AWActivity:
     categories: list[CategoryUsage] = field(default_factory=list)
     # AW was reachable and returned data
     available: bool = False
+    hostname: str | None = None
+    afk_filtered: bool = False
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def total_active_hours(self) -> float:
@@ -106,15 +109,25 @@ def _get_client() -> Any:
     )
 
 
-def _find_bucket(client: Any, prefix: str) -> str | None:
-    """Find a bucket by prefix (e.g. 'aw-watcher-window_')."""
-    try:
-        buckets = client.get_buckets()
-    except Exception:
-        return None
-    for bucket_id in buckets:
-        if str(bucket_id).startswith(prefix):
-            return str(bucket_id)
+def _select_bucket(
+    buckets: dict[str, Any],
+    hostname: str,
+    event_type: str,
+    label: str,
+    warnings: list[str],
+) -> str | None:
+    """Select one source by metadata, never by ID suffix or listing order."""
+    matches = [
+        bucket_id
+        for bucket_id, metadata in buckets.items()
+        if metadata.get("hostname") == hostname and metadata.get("type") == event_type
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        warnings.append(f"No {label} source for host {hostname!r}.")
+    else:
+        warnings.append(f"Multiple {label} sources for host {hostname!r}; {label} data omitted.")
     return None
 
 
@@ -208,9 +221,9 @@ def _fetch_app_usage(
         # Filter window events to only include time when user was not AFK.
         # This is the standard AW pattern used by aw-webui.
         query = [
-            f'afk_events = query_bucket("{afk_bucket}");',
+            f"afk_events = query_bucket({json.dumps(afk_bucket)});",
             'afk_events = filter_keyvals(afk_events, "status", ["not-afk"]);',
-            f'window_events = query_bucket("{window_bucket}");',
+            f"window_events = query_bucket({json.dumps(window_bucket)});",
             "events = filter_period_intersect(window_events, afk_events);",
             'events = merge_events_by_keys(events, ["app"]);',
             "events = sort_by_duration(events);",
@@ -219,7 +232,7 @@ def _fetch_app_usage(
     else:
         # No AFK bucket — fall back to raw window events
         query = [
-            f'events = query_bucket("{window_bucket}");',
+            f"events = query_bucket({json.dumps(window_bucket)});",
             'events = merge_events_by_keys(events, ["app"]);',
             "events = sort_by_duration(events);",
             "RETURN = events;",
@@ -252,9 +265,9 @@ def _fetch_browser_domains(
     """Fetch top domains from aw-watcher-web, with optional AFK filtering."""
     if afk_bucket:
         query = [
-            f'afk_events = query_bucket("{afk_bucket}");',
+            f"afk_events = query_bucket({json.dumps(afk_bucket)});",
             'afk_events = filter_keyvals(afk_events, "status", ["not-afk"]);',
-            f'web_events = query_bucket("{web_bucket}");',
+            f"web_events = query_bucket({json.dumps(web_bucket)});",
             "events = filter_period_intersect(web_events, afk_events);",
             'events = merge_events_by_keys(events, ["$domain"]);',
             "events = sort_by_duration(events);",
@@ -262,7 +275,7 @@ def _fetch_browser_domains(
         ]
     else:
         query = [
-            f'web_events = query_bucket("{web_bucket}");',
+            f"web_events = query_bucket({json.dumps(web_bucket)});",
             'events = merge_events_by_keys(web_events, ["$domain"]);',
             "events = sort_by_duration(events);",
             "RETURN = events;",
@@ -303,9 +316,9 @@ def _fetch_category_usage(
     category_rules = json.dumps(_fetch_category_rules())
     if afk_bucket:
         query = [
-            f'afk_events = query_bucket("{afk_bucket}");',
+            f"afk_events = query_bucket({json.dumps(afk_bucket)});",
             'afk_events = filter_keyvals(afk_events, "status", ["not-afk"]);',
-            f'window_events = query_bucket("{window_bucket}");',
+            f"window_events = query_bucket({json.dumps(window_bucket)});",
             "events = filter_period_intersect(window_events, afk_events);",
             f"events = categorize(events, {category_rules});",
             'events = merge_events_by_keys(events, ["$category"]);',
@@ -314,7 +327,7 @@ def _fetch_category_usage(
         ]
     else:
         query = [
-            f'window_events = query_bucket("{window_bucket}");',
+            f"window_events = query_bucket({json.dumps(window_bucket)});",
             f"events = categorize(window_events, {category_rules});",
             'events = merge_events_by_keys(events, ["$category"]);',
             "events = sort_by_duration(events);",
@@ -341,7 +354,7 @@ def _fetch_category_usage(
     return categories
 
 
-def fetch_aw_activity(start: date, end: date) -> AWActivity:
+def fetch_aw_activity(start: date, end: date, hostname: str | None = None) -> AWActivity:
     """Fetch ActivityWatch activity data for a date range.
 
     Queries window watcher data and aggregates time per app.
@@ -352,11 +365,12 @@ def fetch_aw_activity(start: date, end: date) -> AWActivity:
     Args:
         start: Start date (inclusive)
         end: End date (inclusive)
+        hostname: Bucket metadata hostname; defaults to the sole window-data host.
 
     Returns:
         AWActivity with aggregated app usage data.
     """
-    activity = AWActivity(start_date=start, end_date=end)
+    activity = AWActivity(start_date=start, end_date=end, hostname=hostname)
 
     client = _get_client()
     if client is None:
@@ -369,14 +383,41 @@ def fetch_aw_activity(start: date, end: date) -> AWActivity:
         logger.debug("ActivityWatch server not available at %s", AW_SERVER)
         return activity
 
-    window_bucket = _find_bucket(client, "aw-watcher-window_")
-    if not window_bucket:
-        logger.debug("No aw-watcher-window bucket found")
-        activity.available = True  # AW is running, just no window bucket
+    activity.available = True
+    try:
+        buckets = client.get_buckets()
+    except Exception:
+        activity.warnings.append("Could not read ActivityWatch sources; no time tracking data.")
         return activity
 
-    afk_bucket = _find_bucket(client, "aw-watcher-afk_")
-    web_bucket = _find_bucket(client, "aw-watcher-web-")
+    window_sources = [m for m in buckets.values() if m.get("type") == "currentwindow"]
+    hosts = sorted({m["hostname"] for m in window_sources if m.get("hostname")})
+    if hostname is None:
+        if any(not m.get("hostname") for m in window_sources):
+            activity.warnings.append(
+                "Window sources have missing host metadata; select a known host with --aw-host."
+            )
+            return activity
+        if len(hosts) != 1:
+            activity.warnings.append(
+                "Multiple window-data hosts; select one with --aw-host: " + ", ".join(hosts)
+                if hosts
+                else "No window-data host found."
+            )
+            return activity
+        hostname = hosts[0]
+    activity.hostname = hostname
+
+    window_bucket = _select_bucket(buckets, hostname, "currentwindow", "window", activity.warnings)
+    if window_bucket is None:
+        return activity
+    afk_bucket = _select_bucket(buckets, hostname, "afkstatus", "AFK", activity.warnings)
+    web_bucket = _select_bucket(buckets, hostname, "web.tab.current", "browser", activity.warnings)
+    activity.afk_filtered = afk_bucket is not None
+    if not activity.afk_filtered:
+        activity.warnings.append(
+            "Window time is unfiltered; it may include time away from the computer."
+        )
 
     timeperiod = _build_timeperiod(start, end)
 
@@ -405,21 +446,31 @@ def fetch_aw_activity(start: date, end: date) -> AWActivity:
 def format_aw_activity_for_prompt(activity: AWActivity) -> str:
     """Format ActivityWatch activity as markdown for LLM prompts.
 
-    Returns empty string if AW was not available or no data.
+    Returns empty string if AW was unavailable and preserves source coverage for empty periods.
 
     When categories are available (user has configured AW categorization rules),
     the category breakdown is shown first as a high-level summary, followed by
     the per-app breakdown for detail. Category percentages are relative to
     total categorized time (sum of all category durations), not total_active_seconds.
     """
-    if not activity.available or not activity.top_apps:
+    if not activity.available or (
+        not activity.top_apps and not activity.warnings and activity.hostname is None
+    ):
         return ""
 
     lines: list[str] = []
     lines.append("## ActivityWatch — Time Tracking")
     lines.append(f"Period: {activity.start_date.isoformat()} to {activity.end_date.isoformat()}")
+    if activity.hostname is not None:
+        lines.append(f"Host: {activity.hostname}")
+    for warning in activity.warnings:
+        lines.append(f"- **Coverage**: {warning}")
+    if not activity.top_apps:
+        lines.append("No window activity reported.")
+        return "\n".join(lines) + "\n"
     total_h = activity.total_active_hours
-    lines.append(f"- **Total active time**: {total_h:.1f}h ({activity.total_active_seconds:.0f}s)")
+    time_label = "Total active time" if activity.afk_filtered else "Total window time (unfiltered)"
+    lines.append(f"- **{time_label}**: {total_h:.1f}h ({activity.total_active_seconds:.0f}s)")
     lines.append("")
 
     # Show category breakdown only when user has actual category rules configured.
