@@ -1421,3 +1421,55 @@ def test_destination_fetch_mapping_cannot_borrow_local_baseline(
     )
     assert proc.returncode == 1, proc.stderr
     assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+def test_stale_other_destination_branch_is_not_new_branch_baseline(
+    tmp_path: Path,
+) -> None:
+    """A stale destination branch at the pushed tip must not empty the new-branch scan.
+
+    Scenario: origin/master already holds base B. A stale ``mirror/main`` still
+    points at destructive commit D after that branch was reset remotely.
+    Creating ``mirror/topic`` at D used to add ``mirror/main=D`` to
+    ``_dest_other_excl``, producing ``D --not D`` and a silent pass. A destination
+    tracking ref is a safe baseline only when it is a *strict ancestor* of the
+    commit being pushed, so D itself stays in the scan.
+    """
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    _git(repo, "update-ref", "refs/remotes/mirror/main", head)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "mirror",
+        _git(repo, "remote", "get-url", "mirror"),
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, (
+        "stale dest branch at the pushed tip must not empty the scan "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+def test_fresh_destination_ancestor_still_scopes_new_branch_range(
+    tmp_path: Path,
+) -> None:
+    """The range-limit escape hatch still needs destination ancestor baselines.
+
+    Same shape as ``test_single_remote_new_branch_scopes_range_by_other_dest_refs``,
+    but the ancestor lives on the destination remote itself (``mirror/main=B``)
+    rather than only on origin. Without ancestor baselines the 2-commit range
+    would skip the scan at limit 1.
+    """
+    repo, _base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "update-ref", "refs/remotes/mirror/main", _base)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "mirror",
+        _git(repo, "remote", "get-url", "mirror"),
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "1", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"

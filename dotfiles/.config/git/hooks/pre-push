@@ -329,6 +329,11 @@ if [ -n "$_GUARD_SCRIPT" ]; then
             # an exclusion from the destination's OTHER tracking refs (to scope
             # the range to new commits efficiently) but skip this branch's own
             # tracking ref — it may be stale and could hide a destructive commit.
+            # Other destination branches are a safe baseline only as *strict
+            # ancestors* of the pushed tip. Equality (stale dest/main=D while
+            # creating dest/topic=D) produces `D --not D` and silently permits
+            # restoring D. Descendants and unrelated tips are also not safe
+            # exclusions; they would empty or hide the scan the same way.
             _branch_name="${remote_ref#refs/heads/}"
             _dest_other_excl=""
             if [ -n "$_dest_remote_name" ]; then
@@ -408,6 +413,10 @@ if [ -n "$_GUARD_SCRIPT" ]; then
                     done
                     [ "$_pushed_tracking" = true ] && continue
                     [ "$_dest_ref" = "refs/remotes/${_dest_remote_name}/HEAD" ] && continue
+                    # Equality is not ancestry for this purpose: dest/main=D must
+                    # not exclude D itself from the new dest/topic=D scan.
+                    [ "$_dest_oid" = "$local_sha" ] && continue
+                    git merge-base --is-ancestor "$_dest_oid" "$local_sha" 2>/dev/null || continue
                     _dest_other_excl="$_dest_other_excl $_dest_oid"
                 done < <(git for-each-ref refs/ \
                     --format='%(refname) %(objectname) %(symref)' 2>/dev/null)
