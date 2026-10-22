@@ -67,16 +67,16 @@ _canonical_remote_url() {
         *) realpath -m -- "$url" 2>/dev/null || printf '%s\n' "$url"; return ;;
     esac
     # SCP paths without a leading slash are relative to the SSH user's home,
-    # unlike ssh://host/path and host:/path. GitHub's hosted repository names
-    # are the established exception shared by HTTPS and SSH spellings.
+    # unlike ssh://host/path and host:/path. Hosted GitHub and GitLab repository
+    # names are exceptions shared by HTTPS and their standard SSH spellings.
     if [[ "$url" != *://* && "$url" =~ ^([^/:]+):([^/].*)$ ]]; then
         local scp_authority="${BASH_REMATCH[1]}" scp_path="${BASH_REMATCH[2]}"
         local scp_host="${scp_authority##*@}" scp_user=""
         if [[ "$scp_authority" == *@* ]]; then
             scp_user="${scp_authority%@*}@"
         fi
-        case "${scp_host,,}" in
-            github.com|ssh.github.com) ;;
+        case "${scp_user}${scp_host,,}" in
+            github.com|*@github.com|ssh.github.com|*@ssh.github.com|git@gitlab.com) ;;
             *)
                 scp_path="${scp_path%/}"
                 printf 'scp-home:%s%s/%s\n' "$scp_user" "${scp_host,,}" "${scp_path%.git}"

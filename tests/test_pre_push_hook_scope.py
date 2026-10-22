@@ -1098,3 +1098,31 @@ def test_unmapped_local_refs_are_not_new_branch_baselines(tmp_path: Path) -> Non
     )
     assert proc.returncode == 1, proc.stderr
     assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("new_branch", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_gitlab_ssh_https_alias_retains_destination_commits(
+    tmp_path: Path, new_branch: bool, reverse: bool
+) -> None:
+    """GitLab's hosted SSH paths identify the same repo as HTTPS paths."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination, alias = (
+        "https://gitlab.com/team/Repo.git",
+        "git@gitlab.com:team/Repo.git",
+    )
+    if reverse:
+        destination, alias = alias, destination
+    _git(repo, "remote", "set-url", "origin", destination)
+    _git(repo, "remote", "set-url", "backup", alias)
+    _git(repo, "update-ref", "refs/remotes/backup/topic", head)
+    remote_sha = ZERO if new_branch else base
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {remote_sha}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
