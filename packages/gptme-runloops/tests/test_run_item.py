@@ -3941,3 +3941,71 @@ def _make_hooks_with_handled_delivery(tmp_path: Path) -> RunItemHooks:
         run_cmd=run_cmd,
         delivery_check=["/fake/delivery-check.sh"],
     )
+
+
+@pytest.mark.parametrize(
+    "extra", [[], ["pr_update", "merge_ready", "reviewer_needs_fix"]]
+)
+def test_contributor_review_normalizes_before_lifecycle(tmp_path, extra) -> None:
+    item = make_item(types=[*extra, "contributor_unreviewed"])
+    assert item.types == ("contributor_unreviewed",)
+    assert item.type_label == "contributor_unreviewed"
+    assert issue_coordination_key(item.types, item.repo, item.number) == (
+        "github:gptme/gptme-contrib#1234"
+    )
+    io = FakeLifecycleIO(check=SelfMergeCheckResult(eligible=True), merge_ok=True)
+    plan, lifecycle, io = _plan_for(tmp_path, item, io)
+    assert io.merged == []
+    assert io.triggered == []
+    assert not lifecycle.skip_item
+    assert "Contributor Initial Review" in plan.prompt
+    assert "RULES" not in plan.prompt
+    assert "contributor_unreviewed" in PR_OBSERVE_TYPES
+    assert "contributor_unreviewed" not in PR_STATE_TYPES
+
+
+def test_contributor_review_direct_construction_also_normalizes() -> None:
+    item = RunItem(
+        repo="o/r",
+        number=1,
+        title="PR",
+        detail="",
+        all_numbers=("1",),
+        types=("pr_update", "contributor_unreviewed", "merge_ready"),
+        type_label="pr_update+contributor_unreviewed+merge_ready",
+    )
+    assert item.types == ("contributor_unreviewed",)
+    assert item.to_merge_lifecycle_item().types == ("contributor_unreviewed",)
+
+
+@pytest.mark.parametrize("reviewed", [True, False, None])
+def test_contributor_review_effect_requires_exact_head_review(
+    tmp_path, monkeypatch, reviewed
+) -> None:
+    config, item, plan, outcome, hooks, run_cmd = _unmoved_comment_deliverable_fixture(
+        tmp_path, ("contributor_unreviewed", "pr_update", "merge_ready")
+    )
+    calls = []
+
+    def review_since(*args, **kwargs):
+        calls.append((args, kwargs))
+        return reviewed
+
+    monkeypatch.setattr("gptme_runloops.run_item.viewer_review_since", review_since)
+    # Even apparent PR movement cannot substitute for the required review.
+    hooks.fetch_pr_snapshot = lambda repo, num: {
+        "state": "OPEN",
+        "headRefOid": "new-head",
+        "mergeCommit": None,
+    }
+    run_cmd.on(
+        "graphql", stdout=_viewer_activity_json(comment_at="2026-07-11T10:03:00Z")
+    )
+    hooks.wait_merge_gate = ["/fake/wait-merge"]
+    effect = run_post_session(plan, item, outcome, config, hooks)
+    assert calls
+    assert effect == (
+        "observed" if reviewed else "none" if reviewed is False else "unknown"
+    )
+    assert not run_cmd.find("/fake/wait-merge")
+    assert not run_cmd.find("/fake/check-delivery.py")

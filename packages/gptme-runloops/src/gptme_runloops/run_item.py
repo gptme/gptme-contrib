@@ -130,6 +130,7 @@ from gptme_runloops.worker_records import (
     read_record_pr_state_after,
     update_record_pr_state,
     viewer_activity_since,
+    viewer_review_since,
     voice_postcall_effect_observed,
     write_fallback_session_record,
     write_post_session_record,
@@ -142,6 +143,10 @@ from gptme_runloops.worker_records import (
 # This narrow pair is the *bash* gate. Keep it for parity with the shell
 # executor's wait-and-merge step; it is deliberately NOT the observation gate.
 PR_STATE_TYPES: frozenset[str] = frozenset({"pr_update", "merge_ready"})
+
+# Deployment capability marker: normalization below runs before any lifecycle
+# I/O, including mixed groups. The poller must not emit until this is deployed.
+CONTRIBUTOR_REVIEW_ONLY_V1 = True
 
 # Item types whose `number` addresses a real PR, so a before/after
 # `gh pr view` snapshot is a meaningful observation of whether the dispatch
@@ -182,6 +187,7 @@ PR_OBSERVE_TYPES: frozenset[str] = PR_STATE_TYPES | frozenset(
     {
         "ci_failure",
         "contributor_ci_failure",
+        "contributor_unreviewed",
         "greptile_convergence_adjudication",
         "merge_conflict",
         "pr_changes_requested_stale",
@@ -290,6 +296,14 @@ class RunItem:
     type_label: str = ""
     raw: Mapping[str, Any] = field(default_factory=dict)
     raw_line: str = ""
+
+    def __post_init__(self) -> None:
+        # Grouping can combine this event with pr_update/merge_ready/repair.
+        # Normalize at the schema boundary, before lifecycle I/O (which runs
+        # before the coordination claim), prompt concat, and post-session gates.
+        if "contributor_unreviewed" in self.types:
+            object.__setattr__(self, "types", ("contributor_unreviewed",))
+            object.__setattr__(self, "type_label", "contributor_unreviewed")
 
     @property
     def number_str(self) -> str:
@@ -640,7 +654,15 @@ def issue_coordination_key(
     ``github:REPO#NUM`` key; everything else returns ``None`` (master-CI
     synthetic run ids are excluded by type).
     """
-    if not ({"assigned_issue", "contributor_ci_failure", "pr_update"} & set(types)):
+    if not (
+        {
+            "assigned_issue",
+            "contributor_ci_failure",
+            "contributor_unreviewed",
+            "pr_update",
+        }
+        & set(types)
+    ):
         return None
     if not repo or number is None:
         return None
@@ -2949,6 +2971,28 @@ def run_post_session(
             item.detail, config.workspace, now=session_start
         ):
             effect = EFFECT_OBSERVED
+    if "contributor_unreviewed" in item.types:
+        # PR movement, comments and generic delivery receipts are NOT review
+        # success. Require our new submitted review on the exact live head.
+        reviewed = None
+        if exit_code == 0:
+            try:
+                reviewed = viewer_review_since(
+                    plan.repo,
+                    plan.number,
+                    outcome.started_iso,
+                    cwd=config.workspace,
+                    runner=hooks.run_cmd,
+                )
+            except Exception:
+                pass
+        effect = (
+            EFFECT_OBSERVED
+            if reviewed is True
+            else EFFECT_NONE
+            if reviewed is False or exit_code != 0
+            else EFFECT_UNKNOWN
+        )
     if effect == EFFECT_NONE:
         _log(
             f"WARN: PM dispatch produced NO observable effect on {plan.repo}#{plan.number} "

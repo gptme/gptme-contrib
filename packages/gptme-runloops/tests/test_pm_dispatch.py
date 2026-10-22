@@ -184,6 +184,7 @@ class TestClassifyLane:
             "pr_update",
             "pr_never_checked",
             "contributor_ci_failure",
+            "contributor_unreviewed",
             "ci_failure",
             "master_ci_failure",
             "merge_conflict",
@@ -3000,3 +3001,17 @@ class TestUnitPrefix:
         assert mgr.running_slots == 0
         assert mgr.running_lane_slots("fast") == 0
         assert patterns == ["alice-pm-*-slot-*", "alice-pm-fast-slot-*"]
+
+
+@pytest.mark.parametrize(
+    "types",
+    [
+        ["contributor_unreviewed"],
+        ["pr_update", "contributor_unreviewed"],
+        ["ci_failure", "contributor_unreviewed", "reviewer_needs_fix"],
+    ],
+)
+def test_contributor_unreviewed_always_slow_review_only(monkeypatch, types):
+    monkeypatch.setenv("AUTOMATED_PR_REVIEW_REPOS", "gptme/gptme-contrib")
+    assert classify_lane(types) == "slow"
+    assert classify_item_work_type(types, repo="gptme/gptme-contrib") == "pr-review"

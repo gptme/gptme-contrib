@@ -37,6 +37,7 @@ SLOW_LANE_TYPES: set[str] = {
     "pr_update",
     "pr_never_checked",
     "contributor_ci_failure",
+    "contributor_unreviewed",
     "ci_failure",
     "master_ci_failure",
     "merge_conflict",
@@ -580,6 +581,9 @@ def classify_item_work_type(types: list[str], repo: str | None = None) -> str:
     Returns one of the PM_WORK_TYPES strings defined in pm_bandit.
     """
     types_set = set(types)
+    # Review-only safety dominates every co-grouped repair/automated-review arm.
+    if "contributor_unreviewed" in types_set:
+        return "pr-review"
     if "strategy" in types_set:
         return "strategy-reply"
     if types_set & {"ci_failure", "master_ci_failure"}:

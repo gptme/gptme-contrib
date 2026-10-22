@@ -152,6 +152,40 @@ Other modules:
 
 The legacy import path `run_loops` is kept as a symlink to `gptme_runloops` in source checkouts.
 
+## Contributor initial reviews (PM)
+
+`contributor_unreviewed` is a slow-lane `pr-review` session, never an
+`automated-pr-review` or code-repair session. `RunItem` normalizes mixed groups
+to this type **before** merge-lifecycle I/O; the shared coordination claim is
+`github:OWNER/REPO#NUMBER`. The dedicated prompt replaces generic monitoring,
+repair, arc and mention instructions. It requires live PR/head/CI/managed-review
+checks, detached isolated-worktree inspection, safe test execution, touched and
+adjacent regression suites, and a final head/eligibility recheck. The session
+submits one review with explicit `commit_id`: approval only after meaningful
+green verification, actionable changes requested for defects, or a comment
+review for infrastructure/verification limits. It never edits or pushes the
+contributor branch, opens a parallel fix, or merges.
+
+The detector owns age/author/green-CI eligibility and full-head-SHA dedupe; its
+managed-login configuration must be carried as exactly one
+`managed_logins=Login1,Login2` token in item `detail`. The handler renders quoted
+JSON evidence and adds the authenticated viewer; missing, duplicate or malformed
+tokens fail closed, and display/operator names are never inferred as logins.
+`CONTRIBUTOR_REVIEW_ONLY_V1` in `run_item.py` marks the safe
+executor capability, not deployment of a shell fallback. Enable the detector
+only after the actual executor and any shell adapters support the same policy.
+Shell deployments must normalize mixed types before cheap self-merge pre-gates,
+lifecycle, prompt concatenation, coordination claims and post-session wait/merge.
+Do not route this type through the retired `review-pr` intercept.
+
+PR state is observed, but movement or issue comments do not count as a review.
+`worker_records.viewer_review_since(repo, number, since_iso, *, cwd, runner=...)`
+returns `True` only for a newly submitted authenticated-viewer review on the
+live head (`APPROVED`, `CHANGES_REQUESTED` or `COMMENTED`), `False` if absent,
+and `None` if unobservable. It paginates reviews, checks head stability between
+pages, and is also suitable for a shell adapter. Review-only post-session effect
+uses this evidence instead of generic reply checks or fallback comments.
+
 ## Development
 
 ```bash

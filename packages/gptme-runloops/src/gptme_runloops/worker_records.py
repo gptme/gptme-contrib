@@ -875,6 +875,100 @@ def viewer_activity_since(
     return False
 
 
+def viewer_review_since(
+    repo: str,
+    number: int | str,
+    since_iso: str,
+    *,
+    cwd: str | Path,
+    timeout: float = 20,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> bool | None:
+    """Observe a new submitted viewer review on the live PR head, not a comment.
+
+    Paginate reviews; missing/inconsistent head or API failures are unknown.
+    Re-read the head on each page so movement during pagination fails closed.
+    No PR mutation and no dependency on agent-specific managed-login policy.
+    """
+    since = _parse_github_ts(since_iso)
+    owner, _, name = str(repo).partition("/")
+    try:
+        number_int = int(number)
+    except (ValueError, TypeError):
+        return None
+    if since is None or not owner or not name or number_int <= 0:
+        return None
+    query = (
+        "query($owner:String!,$name:String!,$number:Int!,$after:String){"
+        "viewer{login}repository(owner:$owner,name:$name){"
+        "pullRequest(number:$number){headRefOid reviews(first:100,after:$after){"
+        "nodes{author{login}state submittedAt commit{oid}}"
+        "pageInfo{hasNextPage endCursor}}}}}"
+    )
+    after: str | None = None
+    seen: set[str] = set()
+    head: str | None = None
+    while True:
+        cmd = [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+            "-F",
+            f"number={number_int}",
+        ]
+        if after:
+            cmd += ["-f", f"after={after}"]
+        try:
+            result = runner(
+                cmd,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            if result.returncode != 0:
+                return None
+            payload = json.loads(result.stdout)
+            if payload.get("errors"):
+                return None
+            data = payload["data"]
+            viewer = str(data["viewer"]["login"] or "").lower()
+            pr = data["repository"]["pullRequest"]
+            current_head = pr["headRefOid"]
+            if not viewer or not current_head or (head and head != current_head):
+                return None
+            head = current_head
+            reviews = pr["reviews"]
+            for review in reviews["nodes"]:
+                author = str((review.get("author") or {}).get("login") or "").lower()
+                when = _parse_github_ts(review.get("submittedAt"))
+                if (
+                    author == viewer
+                    and review.get("state")
+                    in {"APPROVED", "CHANGES_REQUESTED", "COMMENTED"}
+                    and (review.get("commit") or {}).get("oid") == head
+                    and when is not None
+                    and when >= since
+                ):
+                    return True
+            page = reviews["pageInfo"]
+            if not page["hasNextPage"]:
+                return False
+            after = page["endCursor"]
+            if not after or after in seen:
+                return None
+            seen.add(after)
+        except Exception:
+            return None
+
+
 def fetch_pr_snapshot(
     repo: str,
     number: int | str,
