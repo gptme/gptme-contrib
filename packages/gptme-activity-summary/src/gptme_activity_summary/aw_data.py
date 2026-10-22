@@ -74,32 +74,6 @@ class AWActivity:
         return self.total_active_seconds / 3600
 
 
-def _get_client() -> Any:
-    """Create an aw-client instance.
-
-    Returns the client or None if aw-client is not available.
-    """
-    try:
-        from aw_client import ActivityWatchClient
-    except ImportError:
-        logger.debug("aw-client not installed")
-        return None
-
-    server = _parse_aw_server()
-    if server is None:
-        logger.warning("Invalid AW_SERVER URL; ActivityWatch is unavailable")
-        return None
-    protocol, host, port, _base_url = server
-
-    return ActivityWatchClient(
-        "gptme-activity-summary",
-        host=host,
-        port=port,
-        protocol=protocol,
-        testing=False,
-    )
-
-
 def _parse_aw_server() -> tuple[str, str, int, str] | None:
     """Parse AW_SERVER into the aw-client arguments and canonical origin."""
     if not AW_SERVER or any(
@@ -149,6 +123,32 @@ def _parse_aw_server() -> tuple[str, str, int, str] | None:
     host = f"[{hostname}]" if ":" in hostname else hostname
     base_url = f"{protocol}://{host}:{port}"
     return protocol, host, port, base_url
+
+
+def _get_client() -> Any:
+    """Create an aw-client instance.
+
+    Returns the client or None if aw-client is not available.
+    """
+    try:
+        from aw_client import ActivityWatchClient
+    except ImportError:
+        logger.debug("aw-client not installed")
+        return None
+
+    server = _parse_aw_server()
+    if server is None:
+        logger.warning("Invalid AW_SERVER URL; ActivityWatch is unavailable")
+        return None
+    protocol, host, port, _base_url = server
+
+    return ActivityWatchClient(
+        "gptme-activity-summary",
+        host=host,
+        port=port,
+        protocol=protocol,
+        testing=False,
+    )
 
 
 def _find_bucket(client: Any, prefix: str) -> str | None:
