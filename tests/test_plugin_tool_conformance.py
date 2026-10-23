@@ -250,7 +250,13 @@ _EXECUTOR_SPECS = [ps for ps in _SPECS if ps.spec.execute is not None]
 def test_plugin_module_imports_succeeded(module_name: str, error: Exception) -> None:
     """Missing dependencies are named skips; broken initialization is a failure."""
     message = f"{module_name}: conformance not checked: {type(error).__name__}: {error}"
-    if isinstance(error, ModuleNotFoundError):
+    if (
+        isinstance(error, ModuleNotFoundError)
+        and error.name
+        and error.name.split(".")[0] not in _plugin_package_names()
+    ):
+        # Only absent external dependencies are optional. Missing modules in
+        # any local plugin (including the discovered package itself) are bugs.
         pytest.skip(message)
     pytest.fail(message)
 
@@ -411,13 +417,46 @@ def test_import_failure_reporting_policy() -> None:
         pytest.skip.Exception, match="missing_plugin.*missing_dependency"
     ):
         test_plugin_module_imports_succeeded(
-            "missing_plugin", ModuleNotFoundError("missing_dependency")
+            "missing_plugin",
+            ModuleNotFoundError("missing_dependency", name="missing_dependency"),
         )
     for error in (RuntimeError("initialization failed"), ImportError("broken API")):
         with pytest.raises(
             pytest.fail.Exception, match="broken_plugin.*conformance not checked"
         ):
             test_plugin_module_imports_succeeded("broken_plugin", error)
+
+
+@pytest.mark.parametrize(
+    "missing_name", ["conformance_internal.missing", "conformance_internal"]
+)
+def test_discovery_fails_for_missing_plugin_modules(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, missing_name: str
+) -> None:
+    import sys
+
+    package = tmp_path / "conformance_internal"
+    package.mkdir()
+    (package / "__init__.py").write_text(f"import {missing_name}\n")
+    if missing_name == "conformance_internal":
+        # A discovered package can also disappear before it is imported.
+        (package / "__init__.py").unlink()
+        package.rmdir()
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(
+        sys.modules[__name__], "_plugin_package_names", lambda: ["conformance_internal"]
+    )
+    errors: list[tuple[str, Exception]] = []
+    assert list(_iter_plugin_specs(errors)) == []
+    assert len(errors) == 1
+    module_name, error = errors[0]
+    assert isinstance(error, ModuleNotFoundError)
+    assert error.name == missing_name
+    try:
+        with pytest.raises(pytest.fail.Exception, match="conformance not checked"):
+            test_plugin_module_imports_succeeded(module_name, error)
+    except pytest.skip.Exception:
+        pytest.fail("a missing plugin module was incorrectly skipped")
 
 
 def test_guard_still_counts_literal_subscript_reads() -> None:
