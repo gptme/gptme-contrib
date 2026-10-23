@@ -76,27 +76,33 @@ def _plugin_package_names() -> list[str]:
     return names
 
 
-def _iter_plugin_specs() -> Iterator[PluginSpec]:
-    """Yield every ToolSpec defined by a plugin in this repo."""
+def _iter_plugin_specs(
+    import_errors: list[tuple[str, Exception]],
+) -> Iterator[PluginSpec]:
+    """Yield plugin ToolSpecs, recording every module that could not be checked.
+
+    Walk explicitly rather than using walk_packages: the latter imports
+    subpackages itself and can swallow ImportError or abort on other errors.
+    """
     seen: set[int] = set()
-    for pkg_name in _plugin_package_names():
+
+    def visit(module_name: str) -> Iterator[PluginSpec]:
         try:
-            pkg = importlib.import_module(pkg_name)
-        except Exception:  # pragma: no cover - optional dependency missing
-            continue
-        modules = [pkg]
-        if hasattr(pkg, "__path__"):
-            for info in pkgutil.walk_packages(pkg.__path__, prefix=f"{pkg_name}."):
-                try:
-                    modules.append(importlib.import_module(info.name))
-                except Exception:  # pragma: no cover - optional dependency missing
-                    continue
-        for module in modules:
-            for obj in vars(module).values():
-                if not isinstance(obj, ToolSpec) or id(obj) in seen:
-                    continue
-                seen.add(id(obj))
-                yield PluginSpec(module=module.__name__, name=obj.name, spec=obj)
+            module = importlib.import_module(module_name)
+        except Exception as exc:
+            import_errors.append((module_name, exc))
+            return
+        for obj in vars(module).values():
+            if not isinstance(obj, ToolSpec) or id(obj) in seen:
+                continue
+            seen.add(id(obj))
+            yield PluginSpec(module=module.__name__, name=obj.name, spec=obj)
+        if hasattr(module, "__path__"):
+            for info in pkgutil.iter_modules(module.__path__, prefix=f"{module_name}."):
+                yield from visit(info.name)
+
+    for pkg_name in _plugin_package_names():
+        yield from visit(pkg_name)
 
 
 def _signature_violation(execute: Any) -> str | None:
@@ -151,6 +157,7 @@ def _kwargs_keys_read(func: Any) -> set[str] | None:
 
     keys: set[str] = set()
     touches_kwargs = False
+    literal_access = False
     for node in ast.walk(funcdef):
         if isinstance(node, ast.Name) and node.id == "kwargs":
             touches_kwargs = True
@@ -171,13 +178,15 @@ def _kwargs_keys_read(func: Any) -> set[str] | None:
             and isinstance(node.slice, ast.Constant)
             and isinstance(node.slice.value, str)
         ):
-            keys.add(node.slice.value)
+            literal_access = True
+            if isinstance(node.ctx, ast.Load):
+                keys.add(node.slice.value)
 
     if not touches_kwargs:
         # The executor never looks at kwargs: a native call carries no other
         # input, so any declared parameter is unreachable.
         return set()
-    if not keys:
+    if not keys and not literal_access:
         # kwargs is used, but not with literal keys: cannot judge statically.
         return None
     return keys
@@ -204,8 +213,22 @@ def _unreachable_params(plugin_spec: PluginSpec) -> set[str]:
     return declared - keys
 
 
-_SPECS = list(_iter_plugin_specs())
+_IMPORT_ERRORS: list[tuple[str, Exception]] = []
+_SPECS = list(_iter_plugin_specs(_IMPORT_ERRORS))
 _EXECUTOR_SPECS = [ps for ps in _SPECS if ps.spec.execute is not None]
+
+
+@pytest.mark.parametrize(
+    ("module_name", "error"),
+    _IMPORT_ERRORS,
+    ids=[name for name, _ in _IMPORT_ERRORS],
+)
+def test_plugin_module_imports_succeeded(module_name: str, error: Exception) -> None:
+    """Missing dependencies are named skips; broken initialization is a failure."""
+    message = f"{module_name}: conformance not checked: {type(error).__name__}: {error}"
+    if isinstance(error, ModuleNotFoundError):
+        pytest.skip(message)
+    pytest.fail(message)
 
 
 def test_plugin_specs_were_discovered() -> None:
@@ -299,3 +322,82 @@ def test_guard_detects_an_unread_declared_param() -> None:
 
     assert _kwargs_keys_read(execute_ignoring_kwargs) == set()
     assert _kwargs_keys_read(execute_reading_kwargs) == {"action"}
+
+
+@pytest.mark.parametrize("operation", ["store", "delete"])
+def test_guard_does_not_count_literal_writes_as_reads(operation: str) -> None:
+    def execute_storing(code: Any, args: Any, kwargs: Any) -> Any:
+        kwargs["action"] = "default"
+        return code
+
+    def execute_deleting(code: Any, args: Any, kwargs: Any) -> Any:
+        del kwargs["action"]
+        return code
+
+    execute = execute_storing if operation == "store" else execute_deleting
+    assert _kwargs_keys_read(execute) == set()
+
+
+def test_discovery_reports_import_failures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A healthy executor must not hide failed packages or submodules."""
+    import sys
+
+    healthy = tmp_path / "conformance_healthy"
+    healthy.mkdir()
+    (healthy / "__init__.py").write_text(
+        "from gptme.tools.base import ToolSpec\n"
+        'tool = ToolSpec(name="healthy", desc="fixture", execute=lambda c, a, k: [])\n'
+    )
+    nested = healthy / "nested"
+    nested.mkdir()
+    (nested / "__init__.py").write_text('raise RuntimeError("nested initialization")\n')
+    broken = tmp_path / "conformance_broken"
+    broken.mkdir()
+    (broken / "__init__.py").write_text(
+        'raise RuntimeError("package initialization")\n'
+    )
+    missing = tmp_path / "conformance_missing"
+    missing.mkdir()
+    (missing / "__init__.py").write_text("import conformance_absent_dependency\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_plugin_package_names",
+        lambda: ["conformance_healthy", "conformance_broken", "conformance_missing"],
+    )
+    errors: list[tuple[str, Exception]] = []
+    try:
+        specs = list(_iter_plugin_specs(errors))
+        assert [ps.name for ps in specs] == ["healthy"]
+        assert {name: type(exc) for name, exc in errors} == {
+            "conformance_healthy.nested": RuntimeError,
+            "conformance_broken": RuntimeError,
+            "conformance_missing": ModuleNotFoundError,
+        }
+    finally:
+        for name in list(sys.modules):
+            if name.startswith("conformance_"):
+                monkeypatch.delitem(sys.modules, name)
+
+
+def test_import_failure_reporting_policy() -> None:
+    with pytest.raises(
+        pytest.skip.Exception, match="missing_plugin.*missing_dependency"
+    ):
+        test_plugin_module_imports_succeeded(
+            "missing_plugin", ModuleNotFoundError("missing_dependency")
+        )
+    for error in (RuntimeError("initialization failed"), ImportError("broken API")):
+        with pytest.raises(
+            pytest.fail.Exception, match="broken_plugin.*conformance not checked"
+        ):
+            test_plugin_module_imports_succeeded("broken_plugin", error)
+
+
+def test_guard_still_counts_literal_subscript_reads() -> None:
+    def execute_reading(code: Any, args: Any, kwargs: Any) -> Any:
+        return kwargs["action"]
+
+    assert _kwargs_keys_read(execute_reading) == {"action"}
