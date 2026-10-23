@@ -142,14 +142,18 @@ class _SubagentProcess:
         self._process.kill()
 
     def close(self) -> None:
+        # Reader/callback errors can reach cleanup with the child still alive.
+        # Stop its group before closing pipes and reaping, just as cancellation
+        # and timeout do; otherwise wait() can replace the original error.
+        if self.returncode is None:
+            _kill_process_tree(self)
         for pipe in self._pipes:
             pipe.close()
         for stream in (self._process.stdout, self._process.stderr):
             if stream is not None:
                 stream.close()
-        # Callers have already waited for exit or sent SIGKILL. Reap here,
-        # without awaiting pipe EOF or another cancellable cleanup task, so
-        # running cancellation and timeout cannot leave an unwaited child.
+        # Reap without awaiting pipe EOF or another cancellable cleanup task,
+        # so cancellation, timeout and ordinary errors cannot leave a zombie.
         self._process.wait(timeout=_CANCEL_PIPE_DRAIN_TIMEOUT_SECONDS)
 
     async def wait(self) -> int:

@@ -1357,6 +1357,69 @@ def test_running_subagent_is_reaped_before_execute_returns(
             process._process.wait(timeout=1)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="needs waitpid and process groups")
+@pytest.mark.parametrize("output_stream", ["stdout", "stderr"])
+def test_subagent_reader_error_delivers_result_and_reaps_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output_stream: str
+) -> None:
+    """A line-limit error must not be replaced by cleanup's TimeoutExpired."""
+    import sys
+
+    script = tmp_path / "fake-subagent.py"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import sys, time\n"
+        f"sys.{output_stream}.write('x' * 70_000 + '\\n')\n"
+        f"sys.{output_stream}.flush()\n"
+        "time.sleep(30)\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.delenv("GPTME_VOICE_SUBAGENT_PATH", raising=False)
+    monkeypatch.setattr(tool_bridge, "_TIMEOUT_BINARY_AVAILABLE", False)
+    real_spawn = tool_bridge._spawn_subagent
+    processes: list[tool_bridge._SubagentProcess] = []
+    temporary_files: list[Path] = []
+
+    async def _capture_spawn(*args, **kwargs):
+        temporary_files.extend(tmp_path.glob("gptme-voice-*"))
+        process = await real_spawn(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(tool_bridge, "_spawn_subagent", _capture_spawn)
+    monkeypatch.setattr(tool_bridge.tempfile, "tempdir", str(tmp_path))
+
+    async def _exercise() -> None:
+        on_result = AsyncMock()
+        bridge = GptmeToolBridge(
+            workspace=str(tmp_path),
+            gptme_path=str(script),
+            on_result=on_result,
+            transcript_provider=lambda: [{"role": "user", "text": "Test cleanup"}],
+        )
+        bridge.transcript_tail_turns = 1
+        dispatch = await bridge.handle_function_call("subagent", {"task": "read"})
+        task_id = dispatch["task_id"]
+        pending = bridge._pending_tasks[task_id]
+        await asyncio.wait_for(pending.task, timeout=5)
+        on_result.assert_awaited_once()
+        assert "longer than limit" in on_result.call_args.args[0]
+        status = await bridge.handle_function_call("subagent_status", {})
+        assert status["pending"] == []
+        assert status["recent_completions"][0]["status"] == "error"
+        assert len(temporary_files) == 2
+        assert all(not path.exists() for path in temporary_files)
+        with pytest.raises(ChildProcessError):
+            os.waitpid(processes[0].pid, os.WNOHANG)
+
+    try:
+        asyncio.run(_exercise())
+    finally:
+        for process in processes:
+            tool_bridge._kill_process_tree(process)
+            process.close()
+
+
 @pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")
 def test_cancel_kills_subagent_descendants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
