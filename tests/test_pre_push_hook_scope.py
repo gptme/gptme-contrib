@@ -16,6 +16,7 @@ code does not actually implement.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -199,6 +200,146 @@ def test_range_limit_above_the_range_still_scans(tmp_path: Path) -> None:
     )
     assert SKIP_MESSAGE not in proc.stderr, proc.stderr
     assert proc.returncode == 1
+
+
+def test_commits_already_on_another_remote_are_not_rescanned(tmp_path: Path) -> None:
+    """A fork rebase must not re-check upstream's own landed mass deletion.
+
+    The fork's branch sits at ``base``; upstream master already contains the
+    deletion commit; the rebased branch adds one commit on top. Only that new
+    commit is ours to check.
+    """
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "update-ref", "refs/remotes/upstream/master", head)
+    tip = _commit(repo, "new.txt")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {tip} refs/heads/topic {base}\n",
+        "fork",
+        "git@github.com:me/r.git",
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
+@pytest.mark.parametrize(
+    "new_branch,remote", [(False, "upstream"), (True, "upstream"), (True, "mirror")]
+)
+def test_pruned_exclusion_ref_does_not_disable_mass_delete_scan(
+    tmp_path: Path, new_branch: bool, remote: str
+) -> None:
+    """Prune after enumeration, before rev-list, without a timing-dependent fetch."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    ref = f"refs/remotes/{remote}/main"
+    _git(repo, "update-ref", ref, base)
+    real_git = shutil.which("git")
+    assert real_git is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = for-each-ref ]; then\n'
+        '    output=$("$REAL_GIT" "$@") || exit $?\n'
+        '    case "$output" in\n'
+        '        *"$PRUNE_REF "*) "$REAL_GIT" update-ref -d "$PRUNE_REF" ;;\n'
+        "    esac\n"
+        '    printf "%s\\n" "$output"\n'
+        "else\n"
+        '    exec "$REAL_GIT" "$@"\n'
+        "fi\n"
+    )
+    wrapper.chmod(0o755)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
+        "mirror",
+        _git(repo, "remote", "get-url", "mirror"),
+        env={
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "REAL_GIT": real_git,
+            "PRUNE_REF": ref,
+            "MASS_DELETE_COMMIT_RANGE_LIMIT": "0",
+            "MASS_DELETE_THRESHOLD": "1",
+        },
+    )
+    assert not _git(repo, "for-each-ref", "--format=%(refname)", ref)
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+def test_stale_destination_tracking_ref_does_not_bypass_guard(tmp_path: Path) -> None:
+    """A stale origin tracking ref must not let a destructive commit skip the scan.
+
+    Scenario: someone force-reset ``origin/topic`` to ``base`` (deletion's parent).
+    Our local ``refs/remotes/origin/topic`` still points to ``head`` (the deletion
+    commit). Git passes ``remote_sha=base``. The guard must scan ``head``; only the
+    destination remote's stale ref caused the problem, and we must not exclude it.
+    """
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    # Stale: our local tracking ref still points to the deletion commit.
+    _git(repo, "update-ref", "refs/remotes/origin/topic", head)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {base}\n",
+        "origin",
+        "git@github.com:me/r.git",
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
+def test_stale_dest_tracking_ref_does_not_bypass_guard_on_new_branch(
+    tmp_path: Path,
+) -> None:
+    """Stale destination tracking ref must not bypass the guard for a new-branch push.
+
+    Scenario: ``origin/topic`` was deleted remotely but the clone still has
+    ``refs/remotes/origin/topic`` pointing to the destructive commit. Git
+    supplies ``remote_sha=ZERO`` (new branch). The old ``--remotes`` range
+    would exclude ``origin/topic=D``, hiding D from the scan; the fix uses
+    ``_other_remotes`` (which excludes only non-destination remotes).
+    """
+    repo, _base, head = _repo_with_mass_deletion(tmp_path)
+    # Clone retains a stale tracking ref on the push destination.
+    _git(repo, "update-ref", "refs/remotes/origin/topic", head)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "origin",
+        "git@github.com:me/r.git",
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
+def test_backup_remote_fetching_same_repo_is_not_excluded(tmp_path: Path) -> None:
+    """A remote that fetches from the destination must not hide destructive commits.
+
+    The exclusion list is built from push URLs, but tracking refs describe what
+    was *fetched*. A 'backup' remote configured to fetch from the same repository
+    as origin but push to a different forge can retain a stale tracking ref
+    pointing to a destructive commit. That ref must not exclude the commit from
+    the scan when we push to origin.
+    """
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    origin_url = _git(repo, "remote", "get-url", "origin").strip()
+    # backup fetches from the same place as origin (same URL) but pushes elsewhere.
+    _git(repo, "remote", "set-url", "backup", origin_url)
+    _git(repo, "remote", "set-url", "--push", "backup", str(tmp_path / "backup.git"))
+    # Stale tracking ref on backup pointing to the deletion commit.
+    _git(repo, "update-ref", "refs/remotes/backup/topic", head)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {base}\n",
+        "origin",
+        origin_url,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, (
+        "guard should fire: backup's stale ref points to the deletion commit "
+        f"but must not exclude it\nstdout={proc.stdout!r}\nstderr={proc.stderr!r}"
+    )
 
 
 def test_range_limit_smaller_than_range_skips(tmp_path: Path) -> None:
@@ -395,3 +536,951 @@ def test_force_reset_guard_runs_when_origin_pushurl_matches_fetchurl(
     )
     assert FORCE_RESET_ERROR in proc.stderr, proc.stderr
     assert proc.returncode == 1
+
+
+def test_single_remote_new_branch_scopes_range_by_other_dest_refs(
+    tmp_path: Path,
+) -> None:
+    """New-branch push in a single-remote clone must scope the range to new commits.
+
+    Scenario: only origin is configured; origin/master already contains the base
+    commit. A new topic branch has one mass-deletion commit on top. Without scoping,
+    the range is all local history (2 commits > limit 1) and the guard skips the
+    scan. With the fix, origin/master excludes the base commit so the range is just
+    the deletion (1 commit, not > 1), the guard runs, and the push is blocked.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "remote", "add", "origin", str(tmp_path / "nonexistent.git"))
+
+    # Seed files so the deletion commit exceeds the threshold.
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (repo / name).write_text("x\n")
+    _git(repo, "add", "a.txt", "b.txt", "c.txt")
+    _git(repo, "commit", "--no-verify", "-qm", "seed")
+    base = _git(repo, "rev-parse", "HEAD")
+    # origin/master already published the seed commit.
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+
+    # New topic branch: one mass-deletion on top of base.
+    _git(repo, "rm", "-q", "a.txt", "b.txt", "c.txt")
+    _git(repo, "commit", "--no-verify", "-qm", "delete everything")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    # Limit 1: scoped range is just the deletion (1 commit, not > 1) → guard runs.
+    # Without fix the range is all local history (2 commits > 1) → guard skips.
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "origin",
+        _git(repo, "remote", "get-url", "origin"),
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "1", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
+def test_bare_url_push_resolves_dest_remote_for_range_scoping(
+    tmp_path: Path,
+) -> None:
+    """Pushing by bare URL must still scope the range using the matching remote's refs.
+
+    Scenario: origin's push URL is the destination. The user runs
+    `git push <origin-url> topic` (git passes the URL as argv[1], not the name
+    "origin"). origin/master already holds the base commit. Without resolving
+    the configured remote name from the URL, _dest_remote_name stays as the raw
+    URL string and for-each-ref finds nothing, leaving the range unscoped. With
+    the fix, the loop recognises that origin's push URL matches, sets
+    _dest_remote_name="origin", and uses refs/remotes/origin/* for scoping.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    origin_url = str(tmp_path / "nonexistent.git")
+    _git(repo, "remote", "add", "origin", origin_url)
+
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (repo / name).write_text("x\n")
+    _git(repo, "add", "a.txt", "b.txt", "c.txt")
+    _git(repo, "commit", "--no-verify", "-qm", "seed")
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+
+    _git(repo, "rm", "-q", "a.txt", "b.txt", "c.txt")
+    _git(repo, "commit", "--no-verify", "-qm", "delete everything")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    # Pass origin_url as argv[1] (the remote "name") and again as argv[2] (URL),
+    # simulating `git push <url> topic` with no configured remote name.
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        origin_url,  # argv[1]: URL as remote name
+        origin_url,  # argv[2]: URL
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "1", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
+def test_relative_remote_url_matches_absolute_destination(tmp_path: Path) -> None:
+    """Relative-URL origin is recognised as the push destination.
+
+    When origin is configured with a relative path (../nonexistent.git) and the
+    push is made to the equivalent absolute URL, the hook must treat them as the
+    same repository.  Before this fix, _canonical_remote_url left the paths
+    distinct so origin entered _other_remotes; a stale refs/remotes/origin/topic
+    at the destructive commit D was then excluded from the scan via
+    ``--remotes=origin``, silently permitting the destructive re-push.
+    """
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    # repo is at tmp_path/repo; ../nonexistent.git resolves to tmp_path/nonexistent.git
+    dest_abs = str(tmp_path / "nonexistent.git")
+    _git(repo, "remote", "set-url", "origin", "../nonexistent.git")
+    # Stale tracking ref at the destructive commit on the push destination.
+    _git(repo, "update-ref", "refs/remotes/origin/topic", head)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {base}\n",
+        dest_abs,
+        dest_abs,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, (
+        "Guard must fire even when origin uses a relative-path URL alias.\n"
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+
+
+@pytest.mark.parametrize("remote_sha", [ZERO, "base"])
+def test_bare_relative_alias_does_not_hide_destination_commit(
+    tmp_path: Path, remote_sha: str
+) -> None:
+    """A plain relative path is a local URL too, even without ./ or ../."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = str(repo / "destination.git")
+    _git(repo, "remote", "set-url", "origin", destination)
+    _git(repo, "remote", "set-url", "backup", "destination.git")
+    _git(repo, "update-ref", "refs/remotes/backup/topic", head)
+    advertised = base if remote_sha == "base" else remote_sha
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {advertised}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("remote_sha", [ZERO, "base"])
+@pytest.mark.parametrize("file_url_destination", [False, True])
+@pytest.mark.parametrize("filename", ["Destination.git", "My Repo%20:Name.git"])
+def test_file_url_alias_does_not_hide_destination_commit(
+    tmp_path: Path, remote_sha: str, file_url_destination: bool, filename: str
+) -> None:
+    """Local paths and file:// URLs must identify the same destination."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    local_path = tmp_path / filename
+    file_url = local_path.as_uri()
+    configured, destination = (
+        (str(local_path), file_url)
+        if file_url_destination
+        else (file_url, str(local_path))
+    )
+    _git(repo, "remote", "set-url", "origin", configured)
+    _git(repo, "update-ref", "refs/remotes/origin/topic", head)
+    advertised = base if remote_sha == "base" else remote_sha
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {advertised}\n",
+        destination,
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("remote_sha", [ZERO, "base"])
+def test_secondary_push_url_alias_does_not_hide_destination_commit(
+    tmp_path: Path, remote_sha: str
+) -> None:
+    """Every configured push destination participates in alias protection."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = _git(repo, "remote", "get-url", "origin")
+    mirror = _git(repo, "remote", "get-url", "backup")
+    _git(repo, "remote", "set-url", "--add", "--push", "backup", mirror)
+    _git(repo, "remote", "set-url", "--add", "--push", "backup", destination)
+    _git(repo, "update-ref", "refs/remotes/backup/topic", head)
+    advertised = base if remote_sha == "base" else remote_sha
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {advertised}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+def test_head_prefixed_branch_scopes_new_branch_range(tmp_path: Path) -> None:
+    """HEAD-feature is an ordinary branch, not the remote HEAD symbolic ref."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "update-ref", "refs/remotes/origin/HEAD-feature", base)
+    destination = _git(repo, "remote", "get-url", "origin")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "1", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://FORGE.example/team/Repo.git", "forge.example/team/Repo"),
+        ("git@FORGE.example:team/Repo.git", "scp-home:git@forge.example/team/Repo"),
+        ("other@FORGE.example:team/Repo.git", "scp-home:other@forge.example/team/Repo"),
+        ("git@FORGE.example:/team/Repo.git", "forge.example/team/Repo"),
+        ("ssh://git@FORGE.example/team/Repo.git", "forge.example/team/Repo"),
+        ("https://GITHUB.com/Team/Repo.git", "github.com/team/repo"),
+    ],
+)
+def test_network_identity_preserves_case_sensitive_repository_paths(
+    url: str, expected: str
+) -> None:
+    """Only GitHub is known to have case-insensitive repository paths."""
+    functions = HOOK.read_text().split(
+        "# Read stdin before any subprocess consumes it."
+    )[0]
+    proc = subprocess.run(
+        ["bash", "-c", functions + '\n_canonical_remote_url "$1"', "hook", url],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc.stdout.strip() == expected
+
+
+@pytest.mark.parametrize("scheme", ["https", "ssh"])
+def test_case_sensitive_push_alias_does_not_borrow_wrong_tracking_baseline(
+    tmp_path: Path, scheme: str
+) -> None:
+    """A fetch-only alias must not become the new-branch push baseline."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    prefix = "https://forge.example/" if scheme == "https" else "git@forge.example:"
+    destination = f"{prefix}team/repo.git"
+    _git(repo, "remote", "add", "alpha", destination)
+    _git(repo, "remote", "set-url", "--push", "alpha", f"{prefix}team/Repo.git")
+    _git(repo, "remote", "add", "beta", destination)
+    _git(repo, "update-ref", "refs/remotes/alpha/master", head)
+    _git(repo, "update-ref", "refs/remotes/beta/master", base)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        destination,
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("nested_alias", [False, True])
+def test_new_branch_does_not_borrow_nested_remote_baseline(
+    tmp_path: Path, nested_alias: bool
+) -> None:
+    """for-each-ref's recursive prefix is not an exact remote namespace."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = _git(repo, "remote", "get-url", "origin")
+    _git(repo, "remote", "add", "team", destination)
+    nested_url = destination if nested_alias else str(tmp_path / "nested.git")
+    # Newer git (2.55 on CI) refuses `remote add` for a nested name, but older
+    # git and hand-edited config still produce one; write the config directly.
+    _git(repo, "config", "remote.team/fork.url", nested_url)
+    _git(
+        repo,
+        "config",
+        "remote.team/fork.fetch",
+        "+refs/heads/*:refs/remotes/team/fork/*",
+    )
+    # A real destination baseline keeps range limiting active; the nested
+    # remote's stale topic must not hide the destructive new branch commit.
+    _git(repo, "update-ref", "refs/remotes/team/master", base)
+    _git(repo, "update-ref", "refs/remotes/team/fork/topic", head)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "team",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "1", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    # The global pass already conservatively protects all nested namespaces
+    # under the destination prefix, even when their URLs differ. The baseline
+    # pass must not reintroduce those excluded refs through recursive traversal.
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("new_branch", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_absolute_ssh_alias_retains_destination_commits(
+    tmp_path: Path, new_branch: bool, reverse: bool
+) -> None:
+    """SCP absolute paths and ssh:// paths describe the same destination."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination, alias = "ssh://git@host/srv/r.git", "git@host:/srv/r.git"
+    if reverse:
+        destination, alias = alias, destination
+    _git(repo, "remote", "set-url", "origin", destination)
+    _git(repo, "remote", "set-url", "backup", alias)
+    _git(repo, "update-ref", "refs/remotes/backup/topic", head)
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("new_branch", [False, True])
+@pytest.mark.parametrize("exact", [False, True])
+def test_destination_custom_fetch_namespace_is_not_another_remote(
+    tmp_path: Path, new_branch: bool, exact: bool
+) -> None:
+    """A remote name does not establish ownership of its tracking namespace."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = _git(repo, "remote", "get-url", "origin")
+    _git(repo, "remote", "add", "cache", str(tmp_path / "cache.git"))
+    refspec = (
+        "+refs/heads/topic:refs/remotes/cache/topic"
+        if exact
+        else "+refs/heads/*:refs/remotes/cache/*"
+    )
+    _git(repo, "config", "--add", "remote.origin.fetch", refspec)
+    _git(repo, "update-ref", "refs/remotes/cache/topic", head)
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("named", [False, True])
+def test_push_only_alias_cannot_supply_new_branch_baseline(
+    tmp_path: Path, named: bool
+) -> None:
+    """Tracking history from A is not a baseline for a push to B."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = str(tmp_path / "destination.git")
+    _git(repo, "remote", "add", "alpha", str(tmp_path / "source.git"))
+    _git(repo, "config", "remote.alpha.pushurl", destination)
+    _git(repo, "update-ref", "refs/remotes/alpha/master", head)
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "alpha" if named else destination,
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("wildcard", [False, True])
+def test_renamed_fetch_tracking_ref_is_not_new_branch_baseline(
+    tmp_path: Path, wildcard: bool
+) -> None:
+    """A deleted branch's stale tracking ref can have a different local name."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = _git(repo, "remote", "get-url", "mirror")
+    spec = (
+        "+refs/heads/*:refs/remotes/mirror/cache-*"
+        if wildcard
+        else "+refs/heads/topic:refs/remotes/mirror/cache"
+    )
+    _git(repo, "config", "--replace-all", "remote.mirror.fetch", spec)
+    tracking = "cache-topic" if wildcard else "cache"
+    _git(repo, "update-ref", f"refs/remotes/mirror/{tracking}", head)
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "mirror",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("wildcard", [False, True])
+def test_other_remote_fetch_mapping_is_not_destination_baseline(
+    tmp_path: Path, wildcard: bool
+) -> None:
+    """A fetch destination's prefix does not prove its repository of origin."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = _git(repo, "remote", "get-url", "mirror")
+    _git(repo, "remote", "add", "cache", str(tmp_path / "cache.git"))
+    spec = (
+        "+refs/heads/*:refs/remotes/mirror/cache-*"
+        if wildcard
+        else "+refs/heads/main:refs/remotes/mirror/cache-topic"
+    )
+    _git(repo, "config", "--replace-all", "remote.cache.fetch", spec)
+    _git(repo, "update-ref", "refs/remotes/mirror/cache-topic", head)
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "mirror",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+def test_empty_fetch_destination_does_not_abort_ordinary_push(tmp_path: Path) -> None:
+    """A FETCH_HEAD-only refspec must not leak false status under set -e."""
+    repo = _init(tmp_path)
+    base = _commit(repo, "seed.txt")
+    head = _commit(repo, "topic.txt")
+    _git(repo, "config", "--add", "remote.mirror.fetch", "refs/heads/main:")
+    destination = _git(repo, "remote", "get-url", "mirror")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {base}\n",
+        "mirror",
+        destination,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_ssh_home_relative_remote_is_not_root_absolute_baseline(tmp_path: Path) -> None:
+    """Protect the relative remote from the other-history exemption to isolate aliasing."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = "git@host:/repo.git"
+    _git(repo, "remote", "add", "alpha", "git@host:repo.git")
+    # A secondary push URL protects alpha's refs from the deliberate exemption
+    # for other repositories; its different fetch endpoint cannot supply history.
+    _git(repo, "config", "--add", "remote.alpha.pushurl", "git@host:repo.git")
+    _git(repo, "config", "--add", "remote.alpha.pushurl", destination)
+    _git(repo, "update-ref", "refs/remotes/alpha/master", head)
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        destination,
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("namespace", ["refs/remotes/vendor", "refs/vendor"])
+@pytest.mark.parametrize("wildcard", [False, True])
+def test_other_remote_custom_fetch_history_is_excluded(
+    tmp_path: Path, namespace: str, wildcard: bool
+) -> None:
+    """Published upstream history is exempt even outside refs/remotes/<name>."""
+    repo, base, deletion = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "remote", "set-url", "upstream", str(tmp_path / "upstream.git"))
+    source = "*" if wildcard else "master"
+    _git(
+        repo,
+        "config",
+        "--replace-all",
+        "remote.upstream.fetch",
+        f"+refs/heads/{source}:{namespace}/{source}",
+    )
+    _git(repo, "update-ref", f"{namespace}/master", deletion)
+    head = _commit(repo, "local.txt")
+    destination = _git(repo, "remote", "get-url", "origin")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {base}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "PUSH BLOCKED: commit" not in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("namespace", ["refs/remotes/cache", "refs/cache"])
+@pytest.mark.parametrize("wildcard", [False, True])
+def test_destination_custom_fetch_history_scopes_new_branch_range(
+    tmp_path: Path, namespace: str, wildcard: bool
+) -> None:
+    """Mapped destination history must scope the range before the size limit."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    source = "*" if wildcard else "master"
+    _git(
+        repo,
+        "config",
+        "--replace-all",
+        "remote.origin.fetch",
+        f"+refs/heads/{source}:{namespace}/{source}",
+    )
+    _git(repo, "update-ref", f"{namespace}/master", base)
+    destination = _git(repo, "remote", "get-url", "origin")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "1", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("new_branch", [False, True])
+def test_custom_fetch_outside_remotes_retains_stale_destination(
+    tmp_path: Path, new_branch: bool
+) -> None:
+    """Widening enumeration must not exempt mapped destination history."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(
+        repo,
+        "config",
+        "--replace-all",
+        "remote.origin.fetch",
+        "+refs/heads/*:refs/cache/*",
+    )
+    _git(repo, "update-ref", "refs/cache/topic", head)
+    _git(repo, "update-ref", "refs/cache/master", base)
+    destination = _git(repo, "remote", "get-url", "origin")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+def test_unmapped_local_refs_are_not_new_branch_baselines(tmp_path: Path) -> None:
+    """A wider ref walk cannot turn ordinary local branches/tags into history."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    _git(repo, "update-ref", "refs/tags/destructive", head)
+    _git(repo, "update-ref", "refs/cache/unowned", head)
+    destination = _git(repo, "remote", "get-url", "origin")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("new_branch", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_gitlab_ssh_https_alias_retains_destination_commits(
+    tmp_path: Path, new_branch: bool, reverse: bool
+) -> None:
+    """GitLab's hosted SSH paths identify the same repo as HTTPS paths."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination, alias = (
+        "https://gitlab.com/team/Repo.git",
+        "git@gitlab.com:team/Repo.git",
+    )
+    if reverse:
+        destination, alias = alias, destination
+    _git(repo, "remote", "set-url", "origin", destination)
+    _git(repo, "remote", "set-url", "backup", alias)
+    _git(repo, "update-ref", "refs/remotes/backup/topic", head)
+    remote_sha = ZERO if new_branch else base
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {remote_sha}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("alias_name", ["HEAD", "alias", "nested/alias"])
+@pytest.mark.parametrize("chained", [False, True])
+def test_symbolic_custom_tracking_ref_cannot_hide_pushed_branch(
+    tmp_path: Path, alias_name: str, chained: bool
+) -> None:
+    """Symbolic aliases cannot reintroduce the excluded pushed-branch tip."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(
+        repo,
+        "config",
+        "--replace-all",
+        "remote.origin.fetch",
+        "+refs/heads/*:refs/cache/*",
+    )
+    _git(repo, "update-ref", "refs/cache/master", base)
+    _git(repo, "update-ref", "refs/cache/topic", head)
+    target = "refs/cache/topic"
+    if chained:
+        _git(repo, "symbolic-ref", "refs/aliases/intermediate", target)
+        target = "refs/aliases/intermediate"
+    _git(repo, "symbolic-ref", f"refs/cache/{alias_name}", target)
+    destination = _git(repo, "remote", "get-url", "origin")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "1", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("new_branch", [False, True])
+@pytest.mark.parametrize("namespace", ["refs/remotes/upstream", "refs/vendor"])
+@pytest.mark.parametrize("chained", [False, True])
+def test_other_remote_symbolic_ref_cannot_hide_destination_commit(
+    tmp_path: Path, new_branch: bool, namespace: str, chained: bool
+) -> None:
+    """An upstream-named alias is not independent published upstream history."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "remote", "set-url", "upstream", str(tmp_path / "upstream.git"))
+    _git(
+        repo,
+        "config",
+        "--replace-all",
+        "remote.upstream.fetch",
+        f"+refs/heads/*:{namespace}/*",
+    )
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    _git(repo, "update-ref", "refs/remotes/origin/topic", head)
+    target = "refs/remotes/origin/topic"
+    if chained:
+        _git(repo, "symbolic-ref", "refs/aliases/intermediate", target)
+        target = "refs/aliases/intermediate"
+    _git(repo, "symbolic-ref", f"{namespace}/HEAD", target)
+    destination = _git(repo, "remote", "get-url", "origin")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
+        "origin",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("branch", ["topic&more", "nested/topic&more"])
+@pytest.mark.parametrize("range_limit", ["0", "2"])
+def test_ampersand_in_mapped_branch_cannot_hide_stale_tip(
+    tmp_path: Path, branch: str, range_limit: str
+) -> None:
+    """Fetch wildcard substitution must preserve literal branch-name ampersands."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(
+        repo,
+        "config",
+        "--replace-all",
+        "remote.origin.fetch",
+        "+refs/heads/*:refs/cache/cache-*",
+    )
+    _git(repo, "update-ref", "refs/cache/cache-master", base)
+    _git(repo, "update-ref", f"refs/cache/cache-{branch}", head)
+    # A strict ancestor avoids the independent equal-tip baseline filter.
+    # If wildcard substitution loses the literal ampersand, the stale deletion
+    # becomes a baseline and only this harmless child is scanned.
+    tip = _commit(repo, "harmless-child.txt")
+    destination = _git(repo, "remote", "get-url", "origin")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/{branch} {tip} refs/heads/{branch} {ZERO}\n",
+        "origin",
+        destination,
+        env={
+            "MASS_DELETE_COMMIT_RANGE_LIMIT": range_limit,
+            "MASS_DELETE_THRESHOLD": "1",
+            "BASHOPTS": "patsub_replacement",
+        },
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("new_branch", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_worktree_and_git_directory_are_same_destination(
+    tmp_path: Path, new_branch: bool, reverse: bool
+) -> None:
+    """A local repository's worktree and .git paths cannot hide its stale tip."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = tmp_path / "destination"
+    _git(repo, "init", "-q", str(destination))
+    urls = [str(destination), str(destination / ".git")]
+    if reverse:
+        urls.reverse()
+    _git(repo, "remote", "set-url", "origin", urls[0])
+    _git(repo, "remote", "set-url", "backup", urls[1])
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    _git(repo, "update-ref", "refs/remotes/backup/topic", head)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
+        "origin",
+        urls[0],
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("new_branch", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("linked_path", ["worktree", "gitfile", "gitdir"])
+def test_linked_worktrees_are_same_destination(
+    tmp_path: Path, new_branch: bool, reverse: bool, linked_path: str
+) -> None:
+    """Shared branch refs must have one identity despite private Git directories."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    destination = tmp_path / "destination"
+    _git(repo, "clone", "-q", str(repo), str(destination))
+    linked = tmp_path / "linked"
+    _git(destination, "worktree", "add", "-q", "--detach", str(linked))
+    alias = linked
+    if linked_path == "gitfile":
+        alias = linked / ".git"
+    elif linked_path == "gitdir":
+        alias = Path(_git(linked, "rev-parse", "--absolute-git-dir"))
+    urls = [str(destination), str(alias)]
+    if reverse:
+        urls.reverse()
+    _git(repo, "remote", "set-url", "origin", urls[0])
+    _git(repo, "remote", "set-url", "backup", urls[1])
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    _git(repo, "update-ref", "refs/remotes/backup/topic", head)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
+        "origin",
+        urls[0],
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("new_branch", [False, True])
+def test_many_exclusions_use_bounded_revision_arguments(
+    tmp_path: Path, new_branch: bool
+) -> None:
+    """Simulate a low exec argument budget without tens of thousands of refs."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "remote", "set-url", "upstream", str(tmp_path / "upstream.git"))
+    subprocess.run(
+        ["git", "-C", str(repo), "update-ref", "--stdin"],
+        input="".join(
+            f"create refs/remotes/upstream/branch-{i} {base}\n" for i in range(100)
+        ),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    real_git = shutil.which("git")
+    assert real_git is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = rev-list ] && [ "$#" -gt 64 ]; then\n'
+        '    echo "simulated exec argument limit" >&2\n'
+        "    exit 126\n"
+        "fi\n"
+        'exec "$REAL_GIT" "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
+        "origin",
+        _git(repo, "remote", "get-url", "origin"),
+        env={
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "REAL_GIT": real_git,
+            "MASS_DELETE_COMMIT_RANGE_LIMIT": "0",
+            "MASS_DELETE_THRESHOLD": "1",
+        },
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("failure_phase", ["count", "commits"])
+def test_revision_enumeration_failure_blocks_push(
+    tmp_path: Path, failure_phase: str
+) -> None:
+    """A failed count or walk must not masquerade as a safe empty range."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    real_git = shutil.which("git")
+    assert real_git is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = rev-list ]; then\n'
+        '    if { [ "$FAILURE_PHASE" = count ] && [ "${2:-}" = --count ]; } ||\n'
+        '       { [ "$FAILURE_PHASE" = commits ] && [ "${2:-}" != --count ]; }; then\n'
+        '        echo "simulated revision failure" >&2\n'
+        "        exit 128\n"
+        "    fi\n"
+        "fi\n"
+        'exec "$REAL_GIT" "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {base}\n",
+        "origin",
+        _git(repo, "remote", "get-url", "origin"),
+        env={
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "REAL_GIT": real_git,
+            "FAILURE_PHASE": failure_phase,
+            "MASS_DELETE_COMMIT_RANGE_LIMIT": "0",
+            "MASS_DELETE_THRESHOLD": "1",
+        },
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: cannot enumerate mass-delete scan" in proc.stderr
+
+
+@pytest.mark.parametrize("new_branch", [False, True])
+@pytest.mark.parametrize("namespace", ["heads", "tags"])
+@pytest.mark.parametrize("wildcard", [False, True])
+def test_fetch_mapping_cannot_publish_local_branches_or_tags(
+    tmp_path: Path, new_branch: bool, namespace: str, wildcard: bool
+) -> None:
+    """A mirror fetch mapping is not evidence a locally writable ref was fetched."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "update-ref", f"refs/{namespace}/topic", head)
+    spec = "+refs/*:refs/*" if wildcard else f"+refs/heads/topic:refs/{namespace}/topic"
+    _git(repo, "config", "--replace-all", "remote.origin.fetch", spec)
+    destination = _git(repo, "remote", "get-url", "mirror")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO if new_branch else base}\n",
+        "mirror",
+        destination,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("namespace", ["heads", "tags"])
+@pytest.mark.parametrize("wildcard", [False, True])
+def test_destination_fetch_mapping_cannot_borrow_local_baseline(
+    tmp_path: Path, namespace: str, wildcard: bool
+) -> None:
+    """The new-branch baseline must reject locally writable refs too."""
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "update-ref", f"refs/{namespace}/local", head)
+    spec = "+refs/*:refs/*" if wildcard else f"+refs/heads/main:refs/{namespace}/local"
+    _git(repo, "config", "--replace-all", "remote.mirror.fetch", spec)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "mirror",
+        _git(repo, "remote", "get-url", "mirror"),
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+def test_stale_other_destination_branch_is_not_new_branch_baseline(
+    tmp_path: Path,
+) -> None:
+    """A stale destination branch at the pushed tip must not empty the new-branch scan.
+
+    Scenario: origin/master already holds base B. A stale ``mirror/main`` still
+    points at destructive commit D after that branch was reset remotely.
+    Creating ``mirror/topic`` at D used to add ``mirror/main=D`` to
+    ``_dest_other_excl``, producing ``D --not D`` and a silent pass. A destination
+    tracking ref is a safe baseline only when it is a *strict ancestor* of the
+    commit being pushed, so D itself stays in the scan.
+    """
+    repo, base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "update-ref", "refs/remotes/origin/master", base)
+    _git(repo, "update-ref", "refs/remotes/mirror/main", head)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "mirror",
+        _git(repo, "remote", "get-url", "mirror"),
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "0", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert proc.returncode == 1, (
+        "stale dest branch at the pushed tip must not empty the scan "
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert "PUSH BLOCKED: commit" in proc.stderr, proc.stderr
+
+
+def test_fresh_destination_ancestor_still_scopes_new_branch_range(
+    tmp_path: Path,
+) -> None:
+    """The range-limit escape hatch still needs destination ancestor baselines.
+
+    Same shape as ``test_single_remote_new_branch_scopes_range_by_other_dest_refs``,
+    but the ancestor lives on the destination remote itself (``mirror/main=B``)
+    rather than only on origin. Without ancestor baselines the 2-commit range
+    would skip the scan at limit 1.
+    """
+    repo, _base, head = _repo_with_mass_deletion(tmp_path)
+    _git(repo, "update-ref", "refs/remotes/mirror/main", _base)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {head} refs/heads/topic {ZERO}\n",
+        "mirror",
+        _git(repo, "remote", "get-url", "mirror"),
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "1", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert SKIP_MESSAGE not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"

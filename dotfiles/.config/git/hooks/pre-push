@@ -34,6 +34,90 @@ _read_hook_conf() {
 # Used to skip origin-specific work when pushing to a mirror or other remote.
 PUSH_REMOTE_NAME="${1:-}"
 
+# Ask Git to identify existing local repositories, including worktree/.git
+# aliases and gitfiles. Linked worktrees share refs in their common Git directory.
+# Nonexistent paths retain their lexical identity.
+_canonical_local_repository() {
+    local path="$1" git_dir common_dir
+    if git_dir="$(git rev-parse --resolve-git-dir "$path" 2>/dev/null)" ||
+       git_dir="$(git rev-parse --resolve-git-dir "$path/.git" 2>/dev/null)"; then
+        path="$git_dir"
+        if common_dir="$(git --git-dir="$git_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
+            path="$common_dir"
+        fi
+    fi
+    realpath -m -- "$path" 2>/dev/null || printf '%s\n' "$path"
+}
+
+# Normalise a remote URL to a canonical identity string so aliases (HTTPS/SSH
+# variants, hostname case, .git suffix) compare equal. Repository path case is
+# preserved except on GitHub, where repository names are case-insensitive. Unknown shapes
+# return a non-empty but distinct string, so callers fail closed.
+_canonical_remote_url() {
+    local url="$1" file_path="" decoded="" byte
+    # Local file URLs share filesystem identity with plain paths. Decode URL
+    # escapes once (not shell escapes), preserving case and the .git suffix.
+    case "$url" in
+        file:///*) file_path="${url#file://}" ;;
+        file://localhost/*) file_path="${url#file://localhost}" ;;
+    esac
+    if [ -n "$file_path" ]; then
+        while [[ "$file_path" =~ ^([^%]*)%([[:xdigit:]]{2})(.*)$ ]]; do
+            # NUL is not a filesystem byte and cannot be represented in Bash.
+            [ "${BASH_REMATCH[2]}" = "00" ] && { printf '%s\n' "$url"; return; }
+            printf -v byte '%b' "\\x${BASH_REMATCH[2]}"
+            decoded+="${BASH_REMATCH[1]}${byte}"
+            file_path="${BASH_REMATCH[3]}"
+        done
+        url="${decoded}${file_path}"
+        _canonical_local_repository "$url"
+        return
+    fi
+    # Git also accepts bare relative paths (repo.git). Keep filesystem identity
+    # separate from network URL normalization: local paths are case-sensitive.
+    case "$url" in
+        "") return ;;
+        /*|./*|../*) _canonical_local_repository "$url"; return ;;
+        *://*|*:*) ;;
+        *) _canonical_local_repository "$url"; return ;;
+    esac
+    # SCP paths without a leading slash are relative to the SSH user's home,
+    # unlike ssh://host/path and host:/path. Hosted GitHub and GitLab repository
+    # names are exceptions shared by HTTPS and their standard SSH spellings.
+    if [[ "$url" != *://* && "$url" =~ ^([^/:]+):([^/].*)$ ]]; then
+        local scp_authority="${BASH_REMATCH[1]}" scp_path="${BASH_REMATCH[2]}"
+        local scp_host="${scp_authority##*@}" scp_user=""
+        if [[ "$scp_authority" == *@* ]]; then
+            scp_user="${scp_authority%@*}@"
+        fi
+        case "${scp_user}${scp_host,,}" in
+            github.com|*@github.com|ssh.github.com|*@ssh.github.com|git@gitlab.com) ;;
+            *)
+                scp_path="${scp_path%/}"
+                printf 'scp-home:%s%s/%s\n' "$scp_user" "${scp_host,,}" "${scp_path%.git}"
+                return
+                ;;
+        esac
+    fi
+    printf '%s\n' "$url" | sed -E \
+        -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://([^@/]+@)?##' \
+        -e 's#^[^/@:]+@##' \
+        -e 's#^([^/:]+):(22|443)(/|$)#\1\3#' \
+        -e 's#^([^/:]+):/?#\1/#' \
+        -e 's#^[^/]+@##' \
+        -e 's#/$##' \
+        -e 's#\.git$##' | awk '
+            {
+                slash = index($0, "/")
+                host = slash ? substr($0, 1, slash - 1) : $0
+                path = slash ? substr($0, slash) : ""
+                host = tolower(host)
+                if (host == "ssh.github.com") host = "github.com"
+                if (host == "github.com") path = tolower(path)
+                print host path
+            }'
+}
+
 # Read stdin before any subprocess consumes it.
 # Git provides per line: local_ref local_sha remote_ref remote_sha
 # The `|| [ -n "$local_ref" ]` handles the last line without a trailing newline
@@ -63,18 +147,289 @@ if [ -n "$_GUARD_SCRIPT" ]; then
     # shellcheck source=../../../scripts/git/guard-mass-delete.sh
     source "$_GUARD_SCRIPT"
 
+    # Build the per-remote exclusion list once (the push destination is constant
+    # across all refs in one invocation).  Exclude only remotes whose push URL
+    # differs from the destination so that:
+    #  - a stale tracking ref on the destination itself never hides a destructive
+    #    commit from the scan (the core P1 fix), and
+    #  - a URL alias of the destination is treated the same as its canonical name.
+    #
+    # Use argv[2] (the URL git supplies) as the identity source: it works even
+    # when the caller pushes to a bare URL instead of a configured remote name
+    # (in which case git remote get-url would fail).
+    _other_remote_prefixes=()
+    _other_fetch_patterns=()
+    _protected_ref_prefixes=()
+    _protected_fetch_patterns=()
+    _protect_remote_refs() {
+        local remote="$1" spec destination
+        _protected_ref_prefixes+=("refs/remotes/${remote}/")
+        # Tracking refs need not live under the remote's name. Protect every
+        # configured fetch destination too, including exact and wildcard maps.
+        # Ignore negative/source-only refspecs: neither writes a local ref.
+        while IFS= read -r spec; do
+            [[ "$spec" == ^* || "$spec" != *:* ]] && continue
+            destination="${spec#*:}"
+            if [ -n "$destination" ]; then
+                _protected_fetch_patterns+=("$destination")
+            fi
+        done < <(git config --get-all "remote.${remote}.fetch" 2>/dev/null)
+    }
+    _dest_push_url="${2:-}"
+    if [ -z "$_dest_push_url" ] && [ -n "$PUSH_REMOTE_NAME" ]; then
+        _dest_push_url="$(git remote get-url --push "$PUSH_REMOTE_NAME" 2>/dev/null || true)"
+    fi
+    _dest_push_identity="$(_canonical_remote_url "$_dest_push_url")"
+    # When pushing by bare URL, PUSH_REMOTE_NAME is the URL itself and
+    # refs/remotes/<url>/ does not exist. Track the configured remote name
+    # (if any) whose fetch AND push URLs match the destination so the new-branch
+    # path can use its tracking history for for-each-ref range scoping.
+    _dest_remote_name=""
+    _dest_name_matched="false"   # true when PUSH_REMOTE_NAME matched a configured name
+    _dest_url_alias=""           # first URL alias (used only when no name match)
+    while IFS= read -r _r; do
+        # Skip by name — record that we found the configured destination remote
+        # so URL aliases below do not override it even if they appear first.
+        if [ "$_r" = "$PUSH_REMOTE_NAME" ]; then
+            _dest_name_matched="true"
+            _r_fetch_url="$(git remote get-url "$_r" 2>/dev/null || true)"
+            if [ "$(_canonical_remote_url "$_r_fetch_url")" = "$_dest_push_identity" ]; then
+                _dest_remote_name="$_r"
+            fi
+            _protect_remote_refs "$_r"
+            continue
+        fi
+        # Skip URL aliases of the push destination and remotes that FETCH from
+        # the same repository. Tracking refs describe what was fetched, not
+        # where pushes land. A remote whose fetch URL matches the destination
+        # can have a stale tracking ref pointing to a destructive commit we are
+        # about to re-push — the same bypass the dest-tracking-ref fix closed.
+        if [ -n "$_dest_push_identity" ]; then
+            _r_push_matches=false
+            while IFS= read -r _r_push_url; do
+                _r_push_identity="$(_canonical_remote_url "$_r_push_url")"
+                if [ "$_r_push_identity" = "$_dest_push_identity" ]; then
+                    _r_push_matches=true
+                    break
+                fi
+            done < <(git remote get-url --push --all "$_r" 2>/dev/null)
+            if [ "$_r_push_matches" = true ]; then
+                # A push alias protects refs, but only a matching FETCH
+                # endpoint can supply destination history as a baseline.
+                _r_fetch_url="$(git remote get-url "$_r" 2>/dev/null || true)"
+                if [ "$(_canonical_remote_url "$_r_fetch_url")" = "$_dest_push_identity" ]; then
+                    [ -z "$_dest_url_alias" ] && _dest_url_alias="$_r"
+                fi
+                _protect_remote_refs "$_r"
+                continue
+            fi
+            _r_fetch_url="$(git remote get-url "$_r" 2>/dev/null || true)"
+            _r_fetch_identity="$(_canonical_remote_url "$_r_fetch_url")"
+            if [ "$_r_fetch_identity" = "$_dest_push_identity" ]; then
+                _protect_remote_refs "$_r"
+                continue
+            fi
+        fi
+        _other_remote_prefixes+=("refs/remotes/${_r}/")
+        while IFS= read -r _spec; do
+            [[ "$_spec" == ^* || "$_spec" != *:* ]] && continue
+            _target="${_spec#*:}"
+            if [ -n "$_target" ]; then
+                _other_fetch_patterns+=("$_target")
+            fi
+        done < <(git config --get-all "remote.${_r}.fetch" 2>/dev/null)
+    done < <(git remote 2>/dev/null)
+    # --remotes=team recursively includes team/fork. Expand to explicit refs,
+    # then conservatively retain every destination/alias namespace in the scan,
+    # even when another remote's prefix overlaps it. Snapshot object IDs in the
+    # same enumeration so a concurrent fetch/prune cannot invalidate exclusions.
+    _other_remotes=""
+    while read -r _ref _oid _symref; do
+        # A symbolic alias can resolve into the protected destination namespace;
+        # its name is not evidence of independent history on another remote.
+        [ -n "$_symref" ] && continue
+        # Mirror/exact fetch mappings can target ordinary local branches and
+        # tags. Those refs may contain unpublished commits created here; a
+        # matching fetch destination does not make them remote history.
+        case "$_ref" in refs/heads/*|refs/tags/*) continue ;; esac
+        _protected=false
+        for _prefix in "${_protected_ref_prefixes[@]}"; do
+            if [[ "$_ref" == "$_prefix"* ]]; then
+                _protected=true
+                break
+            fi
+        done
+        for _pattern in "${_protected_fetch_patterns[@]}"; do
+            # The unquoted RHS deliberately interprets the refspec's wildcard.
+            # shellcheck disable=SC2053
+            if [[ "$_ref" == $_pattern ]]; then
+                _protected=true
+                break
+            fi
+        done
+        [ "$_protected" = true ] && continue
+        _other=false
+        for _prefix in "${_other_remote_prefixes[@]}"; do
+            if [[ "$_ref" == "$_prefix"* ]]; then
+                _other=true
+                break
+            fi
+        done
+        for _pattern in "${_other_fetch_patterns[@]}"; do
+            # shellcheck disable=SC2053
+            if [[ "$_ref" == $_pattern ]]; then
+                _other=true
+                break
+            fi
+        done
+        if [ "$_other" = true ]; then
+            _other_remotes="$_other_remotes $_oid"
+        fi
+    done < <(git for-each-ref --format='%(refname) %(objectname) %(symref)' refs/ 2>/dev/null)
+    # Post-loop: if PUSH_REMOTE_NAME was not matched as a configured name (bare
+    # URL push), substitute the first URL alias we found — it carries tracking refs.
+    # A named remote with a different fetch endpoint supplies no baseline.
+    if [ "$_dest_name_matched" = "false" ] && [ -n "$_dest_url_alias" ]; then
+        _dest_remote_name="$_dest_url_alias"
+    fi
+
+    # A different remote may fetch into the destination's conventional
+    # namespace. Such refs cannot establish destination history merely by name.
+    _non_dest_fetch_patterns=()
+    while IFS= read -r _r; do
+        [ "$_r" = "$_dest_remote_name" ] && continue
+        while IFS= read -r _spec; do
+            [[ "$_spec" == ^* || "$_spec" != *:* ]] && continue
+            _target="${_spec#*:}"
+            if [ -n "$_target" ]; then
+                _non_dest_fetch_patterns+=("$_target")
+            fi
+        done < <(git config --get-all "remote.${_r}.fetch" 2>/dev/null)
+    done < <(git remote 2>/dev/null)
+
     for line in "${STDIN_LINES[@]}"; do
         read -r local_ref local_sha remote_ref remote_sha <<< "$line"
 
         # Skip branch deletions
         [ "$local_sha" = "$ZERO" ] && continue
 
-        # Determine the range of commits being pushed
+        # Determine the range of commits being pushed. Skip commits that any
+        # non-destination remote-tracking ref already contains: rebasing a fork
+        # branch onto upstream master otherwise rescans upstream's own commits,
+        # and a landed mass rename (aw-webui's JS->TS migration, 54 files) trips
+        # the guard on every fork push.
+        #
+        # For existing branches we only exclude OTHER remotes' tracking refs, not
+        # the push destination's. Its tracking ref may be stale (e.g. after a
+        # human force-reset the remote behind this clone's back), and blindly
+        # excluding it would hide the destructive commit from the scan.
         if [ "$remote_sha" = "$ZERO" ]; then
-            # New branch: check commits not reachable from any remote branch
-            range="$local_sha --not --remotes=origin"
+            # New branch: no destination tracking ref from git, but the clone may
+            # retain a stale one (e.g. if the branch was deleted remotely). Build
+            # an exclusion from the destination's OTHER tracking refs (to scope
+            # the range to new commits efficiently) but skip this branch's own
+            # tracking ref — it may be stale and could hide a destructive commit.
+            # Other destination branches are a safe baseline only as *strict
+            # ancestors* of the pushed tip. Equality (stale dest/main=D while
+            # creating dest/topic=D) produces `D --not D` and silently permits
+            # restoring D. Descendants and unrelated tips are also not safe
+            # exclusions; they would empty or hide the scan the same way.
+            _branch_name="${remote_ref#refs/heads/}"
+            _dest_other_excl=""
+            if [ -n "$_dest_remote_name" ]; then
+                # Map the pushed source ref through each positive fetch
+                # refspec. The stale ref may be renamed locally, so comparing
+                # only refs/remotes/<remote>/<branch> is insufficient.
+                _dest_fetch_patterns=()
+                _pushed_tracking_refs=("refs/remotes/${_dest_remote_name}/${_branch_name}")
+                while IFS= read -r _spec; do
+                    [[ "$_spec" == ^* || "$_spec" != *:* ]] && continue
+                    _source="${_spec%%:*}"
+                    _source="${_source#+}"
+                    _target="${_spec#*:}"
+                    [ -z "$_target" ] && continue
+                    _dest_fetch_patterns+=("$_target")
+                    if [[ "$_source" == *\** ]]; then
+                        _source_prefix="${_source%%\**}"
+                        _source_suffix="${_source#*\*}"
+                        if [[ "$remote_ref" == "$_source_prefix"*"$_source_suffix" ]]; then
+                            _capture="${remote_ref#"$_source_prefix"}"
+                            _capture="${_capture%"$_source_suffix"}"
+                            _pushed_tracking_refs+=("${_target/\*/"$_capture"}")
+                        fi
+                    elif [ "$_source" = "$remote_ref" ]; then
+                        _pushed_tracking_refs+=("$_target")
+                    fi
+                done < <(git config --get-all "remote.${_dest_remote_name}.fetch" 2>/dev/null)
+                while read -r _dest_ref _dest_oid _dest_symref; do
+                    # Symbolic aliases do not supply independent fetched history.
+                    # Skip all of them, including custom names and alias chains,
+                    # so they cannot reintroduce the pushed branch's stale tip.
+                    [ -n "$_dest_symref" ] && continue
+                    # Apply the same local-ref boundary to destination baselines.
+                    case "$_dest_ref" in refs/heads/*|refs/tags/*) continue ;; esac
+                    # Fetch destinations can live outside the conventional
+                    # namespace (even outside refs/remotes). Do not admit
+                    # unrelated local branches or tags from the wider walk.
+                    _dest_owned=false
+                    if [[ "$_dest_ref" == "refs/remotes/${_dest_remote_name}/"* ]]; then
+                        _dest_owned=true
+                    fi
+                    for _pattern in "${_dest_fetch_patterns[@]}"; do
+                        # shellcheck disable=SC2053
+                        if [[ "$_dest_ref" == $_pattern ]]; then
+                            _dest_owned=true
+                            break
+                        fi
+                    done
+                    [ "$_dest_owned" = true ] || continue
+                    # for-each-ref recursively includes configured remotes such
+                    # as team/fork under team/. Their refs are not team branch
+                    # baselines, even when both remotes share a destination URL.
+                    _nested_remote=false
+                    for _prefix in "${_protected_ref_prefixes[@]}" "${_other_remote_prefixes[@]}"; do
+                        [ "$_prefix" = "refs/remotes/${_dest_remote_name}/" ] && continue
+                        if [[ "$_prefix" == "refs/remotes/${_dest_remote_name}/"* && "$_dest_ref" == "$_prefix"* ]]; then
+                            _nested_remote=true
+                            break
+                        fi
+                    done
+                    [ "$_nested_remote" = true ] && continue
+                    _foreign_fetch=false
+                    for _pattern in "${_non_dest_fetch_patterns[@]}"; do
+                        # shellcheck disable=SC2053
+                        if [[ "$_dest_ref" == $_pattern ]]; then
+                            _foreign_fetch=true
+                            break
+                        fi
+                    done
+                    [ "$_foreign_fetch" = true ] && continue
+                    _pushed_tracking=false
+                    for _tracking_ref in "${_pushed_tracking_refs[@]}"; do
+                        if [ "$_dest_ref" = "$_tracking_ref" ]; then
+                            _pushed_tracking=true
+                            break
+                        fi
+                    done
+                    [ "$_pushed_tracking" = true ] && continue
+                    [ "$_dest_ref" = "refs/remotes/${_dest_remote_name}/HEAD" ] && continue
+                    # Equality is not ancestry for this purpose: dest/main=D must
+                    # not exclude D itself from the new dest/topic=D scan.
+                    [ "$_dest_oid" = "$local_sha" ] && continue
+                    git merge-base --is-ancestor "$_dest_oid" "$local_sha" 2>/dev/null || continue
+                    _dest_other_excl="$_dest_other_excl $_dest_oid"
+                done < <(git for-each-ref refs/ \
+                    --format='%(refname) %(objectname) %(symref)' 2>/dev/null)
+            fi
+            if [ -n "$_dest_other_excl" ] || [ -n "$_other_remotes" ]; then
+                # shellcheck disable=SC2086
+                range="$local_sha --not${_dest_other_excl}${_other_remotes}"
+            else
+                range="$local_sha"
+            fi
         else
-            range="$remote_sha..$local_sha"
+            # shellcheck disable=SC2086
+            range="$local_sha --not $remote_sha${_other_remotes:+ $_other_remotes}"
         fi
 
         # O(N) protection: skip the per-commit scan when the push range is huge.
@@ -105,8 +460,17 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         case "$_range_limit" in
             '' | *[!0-9]*) _range_limit=500 ;;
         esac
-        # shellcheck disable=SC2086  # $range intentionally unquoted (may contain --not --remotes=origin)
-        _range_count=$(git rev-list --count $range 2>/dev/null || echo 0)
+        # Stream revision tokens through stdin: expanding a large tracking-ref
+        # snapshot into external argv can exceed ARG_MAX and skip the scan.
+        _range_revisions() {
+            # Only object IDs and --not occur in range; printf is a Bash builtin.
+            # shellcheck disable=SC2086
+            printf '%s\n' $range
+        }
+        if ! _range_count=$(_range_revisions | git rev-list --count --stdin); then
+            echo "PUSH BLOCKED: cannot enumerate mass-delete scan range" >&2
+            exit 1
+        fi
         if [ "$_range_limit" -ne 0 ] && [ "$_range_count" -gt "$_range_limit" ]; then
             # Never skip silently — a quiet downgrade of a safety check is its own trap.
             echo "ℹ️  pre-push: skipping per-commit mass-delete scan" >&2
@@ -117,9 +481,13 @@ if [ -n "$_GUARD_SCRIPT" ]; then
             continue
         fi
 
-        # Check each commit in the range
-        # shellcheck disable=SC2086  # $range intentionally unquoted (may contain --not --remotes=origin)
-        for commit in $(git rev-list $range 2>/dev/null); do
+        # Capture status before iterating: a failed rev-list must not look like
+        # an empty, safe range (including after a successful count).
+        if ! _range_commits=$(_range_revisions | git rev-list --stdin); then
+            echo "PUSH BLOCKED: cannot enumerate mass-delete scan commits" >&2
+            exit 1
+        fi
+        for commit in $_range_commits; do
             guard_mass_delete_commit "$commit"
         done
     done
@@ -155,17 +523,7 @@ if [ -z "${ALLOW_FORCE_RESET_PUSH:-}" ]; then
         # `.git`, scp-style SSH, case variants), and treating an alias spelling
         # as a mirror would bypass the origin force-reset guard. Unknown URL
         # shapes fail closed by staying distinct.
-        _canonical_remote_url() {
-            printf '%s\n' "$1" | sed -E \
-                -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://([^@/]+@)?##' \
-                -e 's#^[^/@:]+@##' \
-                -e 's#^([^/:]+):(22|443)(/|$)#\1\3#' \
-                -e 's#^([^/:]+):#\1/#' \
-                -e 's#^[^/]+@##' \
-                -e 's#/$##' \
-                -e 's#\.git$##' | tr '[:upper:]' '[:lower:]' | \
-                sed -e 's#^ssh\.github\.com/#github.com/#'
-        }
+        # (_canonical_remote_url is defined near the top of this hook.)
 
         _remote_branch="${remote_ref#refs/heads/}"
         if [ -n "${PUSH_REMOTE_NAME:-}" ] && [ "${PUSH_REMOTE_NAME:-}" != "origin" ]; then
