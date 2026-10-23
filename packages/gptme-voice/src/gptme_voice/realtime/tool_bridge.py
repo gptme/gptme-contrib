@@ -87,6 +87,7 @@ _TIMEOUT_BINARY_AVAILABLE = shutil.which("timeout") is not None
 _MAX_RECENT_COMPLETIONS = 5
 # Audio cues are optional UX. Never let a blocked transport delay the tool lifecycle.
 _CUE_CALLBACK_TIMEOUT_SECONDS = 1.0
+_CANCEL_PIPE_DRAIN_TIMEOUT_SECONDS = 1.0
 _DEFAULT_TRANSCRIPT_TAIL_TURNS = 8
 _DEFAULT_TRANSCRIPT_TAIL_CHARS = 1_600
 
@@ -98,7 +99,7 @@ _RESPONSE_SUFFIX = (
 
 
 def _kill_process_tree(process: "asyncio.subprocess.Process") -> None:
-    """Kill the subagent and every descendant it spawned.
+    """Kill the subagent's original process group (not escaped sessions).
 
     The direct child is the ``timeout`` wrapper, which runs the wrapper script
     and gptme underneath it. ``process.kill()`` alone SIGKILLs only that
@@ -124,10 +125,20 @@ def _kill_process_tree(process: "asyncio.subprocess.Process") -> None:
 async def _kill_spawned_tree(
     spawn: "asyncio.Future[asyncio.subprocess.Process]",
 ) -> None:
-    """Finish a cancelled caller's spawn, then kill and reap its whole tree."""
+    """Finish spawning and kill the group, without waiting forever for pipe EOF."""
     process = await spawn
     _kill_process_tree(process)
-    await process.communicate()
+    try:
+        await asyncio.wait_for(
+            process.communicate(), timeout=_CANCEL_PIPE_DRAIN_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        # A descendant can escape the group with setsid() and keep our pipes
+        # open. asyncio has no public Process.close(): close the transport to
+        # release those pipe readers before the caller shuts down its loop.
+        # This bounds cleanup; it does not contain the escaped process.
+        process._transport.close()  # type: ignore[attr-defined]
+        await process.wait()
 
 
 @dataclass

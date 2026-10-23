@@ -1426,6 +1426,73 @@ def test_cancel_during_spawn_kills_subagent_descendants(
             os.kill(grandchild, signal.SIGKILL)
 
 
+@pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")
+@pytest.mark.parametrize("repeat_cancel", [False, True])
+def test_cancel_during_spawn_bounds_escaped_descendant_pipe_drain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repeat_cancel: bool
+) -> None:
+    """An escaped process retaining the pipes must not block loop shutdown."""
+    pid_file = tmp_path / "escaped.pid"
+    script = tmp_path / "fake-subagent.sh"
+    script.write_text(
+        "#!/bin/sh\n" f"setsid sh -c 'echo $$ > {pid_file}; exec sleep 30' &\nwait\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.delenv("GPTME_VOICE_SUBAGENT_PATH", raising=False)
+    monkeypatch.setattr(
+        "gptme_voice.realtime.tool_bridge._TIMEOUT_BINARY_AVAILABLE", False
+    )
+    real_exec = asyncio.create_subprocess_exec
+    escaped: int | None = None
+
+    async def _exercise() -> None:
+        nonlocal escaped
+        spawned = asyncio.Event()
+        processes = []
+
+        async def _slow_connect(*args, **kwargs):
+            proc = await real_exec(*args, **kwargs)
+            processes.append(proc)
+            for _ in range(100):
+                if pid_file.exists() and pid_file.read_text().strip():
+                    break
+                await asyncio.sleep(0.01)
+            spawned.set()
+            await asyncio.sleep(0.1)
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _slow_connect)
+        bridge = GptmeToolBridge(
+            workspace=str(tmp_path), gptme_path=str(script), timeout=30
+        )
+        task = asyncio.create_task(bridge._execute("long task", mode="fast"))
+        await asyncio.wait_for(spawned.wait(), timeout=10)
+        escaped = int(pid_file.read_text().strip())
+        assert _pid_alive(escaped)
+        assert os.getpgid(escaped) != processes[0].pid
+        task.cancel()
+        if repeat_cancel:
+            asyncio.get_running_loop().call_later(0.2, task.cancel)
+        done, _ = await asyncio.wait({task}, timeout=3)
+        if not done:
+            # Release inherited pipes so a failing test can still shut down.
+            os.kill(escaped, signal.SIGKILL)
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            pytest.fail("cancellation hung on escaped descendant's pipes")
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert processes[0].returncode is not None
+        # Do not kill the escaped process until AFTER asyncio.run() shuts down.
+        # This tests transport closure, not a claim of detached-process containment.
+
+    try:
+        asyncio.run(_exercise())
+    finally:
+        if escaped is not None and _pid_alive(escaped):
+            os.kill(escaped, signal.SIGKILL)
+
+
 def test_cancelled_task_records_timing_receipt_and_completion() -> None:
     """A cancelled lookup must leave evidence for the call archive and status."""
 
