@@ -173,9 +173,37 @@ def _kwargs_keys_read(func: Any) -> set[str] | None:
     # inspect.signature omits an already-bound self/cls argument.
     parameter_name = positional[2].name
 
+    def input_scope_nodes(node: ast.AST) -> Iterator[ast.AST]:
+        if node is not funcdef and isinstance(
+            node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+        ):
+            # Defaults are evaluated in the enclosing scope, but the body is
+            # not. Never credit a helper's own parameter as native input.
+            for default in [*node.args.defaults, *node.args.kw_defaults]:
+                if default is not None:
+                    yield from input_scope_nodes(default)
+            if not any(
+                isinstance(arg, ast.arg) and arg.arg == parameter_name
+                for arg in ast.walk(node.args)
+            ):
+                # A closure may consume outer input when called. Without call
+                # analysis, leave those uses unaccounted (indeterminate).
+                body = [node.body] if isinstance(node, ast.Lambda) else node.body
+                for statement in body:
+                    yield from (
+                        child
+                        for child in ast.walk(statement)
+                        if isinstance(child, ast.Name)
+                    )
+            return
+        yield node
+        for child in ast.iter_child_nodes(node):
+            yield from input_scope_nodes(child)
+
+    nodes = list(input_scope_nodes(funcdef))
     keys: set[str] = set()
     accounted_uses: set[ast.Name] = set()
-    for node in ast.walk(funcdef):
+    for node in nodes:
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -209,7 +237,7 @@ def _kwargs_keys_read(func: Any) -> set[str] | None:
         isinstance(node, ast.Name)
         and node.id == parameter_name
         and node not in accounted_uses
-        for node in ast.walk(funcdef)
+        for node in nodes
     ):
         return None
     # No uses, or only literal writes/deletes, still means no keys were read.
@@ -352,6 +380,58 @@ def test_guard_detects_an_unread_declared_param() -> None:
 
     assert _kwargs_keys_read(execute_ignoring_kwargs) == set()
     assert _kwargs_keys_read(execute_reading_kwargs) == {"action"}
+
+
+@pytest.mark.parametrize("kind", ["function", "async_function", "lambda"])
+def test_guard_ignores_shadowed_nested_parameters(kind: str) -> None:
+    def execute_with_helper(code: Any, args: Any, kwargs: Any) -> Any:
+        def helper(kwargs: Any) -> Any:
+            return kwargs["action"]
+
+        return code
+
+    def execute_with_async_helper(code: Any, args: Any, kwargs: Any) -> Any:
+        async def helper(kwargs: Any) -> Any:
+            return kwargs.get("action")
+
+        return code
+
+    def execute_with_lambda(code: Any, args: Any, kwargs: Any) -> Any:
+        _helper = lambda kwargs: kwargs["action"]  # noqa: E731
+        return code
+
+    execute = {
+        "function": execute_with_helper,
+        "async_function": execute_with_async_helper,
+        "lambda": execute_with_lambda,
+    }[kind]
+    assert execute(None, None, {"action": "search"}) is None
+    assert _kwargs_keys_read(execute) == set()
+
+
+def test_guard_leaves_closure_reads_indeterminate() -> None:
+    def execute(code: Any, args: Any, kwargs: Any) -> Any:
+        def helper() -> Any:
+            return kwargs["target"]
+
+        return kwargs["action"], helper()
+
+    assert execute(None, None, {"action": "search", "target": "file"}) == (
+        "search",
+        "file",
+    )
+    assert _kwargs_keys_read(execute) is None
+
+
+def test_guard_counts_nested_defaults_in_enclosing_scope() -> None:
+    def execute(code: Any, args: Any, kwargs: Any) -> Any:
+        def helper(kwargs: Any = kwargs["action"]) -> Any:
+            return kwargs
+
+        return helper()
+
+    assert execute(None, None, {"action": "search"}) == "search"
+    assert _kwargs_keys_read(execute) == {"action"}
 
 
 @pytest.mark.parametrize("operation", ["store", "delete"])
