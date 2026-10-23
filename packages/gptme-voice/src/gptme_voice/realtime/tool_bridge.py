@@ -147,6 +147,10 @@ class _SubagentProcess:
         for stream in (self._process.stdout, self._process.stderr):
             if stream is not None:
                 stream.close()
+        # Callers have already waited for exit or sent SIGKILL. Reap here,
+        # without awaiting pipe EOF or another cancellable cleanup task, so
+        # running cancellation and timeout cannot leave an unwaited child.
+        self._process.wait(timeout=_CANCEL_PIPE_DRAIN_TIMEOUT_SECONDS)
 
     async def wait(self) -> int:
         while (returncode := self.returncode) is None:
@@ -179,9 +183,6 @@ async def _spawn_subagent(*cmd: str, **kwargs) -> _SubagentProcess:
     except BaseException:
         _kill_process_tree(process)
         process.close()
-        # SIGKILL has already been sent. Reap synchronously so loop shutdown
-        # cannot cancel another cleanup task before the direct child is reaped.
-        process._process.wait(timeout=_CANCEL_PIPE_DRAIN_TIMEOUT_SECONDS)
         raise
 
 

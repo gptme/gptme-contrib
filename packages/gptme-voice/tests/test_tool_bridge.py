@@ -1304,6 +1304,59 @@ def test_pid_alive_proc_state(
     assert _pid_alive(12345) is expected
 
 
+@pytest.mark.skipif(os.name != "posix", reason="needs waitpid and process groups")
+@pytest.mark.parametrize("stop", ["cancel", "timeout"])
+def test_running_subagent_is_reaped_before_execute_returns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str
+) -> None:
+    """A killed Popen child must not wait for a later spawn to be reaped."""
+    script = tmp_path / "fake-subagent.sh"
+    script.write_text("#!/bin/sh\nexec sleep 30\n")
+    script.chmod(0o755)
+    monkeypatch.delenv("GPTME_VOICE_SUBAGENT_PATH", raising=False)
+    monkeypatch.setattr(tool_bridge, "_TIMEOUT_BINARY_AVAILABLE", False)
+    real_spawn = tool_bridge._spawn_subagent
+    processes: list[tool_bridge._SubagentProcess] = []
+
+    async def _capture_spawn(*args, **kwargs):
+        process = await real_spawn(*args, **kwargs)
+        # Retain Popen so its destructor cannot accidentally reap for the test.
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(tool_bridge, "_spawn_subagent", _capture_spawn)
+
+    async def _exercise() -> None:
+        started = asyncio.Event()
+        bridge = GptmeToolBridge(workspace=str(tmp_path), gptme_path=str(script))
+        monkeypatch.setattr(tool_bridge, "_FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS", 0.1)
+        task = asyncio.create_task(
+            bridge._execute(
+                "long task", mode="fast", on_started=lambda _: started.set()
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        if stop == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            result = await asyncio.wait_for(task, timeout=5)
+            assert not result.success
+            assert "timed out" in (result.error or "")
+        # Unlike _pid_alive(), this distinguishes a zombie from a reaped child.
+        with pytest.raises(ChildProcessError):
+            os.waitpid(processes[0].pid, os.WNOHANG)
+
+    try:
+        asyncio.run(_exercise())
+    finally:
+        for process in processes:
+            tool_bridge._kill_process_tree(process)
+            process.close()
+            process._process.wait(timeout=1)
+
+
 @pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")
 def test_cancel_kills_subagent_descendants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
