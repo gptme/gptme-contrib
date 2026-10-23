@@ -953,6 +953,7 @@ class LaneDispatcher:
                         "number": item.number,
                         "types": item.types,
                         "title": item.title,
+                        "detail": item.detail,
                         "notification_states": item.notification_states,
                     }
                 )

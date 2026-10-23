@@ -2857,8 +2857,9 @@ class TestLaneDispatcherEnvAliases:
         assert "--setenv=AGENT_PM_BANDIT_SHADOW=1" in cmd
         assert "--setenv=BOB_PM_BANDIT_SHADOW=1" in cmd
 
+    @pytest.mark.parametrize("types", [["notification"], ["contributor_unreviewed"]])
     def test_default_launcher_preserves_notification_states(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, types: list[str]
     ) -> None:
         import subprocess
 
@@ -2886,8 +2887,9 @@ class TestLaneDispatcherEnvAliases:
         item = SlotItem(
             "gptme/gptme",
             1,
-            ["notification"],
+            types,
             "Test item",
+            detail="managed_logins=Alice",
             notification_states=[
                 {"id": "25314090843", "updated_at": "2026-10-12T17:40:22Z"}
             ],
@@ -2907,6 +2909,10 @@ class TestLaneDispatcherEnvAliases:
             str(script),
         )
         assert launched_payloads[0]["notification_states"] == item.notification_states
+        from gptme_runloops.run_item import RunItem
+
+        launched = RunItem.from_grouped_json(json.dumps(launched_payloads[0]))
+        assert launched.detail == "managed_logins=Alice"
 
     def test_model_unresolved_writes_empty_not_omitted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
