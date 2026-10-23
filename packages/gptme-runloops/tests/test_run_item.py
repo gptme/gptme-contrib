@@ -4052,3 +4052,20 @@ def test_contributor_review_preserves_suppressed_notification_work(
     assert (config.pending_state_dir / "notif-555.state").exists() == (
         source != "carried"
     )
+
+
+@pytest.mark.parametrize("reviewed", [True, False, None])
+def test_contributor_review_does_not_claim_suppressed_work_or_author_commits(
+    tmp_path, monkeypatch, reviewed
+) -> None:
+    config, item, plan, outcome, hooks, _, latency_calls = _post_session_fixture(
+        tmp_path, types=("contributor_unreviewed", "pr_update", "mention")
+    )
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.viewer_review_since", lambda *a, **kw: reviewed
+    )
+    # The contributor changed the PR during our review; that is not our work.
+    run_post_session(plan, item, outcome, config, hooks)
+    record = json.loads(Path(plan.record_file).read_text())
+    assert record["deliverables"] == []
+    assert latency_calls == []

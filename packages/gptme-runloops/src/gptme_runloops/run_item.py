@@ -2495,9 +2495,12 @@ def run_post_session(
 
     is_pr_item = bool(PR_STATE_TYPES & set(item.types))
     is_pr_observe_item = bool(PR_OBSERVE_TYPES & set(item.types))
+    review_only = "contributor_unreviewed" in item.types
 
     # 2. PR-state diff (worker.sh:379-408)
-    if is_pr_observe_item:
+    # Review-only sessions cannot author branch changes. Do not attribute the
+    # contributor's concurrent push/merge as our deliverable or upgrade outcome.
+    if is_pr_observe_item and not review_only:
         try:
             update_record_pr_state(
                 record_file,
@@ -2652,23 +2655,27 @@ def run_post_session(
     )
 
     # 5. Latency-ledger append (worker.sh:526-550)
-    try:
-        if hooks.append_latency_records is None:
-            raise RuntimeError("append_latency_records collaborator unavailable")
-        append_worker_latency_records(
-            repo_root=config.workspace,
-            item_json=item.raw_line or json.dumps(dict(item.raw), ensure_ascii=False),
-            latency_context_json=outcome.latency_context_json,
-            ack_result_json=outcome.ack_result_json,
-            handled_at=outcome.started_iso,
-            session_id=plan.session_id,
-            outcome=latency_outcome,
-            append_latency_records=hooks.append_latency_records,
-        )
-    except Exception:
-        _log(
-            f"WARN: worker_records latency-ledger append step failed for {plan.repo}#{plan.number}"
-        )
+    # The original payload can contain suppressed mentions/notifications. A
+    # review-only exit provides no handling receipt for those events.
+    if not review_only:
+        try:
+            if hooks.append_latency_records is None:
+                raise RuntimeError("append_latency_records collaborator unavailable")
+            append_worker_latency_records(
+                repo_root=config.workspace,
+                item_json=item.raw_line
+                or json.dumps(dict(item.raw), ensure_ascii=False),
+                latency_context_json=outcome.latency_context_json,
+                ack_result_json=outcome.ack_result_json,
+                handled_at=outcome.started_iso,
+                session_id=plan.session_id,
+                outcome=latency_outcome,
+                append_latency_records=hooks.append_latency_records,
+            )
+        except Exception:
+            _log(
+                f"WARN: worker_records latency-ledger append step failed for {plan.repo}#{plan.number}"
+            )
 
     # 6. Wait-and-merge gate (worker.sh:552-616)
     if is_pr_item and exit_code == 0 and hooks.wait_merge_gate is not None:

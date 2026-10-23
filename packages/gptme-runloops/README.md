@@ -189,6 +189,9 @@ It does not promote pending PR activity or notification watermarks (including
 immutable launch snapshots): co-grouped work suppressed by the review-only
 prompt must remain eligible for a later handling session. The default launcher
 preserves item `detail`, including the required managed-login evidence.
+Review-only sessions also skip generic notification-handling latency receipts
+and PR-movement deliverable attribution: neither a suppressed mention nor a
+contributor's concurrent commit is work delivered by the reviewer.
 
 ## Development
 
