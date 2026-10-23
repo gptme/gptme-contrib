@@ -201,6 +201,9 @@ def _kwargs_keys_read(func: Any) -> set[str] | None:
             yield from input_scope_nodes(child)
 
     nodes = list(input_scope_nodes(funcdef))
+    augmented_targets = {
+        node.target for node in nodes if isinstance(node, ast.AugAssign)
+    }
     keys: set[str] = set()
     accounted_uses: set[ast.Name] = set()
     for node in nodes:
@@ -227,7 +230,8 @@ def _kwargs_keys_read(func: Any) -> set[str] | None:
             and isinstance(node.slice.value, str)
         ):
             accounted_uses.add(node.value)
-            if isinstance(node.ctx, ast.Load):
+            # Augmented assignment has Store context but reads the old value.
+            if isinstance(node.ctx, ast.Load) or node in augmented_targets:
                 keys.add(node.slice.value)
 
     # A partial literal-key set is not exhaustive when another use could read
@@ -537,6 +541,17 @@ def test_discovery_fails_for_missing_plugin_modules(
             test_plugin_module_imports_succeeded(module_name, error)
     except pytest.skip.Exception:
         pytest.fail("a missing plugin module was incorrectly skipped")
+
+
+def test_guard_counts_augmented_subscript_reads() -> None:
+    def execute(code: Any, args: Any, kwargs: Any) -> Any:
+        kwargs["count"] += 1
+        return []
+
+    native_input = {"count": 1}
+    assert execute(None, None, native_input) == []
+    assert native_input == {"count": 2}
+    assert _kwargs_keys_read(execute) == {"count"}
 
 
 def test_guard_still_counts_literal_subscript_reads() -> None:
