@@ -121,13 +121,13 @@ def _kill_process_tree(process: "asyncio.subprocess.Process") -> None:
         pass
 
 
-def _kill_spawned_tree(
+async def _kill_spawned_tree(
     spawn: "asyncio.Future[asyncio.subprocess.Process]",
 ) -> None:
-    """Done-callback: kill the tree of a spawn whose caller was cancelled."""
-    if spawn.cancelled() or spawn.exception() is not None:
-        return
-    _kill_process_tree(spawn.result())
+    """Finish a cancelled caller's spawn, then kill and reap its whole tree."""
+    process = await spawn
+    _kill_process_tree(process)
+    await process.communicate()
 
 
 @dataclass
@@ -708,8 +708,8 @@ class GptmeToolBridge:
         try:
             # The child exists before the pipes are connected. A cancel in that
             # window makes asyncio kill only the direct child, leaving the
-            # wrapper script and gptme running. Shield the spawn and kill the
-            # whole tree once it completes.
+            # wrapper script and gptme running. Shield the spawn and finish
+            # tree cleanup before propagating cancellation to the caller.
             spawn = asyncio.ensure_future(
                 asyncio.create_subprocess_exec(
                     *cmd,
@@ -723,7 +723,19 @@ class GptmeToolBridge:
             try:
                 process = await asyncio.shield(spawn)
             except asyncio.CancelledError:
-                spawn.add_done_callback(_kill_spawned_tree)
+                cleanup = asyncio.create_task(_kill_spawned_tree(spawn))
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        # Repeated cancel requests must not interrupt cleanup.
+                        continue
+                    except Exception:
+                        break
+                try:
+                    cleanup.result()
+                except Exception:
+                    logger.exception("Subagent spawn cleanup failed")
                 raise
             if on_started:
                 on_started(time.monotonic())

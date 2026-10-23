@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import signal
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -1339,8 +1340,9 @@ def test_cancel_kills_subagent_descendants(
 
 
 @pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")
+@pytest.mark.parametrize("repeat_cancel", [False, True])
 def test_cancel_during_spawn_kills_subagent_descendants(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repeat_cancel: bool
 ) -> None:
     """A cancel while the spawn is still connecting pipes must kill the tree.
 
@@ -1382,17 +1384,24 @@ def test_cancel_during_spawn_kills_subagent_descendants(
         grandchild = int(pid_file.read_text().strip())
         assert _pid_alive(grandchild)
         task.cancel()
+        if repeat_cancel:
+            asyncio.get_running_loop().call_later(0.1, task.cancel)
         with pytest.raises(asyncio.CancelledError):
             await task
-        await asyncio.sleep(1.0)  # let the shielded spawn finish
+        # Return immediately: asyncio.run() must be safe to shut down now.
         return grandchild
 
     grandchild = asyncio.run(_exercise())
-    for _ in range(40):
-        if not _pid_alive(grandchild):
-            break
-        time.sleep(0.05)
-    assert not _pid_alive(grandchild), "cancel during spawn left a live descendant"
+    try:
+        for _ in range(40):
+            if not _pid_alive(grandchild):
+                break
+            time.sleep(0.05)
+        assert not _pid_alive(grandchild), "cancel during spawn left a live descendant"
+    finally:
+        # A failed regression must not leave the test's real sleep running.
+        if _pid_alive(grandchild):
+            os.kill(grandchild, signal.SIGKILL)
 
 
 def test_cancelled_task_records_timing_receipt_and_completion() -> None:
