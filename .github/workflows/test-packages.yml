@@ -215,6 +215,7 @@ jobs:
         run: |
           # Find all packages with tests and collect coverage
           for pkg in packages/*/; do
+            pkg=${pkg%/}
             name=$(basename "$pkg")
             # Skip __pycache__ and symlinks
             [ -L "$pkg" ] && continue

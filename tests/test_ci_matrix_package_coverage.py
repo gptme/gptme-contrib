@@ -10,7 +10,10 @@ matrix, or if a package without tests/ is in it.
 """
 
 import json
+import os
+import shutil
 import subprocess
+import textwrap
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -73,3 +76,59 @@ def test_matrix_ignores_symlinked_packages_and_cache(tmp_path: Path):
     (packages / "no-tests").mkdir()
 
     assert _matrix_packages(tmp_path) == ["real-package"]
+
+
+def test_coverage_ignores_symlinked_packages(tmp_path: Path):
+    """Execute the workflow's coverage script with a recording uv stand-in."""
+    workflow = (REPO_ROOT / ".github/workflows/test-packages.yml").read_text()
+    script = textwrap.dedent(
+        workflow.split(
+            "      - name: Run coverage for all packages\n        run: |\n", 1
+        )[1].split("\n      - name:", 1)[0]
+    )
+    packages = tmp_path / "packages"
+    (packages / "real-package" / "tests").mkdir(parents=True)
+    (packages / "real-package" / "src").mkdir()
+    (packages / "package-link").symlink_to("real-package", target_is_directory=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    uv = bin_dir / "uv"
+    uv.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALL_LOG"\n')
+    uv.chmod(0o755)
+    log = tmp_path / "calls.log"
+    subprocess.run(
+        ["bash", "-e", "-c", script],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "CALL_LOG": str(log),
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    calls = log.read_text()
+    assert "packages/real-package" in calls
+    assert "packages/package-link" not in calls
+
+
+def test_matrix_does_not_require_jq(tmp_path: Path):
+    """Python unit-test environments need not install the CI-only jq tool."""
+    (tmp_path / "Makefile").write_text((REPO_ROOT / "Makefile").read_text())
+    (tmp_path / "packages" / "real-package" / "tests").mkdir(parents=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in ("make", "find", "basename", "python3"):
+        executable = shutil.which(tool)
+        assert executable is not None, f"test requires {tool}"
+        (bin_dir / tool).symlink_to(executable)
+    result = subprocess.run(
+        [str(bin_dir / "make"), "--no-print-directory", "ci-list-packages-json"],
+        cwd=tmp_path,
+        env={**os.environ, "PATH": str(bin_dir)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(result.stdout) == ["real-package"]

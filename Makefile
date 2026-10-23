@@ -163,7 +163,7 @@ ci-list-packages-json:  ## Output packages with tests/ as JSON array for CI matr
 			if [ "$$name" = "$$ex" ]; then excluded=true; break; fi; \
 		done; \
 		if [ "$$excluded" = "false" ]; then echo $$name; fi; \
-	done | jq -R -s -c 'split("\n") | map(select(length > 0))'
+	done | python3 -c 'import json, sys; print(json.dumps(sys.stdin.read().splitlines()))'
 
 ci-list-excluded-packages:  ## Print packages excluded from the CI package matrix
 	@for pkg in $(PACKAGE_TEST_DIRS); do \
