@@ -174,11 +174,8 @@ def _kwargs_keys_read(func: Any) -> set[str] | None:
     parameter_name = positional[2].name
 
     keys: set[str] = set()
-    touches_kwargs = False
-    literal_access = False
+    accounted_uses: set[ast.Name] = set()
     for node in ast.walk(funcdef):
-        if isinstance(node, ast.Name) and node.id == parameter_name:
-            touches_kwargs = True
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -189,6 +186,11 @@ def _kwargs_keys_read(func: Any) -> set[str] | None:
             and isinstance(node.args[0].value, str)
         ):
             keys.add(node.args[0].value)
+            accounted_uses.update(
+                child
+                for child in ast.walk(node.func.value)
+                if isinstance(child, ast.Name) and child.id == parameter_name
+            )
         if (
             isinstance(node, ast.Subscript)
             and isinstance(node.value, ast.Name)
@@ -196,17 +198,21 @@ def _kwargs_keys_read(func: Any) -> set[str] | None:
             and isinstance(node.slice, ast.Constant)
             and isinstance(node.slice.value, str)
         ):
-            literal_access = True
+            accounted_uses.add(node.value)
             if isinstance(node.ctx, ast.Load):
                 keys.add(node.slice.value)
 
-    if not touches_kwargs:
-        # The executor never looks at kwargs: a native call carries no other
-        # input, so any declared parameter is unreachable.
-        return set()
-    if not keys and not literal_access:
-        # kwargs is used, but not with literal keys: cannot judge statically.
+    # A partial literal-key set is not exhaustive when another use could read
+    # arbitrary keys (dynamic lookup, aliasing, forwarding, etc.). Do not infer
+    # unreachability without understanding every use of the input mapping.
+    if any(
+        isinstance(node, ast.Name)
+        and node.id == parameter_name
+        and node not in accounted_uses
+        for node in ast.walk(funcdef)
+    ):
         return None
+    # No uses, or only literal writes/deletes, still means no keys were read.
     return keys
 
 
@@ -419,6 +425,40 @@ def test_guard_still_counts_literal_subscript_reads() -> None:
         return kwargs["action"]
 
     assert _kwargs_keys_read(execute_reading) == {"action"}
+
+
+@pytest.mark.parametrize("access", ["get", "subscript", "alias", "forward"])
+def test_guard_does_not_treat_mixed_reads_as_exhaustive(access: str) -> None:
+    def execute_get(code: Any, args: Any, kwargs: Any) -> Any:
+        action = kwargs.get("action")
+        key = "target"
+        return action, kwargs.get(key)
+
+    def execute_subscript(code: Any, args: Any, kwargs: Any) -> Any:
+        action = kwargs["action"]
+        key = "target"
+        return action, kwargs[key]
+
+    def execute_alias(code: Any, args: Any, kwargs: Any) -> Any:
+        action = kwargs.get("action")
+        params = kwargs
+        return action, params.get("target")
+
+    def execute_forward(code: Any, args: Any, kwargs: Any) -> Any:
+        action = kwargs.get("action")
+        return action, dict(**kwargs).get("target")
+
+    execute = {
+        "get": execute_get,
+        "subscript": execute_subscript,
+        "alias": execute_alias,
+        "forward": execute_forward,
+    }[access]
+    assert execute(None, None, {"action": "search", "target": "file"}) == (
+        "search",
+        "file",
+    )
+    assert _kwargs_keys_read(execute) is None
 
 
 def test_guard_follows_third_positional_parameter_name() -> None:
