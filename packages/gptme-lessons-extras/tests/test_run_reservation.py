@@ -10,14 +10,17 @@ No paid API calls are made. The tests prove that:
 """
 
 import json
+import sqlite3
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 from typing import Any
 
 import pytest
 from gptme_lessons_extras.run_reservation import (
     check_labeling_admission,
+    check_session_admission,
     compute_reservation_hash,
     load_reservation,
     validate_reservation,
@@ -362,32 +365,51 @@ def test_no_reservation_path_bypasses_gate(tmp_path: Path) -> None:
 
 
 def test_concurrent_sessions_respect_cap(tmp_path: Path) -> None:
-    """Two threads racing to be admitted; only the cap allows."""
+    """Real concurrent transactions admit exactly the cap, without worker timing."""
     cap = 3  # 3 sessions per arm × 2 arms = 6 total
-    res_path = tmp_path / "res.json"
-    _write_reservation(res_path, _make_reservation(max_sessions=cap))
-    state = tmp_path / "state"
-    cmd = _worker(tmp_path, _selected("commit"))
-
-    def run_session(session_id: str) -> str:
-        r = select(
-            _request(session_id=session_id),
-            state_dir=state,
-            worker_command=cmd,
-            reservation_path=res_path,
-        )
-        return r["reason"] if r["status"] == "fallback" else "ok"
-
+    reservation = _make_reservation(max_sessions=cap)
+    database = tmp_path / "selector.sqlite3"
     sessions = [f"concurrent-{i}" for i in range(cap * 2 + 2)]  # 8 unique sessions
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    barrier = Barrier(len(sessions))
+
+    def run_session(session_id: str) -> str | None:
+        # Test admission itself: select() intentionally falls back after at most
+        # 1s of SQLite contention and also budgets subprocess startup. Requiring
+        # every selection to succeed conflates that deadline with cap safety.
+        connection = sqlite3.connect(database, timeout=30.0)
+        try:
+            barrier.wait(timeout=30.0)
+            connection.execute("BEGIN IMMEDIATE")
+            reason = check_session_admission(
+                reservation, connection, runtime="gptme", session_id=session_id
+            )
+            connection.commit()
+            return reason
+        finally:
+            connection.close()
+
+    with ThreadPoolExecutor(max_workers=len(sessions)) as ex:
         outcomes = list(ex.map(run_session, sessions))
-    admitted = outcomes.count("ok")
+    admitted = outcomes.count(None)
     exhausted = outcomes.count("reservation_exhausted")
-    # Exactly cap * len(arms) = 6 sessions admitted; rest refused
+    # Exactly cap * len(arms) = 6 sessions admitted; rest refused.
     assert (
         admitted == cap * 2
     ), f"expected {cap * 2} admitted, got {admitted}; outcomes={outcomes}"
     assert admitted + exhausted == len(sessions)
+    connection = sqlite3.connect(database)
+    try:
+        enrolled = {
+            row[0]
+            for row in connection.execute(
+                "SELECT session_id FROM experiment_enrollments"
+            )
+        }
+    finally:
+        connection.close()
+    assert enrolled == {
+        session for session, reason in zip(sessions, outcomes) if reason is None
+    }
 
 
 # ---------------------------------------------------------------------------
