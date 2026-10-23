@@ -191,7 +191,11 @@ prompt must remain eligible for a later handling session. The default launcher
 preserves item `detail`, including the required managed-login evidence.
 Review-only sessions also skip generic notification-handling latency receipts
 and PR-movement deliverable attribution: neither a suppressed mention nor a
-contributor's concurrent commit is work delivered by the reviewer.
+contributor's concurrent commit is work delivered by the reviewer. If a review
+is absent or unobservable (including a failed worker), launch event fingerprints
+are cleared for retry without consuming suppressed watermarks. Dispatch ledger
+`types` likewise reflect only the review; mixed inputs remain available as
+per-item `original_types`, never credited as completed repairs.
 
 ## Development
 

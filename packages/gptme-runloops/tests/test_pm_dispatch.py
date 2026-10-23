@@ -3021,3 +3021,19 @@ def test_contributor_unreviewed_always_slow_review_only(monkeypatch, types):
     monkeypatch.setenv("AUTOMATED_PR_REVIEW_REPOS", "gptme/gptme-contrib")
     assert classify_lane(types) == "slow"
     assert classify_item_work_type(types, repo="gptme/gptme-contrib") == "pr-review"
+
+
+@pytest.mark.parametrize("phase", ["started", "completed"])
+def test_review_only_ledger_does_not_credit_suppressed_work(tmp_path, phase):
+    work = tmp_path / "mixed.jsonl"
+    original_types = ["ci_failure", "contributor_unreviewed", "mention"]
+    work.write_text(json.dumps({"repo": "o/r", "number": 7, "types": original_types}))
+    entry = build_full_ledger_entry(
+        phase=phase, work_file=work, exit_code=0, effect="observed"
+    )
+    assert entry["types"] == ["contributor_unreviewed"]
+    assert entry["items"][0]["types"] == ["contributor_unreviewed"]
+    assert entry["items"][0]["original_types"] == original_types
+    assert json.loads(work.read_text())["types"] == original_types
+    if phase == "completed":
+        assert entry["outcome"] == "succeeded"

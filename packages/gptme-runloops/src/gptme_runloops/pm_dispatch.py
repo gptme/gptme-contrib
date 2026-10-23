@@ -403,7 +403,14 @@ def build_full_ledger_entry(
                 if not isinstance(item_types, list) or not item_types:
                     single_type = item.get("type")
                     item_types = [single_type] if isinstance(single_type, str) else []
-                normalized_types = [t for t in item_types if isinstance(t, str) and t]
+                original_types = [t for t in item_types if isinstance(t, str) and t]
+                # Match RunItem's execution boundary: a mixed contributor
+                # review suppresses repair/notification work, not delivers it.
+                normalized_types = (
+                    ["contributor_unreviewed"]
+                    if "contributor_unreviewed" in original_types
+                    else original_types
+                )
                 type_set.update(normalized_types)
                 if number is not None:
                     item_refs.append(f"{repo}#{number}")
@@ -419,6 +426,11 @@ def build_full_ledger_entry(
                         "repo": repo,
                         "number": number,
                         "types": normalized_types,
+                        **(
+                            {"original_types": original_types}
+                            if original_types != normalized_types
+                            else {}
+                        ),
                         "title": item.get("title"),
                         "detail": detail[:300] if detail else None,
                     }
