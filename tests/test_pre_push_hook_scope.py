@@ -1198,7 +1198,7 @@ def test_other_remote_symbolic_ref_cannot_hide_destination_commit(
 
 
 @pytest.mark.parametrize("branch", ["topic&more", "nested/topic&more"])
-@pytest.mark.parametrize("range_limit", ["0", "1"])
+@pytest.mark.parametrize("range_limit", ["0", "2"])
 def test_ampersand_in_mapped_branch_cannot_hide_stale_tip(
     tmp_path: Path, branch: str, range_limit: str
 ) -> None:
@@ -1213,10 +1213,14 @@ def test_ampersand_in_mapped_branch_cannot_hide_stale_tip(
     )
     _git(repo, "update-ref", "refs/cache/cache-master", base)
     _git(repo, "update-ref", f"refs/cache/cache-{branch}", head)
+    # A strict ancestor avoids the independent equal-tip baseline filter.
+    # If wildcard substitution loses the literal ampersand, the stale deletion
+    # becomes a baseline and only this harmless child is scanned.
+    tip = _commit(repo, "harmless-child.txt")
     destination = _git(repo, "remote", "get-url", "origin")
     proc = _run_hook(
         repo,
-        f"refs/heads/{branch} {head} refs/heads/{branch} {ZERO}\n",
+        f"refs/heads/{branch} {tip} refs/heads/{branch} {ZERO}\n",
         "origin",
         destination,
         env={
