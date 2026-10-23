@@ -37,6 +37,7 @@ SLOW_LANE_TYPES: set[str] = {
     "pr_update",
     "pr_never_checked",
     "contributor_ci_failure",
+    "contributor_unreviewed",
     "ci_failure",
     "master_ci_failure",
     "merge_conflict",
@@ -402,7 +403,14 @@ def build_full_ledger_entry(
                 if not isinstance(item_types, list) or not item_types:
                     single_type = item.get("type")
                     item_types = [single_type] if isinstance(single_type, str) else []
-                normalized_types = [t for t in item_types if isinstance(t, str) and t]
+                original_types = [t for t in item_types if isinstance(t, str) and t]
+                # Match RunItem's execution boundary: a mixed contributor
+                # review suppresses repair/notification work, not delivers it.
+                normalized_types = (
+                    ["contributor_unreviewed"]
+                    if "contributor_unreviewed" in original_types
+                    else original_types
+                )
                 type_set.update(normalized_types)
                 if number is not None:
                     item_refs.append(f"{repo}#{number}")
@@ -418,6 +426,11 @@ def build_full_ledger_entry(
                         "repo": repo,
                         "number": number,
                         "types": normalized_types,
+                        **(
+                            {"original_types": original_types}
+                            if original_types != normalized_types
+                            else {}
+                        ),
                         "title": item.get("title"),
                         "detail": detail[:300] if detail else None,
                     }
@@ -580,6 +593,9 @@ def classify_item_work_type(types: list[str], repo: str | None = None) -> str:
     Returns one of the PM_WORK_TYPES strings defined in pm_bandit.
     """
     types_set = set(types)
+    # Review-only safety dominates every co-grouped repair/automated-review arm.
+    if "contributor_unreviewed" in types_set:
+        return "pr-review"
     if "strategy" in types_set:
         return "strategy-reply"
     if types_set & {"ci_failure", "master_ci_failure"}:
@@ -949,6 +965,7 @@ class LaneDispatcher:
                         "number": item.number,
                         "types": item.types,
                         "title": item.title,
+                        "detail": item.detail,
                         "notification_states": item.notification_states,
                     }
                 )
