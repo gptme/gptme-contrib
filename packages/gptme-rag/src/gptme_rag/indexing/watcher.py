@@ -131,7 +131,7 @@ class IndexEventHandler(FileSystemEventHandler):
                 return
 
             # Read file content to ensure it's readable
-            content = path.read_text()
+            content = path.read_text(encoding="utf-8")
             canonical_path = str(path)
 
             # Delete old versions
@@ -190,7 +190,7 @@ class IndexEventHandler(FileSystemEventHandler):
                 for attempt in range(max_attempts):
                     try:
                         # Try to read the file to ensure it's ready
-                        content = dest_path.read_text()
+                        content = dest_path.read_text(encoding="utf-8")
                         # Index the file
                         self.indexer.index_file(dest_path)
 
@@ -353,7 +353,7 @@ class IndexEventHandler(FileSystemEventHandler):
 
                 # Read current content for verification
                 try:
-                    current_content = path.read_text()
+                    current_content = path.read_text(encoding="utf-8")
                 except Exception as e:
                     logger.warning(f"Failed to read file {path}: {e}")
                     if attempt < max_attempts - 1:
