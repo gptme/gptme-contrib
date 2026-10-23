@@ -105,14 +105,14 @@ def _kill_process_tree(process: "asyncio.subprocess.Process") -> None:
     wrapper; the descendants keep running and their answer is discarded
     (incident: 2026-10-16 call, gptme still active 13 s after cancel).
     The child is spawned with ``start_new_session=True``, so its pid is the
-    process group id; the getpgid check avoids signalling an unrelated group.
+    process group id. Signal that group even if its leader has already exited:
+    descendants can still hold the pipes open after the leader is reaped.
     """
     pid = getattr(process, "pid", None)
     if isinstance(pid, int) and pid > 0:
         try:
-            if os.getpgid(pid) == pid:
-                os.killpg(pid, signal.SIGKILL)
-                return
+            os.killpg(pid, signal.SIGKILL)
+            return
         except (ProcessLookupError, PermissionError):
             pass
     try:

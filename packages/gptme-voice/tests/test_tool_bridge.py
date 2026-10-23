@@ -1341,8 +1341,12 @@ def test_cancel_kills_subagent_descendants(
 
 @pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")
 @pytest.mark.parametrize("repeat_cancel", [False, True])
+@pytest.mark.parametrize("leader_exits", [False, True])
 def test_cancel_during_spawn_kills_subagent_descendants(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repeat_cancel: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    repeat_cancel: bool,
+    leader_exits: bool,
 ) -> None:
     """A cancel while the spawn is still connecting pipes must kill the tree.
 
@@ -1356,6 +1360,11 @@ def test_cancel_during_spawn_kills_subagent_descendants(
     script.write_text(f"#!/bin/sh\nsleep 30 &\necho $! > {pid_file}\nwait\n")
     script.chmod(0o755)
     monkeypatch.delenv("GPTME_VOICE_SUBAGENT_PATH", raising=False)
+    if leader_exits:
+        script.write_text(f"#!/bin/sh\nsleep 30 &\necho $! > {pid_file}\n")
+        monkeypatch.setattr(
+            "gptme_voice.realtime.tool_bridge._TIMEOUT_BINARY_AVAILABLE", False
+        )
     real_exec = asyncio.create_subprocess_exec
 
     async def _exercise() -> int:
@@ -1368,6 +1377,12 @@ def test_cancel_during_spawn_kills_subagent_descendants(
                     if pid_file.exists() and pid_file.read_text().strip():
                         break
                     await asyncio.sleep(0.05)
+                if leader_exits:
+                    for _ in range(100):
+                        if proc.returncode is not None:
+                            break
+                        await asyncio.sleep(0.01)
+                    assert proc.returncode == 0
                 spawned.set()
                 await asyncio.sleep(0.5)
             except asyncio.CancelledError:
@@ -1386,6 +1401,13 @@ def test_cancel_during_spawn_kills_subagent_descendants(
         task.cancel()
         if repeat_cancel:
             asyncio.get_running_loop().call_later(0.1, task.cancel)
+        done, _ = await asyncio.wait({task}, timeout=2)
+        if not done:
+            # Unblock inherited pipes before reporting a cleanup hang.
+            os.kill(grandchild, signal.SIGKILL)
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            pytest.fail("cancellation cleanup waited for a surviving descendant")
         with pytest.raises(asyncio.CancelledError):
             await task
         # Return immediately: asyncio.run() must be safe to shut down now.
