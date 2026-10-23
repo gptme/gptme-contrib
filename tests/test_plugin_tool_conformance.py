@@ -155,11 +155,23 @@ def _kwargs_keys_read(func: Any) -> set[str] | None:
     if funcdef is None:
         return None
 
-    positional = [*funcdef.args.posonlyargs, *funcdef.args.args]
+    try:
+        positional = [
+            parameter
+            for parameter in inspect.signature(func).parameters.values()
+            if parameter.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+    except (TypeError, ValueError):
+        return None
     if len(positional) < 3:
         # Variadic executors need data-flow analysis; the shape check is separate.
         return None
-    parameter_name = positional[2].arg
+    # inspect.signature omits an already-bound self/cls argument.
+    parameter_name = positional[2].name
 
     keys: set[str] = set()
     touches_kwargs = False
@@ -414,3 +426,13 @@ def test_guard_follows_third_positional_parameter_name() -> None:
         return params["action"] + (params or {}).get("target", "")
 
     assert _kwargs_keys_read(execute) == {"action", "target"}
+
+
+def test_guard_follows_bound_executor_parameter() -> None:
+    class Executor:
+        def execute(self, code: Any, args: Any, params: Any) -> Any:
+            return params["action"]
+
+    execute = Executor().execute
+    assert _signature_violation(execute) is None
+    assert _kwargs_keys_read(execute) == {"action"}
