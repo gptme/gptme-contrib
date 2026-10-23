@@ -17,10 +17,12 @@ import math
 import os
 import shutil
 import signal
+import subprocess
 import tempfile
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Sequence, TypeVar
 
@@ -98,7 +100,7 @@ _RESPONSE_SUFFIX = (
 )
 
 
-def _kill_process_tree(process: "asyncio.subprocess.Process") -> None:
+def _kill_process_tree(process: "_SubagentProcess") -> None:
     """Kill the subagent's original process group (not escaped sessions).
 
     The direct child is the ``timeout`` wrapper, which runs the wrapper script
@@ -122,8 +124,69 @@ def _kill_process_tree(process: "asyncio.subprocess.Process") -> None:
         pass
 
 
+class _SubagentProcess:
+    """Own the child PID before the first cancellable pipe connection."""
+
+    def __init__(self, process: subprocess.Popen) -> None:
+        self._process = process
+        self.pid = process.pid
+        self.stdout = asyncio.StreamReader()
+        self.stderr = asyncio.StreamReader()
+        self._pipes: list[asyncio.ReadTransport] = []
+
+    @property
+    def returncode(self) -> int | None:
+        return self._process.poll()
+
+    def kill(self) -> None:
+        self._process.kill()
+
+    def close(self) -> None:
+        for pipe in self._pipes:
+            pipe.close()
+        for stream in (self._process.stdout, self._process.stderr):
+            if stream is not None:
+                stream.close()
+
+    async def wait(self) -> int:
+        while (returncode := self.returncode) is None:
+            await asyncio.sleep(0.01)
+        return returncode
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        stdout, stderr = await asyncio.gather(self.stdout.read(), self.stderr.read())
+        await self.wait()
+        return stdout, stderr
+
+
+async def _spawn_subagent(*cmd: str, **kwargs) -> _SubagentProcess:
+    # asyncio.create_subprocess_exec hides the PID until after connecting pipes.
+    # Its internal connection task is also cancelled by asyncio.run() shutdown,
+    # so shielding only the spawn task cannot guarantee process-group cleanup.
+    process = _SubagentProcess(subprocess.Popen(cmd, **kwargs))
+    try:
+        loop = asyncio.get_running_loop()
+        for stream, reader in (
+            (process._process.stdout, process.stdout),
+            (process._process.stderr, process.stderr),
+        ):
+            assert stream is not None
+            transport, _ = await loop.connect_read_pipe(
+                partial(asyncio.StreamReaderProtocol, reader), stream
+            )
+            process._pipes.append(transport)
+        return process
+    except BaseException:
+        _kill_process_tree(process)
+        process.close()
+        # SIGKILL has already been sent. Reap synchronously so loop shutdown
+        # cannot cancel another cleanup task before the direct child is reaped.
+        process._process.wait(timeout=_CANCEL_PIPE_DRAIN_TIMEOUT_SECONDS)
+        raise
+
+
 async def _kill_spawned_tree(
-    spawn: "asyncio.Future[asyncio.subprocess.Process]",
+    spawn: "asyncio.Future[_SubagentProcess]",
 ) -> None:
     """Finish spawning and kill the group, without waiting forever for pipe EOF."""
     process = await spawn
@@ -134,10 +197,9 @@ async def _kill_spawned_tree(
         )
     except asyncio.TimeoutError:
         # A descendant can escape the group with setsid() and keep our pipes
-        # open. asyncio has no public Process.close(): close the transport to
-        # release those pipe readers before the caller shuts down its loop.
+        # open. Close the pipe readers before the caller shuts down its loop.
         # This bounds cleanup; it does not contain the escaped process.
-        process._transport.close()  # type: ignore[attr-defined]
+        process.close()
         await process.wait()
 
 
@@ -716,13 +778,14 @@ class GptmeToolBridge:
             ]
         cmd.append(augmented_task)
 
+        process: _SubagentProcess | None = None
         try:
             # The child exists before the pipes are connected. A cancel in that
             # window makes asyncio kill only the direct child, leaving the
             # wrapper script and gptme running. Shield the spawn and finish
             # tree cleanup before propagating cancellation to the caller.
             spawn = asyncio.ensure_future(
-                asyncio.create_subprocess_exec(
+                _spawn_subagent(
                     *cmd,
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
@@ -893,6 +956,8 @@ class GptmeToolBridge:
             logger.error(f"Subagent error: {e}")
             return ToolResult(success=False, output="", error=str(e))
         finally:
+            if process is not None:
+                process.close()
             response_file.unlink(missing_ok=True)
             if transcript_tail_file is not None:
                 transcript_tail_file.unlink(missing_ok=True)

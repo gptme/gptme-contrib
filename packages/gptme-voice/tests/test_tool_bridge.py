@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import gptme_voice.realtime.tool_bridge as tool_bridge
 import pytest
 from gptme_voice.realtime.tool_bridge import (
     _FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS,
@@ -74,6 +75,9 @@ class _FakeProcess:
     def kill(self) -> None:
         self.killed = True
 
+    def close(self) -> None:
+        pass
+
 
 def test_execute_prefers_meaningful_stdout_error_over_tty_warning() -> None:
     async def _exercise() -> None:
@@ -88,7 +92,7 @@ def test_execute_prefers_meaningful_stdout_error_over_tty_warning() -> None:
             return _FakeProcess(returncode=1, stdout=stdout, stderr=stderr)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             result = await bridge._execute("Investigate the voice system", mode="smart")
 
         assert result.success is False
@@ -116,7 +120,7 @@ def test_execute_does_not_report_tty_warning_when_stdout_is_empty() -> None:
             )
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             result = await bridge._execute("Investigate the voice system", mode="smart")
 
         assert result.success is False
@@ -140,7 +144,7 @@ def test_execute_passes_devnull_stdin_to_subprocess() -> None:
             return _FakeProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace")
             await bridge._execute("Inspect recent voice changes", mode="smart")
 
@@ -160,7 +164,7 @@ def test_execute_uses_legacy_env_override_for_smart_model() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setenv("GPTME_VOICE_SUBAGENT_MODEL", "openai-subscription/gpt-5.4")
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace")
             result = await bridge._execute("Inspect recent voice changes", mode="smart")
 
@@ -198,7 +202,7 @@ def test_execute_uses_fast_model_override_without_touching_smart() -> None:
         with pytest.MonkeyPatch.context() as mp:
             mp.setenv("GPTME_VOICE_SUBAGENT_MODEL_FAST", "openai/gpt-5-mini")
             mp.setenv("GPTME_VOICE_SUBAGENT_MODEL_SMART", "openai-subscription/gpt-5.4")
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace")
             result = await bridge._execute("Inspect recent voice changes", mode="fast")
 
@@ -229,7 +233,7 @@ def test_execute_uses_smart_model_override_without_touching_fast() -> None:
         with pytest.MonkeyPatch.context() as mp:
             mp.setenv("GPTME_VOICE_SUBAGENT_MODEL_FAST", "openai/gpt-5-mini")
             mp.setenv("GPTME_VOICE_SUBAGENT_MODEL_SMART", "openai-subscription/gpt-5.4")
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace")
             result = await bridge._execute("Inspect recent voice changes", mode="smart")
 
@@ -266,7 +270,7 @@ def test_execute_uses_env_override_for_gptme_path() -> None:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setenv("GPTME_VOICE_SUBAGENT_PATH", "/fake/bin/gptme")
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace")
             result = await bridge._execute("Inspect recent voice changes", mode="smart")
 
@@ -295,7 +299,7 @@ def test_execute_fast_mode_keeps_context_files() -> None:
             return _FakeProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace")
             await bridge._execute("quick lookup", mode="fast")
 
@@ -325,7 +329,7 @@ def test_execute_smart_mode_keeps_context_loading() -> None:
             return _FakeProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace")
             await bridge._execute("detailed analysis", mode="smart")
 
@@ -354,7 +358,7 @@ def test_execute_fast_mode_uses_subprocess_timeout_wrapper() -> None:
             return _FakeProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace")
             await bridge._execute("quick lookup", mode="fast")
 
@@ -392,7 +396,7 @@ def test_execute_smart_mode_uses_subprocess_timeout_wrapper() -> None:
             return _FakeProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace")
             await bridge._execute("deep lookup", mode="smart")
 
@@ -431,7 +435,7 @@ def test_execute_passes_bounded_transcript_tail_to_wrapper() -> None:
             return _FakeProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(
                 workspace="/fake/workspace",
                 transcript_provider=lambda: transcript,
@@ -462,7 +466,7 @@ def test_execute_skips_transcript_tail_when_disabled() -> None:
             return _FakeProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(
                 workspace="/fake/workspace",
                 transcript_provider=lambda: [{"role": "user", "text": "hello"}],
@@ -498,7 +502,7 @@ def test_subagent_status_shows_last_output() -> None:
             return proc
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
 
             dispatch = await bridge.handle_function_call(
@@ -583,7 +587,7 @@ def test_execute_falls_back_to_stdout_when_response_file_empty(tmp_path) -> None
             )
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             result = await bridge._execute("What is the weather?", mode="smart")
 
         assert result.success is True
@@ -602,7 +606,7 @@ def test_execute_handles_missing_gptme_binary() -> None:
             raise FileNotFoundError
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _raise_file_not_found)
+            mp.setattr(tool_bridge, "_spawn_subagent", _raise_file_not_found)
             result = await bridge._execute("whatever", mode="smart")
 
         assert result.success is False
@@ -625,7 +629,7 @@ def test_execute_reports_timeout() -> None:
             return _HangingProcess(returncode=-1)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             result = await bridge._execute("long running task", mode="smart")
 
         assert result.success is False
@@ -678,7 +682,7 @@ def test_execute_timeout_exit_code_reports_clear_message_not_shell_noise() -> No
             )
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             result = await bridge._execute(
                 "Summarize the software factory in this workspace", mode="fast"
             )
@@ -703,7 +707,7 @@ def test_execute_sigterm_exit_code_reported_as_timeout() -> None:
             return _FakeProcess(returncode=143, stdout="partial work")
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             result = await bridge._execute("long lookup", mode="fast")
 
         assert result.success is False
@@ -725,7 +729,7 @@ def test_execute_sigkill_exit_code_reports_killed_not_timeout() -> None:
             )
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             result = await bridge._execute("long lookup", mode="fast")
 
         assert result.success is False
@@ -803,7 +807,7 @@ def test_handle_function_call_subagent_still_works_alongside_hangup() -> None:
             return _FakeProcess(returncode=0, stdout="ok")
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             result = await bridge.handle_function_call(
                 "subagent", {"task": "check something"}
             )
@@ -866,7 +870,7 @@ def test_subagent_status_lists_pending_dispatch() -> None:
             return _SlowProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
 
             dispatch = await bridge.handle_function_call(
@@ -909,7 +913,7 @@ def test_subagent_status_shows_recent_completion_on_success() -> None:
             )
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
 
             dispatch = await bridge.handle_function_call(
@@ -944,7 +948,7 @@ def test_subagent_status_shows_recent_timeout() -> None:
             return _FakeProcess(returncode=124, stdout="partial result\n")
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
 
             dispatch = await bridge.handle_function_call(
@@ -988,7 +992,7 @@ def test_subagent_status_shows_asyncio_timeout() -> None:
             return _SlowProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             # Very short timeout so asyncio.wait_for fires immediately
             bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=0.01)
 
@@ -1029,7 +1033,7 @@ def test_subagent_dispatch_defaults_to_fast_mode() -> None:
             return _SlowProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
 
             dispatch = await bridge.handle_function_call(
@@ -1062,7 +1066,7 @@ def test_completed_subagent_logs_timing_summary(caplog) -> None:
             )
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
 
             with caplog.at_level(logging.INFO):
@@ -1118,7 +1122,7 @@ def test_subagent_cancel_specific_task_injects_cancel_notice() -> None:
             injected.append(text)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(
                 workspace="/fake/workspace", timeout=10, on_result=_on_result
             )
@@ -1165,7 +1169,7 @@ def test_execute_kills_process_on_cancel() -> None:
         bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=30)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             task = asyncio.create_task(bridge._execute("long task", mode="fast"))
             await asyncio.sleep(0)  # let the task start
             task.cancel()
@@ -1191,7 +1195,7 @@ def test_get_timings_records_completed_subagent_run() -> None:
             )
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
 
             dispatch = await bridge.handle_function_call(
@@ -1232,7 +1236,7 @@ def test_subagent_cancel_all_cancels_every_pending_task() -> None:
             return _SlowProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
 
             await bridge.handle_function_call("subagent", {"task": "a"})
@@ -1340,6 +1344,58 @@ def test_cancel_kills_subagent_descendants(
 
 
 @pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")
+@pytest.mark.parametrize("pipe_number", [1, 2])
+def test_loop_shutdown_during_spawn_kills_subagent_descendants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipe_number: int
+) -> None:
+    """Shutdown cancels every task, not just the caller awaiting the spawn."""
+    pid_file = tmp_path / "grandchild.pid"
+    script = tmp_path / "fake-subagent.sh"
+    script.write_text(f"#!/bin/sh\nsleep 30 &\necho $! > {pid_file}\nwait\n")
+    script.chmod(0o755)
+    monkeypatch.delenv("GPTME_VOICE_SUBAGENT_PATH", raising=False)
+    monkeypatch.setattr(
+        "gptme_voice.realtime.tool_bridge._TIMEOUT_BINARY_AVAILABLE", False
+    )
+
+    async def _exercise() -> int:
+        spawned = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        real_connect = loop.connect_read_pipe
+        connections = 0
+
+        async def _slow_connect(*args, **kwargs):
+            nonlocal connections
+            connections += 1
+            if connections == pipe_number:
+                while not pid_file.exists() or not pid_file.read_text().strip():
+                    await asyncio.sleep(0.01)
+                spawned.set()
+                await asyncio.sleep(0.2)
+            return await real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(loop, "connect_read_pipe", _slow_connect)
+        bridge = GptmeToolBridge(
+            workspace=str(tmp_path), gptme_path=str(script), timeout=30
+        )
+        asyncio.create_task(bridge._execute("long task", mode="fast"))
+        await asyncio.wait_for(spawned.wait(), timeout=10)
+        # No explicit cancel/await: asyncio.run() itself cancels ALL pending tasks.
+        return int(pid_file.read_text().strip())
+
+    grandchild = asyncio.run(_exercise())
+    try:
+        for _ in range(40):
+            if not _pid_alive(grandchild):
+                break
+            time.sleep(0.01)
+        assert not _pid_alive(grandchild), "loop shutdown left a live descendant"
+    finally:
+        if _pid_alive(grandchild):
+            os.kill(grandchild, signal.SIGKILL)
+
+
+@pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")
 @pytest.mark.parametrize("repeat_cancel", [False, True])
 @pytest.mark.parametrize("leader_exits", [False, True])
 def test_cancel_during_spawn_kills_subagent_descendants(
@@ -1365,7 +1421,7 @@ def test_cancel_during_spawn_kills_subagent_descendants(
         monkeypatch.setattr(
             "gptme_voice.realtime.tool_bridge._TIMEOUT_BINARY_AVAILABLE", False
         )
-    real_exec = asyncio.create_subprocess_exec
+    real_exec = tool_bridge._spawn_subagent
 
     async def _exercise() -> int:
         spawned = asyncio.Event()
@@ -1390,7 +1446,7 @@ def test_cancel_during_spawn_kills_subagent_descendants(
                 raise
             return proc
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", _slow_connect)
+        monkeypatch.setattr(tool_bridge, "_spawn_subagent", _slow_connect)
         bridge = GptmeToolBridge(
             workspace=str(tmp_path), gptme_path=str(script), timeout=30
         )
@@ -1442,7 +1498,7 @@ def test_cancel_during_spawn_bounds_escaped_descendant_pipe_drain(
     monkeypatch.setattr(
         "gptme_voice.realtime.tool_bridge._TIMEOUT_BINARY_AVAILABLE", False
     )
-    real_exec = asyncio.create_subprocess_exec
+    real_exec = tool_bridge._spawn_subagent
     escaped: int | None = None
 
     async def _exercise() -> None:
@@ -1461,7 +1517,7 @@ def test_cancel_during_spawn_bounds_escaped_descendant_pipe_drain(
             await asyncio.sleep(0.1)
             return proc
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", _slow_connect)
+        monkeypatch.setattr(tool_bridge, "_spawn_subagent", _slow_connect)
         bridge = GptmeToolBridge(
             workspace=str(tmp_path), gptme_path=str(script), timeout=30
         )
@@ -1506,7 +1562,7 @@ def test_cancelled_task_records_timing_receipt_and_completion() -> None:
             return _SlowProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
             dispatch = await bridge.handle_function_call(
                 "subagent", {"task": "check issue 1287", "mode": "fast"}
@@ -1541,7 +1597,7 @@ def test_subagent_status_reports_remaining_budget() -> None:
             return _SlowProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
             await bridge.handle_function_call("subagent", {"task": "a", "mode": "fast"})
             await asyncio.sleep(0)
@@ -1650,7 +1706,7 @@ def test_on_dispatch_called_when_subagent_dispatched() -> None:
             return _FakeProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(
                 workspace="/fake/workspace",
                 on_dispatch=_fake_on_dispatch,
@@ -1681,7 +1737,7 @@ def test_on_dispatch_failure_does_not_hide_dispatch_receipt(caplog) -> None:
             return _FakeProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(
                 workspace="/fake/workspace",
                 on_dispatch=_failing_on_dispatch,
@@ -1728,7 +1784,7 @@ def test_on_dispatch_timeout_does_not_hide_dispatch_receipt(
             "gptme_voice.realtime.tool_bridge._CUE_CALLBACK_TIMEOUT_SECONDS", 0.01
         )
         monkeypatch.setattr(
-            asyncio, "create_subprocess_exec", _fake_create_subprocess_exec
+            tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec
         )
         bridge = GptmeToolBridge(
             workspace="/fake/workspace",
@@ -1792,7 +1848,7 @@ def test_on_timeout_called_when_subagent_times_out() -> None:
             return _FakeProcess(returncode=124, stdout="partial output\n")
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(
                 workspace="/fake/workspace",
                 timeout=10,
@@ -1830,7 +1886,7 @@ def test_on_timeout_failure_does_not_suppress_result_or_cleanup(caplog) -> None:
             return _FakeProcess(returncode=124, stdout="partial output\n")
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(
                 workspace="/fake/workspace",
                 timeout=10,
@@ -1877,7 +1933,7 @@ def test_on_timeout_callback_timeout_does_not_suppress_result_or_cleanup(
             "gptme_voice.realtime.tool_bridge._CUE_CALLBACK_TIMEOUT_SECONDS", 0.01
         )
         monkeypatch.setattr(
-            asyncio, "create_subprocess_exec", _fake_create_subprocess_exec
+            tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec
         )
         bridge = GptmeToolBridge(
             workspace="/fake/workspace",
@@ -1914,7 +1970,7 @@ def test_on_timeout_not_called_on_successful_completion() -> None:
             return _FakeProcess(returncode=0)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
             bridge = GptmeToolBridge(
                 workspace="/fake/workspace",
                 on_timeout=_fake_on_timeout,
