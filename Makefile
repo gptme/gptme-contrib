@@ -13,7 +13,7 @@ PACKAGE_DIRS := $(shell find packages -maxdepth 1 -mindepth 1 -type d ! -type l 
 # by Makefile presence: a package with tests but no Makefile used to get NO CI
 # job at all, so a stale test expectation survived a dependency pin bump
 # unnoticed (gptme-usage, 11 days - gptme/gptme-contrib#1973).
-PACKAGE_TEST_DIRS := $(shell for d in packages/*/; do d=$${d%/}; [ -d "$$d/tests" ] && echo "$$d"; done)
+PACKAGE_TEST_DIRS := $(shell for d in $(PACKAGE_DIRS); do [ -d "$$d/tests" ] && echo "$$d"; done)
 # Packages excluded from the CI package matrix. Keep this empty unless a suite
 # genuinely cannot run - the discovery job prints the excluded set so a silent
 # coverage loss shows up in the CI log instead of vanishing.

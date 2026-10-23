@@ -17,10 +17,10 @@ REPO_ROOT = Path(__file__).parent.parent
 PACKAGES_DIR = REPO_ROOT / "packages"
 
 
-def _matrix_packages() -> list[str]:
+def _matrix_packages(repo_root: Path = REPO_ROOT) -> list[str]:
     result = subprocess.run(
         ["make", "--no-print-directory", "ci-list-packages-json"],
-        cwd=REPO_ROOT,
+        cwd=repo_root,
         capture_output=True,
         text=True,
         check=True,
@@ -61,3 +61,15 @@ def test_matrix_contains_no_packages_without_tests():
     """The matrix must not list packages that have no test suite to run."""
     without_tests = set(_matrix_packages()) - _packages_with_tests()
     assert not without_tests, f"matrix entries without tests/: {sorted(without_tests)}"
+
+
+def test_matrix_ignores_symlinked_packages_and_cache(tmp_path: Path):
+    """Only real package directories belong in the matrix, not aliases or caches."""
+    (tmp_path / "Makefile").write_text((REPO_ROOT / "Makefile").read_text())
+    packages = tmp_path / "packages"
+    (packages / "real-package" / "tests").mkdir(parents=True)
+    (packages / "package-link").symlink_to("real-package", target_is_directory=True)
+    (packages / "__pycache__" / "tests").mkdir(parents=True)
+    (packages / "no-tests").mkdir()
+
+    assert _matrix_packages(tmp_path) == ["real-package"]
