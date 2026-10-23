@@ -119,16 +119,16 @@ def _signature_violation(execute: Any) -> str | None:
     return None
 
 
-def _is_kwargs_expr(node: ast.expr) -> bool:
-    """Match ``kwargs`` and ``(kwargs or {})``."""
+def _is_kwargs_expr(node: ast.expr, parameter_name: str) -> bool:
+    """Match the native input parameter and its ``(parameter or {})`` form."""
     if isinstance(node, ast.Name):
-        return node.id == "kwargs"
+        return node.id == parameter_name
     return (
         isinstance(node, ast.BoolOp)
         and isinstance(node.op, ast.Or)
         and bool(node.values)
         and isinstance(node.values[0], ast.Name)
-        and node.values[0].id == "kwargs"
+        and node.values[0].id == parameter_name
     )
 
 
@@ -155,17 +155,23 @@ def _kwargs_keys_read(func: Any) -> set[str] | None:
     if funcdef is None:
         return None
 
+    positional = [*funcdef.args.posonlyargs, *funcdef.args.args]
+    if len(positional) < 3:
+        # Variadic executors need data-flow analysis; the shape check is separate.
+        return None
+    parameter_name = positional[2].arg
+
     keys: set[str] = set()
     touches_kwargs = False
     literal_access = False
     for node in ast.walk(funcdef):
-        if isinstance(node, ast.Name) and node.id == "kwargs":
+        if isinstance(node, ast.Name) and node.id == parameter_name:
             touches_kwargs = True
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "get"
-            and _is_kwargs_expr(node.func.value)
+            and _is_kwargs_expr(node.func.value, parameter_name)
             and node.args
             and isinstance(node.args[0], ast.Constant)
             and isinstance(node.args[0].value, str)
@@ -174,7 +180,7 @@ def _kwargs_keys_read(func: Any) -> set[str] | None:
         if (
             isinstance(node, ast.Subscript)
             and isinstance(node.value, ast.Name)
-            and node.value.id == "kwargs"
+            and node.value.id == parameter_name
             and isinstance(node.slice, ast.Constant)
             and isinstance(node.slice.value, str)
         ):
@@ -401,3 +407,10 @@ def test_guard_still_counts_literal_subscript_reads() -> None:
         return kwargs["action"]
 
     assert _kwargs_keys_read(execute_reading) == {"action"}
+
+
+def test_guard_follows_third_positional_parameter_name() -> None:
+    def execute(code: Any, args: Any, params: Any, /) -> Any:
+        return params["action"] + (params or {}).get("target", "")
+
+    assert _kwargs_keys_read(execute) == {"action", "target"}
