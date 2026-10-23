@@ -414,10 +414,12 @@ def test_merge_with_module_defaults_does_not_mutate_input() -> None:
 @pytest.mark.parametrize(
     "input_model,expected",
     [
-        # Floating aliases resolve to their validated pin, never "latest"
+        # Floating aliases resolve to their validated pin, never "latest".
+        # CC_ALIAS_PINS is the source of truth: a pin bump must update this
+        # list and the cc_dispatch_model_id list below in the same change.
         ("opus", "opus-5"),
         ("sonnet", "sonnet-4-6"),
-        ("haiku", "haiku-4-5"),
+        ("haiku", "haiku-5-5"),
         ("fable", "fable-5-1"),
         # Explicit Fable versions stay distinct
         ("fable-5", "fable-5"),
@@ -733,9 +735,10 @@ def test_estimate_session_cost_fable_alias_resolves(fable_toml_path: Path) -> No
 @pytest.mark.parametrize(
     "input_model,expected",
     [
+        # Same source of truth as the resolve_cc_version list above.
         ("opus", "claude-opus-5"),
         ("sonnet", "claude-sonnet-4-6"),
-        ("haiku", "claude-haiku-4-5-20251001"),
+        ("haiku", "claude-haiku-5-5"),
         ("fable", "claude-fable-5-1"),
         ("opus-5-5", "claude-opus-5-5"),
         ("sonnet-5-5", "claude-sonnet-5-5"),
