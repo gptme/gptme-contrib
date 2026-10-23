@@ -4026,6 +4026,14 @@ def test_contributor_review_preserves_suppressed_notification_work(
     )
     config.state_dir.mkdir(parents=True, exist_ok=True)
     config.pending_state_dir.mkdir(parents=True, exist_ok=True)
+    cooldown = tmp_path / "cooldown"
+    cooldown.mkdir()
+    monkeypatch.setenv("PM_DISPATCH_COOLDOWN_DIR", str(cooldown))
+    monkeypatch.setenv("PM_SLOT_KEY", f"{item.repo}#{item.number}")
+    marker = cooldown / f"{item.repo.replace('/', '-')}-{item.number}.event"
+    logged_marker = marker.with_suffix(".event_logged")
+    for path in (marker, logged_marker):
+        path.write_text("launch-fingerprint")
     old_watermark = "2026-10-22T15:00:00Z"
     (config.state_dir / "notif-555.state").write_text(old_watermark)
     if source != "carried":
@@ -4052,6 +4060,10 @@ def test_contributor_review_preserves_suppressed_notification_work(
     assert (config.pending_state_dir / "notif-555.state").exists() == (
         source != "carried"
     )
+    # Only a confirmed submitted review may retain the launch fingerprint;
+    # absent or unreadable review evidence must permit the next poll to retry.
+    assert marker.exists() == (reviewed is True)
+    assert logged_marker.exists() == (reviewed is True)
 
 
 @pytest.mark.parametrize("reviewed", [True, False, None])

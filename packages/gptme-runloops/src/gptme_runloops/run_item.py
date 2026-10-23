@@ -3005,6 +3005,10 @@ def run_post_session(
             if reviewed is False or exit_code != 0
             else EFFECT_UNKNOWN
         )
+        if effect != EFFECT_OBSERVED:
+            # Keep suppressed activity pending, but remove the launch-only
+            # fingerprint so absent/unobservable reviews can retry next poll.
+            clear_slot_event_markers(config, resolve_slot_key(config, item))
     if effect == EFFECT_NONE:
         _log(
             f"WARN: PM dispatch produced NO observable effect on {plan.repo}#{plan.number} "
