@@ -1977,6 +1977,37 @@ def test_stale_cached_head_mismatch_is_confirmed_live(tmp_path: Path):
     assert len(_rest_head_calls(logged)) == 1
 
 
+def test_footerless_review_refreshes_mismatching_shared_commit_cache(tmp_path: Path):
+    """A cache predating a push cannot force another review of an already-reviewed head."""
+    fixture = {
+        "pr_number": 123,
+        "raw_comments": [_make_greptile_comment(5, reviewed_at=_iso_ago(minutes=2))],
+        "raw_reviews": [],  # Legacy summary: no formal review or SHA footer.
+        "raw_pr": {"head": {"sha": "NEWSHA"}, "created_at": _iso_ago(minutes=120)},
+        "raw_commits": [_make_commit(_iso_ago(minutes=5))],
+    }
+    cache_dir = tmp_path / "c"
+    cache_dir.mkdir()
+    cache_file = cache_dir / f"pr-commits-{_pr_hash('gptme/gptme', 123)}.json"
+    calls = tmp_path / "calls.jsonl"
+    env = {"GH_CALLS": str(calls), "GREPTILE_HELPER_CACHE_DIR": str(cache_dir)}
+    for command in ("status", "trigger"):
+        cache_file.write_text(
+            json.dumps({"head_sha": "OLDSHA", "dates": [_iso_ago(minutes=60)]})
+        )
+        calls.unlink(missing_ok=True)
+        result, gh_log = _run_helper(
+            command, fixture, extra_env=env, capture_gh_log=True
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not gh_log, f"unnecessary re-review posted: {gh_log}"
+        if command == "status":
+            assert result.stdout.strip() == "already-reviewed", result.stderr
+        assert len(_graphql_calls(_calls(calls))) == 1
+        assert len(_rest_head_calls(_calls(calls))) == 1
+        assert json.loads(cache_file.read_text())["head_sha"] == "NEWSHA"
+
+
 def _rest_head_calls(calls: list[list[str]]) -> list[list[str]]:
     """The explicit REST current-head read (`.head.sha` on pulls/N)."""
     return [

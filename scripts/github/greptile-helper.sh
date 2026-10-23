@@ -265,10 +265,10 @@ _pr_reviews_json() {
 #      same PR several times within seconds. The cache lives next to the other
 #      per-PR state files in TMPDIR (override: GREPTILE_HELPER_CACHE_DIR).
 #
-# A live read is memoized for the rest of this process. This info can lag the real
-# head, so it is never the head authority: head decisions use _current_head_sha
-# (REST). Its dates are trusted only when their head agrees with that read; see
-# _commit_info_disagrees_with_head.
+# A live read is memoized for the rest of this process. A shared cache describing
+# a different head from REST is refreshed before using its dates. Even a live
+# GraphQL read can lag, so REST remains the head authority and callers still check
+# _commit_info_disagrees_with_head before trusting the refreshed dates.
 GREPTILE_COMMITS_CACHE_TTL="${GREPTILE_COMMITS_CACHE_TTL:-120}"
 _COMMIT_INFO_CACHE_DIR="${GREPTILE_HELPER_CACHE_DIR:-${TMPDIR:-/tmp}/greptile-helper-cache}"
 _COMMIT_INFO_CACHE_FILE="$_COMMIT_INFO_CACHE_DIR/pr-commits-${_PR_HASH}.json"
@@ -321,8 +321,15 @@ _pr_commit_info() {
         && [ -s "$_COMMIT_INFO_CACHE_FILE" ]; then
         age=$(_file_age_seconds "$_COMMIT_INFO_CACHE_FILE") || age=""
         if [ -n "$age" ] && [ "$age" -ge 0 ] && [ "$age" -lt "$GREPTILE_COMMITS_CACHE_TTL" ]; then
-            cat "$_COMMIT_INFO_CACHE_FILE"
-            return
+            info=$(cat "$_COMMIT_INFO_CACHE_FILE")
+            # A head mismatch invalidates the shared snapshot, not the review.
+            # Refresh once so a footerless review newer than the current commits
+            # can still suppress a duplicate trigger. The live result is memoized
+            # even if GraphQL itself lags; callers retain the disagreement guard.
+            if ! _commit_info_disagrees_with_head "$info"; then
+                printf '%s\n' "$info"
+                return
+            fi
         fi
     fi
     if info=$(_fetch_pr_commit_info); then
