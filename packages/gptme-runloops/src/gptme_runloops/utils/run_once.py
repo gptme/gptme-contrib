@@ -233,7 +233,9 @@ def claude_code_run_once(
         exit_code=(r.returncode or 1) if failed else 0,
         resumed=bool(resume),
         cost_usd=out.get("total_cost_usd"),
-        agent_output=has_output,
+        # Evidence that the session ran is separate from final-result validity:
+        # never permit a fresh fallback after earlier assistant output.
+        agent_output=bool(text) or bool(texts),
         report_text="\n\n".join(texts) if texts else None,
     )
 

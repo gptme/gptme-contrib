@@ -158,7 +158,7 @@ def test_claude_report_failure_keeps_error_semantics():
     )
     with patch.object(ro.subprocess, "run", return_value=_proc(stdout, "boom", 1)):
         r = ClaudeCodeExecutor().run_once("hi", WS, 60, report=True)
-    assert r.is_error and not r.agent_output
+    assert r.is_error and r.agent_output
     assert r.report_text == "partial"
 
 
@@ -219,7 +219,8 @@ def test_claude_blank_result_is_not_success(text, report):
     with patch.object(ro.subprocess, "run", return_value=_proc(stdout)):
         r = ClaudeCodeExecutor().run_once("hi", WS, 60, report=report)
     assert r.report_text == ("partial report" if report else None)
-    assert r.is_error and not r.agent_output
+    assert r.is_error
+    assert r.agent_output == (bool(text) or report)
     assert r.session_id == SID
 
 
@@ -487,6 +488,42 @@ def test_cli_no_fallback_when_resumed_session_ran():
         [ran],
     )
     assert res.exit_code == 1 and once.call_count == 1
+
+
+@pytest.mark.parametrize("text", ["", " ", "\n\t"])
+@pytest.mark.parametrize("subtype", ["success", "error_during_execution"])
+def test_cli_no_fresh_fallback_after_streamed_assistant_output(text, subtype):
+    stdout = _cc_stream(
+        _assistant(_text("Applied the requested edit.")),
+        _result_event(result=text, subtype=subtype),
+    )
+    with (
+        patch("shutil.which", return_value="/usr/bin/claude"),
+        patch.object(ro.subprocess, "run", return_value=_proc(stdout)) as run,
+    ):
+        res = CliRunner().invoke(
+            main,
+            [
+                "run",
+                "--workspace",
+                str(WS),
+                "--backend",
+                "claude-code",
+                "--resume",
+                SID,
+                "--on-resume-failure",
+                "fresh",
+                "--report",
+                "more",
+            ],
+        )
+    assert res.exit_code == 1, res.output
+    out = json.loads(res.output)
+    assert out["is_error"] and out["agent_output"]
+    assert out["report_text"] == "Applied the requested edit."
+    assert out["session_id"] == SID and out["resumed"]
+    assert run.call_count == 1
+    assert _argv(run)[_argv(run).index("--resume") + 1] == SID
 
 
 def test_cli_unsupported_resume_is_usage_error():
