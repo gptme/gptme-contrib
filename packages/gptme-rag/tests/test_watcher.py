@@ -2,10 +2,107 @@
 
 import logging
 import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from watchdog.events import FileMovedEvent
 
 from gptme_rag.indexing.watcher import FileWatcher
+from gptme_rag.indexing.watcher import IndexEventHandler
 
 logger = logging.getLogger(__name__)
+
+
+class _RecordingCache:
+    def clear(self) -> None:
+        pass
+
+
+class _RecordingIndexer:
+    """Small indexer double for exercising watcher decoding boundaries."""
+
+    def __init__(self, persist_directory):
+        self.cache = _RecordingCache()
+        self.persist_directory = persist_directory
+        self.indexed: list = []
+        self.search_queries: list[str] = []
+        self.verify_contents: list[str | None] = []
+
+    def delete_documents(self, where: dict) -> None:
+        pass
+
+    def index_file(self, path) -> int:
+        self.indexed.append(path)
+        return 1
+
+    def search(self, query: str, n_results: int = 1):
+        self.search_queries.append(query)
+        if not self.indexed:
+            return [], [], None
+        return [SimpleNamespace(metadata={"source": str(self.indexed[-1])})], [], None
+
+    def verify_document(self, path, content: str | None = None) -> bool:
+        self.verify_contents.append(content)
+        return path in self.indexed
+
+
+@pytest.fixture
+def non_utf8_default(monkeypatch):
+    """Force implicit text reads through the same non-UTF-8 boundary everywhere."""
+    original_read_text = Path.read_text
+
+    def read_text_with_ascii_default(path, encoding=None, errors=None):
+        if encoding in (None, "locale"):
+            encoding = "ascii"
+        return original_read_text(path, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", read_text_with_ascii_default)
+
+
+def _write_and_verify_utf8(path: Path, content: str) -> None:
+    path.write_bytes(content.encode("utf-8"))
+    with pytest.raises(UnicodeDecodeError):
+        path.read_text()
+    assert path.read_text(encoding="utf-8") == content
+
+
+def test_process_update_reads_utf8_with_explicit_encoding(tmp_path, non_utf8_default):
+    """A UTF-8 update is processed under a non-UTF-8 default locale."""
+    path = tmp_path / "update.txt"
+    _write_and_verify_utf8(path, "watcher update café 東京")
+    indexer = _RecordingIndexer(tmp_path / "index")
+
+    IndexEventHandler(indexer)._process_update(path)
+
+    assert indexer.indexed == [path]
+    assert indexer.search_queries == ["watcher update café 東京"]
+
+
+def test_moved_utf8_file_reads_with_explicit_encoding(tmp_path, non_utf8_default):
+    """A moved UTF-8 file is indexed under a non-UTF-8 default locale."""
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination.txt"
+    _write_and_verify_utf8(source, "watcher move café 東京")
+    source.rename(destination)
+    indexer = _RecordingIndexer(tmp_path / "index")
+
+    IndexEventHandler(indexer).on_moved(FileMovedEvent(str(source), str(destination)))
+
+    assert indexer.indexed == [destination]
+    assert indexer.search_queries == ["watcher move café 東京"]
+
+
+def test_process_single_update_reads_utf8_with_explicit_encoding(tmp_path, non_utf8_default):
+    """A batch UTF-8 update is processed under a non-UTF-8 default locale."""
+    path = tmp_path / "batch.txt"
+    _write_and_verify_utf8(path, "watcher batch café 東京")
+    indexer = _RecordingIndexer(tmp_path / "index")
+
+    IndexEventHandler(indexer)._process_single_update(path, set())
+
+    assert indexer.indexed == [path]
+    assert indexer.verify_contents == ["watcher batch café 東京"]
 
 
 def test_file_watcher_basic(tmp_path, indexer):
