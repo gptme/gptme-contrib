@@ -185,6 +185,10 @@ live head (`APPROVED`, `CHANGES_REQUESTED` or `COMMENTED`), `False` if absent,
 and `None` if unobservable. It paginates reviews, checks head stability between
 pages, and is also suitable for a shell adapter. Review-only post-session effect
 uses this evidence instead of generic reply checks or fallback comments.
+It does not promote pending PR activity or notification watermarks (including
+immutable launch snapshots): co-grouped work suppressed by the review-only
+prompt must remain eligible for a later handling session. The default launcher
+preserves item `detail`, including the required managed-login evidence.
 
 ## Development
 

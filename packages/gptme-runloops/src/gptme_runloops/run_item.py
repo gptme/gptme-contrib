@@ -2812,7 +2812,12 @@ def run_post_session(
     # every pending notif-*.state, consuming exactly what was "rolled back".
     # The result was a fix that passed its tests and changed nothing. Keep all
     # three effects together in rollback_failed_delivery().
-    if delivery_outcome == "orphan_no_delivery":
+    if "contributor_unreviewed" in item.types:
+        # Review-only normalization suppresses co-grouped PR/notification work.
+        # A submitted review does not handle that work: leave both pending and
+        # carried watermarks unconsumed so the gate can emit it again.
+        pass
+    elif delivery_outcome == "orphan_no_delivery":
         rollback_slot_key = resolve_slot_key(config, item)
         if rollback_failed_delivery(config, item.repo, item.number, rollback_slot_key):
             _log(

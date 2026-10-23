@@ -4009,3 +4009,46 @@ def test_contributor_review_effect_requires_exact_head_review(
     )
     assert not run_cmd.find("/fake/wait-merge")
     assert not run_cmd.find("/fake/check-delivery.py")
+
+
+@pytest.mark.parametrize("reviewed", [True, False, None])
+@pytest.mark.parametrize("source", ["carried", "pending", "both"])
+def test_contributor_review_preserves_suppressed_notification_work(
+    tmp_path, monkeypatch, reviewed, source
+) -> None:
+    config, _, plan, outcome, hooks, _ = _unmoved_comment_deliverable_fixture(
+        tmp_path, ("pr_update", "contributor_unreviewed", "mention")
+    )
+    snapshot = {"id": "555", "updated_at": "2026-10-23T15:00:00Z"}
+    item = make_item(
+        types=["pr_update", "contributor_unreviewed", "mention"],
+        notification_states=[snapshot] if source != "pending" else [],
+    )
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    config.pending_state_dir.mkdir(parents=True, exist_ok=True)
+    old_watermark = "2026-10-22T15:00:00Z"
+    (config.state_dir / "notif-555.state").write_text(old_watermark)
+    if source != "carried":
+        (config.pending_state_dir / "notif-555.state").write_text(
+            snapshot["updated_at"]
+        )
+        (config.pending_state_dir / "notif-555.map").write_text(
+            f"{item.repo}#{item.number}"
+        )
+    pr_state = f"{item.repo.replace('/', '-')}-pr-{item.number}.state"
+    (config.pending_state_dir / pr_state).write_text("unhandled-pr-update")
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.viewer_review_since", lambda *a, **kw: reviewed
+    )
+
+    run_post_session(plan, item, outcome, config, hooks)
+    promote_notification_states(config)
+
+    # Neither the immutable launch snapshot nor the current pending directory
+    # may consume a human mention suppressed by the review-only prompt.
+    assert (config.state_dir / "notif-555.state").read_text() == old_watermark
+    assert not (config.state_dir / "notif-555.map").exists()
+    assert not (config.state_dir / pr_state).exists()
+    assert (config.pending_state_dir / "notif-555.state").exists() == (
+        source != "carried"
+    )
