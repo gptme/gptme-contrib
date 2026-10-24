@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from gptme_sessions.record import SessionRecord
 from gptme_sessions.store import SessionStore
 
@@ -47,6 +49,21 @@ def test_malformed_row_stays_at_its_position(tmp_path: Path) -> None:
     lines = store.path.read_text(encoding="utf-8").splitlines()
     assert lines[1] == "{not json"
     assert [json.loads(line)["session_id"] for line in (lines[0], lines[2])] == ["a", "b"]
+
+
+@pytest.mark.parametrize("ending", [b"\r", b"", b"\n", b"\r\n"])
+def test_malformed_row_has_lf_boundary_before_new_record(tmp_path: Path, ending: bytes) -> None:
+    store = SessionStore(sessions_dir=tmp_path)
+    malformed = b"{not json" + ending
+    store.path.write_bytes(malformed)
+
+    store.rewrite([SessionRecord(session_id="new")])
+
+    lines = store.path.read_bytes().split(b"\n")
+    assert lines[0] == malformed.removesuffix(b"\n")
+    assert json.loads(lines[1])["session_id"] == "new"
+    assert lines[2:] == [b""]
+    assert _ids(store) == ["new"]
 
 
 def test_duplicate_disk_rows_collapse_to_the_first_position(tmp_path: Path) -> None:

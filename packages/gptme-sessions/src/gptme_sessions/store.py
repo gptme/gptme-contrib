@@ -342,7 +342,7 @@ class SessionStore:
                         ):
                             # Keep the original bytes, including whitespace and
                             # line ending, rather than the stripped parse input.
-                            out_lines.append(raw if raw.endswith(("\n", "\r")) else raw + "\n")
+                            out_lines.append(raw if raw.endswith("\n") else raw + "\n")
                             continue
                         replacements = by_id.get(rec.session_id)
                         if replacements is None:
