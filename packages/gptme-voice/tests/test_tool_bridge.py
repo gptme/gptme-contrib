@@ -75,7 +75,7 @@ class _FakeProcess:
     def kill(self) -> None:
         self.killed = True
 
-    def close(self) -> None:
+    def close(self, *, kill_tree: bool = True) -> None:
         pass
 
 
@@ -1444,6 +1444,67 @@ def test_subagent_reader_error_delivers_result_and_reaps_child(
         for process in processes:
             tool_bridge._kill_process_tree(process)
             process.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="needs process groups")
+def test_successful_execute_does_not_kill_same_group_descendant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successful tool call must not SIGKILL leftover same-group children.
+
+    ``close()`` runs in ``_execute``'s finally after a successful return.
+    Killpg belongs to cancel/timeout/error; success only reaps the wrapper.
+    The descendant redirects stdio so the wrapper's pipes can EOF.
+    """
+    import sys
+
+    pid_file = tmp_path / "descendant.pid"
+    script = tmp_path / "fake-subagent.py"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import os, time\n"
+        "from pathlib import Path\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    devnull = os.open(os.devnull, os.O_RDWR)\n"
+        "    os.dup2(devnull, 0)\n"
+        "    os.dup2(devnull, 1)\n"
+        "    os.dup2(devnull, 2)\n"
+        f"    Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
+        "    time.sleep(30)\n"
+        "    os._exit(0)\n"
+        "for _ in range(50):\n"
+        f"    if Path({str(pid_file)!r}).exists():\n"
+        "        break\n"
+        "    time.sleep(0.05)\n"
+        "raise SystemExit(0)\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.delenv("GPTME_VOICE_SUBAGENT_PATH", raising=False)
+    monkeypatch.setattr(tool_bridge, "_TIMEOUT_BINARY_AVAILABLE", False)
+    descendant: int | None = None
+
+    async def _exercise() -> None:
+        nonlocal descendant
+        bridge = GptmeToolBridge(workspace=str(tmp_path), gptme_path=str(script))
+        result = await asyncio.wait_for(
+            bridge._execute("start a background helper", mode="fast"),
+            timeout=5,
+        )
+        assert result.success
+        descendant = int(pid_file.read_text())
+        assert _pid_alive(
+            descendant
+        ), "success path killed an intentional same-group background child"
+
+    try:
+        asyncio.run(_exercise())
+    finally:
+        if descendant is not None:
+            try:
+                os.kill(descendant, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 @pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")

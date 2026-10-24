@@ -141,11 +141,13 @@ class _SubagentProcess:
     def kill(self) -> None:
         self._process.kill()
 
-    def close(self) -> None:
-        # Reader/callback errors can leave descendants alive even after the
-        # direct child exits. Stop the original group regardless of its leader's
-        # status before closing pipes and reaping, as cancellation and timeout do.
-        _kill_process_tree(self)
+    def close(self, *, kill_tree: bool = True) -> None:
+        # Cancel, timeout and reader/callback errors can leave descendants
+        # alive even after the direct child exits. Signal the original group
+        # in those cases. A successful tool call only reaps the wrapper:
+        # same-group background work is the caller's to keep or daemonize.
+        if kill_tree:
+            _kill_process_tree(self)
         for pipe in self._pipes:
             pipe.close()
         for stream in (self._process.stdout, self._process.stderr):
@@ -783,6 +785,7 @@ class GptmeToolBridge:
         cmd.append(augmented_task)
 
         process: _SubagentProcess | None = None
+        completed_successfully = False
         try:
             # The child exists before the pipes are connected. A cancel in that
             # window makes asyncio kill only the direct child, leaving the
@@ -950,6 +953,7 @@ class GptmeToolBridge:
                     error=error or f"Exit code {process.returncode}",
                 )
 
+            completed_successfully = True
             return ToolResult(success=True, output=output, error=None)
 
         except FileNotFoundError:
@@ -961,7 +965,7 @@ class GptmeToolBridge:
             return ToolResult(success=False, output="", error=str(e))
         finally:
             if process is not None:
-                process.close()
+                process.close(kill_tree=not completed_successfully)
             response_file.unlink(missing_ok=True)
             if transcript_tail_file is not None:
                 transcript_tail_file.unlink(missing_ok=True)
