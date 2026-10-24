@@ -15,6 +15,8 @@ from gptme_voice.realtime.missed_call_context import (
     write_missed_call_context,
 )
 
+pytestmark = pytest.mark.usefixtures("pinned_utc_now")
+
 PHONE = "+15551212"
 CALL_SID = "CA" + "c" * 32
 MARKER = "Context prepared for this call: the feature is ready to ship."

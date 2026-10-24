@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -12,6 +13,8 @@ from gptme_voice.realtime.missed_call_context import MAX_CONTEXT_AGE
 from gptme_voice.realtime.twilio_integration import sign_stream_params
 
 from .test_server import _DummyToolBridge, _DummyTwilioWebSocket, _FakeRealtimeClient
+
+pytestmark = pytest.mark.usefixtures("pinned_utc_now")
 
 PHONE = "+15551212"
 CALL_SID = "CA" + "a" * 32
@@ -324,7 +327,7 @@ def test_intervening_call_resumes_instead_of_reoffering_missed_standup(callback_
         server_mod.RecentCallRecord(
             caller_id=PHONE,
             source="twilio",
-            ended_at=datetime.now(timezone.utc).timestamp(),
+            ended_at=time.time(),  # the server ages recent calls by wall time
             transcript=[
                 server_mod.TranscriptTurn(
                     role="user", text="We already covered the standup."
