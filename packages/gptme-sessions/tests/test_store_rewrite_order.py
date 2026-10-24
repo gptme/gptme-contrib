@@ -57,3 +57,45 @@ def test_duplicate_disk_rows_collapse_to_the_first_position(tmp_path: Path) -> N
     store.rewrite([SessionRecord(session_id="dup", model="x")])
 
     assert _ids(store) == ["dup", "a", "b"]
+
+
+def test_full_rewrite_preserves_interleaved_duplicate_rows(tmp_path: Path) -> None:
+    store = SessionStore(sessions_dir=tmp_path)
+    rows = [
+        SessionRecord(session_id="dup", timestamp="2026-10-20T01:00:00+00:00"),
+        SessionRecord(session_id="a", timestamp="2026-10-20T02:00:00+00:00"),
+        SessionRecord(session_id="dup", timestamp="2026-10-20T03:00:00+00:00"),
+    ]
+    for row in rows:
+        store.append(row)
+
+    assert store.stamp_attempt_kind("a", "repetition")
+
+    rewritten = store.load_all()
+    assert [(r.session_id, r.timestamp) for r in rewritten] == [
+        (r.session_id, r.timestamp) for r in rows
+    ]
+    assert rewritten[1].attempt_kind == "repetition"
+
+
+def test_excess_input_rows_append_in_input_order(tmp_path: Path) -> None:
+    store = SessionStore(sessions_dir=tmp_path)
+    store.append(SessionRecord(session_id="dup"))
+    store.append(SessionRecord(session_id="existing"))
+
+    store.rewrite(
+        [
+            SessionRecord(session_id="dup", model="first"),
+            SessionRecord(session_id="new", model="new-first"),
+            SessionRecord(session_id="dup", model="second"),
+            SessionRecord(session_id="new", model="new-second"),
+        ]
+    )
+
+    assert [(r.session_id, r.model) for r in store.load_all()] == [
+        ("dup", "first"),
+        ("existing", "unknown"),
+        ("new", "new-first"),
+        ("dup", "second"),
+        ("new", "new-second"),
+    ]
