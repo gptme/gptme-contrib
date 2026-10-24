@@ -1359,17 +1359,31 @@ def test_running_subagent_is_reaped_before_execute_returns(
 
 @pytest.mark.skipif(os.name != "posix", reason="needs waitpid and process groups")
 @pytest.mark.parametrize("output_stream", ["stdout", "stderr"])
+@pytest.mark.parametrize("leader_exits", [False, True])
 def test_subagent_reader_error_delivers_result_and_reaps_child(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output_stream: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    output_stream: str,
+    leader_exits: bool,
 ) -> None:
     """A line-limit error must not be replaced by cleanup's TimeoutExpired."""
     import sys
 
+    pid_file = tmp_path / "descendant.pid"
+    fork_child = (
+        "if os.fork():\n"
+        "    os._exit(0)\n"
+        f"Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
+        if leader_exits
+        else ""
+    )
     script = tmp_path / "fake-subagent.py"
     script.write_text(
         f"#!{sys.executable}\n"
-        "import sys, time\n"
-        f"sys.{output_stream}.write('x' * 70_000 + '\\n')\n"
+        "import os, sys, time\n"
+        "from pathlib import Path\n"
+        + fork_child
+        + f"sys.{output_stream}.write('x' * 70_000 + '\\n')\n"
         f"sys.{output_stream}.flush()\n"
         "time.sleep(30)\n"
     )
@@ -1384,6 +1398,10 @@ def test_subagent_reader_error_delivers_result_and_reaps_child(
         temporary_files.extend(tmp_path.glob("gptme-voice-*"))
         process = await real_spawn(*args, **kwargs)
         processes.append(process)
+        if leader_exits:
+            # Guarantee cleanup sees an exited leader, not a scheduling race
+            # where the reader fails before the wrapper has finished exiting.
+            await asyncio.wait_for(process.wait(), timeout=5)
         return process
 
     monkeypatch.setattr(tool_bridge, "_spawn_subagent", _capture_spawn)
@@ -1398,6 +1416,7 @@ def test_subagent_reader_error_delivers_result_and_reaps_child(
             transcript_provider=lambda: [{"role": "user", "text": "Test cleanup"}],
         )
         bridge.transcript_tail_turns = 1
+        bridge.transcript_tail_chars = 1_600
         dispatch = await bridge.handle_function_call("subagent", {"task": "read"})
         task_id = dispatch["task_id"]
         pending = bridge._pending_tasks[task_id]
@@ -1414,6 +1433,13 @@ def test_subagent_reader_error_delivers_result_and_reaps_child(
 
     try:
         asyncio.run(_exercise())
+        if leader_exits:
+            descendant = int(pid_file.read_text())
+            for _ in range(40):
+                if not _pid_alive(descendant):
+                    break
+                time.sleep(0.05)
+            assert not _pid_alive(descendant), "reader error left a live descendant"
     finally:
         for process in processes:
             tool_bridge._kill_process_tree(process)

@@ -142,11 +142,10 @@ class _SubagentProcess:
         self._process.kill()
 
     def close(self) -> None:
-        # Reader/callback errors can reach cleanup with the child still alive.
-        # Stop its group before closing pipes and reaping, just as cancellation
-        # and timeout do; otherwise wait() can replace the original error.
-        if self.returncode is None:
-            _kill_process_tree(self)
+        # Reader/callback errors can leave descendants alive even after the
+        # direct child exits. Stop the original group regardless of its leader's
+        # status before closing pipes and reaping, as cancellation and timeout do.
+        _kill_process_tree(self)
         for pipe in self._pipes:
             pipe.close()
         for stream in (self._process.stdout, self._process.stderr):
