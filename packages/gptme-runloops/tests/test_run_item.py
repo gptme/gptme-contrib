@@ -3959,6 +3959,10 @@ def test_contributor_review_normalizes_before_lifecycle(tmp_path, extra) -> None
     assert io.triggered == []
     assert not lifecycle.skip_item
     assert "Contributor Initial Review" in plan.prompt
+    # Review-only normalization must not fall back to the generic 900s budget.
+    config = make_config(tmp_path)
+    assert plan.timeout == config.adjudication_timeout
+    assert config.adjudication_time_desc in plan.prompt
     assert "RULES" not in plan.prompt
     assert "contributor_unreviewed" in PR_OBSERVE_TYPES
     assert "contributor_unreviewed" not in PR_STATE_TYPES

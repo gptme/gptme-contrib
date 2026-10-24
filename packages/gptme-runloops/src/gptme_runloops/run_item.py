@@ -622,6 +622,8 @@ def timeout_tier(
     Adjudication reads findings, classifies them, possibly fixes one blocking
     issue and posts a structured recommendation — it never waits on a Greptile
     re-review, so it takes the 1500s tier rather than the 2700s fix tier.
+    Contributor reviews share that budget for investigation, tests and review
+    submission; normalized mixed groups never perform repair or wait for re-review.
 
     ``instruction_kind`` lets callers route to the adjudication tier when the
     lifecycle decision drove the session to adjudication (Phase-A2 early
@@ -632,7 +634,8 @@ def timeout_tier(
     if "assigned_issue" in types:
         return config.assigned_issue_timeout, config.assigned_issue_time_desc
     if (
-        "greptile_convergence_adjudication" in types
+        "contributor_unreviewed" in types
+        or "greptile_convergence_adjudication" in types
         or instruction_kind == "GREPTILE_CONVERGENCE"
     ):
         return config.adjudication_timeout, config.adjudication_time_desc
