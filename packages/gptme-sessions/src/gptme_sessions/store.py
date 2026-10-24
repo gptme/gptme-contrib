@@ -302,11 +302,21 @@ class SessionStore:
         otherwise write the same temp.
 
         ``records`` takes precedence for any session_id present in both.
+
+        **File order is preserved.** An updated record is written at the
+        position its session_id first occupies on disk; records not yet on
+        disk are appended after the existing rows, in the given order.
+        Writing the upsert set first would move every freshly updated row
+        (judge grades, harm categories) to the head of the file, so readers
+        that scan the tail for the most recent sessions would see stale
+        rows instead.
         """
         with self.lock():
-            known_ids = {r.session_id for r in records}
-            extra_records: list[SessionRecord] = []
-            malformed_lines: list[str] = []
+            by_id: dict[str, list[SessionRecord]] = {}
+            for record in records:
+                by_id.setdefault(record.session_id, []).append(record)
+            emitted_ids: set[str] = set()
+            out_lines: list[str] = []
 
             if self.path.exists():
                 with open(
@@ -322,8 +332,6 @@ class SessionStore:
                         try:
                             line.encode("utf-8")  # lone surrogates = undecodable bytes
                             rec = SessionRecord.from_dict(json.loads(line))
-                            if rec.session_id not in known_ids:
-                                extra_records.append(rec)
                         except (
                             json.JSONDecodeError,
                             UnicodeEncodeError,
@@ -332,7 +340,21 @@ class SessionStore:
                         ):
                             # Keep the original bytes, including whitespace and
                             # line ending, rather than the stripped parse input.
-                            malformed_lines.append(raw)
+                            out_lines.append(raw if raw.endswith(("\n", "\r")) else raw + "\n")
+                            continue
+                        replacements = by_id.get(rec.session_id)
+                        if replacements is None:
+                            out_lines.append(rec.to_json() + "\n")
+                        elif rec.session_id not in emitted_ids:
+                            emitted_ids.add(rec.session_id)
+                            out_lines.extend(r.to_json() + "\n" for r in replacements)
+                        # Later on-disk copies of an upserted id are superseded.
+
+            out_lines.extend(
+                record.to_json() + "\n"
+                for record in records
+                if record.session_id not in emitted_ids
+            )
 
             tmp_path = self.path.with_name(
                 f"{self.path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
@@ -345,11 +367,7 @@ class SessionStore:
                     errors="surrogateescape",
                     newline="",
                 ) as f:
-                    for record in records:
-                        f.write(record.to_json() + "\n")
-                    for record in extra_records:
-                        f.write(record.to_json() + "\n")
-                    f.writelines(malformed_lines)
+                    f.writelines(out_lines)
                     f.flush()
                     os.fsync(f.fileno())
                 _ensure_trailing_newline(tmp_path)
