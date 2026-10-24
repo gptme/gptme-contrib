@@ -1446,6 +1446,7 @@ def test_subagent_reader_error_delivers_result_and_reaps_child(
             process.close()
 
 
+@pytest.mark.skipif(not Path("/proc").exists(), reason="needs /proc")
 @pytest.mark.skipif(os.name != "posix", reason="needs process groups")
 def test_successful_execute_does_not_kill_same_group_descendant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
