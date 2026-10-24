@@ -1,4 +1,32 @@
+from datetime import datetime, timezone
+
 import pytest
+
+# Midday UTC, so test offsets of minutes or a few hours never cross a date.
+PINNED_UTC_NOW = datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc)
+
+
+class _PinnedDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        if tz is None:
+            return PINNED_UTC_NOW.replace(tzinfo=None)
+        return PINNED_UTC_NOW.astimezone(tz)
+
+
+@pytest.fixture
+def pinned_utc_now(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """Pin ``datetime.now()`` for the callback loader and the requesting test module.
+
+    The callback loader requires the call, its prepared context and "now" to
+    share a UTC calendar date. Tests that build fixtures from the wall clock
+    with minute offsets therefore failed whenever CI ran just after 00:00 UTC.
+    """
+    from gptme_voice.realtime import missed_call_context
+
+    monkeypatch.setattr(missed_call_context, "datetime", _PinnedDatetime)
+    monkeypatch.setattr(request.module, "datetime", _PinnedDatetime)
+    return PINNED_UTC_NOW
 
 
 @pytest.fixture(autouse=True)
