@@ -38,7 +38,7 @@ def cli() -> None:
 @click.option(
     "--provider",
     "-p",
-    type=click.Choice(["gemini", "dalle", "dalle2"]),
+    type=click.Choice(["gemini", "dalle", "dalle2", "a1111"]),
     default="gemini",
     help="Image generation provider.",
 )

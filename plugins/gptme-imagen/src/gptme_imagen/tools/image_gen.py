@@ -33,7 +33,7 @@ def _get_api_key(env_var: str) -> str | None:
         return os.environ.get(env_var)
 
 
-Provider = Literal["gemini", "dalle", "dalle2"]
+Provider = Literal["gemini", "dalle", "dalle2", "a1111"]
 Style = Literal[
     "photo",
     "illustration",
@@ -62,7 +62,11 @@ PROVIDER_ENV_VAR = {
     "gemini": "GOOGLE_API_KEY",
     "dalle": "OPENAI_API_KEY",
     "dalle2": "OPENAI_API_KEY",
+    "a1111": "AUTOMATIC1111_BASE_URL",
 }
+
+# Default AUTOMATIC1111 base URL
+A1111_DEFAULT_BASE_URL = "http://localhost:7860"
 
 
 @dataclass
@@ -133,7 +137,7 @@ def generate_image(
         raise ValueError(f"count must be >= 1, got {count}")
 
     # Validate provider early
-    valid_providers = ("gemini", "dalle", "dalle2")
+    valid_providers = ("gemini", "dalle", "dalle2", "a1111")
     if provider not in valid_providers:
         raise ValueError(
             f"Unknown provider: {provider}. Must be one of: {valid_providers}"
@@ -147,7 +151,7 @@ def generate_image(
             images = [images]
 
         # Only Gemini supports multimodal generation with images
-        if provider != "gemini":
+        if provider not in ("gemini",):
             raise ValueError(
                 f"Image references only supported for gemini provider, got {provider}. "
                 "For DALL-E, use generate_variation() for variations without text guidance."
@@ -224,6 +228,8 @@ def generate_image(
                 result = _generate_dalle(
                     prompt, size, quality, current_path, model="dall-e-2"
                 )
+            elif provider == "a1111":
+                result = _generate_a1111(prompt, size, current_path)
             else:
                 raise ValueError(f"Unknown provider: {provider}")
 
@@ -488,6 +494,79 @@ def _generate_dalle(
             "quality": quality,
             "cost_usd": cost,
         },
+    )
+
+
+def _generate_a1111(
+    prompt: str,
+    size: str,
+    output_path: Path,
+) -> ImageResult:
+    """Generate image using a local AUTOMATIC1111 Stable Diffusion WebUI instance.
+
+    Requires a running AUTOMATIC1111 server. Set AUTOMATIC1111_BASE_URL to override
+    the default http://localhost:7860.
+    """
+    try:
+        import requests
+    except ImportError:
+        raise ImportError("requests not installed. Install with: pip install requests")
+
+    base_url = os.environ.get("AUTOMATIC1111_BASE_URL", A1111_DEFAULT_BASE_URL).rstrip(
+        "/"
+    )
+
+    # Parse size string "WxH"
+    width, height = 512, 512
+    if "x" in size:
+        try:
+            w, h = size.lower().split("x")
+            width, height = int(w), int(h)
+        except ValueError:
+            pass  # keep defaults
+
+    payload = {
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+        "steps": 20,
+    }
+
+    try:
+        resp = requests.post(f"{base_url}/sdapi/v1/txt2img", json=payload, timeout=120)
+        resp.raise_for_status()
+    except requests.exceptions.ConnectionError:
+        raise RuntimeError(
+            f"Could not connect to AUTOMATIC1111 at {base_url}. "
+            "Make sure the server is running, or set AUTOMATIC1111_BASE_URL."
+        )
+
+    data = resp.json()
+    images = data.get("images", [])
+    if not images:
+        raise RuntimeError("No images returned from AUTOMATIC1111")
+
+    img_bytes = base64.b64decode(images[0])
+    with open(output_path, "wb") as f:
+        f.write(img_bytes)
+
+    cost_tracker = get_cost_tracker()
+    cost_tracker.record_generation(
+        provider="a1111",
+        prompt=prompt,
+        cost=0.0,
+        model="stable-diffusion",
+        size=size,
+        quality="standard",
+        count=1,
+        output_path=str(output_path),
+    )
+
+    return ImageResult(
+        provider="a1111",
+        prompt=prompt,
+        image_path=output_path,
+        metadata={"model": "stable-diffusion", "size": size, "base_url": base_url},
     )
 
 
