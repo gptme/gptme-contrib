@@ -71,7 +71,7 @@ if argv[:2] == ["run", "list"]:
     raise SystemExit(0)
 
 if argv[:2] == ["workflow", "list"]:
-    emit_json([])
+    emit_json(json.loads(os.environ.get("FAKE_GH_DISABLED_WORKFLOWS", "[]")))
     raise SystemExit(0)
 
 raise SystemExit(f"unexpected gh invocation: {argv}")
@@ -268,6 +268,34 @@ def test_dependabot_filled_window_with_red_push_ci_reports_push_failure() -> Non
     assert "gptme-cloud: Failing" in result.stdout
     assert "https://example.test/run/build" in result.stdout
     assert "run/dependabot" not in result.stdout
+
+
+def test_push_fallback_excludes_disabled_workflow_failure() -> None:
+    """Disabled historical failures must stay excluded after the push refetch."""
+    runs = [
+        _run(
+            "Dependabot Updates",
+            "failure",
+            "abc1234",
+            "https://example.test/run/dependabot",
+            "dynamic",
+        )
+    ]
+    push_runs = [
+        _run("Build", "failure", "oldsha00", "https://example.test/run/disabled-build"),
+        _run("Tests", "success", "abc1234", "https://example.test/run/tests"),
+    ]
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_RUNS": json.dumps(runs),
+            "FAKE_GH_PUSH_RUNS": json.dumps(push_runs),
+            "FAKE_GH_DISABLED_WORKFLOWS": json.dumps(["Build"]),
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Passing" in result.stdout
+    assert "Failing" not in result.stdout
+    assert "disabled-build" not in result.stdout
 
 
 def test_workflow_dispatch_nightly_failure_still_visible() -> None:

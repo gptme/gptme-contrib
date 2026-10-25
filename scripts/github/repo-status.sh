@@ -268,8 +268,9 @@ check_repo() {
     if [ "$(echo "$product_json" | jq 'length')" -eq 0 ]; then
         local push_json
         push_json=$(gh run list --repo "$repo" --branch "$default_branch" --event push --limit 20 --json "$run_fields" 2>/dev/null) || push_json="[]"
-        product_json=$(echo "$push_json" | jq '[.[]? | select(
-            (.conclusion != "skipped")
+        product_json=$(echo "$push_json" | jq --argjson disabled "$disabled_json" '[.[]? | select(
+            (.name as $n | $disabled | index($n) | not)
+            and (.conclusion != "skipped")
             and ((.event // "") != "dynamic")
             and ((.name // "") | test("[Dd]ependabot") | not)
         )]' 2>/dev/null) || product_json="[]"
