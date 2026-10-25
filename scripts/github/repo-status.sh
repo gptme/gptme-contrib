@@ -274,6 +274,7 @@ check_repo() {
             and (.conclusion != "skipped")
             and ((.event // "") != "dynamic")
             and ((.name // "") | test("[Dd]ependabot") | not)
+            and ((.conclusion != "startup_failure") or ((.name // "") != ""))
         )]' 2>/dev/null) || product_json="[]"
     fi
     if [ "$(echo "$product_json" | jq 'length')" -gt 0 ]; then
