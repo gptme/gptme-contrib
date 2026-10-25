@@ -269,6 +269,11 @@ check_repo() {
     if [ "$(echo "$product_json" | jq 'length')" -eq 0 ]; then
         local push_json
         push_json=$(gh run list --repo "$repo" --branch "$default_branch" --event push --limit 20 --json "$run_fields" 2>/dev/null) || push_json="[]"
+        # As with the initial query, a successful exit need not return an array.
+        # An unusable fallback must quietly preserve the original run window.
+        if ! echo "$push_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            push_json="[]"
+        fi
         product_json=$(echo "$push_json" | jq --argjson disabled "$disabled_json" '[.[]? | select(
             (.name as $n | $disabled | index($n) | not)
             and (.conclusion != "skipped")

@@ -14,6 +14,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "github" / "repo-status.sh"
 
@@ -50,7 +52,7 @@ if argv[:2] == ["run", "list"]:
         raise SystemExit(0)
     push_raw = os.environ.get("FAKE_GH_PUSH_RUNS")
     if "--event" in argv and push_raw is not None:
-        emit_json(json.loads(push_raw))
+        print(push_raw, end="")
         raise SystemExit(0)
     raw = os.environ.get("FAKE_GH_RUNS")
     if raw:
@@ -348,6 +350,32 @@ def test_ghost_only_push_response_keeps_original_failure() -> None:
     assert "gptme-cloud: Failing" in result.stdout
     assert "https://example.test/run/dependabot" in result.stdout
     assert "No runs" not in result.stdout
+
+
+@pytest.mark.parametrize("push_response", ["", " \n", "null", "{}", "[", "[]"])
+def test_unusable_push_response_keeps_original_failure_quietly(
+    push_response: str,
+) -> None:
+    runs = [
+        _run(
+            "Dependabot Updates",
+            "failure",
+            "abc1234",
+            "https://example.test/run/dependabot",
+            "dynamic",
+        )
+    ]
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_RUNS": json.dumps(runs),
+            "FAKE_GH_PUSH_RUNS": push_response,
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Failing" in result.stdout
+    assert "https://example.test/run/dependabot" in result.stdout
+    assert "integer expression" not in result.stdout
+    assert result.stderr == ""
 
 
 def test_workflow_dispatch_nightly_failure_still_visible() -> None:
