@@ -259,6 +259,7 @@ check_repo() {
     product_json=$(echo "$run_json" | jq '[.[] | select(
         ((.event // "") != "dynamic")
         and ((.name // "") | test("[Dd]ependabot") | not)
+        and ((.conclusion != "startup_failure") or ((.name // "") != ""))
     )]')
     # Dependabot churn can fill the whole --limit 20 window (aw-server
     # 2026-10-23: 28 dynamic + 45 "Dependabot Auto-merge" workflow_run rows

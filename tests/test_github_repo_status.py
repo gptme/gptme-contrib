@@ -298,6 +298,31 @@ def test_push_fallback_excludes_disabled_workflow_failure() -> None:
     assert "disabled-build" not in result.stdout
 
 
+def test_ghost_run_does_not_prevent_push_fallback() -> None:
+    """A ghost in a Dependabot-filled window is not usable product CI."""
+    runs = [
+        _run(
+            "Dependabot Updates",
+            "failure",
+            "abc1234",
+            "https://example.test/run/dependabot",
+            "dynamic",
+        ),
+        _run("", "startup_failure", "abc1234", "https://example.test/run/ghost"),
+    ]
+    push_runs = [_run("Build", "success", "abc1234", "https://example.test/run/build")]
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_RUNS": json.dumps(runs),
+            "FAKE_GH_PUSH_RUNS": json.dumps(push_runs),
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Passing" in result.stdout
+    assert "No runs" not in result.stdout
+    assert "Failing" not in result.stdout
+
+
 def test_workflow_dispatch_nightly_failure_still_visible() -> None:
     """Nightly full-suite failures are product CI; do not drop workflow_dispatch."""
     runs = [
