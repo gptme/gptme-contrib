@@ -260,6 +260,20 @@ check_repo() {
         ((.event // "") != "dynamic")
         and ((.name // "") | test("[Dd]ependabot") | not)
     )]')
+    # Dependabot churn can fill the whole --limit 20 window (aw-server
+    # 2026-10-23: 28 dynamic + 45 "Dependabot Auto-merge" workflow_run rows
+    # in the last 100, push CI green) — the fallback below then reported the
+    # Dependabot update job as the repo's master CI. Before falling back,
+    # look for product CI once more, scoped to push events.
+    if [ "$(echo "$product_json" | jq 'length')" -eq 0 ]; then
+        local push_json
+        push_json=$(gh run list --repo "$repo" --branch "$default_branch" --event push --limit 20 --json "$run_fields" 2>/dev/null) || push_json="[]"
+        product_json=$(echo "$push_json" | jq '[.[]? | select(
+            (.conclusion != "skipped")
+            and ((.event // "") != "dynamic")
+            and ((.name // "") | test("[Dd]ependabot") | not)
+        )]' 2>/dev/null) || product_json="[]"
+    fi
     if [ "$(echo "$product_json" | jq 'length')" -gt 0 ]; then
         run_json="$product_json"
     fi

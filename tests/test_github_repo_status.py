@@ -48,6 +48,10 @@ if argv[:2] == ["run", "list"]:
         if mode == "null":
             print("null")
         raise SystemExit(0)
+    push_raw = os.environ.get("FAKE_GH_PUSH_RUNS")
+    if "--event" in argv and push_raw is not None:
+        emit_json(json.loads(push_raw))
+        raise SystemExit(0)
     raw = os.environ.get("FAKE_GH_RUNS")
     if raw:
         emit_json(json.loads(raw))
@@ -184,6 +188,86 @@ def test_dependabot_only_still_reports_failing() -> None:
     assert result.returncode == 0, result.stderr
     assert "gptme-cloud: Failing" in result.stdout
     assert "https://example.test/run/dependabot" in result.stdout
+
+
+def test_dependabot_filled_window_falls_back_to_push_ci() -> None:
+    """Dependabot churn filling the window must not hide green push CI.
+
+    aw-server 2026-10-23: the newest 20 master runs were all Dependabot update
+    jobs and auto-merge runs, so the Dependabot failure was reported as
+    master CI while push CI was green.
+    """
+    runs = [
+        {
+            "conclusion": "failure",
+            "status": "completed",
+            "url": "https://example.test/run/dependabot",
+            "name": "pip in /. for black - Update #1",
+            "headSha": "abc1234",
+            "event": "dynamic",
+        },
+        {
+            "conclusion": "skipped",
+            "status": "completed",
+            "url": "https://example.test/run/automerge",
+            "name": "Dependabot Auto-merge",
+            "headSha": "abc1234",
+            "event": "workflow_run",
+        },
+    ]
+    push_runs = [
+        {
+            "conclusion": "success",
+            "status": "completed",
+            "url": "https://example.test/run/build",
+            "name": "Build",
+            "headSha": "abc1234",
+            "event": "push",
+        }
+    ]
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_RUNS": json.dumps(runs),
+            "FAKE_GH_PUSH_RUNS": json.dumps(push_runs),
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Passing" in result.stdout
+    assert "Failing" not in result.stdout
+    assert "dependabot" not in result.stdout.lower()
+
+
+def test_dependabot_filled_window_with_red_push_ci_reports_push_failure() -> None:
+    runs = [
+        {
+            "conclusion": "failure",
+            "status": "completed",
+            "url": "https://example.test/run/dependabot",
+            "name": "Dependabot Updates",
+            "headSha": "abc1234",
+            "event": "dynamic",
+        }
+    ]
+    push_runs = [
+        {
+            "conclusion": "failure",
+            "status": "completed",
+            "url": "https://example.test/run/build",
+            "name": "Build",
+            "headSha": "abc1234",
+            "event": "push",
+        }
+    ]
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_RUNS": json.dumps(runs),
+            "FAKE_GH_PUSH_RUNS": json.dumps(push_runs),
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Failing" in result.stdout
+    assert "https://example.test/run/build" in result.stdout
+    assert "run/dependabot" not in result.stdout
 
 
 def test_workflow_dispatch_nightly_failure_still_visible() -> None:
