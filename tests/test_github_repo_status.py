@@ -639,7 +639,7 @@ def test_fork_failure_does_not_mask_skipped_default_branch_run() -> None:
     assert "Failing" not in result.stdout
 
 
-def test_pr_with_only_ghost_alternative_still_reports_status() -> None:
+def test_pr_with_only_ghost_alternative_reports_no_runs() -> None:
     """A deleted workflow is not a usable non-PR fallback."""
     runs = [
         _fork_master_pr_run("success"),
@@ -647,14 +647,81 @@ def test_pr_with_only_ghost_alternative_still_reports_status() -> None:
     ]
     result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
     assert result.returncode == 0, result.stderr
-    assert "gptme-cloud: Passing" in result.stdout
-    assert "HEAD=abc1234" in result.stdout
-    assert "No runs" not in result.stdout
+    assert "gptme-cloud: No runs" in result.stdout
+    assert "Passing" not in result.stdout
 
 
-def test_pr_only_window_still_reports_status() -> None:
+def test_pr_only_window_reports_no_runs() -> None:
     runs = [_fork_master_pr_run("success")]
     result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
     assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: No runs" in result.stdout
+    assert "Passing" not in result.stdout
+
+
+def test_fork_pr_runs_on_master_named_branch_are_not_default_branch_ci() -> None:
+    """A fork PR whose head branch is `master` must not stand in for master CI.
+
+    ActivityWatch/aw-qt 2026-10-19: 0xbrayo/aw-qt PR runs matched
+    `--branch master` and were reported as stale master CI.
+    """
+    runs = [
+        {
+            "conclusion": "failure",
+            "status": "completed",
+            "url": "https://example.test/run/fork-pr",
+            "name": "Build",
+            "headSha": "f0f0f0f",
+            "event": "pull_request",
+        },
+        {
+            "conclusion": "success",
+            "status": "completed",
+            "url": "https://example.test/run/push",
+            "name": "Build",
+            "headSha": "abc1234",
+            "event": "push",
+        },
+    ]
+    result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
+    assert result.returncode == 0, result.stderr
     assert "gptme-cloud: Passing" in result.stdout
-    assert "HEAD=abc1234" in result.stdout
+    assert "Failing" not in result.stdout
+    assert "stale" not in result.stdout
+
+
+def test_workflow_run_window_falls_back_to_push_ci() -> None:
+    """workflow_run follow-ups must not count as default-branch CI.
+
+    ActivityWatch/aw-webui 2026-10-26: a "Comment" workflow_run was reported
+    while Build/Lint push runs had fallen out of the window.
+    """
+    runs = [
+        {
+            "conclusion": "success",
+            "status": "completed",
+            "url": "https://example.test/run/comment",
+            "name": "Comment",
+            "headSha": "abc1234",
+            "event": "workflow_run",
+        }
+    ]
+    push_runs = [
+        {
+            "conclusion": "failure",
+            "status": "completed",
+            "url": "https://example.test/run/build",
+            "name": "Build",
+            "headSha": "abc1234",
+            "event": "push",
+        }
+    ]
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_RUNS": json.dumps(runs),
+            "FAKE_GH_PUSH_RUNS": json.dumps(push_runs),
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Failing" in result.stdout
+    assert "https://example.test/run/build" in result.stdout
