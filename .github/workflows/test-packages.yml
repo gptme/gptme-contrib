@@ -61,7 +61,14 @@ jobs:
           BEFORE: ${{ github.event.before }}
         run: |
           # Get all packages from Makefile (single source of truth)
-          make ci-list-packages-json > /tmp/all_packages.json
+          make --no-print-directory ci-list-packages-json > /tmp/all_packages_raw.txt
+          # make can emit directory chatter; the JSON array is the line starting with '['
+          grep -E '^\[' /tmp/all_packages_raw.txt | tail -1 > /tmp/all_packages.json
+
+          # Surface packages excluded from the matrix, so a coverage loss is
+          # visible in the log instead of silently disappearing.
+          echo "Packages excluded from the CI matrix:"
+          make --no-print-directory ci-list-excluded-packages
 
           # Files changed by this PR, or by this push to master. Schedule/dispatch
           # runs (and pushes we can't diff, e.g. a new branch or a force-push
@@ -136,7 +143,10 @@ jobs:
 
       - name: Run tests for ${{ matrix.package }}
         run: |
-          make -C packages/${{ matrix.package }} test
+          # test-package falls back to a generic pytest run for packages
+          # without their own Makefile, so a package is never skipped for
+          # lacking a Makefile.
+          make test-package PKG=${{ matrix.package }}
 
   # A workspace sync can mask missing dependencies with other members' installs.
   rag-lightweight:
@@ -205,12 +215,13 @@ jobs:
         run: |
           # Find all packages with tests and collect coverage
           for pkg in packages/*/; do
+            pkg=${pkg%/}
             name=$(basename "$pkg")
             # Skip __pycache__ and symlinks
             [ -L "$pkg" ] && continue
             [ "$name" = "__pycache__" ] && continue
             # Only packages with both tests/ and src/
-            if [ -d "$pkg/tests" ] && [ -d "$pkg/src" ] && [ -f "$pkg/Makefile" ]; then
+            if [ -d "$pkg/tests" ] && [ -d "$pkg/src" ]; then
               echo "=== Coverage for $name ==="
               uv run --with pytest --with pytest-cov --with pytest-timeout pytest "$pkg/tests" \
                 --cov="$pkg/src" \

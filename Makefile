@@ -9,6 +9,15 @@ EXCLUDE_PLUGINS :=
 
 # Dynamic discovery - find all directories with Makefile (skip symlinks)
 PACKAGE_DIRS := $(shell find packages -maxdepth 1 -mindepth 1 -type d ! -type l ! -name '__pycache__' 2>/dev/null)
+# Packages that have a tests/ directory. CI discovery is by test presence, not
+# by Makefile presence: a package with tests but no Makefile used to get NO CI
+# job at all, so a stale test expectation survived a dependency pin bump
+# unnoticed (gptme-usage, 11 days - gptme/gptme-contrib#1973).
+PACKAGE_TEST_DIRS := $(shell for d in $(PACKAGE_DIRS); do [ -d "$$d/tests" ] && echo "$$d"; done)
+# Packages excluded from the CI package matrix. Keep this empty unless a suite
+# genuinely cannot run - the discovery job prints the excluded set so a silent
+# coverage loss shows up in the CI log instead of vanishing.
+EXCLUDE_PACKAGES :=
 # Base ref for changed-package detection (override with BASE=<ref>)
 BASE ?= origin/master
 PLUGIN_DIRS := $(shell find plugins -maxdepth 1 -mindepth 1 -type d ! -type l 2>/dev/null)
@@ -62,21 +71,39 @@ list-packages:  ## List all discovered packages
 	@echo "Discovered packages:"
 	@for pkg in $(PACKAGE_DIRS); do echo "  - $$(basename $$pkg)"; done
 
+# Run the test suite of one package. Packages with their own Makefile use it
+# (per-package extras, custom pytest flags); packages without one fall back to
+# a generic pytest run of their tests/ directory from the workspace root, so a
+# missing Makefile can never silently drop a package from coverage.
+test-package:  ## Run tests for one package (PKG=<name>)
+	@pkg="packages/$(PKG)"; \
+	if [ ! -d "$$pkg/tests" ]; then echo "no tests/ directory for $(PKG)"; exit 1; fi; \
+	if [ -f "$$pkg/Makefile" ]; then \
+		$(MAKE) -C "$$pkg" test; \
+	else \
+		uv run --all-packages pytest "$$pkg/tests" -v; \
+	fi
+
 test-packages:  ## Run tests for all packages
 	@echo "Running tests for all packages..."
 	@failed=; \
-	for pkg in $(PACKAGE_DIRS); do \
-		if [ -f "$$pkg/Makefile" ]; then \
-			echo "\n=== Testing $$(basename $$pkg) ==="; \
-			$(MAKE) -C "$$pkg" test || failed=1; \
-		fi \
+	for pkg in $(PACKAGE_TEST_DIRS); do \
+		name=$$(basename $$pkg); \
+		excluded=false; \
+		for ex in $(EXCLUDE_PACKAGES); do \
+			if [ "$$name" = "$$ex" ]; then excluded=true; break; fi; \
+		done; \
+		if [ "$$excluded" = "false" ]; then \
+			echo "\n=== Testing $$name ==="; \
+			$(MAKE) test-package PKG=$$name || failed=1; \
+		fi; \
 	done; \
 	if [ -n "$$failed" ]; then exit 1; fi
 
 test-changed-packages:  ## Run tests only for packages changed since BASE (default: origin/master)
 	@ALL=$$(git diff --name-only "$(BASE)"...HEAD 2>/dev/null); \
 	CHANGED=$$(echo "$$ALL" | grep '^packages/' | cut -d/ -f1-2 | sort -u \
-		| while IFS= read -r p; do [ -f "$$p/Makefile" ] && echo "$$p"; done); \
+		| while IFS= read -r p; do [ -d "$$p/tests" ] && echo "$$p"; done); \
 	if echo "$$ALL" | grep -qE '^(Makefile|pyproject\.toml|uv\.lock|\.github/workflows/test-packages\.yml)'; then \
 		echo "Shared workspace config changed vs $(BASE) — running all packages"; \
 		$(MAKE) test-packages; \
@@ -89,7 +116,7 @@ test-changed-packages:  ## Run tests only for packages changed since BASE (defau
 		failed=; \
 		for pkg in $$CHANGED; do \
 			printf '\n=== Testing %s (changed) ===\n' "$$(basename $$pkg)"; \
-			$(MAKE) -C "$$pkg" test || failed=1; \
+			$(MAKE) test-package PKG=$$(basename $$pkg) || failed=1; \
 		done; \
 		if [ -n "$$failed" ]; then exit 1; fi; \
 	fi
@@ -128,8 +155,23 @@ test-plugins:  ## Run tests for all plugins with test directories
 # CI Helper targets (for GitHub Actions matrix)
 # ============================================================
 
-ci-list-packages-json:  ## Output packages as JSON array for CI matrix
-	@for pkg in $(PACKAGE_DIRS); do if [ -f "$$pkg/Makefile" ]; then basename $$pkg; fi; done | jq -R -s -c 'split("\n") | map(select(length > 0))'
+ci-list-packages-json:  ## Output packages with tests/ as JSON array for CI matrix (excludes EXCLUDE_PACKAGES)
+	@for pkg in $(PACKAGE_TEST_DIRS); do \
+		name=$$(basename $$pkg); \
+		excluded=false; \
+		for ex in $(EXCLUDE_PACKAGES); do \
+			if [ "$$name" = "$$ex" ]; then excluded=true; break; fi; \
+		done; \
+		if [ "$$excluded" = "false" ]; then echo $$name; fi; \
+	done | python3 -c 'import json, sys; print(json.dumps(sys.stdin.read().splitlines()))'
+
+ci-list-excluded-packages:  ## Print packages excluded from the CI package matrix
+	@for pkg in $(PACKAGE_TEST_DIRS); do \
+		name=$$(basename $$pkg); \
+		for ex in $(EXCLUDE_PACKAGES); do \
+			if [ "$$name" = "$$ex" ]; then echo "$$name (listed in EXCLUDE_PACKAGES)"; fi; \
+		done; \
+	done
 
 ci-list-plugins-json:  ## Output plugins with tests as JSON array for CI matrix (excludes EXCLUDE_PLUGINS)
 	@for plugin in $(PLUGIN_DIRS); do \
