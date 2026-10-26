@@ -167,3 +167,16 @@ Also exported: `SymbolIndex`, `SqliteIndexCache`, `parse_file`,
 - Non-Python import resolution is best-effort, not fully semantic.
 - Python namespace packages (no `__init__.py`) are not resolved yet.
 - `search` has only the `lexical` backend.
+
+## Development
+
+Run `make -C packages/gptme-codegraph test` from the repository root. The
+package's `test` extra installs every supported tree-sitter grammar plus the MCP
+and pytest dependencies, so the parser tests execute instead of silently skipping.
+CI uses the same Makefile target in an isolated environment, selecting `python3`
+from the job's PATH rather than inheriting a sibling package's Python floor.
+Override the interpreter with `make -C packages/gptme-codegraph test PYTHON=python3.10`.
+A base install still has no dependencies.
+
+Run `make -C packages/gptme-codegraph typecheck` for mypy; the `dev` extra
+includes the test dependencies.

@@ -36,6 +36,7 @@ TYPECHECKED_PACKAGES = {
     "gptme-backoff",
     "gptme-block-registry",
     "gptme-browser-semantic",
+    "gptme-codegraph",
     "gptme-contrib-lib",
     "gptme-coordination",
     "gptme-daily-briefing",

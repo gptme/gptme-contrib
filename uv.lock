@@ -1813,11 +1813,46 @@ source = { editable = "packages/gptme-codegraph" }
 
 [package.optional-dependencies]
 dev = [
+    { name = "mcp" },
     { name = "mypy" },
     { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "tree-sitter" },
+    { name = "tree-sitter-c" },
+    { name = "tree-sitter-c-sharp" },
+    { name = "tree-sitter-cpp" },
+    { name = "tree-sitter-go" },
+    { name = "tree-sitter-java" },
+    { name = "tree-sitter-javascript" },
+    { name = "tree-sitter-kotlin" },
+    { name = "tree-sitter-php" },
+    { name = "tree-sitter-python" },
+    { name = "tree-sitter-ruby" },
+    { name = "tree-sitter-rust" },
+    { name = "tree-sitter-swift" },
+    { name = "tree-sitter-typescript" },
 ]
 mcp = [
     { name = "mcp" },
+]
+test = [
+    { name = "mcp" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "tree-sitter" },
+    { name = "tree-sitter-c" },
+    { name = "tree-sitter-c-sharp" },
+    { name = "tree-sitter-cpp" },
+    { name = "tree-sitter-go" },
+    { name = "tree-sitter-java" },
+    { name = "tree-sitter-javascript" },
+    { name = "tree-sitter-kotlin" },
+    { name = "tree-sitter-php" },
+    { name = "tree-sitter-python" },
+    { name = "tree-sitter-ruby" },
+    { name = "tree-sitter-rust" },
+    { name = "tree-sitter-swift" },
+    { name = "tree-sitter-typescript" },
 ]
 treesitter = [
     { name = "tree-sitter" },
@@ -1838,9 +1873,12 @@ treesitter = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.0.0" },
+    { name = "gptme-codegraph", extras = ["test"], marker = "extra == 'dev'" },
+    { name = "gptme-codegraph", extras = ["treesitter", "mcp"], marker = "extra == 'test'" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.0.0,<2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0.0" },
+    { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23.0" },
     { name = "tree-sitter", marker = "extra == 'treesitter'", specifier = ">=0.21.0" },
     { name = "tree-sitter-c", marker = "extra == 'treesitter'", specifier = ">=0.23.0" },
     { name = "tree-sitter-c-sharp", marker = "extra == 'treesitter'", specifier = ">=0.23.0" },
@@ -1856,7 +1894,7 @@ requires-dist = [
     { name = "tree-sitter-swift", marker = "extra == 'treesitter'", specifier = ">=0.7.3" },
     { name = "tree-sitter-typescript", marker = "extra == 'treesitter'", specifier = ">=0.23.0" },
 ]
-provides-extras = ["treesitter", "mcp", "dev"]
+provides-extras = ["treesitter", "mcp", "test", "dev"]
 
 [[package]]
 name = "gptme-consortium"
