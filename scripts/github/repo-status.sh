@@ -292,8 +292,13 @@ check_repo() {
     # we don't treat a stale red/green as authoritative for HEAD.
     # Skipped entirely when latest run is in-progress — caller already signaled that
     # fresh CI is running, so "stale" would be noise.
-    local stale_suffix=""
-    if [ -z "$in_progress" ]; then
+    # Also skipped for schedule runs: a cron run's SHA is whatever HEAD was when
+    # it fired, so in a busy repo it never matches HEAD, and the run is already
+    # its workflow's newest completed result (see failing_json above). A SHA
+    # mismatch there measures commit cadence, not whether a newer result exists.
+    local stale_suffix="" run_event
+    run_event=$(echo "$run_json" | jq -r ".[$idx].event // \"\"")
+    if [ -z "$in_progress" ] && [ "$run_event" != "schedule" ]; then
         local run_head_sha
         run_head_sha=$(echo "$run_json" | jq -r ".[$idx].headSha // \"\"")
         if [ -n "$run_head_sha" ]; then

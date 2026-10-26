@@ -333,7 +333,20 @@ def test_newer_green_workflow_does_not_mask_red_workflow() -> None:
     assert result.returncode == 0, result.stderr
     assert "gptme-cloud: Failing" in result.stdout
     assert "https://example.test/run/precommit" in result.stdout
-    assert "stale; HEAD=abc1234, run=oldsha0" in result.stdout
+    # A schedule run is its workflow's newest result; its SHA only records when
+    # the cron fired, so it is not annotated stale.
+    assert "stale" not in result.stdout
+
+
+def test_failing_push_run_on_older_sha_is_annotated_stale() -> None:
+    """Path filters can skip a push workflow on newer commits; keep flagging it."""
+    runs = [
+        _run("Tests", "failure", "oldsha00", "https://example.test/run/tests"),
+    ]
+    result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Failing (stale; HEAD=abc1234, run=oldsha0)" in result.stdout
+    assert "https://example.test/run/tests" in result.stdout
 
 
 def test_newer_green_run_of_same_workflow_clears_failure() -> None:
