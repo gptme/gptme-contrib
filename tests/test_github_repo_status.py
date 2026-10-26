@@ -423,6 +423,19 @@ def test_fork_master_pr_run_does_not_mask_head_push_run() -> None:
         assert "stale" not in result.stdout.lower(), pr_run
 
 
+def test_pr_with_only_ghost_alternative_still_reports_status() -> None:
+    """A deleted workflow is not a usable non-PR fallback."""
+    runs = [
+        _fork_master_pr_run("success"),
+        _run("", "startup_failure", "abc1234", "https://example.test/run/ghost"),
+    ]
+    result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Passing" in result.stdout
+    assert "HEAD=abc1234" in result.stdout
+    assert "No runs" not in result.stdout
+
+
 def test_pr_only_window_still_reports_status() -> None:
     runs = [_fork_master_pr_run("success")]
     result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
