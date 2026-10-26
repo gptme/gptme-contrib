@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import uuid
+from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -277,8 +278,8 @@ class SessionStore:
 
         **Additive (upsert) semantics**: ``records`` is treated as an upsert
         set, *not* a full replacement.  Any record present in the on-disk file
-        but absent from ``records`` is silently preserved (re-read from disk
-        and appended to the output).  There is no way to delete a record via
+        but absent from ``records`` is silently preserved in place (re-read
+        from disk).  There is no way to delete a record via
         this method; to remove records, edit the JSONL file directly.
 
         Holds the store lock across the re-read → write → replace cycle, so
@@ -302,11 +303,22 @@ class SessionStore:
         otherwise write the same temp.
 
         ``records`` takes precedence for any session_id present in both.
+
+        **File order is preserved.** An updated record is written at the
+        position of the next on-disk occurrence of its session_id. Excess
+        on-disk occurrences of an upserted id are superseded; excess input
+        records are appended after existing rows, in the given order.
+        Writing the upsert set first would move every freshly updated row
+        (judge grades, harm categories) to the head of the file, so readers
+        that scan the tail for the most recent sessions would see stale
+        rows instead.
         """
         with self.lock():
-            known_ids = {r.session_id for r in records}
-            extra_records: list[SessionRecord] = []
-            malformed_lines: list[str] = []
+            by_id: dict[str, deque[int]] = {}
+            for index, record in enumerate(records):
+                by_id.setdefault(record.session_id, deque()).append(index)
+            emitted_indices: set[int] = set()
+            out_lines: list[str] = []
 
             if self.path.exists():
                 with open(
@@ -322,8 +334,6 @@ class SessionStore:
                         try:
                             line.encode("utf-8")  # lone surrogates = undecodable bytes
                             rec = SessionRecord.from_dict(json.loads(line))
-                            if rec.session_id not in known_ids:
-                                extra_records.append(rec)
                         except (
                             json.JSONDecodeError,
                             UnicodeEncodeError,
@@ -332,7 +342,22 @@ class SessionStore:
                         ):
                             # Keep the original bytes, including whitespace and
                             # line ending, rather than the stripped parse input.
-                            malformed_lines.append(raw)
+                            out_lines.append(raw if raw.endswith("\n") else raw + "\n")
+                            continue
+                        replacements = by_id.get(rec.session_id)
+                        if replacements is None:
+                            out_lines.append(rec.to_json() + "\n")
+                        elif replacements:
+                            index = replacements.popleft()
+                            emitted_indices.add(index)
+                            out_lines.append(records[index].to_json() + "\n")
+                        # Excess on-disk copies of an upserted id are superseded.
+
+            out_lines.extend(
+                record.to_json() + "\n"
+                for index, record in enumerate(records)
+                if index not in emitted_indices
+            )
 
             tmp_path = self.path.with_name(
                 f"{self.path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
@@ -345,11 +370,7 @@ class SessionStore:
                     errors="surrogateescape",
                     newline="",
                 ) as f:
-                    for record in records:
-                        f.write(record.to_json() + "\n")
-                    for record in extra_records:
-                        f.write(record.to_json() + "\n")
-                    f.writelines(malformed_lines)
+                    f.writelines(out_lines)
                     f.flush()
                     os.fsync(f.fileno())
                 _ensure_trailing_newline(tmp_path)
