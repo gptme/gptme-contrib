@@ -952,7 +952,8 @@ class ProjectMonitoringRun(BaseRunLoop):
         Args:
             repo: Repository name (owner/repo)
             managed_logins: Team login set used both for author filtering and
-                review checks.  Defaults match the brain-repo poller defaults.
+                review checks. Defaults match the brain-repo poller defaults;
+                the configured author is always included.
             min_age_hours: Minimum PR age in hours before eligibility.
 
         Returns:
@@ -968,22 +969,16 @@ class ProjectMonitoringRun(BaseRunLoop):
             return []
 
         work_items = []
+        managed_logins = tuple(dict.fromkeys((*managed_logins, self.author)))
         managed = {login.casefold() for login in managed_logins}
-        _PR_FIELDS = "number,title,author,headRefOid,url,isDraft,state,createdAt,statusCheckRollup"
         try:
             result = subprocess.run(
                 [
                     "gh",
-                    "pr",
-                    "list",
-                    "--repo",
-                    repo,
-                    "--state",
-                    "open",
-                    "--limit",
-                    "100",
-                    "--json",
-                    _PR_FIELDS,
+                    "api",
+                    "--paginate",
+                    "--slurp",
+                    f"repos/{repo}/pulls?state=open&per_page=100",
                 ],
                 capture_output=True,
                 text=True,
@@ -992,15 +987,16 @@ class ProjectMonitoringRun(BaseRunLoop):
             if result.returncode != 0 or not result.stdout.strip():
                 return []
 
-            prs = json.loads(result.stdout)
+            pages = json.loads(result.stdout)
+            prs = [pr for page in pages for pr in page]
             now = datetime.now(timezone.utc)
 
             for pr in prs:
                 if not isinstance(pr, dict):
                     continue
-                if pr.get("isDraft") or pr.get("state", "").upper() != "OPEN":
+                if pr.get("draft") or pr.get("state", "").upper() != "OPEN":
                     continue
-                author_info = pr.get("author") or {}
+                author_info = pr.get("user") or {}
                 author = str(author_info.get("login") or "").strip()
                 if not author:
                     continue
@@ -1012,7 +1008,7 @@ class ProjectMonitoringRun(BaseRunLoop):
                     continue
 
                 # Age gate
-                created_str = pr.get("createdAt") or ""
+                created_str = pr.get("created_at") or ""
                 try:
                     created = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
                 except (ValueError, AttributeError):
@@ -1020,8 +1016,48 @@ class ProjectMonitoringRun(BaseRunLoop):
                 if (now - created).total_seconds() < min_age_hours * 3600:
                     continue
 
+                number = pr.get("number")
+                if not isinstance(number, int):
+                    continue
+                head = str((pr.get("head") or {}).get("sha") or "").strip()
+                if not head:
+                    continue
+
+                # REST enumerates every page without a search-result ceiling.
+                # Fetch CI only after cheap author/age filters; a changed head
+                # must wait for the next poll rather than use stale eligibility.
+                try:
+                    ci_result = subprocess.run(
+                        [
+                            "gh",
+                            "pr",
+                            "view",
+                            str(number),
+                            "--repo",
+                            repo,
+                            "--json",
+                            "headRefOid,statusCheckRollup",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                except subprocess.TimeoutExpired:
+                    self.logger.warning(
+                        f"CI lookup timed out for {repo}#{number}; skipping candidate"
+                    )
+                    continue
+                if ci_result.returncode != 0:
+                    continue
+                try:
+                    ci = json.loads(ci_result.stdout)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(ci, dict) or ci.get("headRefOid") != head:
+                    continue
+
                 # CI green gate: all checks success/skipped, at least one check
-                checks = pr.get("statusCheckRollup") or []
+                checks = ci.get("statusCheckRollup") or []
                 if not checks:
                     continue
                 if not all(
@@ -1033,14 +1069,6 @@ class ProjectMonitoringRun(BaseRunLoop):
                     )
                     for c in checks
                 ):
-                    continue
-
-                head = str(pr.get("headRefOid") or "").strip()
-                if not head:
-                    continue
-
-                number = pr.get("number")
-                if not isinstance(number, int):
                     continue
 
                 # Fetch full review list to check for existing managed review
@@ -1114,7 +1142,9 @@ class ProjectMonitoringRun(BaseRunLoop):
                         item_type="contributor_unreviewed",
                         number=number,
                         title=pr.get("title", f"PR #{number}"),
-                        url=pr.get("url", f"https://github.com/{repo}/pull/{number}"),
+                        url=pr.get(
+                            "html_url", f"https://github.com/{repo}/pull/{number}"
+                        ),
                         details=detail,
                     )
                 )
