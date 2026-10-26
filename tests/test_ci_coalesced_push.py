@@ -125,8 +125,9 @@ def test_discovery_retains_uncovered_changes(tmp_path, kind, scenario, expected)
         "github.run_id": "100",
     }.items():
         script = script.replace("${{ " + key + " }}", value)
-    # Keep each replay's matrix files private, including Python's open() paths.
-    script = script.replace("/tmp/all_", str(tmp_path / "all_"))
+    # Run from the private tmp_path, so relative names isolate both shell
+    # redirects and Python open() calls without interpolating paths into code.
+    script = script.replace("/tmp/all_", "all_")
     output = tmp_path / "output"
     result = subprocess.run(
         ["bash", "-eo", "pipefail", "-c", script],
@@ -136,7 +137,7 @@ def test_discovery_retains_uncovered_changes(tmp_path, kind, scenario, expected)
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "BASE_REF": "master",
             "BEFORE": before,
-            "GITHUB_OUTPUT": str(output),
+            "GITHUB_OUTPUT": "output",
             "SCENARIO": scenario,
             "RUNS": json.dumps(runs),
         },
