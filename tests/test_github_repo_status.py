@@ -690,8 +690,27 @@ def test_fork_pr_runs_on_master_named_branch_are_not_default_branch_ci() -> None
     assert "stale" not in result.stdout
 
 
+def test_chained_product_workflow_failure_is_not_masked_by_green_push() -> None:
+    """workflow_run is a trigger, not evidence that a workflow is non-product."""
+    runs = [
+        _run("Build", "success", "abc1234", "https://example.test/run/build"),
+        _run(
+            "Integration Tests",
+            "failure",
+            "abc1234",
+            "https://example.test/run/integration",
+            "workflow_run",
+        ),
+    ]
+    result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Failing" in result.stdout
+    assert "https://example.test/run/integration" in result.stdout
+    assert "Passing" not in result.stdout
+
+
 def test_workflow_run_window_falls_back_to_push_ci() -> None:
-    """workflow_run follow-ups must not count as default-branch CI.
+    """Known comment-only follow-ups must not count as default-branch CI.
 
     ActivityWatch/aw-webui 2026-10-26: a "Comment" workflow_run was reported
     while Build/Lint push runs had fallen out of the window.

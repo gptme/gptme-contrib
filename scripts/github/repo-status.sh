@@ -245,16 +245,16 @@ check_repo() {
     # SHA → compact context reported the repo Failing). operator-health.py
     # already excludes event=dynamic from master-red escalation
     # (MASTER_CI_NONBLOCKING_EVENTS). Do not drop workflow_dispatch here —
-    # nightly full-suite failures are still useful status. workflow_run rows
-    # are follow-ups to other runs (PR comment bots, auto-merge), not builds
-    # of the default branch; counting them kept the push fallback from firing
-    # (ActivityWatch/aw-webui 2026-10-26: a "Comment" workflow_run reported
-    # as master CI while Build/Lint had fallen out of the window). Only drop
-    # these rows when a product-CI run remains to report.
+    # nightly full-suite failures are still useful status. workflow_run can
+    # also trigger product CI (e.g. chained Integration Tests), so exclude only
+    # the known "Comment" follow-up, not the event as a whole. That bot kept
+    # the push fallback from firing on ActivityWatch/aw-webui 2026-10-26 while
+    # Build/Lint had fallen out of the window. Only drop these non-product
+    # rows when a product-CI run remains to report.
     local product_json
     product_json=$(echo "$run_json" | jq '[.[] | select(
         ((.event // "") != "dynamic")
-        and ((.event // "") != "workflow_run")
+        and (((.event // "") == "workflow_run" and .name == "Comment") | not)
         and ((.name // "") | test("[Dd]ependabot") | not)
         and ((.conclusion != "startup_failure") or ((.name // "") != ""))
     )]')
