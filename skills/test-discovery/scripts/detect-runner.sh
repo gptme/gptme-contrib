@@ -73,13 +73,16 @@ def toml_has_table(text, *keys):
     return True
 
 
-def ini_has_section(text, *names):
+def ini_has_section(text, *names, prefixes=()):
     parser = configparser.RawConfigParser(interpolation=None)
     try:
         parser.read_string(text)
     except configparser.Error:
         return False
-    return bool({s.lower() for s in parser.sections()} & {n.lower() for n in names})
+    sections = {s.lower() for s in parser.sections()}
+    return bool(sections & {n.lower() for n in names}) or any(
+        s.startswith(prefixes) for s in sections
+    )
 
 
 def found(cmd, reason):
@@ -106,7 +109,7 @@ for name in ("tox.ini", "pyproject.toml", "setup.cfg"):
     if text is None:
         continue
     if (
-        (name == "tox.ini" and ini_has_section(text, "tox", "testenv"))
+        (name == "tox.ini" and ini_has_section(text, "tox", "testenv", prefixes=("testenv:",)))
         or (name == "pyproject.toml" and toml_has_table(text, "tool", "tox"))
         or (name == "setup.cfg" and ini_has_section(text, "tox", "tox:tox"))
     ):

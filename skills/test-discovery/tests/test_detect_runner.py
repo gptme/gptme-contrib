@@ -27,6 +27,11 @@ CASES = {
         {"tox.ini": "[testenv]\ncommands = python -m unittest discover\n"},
         "tox",
     ),
+    "tox-named-env-only": (
+        {"tox.ini": "[testenv:py]\ncommands = python -m unittest discover\n"},
+        "tox",
+    ),
+    "tox-unrelated-section": ({"tox.ini": "[testenvironment]\nx = 1\n"}, None),
     "pyproject-tox": ({"pyproject.toml": "[tool.tox]\nx = 1\n"}, "tox"),
     "npm-test": ({"package.json": '{"scripts": {"test": "vitest run"}}'}, "npm test"),
     "npm-no-test-script": (
