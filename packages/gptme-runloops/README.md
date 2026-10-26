@@ -166,6 +166,12 @@ green verification, actionable changes requested for defects, or a comment
 review for infrastructure/verification limits. It never edits or pushes the
 contributor branch, opens a parallel fix, or merges.
 
+The legacy `ProjectMonitoringRun` discovery loop also uses this shared review-only
+prompt. It executes each contributor review in a separate session, excludes those
+PRs (including other event types for the same PR) from its generic repair batch,
+and retains unrelated repair work. A timed-out review lookup skips that candidate
+without abandoning later PRs in the repository scan.
+
 The detector owns age/author/green-CI eligibility and full-head-SHA dedupe; its
 managed-login configuration must be carried as exactly one
 `managed_logins=Login1,Login2` token in item `detail`. The handler renders quoted

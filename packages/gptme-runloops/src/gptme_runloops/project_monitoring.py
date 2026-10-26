@@ -13,6 +13,7 @@ except ImportError:
     _fcntl = None  # type: ignore[assignment]
 
 from gptme_runloops.base import BaseRunLoop
+from gptme_runloops.prompt_templates import ItemPromptParams, render_main_prompt
 from gptme_runloops.utils.execution import ExecutionResult
 from gptme_runloops.utils.executor import Executor
 from gptme_runloops.utils.github import CommentLoopDetector, has_unresolved_bot_reviews
@@ -1038,18 +1039,24 @@ class ProjectMonitoringRun(BaseRunLoop):
                     continue
 
                 # Fetch full review list to check for existing managed review
-                reviews_result = subprocess.run(
-                    [
-                        "gh",
-                        "api",
-                        "--paginate",
-                        "--slurp",
-                        f"repos/{repo}/pulls/{number}/reviews?per_page=100",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
+                try:
+                    reviews_result = subprocess.run(
+                        [
+                            "gh",
+                            "api",
+                            "--paginate",
+                            "--slurp",
+                            f"repos/{repo}/pulls/{number}/reviews?per_page=100",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                except subprocess.TimeoutExpired:
+                    self.logger.warning(
+                        f"Review lookup timed out for {repo}#{number}; skipping candidate"
+                    )
+                    continue
                 if reviews_result.returncode != 0:
                     continue
                 try:
@@ -1442,14 +1449,25 @@ class ProjectMonitoringRun(BaseRunLoop):
             Project monitoring prompt with discovered work
         """
         # Use cached work from has_work() - don't re-discover
-        work_items = self._discovered_work
+        # Contributor reviews run in separate sessions in execute(), using the
+        # shared review-only template. Never include them in this repair prompt.
+        review_targets = {
+            (item.repo, item.number)
+            for item in self._discovered_work
+            if item.item_type == "contributor_unreviewed"
+        }
+        work_items = [
+            item
+            for item in self._discovered_work
+            if (item.repo, item.number) not in review_targets
+        ]
 
         if not work_items:
-            # Shouldn't happen if has_work() was called first, but handle gracefully
-            self.logger.warning(
-                "No cached work items (has_work() may not have been called)"
-            )
-            return ""  # Will be handled by execute()
+            if not self._discovered_work:
+                self.logger.warning(
+                    "No cached work items (has_work() may not have been called)"
+                )
+            return ""  # Review-only work is handled by execute().
 
         self.logger.info(f"Using {len(work_items)} cached work items")
 
@@ -1548,10 +1566,55 @@ Begin processing the work now.
         Returns:
             ExecutionResult with exit code and status
         """
-        # Check if work was found
-        if not prompt:
+        # A legacy discovery batch can contain both repair and review work.
+        # Execute each contributor in a fresh session so no generic repair,
+        # push or merge instructions can leak into its review-only context.
+        original_timeout = self.timeout
+        failure_code = 0
+        timed_out = False
+        last_result = None
+        try:
+            for item in self._discovered_work:
+                if item.item_type != "contributor_unreviewed":
+                    continue
+                self.timeout = self._compute_timeout([item])
+                review_prompt = render_main_prompt(
+                    ItemPromptParams(
+                        repo=item.repo,
+                        number=item.number,
+                        workspace=str(self.workspace),
+                        detail=item.details,
+                        author=self.author,
+                        agent_name=self.agent_name,
+                    ),
+                    item_type=item.item_type,
+                    title=item.title,
+                    investigate="",
+                    monitoring_rules="",
+                    time_desc=f"{self.timeout}s",
+                )
+                # Record/clean each completed session once; leave the final
+                # result for the normal run() -> post_run() lifecycle.
+                if last_result is not None:
+                    super().post_run(last_result)
+                last_result = super().execute(review_prompt)
+                failure_code = failure_code or last_result.exit_code
+                timed_out = timed_out or last_result.timed_out
+        finally:
+            self.timeout = original_timeout
+
+        if prompt:
+            if last_result is not None:
+                super().post_run(last_result)
+            last_result = super().execute(prompt)
+
+        if last_result is None:
             self.logger.info("No work found, skipping execution")
             return ExecutionResult(exit_code=0, timed_out=False)
-
-        # Execute with gptme
-        return super().execute(prompt)
+        if failure_code or timed_out:
+            last_result.exit_code = failure_code or last_result.exit_code
+            last_result.timed_out = timed_out or last_result.timed_out
+            last_result.success = (
+                last_result.exit_code == 0 and not last_result.timed_out
+            )
+        return last_result

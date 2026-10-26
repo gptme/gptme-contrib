@@ -1528,3 +1528,129 @@ def test_discover_work_calls_check_contributor_unreviewed(workspace):
         work = run.discover_work()
 
     assert any(w.item_type == "contributor_unreviewed" for w in work)
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_contributor_reviews_execute_in_isolated_review_only_sessions(workspace, mixed):
+    """Legacy execution must never combine contributor reviews with repair prompts."""
+    from gptme_runloops.utils.execution import ExecutionResult
+
+    executor = MagicMock()
+    executor.execute.return_value = ExecutionResult(exit_code=0)
+    run = ProjectMonitoringRun(workspace, executor=executor, author="TimeToBuildBob")
+    contributors = [
+        WorkItem(
+            repo="owner/repo",
+            item_type="contributor_unreviewed",
+            number=number,
+            title="Outside contribution",
+            url=f"https://github.com/owner/repo/pull/{number}",
+            details="managed_logins=TimeToBuildBob,ErikBjare",
+        )
+        for number in (301, 302)
+    ]
+    run._discovered_work = contributors + (
+        [
+            WorkItem("team/repo", "pr_update", 400, "Repair", "url", "repair #400"),
+            WorkItem(
+                "owner/repo",
+                "ci_failure",
+                301,
+                "Same contributor",
+                "url",
+                "fix contributor #301",
+            ),
+        ]
+        if mixed
+        else []
+    )
+    result = run.execute(run.generate_prompt())
+
+    assert result.success
+    calls = executor.execute.call_args_list
+    assert len(calls) == 2 + int(mixed)
+    review_prompts = [
+        c.kwargs["prompt"]
+        for c in calls
+        if "Contributor Initial Review" in c.kwargs["prompt"]
+    ]
+    assert len(review_prompts) == 2
+    for number, prompt in zip((301, 302), review_prompts):
+        assert f"PR: #{number}" in prompt
+        assert "Never push, commit" in prompt
+        assert "commit_id" in prompt
+        assert '["TimeToBuildBob", "ErikBjare"]' in prompt
+        assert "Implement fixes, test, commit, push" not in prompt
+        assert "repair #400" not in prompt
+    if mixed:
+        repair_prompt = next(
+            c.kwargs["prompt"] for c in calls if "repair #400" in c.kwargs["prompt"]
+        )
+        assert "Implement fixes, test, commit, push" in repair_prompt
+        assert "Outside contribution" not in repair_prompt
+        assert "Contributor Unreviewed" not in repair_prompt
+        assert "fix contributor #301" not in repair_prompt
+
+
+def test_contributor_review_timeout_does_not_abort_later_candidates(workspace):
+    """A timed-out lookup skips only the unobservable PR, not its siblings."""
+    import subprocess
+
+    run = ProjectMonitoringRun(workspace)
+    visited = []
+
+    def fake_run(cmd, **kwargs):
+        if "list" in cmd:
+            return MagicMock(
+                returncode=0, stdout=json.dumps([_make_pr(401), _make_pr(402)])
+            )
+        visited.append(cmd[-1])
+        if "/401/" in cmd[-1]:
+            raise subprocess.TimeoutExpired(cmd, 30)
+        return MagicMock(returncode=0, stdout="[[]]")
+
+    with patch(
+        "gptme_runloops.project_monitoring.subprocess.run", side_effect=fake_run
+    ):
+        items = run.check_contributor_unreviewed("owner/repo")
+
+    assert [item.number for item in items] == [402]
+    assert len(visited) == 2
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_contributor_sessions_record_each_trajectory_once(workspace, mixed):
+    from gptme_runloops.utils.execution import ExecutionResult
+
+    results = [ExecutionResult(exit_code=1), ExecutionResult(exit_code=0)]
+    executor = MagicMock()
+    executor.execute.side_effect = results
+    run = ProjectMonitoringRun(workspace, executor=executor)
+    run._discovered_work = [
+        WorkItem(
+            "owner/repo",
+            "contributor_unreviewed",
+            1,
+            "Review",
+            "url",
+            "managed_logins=Bob",
+        ),
+        WorkItem(
+            "owner/repo",
+            "pr_update" if mixed else "contributor_unreviewed",
+            2,
+            "Other",
+            "url",
+            "managed_logins=Bob",
+        ),
+    ]
+    original_timeout = run.timeout
+    with patch.object(run, "_record_session") as record:
+        result = run.execute(run.generate_prompt())
+        run.post_run(result)
+    assert record.call_count == 2
+    assert record.call_args_list[0].args[0] is results[0]
+    assert record.call_args_list[1].args[0] is results[1]
+    assert not result.success
+    assert result.exit_code == 1
+    assert run.timeout == original_timeout
