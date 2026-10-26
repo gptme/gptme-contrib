@@ -2198,11 +2198,15 @@ version = "0.1.0"
 source = { editable = "plugins/gptme-imagen" }
 
 [package.optional-dependencies]
+a1111 = [
+    { name = "requests" },
+]
 all = [
     { name = "click" },
     { name = "google-genai" },
     { name = "gptme" },
     { name = "openai" },
+    { name = "requests" },
 ]
 cli = [
     { name = "click" },
@@ -2228,12 +2232,13 @@ requires-dist = [
     { name = "click", marker = "extra == 'test'", specifier = ">=8.0" },
     { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=1.0.0" },
     { name = "gptme", marker = "extra == 'gptme'", git = "https://github.com/gptme/gptme.git?branch=master" },
-    { name = "gptme-imagen", extras = ["gptme", "cli", "gemini", "dalle"], marker = "extra == 'all'" },
+    { name = "gptme-imagen", extras = ["gptme", "cli", "gemini", "dalle", "a1111"], marker = "extra == 'all'" },
     { name = "openai", marker = "extra == 'dalle'", specifier = ">=1.0.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
     { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.12.0" },
+    { name = "requests", marker = "extra == 'a1111'", specifier = ">=2.0" },
 ]
-provides-extras = ["gptme", "cli", "test", "gemini", "dalle", "all"]
+provides-extras = ["gptme", "cli", "test", "gemini", "dalle", "a1111", "all"]
 
 [[package]]
 name = "gptme-lessons-extras"

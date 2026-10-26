@@ -23,8 +23,11 @@ gemini = [
 dalle = [
     "openai>=1.0.0",
 ]
+a1111 = [
+    "requests>=2.0",
+]
 all = [
-    "gptme-imagen[gptme,cli,gemini,dalle]",
+    "gptme-imagen[gptme,cli,gemini,dalle,a1111]",
 ]
 
 [project.scripts]
