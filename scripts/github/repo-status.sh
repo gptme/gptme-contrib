@@ -226,6 +226,20 @@ check_repo() {
         run_json="$product_json"
     fi
 
+    # A fork PR whose head branch is named "master" reports headBranch=master,
+    # so `--branch master` returns its pull_request runs next to the real push
+    # runs (ActivityWatch/aw-qt 2026-10-19: a fork-master PR run on 3f2e243
+    # masked green push runs on HEAD and printed "Stale passing run"). Those
+    # runs tested a fork merge ref, never a default-branch commit. Same
+    # fallback as above: keep them only if nothing else is in the window.
+    local push_json
+    push_json=$(echo "$run_json" | jq '[.[] | select(
+        (.event // "") != "pull_request" and (.event // "") != "pull_request_target"
+    )]')
+    if [ "$(echo "$push_json" | jq 'length')" -gt 0 ]; then
+        run_json="$push_json"
+    fi
+
     # Filter out startup_failure runs from deleted/ghost workflows. GitHub keeps
     # historical check-suite records for workflows that were added with invalid YAML
     # and then deleted (state=deleted, path=BuildFailed). These fire as push-event

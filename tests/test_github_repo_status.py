@@ -384,3 +384,48 @@ def test_only_pending_runs_still_report_no_previous_run() -> None:
     result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
     assert result.returncode == 0, result.stderr
     assert "gptme-cloud: In progress (no previous run)" in result.stdout
+
+
+def _fork_master_pr_run(conclusion: str, event: str = "pull_request") -> dict:
+    # A fork PR whose head branch is named "master" reports headBranch=master,
+    # so `gh run list --branch master` returns it (ActivityWatch/aw-qt 2026-10-19).
+    return {
+        "conclusion": conclusion,
+        "status": "completed",
+        "url": "https://example.test/run/fork-pr",
+        "name": "Build",
+        "headSha": "fork999",
+        "event": event,
+    }
+
+
+def _push_run() -> dict:
+    return {
+        "conclusion": "success",
+        "status": "completed",
+        "url": "https://example.test/run/push",
+        "name": "Build",
+        "headSha": "abc1234",
+        "event": "push",
+    }
+
+
+def test_fork_master_pr_run_does_not_mask_head_push_run() -> None:
+    for pr_run in (
+        _fork_master_pr_run("success"),
+        _fork_master_pr_run("failure"),
+        _fork_master_pr_run("failure", event="pull_request_target"),
+    ):
+        runs = [pr_run, _push_run()]
+        result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
+        assert result.returncode == 0, result.stderr
+        assert "gptme-cloud: Passing" in result.stdout, pr_run
+        assert "stale" not in result.stdout.lower(), pr_run
+
+
+def test_pr_only_window_still_reports_status() -> None:
+    runs = [_fork_master_pr_run("success")]
+    result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Passing" in result.stdout
+    assert "HEAD=abc1234" in result.stdout
