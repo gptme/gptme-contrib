@@ -158,7 +158,7 @@ def test_claude_report_failure_keeps_error_semantics():
     )
     with patch.object(ro.subprocess, "run", return_value=_proc(stdout, "boom", 1)):
         r = ClaudeCodeExecutor().run_once("hi", WS, 60, report=True)
-    assert r.is_error and not r.agent_output
+    assert r.is_error and r.agent_output
     assert r.report_text == "partial"
 
 
@@ -178,6 +178,67 @@ def test_report_rejected_on_other_backends():
 def test_claude_rejects_sandbox():
     with pytest.raises(ValueError):
         ClaudeCodeExecutor().run_once("hi", WS, 60, sandbox="read-only")
+
+
+@pytest.mark.parametrize(
+    "subtype",
+    [
+        "error_during_execution",
+        "error_max_turns",
+        "error_max_budget_usd",
+        "error_max_structured_output_retries",
+        "unknown_future_subtype",
+    ],
+)
+@pytest.mark.parametrize("report", [False, True])
+def test_claude_explicit_non_success_preserves_partial_output(subtype, report):
+    payload = {"subtype": subtype, "result": "Partial work"}
+    stdout = (
+        _cc_stream(_assistant(_text("partial report")), _result_event(**payload))
+        if report
+        else _cc_json(**payload)
+    )
+    with patch.object(ro.subprocess, "run", return_value=_proc(stdout)):
+        r = ClaudeCodeExecutor().run_once("more", WS, 60, resume=SID, report=report)
+    assert r.report_text == ("partial report" if report else None)
+    assert r.is_error and r.exit_code == 1
+    assert r.result == "Partial work" and r.agent_output
+    assert r.session_id == SID and r.resumed
+    assert r.model == "claude-opus-4-8" and r.cost_usd == 0.12
+
+
+@pytest.mark.parametrize("text", ["", " ", "\n\t"])
+@pytest.mark.parametrize("report", [False, True])
+def test_claude_blank_result_is_not_success(text, report):
+    payload = {"subtype": "success", "result": text}
+    stdout = (
+        _cc_stream(_assistant(_text("partial report")), _result_event(**payload))
+        if report
+        else _cc_json(**payload)
+    )
+    with patch.object(ro.subprocess, "run", return_value=_proc(stdout)):
+        r = ClaudeCodeExecutor().run_once("hi", WS, 60, report=report)
+    assert r.report_text == ("partial report" if report else None)
+    assert r.is_error
+    assert r.agent_output == (bool(text) or report)
+    assert r.session_id == SID
+
+
+@pytest.mark.parametrize("subtype", ["success", None])
+@pytest.mark.parametrize("report", [False, True])
+def test_claude_success_and_legacy_result(subtype, report):
+    payload = {} if subtype is None else {"subtype": subtype}
+    payload["result"] = "  done\n"
+    stdout = (
+        _cc_stream(_assistant(_text("full report")), _result_event(**payload))
+        if report
+        else _cc_json(**payload)
+    )
+    with patch.object(ro.subprocess, "run", return_value=_proc(stdout)):
+        r = ClaudeCodeExecutor().run_once("hi", WS, 60, report=report)
+    assert r.report_text == ("full report" if report else None)
+    assert not r.is_error and r.agent_output
+    assert r.result == "  done\n"  # Validation must not rewrite useful output.
 
 
 # --- codex ---
@@ -427,6 +488,42 @@ def test_cli_no_fallback_when_resumed_session_ran():
         [ran],
     )
     assert res.exit_code == 1 and once.call_count == 1
+
+
+@pytest.mark.parametrize("text", ["", " ", "\n\t"])
+@pytest.mark.parametrize("subtype", ["success", "error_during_execution"])
+def test_cli_no_fresh_fallback_after_streamed_assistant_output(text, subtype):
+    stdout = _cc_stream(
+        _assistant(_text("Applied the requested edit.")),
+        _result_event(result=text, subtype=subtype),
+    )
+    with (
+        patch("shutil.which", return_value="/usr/bin/claude"),
+        patch.object(ro.subprocess, "run", return_value=_proc(stdout)) as run,
+    ):
+        res = CliRunner().invoke(
+            main,
+            [
+                "run",
+                "--workspace",
+                str(WS),
+                "--backend",
+                "claude-code",
+                "--resume",
+                SID,
+                "--on-resume-failure",
+                "fresh",
+                "--report",
+                "more",
+            ],
+        )
+    assert res.exit_code == 1, res.output
+    out = json.loads(res.output)
+    assert out["is_error"] and out["agent_output"]
+    assert out["report_text"] == "Applied the requested edit."
+    assert out["session_id"] == SID and out["resumed"]
+    assert run.call_count == 1
+    assert _argv(run)[_argv(run).index("--resume") + 1] == SID
 
 
 def test_cli_unsupported_resume_is_usage_error():
