@@ -494,40 +494,40 @@ _greptile_summary_reviewed_sha() {
 # --- Helper: check if re-review is needed (new commits since latest review) ---
 # Returns 0 = re-review needed, 1 = no re-review needed
 #
-# PRIMARY (robust): compare the commit Greptile actually reviewed (the latest
-# greptile PR-review's commit_id) against the current PR head SHA. This is immune
-# to the timestamp/timezone and in-place comment-update quirks the date heuristic
-# below missed — e.g. ErikBjare/bob#890 (2026-06-14): a fix commit landed after
-# the review but the date compare skipped the re-trigger, leaving a hardened PR
-# stuck on a stale low score. A SHA mismatch is unambiguous and loop-safe: once
-# Greptile reviews the head, reviewed_sha == head_sha → it stops re-triggering.
+# PRIMARY (robust): compare the commit Greptile actually reviewed against the
+# current PR head SHA. Provenance order:
+#   1. Summary footer "Last reviewed commit" — the SHA self-merge-check.py
+#      gates on, and the SHA of the code Greptile scored. Prefer this even
+#      when a later formal PR-review object carries a newer commit_id.
+#      Thread-reply reviews (withdrawals, "I'll withdraw this finding") stamp
+#      the current HEAD without rewriting the summary; taking that commit_id
+#      reported already-reviewed while the gate called the review stale
+#      (gptme/gptme#4494, 2026-10-25: withdrawals at 8dc0cb69b hid a 4/5
+#      summary of e78b820).
+#   2. Latest greptile PR-review commit_id, when the footer is absent.
+# A SHA mismatch is unambiguous and loop-safe: once Greptile reviews the head
+# (footer or formal review), reviewed_sha == head_sha → it stops re-triggering.
 # On SHA mismatch, one more server-side check runs before declaring "re-review
 # needed": Greptile often responds to triggers via in-place issue-comment update
 # (never advancing the formal review's commit_id) — see the marker check inline.
 #
-# FALLBACK (date-based): when Greptile posted only an issue comment and no PR
-# review object carries a commit_id, fall back to the original committer.date
-# heuristic so behaviour is unchanged for that case.
+# FALLBACK (date-based): when neither the footer nor a PR-review object names
+# a commit, fall back to the original committer.date heuristic.
 _needs_re_review() {
     local reviewed_sha head_sha info reviewed_at new_commits
-    reviewed_sha=$(_pr_reviews_json \
-        | jq -r '[.[]
-              | select((.user.login // "") | test("greptile"; "i"))
-              | select((.commit_id // "") != "")]
-            | sort_by(.submitted_at) | last | (.commit_id // "")' 2>/dev/null) || reviewed_sha=""
-
-    # No formal review object carries a commit_id (Greptile frequently reviews via
-    # issue comment only). Before falling back to the date heuristic, use the
-    # summary footer's "Last reviewed commit" — it is server-side, unambiguous,
-    # and is exactly what self-merge-check.py gates on. Without this the two tools
-    # deadlock: the gate demands a re-review of head while this helper reports
-    # "no new commits" and refuses to trigger one. Observed on
-    # gptme/gptme-cloud#892 (2026-09-02): head dcf167ea was committed at 12:08:15
-    # and Greptile posted its review of the PREVIOUS commit 63f9d6b7 at 12:08:47,
-    # so `committer.date > reviewed_at` counted zero new commits and the PR sat
-    # permanently ineligible while repo-wide CI stayed red.
+    # Footer first: same provenance as self-merge-check.py. Without this the
+    # two tools deadlock when a thread-reply review stamps HEAD (helper says
+    # current) while the summary still names the previous commit (gate says
+    # stale). Observed on gptme/gptme-cloud#892 as the inverse (footer stale,
+    # no formal review) and gptme/gptme#4494 (footer stale, formal review on
+    # HEAD from thread replies).
+    reviewed_sha=$(_greptile_summary_reviewed_sha) || reviewed_sha=""
     if [ -z "$reviewed_sha" ]; then
-        reviewed_sha=$(_greptile_summary_reviewed_sha) || reviewed_sha=""
+        reviewed_sha=$(_pr_reviews_json \
+            | jq -r '[.[]
+                  | select((.user.login // "") | test("greptile"; "i"))
+                  | select((.commit_id // "") != "")]
+                | sort_by(.submitted_at) | last | (.commit_id // "")' 2>/dev/null) || reviewed_sha=""
     fi
 
     if [ -n "$reviewed_sha" ]; then

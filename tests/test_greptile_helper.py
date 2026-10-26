@@ -718,6 +718,48 @@ def test_summary_footer_matching_head_suppresses_re_review():
     assert status.stdout.strip() == "already-reviewed", f"stderr: {status.stderr}"
 
 
+def test_thread_reply_review_on_head_does_not_mask_stale_summary_footer():
+    """Regression: gptme/gptme#4494 (2026-10-25).
+
+    Greptile scored OLDSHA 4/5 in the summary footer. A fix commit advanced
+    HEAD. Greptile then posted empty-body PR reviews (thread withdrawals)
+    whose commit_id is the new HEAD. Taking the last formal review's
+    commit_id reported already-reviewed and refused to re-trigger.
+    self-merge-check.py read the footer (OLDSHA) and called the review
+    stale: the score could not iterate and the helper would not unstick it.
+    """
+    reviewed_at = _iso_ago(minutes=30)
+    old = "e78b820945d39620907462b6b8d18d6cc950f64a"
+    new = "8dc0cb69b15df0371c158f78fc5750fa901c7dda"
+    fixture = {
+        "pr_number": 4494,
+        "raw_comments": [
+            _make_greptile_comment(
+                4,
+                reviewed_at=reviewed_at,
+                updated_at=reviewed_at,
+                reviewed_commit=old,
+            ),
+        ],
+        "raw_reviews": [
+            _make_greptile_review(old, reviewed_at),
+            # Thread-reply withdrawals stamp HEAD without a new summary.
+            _make_greptile_review(new, _iso_ago(minutes=28)),
+        ],
+        "raw_pr": {"head": {"sha": new}, "created_at": _iso_ago(minutes=120)},
+        "raw_commits": [_make_commit(_iso_ago(minutes=29))],
+        "bot_reaction_count": 1,
+    }
+    status = _run_helper("status", fixture, repo="gptme/gptme")
+    assert status.stdout.strip() == "needs-re-review", f"stderr: {status.stderr}"
+
+    result = _run_helper("check", fixture, repo="gptme/gptme")
+    assert result.returncode == 0, (
+        f"Stale summary footer must allow re-trigger even when a later "
+        f"thread-reply review stamps HEAD. stderr: {result.stderr}"
+    )
+
+
 def test_fresh_pr_awaits_initial_review():
     """Fresh PR (< 20 min, no review, no trigger) → awaiting-initial-review."""
     fixture = {
