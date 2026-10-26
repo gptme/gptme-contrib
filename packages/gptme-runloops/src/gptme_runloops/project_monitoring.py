@@ -1025,9 +1025,13 @@ class ProjectMonitoringRun(BaseRunLoop):
                 if not checks:
                     continue
                 if not all(
-                    str(c.get("conclusion") or "").upper() in {"SUCCESS", "SKIPPED"}
+                    isinstance(c, dict)
+                    and (
+                        str(c.get("conclusion") or "").upper() in {"SUCCESS", "SKIPPED"}
+                        if "conclusion" in c
+                        else str(c.get("state") or "").upper() == "SUCCESS"
+                    )
                     for c in checks
-                    if isinstance(c, dict)
                 ):
                     continue
 

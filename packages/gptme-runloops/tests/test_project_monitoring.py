@@ -1684,3 +1684,31 @@ def test_notification_takes_priority_over_initial_contributor_review(workspace):
         run._discovered_work = run.discover_work()
     assert run._discovered_work == [notification]
     assert "answer mention" in run.generate_prompt()
+
+
+@pytest.mark.parametrize(
+    "checks,eligible",
+    [
+        ([{"__typename": "StatusContext", "state": "SUCCESS"}], True),
+        (
+            [
+                {"conclusion": "SUCCESS"},
+                {"__typename": "StatusContext", "state": "SUCCESS"},
+            ],
+            True,
+        ),
+        ([{"state": "PENDING"}], False),
+        ([{"state": "FAILURE"}], False),
+        ([{"conclusion": "FAILURE", "state": "SUCCESS"}], False),
+        ([None], False),
+        ([{"conclusion": "SUCCESS"}, None], False),
+    ],
+)
+def test_contributor_ci_gate_handles_checks_and_commit_statuses(
+    workspace, checks, eligible
+):
+    run = ProjectMonitoringRun(workspace)
+    pr = _make_pr(501)
+    pr["statusCheckRollup"] = checks
+    items = _run_check_contributor_unreviewed(run, [pr])
+    assert bool(items) is eligible
