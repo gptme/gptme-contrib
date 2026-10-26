@@ -253,7 +253,8 @@ check_repo() {
     # rows when a product-CI run remains to report.
     local product_json
     product_json=$(echo "$run_json" | jq '[.[] | select(
-        ((.event // "") != "dynamic")
+        (.conclusion != "skipped")
+        and ((.event // "") != "dynamic")
         and (((.event // "") == "workflow_run" and .name == "Comment") | not)
         and ((.name // "") | test("[Dd]ependabot") | not)
         and ((.conclusion != "startup_failure") or ((.name // "") != ""))
@@ -262,7 +263,8 @@ check_repo() {
     # 2026-10-23: 28 dynamic + 45 "Dependabot Auto-merge" workflow_run rows
     # in the last 100, push CI green) — the fallback below then reported the
     # Dependabot update job as the repo's master CI. Before falling back,
-    # look for product CI once more, scoped to push events.
+    # look for product CI once more, scoped to push events. An all-skipped
+    # window is also unusable; retain it only if the push query finds no CI.
     if [ "$(echo "$product_json" | jq 'length')" -eq 0 ]; then
         local push_json
         push_json=$(gh run list --repo "$repo" --branch "$default_branch" --event push --limit 20 --json "$run_fields" 2>/dev/null) || push_json="[]"

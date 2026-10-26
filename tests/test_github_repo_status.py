@@ -272,6 +272,43 @@ def test_dependabot_filled_window_with_red_push_ci_reports_push_failure() -> Non
     assert "run/dependabot" not in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("push_conclusion", "expected"),
+    [("failure", "Failing"), ("success", "Passing"), (None, "Skipped")],
+)
+def test_all_skipped_window_checks_push_ci_before_reporting_skipped(
+    push_conclusion: str | None, expected: str
+) -> None:
+    runs = [
+        _run(
+            "Dependabot Auto-merge",
+            "skipped",
+            "abc1234",
+            "https://example.test/run/automerge",
+            "workflow_run",
+        ),
+        _run("Build", "skipped", "abc1234", "https://example.test/run/skipped"),
+    ]
+    push_runs = (
+        [_run("Build", push_conclusion, "oldsha00", "https://example.test/run/build")]
+        if push_conclusion is not None
+        else []
+    )
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_RUNS": json.dumps(runs),
+            "FAKE_GH_PUSH_RUNS": json.dumps(push_runs),
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"gptme-cloud: {expected}" in result.stdout
+    if push_conclusion == "failure":
+        assert "https://example.test/run/build" in result.stdout
+    if push_conclusion is not None:
+        assert "stale; HEAD=abc1234, run=oldsha0" in result.stdout
+        assert "Skipped" not in result.stdout
+
+
 def test_push_fallback_excludes_disabled_workflow_failure() -> None:
     """Disabled historical failures must stay excluded after the push refetch."""
     runs = [
