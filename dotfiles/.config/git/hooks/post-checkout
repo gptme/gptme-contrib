@@ -103,12 +103,14 @@ if [ -n "$_gw_git_dir" ] && [ "$_gw_git_dir" != "$_gw_common_dir" ]; then
                 # linked worktree inherits the hole (2026-10-26: no @jest/core
                 # and no rollup native across aw-webui worktrees). Name the
                 # cause instead of letting each session rediscover it.
-                _gw_rot=$(find "$_gw_base" -mindepth 1 -maxdepth 2 -type d \
-                    \( -path "$_gw_base/@*/*" -o -not -path "$_gw_base/*/*" \) \
+                # Match relative paths so glob/regex characters in the checkout
+                # path cannot alter the selection or the displayed examples.
+                _gw_rot=$(cd "$_gw_base" && find . -mindepth 1 -maxdepth 2 -type d \
+                    \( -path './@*/*' -o -not -path './*/*' \) \
                     \( \( -empty -not -name '.*' \) -o -name '.*-????????' \) \
-                    2>/dev/null)
+                    -print 2>/dev/null | sed 's|^\./||')
                 if [ -n "$_gw_rot" ]; then
-                    echo "[git-worktree] WARNING: donor $_gw_base has $(printf '%s\n' "$_gw_rot" | wc -l) empty or half-installed package dir(s), e.g. $(printf '%s\n' "$_gw_rot" | head -3 | sed "s|^$_gw_base/||" | paste -sd ' ' -). Linked worktrees inherit them. Repair the donor, not the worktree: install its lockfile in a sibling dir on the same filesystem, then swap it in with two mv renames."
+                    echo "[git-worktree] WARNING: donor $_gw_base has $(printf '%s\n' "$_gw_rot" | wc -l) empty or half-installed package dir(s), e.g. $(printf '%s\n' "$_gw_rot" | head -3 | paste -sd ' ' -). Linked worktrees inherit them. Repair the donor, not the worktree: install its lockfile in a sibling dir on the same filesystem, then swap it in with two mv renames."
                 fi
             fi
         done < <(find "$_gw_main_root" -maxdepth 3 -type d -name node_modules \
