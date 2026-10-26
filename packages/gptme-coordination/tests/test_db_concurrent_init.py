@@ -2,10 +2,10 @@
 
 Two processes opening the same brand-new coordination database must not fail
 with ``sqlite3.OperationalError: database is locked``. Changing a database to
-WAL mode needs exclusive access to the file, and SQLite does **not** consult
-the busy handler for that change: the loser of the race fails immediately,
-even with ``PRAGMA busy_timeout`` already set. The conversion therefore has
-to be retried explicitly.
+WAL mode needs exclusive access to the file, and SQLite can bypass the busy
+handler for that change: the loser of a first-open race can fail immediately,
+even with ``PRAGMA busy_timeout`` already set. Other lock waits do invoke the
+busy handler, so explicit retries must also prevent it extending the budget.
 """
 
 from __future__ import annotations
@@ -149,11 +149,59 @@ def test_wal_conversion_does_not_retry_unrelated_io_errors(monkeypatch):
 
     error = sqlite3.OperationalError("disk I/O error")
     conn = Mock(spec=sqlite3.Connection)
-    conn.execute.side_effect = error
+    conn.execute.return_value.fetchone.return_value = (5000,)
+
+    def execute(sql):
+        if sql == "PRAGMA journal_mode=WAL":
+            raise error
+        return conn.execute.return_value
+
+    conn.execute.side_effect = execute
     sleep = Mock()
     monkeypatch.setattr(db_module.time, "sleep", sleep)
     with pytest.raises(sqlite3.OperationalError) as raised:
         _enable_wal(conn)
     assert raised.value is error
-    conn.execute.assert_called_once_with("PRAGMA journal_mode=WAL")
+    assert conn.execute.call_args_list[-1].args == ("PRAGMA busy_timeout=5000",)
+    assert (
+        sum(
+            call.args == ("PRAGMA journal_mode=WAL",)
+            for call in conn.execute.call_args_list
+        )
+        == 1
+    )
     sleep.assert_not_called()
+
+
+def test_wal_retry_budget_includes_sqlite_busy_wait(tmp_path):
+    """A preconfigured busy handler must not extend the WAL retry budget."""
+    import time
+
+    path = tmp_path / "busy-handler.db"
+    reader = sqlite3.connect(path, isolation_level=None)
+    writer = sqlite3.connect(path, isolation_level=None)
+    try:
+        reader.execute("CREATE TABLE example (value INTEGER)")
+        reader.execute("BEGIN")
+        reader.execute("SELECT * FROM example").fetchall()
+        writer.execute("PRAGMA busy_timeout=2000")
+        started = time.monotonic()
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            _enable_wal(writer, timeout=0.05)
+        elapsed = time.monotonic() - started
+        assert elapsed < 1.0, f"busy handler extended retry budget: {elapsed:.2f}s"
+        assert writer.execute("PRAGMA busy_timeout").fetchone() == (2000,)
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_wal_conversion_restores_busy_timeout_on_success(tmp_path):
+    conn = sqlite3.connect(tmp_path / "success.db", isolation_level=None)
+    try:
+        conn.execute("PRAGMA busy_timeout=1234")
+        _enable_wal(conn)
+        assert conn.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        assert conn.execute("PRAGMA busy_timeout").fetchone() == (1234,)
+    finally:
+        conn.close()

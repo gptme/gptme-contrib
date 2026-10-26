@@ -151,9 +151,9 @@ def resolve_coordination_db_path(
 
 # Switching a database to WAL mode requires exclusive access to the file.
 # When another process opens the same (possibly brand-new) database
-# concurrently, SQLite reports "database is locked" right away: the busy
-# handler is not consulted for a journal-mode change, so busy_timeout alone
-# does not help. Retry the conversion briefly instead of failing the caller.
+# concurrently, SQLite can report "database is locked" right away without
+# consulting the busy handler, so busy_timeout alone does not help. Retry
+# the conversion briefly instead of failing the caller.
 WAL_RETRY_TIMEOUT = 5.0
 WAL_RETRY_DELAY = 0.02
 
@@ -161,23 +161,32 @@ WAL_RETRY_DELAY = 0.02
 def _enable_wal(conn: sqlite3.Connection, timeout: float = WAL_RETRY_TIMEOUT) -> None:
     """Enable WAL mode, retrying while another process holds the file.
 
-    SQLite does not invoke the busy handler for a journal-mode change, so
-    the loser of a concurrent first-open race gets ``database is locked``
-    immediately instead of waiting for ``busy_timeout``. Retrying the
-    conversion makes the loser wait for the winner to finish.
+    SQLite can bypass the busy handler for a journal-mode change, so the
+    loser of a concurrent first-open race gets ``database is locked``
+    immediately. Retrying makes the loser wait for the winner to finish.
+    The timeout bounds lock retries, not filesystem I/O or OS scheduling.
     """
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            return
-        except sqlite3.OperationalError as e:
-            message = str(e).lower()
-            if "locked" not in message and "busy" not in message:
-                raise
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(WAL_RETRY_DELAY)
+    # Some conversion lock waits do invoke SQLite's busy handler. Disable it
+    # temporarily so it cannot extend our retry budget; schema writes still
+    # use the caller's original timeout after this helper returns or raises.
+    busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    conn.execute("PRAGMA busy_timeout=0")
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                return
+            except sqlite3.OperationalError as e:
+                message = str(e).lower()
+                if "locked" not in message and "busy" not in message:
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(WAL_RETRY_DELAY, remaining))
+    finally:
+        conn.execute(f"PRAGMA busy_timeout={busy_timeout}")
 
 
 class CoordinationDB:
