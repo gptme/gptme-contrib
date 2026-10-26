@@ -12,6 +12,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
+from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,57 @@ class AWActivity:
         return self.total_active_seconds / 3600
 
 
+def _parse_aw_server() -> tuple[str, str, int, str] | None:
+    """Parse AW_SERVER into the aw-client arguments and canonical origin."""
+    if not AW_SERVER or any(
+        char.isspace() or ord(char) < 32 or ord(char) == 127 for char in AW_SERVER
+    ):
+        return None
+
+    try:
+        parsed = urlsplit(AW_SERVER)
+        protocol = parsed.scheme.lower()
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+
+    if (
+        protocol not in {"http", "https"}
+        or not parsed.netloc
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or "?" in AW_SERVER
+        or "#" in AW_SERVER
+    ):
+        return None
+
+    # A colon with no port is malformed, not an omitted port. For bracketed
+    # IPv6, allow only an optional :port after the closing bracket.
+    authority = parsed.netloc
+    if authority.endswith(":"):
+        return None
+    if authority.startswith("["):
+        bracket_end = authority.find("]")
+        suffix = authority[bracket_end + 1 :]
+        if suffix and not suffix.startswith(":"):
+            return None
+
+    port = port if port is not None else (80 if protocol == "http" else 443)
+    if not 1 <= port <= 65535:
+        return None
+
+    # aw-client inserts its host verbatim between :// and :port. Restore IPv6
+    # brackets so its server_address remains a valid URL.
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    base_url = f"{protocol}://{host}:{port}"
+    return protocol, host, port, base_url
+
+
 def _get_client() -> Any:
     """Create an aw-client instance.
 
@@ -87,24 +139,17 @@ def _get_client() -> Any:
         logger.debug("aw-client not installed")
         return None
 
-    # Parse host and port from AW_SERVER
-    host = "localhost"
-    port = 5600
-    server = AW_SERVER.replace("http://", "").replace("https://", "")
-    if ":" in server:
-        parts = server.split(":")
-        host = parts[0]
-        try:
-            port = int(parts[1].rstrip("/"))
-        except ValueError:
-            pass
-    elif server:
-        host = server.rstrip("/")
+    server = _parse_aw_server()
+    if server is None:
+        logger.warning("Invalid AW_SERVER URL; ActivityWatch is unavailable")
+        return None
+    protocol, host, port, _base_url = server
 
     return ActivityWatchClient(
         "gptme-activity-summary",
         host=host,
         port=port,
+        protocol=protocol,
         testing=False,
     )
 
@@ -181,7 +226,11 @@ def _fetch_category_rules() -> list[list[Any]]:
     query, which yields ``["Uncategorized"]`` instead of a server-side parse
     error.
     """
-    settings_url = f"{AW_SERVER.rstrip('/')}/api/0/settings/classes"
+    server = _parse_aw_server()
+    if server is None:
+        logger.warning("Invalid AW_SERVER URL; ActivityWatch categories are unavailable")
+        return []
+    settings_url = f"{server[3]}/api/0/settings/classes"
     try:
         with urlopen(settings_url, timeout=AW_TIMEOUT) as response:
             payload = json.load(response)
