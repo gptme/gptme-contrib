@@ -98,6 +98,18 @@ if [ -n "$_gw_git_dir" ] && [ "$_gw_git_dir" != "$_gw_common_dir" ]; then
                     && ! cmp -s "$_gw_main_root/$_gw_lock" "$_gw_wt_root/$_gw_lock"; then
                     echo "[git-worktree] WARNING: $_gw_lock differs from $_gw_main_root; linked $_gw_rel may be stale for tests. Keep the links for format/lint hooks. Do not run a full install unless a test fails for a package this lockfile added."
                 fi
+                # An interrupted install leaves empty package dirs and npm
+                # `.<name>-XXXXXXXX` staging dirs in the donor, and every
+                # linked worktree inherits the hole (2026-10-26: no @jest/core
+                # and no rollup native across aw-webui worktrees). Name the
+                # cause instead of letting each session rediscover it.
+                _gw_rot=$(find "$_gw_base" -mindepth 1 -maxdepth 2 -type d \
+                    \( -path "$_gw_base/@*/*" -o -not -path "$_gw_base/*/*" \) \
+                    \( \( -empty -not -name '.*' \) -o -name '.*-????????' \) \
+                    2>/dev/null)
+                if [ -n "$_gw_rot" ]; then
+                    echo "[git-worktree] WARNING: donor $_gw_base has $(printf '%s\n' "$_gw_rot" | wc -l) empty or half-installed package dir(s), e.g. $(printf '%s\n' "$_gw_rot" | head -3 | sed "s|^$_gw_base/||" | paste -sd ' ' -). Linked worktrees inherit them. Repair the donor, not the worktree: install its lockfile in a sibling dir on the same filesystem, then swap it in with two mv renames."
+                fi
             fi
         done < <(find "$_gw_main_root" -maxdepth 3 -type d -name node_modules \
                  -not -path "*/node_modules/*" -print0 2>/dev/null)
