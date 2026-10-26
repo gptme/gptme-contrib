@@ -11,9 +11,15 @@ on:
   workflow_dispatch:
 
 # Cancel a PR's older runs when it gets a new push (they're superseded).
-# Pushes to master are grouped by commit, so they never cancel each other.
+# Pushes to a branch share one group without cancel-in-progress: a running
+# master run finishes, but a queued one is replaced by the newer push, so a
+# burst of merges runs once on the latest commit instead of once per commit.
+# Push runs only test what changed, so `discover` diffs from a successful run
+# of this workflow, not from github.event.before; the survivor then also
+# covers replaced or failed runs. Without a safe baseline, test everything.
+# Schedule/dispatch runs keep a per-commit group.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -45,6 +51,9 @@ jobs:
     # Always run on push to master; on PRs, only when plugin code changed
     if: github.event_name != 'pull_request' || needs.changes.outputs.plugins == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     outputs:
       plugins: ${{ steps.discover.outputs.plugins }}
     steps:
@@ -57,9 +66,30 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
           BEFORE: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           # Get all plugins from Makefile (single source of truth)
           make ci-list-plugins-json > /tmp/all_plugins.json
+
+          # Only success establishes coverage: a failed or in-progress run may
+          # never reach its test matrix. Filter server-side so queued/cancelled
+          # bursts cannot crowd the baseline out of the response. If the lookup
+          # fails, is empty, or finds a non-ancestor, clear BEFORE to run fully;
+          # event.before alone would omit changes from replaced runs.
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            BEFORE=""
+            covered=$(gh api "repos/${{ github.repository }}/actions/workflows/test-plugins.yml/runs?branch=${{ github.ref_name }}&event=push&status=success&per_page=50" \
+              --jq '[.workflow_runs[] | select(.id < ${{ github.run_id }} and .status == "completed" and .conclusion == "success")][0].head_sha // empty' \
+              2>/dev/null || true)
+            if [[ -n "$covered" ]] \
+                && git cat-file -e "${covered}^{commit}" 2>/dev/null \
+                && git merge-base --is-ancestor "$covered" HEAD; then
+              echo "Diffing from $covered, the last successful run of this workflow"
+              BEFORE="$covered"
+            else
+              echo "No successful ancestor baseline; running all plugins"
+            fi
+          fi
 
           # Files changed by this PR, or by this push to master. Schedule/dispatch
           # runs (and pushes we can't diff, e.g. a new branch or a force-push

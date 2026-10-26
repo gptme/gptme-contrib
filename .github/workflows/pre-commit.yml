@@ -7,9 +7,13 @@ on:
     branches: [ main, master ]
 
 # Cancel a PR's older runs when it gets a new push (they're superseded).
-# Pushes to master are grouped by commit, so they never cancel each other.
+# Pushes to a branch share one group without cancel-in-progress: a running
+# master run finishes, but a queued one is replaced by the newer push, so a
+# burst of merges runs once on the latest commit instead of once per commit.
+# Push runs here test the whole tree, so the survivor covers the replaced
+# commits. Schedule/dispatch runs keep a per-commit group.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
