@@ -62,7 +62,7 @@ match wins:
 | Signal | Runner | Command |
 |---|---|---|
 | `pytest.ini`, `[tool.pytest]` in `pyproject.toml`, `[pytest]`/`[tool:pytest]` in `setup.cfg`, `[pytest]` in `tox.ini` | pytest | `uv run pytest -x -q` |
-| `[tox]` in `tox.ini`, `[tool.tox]` in `pyproject.toml`, `[tox]`/`[tox:tox]` in `setup.cfg` | tox | `tox` |
+| `[tox]`/`[testenv]` in `tox.ini`, `[tool.tox]` in `pyproject.toml`, `[tox]`/`[tox:tox]` in `setup.cfg` | tox | `tox` |
 | `package.json` with an exact `"test"` script | npm | `npm test` |
 | `Cargo.toml` | cargo | `cargo test` |
 | First existing file in GNU Make order (`GNUmakefile`, `makefile`, `Makefile`) with a `test:` or `test::` target | make | `make test` |
@@ -72,10 +72,11 @@ not in the project. `npm test` also runs `pretest`/`posttest`; the detector
 prints those scripts on stderr so you can read them first.
 
 Python 3 is needed to parse Python/npm configuration; Cargo and Make detection
-also work without it. One intentional correction to the canonical detector's
-initial implementation: Make discovery inspects only the first existing default
-makefile, in GNU Make order, rather than advertising a shadowed `test` target
-that `make test` would not run.
+also work without it. Two intentional corrections to the canonical detector's
+initial implementation: a valid `tox.ini` with only `[testenv]` still selects tox,
+and Make discovery inspects only the first existing default makefile, in GNU Make
+order, rather than advertising a shadowed `test` target that `make test` would
+not run. Explicit pytest configuration still takes precedence over tox.
 
 ### Step 2: Narrow the scope
 

@@ -1,4 +1,4 @@
-"""detect-runner.sh must agree with gptme's canonical completion-time detector."""
+"""Pin canonical discovery behavior and documented compatibility corrections."""
 
 import os
 import shutil
@@ -23,7 +23,10 @@ CASES = {
         PYTEST,
     ),
     "tox": ({"tox.ini": "[tox]\nenvlist = py\n"}, "tox"),
-    "tox-testenv-only": ({"tox.ini": "[testenv]\ncommands = x\n"}, None),
+    "tox-testenv-only": (
+        {"tox.ini": "[testenv]\ncommands = python -m unittest discover\n"},
+        "tox",
+    ),
     "pyproject-tox": ({"pyproject.toml": "[tool.tox]\nx = 1\n"}, "tox"),
     "npm-test": ({"package.json": '{"scripts": {"test": "vitest run"}}'}, "npm test"),
     "npm-no-test-script": (

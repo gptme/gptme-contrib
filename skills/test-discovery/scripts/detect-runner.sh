@@ -106,7 +106,7 @@ for name in ("tox.ini", "pyproject.toml", "setup.cfg"):
     if text is None:
         continue
     if (
-        (name == "tox.ini" and ini_has_section(text, "tox"))
+        (name == "tox.ini" and ini_has_section(text, "tox", "testenv"))
         or (name == "pyproject.toml" and toml_has_table(text, "tool", "tox"))
         or (name == "setup.cfg" and ini_has_section(text, "tox", "tox:tox"))
     ):
