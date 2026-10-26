@@ -56,7 +56,11 @@ if argv[:2] == ["run", "list"]:
         raise SystemExit(0)
     raw = os.environ.get("FAKE_GH_RUNS")
     if raw:
-        emit_json(json.loads(raw))
+        runs = json.loads(raw)
+        if "--event" in argv:
+            event = argv[argv.index("--event") + 1]
+            runs = [run for run in runs if run.get("event") == event]
+        emit_json(runs)
     else:
         emit_json(
             [
@@ -781,3 +785,21 @@ def test_workflow_run_window_falls_back_to_push_ci() -> None:
     assert result.returncode == 0, result.stderr
     assert "gptme-cloud: Failing" in result.stdout
     assert "https://example.test/run/build" in result.stdout
+
+
+@pytest.mark.parametrize("window", ["fork", "ghost", "fork_and_ghost"])
+def test_filtered_empty_window_still_queries_push_ci(window: str) -> None:
+    fork = _fork_master_pr_run("failure")
+    ghost = _run("", "startup_failure", "abc1234", "https://example.test/run/ghost")
+    runs = {"fork": [fork], "ghost": [ghost], "fork_and_ghost": [fork, ghost]}[window]
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_RUNS": json.dumps(runs),
+            "FAKE_GH_PUSH_RUNS": json.dumps([_push_run()]),
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Passing" in result.stdout
+    assert "No runs" not in result.stdout
+    assert "stale" not in result.stdout
+    assert result.stderr == ""
