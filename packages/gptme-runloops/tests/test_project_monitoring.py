@@ -1411,8 +1411,10 @@ def test_check_contributor_unreviewed_emits_eligible_pr(workspace):
     assert item.item_type == "contributor_unreviewed"
     assert item.number == 101
     assert item.repo == "owner/repo"
-    assert "managed_logins=" in item.details
-    assert "TimeToBuildBob" in item.details
+    token = next(
+        part for part in item.details.split() if part.startswith("managed_logins=")
+    )
+    assert token == "managed_logins=TimeToBuildBob,ErikBjare"
 
 
 def test_check_contributor_unreviewed_skips_managed_author(workspace):

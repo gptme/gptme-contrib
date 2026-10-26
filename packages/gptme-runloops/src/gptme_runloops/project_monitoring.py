@@ -969,7 +969,9 @@ class ProjectMonitoringRun(BaseRunLoop):
             return []
 
         work_items = []
-        managed_logins = tuple(dict.fromkeys((*managed_logins, self.author)))
+        managed_logins = tuple(
+            dict.fromkeys(filter(None, (*managed_logins, self.author)))
+        )
         managed = {login.casefold() for login in managed_logins}
         try:
             result = subprocess.run(
