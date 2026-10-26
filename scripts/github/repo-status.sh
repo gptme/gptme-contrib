@@ -222,6 +222,21 @@ check_repo() {
         return
     fi
 
+    # A fork PR whose head branch is named "master" reports headBranch=master,
+    # so `--branch master` returns its pull_request runs next to the real push
+    # runs (ActivityWatch/aw-qt 2026-10-19: a fork-master PR run on 3f2e243
+    # masked green push runs on HEAD and printed "Stale passing run"). Those
+    # runs tested a fork merge ref, never a default-branch commit. Keep them
+    # only if no reportable non-PR run remains. Select this window before
+    # skipped/Dependabot preferences can discard its non-PR alternatives.
+    local push_json
+    push_json=$(echo "$run_json" | jq '[.[] | select(
+        (.event // "") != "pull_request" and (.event // "") != "pull_request_target"
+    )]')
+    if [ "$(echo "$push_json" | jq 'length')" -gt 0 ]; then
+        run_json="$push_json"
+    fi
+
     # Filter out runs with "skipped" conclusion — conditional workflows that don't apply
     # to the current event type (e.g. gptme-bot only runs on PR/issue events, gets
     # "skipped" on master pushes and otherwise masks the passing build/test runs).
@@ -247,20 +262,6 @@ check_repo() {
     )]')
     if [ "$(echo "$product_json" | jq 'length')" -gt 0 ]; then
         run_json="$product_json"
-    fi
-
-    # A fork PR whose head branch is named "master" reports headBranch=master,
-    # so `--branch master` returns its pull_request runs next to the real push
-    # runs (ActivityWatch/aw-qt 2026-10-19: a fork-master PR run on 3f2e243
-    # masked green push runs on HEAD and printed "Stale passing run"). Those
-    # runs tested a fork merge ref, never a default-branch commit. Same
-    # fallback as above: keep them only if nothing else is in the window.
-    local push_json
-    push_json=$(echo "$run_json" | jq '[.[] | select(
-        (.event // "") != "pull_request" and (.event // "") != "pull_request_target"
-    )]')
-    if [ "$(echo "$push_json" | jq 'length')" -gt 0 ]; then
-        run_json="$push_json"
     fi
 
     # Report a red workflow even when a newer run of a DIFFERENT workflow passed.

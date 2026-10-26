@@ -423,6 +423,17 @@ def test_fork_master_pr_run_does_not_mask_head_push_run() -> None:
         assert "stale" not in result.stdout.lower(), pr_run
 
 
+def test_fork_failure_does_not_mask_skipped_default_branch_run() -> None:
+    runs = [
+        _fork_master_pr_run("failure"),
+        _run("Build", "skipped", "abc1234", "https://example.test/run/skipped"),
+    ]
+    result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Skipped" in result.stdout
+    assert "Failing" not in result.stdout
+
+
 def test_pr_with_only_ghost_alternative_still_reports_status() -> None:
     """A deleted workflow is not a usable non-PR fallback."""
     runs = [
