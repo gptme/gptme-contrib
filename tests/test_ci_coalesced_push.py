@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -9,6 +10,10 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# jq executes the workflow's actual --jq expression rather than duplicating
+# the selector in Python. Missing tooling must not masquerade as a regression.
+pytestmark = pytest.mark.skipif(shutil.which("jq") is None, reason="requires jq")
 
 
 @pytest.mark.parametrize("kind", ["packages", "plugins"])
@@ -34,6 +39,7 @@ def test_discovery_retains_uncovered_changes(tmp_path, kind, scenario, expected)
     git("init", "-q")
     # Synthetic history must not invoke the developer's global Git hooks.
     git("config", "core.hooksPath", str(tmp_path / "no-hooks"))
+    git("config", "commit.gpgsign", "false")
     git("config", "user.name", "Test")
     git("config", "user.email", "test@example.com")
 
