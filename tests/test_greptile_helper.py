@@ -77,13 +77,26 @@ if "body" in fields and endpoint.endswith(f"/issues/{pr_number}/comments"):
     Path(os.environ["GH_LOG"]).write_text(json.dumps({"body": fields["body"]}))
     raise SystemExit(0)
 
+# REST head read (greptile-helper's _current_head_sha): `.head.sha` on the PR
+# object. rest_head_error simulates that one read failing; other PR reads (the
+# initial-review state/created_at lookup) are unaffected.
+if (
+    fixture.get("rest_head_error")
+    and endpoint.endswith(f"/pulls/{pr_number}")
+    and ".head.sha" in jq_expr
+):
+    raise SystemExit(1)
+
 # GraphQL: PR head SHA + commit dates (greptile-helper's _fetch_pr_commit_info).
 # Derived from the same raw_pr / raw_commits fixtures the REST routes serve, so
 # every existing test exercises the GraphQL path whenever raw_pr carries a head.
+# graphql_head_sha overrides only the GraphQL headRefOid, so a test can make the
+# GraphQL head lag the REST head independently (a successful but stale read).
 if endpoint == "graphql":
     if fixture.get("graphql_error"):
         raise SystemExit(1)
     head = (fixture.get("raw_pr") or {}).get("head", {}).get("sha")
+    head = fixture.get("graphql_head_sha", head)
     nodes = [
         {"commit": {"committedDate": c["commit"]["committer"]["date"]}}
         for c in fixture.get("raw_commits", [])
@@ -1851,41 +1864,62 @@ def test_full_review_page_falls_back_to_pagination(tmp_path: Path):
     ]
 
 
-def test_commit_info_uses_graphql_not_paginated_rest(tmp_path: Path):
-    """Head SHA + commit dates come from one GraphQL query, not core REST."""
+def test_head_decision_reads_rest_head_once_and_no_commit_list(tmp_path: Path):
+    """A head mismatch is settled by the formal review and one REST head read.
+
+    No commit list is needed (and no paginated REST traversal): the verdict must not
+    depend on GraphQL or cached commit data at all.
+    """
     calls = tmp_path / "calls.jsonl"
     env = {"GH_CALLS": str(calls), "GREPTILE_HELPER_CACHE_DIR": str(tmp_path / "c")}
     status = _run_helper("status", _sha_mismatch_fixture(), extra_env=env)
     assert status.stdout.strip() == "needs-re-review", f"stderr: {status.stderr}"
     logged = _calls(calls)
     assert _rest_commit_calls(logged) == []
-    assert not [c for c in logged if c[:2] == ["api", "repos/gptme/gptme/pulls/123"]]
-    # One live read for the cached view, one confirming read for the mismatch —
-    # memoized, so never more than that per process.
-    assert 1 <= len(_graphql_calls(logged)) <= 2
+    assert _graphql_calls(logged) == []
+    assert len(_rest_head_calls(logged)) == 1
 
 
 def test_commit_info_falls_back_to_rest_when_graphql_fails(tmp_path: Path):
-    """GraphQL failure must not change the decision: fall back to REST."""
-    fixture = {**_sha_mismatch_fixture(), "graphql_error": True}
+    """GraphQL failure must not change the decision: the commit list falls back to REST.
+
+    A marker-less trigger 20min old makes the no-new-commit guard consult commit
+    dates, so the failing GraphQL commit read is actually exercised here.
+    """
+    fixture = {
+        **_sha_mismatch_fixture(),
+        "graphql_error": True,
+        "raw_comments": [
+            _make_greptile_comment(
+                4, reviewed_at=_iso_ago(minutes=30), updated_at=_iso_ago(minutes=30)
+            ),
+            _make_trigger_comment("test-user", _iso_ago(minutes=20)),
+        ],
+        "bot_reaction_count": 0,
+    }
     calls = tmp_path / "calls.jsonl"
     env = {"GH_CALLS": str(calls), "GREPTILE_HELPER_CACHE_DIR": str(tmp_path / "c")}
     status = _run_helper("status", fixture, extra_env=env)
-    assert status.stdout.strip() == "needs-re-review", f"stderr: {status.stderr}"
-    assert _rest_commit_calls(_calls(calls)), "expected REST fallback"
+    # The only commit (90min) predates our 20min-old trigger, so the legacy date
+    # guard correctly sees nothing new since that trigger.
+    assert status.stdout.strip() == "already-reviewed", f"stderr: {status.stderr}"
+    # One fallback fetch for the whole decision: a failed GraphQL read is not memoized,
+    # so a second fetch here would repeat the paginated REST traversal.
+    assert len(_rest_commit_calls(_calls(calls))) == 1, "expected one REST fallback"
     # Failed GraphQL reads are not what gets shared, but the REST result is.
     assert list((tmp_path / "c").glob("pr-commits-*.json"))
 
 
 def test_commit_info_cache_is_shared_across_processes(tmp_path: Path):
-    """A second helper run within the TTL reuses the first run's fetch."""
+    """Commit dates (the legacy date fallback) are shared across runs in the TTL."""
     reviewed_at = _iso_ago(minutes=30)
     fixture = {
         "pr_number": 123,
         "raw_comments": [
             _make_greptile_comment(5, reviewed_at=reviewed_at, updated_at=reviewed_at),
         ],
-        "raw_reviews": [_make_greptile_review("HEADSHA", reviewed_at)],
+        # No formal review object: the date fallback is the one reading commit dates.
+        "raw_reviews": [],
         "raw_pr": {"head": {"sha": "HEADSHA"}, "created_at": _iso_ago(minutes=120)},
         "raw_commits": [_make_commit(_iso_ago(minutes=60))],
         "bot_reaction_count": 1,
@@ -1898,10 +1932,8 @@ def test_commit_info_cache_is_shared_across_processes(tmp_path: Path):
     calls.unlink()
     second = _run_helper("status", fixture, extra_env=env)
     assert second.stdout.strip() == "already-reviewed", f"stderr: {second.stderr}"
-    # _needs_re_review always confirms the head with a live read (a stale cache
-    # can falsely MATCH reviewed_sha), but that read is memoized per process and
-    # re-populates the shared cache — at most one GraphQL query per run.
-    assert len(_graphql_calls(_calls(calls))) == 1, "expected one memoized confirm read"
+    # The second run is served by the shared commit cache: no GraphQL query.
+    assert _graphql_calls(_calls(calls)) == []
 
     # TTL=0 disables sharing.
     calls.unlink(missing_ok=True)
@@ -1913,8 +1945,11 @@ def test_commit_info_cache_is_shared_across_processes(tmp_path: Path):
 
 
 def test_stale_cached_head_mismatch_is_confirmed_live(tmp_path: Path):
-    """A cached head older than Greptile's reviewed commit must not cause a
-    spurious re-review: a mismatch is re-checked against a live read."""
+    """A stale commit-cache head must not cause a spurious re-review.
+
+    The cache says OLDSHA while Greptile reviewed NEWSHA, the live head. The head
+    decision reads REST, never the cached head, so it matches and suppresses.
+    """
     reviewed_at = _iso_ago(minutes=2)
     fixture = {
         "pr_number": 123,
@@ -1937,4 +1972,319 @@ def test_stale_cached_head_mismatch_is_confirmed_live(tmp_path: Path):
     env = {"GH_CALLS": str(calls), "GREPTILE_HELPER_CACHE_DIR": str(cache_dir)}
     status = _run_helper("status", fixture, extra_env=env)
     assert status.stdout.strip() == "already-reviewed", f"stderr: {status.stderr}"
-    assert len(_graphql_calls(_calls(calls))) == 1
+    logged = _calls(calls)
+    assert _graphql_calls(logged) == [], "stale cached head must not be consulted"
+    assert len(_rest_head_calls(logged)) == 1
+
+
+def test_footerless_review_refreshes_mismatching_shared_commit_cache(tmp_path: Path):
+    """A cache predating a push cannot force another review of an already-reviewed head."""
+    fixture = {
+        "pr_number": 123,
+        "raw_comments": [_make_greptile_comment(5, reviewed_at=_iso_ago(minutes=2))],
+        "raw_reviews": [],  # Legacy summary: no formal review or SHA footer.
+        "raw_pr": {"head": {"sha": "NEWSHA"}, "created_at": _iso_ago(minutes=120)},
+        "raw_commits": [_make_commit(_iso_ago(minutes=5))],
+    }
+    cache_dir = tmp_path / "c"
+    cache_dir.mkdir()
+    cache_file = cache_dir / f"pr-commits-{_pr_hash('gptme/gptme', 123)}.json"
+    calls = tmp_path / "calls.jsonl"
+    env = {"GH_CALLS": str(calls), "GREPTILE_HELPER_CACHE_DIR": str(cache_dir)}
+    for command in ("status", "trigger"):
+        cache_file.write_text(
+            json.dumps({"head_sha": "OLDSHA", "dates": [_iso_ago(minutes=60)]})
+        )
+        calls.unlink(missing_ok=True)
+        result, gh_log = _run_helper(
+            command, fixture, extra_env=env, capture_gh_log=True
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not gh_log, f"unnecessary re-review posted: {gh_log}"
+        if command == "status":
+            assert result.stdout.strip() == "already-reviewed", result.stderr
+        assert len(_graphql_calls(_calls(calls))) == 1
+        assert len(_rest_head_calls(_calls(calls))) == 1
+        assert json.loads(cache_file.read_text())["head_sha"] == "NEWSHA"
+
+
+def _rest_head_calls(calls: list[list[str]]) -> list[list[str]]:
+    """The explicit REST current-head read (`.head.sha` on pulls/N)."""
+    return [
+        c
+        for c in calls
+        if "repos/gptme/gptme/pulls/123" in c and any(".head.sha" in a for a in c)
+    ]
+
+
+def test_stale_graphql_head_does_not_suppress_rest_head_change(tmp_path: Path):
+    """A successful GraphQL response can lag the independently read REST head.
+
+    A successful but lagging GraphQL read still reports the OLD head, which
+    matches the reviewed SHA, while REST shows a newly pushed NEWSHA. The
+    helper must not report already-reviewed for the obsolete head: the REST
+    head is authoritative, so re-review is required.
+    """
+    fixture = {
+        **_sha_mismatch_fixture(),
+        "graphql_head_sha": "OLDSHA",  # lagging GraphQL headRefOid
+    }
+    calls = tmp_path / "calls.jsonl"
+    env = {"GH_CALLS": str(calls), "GREPTILE_HELPER_CACHE_DIR": str(tmp_path / "c")}
+    status = _run_helper("status", fixture, extra_env=env)
+    assert status.stdout.strip() == "needs-re-review", (
+        f"Lagging GraphQL OLDSHA must not hide REST NEWSHA. "
+        f"got: {status.stdout.strip()!r} stderr: {status.stderr}"
+    )
+    assert len(_rest_head_calls(_calls(calls))) == 1
+
+
+# Real-looking hex SHAs: the trigger marker and footer parsers only accept hex.
+OLD_SHA = "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567"
+NEW_SHA = "e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e"
+
+
+def _lagging_graphql_fixture(**overrides: object) -> dict:
+    """Formal review OLD_SHA, REST head NEW_SHA, GraphQL still reporting OLD_SHA."""
+    return {
+        "pr_number": 123,
+        "raw_comments": [
+            _make_greptile_comment(
+                4, reviewed_at=_iso_ago(minutes=30), updated_at=_iso_ago(minutes=30)
+            ),
+        ],
+        "raw_reviews": [_make_greptile_review(OLD_SHA, _iso_ago(minutes=30))],
+        "raw_pr": {"head": {"sha": NEW_SHA}, "created_at": _iso_ago(minutes=120)},
+        "graphql_head_sha": OLD_SHA,
+        "raw_commits": [_make_commit(_iso_ago(minutes=90))],
+        "bot_reaction_count": 1,
+        **overrides,
+    }
+
+
+def test_lagging_graphql_head_triggers_rereview_through_trigger(tmp_path: Path):
+    """The trigger guard must not be fooled by the lagging GraphQL dates either.
+
+    Our legacy trigger (no marker) was posted 20min ago, after the review, and every
+    commit date predates it. With a lagging GraphQL head those dates describe the
+    OLD head, so they cannot prove nothing was pushed: the re-review is posted.
+    """
+    fixture = _lagging_graphql_fixture(
+        raw_comments=[
+            _make_greptile_comment(
+                4, reviewed_at=_iso_ago(minutes=30), updated_at=_iso_ago(minutes=30)
+            ),
+            _make_trigger_comment("test-user", _iso_ago(minutes=20)),
+        ],
+        bot_reaction_count=0,
+    )
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "Re-triggered successfully" in result.stdout, result.stdout
+    assert f"greptile-helper head-sha: {NEW_SHA}" in gh_log, gh_log
+
+
+def test_legacy_trigger_date_guard_still_suppresses_when_heads_agree(tmp_path: Path):
+    """Control: with GraphQL and REST agreeing, the legacy date guard is unchanged."""
+    fixture = _lagging_graphql_fixture(
+        graphql_head_sha=NEW_SHA,
+        raw_comments=[
+            _make_greptile_comment(
+                4, reviewed_at=_iso_ago(minutes=30), updated_at=_iso_ago(minutes=30)
+            ),
+            _make_trigger_comment("test-user", _iso_ago(minutes=20)),
+        ],
+        bot_reaction_count=0,
+    )
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "no new commits since our last" in result.stdout, result.stdout
+    assert not gh_log, f"duplicate trigger posted: {gh_log}"
+
+
+def test_footer_provenance_uses_rest_head_over_lagging_graphql(tmp_path: Path):
+    """Footer provenance (no formal review): OLD footer + REST NEW must re-review."""
+    fixture = _lagging_graphql_fixture(
+        raw_comments=[
+            _make_greptile_comment(
+                5,
+                reviewed_at=_iso_ago(minutes=30),
+                updated_at=_iso_ago(minutes=30),
+                reviewed_commit=OLD_SHA,
+            ),
+        ],
+        raw_reviews=[],
+    )
+    status = _run_helper("status", fixture)
+    assert status.stdout.strip() == "needs-re-review", f"stderr: {status.stderr}"
+
+
+def test_footer_matching_rest_head_suppresses_despite_lagging_graphql(tmp_path: Path):
+    """Footer provenance control: footer and REST head agree on NEW → suppress,
+    even though the lagging GraphQL head still says OLD."""
+    fixture = _lagging_graphql_fixture(
+        raw_comments=[
+            _make_greptile_comment(
+                5,
+                reviewed_at=_iso_ago(minutes=30),
+                updated_at=_iso_ago(minutes=30),
+                reviewed_commit=NEW_SHA,
+            ),
+        ],
+        raw_reviews=[],
+    )
+    status = _run_helper("status", fixture)
+    assert status.stdout.strip() == "already-reviewed", f"stderr: {status.stderr}"
+
+
+def test_formal_matching_rest_head_suppresses_despite_lagging_graphql(tmp_path: Path):
+    """Formal provenance control: REST NEW reviewed → suppress, even though the
+    lagging GraphQL head says OLD (the stale head must not force a re-review)."""
+    fixture = _lagging_graphql_fixture(
+        raw_reviews=[_make_greptile_review(NEW_SHA, _iso_ago(minutes=30))],
+    )
+    status = _run_helper("status", fixture)
+    assert status.stdout.strip() == "already-reviewed", f"stderr: {status.stderr}"
+
+
+def test_rest_head_failure_reports_error_and_never_already_reviewed(tmp_path: Path):
+    """REST head unreadable → status 'error' (no authoritative verdict), even when
+    the formal review matches the head."""
+    fixture = _lagging_graphql_fixture(
+        raw_reviews=[_make_greptile_review(NEW_SHA, _iso_ago(minutes=30))],
+        rest_head_error=True,
+    )
+    result = _run_helper("status", fixture)
+    assert result.stdout.strip() == "error", result.stdout + result.stderr
+    assert result.returncode == 0
+
+
+def test_rest_head_failure_check_exits_api_error(tmp_path: Path):
+    """check: REST head failure is exit 3 (api error = skip), never 0 or 2."""
+    result = _run_helper("check", _lagging_graphql_fixture(rest_head_error=True))
+    assert result.returncode == 3, f"stderr: {result.stderr}"
+
+
+def test_rest_head_failure_never_posts_a_trigger(tmp_path: Path):
+    """No trigger spam on uncertain transport: repeated trigger runs post nothing."""
+    fixture = _lagging_graphql_fixture(rest_head_error=True)
+    for _ in range(3):
+        result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+        assert result.returncode == 3, result.stdout + result.stderr
+        assert "Not triggering" in result.stdout
+        assert not gh_log, f"trigger posted on REST failure: {gh_log}"
+
+
+def test_rest_head_failure_reads_head_once_per_process(tmp_path: Path):
+    """Negative results are memoized too: a failing REST head is attempted once."""
+    calls = tmp_path / "calls.jsonl"
+    env = {"GH_CALLS": str(calls), "GREPTILE_HELPER_CACHE_DIR": str(tmp_path / "c")}
+    _run_helper("status", _lagging_graphql_fixture(rest_head_error=True), extra_env=env)
+    assert len(_rest_head_calls(_calls(calls))) == 1
+
+
+def _marker_trigger_fixture(*, marker_sha: str, **overrides: object) -> dict:
+    """Our trigger (20min old, unacked) carries marker_sha; review still names OLD.
+
+    Unacked means the trigger is "stale", so the no-new-commit guard (not the
+    in-progress path) decides, which is what these tests exercise.
+    """
+    return _lagging_graphql_fixture(
+        raw_comments=[
+            _make_greptile_comment(
+                4, reviewed_at=_iso_ago(minutes=60), updated_at=_iso_ago(minutes=60)
+            ),
+            _make_trigger_comment(
+                "test-user", _iso_ago(minutes=20), head_sha=marker_sha
+            ),
+        ],
+        raw_reviews=[_make_greptile_review(OLD_SHA, _iso_ago(minutes=60))],
+        bot_reaction_count=0,
+        **overrides,
+    )
+
+
+def test_matching_marker_suppresses_duplicate_trigger(tmp_path: Path):
+    """Marker, no-new-commit guard and review decision agree on the REST head.
+
+    Our trigger was posted for NEW, the live head, while the lagging GraphQL and the
+    formal review still name OLD. Nothing was pushed since that trigger, so status is
+    up to date and repeated trigger calls must not post a duplicate.
+    """
+    fixture = _marker_trigger_fixture(marker_sha=NEW_SHA)
+    status = _run_helper("status", fixture)
+    assert status.stdout.strip() == "already-reviewed", f"stderr: {status.stderr}"
+    for _ in range(2):
+        result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert not gh_log, f"duplicate trigger for matching head: {gh_log}"
+
+
+def test_moved_head_past_marker_allows_rereview(tmp_path: Path):
+    """Marker says OLD, the live head is NEW: the head moved after our trigger, so
+    the guard allows a re-review and the new trigger embeds the NEW marker."""
+    fixture = _marker_trigger_fixture(marker_sha=OLD_SHA)
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert f"greptile-helper head-sha: {NEW_SHA}" in gh_log, gh_log
+
+
+def test_empty_rest_head_keeps_legacy_date_fallback(tmp_path: Path):
+    """REST legitimately returns no SHA (not a failure): the review's commit_id is
+    not comparable, so the legacy commit-date comparison decides as before."""
+    reviewed_at = _iso_ago(minutes=30)
+    base = {
+        "pr_number": 123,
+        "raw_comments": [
+            _make_greptile_comment(4, reviewed_at=reviewed_at, updated_at=reviewed_at),
+        ],
+        "raw_reviews": [_make_greptile_review(OLD_SHA, reviewed_at)],
+        "raw_pr": {"created_at": _iso_ago(minutes=120)},  # no head.sha at all
+        "bot_reaction_count": 1,
+    }
+    newer = _run_helper(
+        "status", {**base, "raw_commits": [_make_commit(_iso_ago(minutes=5))]}
+    )
+    assert newer.stdout.strip() == "needs-re-review", f"stderr: {newer.stderr}"
+    older = _run_helper(
+        "status", {**base, "raw_commits": [_make_commit(_iso_ago(minutes=90))]}
+    )
+    assert older.stdout.strip() == "already-reviewed", f"stderr: {older.stderr}"
+
+
+def test_rest_head_is_read_once_across_all_decision_points(tmp_path: Path):
+    """One REST head per process even though the gate, review comparison, marker and
+    no-new-commit guard each consume it."""
+    calls = tmp_path / "calls.jsonl"
+    env = {"GH_CALLS": str(calls), "GREPTILE_HELPER_CACHE_DIR": str(tmp_path / "c")}
+    fixture = _marker_trigger_fixture(marker_sha=NEW_SHA)
+    status = _run_helper("status", fixture, extra_env=env)
+    assert status.stdout.strip() == "already-reviewed", f"stderr: {status.stderr}"
+    assert len(_rest_head_calls(_calls(calls))) == 1
+
+
+def test_initial_review_head_transport_failure_does_not_post_or_spend_guard():
+    """Even the one-time initial fallback waits for successful head transport."""
+    fixture = {
+        "pr_number": 123,
+        "raw_comments": [],
+        "raw_reviews": [],
+        "raw_pr": {"head": {"sha": NEW_SHA}, "created_at": _iso_ago(minutes=120)},
+        "rest_head_error": True,
+    }
+    result, gh_log = _run_helper("trigger", fixture, capture_gh_log=True)
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert not gh_log
+    result, ts = _run_helper("trigger", fixture, capture_ts_file=True)
+    assert result.returncode == 3
+    assert ts is None
+
+
+def test_rest_head_gate_preserves_parent_cache_cleanup(tmp_path: Path):
+    """The REST gate must not clear the parent EXIT trap used by all caches."""
+    result = _run_helper(
+        "status", _lagging_graphql_fixture(), extra_env={"TMPDIR": str(tmp_path)}
+    )
+    assert result.stdout.strip() == "needs-re-review"
+    leftovers = [p.name for p in tmp_path.glob("greptile-*") if p.is_file()]
+    assert leftovers == [], leftovers
