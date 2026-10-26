@@ -55,6 +55,15 @@ Testing is encouraged but not required. If you want to add tests:
 1. Create a test file in the `tests/` directory
 2. Use pytest for testing Python tools
 
+The shared package CI matrix runs Python 3.11 and 3.12: the workspace lock
+requires >=3.11 even though many individual packages declare >=3.10. It
+passes setup-python's absolute executable to uv and checks
+`CI_EXPECTED_PYTHON` inside each pytest process. A version mismatch fails
+before collection, rather than giving a green job under the wrong label.
+Python 3.10 package support needs an isolated package environment (the
+`rag-lightweight` job is one example); the workspace matrix does not verify
+it. Package-specific Makefiles remain the test entry points.
+
 ## Pull Request Process
 
 1. Fork the repository

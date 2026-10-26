@@ -38,6 +38,7 @@ jobs:
             - 'pyproject.toml'
             - 'uv.lock'
             - 'Makefile'
+            - 'conftest.py'
             - '.github/workflows/test-packages.yml'
 
   # Discovery job - outputs package matrix dynamically using Makefile (single source of truth)
@@ -87,7 +88,7 @@ jobs:
           if [[ "$full" == "0" ]]; then
 
             # If shared config changed, run all packages (can't tell which are affected)
-            if echo "$changed" | grep -qE '^(Makefile|pyproject\.toml|uv\.lock|\.github/workflows/test-packages\.yml)'; then
+            if echo "$changed" | grep -qE '^(Makefile|conftest\.py|pyproject\.toml|uv\.lock|\.github/workflows/test-packages\.yml)'; then
               echo "Shared config changed, running all packages"
               packages=$(cat /tmp/all_packages.json)
             else
@@ -123,8 +124,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.10', '3.11', '3.12']
+        # The shared lock requires >=3.11. Python 3.10 support must be
+        # exercised in isolated package jobs (e.g. rag-lightweight), not
+        # labelled as covered by an incompatible workspace installation.
+        python-version: ['3.11', '3.12']
         package: ${{ fromJson(needs.discover.outputs.packages) }}
+    env:
+      CI_EXPECTED_PYTHON: ${{ matrix.python-version }}
+      UV_PYTHON_DOWNLOADS: never
 
     steps:
       - uses: actions/checkout@v4
@@ -133,15 +140,18 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Set up Python ${{ matrix.python-version }}
+        id: python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: |
-          uv sync --all-packages
+          uv sync --all-packages --python "${{ steps.python.outputs.python-path }}"
 
       - name: Run tests for ${{ matrix.package }}
+        env:
+          UV_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
           # test-package falls back to a generic pytest run for packages
           # without their own Makefile, so a package is never skipped for
@@ -290,7 +300,7 @@ jobs:
 
       - name: Run script tests
         run: |
-          uv run --with pytest pytest tests/test_check_install_size.py -v
+          uv run --with pytest --with pyyaml pytest tests/test_check_install_size.py tests/test_ci_python_runtime.py -v
 
       - name: Run install-size check
         run: |
