@@ -1810,14 +1810,19 @@ def test_full_review_page_falls_back_to_pagination(tmp_path: Path):
 
 
 def test_commit_info_uses_graphql_not_paginated_rest(tmp_path: Path):
-    """Head SHA + commit dates come from one GraphQL query, not core REST."""
+    """Commit dates come from GraphQL, not paginated core REST.
+
+    Head SHA is still overridden with one REST pulls read (GraphQL headRefOid lags
+    fresh pushes), so at most one single-object pulls call is allowed.
+    """
     calls = tmp_path / "calls.jsonl"
     env = {"GH_CALLS": str(calls), "GREPTILE_HELPER_CACHE_DIR": str(tmp_path / "c")}
     status = _run_helper("status", _sha_mismatch_fixture(), extra_env=env)
     assert status.stdout.strip() == "needs-re-review", f"stderr: {status.stderr}"
     logged = _calls(calls)
     assert _rest_commit_calls(logged) == []
-    assert not [c for c in logged if c[:2] == ["api", "repos/gptme/gptme/pulls/123"]]
+    pulls_calls = [c for c in logged if c[:2] == ["api", "repos/gptme/gptme/pulls/123"]]
+    assert len(pulls_calls) <= 1 and all("--paginate" not in c for c in pulls_calls)
     # One live read for the cached view, one confirming read for the mismatch —
     # memoized, so never more than that per process.
     assert 1 <= len(_graphql_calls(logged)) <= 2
