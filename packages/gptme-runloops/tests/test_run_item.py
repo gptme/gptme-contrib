@@ -3941,3 +3941,263 @@ def _make_hooks_with_handled_delivery(tmp_path: Path) -> RunItemHooks:
         run_cmd=run_cmd,
         delivery_check=["/fake/delivery-check.sh"],
     )
+
+
+@pytest.mark.parametrize(
+    "extra", [[], ["pr_update", "merge_ready", "reviewer_needs_fix"]]
+)
+def test_contributor_review_normalizes_before_lifecycle(tmp_path, extra) -> None:
+    item = make_item(types=[*extra, "contributor_unreviewed"])
+    assert item.types == ("contributor_unreviewed",)
+    assert item.type_label == "contributor_unreviewed"
+    assert issue_coordination_key(item.types, item.repo, item.number) == (
+        "github:gptme/gptme-contrib#1234"
+    )
+    io = FakeLifecycleIO(check=SelfMergeCheckResult(eligible=True), merge_ok=True)
+    plan, lifecycle, io = _plan_for(tmp_path, item, io)
+    assert io.merged == []
+    assert io.triggered == []
+    assert not lifecycle.skip_item
+    assert "Contributor Initial Review" in plan.prompt
+    # Review-only normalization must not fall back to the generic 900s budget.
+    config = make_config(tmp_path)
+    assert plan.timeout == config.adjudication_timeout
+    assert config.adjudication_time_desc in plan.prompt
+    assert "RULES" not in plan.prompt
+    assert "contributor_unreviewed" in PR_OBSERVE_TYPES
+    assert "contributor_unreviewed" not in PR_STATE_TYPES
+
+
+def test_contributor_review_direct_construction_also_normalizes() -> None:
+    item = RunItem(
+        repo="o/r",
+        number=1,
+        title="PR",
+        detail="",
+        all_numbers=("1",),
+        types=("pr_update", "contributor_unreviewed", "merge_ready"),
+        type_label="pr_update+contributor_unreviewed+merge_ready",
+    )
+    assert item.types == ("contributor_unreviewed",)
+    assert item.to_merge_lifecycle_item().types == ("contributor_unreviewed",)
+
+
+@pytest.mark.parametrize("reviewed", [True, False, None])
+def test_contributor_review_effect_requires_exact_head_review(
+    tmp_path, monkeypatch, reviewed
+) -> None:
+    config, item, plan, outcome, hooks, run_cmd = _unmoved_comment_deliverable_fixture(
+        tmp_path, ("contributor_unreviewed", "pr_update", "merge_ready")
+    )
+    # Exercise an eligible miss, not the separate missing-login stop policy.
+    item = make_item(
+        types=["contributor_unreviewed", "pr_update", "merge_ready"],
+        detail="managed_logins=Bob",
+    )
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.contributor_review_skip_observed",
+        lambda *a, **kw: False,
+    )
+    calls = []
+
+    def review_since(*args, **kwargs):
+        calls.append((args, kwargs))
+        return reviewed
+
+    monkeypatch.setattr("gptme_runloops.run_item.viewer_review_since", review_since)
+    # Even apparent PR movement cannot substitute for the required review.
+    hooks.fetch_pr_snapshot = lambda repo, num: {
+        "state": "OPEN",
+        "headRefOid": "new-head",
+        "mergeCommit": None,
+    }
+    run_cmd.on(
+        "graphql", stdout=_viewer_activity_json(comment_at="2026-07-11T10:03:00Z")
+    )
+    hooks.wait_merge_gate = ["/fake/wait-merge"]
+    effect = run_post_session(plan, item, outcome, config, hooks)
+    assert calls
+    assert effect == (
+        "observed" if reviewed else "none" if reviewed is False else "unknown"
+    )
+    assert not run_cmd.find("/fake/wait-merge")
+    assert not run_cmd.find("/fake/check-delivery.py")
+
+
+@pytest.mark.parametrize("reviewed", [True, False, None])
+@pytest.mark.parametrize("source", ["carried", "pending", "both"])
+def test_contributor_review_preserves_suppressed_notification_work(
+    tmp_path, monkeypatch, reviewed, source
+) -> None:
+    config, _, plan, outcome, hooks, _ = _unmoved_comment_deliverable_fixture(
+        tmp_path, ("pr_update", "contributor_unreviewed", "mention")
+    )
+    snapshot = {"id": "555", "updated_at": "2026-10-23T15:00:00Z"}
+    item = make_item(
+        types=["pr_update", "contributor_unreviewed", "mention"],
+        notification_states=[snapshot] if source != "pending" else [],
+    )
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    config.pending_state_dir.mkdir(parents=True, exist_ok=True)
+    cooldown = tmp_path / "cooldown"
+    cooldown.mkdir()
+    monkeypatch.setenv("PM_DISPATCH_COOLDOWN_DIR", str(cooldown))
+    monkeypatch.setenv("PM_SLOT_KEY", f"{item.repo}#{item.number}")
+    marker = cooldown / f"{item.repo.replace('/', '-')}-{item.number}.event"
+    logged_marker = marker.with_suffix(".event_logged")
+    for path in (marker, logged_marker):
+        path.write_text("launch-fingerprint")
+    old_watermark = "2026-10-22T15:00:00Z"
+    (config.state_dir / "notif-555.state").write_text(old_watermark)
+    if source != "carried":
+        (config.pending_state_dir / "notif-555.state").write_text(
+            snapshot["updated_at"]
+        )
+        (config.pending_state_dir / "notif-555.map").write_text(
+            f"{item.repo}#{item.number}"
+        )
+    pr_state = f"{item.repo.replace('/', '-')}-pr-{item.number}.state"
+    (config.pending_state_dir / pr_state).write_text("unhandled-pr-update")
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.viewer_review_since", lambda *a, **kw: reviewed
+    )
+
+    run_post_session(plan, item, outcome, config, hooks)
+    promote_notification_states(config)
+
+    # Neither the immutable launch snapshot nor the current pending directory
+    # may consume a human mention suppressed by the review-only prompt.
+    assert (config.state_dir / "notif-555.state").read_text() == old_watermark
+    assert not (config.state_dir / "notif-555.map").exists()
+    assert not (config.state_dir / pr_state).exists()
+    assert (config.pending_state_dir / "notif-555.state").exists() == (
+        source != "carried"
+    )
+    # Only a confirmed submitted review may retain the launch fingerprint;
+    # absent or unreadable review evidence must permit the next poll to retry.
+    # Confirmed prompt-skips are graded observed but still clear the stamp
+    # (shared slot key; eligibility can return). The default skip probe here
+    # is unobservable, so False stays a retry.
+    assert marker.exists() == (reviewed is True)
+    assert logged_marker.exists() == (reviewed is True)
+
+
+@pytest.mark.parametrize("reviewed", [True, False, None])
+def test_contributor_review_does_not_claim_suppressed_work_or_author_commits(
+    tmp_path, monkeypatch, reviewed
+) -> None:
+    config, item, plan, outcome, hooks, _, latency_calls = _post_session_fixture(
+        tmp_path, types=("contributor_unreviewed", "pr_update", "mention")
+    )
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.viewer_review_since", lambda *a, **kw: reviewed
+    )
+    # The contributor changed the PR during our review; that is not our work.
+    run_post_session(plan, item, outcome, config, hooks)
+    record = json.loads(Path(plan.record_file).read_text())
+    assert record["deliverables"] == []
+    assert latency_calls == []
+
+
+@pytest.mark.parametrize(
+    "skipped, expected_effect, marker_kept",
+    [
+        (True, "observed", False),
+        (False, "none", False),
+        (None, "none", False),
+    ],
+)
+def test_contributor_review_prompt_skip_is_observed_without_keeping_fingerprint(
+    tmp_path, monkeypatch, skipped, expected_effect, marker_kept
+) -> None:
+    config, item, plan, outcome, hooks, _ = _unmoved_comment_deliverable_fixture(
+        tmp_path, ("contributor_unreviewed",)
+    )
+    item = make_item(
+        types=["contributor_unreviewed"],
+        detail="managed_logins=Alice",
+    )
+    cooldown = tmp_path / "cooldown"
+    cooldown.mkdir()
+    monkeypatch.setenv("PM_DISPATCH_COOLDOWN_DIR", str(cooldown))
+    monkeypatch.setenv("PM_SLOT_KEY", f"{item.repo}#{item.number}")
+    marker = cooldown / f"{item.repo.replace('/', '-')}-{item.number}.event"
+    marker.write_text("launch-fingerprint")
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.viewer_review_since", lambda *a, **kw: False
+    )
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.contributor_review_skip_observed",
+        lambda *a, **kw: skipped,
+    )
+
+    effect = run_post_session(plan, item, outcome, config, hooks)
+    assert effect == expected_effect
+    assert marker.exists() is marker_kept
+
+
+@pytest.mark.parametrize("reviewed", [False, None, "raises"])
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "",
+        "green",
+        "managed_logins=",
+        "managed_logins=Bob,",
+        "managed_logins=Bob managed_logins=Alice",
+    ],
+)
+def test_contributor_review_invalid_login_evidence_is_mandated_skip(
+    tmp_path, monkeypatch, detail, reviewed
+) -> None:
+    from gptme_runloops.worker_records import contributor_review_skip_observed
+
+    config, item, plan, outcome, hooks, _ = _unmoved_comment_deliverable_fixture(
+        tmp_path, ("contributor_unreviewed",)
+    )
+    item = make_item(types=["contributor_unreviewed"], detail=detail)
+
+    def observe_review(*args, **kwargs):
+        if reviewed == "raises":
+            raise RuntimeError("GitHub review observation unavailable")
+        return reviewed
+
+    monkeypatch.setattr("gptme_runloops.run_item.viewer_review_since", observe_review)
+
+    def skip_observed(*args, **kwargs):
+        assert kwargs["managed_logins"] == ()
+        kwargs["runner"] = lambda *a, **kw: pytest.fail(
+            "local skip needs no GitHub I/O"
+        )
+        return contributor_review_skip_observed(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.contributor_review_skip_observed", skip_observed
+    )
+    assert run_post_session(plan, item, outcome, config, hooks) == "observed"
+
+
+def test_contributor_review_skip_probe_uses_managed_logins_from_detail(
+    tmp_path, monkeypatch
+) -> None:
+    config, item, plan, outcome, hooks, _ = _unmoved_comment_deliverable_fixture(
+        tmp_path, ("contributor_unreviewed",)
+    )
+    item = make_item(
+        types=["contributor_unreviewed"],
+        detail="managed_logins=Alice,Bob",
+    )
+    calls = []
+
+    def skip_observed(*args, **kwargs):
+        calls.append(kwargs["managed_logins"])
+        return True
+
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.viewer_review_since", lambda *a, **kw: False
+    )
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.contributor_review_skip_observed", skip_observed
+    )
+    assert run_post_session(plan, item, outcome, config, hooks) == "observed"
+    assert calls == [("Alice", "Bob")]

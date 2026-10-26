@@ -575,3 +575,98 @@ def test_every_expected_golden_exists() -> None:
     }
     present = set(_GOLDENS)
     assert expected <= present, f"missing goldens: {expected - present}"
+
+
+def test_contributor_review_prompt_safety_contract() -> None:
+    rendered = build_investigate(["contributor_unreviewed"], BOB_PARAMS)
+    for receipt in (
+        "Contributor Initial Review",
+        "headRefOid",
+        "managed",
+        "submitted",
+        "current head",
+        "draft",
+        "closed",
+        "non-green",
+        "isolated worktree",
+        "detached",
+        "before executing",
+        "touched tests",
+        "adjacent regression suites",
+        "commit_id",
+        "APPROVE",
+        "COMMENT",
+        "CHANGES_REQUESTED",
+        "Never push",
+        "never merge",
+    ):
+        assert receipt in rendered
+
+
+def test_contributor_review_dominates_combined_prompts() -> None:
+    rendered = build_investigate(
+        ["ci_failure", "pr_update", "contributor_unreviewed", "reviewer_needs_fix"],
+        BOB_PARAMS,
+    )
+    assert rendered == build_investigate(["contributor_unreviewed"], BOB_PARAMS)
+
+
+def test_contributor_review_omits_generic_repair_and_merge_instructions() -> None:
+    rendered = render_main_prompt(
+        BOB_PARAMS,
+        item_type="pr_update+contributor_unreviewed",
+        title="Contributor PR",
+        investigate=build_investigate(["contributor_unreviewed"], BOB_PARAMS),
+        monitoring_rules="GENERIC: fix, push and merge",
+        time_desc="25 minutes",
+        greptile_fix_instructions="GREPTILE: repair code",
+        arc_context="ARC: push a fix",
+        mention_constraint="MENTION: implement it now",
+        preheld_block="CLAIM: already held",
+    )
+    for forbidden in (
+        "GENERIC:",
+        "GREPTILE:",
+        "ARC:",
+        "MENTION:",
+        "investigate -> fix",
+    ):
+        assert forbidden not in rendered
+    assert "CLAIM: already held" in rendered
+    assert "Contributor Initial Review" in rendered
+
+
+@pytest.mark.parametrize(
+    "detail,logins",
+    [
+        (
+            "green; managed_logins=TimeToBuildBob,ErikBjare",
+            ("TimeToBuildBob", "ErikBjare"),
+        ),
+        ("managed_logins=Alice-Agent; green", ("Alice-Agent",)),
+        (
+            "managed_logins=Alice,github-actions[bot]",
+            ("Alice", "github-actions[bot]"),
+        ),
+        ("managed_logins=dependabot[bot]", ("dependabot[bot]",)),
+        ("managed_logins=[bot]", ()),
+        ("managed_logins=app[bot]suffix", ()),
+        ("managed_logins=app[bot][bot]", ()),
+        ("green", ()),
+        ("managed_logins=", ()),
+        ("managed_logins=Bob,", ()),
+        ("managed_logins=Bob managed_logins=Other", ()),
+        ("managed_logins=Bob,$(command)", ()),
+    ],
+)
+def test_contributor_review_exact_deployment_logins(detail, logins):
+    from dataclasses import replace
+
+    params = replace(BOB_PARAMS, detail=detail)
+    assert params.contributor_managed_logins == logins
+    rendered = build_investigate(["contributor_unreviewed"], params)
+    if logins:
+        assert json.dumps(list(logins)) in rendered
+    else:
+        assert "MISSING_OR_INVALID_MANAGED_LOGINS" in rendered
+    assert "do not infer a login" in rendered

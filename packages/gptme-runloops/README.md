@@ -152,6 +152,60 @@ Other modules:
 
 The legacy import path `run_loops` is kept as a symlink to `gptme_runloops` in source checkouts.
 
+## Contributor initial reviews (PM)
+
+`contributor_unreviewed` is a slow-lane `pr-review` session, never an
+`automated-pr-review` or code-repair session. `RunItem` normalizes mixed groups
+to this type **before** merge-lifecycle I/O; the shared coordination claim is
+`github:OWNER/REPO#NUMBER`. The dedicated prompt replaces generic monitoring,
+repair, arc and mention instructions. It requires live PR/head/CI/managed-review
+checks, detached isolated-worktree inspection, safe test execution, touched and
+adjacent regression suites, and a final head/eligibility recheck. The session
+submits one review with explicit `commit_id`: approval only after meaningful
+green verification, actionable changes requested for defects, or a comment
+review for infrastructure/verification limits. It never edits or pushes the
+contributor branch, opens a parallel fix, or merges.
+
+The detector owns age/author/green-CI eligibility and full-head-SHA dedupe; its
+managed-login configuration must be carried as exactly one
+`managed_logins=Login1,Login2` token in item `detail`. The handler renders quoted
+JSON evidence and adds the authenticated viewer; user logins and GitHub App
+`[bot]` logins are accepted. Missing, duplicate or malformed tokens fail closed,
+and display/operator names are never inferred as logins.
+`CONTRIBUTOR_REVIEW_ONLY_V1` in `run_item.py` marks the safe
+executor capability, not deployment of a shell fallback. Enable the detector
+only after the actual executor and any shell adapters support the same policy.
+Shell deployments must normalize mixed types before cheap self-merge pre-gates,
+lifecycle, prompt concatenation, coordination claims and post-session wait/merge.
+Do not route this type through the retired `review-pr` intercept.
+
+PR state is observed, but movement or issue comments do not count as a review.
+`worker_records.viewer_review_since(repo, number, since_iso, *, cwd, runner=...)`
+returns `True` only for a newly submitted authenticated-viewer review on the
+live head (`APPROVED`, `CHANGES_REQUESTED` or `COMMENTED`), `False` if absent,
+and `None` if unobservable. It paginates reviews, checks head stability between
+pages, and is also suitable for a shell adapter. Review-only post-session effect
+uses this evidence instead of generic reply checks or fallback comments.
+It does not promote pending PR activity or notification watermarks (including
+immutable launch snapshots): co-grouped work suppressed by the review-only
+prompt must remain eligible for a later handling session. The default launcher
+preserves item `detail`, including the required managed-login evidence.
+Review-only sessions also skip generic notification-handling latency receipts
+and PR-movement deliverable attribution: neither a suppressed mention nor a
+contributor's concurrent commit is work delivered by the reviewer. If a review
+is absent or unobservable (including a failed worker), launch event fingerprints
+are cleared for retry without consuming suppressed watermarks. A confirmed
+prompt-mandated skip (missing/invalid managed-login evidence, draft,
+closed/merged, managed-author, non-green CI, or a managed review already on the
+live head) is graded `observed` so recovery does
+not drain the ineffective budget, and fingerprints are still cleared so other
+slot types and later eligibility are not suppressed. Head movement is not a
+skip: the new head remains eligible and retries. `contributor_review_skip_observed`
+is the observation helper for that distinction; an empty parsed managed-login
+set proves the local fail-closed skip without a GitHub request. Dispatch ledger
+`types` likewise reflect only the review; mixed inputs remain available as
+per-item `original_types`, never credited as completed repairs.
+
 ## Development
 
 ```bash

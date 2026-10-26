@@ -184,6 +184,7 @@ class TestClassifyLane:
             "pr_update",
             "pr_never_checked",
             "contributor_ci_failure",
+            "contributor_unreviewed",
             "ci_failure",
             "master_ci_failure",
             "merge_conflict",
@@ -2856,8 +2857,9 @@ class TestLaneDispatcherEnvAliases:
         assert "--setenv=AGENT_PM_BANDIT_SHADOW=1" in cmd
         assert "--setenv=BOB_PM_BANDIT_SHADOW=1" in cmd
 
+    @pytest.mark.parametrize("types", [["notification"], ["contributor_unreviewed"]])
     def test_default_launcher_preserves_notification_states(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, types: list[str]
     ) -> None:
         import subprocess
 
@@ -2885,8 +2887,9 @@ class TestLaneDispatcherEnvAliases:
         item = SlotItem(
             "gptme/gptme",
             1,
-            ["notification"],
+            types,
             "Test item",
+            detail="managed_logins=Alice",
             notification_states=[
                 {"id": "25314090843", "updated_at": "2026-10-12T17:40:22Z"}
             ],
@@ -2906,6 +2909,10 @@ class TestLaneDispatcherEnvAliases:
             str(script),
         )
         assert launched_payloads[0]["notification_states"] == item.notification_states
+        from gptme_runloops.run_item import RunItem
+
+        launched = RunItem.from_grouped_json(json.dumps(launched_payloads[0]))
+        assert launched.detail == "managed_logins=Alice"
 
     def test_model_unresolved_writes_empty_not_omitted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3000,3 +3007,33 @@ class TestUnitPrefix:
         assert mgr.running_slots == 0
         assert mgr.running_lane_slots("fast") == 0
         assert patterns == ["alice-pm-*-slot-*", "alice-pm-fast-slot-*"]
+
+
+@pytest.mark.parametrize(
+    "types",
+    [
+        ["contributor_unreviewed"],
+        ["pr_update", "contributor_unreviewed"],
+        ["ci_failure", "contributor_unreviewed", "reviewer_needs_fix"],
+    ],
+)
+def test_contributor_unreviewed_always_slow_review_only(monkeypatch, types):
+    monkeypatch.setenv("AUTOMATED_PR_REVIEW_REPOS", "gptme/gptme-contrib")
+    assert classify_lane(types) == "slow"
+    assert classify_item_work_type(types, repo="gptme/gptme-contrib") == "pr-review"
+
+
+@pytest.mark.parametrize("phase", ["started", "completed"])
+def test_review_only_ledger_does_not_credit_suppressed_work(tmp_path, phase):
+    work = tmp_path / "mixed.jsonl"
+    original_types = ["ci_failure", "contributor_unreviewed", "mention"]
+    work.write_text(json.dumps({"repo": "o/r", "number": 7, "types": original_types}))
+    entry = build_full_ledger_entry(
+        phase=phase, work_file=work, exit_code=0, effect="observed"
+    )
+    assert entry["types"] == ["contributor_unreviewed"]
+    assert entry["items"][0]["types"] == ["contributor_unreviewed"]
+    assert entry["items"][0]["original_types"] == original_types
+    assert json.loads(work.read_text())["types"] == original_types
+    if phase == "completed":
+        assert entry["outcome"] == "succeeded"

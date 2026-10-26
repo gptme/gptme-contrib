@@ -1118,3 +1118,443 @@ def test_update_record_pr_state_adds_subtype_after_productive_upgrade(
     payload = json.loads(record.read_text())
     assert payload["outcome"] == "productive"
     assert payload["outcome_subtype"] == "engage"
+
+
+@pytest.mark.parametrize(
+    "review,expected",
+    [
+        (
+            {
+                "state": "APPROVED",
+                "submittedAt": "2026-10-22T05:20:01Z",
+                "commit": {"oid": "abc"},
+            },
+            True,
+        ),
+        (
+            {
+                "state": "COMMENTED",
+                "submittedAt": "2026-10-22T05:20:01Z",
+                "commit": {"oid": "abc"},
+            },
+            True,
+        ),
+        (
+            {
+                "state": "CHANGES_REQUESTED",
+                "submittedAt": "2026-10-22T05:20:01Z",
+                "commit": {"oid": "abc"},
+            },
+            True,
+        ),
+        (
+            {
+                "state": "PENDING",
+                "submittedAt": "2026-10-22T05:20:01Z",
+                "commit": {"oid": "abc"},
+            },
+            False,
+        ),
+        (
+            {
+                "state": "DISMISSED",
+                "submittedAt": "2026-10-22T05:20:01Z",
+                "commit": {"oid": "abc"},
+            },
+            False,
+        ),
+        (
+            {
+                "state": "APPROVED",
+                "submittedAt": "2026-10-22T05:19:59Z",
+                "commit": {"oid": "abc"},
+            },
+            False,
+        ),
+        (
+            {
+                "state": "APPROVED",
+                "submittedAt": "2026-10-22T05:20:01Z",
+                "commit": {"oid": "old"},
+            },
+            False,
+        ),
+        ({"state": "APPROVED", "submittedAt": None, "commit": {"oid": "abc"}}, False),
+    ],
+)
+def test_viewer_review_since_requires_new_submitted_current_head_review(
+    tmp_path, review, expected
+):
+    from gptme_runloops.worker_records import viewer_review_since
+
+    def runner(argv, **kwargs):
+        query = " ".join(argv)
+        assert "headRefOid" in query
+        assert "submittedAt" in query and "commit{oid}" in query
+        assert "comments(" not in query
+        node = {"author": {"login": "Agent"}, **review}
+        payload = {
+            "data": {
+                "viewer": {"login": "Agent"},
+                "repository": {
+                    "pullRequest": {
+                        "headRefOid": "abc",
+                        "reviews": {
+                            "nodes": [node],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                },
+            }
+        }
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload))
+
+    assert (
+        viewer_review_since(
+            "o/r", 1, "2026-10-22T05:20:00Z", cwd=tmp_path, runner=runner
+        )
+        is expected
+    )
+
+
+def test_viewer_review_since_paginates_and_checks_identity(tmp_path):
+    from gptme_runloops.worker_records import viewer_review_since
+
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        node = {
+            "author": {"login": "Other" if len(calls) == 1 else "Agent"},
+            "state": "APPROVED",
+            "submittedAt": "2026-10-22T05:20:01Z",
+            "commit": {"oid": "abc"},
+        }
+        payload = {
+            "data": {
+                "viewer": {"login": "Agent"},
+                "repository": {
+                    "pullRequest": {
+                        "headRefOid": "abc",
+                        "reviews": {
+                            "nodes": [node],
+                            "pageInfo": {
+                                "hasNextPage": len(calls) == 1,
+                                "endCursor": "cursor",
+                            },
+                        },
+                    }
+                },
+            }
+        }
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload))
+
+    assert (
+        viewer_review_since(
+            "o/r", 1, "2026-10-22T05:20:00Z", cwd=tmp_path, runner=runner
+        )
+        is True
+    )
+    assert len(calls) == 2
+    assert "after=cursor" in calls[1]
+
+
+def test_viewer_review_since_api_failure_is_unknown(tmp_path):
+    from gptme_runloops.worker_records import viewer_review_since
+
+    assert (
+        viewer_review_since(
+            "o/r",
+            1,
+            "2026-10-22T05:20:00Z",
+            cwd=tmp_path,
+            runner=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, ""),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["head_move", "cursor_repeat", "graphql_error", "missing_head", "bad_json"],
+)
+def test_viewer_review_since_inconsistent_or_incomplete_evidence_is_unknown(
+    tmp_path, failure
+):
+    from gptme_runloops.worker_records import viewer_review_since
+
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        if failure == "bad_json":
+            return subprocess.CompletedProcess(argv, 0, "not json")
+        payload = {
+            "data": {
+                "viewer": {"login": "Agent"},
+                "repository": {
+                    "pullRequest": {
+                        "headRefOid": None
+                        if failure == "missing_head"
+                        else "new"
+                        if len(calls) > 1
+                        else "abc",
+                        "reviews": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": True, "endCursor": "cursor"},
+                        },
+                    }
+                },
+            }
+        }
+        if failure == "graphql_error":
+            payload["errors"] = [{"message": "partial response"}]
+        if failure == "cursor_repeat":
+            payload["data"]["repository"]["pullRequest"]["headRefOid"] = "abc"
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload))
+
+    assert (
+        viewer_review_since(
+            "o/r", 1, "2026-10-22T05:20:00Z", cwd=tmp_path, runner=runner
+        )
+        is None
+    )
+    assert len(calls) <= 2
+
+
+def _skip_pr_payload(
+    *,
+    state="OPEN",
+    is_draft=False,
+    author="contrib",
+    head="abc",
+    rollup="SUCCESS",
+    commit_oid="abc",
+    reviews=None,
+    has_next=False,
+    cursor=None,
+    viewer="Viewer",
+):
+    return {
+        "data": {
+            "viewer": {"login": viewer},
+            "repository": {
+                "pullRequest": {
+                    "state": state,
+                    "isDraft": is_draft,
+                    "author": {"login": author},
+                    "headRefOid": head,
+                    "commits": {
+                        "nodes": [
+                            {
+                                "commit": {
+                                    "oid": commit_oid,
+                                    "statusCheckRollup": (
+                                        {"state": rollup}
+                                        if rollup is not None
+                                        else None
+                                    ),
+                                }
+                            }
+                        ]
+                    },
+                    "reviews": {
+                        "nodes": reviews or [],
+                        "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+                    },
+                }
+            },
+        }
+    }
+
+
+def _skip_runner(payload):
+    def runner(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload))
+
+    return runner
+
+
+@pytest.mark.parametrize(
+    "payload, logins, expected",
+    [
+        (_skip_pr_payload(state="CLOSED"), ("Agent",), True),
+        (_skip_pr_payload(state="MERGED"), ("Agent",), True),
+        (_skip_pr_payload(is_draft=True), ("Agent",), True),
+        (_skip_pr_payload(author="Agent"), ("Agent",), True),
+        (_skip_pr_payload(rollup="PENDING"), ("Agent",), True),
+        (_skip_pr_payload(rollup=None), ("Agent",), True),
+        (
+            _skip_pr_payload(
+                reviews=[
+                    {
+                        "author": {"login": "Agent"},
+                        "state": "APPROVED",
+                        "commit": {"oid": "abc"},
+                    }
+                ]
+            ),
+            ("Agent",),
+            True,
+        ),
+        (_skip_pr_payload(), ("Agent",), False),
+        (_skip_pr_payload(), (), True),
+        (
+            _skip_pr_payload(
+                reviews=[
+                    {
+                        "author": {"login": "Agent"},
+                        "state": "APPROVED",
+                        "commit": {"oid": "abc"},
+                    }
+                ]
+            ),
+            (),
+            True,
+        ),
+    ],
+)
+def test_contributor_review_skip_observed_matches_prompt_skips(
+    tmp_path, payload, logins, expected
+):
+    from gptme_runloops.worker_records import contributor_review_skip_observed
+
+    assert (
+        contributor_review_skip_observed(
+            "o/r",
+            1,
+            managed_logins=logins,
+            cwd=tmp_path,
+            runner=_skip_runner(payload),
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    "author, review_state, review_head, expected",
+    [
+        ("bOb", None, "abc", True),
+        ("contrib", "APPROVED", "abc", True),
+        ("contrib", "CHANGES_REQUESTED", "abc", True),
+        ("contrib", "COMMENTED", "abc", True),
+        ("contrib", "PENDING", "abc", False),
+        ("contrib", "APPROVED", "old", False),
+    ],
+)
+def test_contributor_review_skip_includes_authenticated_viewer(
+    tmp_path, author, review_state, review_head, expected
+):
+    from gptme_runloops.worker_records import contributor_review_skip_observed
+
+    payload = _skip_pr_payload(
+        viewer="Bob",
+        author=author,
+        reviews=[
+            {
+                "author": {"login": "bOB"},
+                "state": review_state,
+                "commit": {"oid": review_head},
+            }
+        ],
+    )
+
+    def runner(argv, **kwargs):
+        assert any("viewer{login}" in arg for arg in argv)
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload))
+
+    assert (
+        contributor_review_skip_observed(
+            "o/r",
+            1,
+            managed_logins=("Alice",),
+            cwd=tmp_path,
+            runner=runner,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize("viewer", [None, ""])
+def test_contributor_review_skip_missing_viewer_is_unknown(tmp_path, viewer):
+    from gptme_runloops.worker_records import contributor_review_skip_observed
+
+    assert (
+        contributor_review_skip_observed(
+            "o/r",
+            1,
+            managed_logins=("Alice",),
+            cwd=tmp_path,
+            runner=_skip_runner(_skip_pr_payload(viewer=viewer)),
+        )
+        is None
+    )
+
+
+def test_contributor_review_skip_observed_head_move_is_unknown(tmp_path):
+    from gptme_runloops.worker_records import contributor_review_skip_observed
+
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        payload = _skip_pr_payload(
+            head="new" if len(calls) > 1 else "abc",
+            reviews=[],
+            has_next=len(calls) == 1,
+            cursor="cursor",
+        )
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload))
+
+    assert (
+        contributor_review_skip_observed(
+            "o/r", 1, managed_logins=("Agent",), cwd=tmp_path, runner=runner
+        )
+        is None
+    )
+
+
+def test_contributor_review_skip_observed_paginates_managed_reviews(tmp_path):
+    from gptme_runloops.worker_records import contributor_review_skip_observed
+
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        if len(calls) == 1:
+            payload = _skip_pr_payload(has_next=True, cursor="cursor")
+        else:
+            payload = _skip_pr_payload(
+                reviews=[
+                    {
+                        "author": {"login": "Agent"},
+                        "state": "COMMENTED",
+                        "commit": {"oid": "abc"},
+                    }
+                ]
+            )
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload))
+
+    assert (
+        contributor_review_skip_observed(
+            "o/r", 1, managed_logins=("Agent",), cwd=tmp_path, runner=runner
+        )
+        is True
+    )
+    assert len(calls) == 2
+    assert "after=cursor" in calls[1]
+
+
+def test_contributor_review_skip_observed_api_failure_is_unknown(tmp_path):
+    from gptme_runloops.worker_records import contributor_review_skip_observed
+
+    assert (
+        contributor_review_skip_observed(
+            "o/r",
+            1,
+            managed_logins=("Agent",),
+            cwd=tmp_path,
+            runner=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, ""),
+        )
+        is None
+    )

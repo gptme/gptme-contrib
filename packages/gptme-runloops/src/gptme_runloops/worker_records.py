@@ -881,6 +881,218 @@ def viewer_activity_since(
     return False
 
 
+def viewer_review_since(
+    repo: str,
+    number: int | str,
+    since_iso: str,
+    *,
+    cwd: str | Path,
+    timeout: float = 20,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> bool | None:
+    """Observe a new submitted viewer review on the live PR head, not a comment.
+
+    Paginate reviews; missing/inconsistent head or API failures are unknown.
+    Re-read the head on each page so movement during pagination fails closed.
+    No PR mutation and no dependency on agent-specific managed-login policy.
+    """
+    since = _parse_github_ts(since_iso)
+    owner, _, name = str(repo).partition("/")
+    try:
+        number_int = int(number)
+    except (ValueError, TypeError):
+        return None
+    if since is None or not owner or not name or number_int <= 0:
+        return None
+    query = (
+        "query($owner:String!,$name:String!,$number:Int!,$after:String){"
+        "viewer{login}repository(owner:$owner,name:$name){"
+        "pullRequest(number:$number){headRefOid reviews(first:100,after:$after){"
+        "nodes{author{login}state submittedAt commit{oid}}"
+        "pageInfo{hasNextPage endCursor}}}}}"
+    )
+    after: str | None = None
+    seen: set[str] = set()
+    head: str | None = None
+    while True:
+        cmd = [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+            "-F",
+            f"number={number_int}",
+        ]
+        if after:
+            cmd += ["-f", f"after={after}"]
+        try:
+            result = runner(
+                cmd,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            if result.returncode != 0:
+                return None
+            payload = json.loads(result.stdout)
+            if payload.get("errors"):
+                return None
+            data = payload["data"]
+            viewer = str(data["viewer"]["login"] or "").lower()
+            pr = data["repository"]["pullRequest"]
+            current_head = pr["headRefOid"]
+            if not viewer or not current_head or (head and head != current_head):
+                return None
+            head = current_head
+            reviews = pr["reviews"]
+            for review in reviews["nodes"]:
+                author = str((review.get("author") or {}).get("login") or "").lower()
+                when = _parse_github_ts(review.get("submittedAt"))
+                if (
+                    author == viewer
+                    and review.get("state")
+                    in {"APPROVED", "CHANGES_REQUESTED", "COMMENTED"}
+                    and (review.get("commit") or {}).get("oid") == head
+                    and when is not None
+                    and when >= since
+                ):
+                    return True
+            page = reviews["pageInfo"]
+            if not page["hasNextPage"]:
+                return False
+            after = page["endCursor"]
+            if not after or after in seen:
+                return None
+            seen.add(after)
+        except Exception:
+            return None
+
+
+_SUBMITTED_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "COMMENTED"})
+_GREEN_CHECK_ROLLUP = "SUCCESS"
+
+
+def contributor_review_skip_observed(
+    repo: str,
+    number: int | str,
+    *,
+    managed_logins: Sequence[str],
+    cwd: str | Path,
+    timeout: float = 20,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> bool | None:
+    """True when the live PR is a prompt-mandated contributor-review skip.
+
+    Draft, closed/merged, managed-author, non-green CI, or a managed login
+    (including the authenticated viewer) already reviewing the current head
+    are skips. Head movement is not: the new head stays eligible. API or
+    inconsistent-head failures are unknown.
+    Missing/invalid configured logins mandate a local skip before GitHub I/O,
+    matching the prompt's fail-closed policy. Otherwise missing viewer identity
+    is unknown.
+    """
+    owner, _, name = str(repo).partition("/")
+    try:
+        number_int = int(number)
+    except (ValueError, TypeError):
+        return None
+    if not owner or not name or number_int <= 0:
+        return None
+    managed = {str(login).lower() for login in managed_logins if str(login).strip()}
+    if not managed:
+        # The prompt cannot review without deployment-owned login evidence.
+        # This is a mandated stop, not an ineffective review attempt.
+        return True
+    query = (
+        "query($owner:String!,$name:String!,$number:Int!,$after:String){"
+        "viewer{login}repository(owner:$owner,name:$name){pullRequest(number:$number){"
+        "state isDraft author{login} headRefOid "
+        "commits(last:1){nodes{commit{oid statusCheckRollup{state}}}}"
+        "reviews(first:100,after:$after){nodes{author{login}state commit{oid}}"
+        "pageInfo{hasNextPage endCursor}}}}}"
+    )
+    after: str | None = None
+    seen: set[str] = set()
+    head: str | None = None
+    while True:
+        cmd = [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+            "-F",
+            f"number={number_int}",
+        ]
+        if after:
+            cmd += ["-f", f"after={after}"]
+        try:
+            result = runner(
+                cmd,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            if result.returncode != 0:
+                return None
+            payload = json.loads(result.stdout)
+            if payload.get("errors"):
+                return None
+            data = payload["data"]
+            viewer = str(data["viewer"]["login"] or "").lower()
+            if not viewer:
+                return None
+            managed.add(viewer)
+            pr = data["repository"]["pullRequest"]
+            current_head = pr["headRefOid"]
+            if not current_head or (head and head != current_head):
+                return None
+            head = current_head
+            if str(pr.get("state") or "").upper() != "OPEN" or pr.get("isDraft"):
+                return True
+            author = str((pr.get("author") or {}).get("login") or "").lower()
+            if author and author in managed:
+                return True
+            commits = (pr.get("commits") or {}).get("nodes") or []
+            commit = (commits[-1].get("commit") or {}) if commits else {}
+            if commit.get("oid") != head:
+                return None
+            rollup = commit.get("statusCheckRollup") or {}
+            if rollup.get("state") != _GREEN_CHECK_ROLLUP:
+                return True
+            if managed:
+                for review in pr["reviews"]["nodes"]:
+                    login = str((review.get("author") or {}).get("login") or "").lower()
+                    if (
+                        login in managed
+                        and review.get("state") in _SUBMITTED_REVIEW_STATES
+                        and (review.get("commit") or {}).get("oid") == head
+                    ):
+                        return True
+            page = pr["reviews"]["pageInfo"]
+            if not managed or not page["hasNextPage"]:
+                return False
+            after = page["endCursor"]
+            if not after or after in seen:
+                return None
+            seen.add(after)
+        except Exception:
+            return None
+
+
 def fetch_pr_snapshot(
     repo: str,
     number: int | str,

@@ -122,6 +122,7 @@ from gptme_runloops.worker_records import (
     build_wait_merge_gate_entry,
     capture_pr_snapshot_json,
     compute_latency_outcome,
+    contributor_review_skip_observed,
     extract_delivery_field,
     fallback_outcome,
     normalize_delivery_outcome,
@@ -130,6 +131,7 @@ from gptme_runloops.worker_records import (
     read_record_pr_state_after,
     update_record_pr_state,
     viewer_activity_since,
+    viewer_review_since,
     voice_postcall_effect_observed,
     write_fallback_session_record,
     write_post_session_record,
@@ -142,6 +144,10 @@ from gptme_runloops.worker_records import (
 # This narrow pair is the *bash* gate. Keep it for parity with the shell
 # executor's wait-and-merge step; it is deliberately NOT the observation gate.
 PR_STATE_TYPES: frozenset[str] = frozenset({"pr_update", "merge_ready"})
+
+# Deployment capability marker: normalization below runs before any lifecycle
+# I/O, including mixed groups. The poller must not emit until this is deployed.
+CONTRIBUTOR_REVIEW_ONLY_V1 = True
 
 # Item types whose `number` addresses a real PR, so a before/after
 # `gh pr view` snapshot is a meaningful observation of whether the dispatch
@@ -182,6 +188,7 @@ PR_OBSERVE_TYPES: frozenset[str] = PR_STATE_TYPES | frozenset(
     {
         "ci_failure",
         "contributor_ci_failure",
+        "contributor_unreviewed",
         "greptile_convergence_adjudication",
         "merge_conflict",
         "pr_changes_requested_stale",
@@ -290,6 +297,14 @@ class RunItem:
     type_label: str = ""
     raw: Mapping[str, Any] = field(default_factory=dict)
     raw_line: str = ""
+
+    def __post_init__(self) -> None:
+        # Grouping can combine this event with pr_update/merge_ready/repair.
+        # Normalize at the schema boundary, before lifecycle I/O (which runs
+        # before the coordination claim), prompt concat, and post-session gates.
+        if "contributor_unreviewed" in self.types:
+            object.__setattr__(self, "types", ("contributor_unreviewed",))
+            object.__setattr__(self, "type_label", "contributor_unreviewed")
 
     @property
     def number_str(self) -> str:
@@ -608,6 +623,8 @@ def timeout_tier(
     Adjudication reads findings, classifies them, possibly fixes one blocking
     issue and posts a structured recommendation — it never waits on a Greptile
     re-review, so it takes the 1500s tier rather than the 2700s fix tier.
+    Contributor reviews share that budget for investigation, tests and review
+    submission; normalized mixed groups never perform repair or wait for re-review.
 
     ``instruction_kind`` lets callers route to the adjudication tier when the
     lifecycle decision drove the session to adjudication (Phase-A2 early
@@ -618,7 +635,8 @@ def timeout_tier(
     if "assigned_issue" in types:
         return config.assigned_issue_timeout, config.assigned_issue_time_desc
     if (
-        "greptile_convergence_adjudication" in types
+        "contributor_unreviewed" in types
+        or "greptile_convergence_adjudication" in types
         or instruction_kind == "GREPTILE_CONVERGENCE"
     ):
         return config.adjudication_timeout, config.adjudication_time_desc
@@ -640,7 +658,15 @@ def issue_coordination_key(
     ``github:REPO#NUM`` key; everything else returns ``None`` (master-CI
     synthetic run ids are excluded by type).
     """
-    if not ({"assigned_issue", "contributor_ci_failure", "pr_update"} & set(types)):
+    if not (
+        {
+            "assigned_issue",
+            "contributor_ci_failure",
+            "contributor_unreviewed",
+            "pr_update",
+        }
+        & set(types)
+    ):
         return None
     if not repo or number is None:
         return None
@@ -2473,9 +2499,12 @@ def run_post_session(
 
     is_pr_item = bool(PR_STATE_TYPES & set(item.types))
     is_pr_observe_item = bool(PR_OBSERVE_TYPES & set(item.types))
+    review_only = "contributor_unreviewed" in item.types
 
     # 2. PR-state diff (worker.sh:379-408)
-    if is_pr_observe_item:
+    # Review-only sessions cannot author branch changes. Do not attribute the
+    # contributor's concurrent push/merge as our deliverable or upgrade outcome.
+    if is_pr_observe_item and not review_only:
         try:
             update_record_pr_state(
                 record_file,
@@ -2630,23 +2659,27 @@ def run_post_session(
     )
 
     # 5. Latency-ledger append (worker.sh:526-550)
-    try:
-        if hooks.append_latency_records is None:
-            raise RuntimeError("append_latency_records collaborator unavailable")
-        append_worker_latency_records(
-            repo_root=config.workspace,
-            item_json=item.raw_line or json.dumps(dict(item.raw), ensure_ascii=False),
-            latency_context_json=outcome.latency_context_json,
-            ack_result_json=outcome.ack_result_json,
-            handled_at=outcome.started_iso,
-            session_id=plan.session_id,
-            outcome=latency_outcome,
-            append_latency_records=hooks.append_latency_records,
-        )
-    except Exception:
-        _log(
-            f"WARN: worker_records latency-ledger append step failed for {plan.repo}#{plan.number}"
-        )
+    # The original payload can contain suppressed mentions/notifications. A
+    # review-only exit provides no handling receipt for those events.
+    if not review_only:
+        try:
+            if hooks.append_latency_records is None:
+                raise RuntimeError("append_latency_records collaborator unavailable")
+            append_worker_latency_records(
+                repo_root=config.workspace,
+                item_json=item.raw_line
+                or json.dumps(dict(item.raw), ensure_ascii=False),
+                latency_context_json=outcome.latency_context_json,
+                ack_result_json=outcome.ack_result_json,
+                handled_at=outcome.started_iso,
+                session_id=plan.session_id,
+                outcome=latency_outcome,
+                append_latency_records=hooks.append_latency_records,
+            )
+        except Exception:
+            _log(
+                f"WARN: worker_records latency-ledger append step failed for {plan.repo}#{plan.number}"
+            )
 
     # 6. Wait-and-merge gate (worker.sh:552-616)
     if is_pr_item and exit_code == 0 and hooks.wait_merge_gate is not None:
@@ -2790,7 +2823,12 @@ def run_post_session(
     # every pending notif-*.state, consuming exactly what was "rolled back".
     # The result was a fix that passed its tests and changed nothing. Keep all
     # three effects together in rollback_failed_delivery().
-    if delivery_outcome == "orphan_no_delivery":
+    if "contributor_unreviewed" in item.types:
+        # Review-only normalization suppresses co-grouped PR/notification work.
+        # A submitted review does not handle that work: leave both pending and
+        # carried watermarks unconsumed so the gate can emit it again.
+        pass
+    elif delivery_outcome == "orphan_no_delivery":
         rollback_slot_key = resolve_slot_key(config, item)
         if rollback_failed_delivery(config, item.repo, item.number, rollback_slot_key):
             _log(
@@ -2949,6 +2987,55 @@ def run_post_session(
             item.detail, config.workspace, now=session_start
         ):
             effect = EFFECT_OBSERVED
+    if "contributor_unreviewed" in item.types:
+        # PR movement, comments and generic delivery receipts are NOT review
+        # success. Require our new submitted review on the exact live head.
+        reviewed = None
+        if exit_code == 0:
+            try:
+                reviewed = viewer_review_since(
+                    plan.repo,
+                    plan.number,
+                    outcome.started_iso,
+                    cwd=config.workspace,
+                    runner=hooks.run_cmd,
+                )
+            except Exception:
+                pass
+        effect = (
+            EFFECT_OBSERVED
+            if reviewed is True
+            else EFFECT_NONE
+            if reviewed is False or exit_code != 0
+            else EFFECT_UNKNOWN
+        )
+        if reviewed is not True and exit_code == 0:
+            # Prompt-mandated skips (draft/closed/managed-author/non-green/
+            # sibling already reviewed) can explain a missing review. Missing
+            # login evidence proves a local skip even if review observation
+            # failed. Grade confirmed skips observed so recovery does not
+            # drain the ineffective budget, but
+            # still clear the launch fingerprint below: the slot key is shared
+            # with mentions/CI, and eligibility can return on a later poll.
+            skipped = None
+            try:
+                skipped = contributor_review_skip_observed(
+                    plan.repo,
+                    plan.number,
+                    managed_logins=config.prompt_params(
+                        item
+                    ).contributor_managed_logins,
+                    cwd=config.workspace,
+                    runner=hooks.run_cmd,
+                )
+            except Exception:
+                skipped = None
+            if skipped is True:
+                effect = EFFECT_OBSERVED
+        if reviewed is not True:
+            # Keep suppressed activity pending, but remove the launch-only
+            # fingerprint so absent/unobservable reviews can retry next poll.
+            clear_slot_event_markers(config, resolve_slot_key(config, item))
     if effect == EFFECT_NONE:
         _log(
             f"WARN: PM dispatch produced NO observable effect on {plan.repo}#{plan.number} "
