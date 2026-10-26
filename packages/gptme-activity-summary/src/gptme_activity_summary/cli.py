@@ -224,7 +224,8 @@ def _build_extra_context(
                 f", {len(aw_activity.top_domains)} domains" if aw_activity.top_domains else ""
             )
             click.echo(
-                f"  ActivityWatch: {aw_activity.total_active_hours:.1f}h active"
+                f"  ActivityWatch: {aw_activity.total_active_hours:.1f}h "
+                f"{'active' if aw_activity.afk_filtered else 'unfiltered window time'}"
                 f", {len(aw_activity.top_apps)} apps{domain_info}"
             )
 
@@ -583,6 +584,7 @@ def _run_human_summary(
     period_str: str,
     period: str,
     github_user: str | None,
+    aw_host: str | None,
     raw: bool,
     verbose: bool,
 ) -> None:
@@ -592,7 +594,8 @@ def _run_human_summary(
     parts: list[str] = []
 
     # ActivityWatch time tracking (primary source)
-    aw_activity = fetch_aw_activity(start_date, end_date)
+    aw_activity = fetch_aw_activity(start_date, end_date, hostname=aw_host)
+    has_activity = bool(aw_activity.top_apps)
     aw_text = format_aw_activity_for_prompt(aw_activity)
     if aw_text:
         parts.append(aw_text)
@@ -601,7 +604,8 @@ def _run_human_summary(
                 f", {len(aw_activity.top_domains)} domains" if aw_activity.top_domains else ""
             )
             click.echo(
-                f"  ActivityWatch: {aw_activity.total_active_hours:.1f}h active, "
+                f"  ActivityWatch: {aw_activity.total_active_hours:.1f}h "
+                f"{'active' if aw_activity.afk_filtered else 'unfiltered window time'}, "
                 f"{len(aw_activity.top_apps)} apps{domain_info}"
             )
     elif not aw_activity.available:
@@ -612,6 +616,7 @@ def _run_human_summary(
         gh_activity = fetch_user_activity(start_date, end_date, github_user)
         gh_text = format_activity_for_prompt(gh_activity)
         if gh_text:
+            has_activity = True
             parts.append(gh_text)
             if verbose:
                 click.echo(
@@ -620,7 +625,9 @@ def _run_human_summary(
                     f"{gh_activity.total_issues_closed} issues"
                 )
 
-    if not parts:
+    if not has_activity:
+        if aw_text:
+            click.echo(f"\n{aw_text}")
         click.echo("No activity data found for this period.")
         return
 
@@ -630,15 +637,15 @@ def _run_human_summary(
         click.echo(f"\n{combined_context}")
         return
 
+    for warning in aw_activity.warnings:
+        click.echo(f"  ActivityWatch coverage: {warning}")
+
     # Generate LLM summary
     if github_user and period != "daily":
         from .cc_backend import summarize_github_activity_with_cc
 
         click.echo("Generating summary with Claude Code...")
         result = summarize_github_activity_with_cc(combined_context, github_user, period_str)
-
-        click.echo(f"\n## Activity Summary: @{github_user}")
-        click.echo(f"**Period**: {period_str}\n")
     else:
         from .cc_backend import summarize_human_day_with_cc
 
@@ -646,6 +653,16 @@ def _run_human_summary(
         click.echo("Generating summary with Claude Code...")
         result = summarize_human_day_with_cc(combined_context, username, period_str)
 
+    if result.get("_cc_failed"):
+        raise click.ClickException(
+            "Summary generation failed. Check the generation logs and retry, "
+            "or use --raw to print the source data."
+        )
+
+    if github_user and period != "daily":
+        click.echo(f"\n## Activity Summary: @{github_user}")
+        click.echo(f"**Period**: {period_str}\n")
+    else:
         click.echo(f"\n## Daily Summary: {period_str}")
         if github_user:
             click.echo(f"**GitHub**: @{github_user}\n")
@@ -739,6 +756,11 @@ def _repo_option(command):
     default=None,
     help="GitHub username for human mode (optional)",
 )
+@click.option(
+    "--aw-host",
+    default=None,
+    help="ActivityWatch hostname (human mode); required when multiple window hosts exist",
+)
 @click.option("--raw", is_flag=True, help="Print raw data without LLM summarization (human mode)")
 @_repo_option
 @click.pass_context
@@ -747,6 +769,7 @@ def daily(
     date_str: str,
     mode: str,
     github_user: str | None,
+    aw_host: str | None,
     raw: bool,
     repos: tuple[str, ...],
 ) -> None:
@@ -763,6 +786,7 @@ def daily(
             period_str=target_date.isoformat(),
             period="daily",
             github_user=github_user,
+            aw_host=aw_host,
             raw=raw,
             verbose=verbose,
         )
@@ -808,6 +832,11 @@ def daily(
     default=None,
     help="GitHub username for human mode (optional)",
 )
+@click.option(
+    "--aw-host",
+    default=None,
+    help="ActivityWatch hostname (human mode); required when multiple window hosts exist",
+)
 @click.option("--raw", is_flag=True, help="Print raw data without LLM summarization (human mode)")
 @_repo_option
 @click.pass_context
@@ -816,6 +845,7 @@ def weekly(
     week: str,
     mode: str,
     github_user: str | None,
+    aw_host: str | None,
     raw: bool,
     repos: tuple[str, ...],
 ) -> None:
@@ -846,6 +876,7 @@ def weekly(
             period_str=f"{start_date.isoformat()} to {end_date.isoformat()}",
             period="weekly",
             github_user=github_user,
+            aw_host=aw_host,
             raw=raw,
             verbose=verbose,
         )
@@ -885,6 +916,11 @@ def weekly(
     default=None,
     help="GitHub username for human mode (optional)",
 )
+@click.option(
+    "--aw-host",
+    default=None,
+    help="ActivityWatch hostname (human mode); required when multiple window hosts exist",
+)
 @click.option("--raw", is_flag=True, help="Print raw data without LLM summarization (human mode)")
 @_repo_option
 @click.pass_context
@@ -893,6 +929,7 @@ def monthly(
     month: str,
     mode: str,
     github_user: str | None,
+    aw_host: str | None,
     raw: bool,
     repos: tuple[str, ...],
 ) -> None:
@@ -921,6 +958,7 @@ def monthly(
             period_str=month,
             period="monthly",
             github_user=github_user,
+            aw_host=aw_host,
             raw=raw,
             verbose=verbose,
         )
