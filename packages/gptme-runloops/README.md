@@ -169,8 +169,9 @@ contributor branch, opens a parallel fix, or merges.
 The detector owns age/author/green-CI eligibility and full-head-SHA dedupe; its
 managed-login configuration must be carried as exactly one
 `managed_logins=Login1,Login2` token in item `detail`. The handler renders quoted
-JSON evidence and adds the authenticated viewer; missing, duplicate or malformed
-tokens fail closed, and display/operator names are never inferred as logins.
+JSON evidence and adds the authenticated viewer; user logins and GitHub App
+`[bot]` logins are accepted. Missing, duplicate or malformed tokens fail closed,
+and display/operator names are never inferred as logins.
 `CONTRIBUTOR_REVIEW_ONLY_V1` in `run_item.py` marks the safe
 executor capability, not deployment of a shell fallback. Enable the detector
 only after the actual executor and any shell adapters support the same policy.
@@ -194,12 +195,14 @@ and PR-movement deliverable attribution: neither a suppressed mention nor a
 contributor's concurrent commit is work delivered by the reviewer. If a review
 is absent or unobservable (including a failed worker), launch event fingerprints
 are cleared for retry without consuming suppressed watermarks. A confirmed
-prompt-mandated skip (draft, closed/merged, managed-author, non-green CI, or a
-managed review already on the live head) is graded `observed` so recovery does
+prompt-mandated skip (missing/invalid managed-login evidence, draft,
+closed/merged, managed-author, non-green CI, or a managed review already on the
+live head) is graded `observed` so recovery does
 not drain the ineffective budget, and fingerprints are still cleared so other
 slot types and later eligibility are not suppressed. Head movement is not a
 skip: the new head remains eligible and retries. `contributor_review_skip_observed`
-is the GitHub observation helper for that distinction. Dispatch ledger
+is the observation helper for that distinction; an empty parsed managed-login
+set proves the local fail-closed skip without a GitHub request. Dispatch ledger
 `types` likewise reflect only the review; mixed inputs remain available as
 per-item `original_types`, never credited as completed repairs.
 

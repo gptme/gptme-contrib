@@ -798,7 +798,10 @@ class ItemPromptParams:
             return ()
         logins = matches[0].split(",")
         if not all(
-            re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", login)
+            re.fullmatch(
+                r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?(?:\[bot\])?",
+                login,
+            )
             for login in logins
         ):
             return ()

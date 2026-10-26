@@ -988,8 +988,9 @@ def contributor_review_skip_observed(
     (including the authenticated viewer) already reviewing the current head
     are skips. Head movement is not: the new head stays eligible. API or
     inconsistent-head failures are unknown.
-    Without configured logins, only the viewer can prove author/review skips.
-    Missing viewer identity is unknown.
+    Missing/invalid configured logins mandate a local skip before GitHub I/O,
+    matching the prompt's fail-closed policy. Otherwise missing viewer identity
+    is unknown.
     """
     owner, _, name = str(repo).partition("/")
     try:
@@ -999,6 +1000,10 @@ def contributor_review_skip_observed(
     if not owner or not name or number_int <= 0:
         return None
     managed = {str(login).lower() for login in managed_logins if str(login).strip()}
+    if not managed:
+        # The prompt cannot review without deployment-owned login evidence.
+        # This is a mandated stop, not an ineffective review attempt.
+        return True
     query = (
         "query($owner:String!,$name:String!,$number:Int!,$after:String){"
         "viewer{login}repository(owner:$owner,name:$name){pullRequest(number:$number){"

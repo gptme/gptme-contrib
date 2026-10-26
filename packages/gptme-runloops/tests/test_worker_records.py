@@ -1398,6 +1398,7 @@ def _skip_runner(payload):
             True,
         ),
         (_skip_pr_payload(), ("Agent",), False),
+        (_skip_pr_payload(), (), True),
         (
             _skip_pr_payload(
                 reviews=[
@@ -1409,7 +1410,7 @@ def _skip_runner(payload):
                 ]
             ),
             (),
-            False,
+            True,
         ),
     ],
 )

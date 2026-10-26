@@ -3989,6 +3989,15 @@ def test_contributor_review_effect_requires_exact_head_review(
     config, item, plan, outcome, hooks, run_cmd = _unmoved_comment_deliverable_fixture(
         tmp_path, ("contributor_unreviewed", "pr_update", "merge_ready")
     )
+    # Exercise an eligible miss, not the separate missing-login stop policy.
+    item = make_item(
+        types=["contributor_unreviewed", "pr_update", "merge_ready"],
+        detail="managed_logins=Bob",
+    )
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.contributor_review_skip_observed",
+        lambda *a, **kw: False,
+    )
     calls = []
 
     def review_since(*args, **kwargs):
@@ -4125,6 +4134,42 @@ def test_contributor_review_prompt_skip_is_observed_without_keeping_fingerprint(
     effect = run_post_session(plan, item, outcome, config, hooks)
     assert effect == expected_effect
     assert marker.exists() is marker_kept
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "",
+        "green",
+        "managed_logins=",
+        "managed_logins=Bob,",
+        "managed_logins=Bob managed_logins=Alice",
+    ],
+)
+def test_contributor_review_invalid_login_evidence_is_mandated_skip(
+    tmp_path, monkeypatch, detail
+) -> None:
+    from gptme_runloops.worker_records import contributor_review_skip_observed
+
+    config, item, plan, outcome, hooks, _ = _unmoved_comment_deliverable_fixture(
+        tmp_path, ("contributor_unreviewed",)
+    )
+    item = make_item(types=["contributor_unreviewed"], detail=detail)
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.viewer_review_since", lambda *a, **kw: False
+    )
+
+    def skip_observed(*args, **kwargs):
+        assert kwargs["managed_logins"] == ()
+        kwargs["runner"] = lambda *a, **kw: pytest.fail(
+            "local skip needs no GitHub I/O"
+        )
+        return contributor_review_skip_observed(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.contributor_review_skip_observed", skip_observed
+    )
+    assert run_post_session(plan, item, outcome, config, hooks) == "observed"
 
 
 def test_contributor_review_skip_probe_uses_managed_logins_from_detail(
