@@ -99,6 +99,7 @@ class ProjectMonitoringRun(BaseRunLoop):
         "ci_failure": 1200,  # ~20 min: investigate + fix
         "notification": 600,  # ~10 min: simple processing
         "linear_notification_retry": 600,  # ~10 min: retry a failed Linear notification delivery
+        "contributor_unreviewed": 1500,  # ~25 min: review investigation + test run + submit
         # greptile_needs_fix and greptile_convergence_adjudication are intentionally
         # absent: they are dispatcher-derived and handled by run_item.timeout_tier().
     }
@@ -921,6 +922,196 @@ class ProjectMonitoringRun(BaseRunLoop):
             )
             return False
 
+    def check_contributor_unreviewed(
+        self,
+        repo: str,
+        managed_logins: tuple[str, ...] = ("TimeToBuildBob", "ErikBjare"),
+        min_age_hours: int = 24,
+    ) -> list[WorkItem]:
+        """Check for outside-contributor PRs with green CI and no team review.
+
+        Emits ``contributor_unreviewed`` items only when
+        ``CONTRIBUTOR_REVIEW_ONLY_V1`` is deployed (checked at import).  The
+        caller never needs to guard separately; a false flag produces an empty
+        list with no I/O.
+
+        Eligibility:
+        - Open, non-draft
+        - Author not in *managed_logins* and not a bot (``[bot]`` suffix)
+        - Green CI (all check conclusions success/skipped, at least one check)
+        - Age >= *min_age_hours* since creation
+        - No managed login has submitted APPROVED / CHANGES_REQUESTED /
+          COMMENTED on the **current** head SHA
+
+        The ``detail`` field carries ``managed_logins=X,Y`` so the runtime
+        prompt can render the exact deployment-owned login set without relying
+        on inference.
+
+        Args:
+            repo: Repository name (owner/repo)
+            managed_logins: Team login set used both for author filtering and
+                review checks.  Defaults match the brain-repo poller defaults.
+            min_age_hours: Minimum PR age in hours before eligibility.
+
+        Returns:
+            List of WorkItem for unreviewed contributor PRs.
+        """
+        # Lazy import: run_item is not imported at module level to avoid the
+        # circular-import RuntimeWarning when running pm_dispatch as __main__
+        # (__init__ imports project_monitoring which would pull run_item into
+        # sys.modules before pm_dispatch is fully initialized).
+        from gptme_runloops.run_item import CONTRIBUTOR_REVIEW_ONLY_V1
+
+        if not CONTRIBUTOR_REVIEW_ONLY_V1:
+            return []
+
+        work_items = []
+        managed = {login.casefold() for login in managed_logins}
+        _PR_FIELDS = "number,title,author,headRefOid,url,isDraft,state,createdAt,statusCheckRollup"
+        try:
+            result = subprocess.run(
+                [
+                    "gh",
+                    "pr",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--state",
+                    "open",
+                    "--limit",
+                    "100",
+                    "--json",
+                    _PR_FIELDS,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return []
+
+            prs = json.loads(result.stdout)
+            now = datetime.now(timezone.utc)
+
+            for pr in prs:
+                if not isinstance(pr, dict):
+                    continue
+                if pr.get("isDraft") or pr.get("state", "").upper() != "OPEN":
+                    continue
+                author_info = pr.get("author") or {}
+                author = str(author_info.get("login") or "").strip()
+                if not author:
+                    continue
+                if author.casefold() in managed:
+                    continue
+                if author.casefold().endswith("[bot]") or author.casefold().startswith(
+                    "app/"
+                ):
+                    continue
+
+                # Age gate
+                created_str = pr.get("createdAt") or ""
+                try:
+                    created = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                except (ValueError, AttributeError):
+                    continue
+                if (now - created).total_seconds() < min_age_hours * 3600:
+                    continue
+
+                # CI green gate: all checks success/skipped, at least one check
+                checks = pr.get("statusCheckRollup") or []
+                if not checks:
+                    continue
+                if not all(
+                    str(c.get("conclusion") or "").upper() in {"SUCCESS", "SKIPPED"}
+                    for c in checks
+                    if isinstance(c, dict)
+                ):
+                    continue
+
+                head = str(pr.get("headRefOid") or "").strip()
+                if not head:
+                    continue
+
+                number = pr.get("number")
+                if not isinstance(number, int):
+                    continue
+
+                # Fetch full review list to check for existing managed review
+                reviews_result = subprocess.run(
+                    [
+                        "gh",
+                        "api",
+                        "--paginate",
+                        "--slurp",
+                        f"repos/{repo}/pulls/{number}/reviews?per_page=100",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if reviews_result.returncode != 0:
+                    continue
+                try:
+                    pages = json.loads(reviews_result.stdout or "null")
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(pages, list):
+                    continue
+                # Flatten pages (--slurp wraps each page in an outer list)
+                reviews = [
+                    r
+                    for page in pages
+                    for r in (page if isinstance(page, list) else [page])
+                    if isinstance(r, dict)
+                ]
+
+                # Skip if a managed login already reviewed this head
+                already_reviewed = False
+                for review in reviews:
+                    reviewer_info = review.get("user") or {}
+                    reviewer = str(reviewer_info.get("login") or "").strip().casefold()
+                    if reviewer not in managed:
+                        continue
+                    review_state = str(review.get("state") or "").upper()
+                    if review_state not in {
+                        "APPROVED",
+                        "CHANGES_REQUESTED",
+                        "COMMENTED",
+                    }:
+                        continue
+                    reviewed_head = str(review.get("commit_id") or "").strip()
+                    if reviewed_head == head:
+                        already_reviewed = True
+                        break
+
+                if already_reviewed:
+                    continue
+
+                managed_logins_token = ",".join(managed_logins)
+                detail = (
+                    f"green outside-contributor PR by @{author}, open >={min_age_hours}h with "
+                    "no submitted team review on the current head; inspect and "
+                    "submit a head-pinned review with test receipts. Do NOT push "
+                    "to the contributor branch or merge. "
+                    f"managed_logins={managed_logins_token}"
+                )
+                work_items.append(
+                    WorkItem(
+                        repo=repo,
+                        item_type="contributor_unreviewed",
+                        number=number,
+                        title=pr.get("title", f"PR #{number}"),
+                        url=pr.get("url", f"https://github.com/{repo}/pull/{number}"),
+                        details=detail,
+                    )
+                )
+
+        except Exception as e:
+            self.logger.error(f"Error checking contributor PRs in {repo}: {e}")
+
+        return work_items
+
     def check_assigned_issues(self, repo: str) -> list[WorkItem]:
         """Check for assigned issues using state tracking.
 
@@ -1236,6 +1427,11 @@ class ProjectMonitoringRun(BaseRunLoop):
             # Check assigned issues
             issue_work = self.check_assigned_issues(repo)
             all_work.extend(issue_work)
+
+            # Check outside-contributor PRs that need an initial review
+            # (slow-lane, review-only; gated on CONTRIBUTOR_REVIEW_ONLY_V1)
+            contributor_work = self.check_contributor_unreviewed(repo)
+            all_work.extend(contributor_work)
 
         return all_work
 
