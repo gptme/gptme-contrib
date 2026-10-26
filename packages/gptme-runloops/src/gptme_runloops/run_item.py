@@ -3009,10 +3009,12 @@ def run_post_session(
             if reviewed is False or exit_code != 0
             else EFFECT_UNKNOWN
         )
-        if reviewed is False and exit_code == 0:
+        if reviewed is not True and exit_code == 0:
             # Prompt-mandated skips (draft/closed/managed-author/non-green/
-            # sibling already reviewed) also yield reviewed=False. Grade those
-            # observed so recovery does not drain the ineffective budget, but
+            # sibling already reviewed) can explain a missing review. Missing
+            # login evidence proves a local skip even if review observation
+            # failed. Grade confirmed skips observed so recovery does not
+            # drain the ineffective budget, but
             # still clear the launch fingerprint below: the slot key is shared
             # with mentions/CI, and eligibility can return on a later poll.
             skipped = None

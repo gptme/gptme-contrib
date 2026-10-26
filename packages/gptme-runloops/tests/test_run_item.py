@@ -4136,6 +4136,7 @@ def test_contributor_review_prompt_skip_is_observed_without_keeping_fingerprint(
     assert marker.exists() is marker_kept
 
 
+@pytest.mark.parametrize("reviewed", [False, None, "raises"])
 @pytest.mark.parametrize(
     "detail",
     [
@@ -4147,7 +4148,7 @@ def test_contributor_review_prompt_skip_is_observed_without_keeping_fingerprint(
     ],
 )
 def test_contributor_review_invalid_login_evidence_is_mandated_skip(
-    tmp_path, monkeypatch, detail
+    tmp_path, monkeypatch, detail, reviewed
 ) -> None:
     from gptme_runloops.worker_records import contributor_review_skip_observed
 
@@ -4155,9 +4156,13 @@ def test_contributor_review_invalid_login_evidence_is_mandated_skip(
         tmp_path, ("contributor_unreviewed",)
     )
     item = make_item(types=["contributor_unreviewed"], detail=detail)
-    monkeypatch.setattr(
-        "gptme_runloops.run_item.viewer_review_since", lambda *a, **kw: False
-    )
+
+    def observe_review(*args, **kwargs):
+        if reviewed == "raises":
+            raise RuntimeError("GitHub review observation unavailable")
+        return reviewed
+
+    monkeypatch.setattr("gptme_runloops.run_item.viewer_review_since", observe_review)
 
     def skip_observed(*args, **kwargs):
         assert kwargs["managed_logins"] == ()
