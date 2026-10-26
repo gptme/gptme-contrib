@@ -16,15 +16,12 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from gptme_coordination.db import CoordinationDB
+from gptme_coordination import db as db_module
+from gptme_coordination.db import CoordinationDB, _enable_wal
 
 
 def _init_db(db_path: str, barrier: object) -> None:
     """Open the coordination DB, synchronized with the competing process."""
-    # Open a plain connection first so both processes race on the *same*
-    # brand-new file, then line up before the initialization runs.
-    conn = sqlite3.connect(db_path, isolation_level=None)
-    conn.close()
     barrier.wait(timeout=30)  # type: ignore[attr-defined]
     with CoordinationDB(db_path) as db:
         db.conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
@@ -97,3 +94,66 @@ def test_failed_worker_does_not_leave_its_peer_running(monkeypatch) -> None:
             if proc.is_alive():
                 proc.kill()
             proc.join(timeout=5)
+
+
+def test_wal_conversion_retries_until_reader_releases_lock(tmp_path, monkeypatch):
+    """Force a real conversion failure, then release the reader on retry."""
+    path = tmp_path / "reader.db"
+    reader = sqlite3.connect(path, isolation_level=None)
+    writer = sqlite3.connect(path, isolation_level=None)
+    sleeps = []
+    try:
+        reader.execute("CREATE TABLE example (value INTEGER)")
+        reader.execute("BEGIN")
+        reader.execute("SELECT * FROM example").fetchall()
+        writer.execute("PRAGMA busy_timeout=0")
+
+        def release_reader(delay):
+            sleeps.append(delay)
+            reader.execute("ROLLBACK")
+
+        monkeypatch.setattr(db_module.time, "sleep", release_reader)
+        _enable_wal(writer)
+        assert sleeps == [db_module.WAL_RETRY_DELAY]
+        assert writer.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_wal_conversion_reraises_when_lock_outlasts_deadline(tmp_path, monkeypatch):
+    """The retry budget is bounded and preserves SQLite's lock exception."""
+    path = tmp_path / "locked.db"
+    reader = sqlite3.connect(path, isolation_level=None)
+    writer = sqlite3.connect(path, isolation_level=None)
+    sleeps = []
+    clock = iter([0.0, 0.0, 1.0])
+    monkeypatch.setattr(db_module.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(db_module.time, "sleep", sleeps.append)
+    try:
+        reader.execute("CREATE TABLE example (value INTEGER)")
+        reader.execute("BEGIN")
+        reader.execute("SELECT * FROM example").fetchall()
+        writer.execute("PRAGMA busy_timeout=0")
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            _enable_wal(writer, timeout=1.0)
+        assert sleeps == [db_module.WAL_RETRY_DELAY]
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_wal_conversion_does_not_retry_unrelated_io_errors(monkeypatch):
+    """A real storage failure must not be misclassified as lock contention."""
+    from unittest.mock import Mock
+
+    error = sqlite3.OperationalError("disk I/O error")
+    conn = Mock(spec=sqlite3.Connection)
+    conn.execute.side_effect = error
+    sleep = Mock()
+    monkeypatch.setattr(db_module.time, "sleep", sleep)
+    with pytest.raises(sqlite3.OperationalError) as raised:
+        _enable_wal(conn)
+    assert raised.value is error
+    conn.execute.assert_called_once_with("PRAGMA journal_mode=WAL")
+    sleep.assert_not_called()
