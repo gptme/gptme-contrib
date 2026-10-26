@@ -1,84 +1,148 @@
 #!/usr/bin/env bash
-# Detect the test runner for the current project and print the recommended command.
-# Exit 0 on success (prints command), exit 1 if no runner detected.
+# Detect the test runner for a project and print the recommended command.
+# Usage: detect-runner.sh [DIR]   (default: current directory)
+# Exit 0 on success (prints "CMD  # REASON"), exit 1 if no runner detected.
+#
+# Mirrors gptme's canonical detector, gptme.util.completion_verification.
+# discover_verification_command, used by GPTME_VERIFY_COMPLETION_AUTO=1:
+# pytest config > tox config > exact npm "test" script > Cargo > Make "test"
+# target. There is deliberately no npx fallback: npx can fetch and execute
+# packages that are not in the project.
 set -euo pipefail
 
-REASON=""
-CMD=""
-
-# Resolve pytest invocation: prefer uv run pytest when uv is available
-if command -v uv &>/dev/null; then
-    PYTEST_CMD="uv run pytest -x -q"
-else
-    PYTEST_CMD="pytest -x -q"
-fi
-
-# Python: pytest (priority: explicit config > pyproject > setup.cfg > tox > presence)
-if [[ -f pytest.ini ]]; then
-    CMD="$PYTEST_CMD"
-    REASON="pytest.ini found"
-elif [[ -f pyproject.toml ]] && grep -q '\[tool\.pytest' pyproject.toml 2>/dev/null; then
-    CMD="$PYTEST_CMD"
-    REASON="[tool.pytest.ini_options] in pyproject.toml"
-elif [[ -f setup.cfg ]] && grep -q '^\[tool:pytest\]' setup.cfg 2>/dev/null; then
-    CMD="$PYTEST_CMD"
-    REASON="[tool:pytest] in setup.cfg"
-elif [[ -f tox.ini ]]; then
-    if grep -qE '^\[(tox|testenv)\]' tox.ini 2>/dev/null; then
-        # Real tox project — [tox] or [testenv] section present; let tox manage the env
-        # (A [pytest] section may coexist; tox still owns the run)
-        CMD="tox"
-        REASON="tox.ini found ([tox]/[testenv] section detected)"
-    elif grep -q '^\[pytest\]' tox.ini 2>/dev/null; then
-        # tox.ini used as a plain pytest config (no [testenv]) — run pytest directly
-        CMD="$PYTEST_CMD"
-        REASON="[pytest] section in tox.ini (no tox/testenv section)"
-    else
-        CMD="tox"
-        REASON="tox.ini found"
+# Keep non-Python projects usable on images without Python. Structured Python
+# and npm configuration detection below requires python3; do not guess at JSON.
+if ! command -v python3 >/dev/null 2>&1; then
+    workspace=${1:-.}
+    if [[ -f "$workspace/Cargo.toml" ]]; then
+        echo "cargo test  # Cargo.toml defines a Cargo project"
+        exit 0
     fi
-elif command -v pytest &>/dev/null || command -v uv &>/dev/null; then
-    # Heuristic: if there are test files, assume pytest
-    # Note: avoid piping find to grep -q under pipefail — grep exits early and find
-    # gets SIGPIPE (exit 141), making the pipeline non-zero even when a match exists.
-    if [[ -n "$(find . -name 'test_*.py' -o -name '*_test.py' 2>/dev/null)" ]]; then
-        CMD="$PYTEST_CMD"
-        REASON="test_*.py files found (pytest assumed)"
-    fi
-fi
-
-# JavaScript/TypeScript: vitest or jest (only if no Python runner found)
-if [[ -z "$CMD" ]] && [[ -f package.json ]]; then
-    if python3 -c "import json,sys; s=json.load(open('package.json')).get('scripts',{}); sys.exit(0 if any('vitest' in v for v in s.values()) else 1)" 2>/dev/null; then
-        CMD="npx vitest run"
-        REASON="vitest in package.json scripts"
-    elif python3 -c "import json,sys; s=json.load(open('package.json')).get('scripts',{}); sys.exit(0 if 'test' in s else 1)" 2>/dev/null; then
-        CMD="npm test"
-        REASON="test script in package.json"
-    elif python3 -c "import json,sys; s=json.load(open('package.json')).get('scripts',{}); sys.exit(0 if any('jest' in v for v in s.values()) else 1)" 2>/dev/null; then
-        # jest found in a script value but no canonical 'test' key (e.g. 'test:unit': 'jest')
-        CMD="npx jest"
-        REASON="jest in package.json scripts"
-    fi
-fi
-
-# Rust: cargo test
-if [[ -z "$CMD" ]] && [[ -f Cargo.toml ]]; then
-    CMD="cargo test 2>&1"
-    REASON="Cargo.toml found"
-fi
-
-# Makefile: test target
-if [[ -z "$CMD" ]] && [[ -f Makefile ]]; then
-    if grep -q '^test[[:space:]]*:' Makefile 2>/dev/null; then
-        CMD="make test"
-        REASON="test target in Makefile"
-    fi
-fi
-
-if [[ -z "$CMD" ]]; then
-    echo "No test runner detected" >&2
+    # GNU Make reads only the first existing default makefile.
+    for name in GNUmakefile makefile Makefile; do
+        if [[ -f "$workspace/$name" ]]; then
+            if grep -qE '^test[[:space:]]*:' "$workspace/$name"; then
+                echo "make test  # $name defines a test target"
+                exit 0
+            fi
+            break
+        fi
+    done
+    echo "No test runner detected (python3 unavailable for Python/npm configuration)" >&2
     exit 1
 fi
 
-echo "$CMD  # $REASON"
+# Do not import modules from the inspected project or PYTHONPATH.
+exec python3 -I - "${1:-.}" <<'PY'
+import configparser
+import json
+import re
+import shutil
+import sys
+from pathlib import Path
+
+try:
+    import tomllib
+except ImportError:  # Python < 3.11
+    tomllib = None
+
+ws = Path(sys.argv[1])
+pytest_cmd = "uv run pytest -x -q" if shutil.which("uv") else "pytest -x -q"
+
+
+def read(name):
+    path = ws / name
+    if not path.is_file():
+        return None
+    try:
+        return path.read_text(errors="replace")
+    except OSError:
+        return None
+
+
+def toml_has_table(text, *keys):
+    if tomllib is None:
+        return re.search(r"(?m)^\[" + re.escape(".".join(keys)) + r"[\].]", text) is not None
+    try:
+        cur = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return False
+    for key in keys:
+        if not isinstance(cur, dict) or key not in cur:
+            return False
+        cur = cur[key]
+    return True
+
+
+def ini_has_section(text, *names, prefixes=()):
+    parser = configparser.RawConfigParser(interpolation=None)
+    try:
+        parser.read_string(text)
+    except configparser.Error:
+        return False
+    sections = {s.lower() for s in parser.sections()}
+    return bool(sections & {n.lower() for n in names}) or any(
+        s.startswith(prefixes) for s in sections
+    )
+
+
+def found(cmd, reason):
+    print(f"{cmd}  # {reason}")
+    sys.exit(0)
+
+
+# 1. Explicit pytest configuration
+for name in ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini"):
+    text = read(name)
+    if text is None:
+        continue
+    if (
+        name == "pytest.ini"
+        or (name == "pyproject.toml" and toml_has_table(text, "tool", "pytest"))
+        or (name == "setup.cfg" and ini_has_section(text, "pytest", "tool:pytest"))
+        or (name == "tox.ini" and ini_has_section(text, "pytest"))
+    ):
+        found(pytest_cmd, f"{name} contains explicit pytest configuration")
+
+# 2. tox configuration
+for name in ("tox.ini", "pyproject.toml", "setup.cfg"):
+    text = read(name)
+    if text is None:
+        continue
+    if (
+        (name == "tox.ini" and ini_has_section(text, "tox", "testenv", prefixes=("testenv:",)))
+        or (name == "pyproject.toml" and toml_has_table(text, "tool", "tox"))
+        or (name == "setup.cfg" and ini_has_section(text, "tox", "tox:tox"))
+    ):
+        found("tox", f"{name} contains tox configuration")
+
+# 3. Exact npm "test" script (pre/post lifecycle scripts run too: shown on stderr)
+text = read("package.json")
+if text is not None:
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = None
+    scripts = data.get("scripts") if isinstance(data, dict) else None
+    if isinstance(scripts, dict) and isinstance(scripts.get("test"), str):
+        for hook in ("pretest", "test", "posttest"):
+            if isinstance(scripts.get(hook), str):
+                print(f"npm lifecycle {hook}: {scripts[hook]}", file=sys.stderr)
+        found("npm test", "package.json defines an exact test script")
+
+# 4. Cargo
+if (ws / "Cargo.toml").is_file():
+    found("cargo test", "Cargo.toml defines a Cargo project")
+
+# 5. GNU Make reads only the first existing default makefile.
+for name in ("GNUmakefile", "makefile", "Makefile"):
+    if not (ws / name).is_file():
+        continue
+    text = read(name)
+    if text is not None and re.search(r"(?m)^test\s*(?::|::)", text):
+        found("make test", f"{name} defines a test target")
+    break
+
+print("No test runner detected", file=sys.stderr)
+sys.exit(1)
+PY
