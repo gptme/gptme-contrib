@@ -22,7 +22,7 @@ Not published on PyPI. Install from the repository subdirectory and pick the
 extras you need:
 
 ```bash
-# gptme plugin + both providers + CLI
+# gptme plugin + all providers + CLI
 pip install "gptme-imagen[all] @ git+https://github.com/gptme/gptme-contrib.git#subdirectory=plugins/gptme-imagen"
 
 # CLI only, Gemini only (no gptme dependency)
@@ -30,7 +30,7 @@ pip install "gptme-imagen[cli,gemini] @ git+https://github.com/gptme/gptme-contr
 ```
 
 Extras: `gptme` (plugin), `cli` (click), `gemini` (google-genai), `dalle`
-(openai), `all`. Reference images additionally need Pillow, and DALL-E
+(openai), `a1111` (requests), `all`. Reference images additionally need Pillow, and DALL-E
 URL responses need `requests`.
 
 API keys are read from gptme's config/env lookup when gptme is installed,
@@ -39,7 +39,12 @@ otherwise from the environment:
 ```bash
 export GOOGLE_API_KEY=...   # Gemini (GEMINI_API_KEY also accepted)
 export OPENAI_API_KEY=...   # DALL-E 3 / DALL-E 2
+export AUTOMATIC1111_BASE_URL=http://localhost:7860  # local AUTOMATIC1111 (this is the default)
 ```
+
+The `a1111` provider needs no key: it calls a running
+[AUTOMATIC1111 web UI](https://github.com/AUTOMATIC1111/stable-diffusion-webui)
+started with `--api`, and records a cost of $0.
 
 ### Enabling in gptme
 
@@ -76,12 +81,13 @@ gptme-imagen generate "a sunset over mountains"
 gptme-imagen generate "tech startup logo" -p dalle --quality hd --style flat-design -o logo.png
 gptme-imagen generate "logo variations" -n 3   # generated_<timestamp>_001.png ... _003.png
 gptme-imagen generate "change the background to a beach" -i photo.png   # Gemini only
+gptme-imagen generate "a lighthouse at dusk" -p a1111 -s 512x512   # local AUTOMATIC1111
 gptme-imagen styles
 gptme-imagen cost --since 2026-01-01
 gptme-imagen history -n 20
 ```
 
-`generate` options: `--provider/-p {gemini,dalle,dalle2}`, `--output/-o`,
+`generate` options: `--provider/-p {gemini,dalle,dalle2,a1111}`, `--output/-o`,
 `--size/-s`, `--quality/-q {standard,hd}`, `--count/-n`, `--style`,
 `--enhance`, `--images/-i` (repeatable), `--open`. The CLI refuses an
 `--output` that has a file extension when `--count` is greater than 1. For
@@ -98,7 +104,8 @@ numbered files such as `logos/option_001.png`, use the Python
 | `compare_providers(prompt, providers=None, view=True, **kwargs)` | Same prompt across providers |
 
 - `provider`: `gemini` (model `gemini-3-pro-image-preview`), `dalle`
-  (`dall-e-3`), `dalle2` (`dall-e-2`).
+  (`dall-e-3`), `dalle2` (`dall-e-2`), `a1111` (local AUTOMATIC1111,
+  20 txt2img steps at the requested size).
 - `style` presets: `photo`, `illustration`, `sketch`, `technical-diagram`,
   `flat-design`, `cyberpunk`, `watercolor`, `oil-painting`.
 - `enhance=True` appends generic quality/composition keywords to the prompt
