@@ -199,6 +199,44 @@ check_repo() {
         run_json=$(echo "$run_json" | jq --argjson disabled "$disabled_json" '[.[] | select(.name as $n | $disabled | index($n) | not)]')
     fi
 
+    # Filter out startup_failure runs from deleted/ghost workflows. GitHub keeps
+    # historical check-suite records for workflows that were added with invalid YAML
+    # and then deleted (state=deleted, path=BuildFailed). These fire as push-event
+    # startup_failure runs with an EMPTY NAME on every commit and mask real CI
+    # status (ErikBjare/bob workflow_id 365726176, path=BuildFailed). Match on the
+    # empty-name shape, not the conclusion alone: a real broken workflow that is
+    # still present reports startup_failure with its own name and must keep
+    # surfacing even alongside passing workflows. Always drop the ghost shape
+    # with no fallback: the runs window is --limit 20 and ghost fires (push +
+    # schedule + issues) can crowd it out entirely, in which case keeping them
+    # would mask the real runs that fell outside the window. A repo left with
+    # only ghost runs reports "No runs", which is accurate.
+    # Drop them before fallback decisions: they cannot provide a reportable
+    # alternative to skipped, Dependabot, or pull_request runs.
+    run_json=$(echo "$run_json" | jq '[.[] | select(
+        (.conclusion != "startup_failure")
+        or ((.name // "") != "")
+    )]')
+    if [ "$(echo "$run_json" | jq 'length')" -eq 0 ]; then
+        echo -e "${YELLOW}-${NC} $label: No runs (only ghost startup_failure runs from deleted workflows)"
+        return
+    fi
+
+    # A fork PR whose head branch is named "master" reports headBranch=master,
+    # so `--branch master` returns its pull_request runs next to the real push
+    # runs (ActivityWatch/aw-qt 2026-10-19: a fork-master PR run on 3f2e243
+    # masked green push runs on HEAD and printed "Stale passing run"). Those
+    # runs tested a fork merge ref, never a default-branch commit. Keep them
+    # only if no reportable non-PR run remains. Select this window before
+    # skipped/Dependabot preferences can discard its non-PR alternatives.
+    local push_json
+    push_json=$(echo "$run_json" | jq '[.[] | select(
+        (.event // "") != "pull_request" and (.event // "") != "pull_request_target"
+    )]')
+    if [ "$(echo "$push_json" | jq 'length')" -gt 0 ]; then
+        run_json="$push_json"
+    fi
+
     # Filter out runs with "skipped" conclusion — conditional workflows that don't apply
     # to the current event type (e.g. gptme-bot only runs on PR/issue events, gets
     # "skipped" on master pushes and otherwise masks the passing build/test runs).
@@ -224,29 +262,6 @@ check_repo() {
     )]')
     if [ "$(echo "$product_json" | jq 'length')" -gt 0 ]; then
         run_json="$product_json"
-    fi
-
-    # Filter out startup_failure runs from deleted/ghost workflows. GitHub keeps
-    # historical check-suite records for workflows that were added with invalid YAML
-    # and then deleted (state=deleted, path=BuildFailed). These fire as push-event
-    # startup_failure runs with an EMPTY NAME on every commit and mask real CI
-    # status (ErikBjare/bob workflow_id 365726176, path=BuildFailed). Match on the
-    # empty-name shape, not the conclusion alone: a real broken workflow that is
-    # still present reports startup_failure with its own name and must keep
-    # surfacing even alongside passing workflows. Always drop the ghost shape
-    # with no fallback: the runs window is --limit 20 and ghost fires (push +
-    # schedule + issues) can crowd it out entirely, in which case keeping them
-    # would mask the real runs that fell outside the window. A repo left with
-    # only ghost runs reports "No runs", which is accurate.
-    run_json=$(echo "$run_json" | jq '[.[] | select(
-        (.conclusion != "startup_failure")
-        or ((.name // "") != "")
-    )]')
-    # The empty-array check above ran BEFORE this filter, so an all-ghost window
-    # would otherwise fall through to conclusion="" and print "Unknown ()".
-    if [ "$(echo "$run_json" | jq 'length')" -eq 0 ]; then
-        echo -e "${YELLOW}-${NC} $label: No runs (only ghost startup_failure runs from deleted workflows)"
-        return
     fi
 
     # Report a red workflow even when a newer run of a DIFFERENT workflow passed.
