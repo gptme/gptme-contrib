@@ -2,7 +2,7 @@
 name = "gptme-contrib-workspace"
 version = "0.1.0"
 description = "Community contributions and utilities for gptme agents"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = ["PyYAML"]
 
 [build-system]
@@ -72,6 +72,13 @@ cache_dir = ".pytest_cache"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]
+
+[tool.ruff]
+# Lint for the packages' own floor. Every member still declares >=3.10;
+# only the workspace lock (gptme-review, tomllib) needs the root >=3.11
+# floor above, and ruff would otherwise infer py311 from it and rewrite
+# every version guard in the repo.
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
