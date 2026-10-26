@@ -4066,6 +4066,9 @@ def test_contributor_review_preserves_suppressed_notification_work(
     )
     # Only a confirmed submitted review may retain the launch fingerprint;
     # absent or unreadable review evidence must permit the next poll to retry.
+    # Confirmed prompt-skips are graded observed but still clear the stamp
+    # (shared slot key; eligibility can return). The default skip probe here
+    # is unobservable, so False stays a retry.
     assert marker.exists() == (reviewed is True)
     assert logged_marker.exists() == (reviewed is True)
 
@@ -4085,3 +4088,66 @@ def test_contributor_review_does_not_claim_suppressed_work_or_author_commits(
     record = json.loads(Path(plan.record_file).read_text())
     assert record["deliverables"] == []
     assert latency_calls == []
+
+
+@pytest.mark.parametrize(
+    "skipped, expected_effect, marker_kept",
+    [
+        (True, "observed", False),
+        (False, "none", False),
+        (None, "none", False),
+    ],
+)
+def test_contributor_review_prompt_skip_is_observed_without_keeping_fingerprint(
+    tmp_path, monkeypatch, skipped, expected_effect, marker_kept
+) -> None:
+    config, item, plan, outcome, hooks, _ = _unmoved_comment_deliverable_fixture(
+        tmp_path, ("contributor_unreviewed",)
+    )
+    item = make_item(
+        types=["contributor_unreviewed"],
+        detail="managed_logins=Alice",
+    )
+    cooldown = tmp_path / "cooldown"
+    cooldown.mkdir()
+    monkeypatch.setenv("PM_DISPATCH_COOLDOWN_DIR", str(cooldown))
+    monkeypatch.setenv("PM_SLOT_KEY", f"{item.repo}#{item.number}")
+    marker = cooldown / f"{item.repo.replace('/', '-')}-{item.number}.event"
+    marker.write_text("launch-fingerprint")
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.viewer_review_since", lambda *a, **kw: False
+    )
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.contributor_review_skip_observed",
+        lambda *a, **kw: skipped,
+    )
+
+    effect = run_post_session(plan, item, outcome, config, hooks)
+    assert effect == expected_effect
+    assert marker.exists() is marker_kept
+
+
+def test_contributor_review_skip_probe_uses_managed_logins_from_detail(
+    tmp_path, monkeypatch
+) -> None:
+    config, item, plan, outcome, hooks, _ = _unmoved_comment_deliverable_fixture(
+        tmp_path, ("contributor_unreviewed",)
+    )
+    item = make_item(
+        types=["contributor_unreviewed"],
+        detail="managed_logins=Alice,Bob",
+    )
+    calls = []
+
+    def skip_observed(*args, **kwargs):
+        calls.append(kwargs["managed_logins"])
+        return True
+
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.viewer_review_since", lambda *a, **kw: False
+    )
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.contributor_review_skip_observed", skip_observed
+    )
+    assert run_post_session(plan, item, outcome, config, hooks) == "observed"
+    assert calls == [("Alice", "Bob")]

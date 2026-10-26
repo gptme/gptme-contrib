@@ -193,7 +193,13 @@ Review-only sessions also skip generic notification-handling latency receipts
 and PR-movement deliverable attribution: neither a suppressed mention nor a
 contributor's concurrent commit is work delivered by the reviewer. If a review
 is absent or unobservable (including a failed worker), launch event fingerprints
-are cleared for retry without consuming suppressed watermarks. Dispatch ledger
+are cleared for retry without consuming suppressed watermarks. A confirmed
+prompt-mandated skip (draft, closed/merged, managed-author, non-green CI, or a
+managed review already on the live head) is graded `observed` so recovery does
+not drain the ineffective budget, and fingerprints are still cleared so other
+slot types and later eligibility are not suppressed. Head movement is not a
+skip: the new head remains eligible and retries. `contributor_review_skip_observed`
+is the GitHub observation helper for that distinction. Dispatch ledger
 `types` likewise reflect only the review; mixed inputs remain available as
 per-item `original_types`, never credited as completed repairs.
 

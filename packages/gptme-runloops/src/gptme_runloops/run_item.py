@@ -122,6 +122,7 @@ from gptme_runloops.worker_records import (
     build_wait_merge_gate_entry,
     capture_pr_snapshot_json,
     compute_latency_outcome,
+    contributor_review_skip_observed,
     extract_delivery_field,
     fallback_outcome,
     normalize_delivery_outcome,
@@ -3008,7 +3009,28 @@ def run_post_session(
             if reviewed is False or exit_code != 0
             else EFFECT_UNKNOWN
         )
-        if effect != EFFECT_OBSERVED:
+        if reviewed is False and exit_code == 0:
+            # Prompt-mandated skips (draft/closed/managed-author/non-green/
+            # sibling already reviewed) also yield reviewed=False. Grade those
+            # observed so recovery does not drain the ineffective budget, but
+            # still clear the launch fingerprint below: the slot key is shared
+            # with mentions/CI, and eligibility can return on a later poll.
+            skipped = None
+            try:
+                skipped = contributor_review_skip_observed(
+                    plan.repo,
+                    plan.number,
+                    managed_logins=config.prompt_params(
+                        item
+                    ).contributor_managed_logins,
+                    cwd=config.workspace,
+                    runner=hooks.run_cmd,
+                )
+            except Exception:
+                skipped = None
+            if skipped is True:
+                effect = EFFECT_OBSERVED
+        if reviewed is not True:
             # Keep suppressed activity pending, but remove the launch-only
             # fingerprint so absent/unobservable reviews can retry next poll.
             clear_slot_event_markers(config, resolve_slot_key(config, item))
