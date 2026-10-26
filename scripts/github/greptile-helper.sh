@@ -278,6 +278,12 @@ _fetch_pr_commit_info() {
                    dates: [.[].data.repository.pullRequest.commits.nodes[]?.commit.committedDate]}' \
         2>/dev/null) || out=""
     if [ -n "$out" ] && [ -n "$(printf '%s' "$out" | jq -r '.head_sha' 2>/dev/null)" ]; then
+        # GraphQL headRefOid can lag a fresh push by seconds–minutes (eventual consistency).
+        # Override with the REST /pulls endpoint which converges faster.
+        rest_head=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha // ""' 2>/dev/null) || rest_head=""
+        if [ -n "$rest_head" ]; then
+            out=$(printf '%s' "$out" | jq --arg h "$rest_head" '.head_sha = $h' 2>/dev/null) || true
+        fi
         printf '%s\n' "$out"
         return 0
     fi
