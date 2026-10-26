@@ -2,10 +2,10 @@
 name: test-discovery
 description: Auto-discover and run the relevant test suite after making code edits. Use when you've edited source files and want to verify correctness without being told which tests to run. Do NOT use for purely exploratory sessions with no file edits, or when the user has already specified which test command to run.
 license: MIT
-compatibility: "Works with projects using pytest, jest/vitest, cargo test, or Makefile targets"
+compatibility: "Works with projects using pytest, tox, an npm test script, cargo test, or Makefile targets"
 metadata:
   author: bob
-  version: "1.0.0"
+  version: "1.1.0"
   tags: [testing, pytest, jest, cargo, test-discovery, tdd, verification]
   requires_tools: [shell]
   requires_skills: []
@@ -29,6 +29,22 @@ self-correct from test failures without a manual "run tests" prompt.
 - Exploratory or documentation-only session with no source edits
 - The test suite is known to be very slow and the change is clearly non-breaking
 
+## Automatic Completion Verification
+
+gptme can run this discovery itself when the agent calls `complete`. Set
+`GPTME_VERIFY_COMPLETION_AUTO=1` (off by default, gptme with
+[gptme/gptme#3755](https://github.com/gptme/gptme/pull/3755)). After an
+episode that changed source, test or manifest files, the `complete` hook
+runs the discovered command, feeds a failure back to the agent as untrusted
+output, and closes once it passes or the retries run out. Documentation-only
+edits and test runs alone do not trigger it. Precedence: the
+`GPTME_VERIFY_COMPLETION` command, then `.gptme/verify-completion.sh`, then
+the discovered runner. The discovered command goes through normal shell
+confirmation.
+
+With that enabled, use this skill for the faster mid-task loop (Step 2's
+narrowed runs); the full-suite check at completion is automatic.
+
 ## Procedure
 
 ### Step 1: Detect the test runner
@@ -39,15 +55,21 @@ Run the bundled detector:
 bash skills/test-discovery/scripts/detect-runner.sh
 ```
 
-Or detect manually by priority:
+It mirrors gptme's canonical detector
+(`gptme.util.completion_verification.discover_verification_command`), first
+match wins:
 
-| Signal file | Runner | Command |
+| Signal | Runner | Command |
 |---|---|---|
-| `pytest.ini` / `[tool.pytest]` in `pyproject.toml` / `setup.cfg [tool:pytest]` | pytest | `uv run pytest -x -q` |
-| `package.json` with `"vitest"` or `"jest"` in scripts | jest/vitest | `npm test` or `npx vitest run` |
-| `Cargo.toml` | cargo | `cargo test 2>&1` |
-| `Makefile` with `test` target | make | `make test` |
-| `tox.ini` | tox | `tox` |
+| `pytest.ini`, `[tool.pytest]` in `pyproject.toml`, `[pytest]`/`[tool:pytest]` in `setup.cfg`, `[pytest]` in `tox.ini` | pytest | `uv run pytest -x -q` |
+| `[tox]` in `tox.ini`, `[tool.tox]` in `pyproject.toml`, `[tox]`/`[tox:tox]` in `setup.cfg` | tox | `tox` |
+| `package.json` with an exact `"test"` script | npm | `npm test` |
+| `Cargo.toml` | cargo | `cargo test` |
+| `Makefile`/`makefile`/`GNUmakefile` with a `test:` or `test::` target | make | `make test` |
+
+There is no `npx` fallback: `npx` can download and execute a package that is
+not in the project. `npm test` also runs `pretest`/`posttest`; the detector
+prints those scripts on stderr so you can read them first.
 
 ### Step 2: Narrow the scope
 
@@ -67,10 +89,8 @@ uv run pytest -x -q
 For JavaScript/TypeScript:
 
 ```shell
-# Run test file matching changed source
-npx vitest run src/<module>.test.ts
-# Or jest
-npx jest src/<module>.test.ts --no-coverage
+# Pass the changed test file through to the project's own test script
+npm test -- src/<module>.test.ts
 ```
 
 For Rust:
@@ -106,15 +126,16 @@ Never dump the full pytest traceback into the response unless the user asks for 
 
 ## Detection Script
 
-`scripts/detect-runner.sh` returns the recommended test command for the current
-directory and prints a brief rationale. Exit 0 = found, exit 1 = no test runner detected.
+`scripts/detect-runner.sh [DIR]` prints the recommended test command for `DIR`
+(default: current directory) with a brief rationale. Exit 0 = found, exit 1 = no
+test runner detected.
 
 ```shell
 bash skills/test-discovery/scripts/detect-runner.sh
-# → uv run pytest -x -q  (pytest.ini found)
-# → npm test  (package.json with jest script found)
-# → cargo test 2>&1  (Cargo.toml found)
-# → echo "No test runner detected"  (exit 1)
+# → uv run pytest -x -q  # pytest.ini contains explicit pytest configuration
+# → npm test  # package.json defines an exact test script
+# → cargo test  # Cargo.toml defines a Cargo project
+# → "No test runner detected" on stderr  (exit 1)
 ```
 
 ## Anti-Patterns
@@ -138,4 +159,4 @@ The skill worked if:
 
 - `skills/test-driven-development/SKILL.md` — write tests *before* code
 - `lessons/workflow/verifiable-tasks-principle.md` — prefer tasks with objective verification
-- gptme issue idea #1136 — tool-side auto-detection (post-exec hook in shell.py, deferred until PR queue < 12)
+- [gptme/gptme#3755](https://github.com/gptme/gptme/pull/3755) — opt-in completion-time discovery (`GPTME_VERIFY_COMPLETION_AUTO=1`), the canonical detector this skill mirrors
