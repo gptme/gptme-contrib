@@ -14,9 +14,9 @@ on:
 # Pushes to a branch share one group without cancel-in-progress: a running
 # master run finishes, but a queued one is replaced by the newer push, so a
 # burst of merges runs once on the latest commit instead of once per commit.
-# Push runs only test what changed, so `discover` diffs from the last run of
-# this workflow that actually started, not from github.event.before; the
-# survivor then also covers the commits of the replaced runs.
+# Push runs only test what changed, so `discover` diffs from a successful run
+# of this workflow, not from github.event.before; the survivor then also
+# covers replaced or failed runs. Without a safe baseline, test everything.
 # Schedule/dispatch runs keep a per-commit group.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.sha }}
@@ -81,20 +81,23 @@ jobs:
           echo "Packages excluded from the CI matrix:"
           make --no-print-directory ci-list-excluded-packages
 
-          # A queued push run can be replaced by a newer push (see the
-          # concurrency note at the top). Diff from the last run of this workflow
-          # on this branch that started (in progress, or completed with success
-          # or failure) so the commits of replaced runs are tested too. Keep
-          # github.event.before if the lookup fails or finds no ancestor.
+          # Only success establishes coverage: a failed or in-progress run may
+          # never reach its test matrix. Filter server-side so queued/cancelled
+          # bursts cannot crowd the baseline out of the response. If the lookup
+          # fails, is empty, or finds a non-ancestor, clear BEFORE to run fully;
+          # event.before alone would omit changes from replaced runs.
           if [[ "${{ github.event_name }}" == "push" ]]; then
-            covered=$(gh api "repos/${{ github.repository }}/actions/workflows/test-packages.yml/runs?branch=${{ github.ref_name }}&event=push&per_page=50" \
-              --jq '[.workflow_runs[] | select(.id < ${{ github.run_id }} and (.status == "in_progress" or (.status == "completed" and (.conclusion == "success" or .conclusion == "failure"))))][0].head_sha // empty' \
+            BEFORE=""
+            covered=$(gh api "repos/${{ github.repository }}/actions/workflows/test-packages.yml/runs?branch=${{ github.ref_name }}&event=push&status=success&per_page=50" \
+              --jq '[.workflow_runs[] | select(.id < ${{ github.run_id }} and .status == "completed" and .conclusion == "success")][0].head_sha // empty' \
               2>/dev/null || true)
-            if [[ -n "$covered" && "$covered" != "$BEFORE" ]] \
+            if [[ -n "$covered" ]] \
                 && git cat-file -e "${covered}^{commit}" 2>/dev/null \
                 && git merge-base --is-ancestor "$covered" HEAD; then
-              echo "Diffing from $covered, the last started run of this workflow (event.before: $BEFORE)"
+              echo "Diffing from $covered, the last successful run of this workflow"
               BEFORE="$covered"
+            else
+              echo "No successful ancestor baseline; running all packages"
             fi
           fi
 
