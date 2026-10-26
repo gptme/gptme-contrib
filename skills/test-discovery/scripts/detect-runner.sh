@@ -10,6 +10,28 @@
 # packages that are not in the project.
 set -euo pipefail
 
+# Keep non-Python projects usable on images without Python. Structured Python
+# and npm configuration detection below requires python3; do not guess at JSON.
+if ! command -v python3 >/dev/null 2>&1; then
+    workspace=${1:-.}
+    if [[ -f "$workspace/Cargo.toml" ]]; then
+        echo "cargo test  # Cargo.toml defines a Cargo project"
+        exit 0
+    fi
+    # GNU Make reads only the first existing default makefile.
+    for name in GNUmakefile makefile Makefile; do
+        if [[ -f "$workspace/$name" ]]; then
+            if grep -qE '^test[[:space:]]*:' "$workspace/$name"; then
+                echo "make test  # $name defines a test target"
+                exit 0
+            fi
+            break
+        fi
+    done
+    echo "No test runner detected (python3 unavailable for Python/npm configuration)" >&2
+    exit 1
+fi
+
 exec python3 - "${1:-.}" <<'PY'
 import configparser
 import json
@@ -108,11 +130,14 @@ if text is not None:
 if (ws / "Cargo.toml").is_file():
     found("cargo test", "Cargo.toml defines a Cargo project")
 
-# 5. Make "test" target
-for name in ("Makefile", "makefile", "GNUmakefile"):
+# 5. GNU Make reads only the first existing default makefile.
+for name in ("GNUmakefile", "makefile", "Makefile"):
+    if not (ws / name).is_file():
+        continue
     text = read(name)
     if text is not None and re.search(r"(?m)^test\s*(?::|::)", text):
         found("make test", f"{name} defines a test target")
+    break
 
 print("No test runner detected", file=sys.stderr)
 sys.exit(1)

@@ -1,5 +1,6 @@
 """detect-runner.sh must agree with gptme's canonical completion-time detector."""
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -52,6 +53,60 @@ def test_detect_runner(tmp_path, files, expected):
     else:
         assert result.returncode == 0, result.stderr
         assert result.stdout.split("  #")[0] == expected
+
+
+@pytest.mark.parametrize(
+    "files,expected",
+    [
+        ({"Cargo.toml": "[package]\nname = 'a'\n"}, "cargo test"),
+        ({"Makefile": "test:\n\ttrue\n"}, "make test"),
+        ({"GNUmakefile": "test::\n\ttrue\n"}, "make test"),
+        ({}, None),
+    ],
+)
+def test_detect_runner_without_python(tmp_path, files, expected):
+    # Only grep is available: invoke Bash by absolute path, and expose no Python.
+    bash = shutil.which("bash")
+    grep = shutil.which("grep")
+    assert bash is not None and grep is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "grep").symlink_to(grep)
+    for name, content in files.items():
+        (tmp_path / name).write_text(content)
+    result = subprocess.run(
+        [bash, str(SCRIPT), str(tmp_path)],
+        env={**os.environ, "PATH": str(bin_dir)},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == (0 if expected else 1), result.stderr
+    assert result.stdout.split("  #")[0].strip() == (expected or "")
+
+
+@pytest.mark.parametrize(
+    "preferred,shadowed",
+    [
+        ("GNUmakefile", "makefile"),
+        ("GNUmakefile", "Makefile"),
+        ("makefile", "Makefile"),
+    ],
+)
+def test_make_uses_first_existing_default_file(tmp_path, preferred, shadowed):
+    (tmp_path / preferred).write_text("all:\n\ttrue\n")
+    (tmp_path / shadowed).write_text("test:\n\ttrue\n")
+    make = subprocess.run(
+        ["make", "--no-print-directory", "-n", "test"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert make.returncode != 0  # The shadowed test target is not executable.
+    result = subprocess.run(
+        ["bash", str(SCRIPT), str(tmp_path)], capture_output=True, text=True
+    )
+    assert result.returncode == 1, result.stdout
+    assert result.stdout == ""
 
 
 def test_npm_lifecycle_scripts_shown(tmp_path):

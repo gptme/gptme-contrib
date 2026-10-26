@@ -2,7 +2,7 @@
 name: test-discovery
 description: Auto-discover and run the relevant test suite after making code edits. Use when you've edited source files and want to verify correctness without being told which tests to run. Do NOT use for purely exploratory sessions with no file edits, or when the user has already specified which test command to run.
 license: MIT
-compatibility: "Works with projects using pytest, tox, an npm test script, cargo test, or Makefile targets"
+compatibility: "Requires Bash; Python 3 for Python/npm config parsing. Cargo and Make discovery also work without Python."
 metadata:
   author: bob
   version: "1.1.0"
@@ -65,11 +65,17 @@ match wins:
 | `[tox]` in `tox.ini`, `[tool.tox]` in `pyproject.toml`, `[tox]`/`[tox:tox]` in `setup.cfg` | tox | `tox` |
 | `package.json` with an exact `"test"` script | npm | `npm test` |
 | `Cargo.toml` | cargo | `cargo test` |
-| `Makefile`/`makefile`/`GNUmakefile` with a `test:` or `test::` target | make | `make test` |
+| First existing file in GNU Make order (`GNUmakefile`, `makefile`, `Makefile`) with a `test:` or `test::` target | make | `make test` |
 
 There is no `npx` fallback: `npx` can download and execute a package that is
 not in the project. `npm test` also runs `pretest`/`posttest`; the detector
 prints those scripts on stderr so you can read them first.
+
+Python 3 is needed to parse Python/npm configuration; Cargo and Make detection
+also work without it. One intentional correction to the canonical detector's
+initial implementation: Make discovery inspects only the first existing default
+makefile, in GNU Make order, rather than advertising a shadowed `test` target
+that `make test` would not run.
 
 ### Step 2: Narrow the scope
 
