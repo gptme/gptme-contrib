@@ -1,0 +1,64 @@
+name: Test Skills
+
+# Runs every skills/<name>/tests suite. test-packages.yml only discovers
+# packages/<name>, so skill suites otherwise run in no workflow.
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'skills/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/test-skills.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'skills/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/test-skills.yml'
+  schedule:
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Skill scripts import workspace dependencies (click, jsonschema), so the
+      # suites run in the workspace environment rather than a bare pytest.
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      # The suites are small (seconds in total), so all of them run on every
+      # trigger; one pytest invocation per skill keeps their sys.path inserts
+      # from colliding and names the failing skill in the log.
+      - name: Run skill test suites
+        run: |
+          failed=()
+          for tests in skills/*/tests; do
+            [ -d "$tests" ] || continue
+            echo "::group::$tests"
+            if ! uv run pytest "$tests" -q; then
+              failed+=("$tests")
+            fi
+            echo "::endgroup::"
+          done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "Failed skill suites: ${failed[*]}"
+            exit 1
+          fi
