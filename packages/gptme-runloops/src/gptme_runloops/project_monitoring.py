@@ -90,6 +90,7 @@ class ProjectMonitoringRun(BaseRunLoop):
 
         # Cache discovered work between has_work() and generate_prompt()
         self._discovered_work: list[WorkItem] = []
+        self._final_session_result: ExecutionResult | None = None
 
     # Per-item timeout in seconds for work produced by this legacy discovery loop.
     # The slot-based executor uses run_item.timeout_tier() for dispatcher-derived
@@ -1438,7 +1439,15 @@ class ProjectMonitoringRun(BaseRunLoop):
             # Check outside-contributor PRs that need an initial review
             # (slow-lane, review-only; gated on CONTRIBUTOR_REVIEW_ONLY_V1)
             contributor_work = self.check_contributor_unreviewed(repo)
-            all_work.extend(contributor_work)
+            # Discovery has already consumed legacy notification/activity
+            # watermarks. Handle that work first rather than suppressing it
+            # with a review-only session; an initial review can wait a poll.
+            existing_targets = {(item.repo, item.number) for item in all_work}
+            all_work.extend(
+                item
+                for item in contributor_work
+                if (item.repo, item.number) not in existing_targets
+            )
 
         return all_work
 
@@ -1612,9 +1621,16 @@ Begin processing the work now.
             self.logger.info("No work found, skipping execution")
             return ExecutionResult(exit_code=0, timed_out=False)
         if failure_code or timed_out:
-            last_result.exit_code = failure_code or last_result.exit_code
-            last_result.timed_out = timed_out or last_result.timed_out
-            last_result.success = (
-                last_result.exit_code == 0 and not last_result.timed_out
+            # Batch status must not rewrite the final session's trajectory.
+            self._final_session_result = last_result
+            return ExecutionResult(
+                exit_code=failure_code or last_result.exit_code,
+                timed_out=timed_out or last_result.timed_out,
             )
         return last_result
+
+    def post_run(self, result: ExecutionResult) -> None:
+        """Record the actual final session, not an aggregate batch failure."""
+        final_session = self._final_session_result
+        self._final_session_result = None
+        super().post_run(final_session if final_session is not None else result)

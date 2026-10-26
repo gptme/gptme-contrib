@@ -1654,3 +1654,33 @@ def test_contributor_sessions_record_each_trajectory_once(workspace, mixed):
     assert not result.success
     assert result.exit_code == 1
     assert run.timeout == original_timeout
+    assert results[1].exit_code == 0
+    assert results[1].success
+
+
+def test_notification_takes_priority_over_initial_contributor_review(workspace):
+    """Discovery must not consume a notification and then suppress its handler."""
+    run = ProjectMonitoringRun(workspace, target_repos=["owner/repo"])
+    notification = WorkItem(
+        "owner/repo", "notification", 301, "Mention", "url", "answer mention"
+    )
+    contributor = WorkItem(
+        "owner/repo",
+        "contributor_unreviewed",
+        301,
+        "Review",
+        "url",
+        "managed_logins=Bob",
+    )
+    with (
+        patch.object(run, "check_notifications", return_value=[notification]),
+        patch.object(run, "check_linear_notifications", return_value=[]),
+        patch.object(run, "discover_repositories", return_value=["owner/repo"]),
+        patch.object(run, "check_pr_updates", return_value=[]),
+        patch.object(run, "check_ci_failures", return_value=[]),
+        patch.object(run, "check_assigned_issues", return_value=[]),
+        patch.object(run, "check_contributor_unreviewed", return_value=[contributor]),
+    ):
+        run._discovered_work = run.discover_work()
+    assert run._discovered_work == [notification]
+    assert "answer mention" in run.generate_prompt()

@@ -169,7 +169,11 @@ contributor branch, opens a parallel fix, or merges.
 The legacy `ProjectMonitoringRun` discovery loop also uses this shared review-only
 prompt. It executes each contributor review in a separate session, excludes those
 PRs (including other event types for the same PR) from its generic repair batch,
-and retains unrelated repair work. A timed-out review lookup skips that candidate
+and retains unrelated repair work. At discovery, existing notifications/activity
+for a PR take priority over its initial-review candidate, so consumed legacy
+watermarks never hide an unanswered request behind a review-only session.
+Per-session recording retains each session's own outcome; a separate aggregate
+result reports batch failure. A timed-out review lookup skips that candidate
 without abandoning later PRs in the repository scan.
 
 The detector owns age/author/green-CI eligibility and full-head-SHA dedupe; its
