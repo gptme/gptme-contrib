@@ -1333,9 +1333,11 @@ def _skip_pr_payload(
     reviews=None,
     has_next=False,
     cursor=None,
+    viewer="Viewer",
 ):
     return {
         "data": {
+            "viewer": {"login": viewer},
             "repository": {
                 "pullRequest": {
                     "state": state,
@@ -1361,7 +1363,7 @@ def _skip_pr_payload(
                         "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
                     },
                 }
-            }
+            },
         }
     }
 
@@ -1425,6 +1427,66 @@ def test_contributor_review_skip_observed_matches_prompt_skips(
             runner=_skip_runner(payload),
         )
         is expected
+    )
+
+
+@pytest.mark.parametrize(
+    "author, review_state, review_head, expected",
+    [
+        ("bOb", None, "abc", True),
+        ("contrib", "APPROVED", "abc", True),
+        ("contrib", "CHANGES_REQUESTED", "abc", True),
+        ("contrib", "COMMENTED", "abc", True),
+        ("contrib", "PENDING", "abc", False),
+        ("contrib", "APPROVED", "old", False),
+    ],
+)
+def test_contributor_review_skip_includes_authenticated_viewer(
+    tmp_path, author, review_state, review_head, expected
+):
+    from gptme_runloops.worker_records import contributor_review_skip_observed
+
+    payload = _skip_pr_payload(
+        viewer="Bob",
+        author=author,
+        reviews=[
+            {
+                "author": {"login": "bOB"},
+                "state": review_state,
+                "commit": {"oid": review_head},
+            }
+        ],
+    )
+
+    def runner(argv, **kwargs):
+        assert any("viewer{login}" in arg for arg in argv)
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload))
+
+    assert (
+        contributor_review_skip_observed(
+            "o/r",
+            1,
+            managed_logins=("Alice",),
+            cwd=tmp_path,
+            runner=runner,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize("viewer", [None, ""])
+def test_contributor_review_skip_missing_viewer_is_unknown(tmp_path, viewer):
+    from gptme_runloops.worker_records import contributor_review_skip_observed
+
+    assert (
+        contributor_review_skip_observed(
+            "o/r",
+            1,
+            managed_logins=("Alice",),
+            cwd=tmp_path,
+            runner=_skip_runner(_skip_pr_payload(viewer=viewer)),
+        )
+        is None
     )
 
 

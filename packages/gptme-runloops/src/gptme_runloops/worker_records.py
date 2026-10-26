@@ -985,10 +985,11 @@ def contributor_review_skip_observed(
     """True when the live PR is a prompt-mandated contributor-review skip.
 
     Draft, closed/merged, managed-author, non-green CI, or a managed login
-    already reviewing the current head are skips. Head movement is not: the
-    new head stays eligible. API or inconsistent-head failures are unknown.
-    Missing managed-login evidence cannot prove author/review skips, but
-    draft/closed/CI skips still apply.
+    (including the authenticated viewer) already reviewing the current head
+    are skips. Head movement is not: the new head stays eligible. API or
+    inconsistent-head failures are unknown.
+    Without configured logins, only the viewer can prove author/review skips.
+    Missing viewer identity is unknown.
     """
     owner, _, name = str(repo).partition("/")
     try:
@@ -1000,7 +1001,7 @@ def contributor_review_skip_observed(
     managed = {str(login).lower() for login in managed_logins if str(login).strip()}
     query = (
         "query($owner:String!,$name:String!,$number:Int!,$after:String){"
-        "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+        "viewer{login}repository(owner:$owner,name:$name){pullRequest(number:$number){"
         "state isDraft author{login} headRefOid "
         "commits(last:1){nodes{commit{oid statusCheckRollup{state}}}}"
         "reviews(first:100,after:$after){nodes{author{login}state commit{oid}}"
@@ -1039,7 +1040,12 @@ def contributor_review_skip_observed(
             payload = json.loads(result.stdout)
             if payload.get("errors"):
                 return None
-            pr = payload["data"]["repository"]["pullRequest"]
+            data = payload["data"]
+            viewer = str(data["viewer"]["login"] or "").lower()
+            if not viewer:
+                return None
+            managed.add(viewer)
+            pr = data["repository"]["pullRequest"]
             current_head = pr["headRefOid"]
             if not current_head or (head and head != current_head):
                 return None
