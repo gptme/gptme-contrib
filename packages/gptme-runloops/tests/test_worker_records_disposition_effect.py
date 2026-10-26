@@ -150,3 +150,49 @@ def test_last_marker_is_used_not_an_older_disposed_review():
         "comments": [{"body": marker({FP: {}})}, {"body": marker({})}],
     }
     assert parse_pr_snapshot(json.dumps(raw))["aiReviewDispositions"] == "0"
+
+
+def test_same_head_rereview_clearing_findings_is_effect():
+    """A forced re-review that clears a stale finding is the fix (gptme#4479)."""
+    before = snapshot({})
+    after = snapshot({}, findings=[])
+    payload = apply_pr_state_diff(
+        {}, parse_pr_snapshot(json.dumps(before)), parse_pr_snapshot(json.dumps(after))
+    )
+    assert payload["pr_ai_review_findings_before"] == "1"
+    assert payload["pr_ai_review_findings_after"] == "0"
+    assert derive_effect_signal(payload) == "observed"
+
+
+def test_partial_or_replacement_rereview_is_not_effect():
+    two = [{"fp": FP}, {"fp": "other"}]
+    assert (
+        derive_effect_signal(
+            apply_pr_state_diff({}, snapshot({}, findings=two), snapshot({}))
+        )
+        == "none"
+    )
+
+
+def test_clean_review_staying_clean_is_not_effect():
+    assert (
+        derive_effect_signal(
+            apply_pr_state_diff(
+                {}, snapshot({}, findings=[]), snapshot({}, findings=[])
+            )
+        )
+        == "none"
+    )
+
+
+def test_findings_cleared_on_stale_marker_is_not_effect():
+    assert (
+        derive_effect_signal(
+            apply_pr_state_diff(
+                {},
+                snapshot({}, sha="oldhead"),
+                snapshot({}, sha="oldhead", findings=[]),
+            )
+        )
+        == "none"
+    )

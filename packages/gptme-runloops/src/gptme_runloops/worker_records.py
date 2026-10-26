@@ -575,6 +575,7 @@ def _review_disposition_snapshot(payload: dict[str, Any]) -> dict[str, str]:
         "aiReviewDispositions": str(
             sum(isinstance(dispositions.get(fp), dict) for fp in fps)
         ),
+        "aiReviewFindingCount": str(len(fps)),
     }
 
 
@@ -611,6 +612,9 @@ def normalize_pr_snapshot(payload: Any) -> dict[str, str]:
     if count is not None and isinstance(identity, str) and identity:
         snapshot["aiReviewDispositions"] = str(count)
         snapshot["aiReviewFindingSet"] = identity
+        findings = _parse_thread_count(payload.get("aiReviewFindingCount"))
+        if findings is not None:
+            snapshot["aiReviewFindingCount"] = str(findings)
     return snapshot
 
 
@@ -693,6 +697,8 @@ def apply_pr_state_diff(
             ]
         if snapshot.get("aiReviewFindingSet"):
             payload[f"pr_ai_review_finding_set_{side}"] = snapshot["aiReviewFindingSet"]
+        if snapshot.get("aiReviewFindingCount") is not None:
+            payload[f"pr_ai_review_findings_{side}"] = snapshot["aiReviewFindingCount"]
 
     if before_head and after_head and before_head != after_head:
         deliverables.append(after_head)
@@ -1615,6 +1621,25 @@ def derive_effect_signal(
         and before_dispositions is not None
         and after_dispositions is not None
         and after_dispositions > before_dispositions
+    ):
+        return EFFECT_OBSERVED
+
+    # A forced same-head re-review that clears every finding is the prescribed
+    # fix for a stale body-snapshot finding (lesson ai-review-body-snapshot-
+    # finding). The sweep skips an already-reviewed head, so a clear-to-zero at
+    # the same head during a dispatch is this session's work. Without it the
+    # fix reads as `none` and spends the ineffective budget: gptme/gptme#4479
+    # was escalated that way, which then blocked a real finding on the same
+    # head. A replacement review with any surviving finding is still `none`.
+    before_count = _parse_thread_count(payload.get("pr_ai_review_findings_before"))
+    after_count = _parse_thread_count(payload.get("pr_ai_review_findings_after"))
+    if (
+        before_head
+        and before_head == after_head
+        and before_count is not None
+        and after_count is not None
+        and before_count > 0
+        and after_count == 0
     ):
         return EFFECT_OBSERVED
 
