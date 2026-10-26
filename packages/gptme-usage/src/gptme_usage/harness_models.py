@@ -872,7 +872,7 @@ def cc_dispatch_model_id(model: str) -> str:
     Examples:
         cc_dispatch_model_id("opus")        -> "claude-opus-5"  (pinned)
         cc_dispatch_model_id("opus-5-5")    -> "claude-opus-5-5"
-        cc_dispatch_model_id("haiku")       -> "claude-haiku-4-5-20251001"
+        cc_dispatch_model_id("haiku")       -> "claude-haiku-5-5"
         cc_dispatch_model_id("claude-opus-4-7-20251014") -> "claude-opus-4-7-20251014"
     """
     raw = model.strip()
