@@ -32,7 +32,8 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 1
 fi
 
-exec python3 - "${1:-.}" <<'PY'
+# Do not import modules from the inspected project or PYTHONPATH.
+exec python3 -I - "${1:-.}" <<'PY'
 import configparser
 import json
 import re

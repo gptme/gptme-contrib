@@ -126,3 +126,19 @@ def test_npm_lifecycle_scripts_shown(tmp_path):
     )
     assert result.returncode == 0
     assert "npm lifecycle pretest: echo pre" in result.stderr
+
+
+@pytest.mark.parametrize("module", ["configparser", "json", "re", "shutil", "pathlib"])
+def test_discovery_does_not_import_project_modules(tmp_path, module):
+    marker = tmp_path / "module-executed"
+    (tmp_path / f"{module}.py").write_text(
+        f"open({str(marker)!r}, 'w').write('executed')\n"
+        "raise RuntimeError('project module imported during discovery')\n"
+    )
+    (tmp_path / "Cargo.toml").write_text("[package]\nname = 'a'\n")
+    result = subprocess.run(
+        ["bash", str(SCRIPT)], cwd=tmp_path, capture_output=True, text=True
+    )
+    assert not marker.exists(), result.stderr
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split("  #")[0] == "cargo test"
