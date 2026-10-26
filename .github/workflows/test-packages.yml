@@ -11,9 +11,15 @@ on:
   workflow_dispatch:
 
 # Cancel a PR's older runs when it gets a new push (they're superseded).
-# Pushes to master are grouped by commit, so they never cancel each other.
+# Pushes to a branch share one group without cancel-in-progress: a running
+# master run finishes, but a queued one is replaced by the newer push, so a
+# burst of merges runs once on the latest commit instead of once per commit.
+# Push runs only test what changed, so `discover` diffs from the last run of
+# this workflow that actually started, not from github.event.before; the
+# survivor then also covers the commits of the replaced runs.
+# Schedule/dispatch runs keep a per-commit group.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -48,6 +54,9 @@ jobs:
     # Always run on push to master; on PRs, only when package code changed
     if: github.event_name != 'pull_request' || needs.changes.outputs.packages == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     outputs:
       packages: ${{ steps.discover.outputs.packages }}
     steps:
@@ -60,6 +69,7 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
           BEFORE: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           # Get all packages from Makefile (single source of truth)
           make --no-print-directory ci-list-packages-json > /tmp/all_packages_raw.txt
@@ -70,6 +80,23 @@ jobs:
           # visible in the log instead of silently disappearing.
           echo "Packages excluded from the CI matrix:"
           make --no-print-directory ci-list-excluded-packages
+
+          # A queued push run can be replaced by a newer push (see the
+          # concurrency note at the top). Diff from the last run of this workflow
+          # on this branch that started (in progress, or completed with success
+          # or failure) so the commits of replaced runs are tested too. Keep
+          # github.event.before if the lookup fails or finds no ancestor.
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            covered=$(gh api "repos/${{ github.repository }}/actions/workflows/test-packages.yml/runs?branch=${{ github.ref_name }}&event=push&per_page=50" \
+              --jq '[.workflow_runs[] | select(.id < ${{ github.run_id }} and (.status == "in_progress" or (.status == "completed" and (.conclusion == "success" or .conclusion == "failure"))))][0].head_sha // empty' \
+              2>/dev/null || true)
+            if [[ -n "$covered" && "$covered" != "$BEFORE" ]] \
+                && git cat-file -e "${covered}^{commit}" 2>/dev/null \
+                && git merge-base --is-ancestor "$covered" HEAD; then
+              echo "Diffing from $covered, the last started run of this workflow (event.before: $BEFORE)"
+              BEFORE="$covered"
+            fi
+          fi
 
           # Files changed by this PR, or by this push to master. Schedule/dispatch
           # runs (and pushes we can't diff, e.g. a new branch or a force-push
