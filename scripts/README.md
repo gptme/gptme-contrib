@@ -26,6 +26,24 @@ for details.
 | [twitter/](./twitter/) | Twitter automation and monitoring |
 | [workspace_validator/](./workspace_validator/) | Agent workspace structure validation |
 
+## Shell continuation safety hook
+
+`validate-bash-continuation-comment` is exported in `.pre-commit-hooks.yaml`
+for consuming repositories and enabled locally in `.pre-commit-config.yaml`.
+It rejects a comment line immediately after a backslash-continued command:
+Bash ends the command at the comment's newline, so later lines run separately.
+Move the comment above the command instead. This caught an `env`-without-a-program
+credential dump in a downstream agent workspace (ErikBjare/bob#1409).
+
+The standalone checker is
+[`precommit/validators/validate_bash_continuation_comment.py`](./precommit/validators/validate_bash_continuation_comment.py).
+It accepts shell filenames, prints line-numbered diagnostics, and exits 1 on
+violations or 0 otherwise. It skips common heredoc bodies, trailing comments,
+escaped backslashes and double-quoted multiline content. This is a lightweight
+scanner, not a complete shell parser: single quotes are assumed to close on the
+same line, and heredoc delimiters must be ordinary identifier words. Unreadable
+files are skipped. Keep ShellCheck enabled alongside it.
+
 ## Notable standalone scripts
 
 | Script | Description |
