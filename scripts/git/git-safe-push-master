@@ -12,7 +12,8 @@
 # The name "push-master" is kept for back-compat; it publishes whatever the
 # derived trunk is.
 #
-# Usage: git-safe-push-master
+# Usage: git-safe-push-master [-h|--help] [--dry-run]
+#        --dry-run fetches and previews without publishing or updating local trunk.
 #        GIT_SAFE_PUSH_LOCK_TIMEOUT=30 git-safe-push-master
 #        GIT_SAFE_TRUNK=main git-safe-push-master          # override derived trunk
 #        GIT_SAFE_REMOTE=upstream git-safe-push-master     # override remote
@@ -38,6 +39,32 @@
 # empty-commit scenarios caused by auto-sync merge commit content.
 
 set -uo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: git-safe-push-master [-h|--help] [--dry-run]
+
+Publish local trunk using the shared commit lock and off-tree reconciliation.
+  -h, --help  Show this help without running git or acquiring the lock.
+  --dry-run   Fetch and preview fast-forward/squash/conflicts; never publish,
+              create a commit, or update local trunk, index or working tree.
+              Fetch updates tracking refs; merge-tree may write git objects.
+
+Environment: GIT_SAFE_REMOTE (origin), GIT_SAFE_TRUNK (remote HEAD, else master),
+             GIT_SAFE_PUSH_LOCK_TIMEOUT (60 seconds).
+Exit codes: 0 success/clean preview, 1 conflict, 2 error/invalid argument.
+EOF
+}
+
+DRY_RUN=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --dry-run) DRY_RUN=1 ;;
+        *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
+done
 
 GIT_DIR="$(git rev-parse --git-dir 2>/dev/null)" || {
     echo "error: not in a git repository" >&2
@@ -94,6 +121,10 @@ fi
 LOCAL_COMMIT_COUNT=$(git log --no-merges --format="%H" "$REMOTE_SHA".."$LOCAL_SHA" | wc -l)
 
 if [ "$LOCAL_COMMIT_COUNT" -eq 0 ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+        echo "Dry-run: would reset local-only merge commits to $REMOTE/$TRUNK; no changes made"
+        exit 0
+    fi
     # Only merge commits locally — accumulated from previous failed pushes; discard them
     if git update-ref "refs/heads/$TRUNK" "$REMOTE_SHA" "$LOCAL_SHA" 2>/dev/null; then
         echo "✓ Discarded local-only merge commits; reset to $REMOTE/$TRUNK"
@@ -171,6 +202,14 @@ push_failure_or_retry_race() {
 # Keep failure output until a refetch proves whether this was a real race.
 LOCAL_MERGE_COUNT=$(git log --merges --format="%H" "$REMOTE_SHA".."$LOCAL_SHA" | wc -l)
 if [ "$LOCAL_MERGE_COUNT" -eq 0 ] && git merge-base --is-ancestor "$REMOTE_SHA" "$LOCAL_SHA" 2>/dev/null; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+        MERGE_TREE=$(git merge-tree --write-tree "$REMOTE_SHA" "$LOCAL_SHA" 2>&1) || {
+            echo "error: merge preview failed: $MERGE_TREE" >&2
+            exit 2
+        }
+        echo "Dry-run: fast-forward $LOCAL_COMMIT_COUNT commit(s) to $REMOTE/$TRUNK (tree $MERGE_TREE); no changes made"
+        exit 0
+    fi
     PUSH_OUTPUT=$(mktemp)
     PUSH_TRACE=$(mktemp)
     if push_with_output "$PUSH_OUTPUT" "$PUSH_TRACE" "$REMOTE" "$TRUNK"; then
@@ -205,6 +244,10 @@ MERGE_OUTPUT=$(git merge-tree --write-tree "$REMOTE_SHA" "$LOCAL_SHA" 2>&1) || {
 }
 
 MERGE_TREE="$MERGE_OUTPUT"
+if [ "$DRY_RUN" -eq 1 ]; then
+    echo "Dry-run: squash $LOCAL_COMMIT_COUNT commit(s) onto $REMOTE/$TRUNK (tree $MERGE_TREE); no changes made"
+    exit 0
+fi
 
 # Rebuild from the current source range on every attempt: a competing push may
 # publish some local commits, changing both the summary and the session set.
