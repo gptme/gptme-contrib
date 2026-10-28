@@ -213,6 +213,7 @@ def test_unknown_args_print_usage_and_exit_two_without_publishing(
     [
         (("-h",), 0),
         (("--help",), 0),
+        (("--dry-run", "--help"), 0),
         (("--bogus",), 2),
         (("main",), 2),
         (("--force",), 2),
@@ -290,7 +291,8 @@ def test_dry_run_linear_fast_path_fetches_but_never_publishes(
     res = _run(SAFE_PUSH, clone, env_extra={"PATH": path}, args=("--dry-run",))
     assert res.returncode == 0, res.stderr
     assert "fast-forward" in res.stdout
-    assert "tree " in res.stdout
+    tree = res.stdout.split("(tree ", 1)[1].split(")", 1)[0]
+    assert _git("cat-file", "-t", tree, cwd=clone, check=True).stdout.strip() == "tree"
     assert _bare_head(clone, "main") == before_remote
     assert _local_state(clone) == before_local
     called = _git_subcommands(log)
@@ -313,7 +315,8 @@ def test_dry_run_diverged_disjoint_squash_path_is_read_only(remote_and_clone, tm
     assert _bare_head(clone, "main") == before_remote
     assert _local_state(clone) == before_local
     assert "squash" in res.stdout
-    assert "tree " in res.stdout
+    tree = res.stdout.split("(tree ", 1)[1].split(")", 1)[0]
+    assert _git("cat-file", "-t", tree, cwd=clone, check=True).stdout.strip() == "tree"
     assert not (clone / "upstream.txt").exists(), "dry run materialized upstream path"
     called = _git_subcommands(log)
     assert {"fetch", "merge-tree"} <= called, called
@@ -367,8 +370,8 @@ def test_dry_run_preserves_staged_unstaged_and_untracked_content(remote_and_clon
     (clone / "untracked.txt").write_text("private\n")
     _advance_remote(clone, "main", "upstream.txt", "up\n")
     index = clone / ".git" / "index"
-    before_index = index.read_bytes()
     before_local = _local_state(clone)
+    before_index = index.read_bytes()
     before_remote = _bare_head(clone, "main")
 
     res = _run(SAFE_PUSH, clone, args=("--dry-run",))
@@ -409,3 +412,22 @@ def test_pull_rejects_unknown_arguments_before_git_or_lock(tmp_path, arg):
     assert res.returncode == 2
     assert "unknown argument" in res.stderr
     assert not log.exists()
+
+
+def test_dry_run_behind_remote_previews_reset_without_moving_trunk(
+    remote_and_clone, tmp_path
+):
+    clone = remote_and_clone("main")
+    _advance_remote(clone, "main", "upstream.txt", "up\n")
+    before_local = _local_state(clone)
+    before_remote = _bare_head(clone, "main")
+    path, log = _git_spy(tmp_path)
+
+    res = _run(SAFE_PUSH, clone, env_extra={"PATH": path}, args=("--dry-run",))
+    assert res.returncode == 0, res.stderr
+    assert "would reset local trunk" in res.stdout
+    assert "local-only merge commits" not in res.stdout
+    assert _local_state(clone) == before_local
+    assert _bare_head(clone, "main") == before_remote
+    assert not (clone / "upstream.txt").exists()
+    assert not _git_subcommands(log) & FORBIDDEN_PUBLISH

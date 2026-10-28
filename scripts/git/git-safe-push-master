@@ -46,7 +46,7 @@ Usage: git-safe-push-master [-h|--help] [--dry-run]
 
 Publish local trunk using the shared commit lock and off-tree reconciliation.
   -h, --help  Show this help without running git or acquiring the lock.
-  --dry-run   Fetch and preview fast-forward/squash/conflicts; never publish,
+  --dry-run   Take the shared commit lock, fetch and preview; never publish,
               create a commit, or update local trunk, index or working tree.
               Fetch updates tracking refs; merge-tree may write git objects.
 
@@ -122,7 +122,7 @@ LOCAL_COMMIT_COUNT=$(git log --no-merges --format="%H" "$REMOTE_SHA".."$LOCAL_SH
 
 if [ "$LOCAL_COMMIT_COUNT" -eq 0 ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
-        echo "Dry-run: would reset local-only merge commits to $REMOTE/$TRUNK; no changes made"
+        echo "Dry-run: would reset local trunk to $REMOTE/$TRUNK (no unpublished non-merge commits); no changes made"
         exit 0
     fi
     # Only merge commits locally — accumulated from previous failed pushes; discard them
