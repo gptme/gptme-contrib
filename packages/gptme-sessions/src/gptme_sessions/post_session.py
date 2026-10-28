@@ -538,6 +538,10 @@ def post_session(
          (recording ``"noop"`` would unfairly penalize the backend's bandit
          weight for a session whose real work can't be observed).
     """
+    if not isinstance(harness, str):
+        raise TypeError("harness must be a str")
+    if model is not None and not isinstance(model, str):
+        raise TypeError("model must be a str or None")
     if context_tier is not None and context_tier not in VALID_CONTEXT_TIERS:
         raise ValueError(
             f"Invalid context_tier {context_tier!r}. Expected one of {sorted(VALID_CONTEXT_TIERS)}"
