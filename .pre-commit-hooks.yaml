@@ -1,3 +1,12 @@
+- id: validate-bash-continuation-comment
+  name: Reject comment lines inside backslash-continued shell commands
+  description: >
+    A comment after a backslash continuation ends the command and can make
+    the remaining lines run separately. Move the comment above the command.
+  entry: scripts/precommit/validators/validate_bash_continuation_comment.py
+  language: script
+  types: [shell]
+
 - id: check-root-structure
   name: Check root directory structure
   description: >
