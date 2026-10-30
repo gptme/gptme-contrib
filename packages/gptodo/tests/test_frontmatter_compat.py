@@ -5,9 +5,41 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import pytest
 import yaml
 
 from gptodo.frontmatter_compat import Post, dumps, frontmatter, load, loads
+
+
+def test_loads_uses_safe_accelerator_when_available(monkeypatch) -> None:
+    if not hasattr(yaml, "CSafeLoader"):
+        pytest.skip("libyaml is not installed")
+    original_load = yaml.load
+    seen = []
+
+    def recording_load(stream, Loader):
+        seen.append(Loader)
+        return original_load(stream, Loader=Loader)
+
+    monkeypatch.setattr(yaml, "load", recording_load)
+    post = loads("---\nstate: waiting\n---\nbody\n")
+    assert post.metadata == {"state": "waiting"}
+    assert seen == [yaml.CSafeLoader]
+
+
+def test_loads_falls_back_to_safe_python_loader(monkeypatch) -> None:
+    monkeypatch.delattr(yaml, "CSafeLoader", raising=False)
+    post = loads("---\nstate: waiting\n---\nbody\n")
+    assert post.metadata == {"state": "waiting"}
+    assert post.content == "body\n"
+
+
+@pytest.mark.parametrize("accelerated", [True, False])
+def test_loads_rejects_python_object_tags(monkeypatch, accelerated) -> None:
+    if not accelerated:
+        monkeypatch.delattr(yaml, "CSafeLoader", raising=False)
+    with pytest.raises(yaml.constructor.ConstructorError):
+        loads("---\nvalue: !!python/object/apply:builtins.str [unsafe]\n---\n")
 
 
 def test_loads_frontmatter_file(tmp_path: Path) -> None:

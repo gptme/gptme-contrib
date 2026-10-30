@@ -65,7 +65,8 @@ def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     if body.startswith("\n"):
         body = body[1:]
 
-    metadata = yaml.safe_load(raw_metadata) if raw_metadata else {}
+    safe_loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+    metadata = yaml.load(raw_metadata, Loader=safe_loader) if raw_metadata else {}
     if metadata is None:
         metadata = {}
     if not isinstance(metadata, dict):
