@@ -13,6 +13,7 @@ except ImportError:
     _fcntl = None  # type: ignore[assignment]
 
 from gptme_runloops.base import BaseRunLoop
+from gptme_runloops.prompt_templates import ItemPromptParams, render_main_prompt
 from gptme_runloops.utils.execution import ExecutionResult
 from gptme_runloops.utils.executor import Executor
 from gptme_runloops.utils.github import CommentLoopDetector, has_unresolved_bot_reviews
@@ -89,6 +90,7 @@ class ProjectMonitoringRun(BaseRunLoop):
 
         # Cache discovered work between has_work() and generate_prompt()
         self._discovered_work: list[WorkItem] = []
+        self._final_session_result: ExecutionResult | None = None
 
     # Per-item timeout in seconds for work produced by this legacy discovery loop.
     # The slot-based executor uses run_item.timeout_tier() for dispatcher-derived
@@ -99,6 +101,7 @@ class ProjectMonitoringRun(BaseRunLoop):
         "ci_failure": 1200,  # ~20 min: investigate + fix
         "notification": 600,  # ~10 min: simple processing
         "linear_notification_retry": 600,  # ~10 min: retry a failed Linear notification delivery
+        "contributor_unreviewed": 1500,  # ~25 min: review investigation + test run + submit
         # greptile_needs_fix and greptile_convergence_adjudication are intentionally
         # absent: they are dispatcher-derived and handled by run_item.timeout_tier().
     }
@@ -921,6 +924,238 @@ class ProjectMonitoringRun(BaseRunLoop):
             )
             return False
 
+    def check_contributor_unreviewed(
+        self,
+        repo: str,
+        managed_logins: tuple[str, ...] = ("TimeToBuildBob", "ErikBjare"),
+        min_age_hours: int = 24,
+    ) -> list[WorkItem]:
+        """Check for outside-contributor PRs with green CI and no team review.
+
+        Emits ``contributor_unreviewed`` items only when
+        ``CONTRIBUTOR_REVIEW_ONLY_V1`` is deployed (checked at import).  The
+        caller never needs to guard separately; a false flag produces an empty
+        list with no I/O.
+
+        Eligibility:
+        - Open, non-draft
+        - Author not in *managed_logins* and not a bot (``[bot]`` suffix)
+        - Green CI (all check conclusions success/skipped, at least one check)
+        - Age >= *min_age_hours* since creation
+        - No managed login has submitted APPROVED / CHANGES_REQUESTED /
+          COMMENTED on the **current** head SHA
+
+        The ``detail`` field carries ``managed_logins=X,Y`` so the runtime
+        prompt can render the exact deployment-owned login set without relying
+        on inference.
+
+        Args:
+            repo: Repository name (owner/repo)
+            managed_logins: Team login set used both for author filtering and
+                review checks. Defaults match the brain-repo poller defaults;
+                the configured author is always included.
+            min_age_hours: Minimum PR age in hours before eligibility.
+
+        Returns:
+            List of WorkItem for unreviewed contributor PRs.
+        """
+        # Lazy import: run_item is not imported at module level to avoid the
+        # circular-import RuntimeWarning when running pm_dispatch as __main__
+        # (__init__ imports project_monitoring which would pull run_item into
+        # sys.modules before pm_dispatch is fully initialized).
+        from gptme_runloops.run_item import CONTRIBUTOR_REVIEW_ONLY_V1
+
+        if not CONTRIBUTOR_REVIEW_ONLY_V1:
+            return []
+
+        work_items = []
+        managed_logins = tuple(
+            dict.fromkeys(filter(None, (*managed_logins, self.author)))
+        )
+        managed = {login.casefold() for login in managed_logins}
+        try:
+            result = subprocess.run(
+                [
+                    "gh",
+                    "api",
+                    "--paginate",
+                    "--slurp",
+                    f"repos/{repo}/pulls?state=open&per_page=100",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return []
+
+            pages = json.loads(result.stdout)
+            prs = [pr for page in pages for pr in page]
+            now = datetime.now(timezone.utc)
+
+            for pr in prs:
+                if not isinstance(pr, dict):
+                    continue
+                if pr.get("draft") or pr.get("state", "").upper() != "OPEN":
+                    continue
+                author_info = pr.get("user") or {}
+                author = str(author_info.get("login") or "").strip()
+                if not author:
+                    continue
+                if author.casefold() in managed:
+                    continue
+                if author.casefold().endswith("[bot]") or author.casefold().startswith(
+                    "app/"
+                ):
+                    continue
+
+                # Age gate
+                created_str = pr.get("created_at") or ""
+                try:
+                    created = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                except (ValueError, AttributeError):
+                    continue
+                if (now - created).total_seconds() < min_age_hours * 3600:
+                    continue
+
+                number = pr.get("number")
+                if not isinstance(number, int):
+                    continue
+                head = str((pr.get("head") or {}).get("sha") or "").strip()
+                if not head:
+                    continue
+
+                # REST enumerates every page without a search-result ceiling.
+                # Fetch CI only after cheap author/age filters; a changed head
+                # must wait for the next poll rather than use stale eligibility.
+                try:
+                    ci_result = subprocess.run(
+                        [
+                            "gh",
+                            "pr",
+                            "view",
+                            str(number),
+                            "--repo",
+                            repo,
+                            "--json",
+                            "headRefOid,statusCheckRollup",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                except subprocess.TimeoutExpired:
+                    self.logger.warning(
+                        f"CI lookup timed out for {repo}#{number}; skipping candidate"
+                    )
+                    continue
+                if ci_result.returncode != 0:
+                    continue
+                try:
+                    ci = json.loads(ci_result.stdout)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(ci, dict) or ci.get("headRefOid") != head:
+                    continue
+
+                # CI green gate: all checks success/skipped, at least one check
+                checks = ci.get("statusCheckRollup") or []
+                if not checks:
+                    continue
+                if not all(
+                    isinstance(c, dict)
+                    and (
+                        str(c.get("conclusion") or "").upper() in {"SUCCESS", "SKIPPED"}
+                        if "conclusion" in c
+                        else str(c.get("state") or "").upper() == "SUCCESS"
+                    )
+                    for c in checks
+                ):
+                    continue
+
+                # Fetch full review list to check for existing managed review
+                try:
+                    reviews_result = subprocess.run(
+                        [
+                            "gh",
+                            "api",
+                            "--paginate",
+                            "--slurp",
+                            f"repos/{repo}/pulls/{number}/reviews?per_page=100",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                except subprocess.TimeoutExpired:
+                    self.logger.warning(
+                        f"Review lookup timed out for {repo}#{number}; skipping candidate"
+                    )
+                    continue
+                if reviews_result.returncode != 0:
+                    continue
+                try:
+                    pages = json.loads(reviews_result.stdout or "null")
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(pages, list):
+                    continue
+                # Flatten pages (--slurp wraps each page in an outer list)
+                reviews = [
+                    r
+                    for page in pages
+                    for r in (page if isinstance(page, list) else [page])
+                    if isinstance(r, dict)
+                ]
+
+                # Skip if a managed login already reviewed this head
+                already_reviewed = False
+                for review in reviews:
+                    reviewer_info = review.get("user") or {}
+                    reviewer = str(reviewer_info.get("login") or "").strip().casefold()
+                    if reviewer not in managed:
+                        continue
+                    review_state = str(review.get("state") or "").upper()
+                    if review_state not in {
+                        "APPROVED",
+                        "CHANGES_REQUESTED",
+                        "COMMENTED",
+                    }:
+                        continue
+                    reviewed_head = str(review.get("commit_id") or "").strip()
+                    if reviewed_head == head:
+                        already_reviewed = True
+                        break
+
+                if already_reviewed:
+                    continue
+
+                managed_logins_token = ",".join(managed_logins)
+                detail = (
+                    f"green outside-contributor PR by @{author}, open >={min_age_hours}h with "
+                    "no submitted team review on the current head; inspect and "
+                    "submit a head-pinned review with test receipts. Do NOT push "
+                    "to the contributor branch or merge. "
+                    f"managed_logins={managed_logins_token}"
+                )
+                work_items.append(
+                    WorkItem(
+                        repo=repo,
+                        item_type="contributor_unreviewed",
+                        number=number,
+                        title=pr.get("title", f"PR #{number}"),
+                        url=pr.get(
+                            "html_url", f"https://github.com/{repo}/pull/{number}"
+                        ),
+                        details=detail,
+                    )
+                )
+
+        except Exception as e:
+            self.logger.error(f"Error checking contributor PRs in {repo}: {e}")
+
+        return work_items
+
     def check_assigned_issues(self, repo: str) -> list[WorkItem]:
         """Check for assigned issues using state tracking.
 
@@ -1237,6 +1472,19 @@ class ProjectMonitoringRun(BaseRunLoop):
             issue_work = self.check_assigned_issues(repo)
             all_work.extend(issue_work)
 
+            # Check outside-contributor PRs that need an initial review
+            # (slow-lane, review-only; gated on CONTRIBUTOR_REVIEW_ONLY_V1)
+            contributor_work = self.check_contributor_unreviewed(repo)
+            # Discovery has already consumed legacy notification/activity
+            # watermarks. Handle that work first rather than suppressing it
+            # with a review-only session; an initial review can wait a poll.
+            existing_targets = {(item.repo, item.number) for item in all_work}
+            all_work.extend(
+                item
+                for item in contributor_work
+                if (item.repo, item.number) not in existing_targets
+            )
+
         return all_work
 
     def generate_prompt(self) -> str:
@@ -1246,14 +1494,25 @@ class ProjectMonitoringRun(BaseRunLoop):
             Project monitoring prompt with discovered work
         """
         # Use cached work from has_work() - don't re-discover
-        work_items = self._discovered_work
+        # Contributor reviews run in separate sessions in execute(), using the
+        # shared review-only template. Never include them in this repair prompt.
+        review_targets = {
+            (item.repo, item.number)
+            for item in self._discovered_work
+            if item.item_type == "contributor_unreviewed"
+        }
+        work_items = [
+            item
+            for item in self._discovered_work
+            if (item.repo, item.number) not in review_targets
+        ]
 
         if not work_items:
-            # Shouldn't happen if has_work() was called first, but handle gracefully
-            self.logger.warning(
-                "No cached work items (has_work() may not have been called)"
-            )
-            return ""  # Will be handled by execute()
+            if not self._discovered_work:
+                self.logger.warning(
+                    "No cached work items (has_work() may not have been called)"
+                )
+            return ""  # Review-only work is handled by execute().
 
         self.logger.info(f"Using {len(work_items)} cached work items")
 
@@ -1352,10 +1611,62 @@ Begin processing the work now.
         Returns:
             ExecutionResult with exit code and status
         """
-        # Check if work was found
-        if not prompt:
+        # A legacy discovery batch can contain both repair and review work.
+        # Execute each contributor in a fresh session so no generic repair,
+        # push or merge instructions can leak into its review-only context.
+        original_timeout = self.timeout
+        failure_code = 0
+        timed_out = False
+        last_result = None
+        try:
+            for item in self._discovered_work:
+                if item.item_type != "contributor_unreviewed":
+                    continue
+                self.timeout = self._compute_timeout([item])
+                review_prompt = render_main_prompt(
+                    ItemPromptParams(
+                        repo=item.repo,
+                        number=item.number,
+                        workspace=str(self.workspace),
+                        detail=item.details,
+                        author=self.author,
+                        agent_name=self.agent_name,
+                    ),
+                    item_type=item.item_type,
+                    title=item.title,
+                    investigate="",
+                    monitoring_rules="",
+                    time_desc=f"{self.timeout}s",
+                )
+                # Record/clean each completed session once; leave the final
+                # result for the normal run() -> post_run() lifecycle.
+                if last_result is not None:
+                    super().post_run(last_result)
+                last_result = super().execute(review_prompt)
+                failure_code = failure_code or last_result.exit_code
+                timed_out = timed_out or last_result.timed_out
+        finally:
+            self.timeout = original_timeout
+
+        if prompt:
+            if last_result is not None:
+                super().post_run(last_result)
+            last_result = super().execute(prompt)
+
+        if last_result is None:
             self.logger.info("No work found, skipping execution")
             return ExecutionResult(exit_code=0, timed_out=False)
+        if failure_code or timed_out:
+            # Batch status must not rewrite the final session's trajectory.
+            self._final_session_result = last_result
+            return ExecutionResult(
+                exit_code=failure_code or last_result.exit_code,
+                timed_out=timed_out or last_result.timed_out,
+            )
+        return last_result
 
-        # Execute with gptme
-        return super().execute(prompt)
+    def post_run(self, result: ExecutionResult) -> None:
+        """Record the actual final session, not an aggregate batch failure."""
+        final_session = self._final_session_result
+        self._final_session_result = None
+        super().post_run(final_session if final_session is not None else result)

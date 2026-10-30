@@ -166,6 +166,22 @@ green verification, actionable changes requested for defects, or a comment
 review for infrastructure/verification limits. It never edits or pushes the
 contributor branch, opens a parallel fix, or merges.
 
+The legacy `ProjectMonitoringRun` discovery loop also uses this shared review-only
+prompt. It executes each contributor review in a separate session, excludes those
+PRs (including other event types for the same PR) from its generic repair batch,
+and retains unrelated repair work. At discovery, existing notifications/activity
+for a PR take priority over its initial-review candidate, so consumed legacy
+watermarks never hide an unanswered request behind a review-only session.
+Per-session recording retains each session's own outcome; a separate aggregate
+result reports batch failure. Candidate enumeration paginates all open REST
+pull-request pages before filtering, so newer managed PRs cannot hide older
+contributors behind a fixed listing limit. CI is fetched only for age/author
+eligible candidates and must match the enumerated head. Timed-out CI or review
+lookups skip that candidate without abandoning later PRs in the repository scan.
+The legacy detector includes the configured `author` in its managed-login set
+for both authorship and current-head review checks, and carries that set into
+the review-only prompt.
+
 The detector owns age/author/green-CI eligibility and full-head-SHA dedupe; its
 managed-login configuration must be carried as exactly one
 `managed_logins=Login1,Login2` token in item `detail`. The handler renders quoted
