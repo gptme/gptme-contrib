@@ -672,6 +672,131 @@ def test_capture_allowed_rate_limit_event_not_rate_limit(tmp_path: Path):
     assert reason == FAILURE_REASON_NONZERO
 
 
+RESPONSES_OVERLOAD = (
+    "Responses stream error: server_is_overloaded: "
+    "Our servers are currently overloaded. Please try again later."
+)
+
+
+@pytest.mark.parametrize("error", [RESPONSES_OVERLOAD, "server_is_overloaded"])
+def test_classify_responses_overloaded(error: str):
+    assert (
+        classify_failure_reason(
+            exit_code=1,
+            duration_seconds=300,
+            input_tokens=100,
+            has_assistant_turn=True,
+            error_text=error,
+        )
+        == FAILURE_REASON_UPSTREAM_OVERLOADED
+    )
+
+
+@pytest.mark.parametrize(
+    ("prefix", "expected"),
+    [
+        ("HTTP 429 Too Many Requests: ", FAILURE_REASON_RATE_LIMIT),
+        ("insufficient_quota: ", FAILURE_REASON_QUOTA),
+        ("HTTP 400 Bad Request: ", FAILURE_REASON_INVALID_REQUEST),
+        ("llm_openai.py IndexError: list index out of range\n", FAILURE_REASON_MODEL_STREAM_CRASH),
+        ("401 Unauthorized: ", FAILURE_REASON_UPSTREAM_OVERLOADED),
+    ],
+)
+def test_responses_overload_preserves_specific_failure_precedence(prefix: str, expected: str):
+    assert (
+        classify_failure_reason(
+            exit_code=1,
+            duration_seconds=300,
+            input_tokens=100,
+            has_assistant_turn=True,
+            error_text=prefix + RESPONSES_OVERLOAD,
+        )
+        == expected
+    )
+
+
+def test_post_session_records_gptme_responses_terminal_overload(tmp_path: Path):
+    """Use the native terminal system record, not an invented type=error shape."""
+    traj = tmp_path / "conversation.jsonl"
+    records = [
+        {"role": "user", "content": "Do some work"},
+        {"role": "assistant", "content": "Partial work before provider failure"},
+        {
+            "role": "system",
+            "content": "error: generic\n" + RESPONSES_OVERLOAD,
+            "metadata": {"error": True, "error_class": "generic", "exit_code": 1},
+        },
+    ]
+    traj.write_text("".join(json.dumps(rec) + "\n" for rec in records), encoding="utf-8")
+    store = SessionStore(sessions_dir=tmp_path / "sessions")
+    result = post_session(
+        store=store,
+        harness="gptme",
+        exit_code=1,
+        duration_seconds=300,
+        trajectory_path=traj,
+    )
+    assert result.record.failure_reason == FAILURE_REASON_UPSTREAM_OVERLOADED
+    assert result.record.outcome == "failed"
+    assert result.record.exit_code == 1
+    assert _trajectory_has_assistant(traj)
+    assert result.record.error is not None
+    assert RESPONSES_OVERLOAD in result.record.error
+    assert store.load_all()[0].failure_reason == FAILURE_REASON_UPSTREAM_OVERLOADED
+
+
+@pytest.mark.parametrize("has_assistant", [False, True])
+@pytest.mark.parametrize("exit_code", [0, 1, 124])
+def test_capture_responses_overload_stderr(tmp_path: Path, has_assistant: bool, exit_code: int):
+    traj = tmp_path / "conversation.jsonl"
+    traj.write_text(
+        json.dumps({"role": "assistant" if has_assistant else "user", "content": "hello"}) + "\n",
+        encoding="utf-8",
+    )
+    stderr = tmp_path / "harness.stderr"
+    stderr.write_text(RESPONSES_OVERLOAD, encoding="utf-8")
+    reason, detail = capture_session_failure(
+        exit_code=exit_code,
+        duration_seconds=30,
+        input_tokens=100 if has_assistant else 0,
+        trajectory_path=traj,
+        harness_stderr_path=stderr,
+    )
+    if exit_code == 0:
+        assert (reason, detail) == (None, None)
+    else:
+        expected = (
+            FAILURE_REASON_TIMEOUT if exit_code == 124 else FAILURE_REASON_UPSTREAM_OVERLOADED
+        )
+        assert reason == expected
+        assert detail == RESPONSES_OVERLOAD
+
+
+@pytest.mark.parametrize("role", ["user", "system"])
+@pytest.mark.parametrize("metadata", [{}, {"error": False}, {"error": "true"}])
+def test_responses_overload_in_prompt_is_not_failure_evidence(
+    tmp_path: Path, role: str, metadata: dict
+):
+    traj = tmp_path / "conversation.jsonl"
+    traj.write_text(
+        json.dumps(
+            {"role": role, "content": "Quoted example: " + RESPONSES_OVERLOAD, "metadata": metadata}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert _extract_trajectory_error_line(traj) is None
+    reason, detail = capture_session_failure(
+        exit_code=1,
+        duration_seconds=300,
+        input_tokens=100,
+        trajectory_path=traj,
+        harness_stderr_path=None,
+    )
+    assert reason == FAILURE_REASON_NONZERO
+    assert detail is None
+
+
 def test_classify_upstream_overloaded():
     """Provider model-capacity errors classify distinctly from a generic crash."""
     reason = classify_failure_reason(
@@ -895,13 +1020,14 @@ def test_structured_error_signals_extracts_codex_payload_error():
     ]
 
 
-def test_structured_error_signals_keeps_overload_past_truncation():
+@pytest.mark.parametrize("indicator", ["model is at capacity", "server_is_overloaded"])
+def test_structured_error_signals_keeps_overload_past_truncation(indicator: str):
     """An overload phrase beyond the stored cut still classifies as overload."""
     rec = {
         "type": "event_msg",
         "payload": {
             "type": "task_complete",
-            "error": {"message": ("x" * 600) + " model is at capacity"},
+            "error": {"message": ("x" * 600) + " " + indicator},
         },
     }
     signals = _structured_error_signals(rec)

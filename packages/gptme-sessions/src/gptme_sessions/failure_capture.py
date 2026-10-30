@@ -23,6 +23,7 @@ FAILURE_REASON_UPSTREAM_OVERLOADED = "upstream_overloaded"
 # (message truncated before the phrase) still classifies as overload.
 _OVERLOAD_MARKERS = (
     "server_overloaded",
+    "server_is_overloaded",
     "at capacity",
     "model is overloaded",
     FAILURE_REASON_UPSTREAM_OVERLOADED,
@@ -331,6 +332,15 @@ def _extract_trajectory_error_line(trajectory_path: Path | None) -> str | None:
                 # result after structured fields have been considered.
                 is_error_record = rec.get("type") in {"error", "result"}
                 is_error_record = bool(is_error_record or rec.get("is_error") or rec.get("isError"))
+                # gptme marks terminal system errors in metadata, not type/is_error.
+                # Ordinary system prompts must remain excluded from failure evidence.
+                metadata = rec.get("metadata")
+                if (
+                    rec.get("role") == "system"
+                    and isinstance(metadata, dict)
+                    and metadata.get("error") is True
+                ):
+                    is_error_record = True
                 if _record_is_assistant(rec) or is_error_record:
                     content = _record_content_text(rec)
                     for part in (part.strip() for part in content.splitlines()):
