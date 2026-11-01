@@ -1316,3 +1316,518 @@ def test_check_notifications_previously_processed_skipped(workspace):
 
     assert items == []
     assert "4" in state_file.read_text().split("\n")
+
+
+# ── check_contributor_unreviewed ─────────────────────────────────────────────
+
+
+def _make_pr(
+    number: int,
+    author: str = "outsider",
+    is_draft: bool = False,
+    state: str = "OPEN",
+    head: str = "abc123def456",
+    created_offset_hours: float = 48.0,
+    checks_green: bool = True,
+    url: str | None = None,
+) -> dict:
+    """Build a minimal gh pr list JSON object."""
+    from datetime import datetime, timedelta, timezone
+
+    created = (
+        datetime.now(timezone.utc) - timedelta(hours=created_offset_hours)
+    ).isoformat()
+    checks = (
+        [{"conclusion": "SUCCESS", "name": "tests"}]
+        if checks_green
+        else [{"conclusion": "FAILURE", "name": "tests"}]
+    )
+    return {
+        "number": number,
+        "title": f"PR #{number}",
+        "author": {"login": author},
+        "isDraft": is_draft,
+        "state": state,
+        "headRefOid": head,
+        "url": url or f"https://github.com/owner/repo/pull/{number}",
+        "createdAt": created,
+        "statusCheckRollup": checks,
+    }
+
+
+def _rest_pr(pr: dict) -> dict:
+    """REST pull-list shape, distinct from gh pr view's GraphQL shape."""
+    return {
+        "number": pr["number"],
+        "title": pr["title"],
+        "user": pr["author"],
+        "head": {"sha": pr["headRefOid"]},
+        "html_url": pr["url"],
+        "draft": pr["isDraft"],
+        "state": pr["state"],
+        "created_at": pr["createdAt"],
+    }
+
+
+def _run_check_contributor_unreviewed(
+    run: ProjectMonitoringRun,
+    prs: list[dict],
+    reviews: list[dict] | None = None,
+) -> list[WorkItem]:
+    """Call check_contributor_unreviewed with mocked subprocess.run."""
+    if reviews is None:
+        reviews = []
+
+    pr_result = MagicMock(returncode=0, stdout=json.dumps(prs))
+    review_result = MagicMock(returncode=0, stdout=json.dumps([reviews]))
+
+    def fake_run(cmd, **kwargs):
+        if "pr" in cmd and "list" in cmd:
+            return pr_result
+        if "api" in cmd and "/pulls?" in cmd[-1]:
+            return MagicMock(
+                returncode=0, stdout=json.dumps([[_rest_pr(pr) for pr in prs]])
+            )
+        if "pr" in cmd and "view" in cmd:
+            pr = next(pr for pr in prs if str(pr["number"]) in cmd)
+            return MagicMock(returncode=0, stdout=json.dumps(pr))
+        if "api" in cmd:
+            return review_result
+        return MagicMock(returncode=1, stdout="")
+
+    with patch(
+        "gptme_runloops.project_monitoring.subprocess.run", side_effect=fake_run
+    ):
+        return run.check_contributor_unreviewed("owner/repo")
+
+
+def test_check_contributor_unreviewed_emits_eligible_pr(workspace):
+    """An open, green, old enough, unreviewed outside-contributor PR emits a work item."""
+    run = ProjectMonitoringRun(workspace)
+    pr = _make_pr(101, author="outside-dev")
+    items = _run_check_contributor_unreviewed(run, [pr])
+    assert len(items) == 1
+    item = items[0]
+    assert item.item_type == "contributor_unreviewed"
+    assert item.number == 101
+    assert item.repo == "owner/repo"
+    token = next(
+        part for part in item.details.split() if part.startswith("managed_logins=")
+    )
+    assert token == "managed_logins=TimeToBuildBob,ErikBjare"
+
+
+def test_check_contributor_unreviewed_skips_managed_author(workspace):
+    """PRs authored by a managed login are skipped."""
+    run = ProjectMonitoringRun(workspace)
+    pr = _make_pr(102, author="TimeToBuildBob")
+    items = _run_check_contributor_unreviewed(run, [pr])
+    assert items == []
+
+
+def test_check_contributor_unreviewed_skips_configured_author(workspace):
+    run = ProjectMonitoringRun(workspace, author="OtherAgent")
+    assert (
+        _run_check_contributor_unreviewed(run, [_make_pr(102, author="otheragent")])
+        == []
+    )
+
+
+def test_check_contributor_unreviewed_honors_configured_author_review(workspace):
+    run = ProjectMonitoringRun(workspace, author="OtherAgent")
+    pr = _make_pr(103)
+    assert (
+        _run_check_contributor_unreviewed(
+            run,
+            [pr],
+            reviews=[
+                {
+                    "user": {"login": "otheragent"},
+                    "state": "COMMENTED",
+                    "commit_id": pr["headRefOid"],
+                }
+            ],
+        )
+        == []
+    )
+
+
+def test_check_contributor_unreviewed_finds_pr_beyond_first_page(workspace):
+    run = ProjectMonitoringRun(workspace)
+    recent = [_make_pr(n, author="TimeToBuildBob") for n in range(100)]
+    older = _make_pr(101)
+
+    def fake_run(cmd, **kwargs):
+        if "list" in cmd:
+            return MagicMock(returncode=0, stdout=json.dumps(recent))
+        if "/pulls?" in cmd[-1]:
+            assert "--paginate" in cmd and "--slurp" in cmd
+            pages = [[_rest_pr(pr) for pr in page] for page in (recent, [older])]
+            return MagicMock(returncode=0, stdout=json.dumps(pages))
+        if "view" in cmd:
+            assert "101" in cmd
+            return MagicMock(returncode=0, stdout=json.dumps(older))
+        return MagicMock(returncode=0, stdout="[[]]")
+
+    with patch(
+        "gptme_runloops.project_monitoring.subprocess.run", side_effect=fake_run
+    ):
+        items = run.check_contributor_unreviewed("owner/repo")
+    assert [item.number for item in items] == [101]
+
+
+@pytest.mark.parametrize(
+    "ci_result",
+    [
+        MagicMock(returncode=1, stdout=""),
+        MagicMock(returncode=0, stdout="invalid json"),
+        MagicMock(returncode=0, stdout="[]"),
+        MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "headRefOid": "changed-head",
+                    "statusCheckRollup": [{"conclusion": "SUCCESS"}],
+                }
+            ),
+        ),
+    ],
+)
+def test_check_contributor_unreviewed_skips_unobservable_or_changed_ci(
+    workspace, ci_result
+):
+    run = ProjectMonitoringRun(workspace)
+    pr = _make_pr(104)
+    with patch(
+        "gptme_runloops.project_monitoring.subprocess.run",
+        side_effect=[
+            MagicMock(returncode=0, stdout=json.dumps([[_rest_pr(pr)]])),
+            ci_result,
+        ],
+    ) as mocked:
+        assert run.check_contributor_unreviewed("owner/repo") == []
+    assert mocked.call_count == 2
+
+
+def test_check_contributor_unreviewed_carries_configured_author(workspace):
+    run = ProjectMonitoringRun(workspace, author="OtherAgent")
+    items = _run_check_contributor_unreviewed(run, [_make_pr(105)])
+    assert "managed_logins=TimeToBuildBob,ErikBjare,OtherAgent" in items[0].details
+
+
+def test_check_contributor_unreviewed_skips_bot_author(workspace):
+    """Bot-authored PRs are skipped (dependabot etc.)."""
+    run = ProjectMonitoringRun(workspace)
+    pr = _make_pr(103, author="dependabot[bot]")
+    items = _run_check_contributor_unreviewed(run, [pr])
+    assert items == []
+
+
+def test_check_contributor_unreviewed_skips_draft(workspace):
+    """Draft PRs are skipped."""
+    run = ProjectMonitoringRun(workspace)
+    pr = _make_pr(104, is_draft=True)
+    items = _run_check_contributor_unreviewed(run, [pr])
+    assert items == []
+
+
+def test_check_contributor_unreviewed_skips_too_young(workspace):
+    """PRs younger than 24h are skipped."""
+    run = ProjectMonitoringRun(workspace)
+    pr = _make_pr(105, created_offset_hours=12.0)
+    items = _run_check_contributor_unreviewed(run, [pr])
+    assert items == []
+
+
+def test_check_contributor_unreviewed_skips_failing_ci(workspace):
+    """PRs with failing CI are skipped."""
+    run = ProjectMonitoringRun(workspace)
+    pr = _make_pr(106, checks_green=False)
+    items = _run_check_contributor_unreviewed(run, [pr])
+    assert items == []
+
+
+def test_check_contributor_unreviewed_skips_already_reviewed(workspace):
+    """PRs already reviewed by a managed login on the current head are skipped."""
+    run = ProjectMonitoringRun(workspace)
+    head = "deadbeef1234"
+    pr = _make_pr(107, head=head)
+    review = {
+        "user": {"login": "TimeToBuildBob"},
+        "state": "APPROVED",
+        "commit_id": head,
+        "submittedAt": "2026-10-25T10:00:00Z",
+    }
+    items = _run_check_contributor_unreviewed(run, [pr], reviews=[review])
+    assert items == []
+
+
+def test_check_contributor_unreviewed_review_on_old_head_not_skip(workspace):
+    """A managed review on a DIFFERENT (older) head does not block dispatch."""
+    run = ProjectMonitoringRun(workspace)
+    current_head = "newhead1234"
+    old_head = "oldhead5678"
+    pr = _make_pr(108, head=current_head)
+    review = {
+        "user": {"login": "TimeToBuildBob"},
+        "state": "APPROVED",
+        "commit_id": old_head,
+        "submittedAt": "2026-10-24T08:00:00Z",
+    }
+    items = _run_check_contributor_unreviewed(run, [pr], reviews=[review])
+    assert len(items) == 1
+    assert items[0].number == 108
+
+
+def test_check_contributor_unreviewed_skips_no_ci_checks(workspace):
+    """PRs with empty CI check list are skipped (cannot confirm green)."""
+    run = ProjectMonitoringRun(workspace)
+    pr = _make_pr(109)
+    pr["statusCheckRollup"] = []
+    items = _run_check_contributor_unreviewed(run, [pr])
+    assert items == []
+
+
+def test_check_contributor_unreviewed_timeout_in_item_timeouts(workspace):
+    """contributor_unreviewed has a timeout budget in _ITEM_TIMEOUTS."""
+    run = ProjectMonitoringRun(workspace)
+    assert "contributor_unreviewed" in run._ITEM_TIMEOUTS
+    assert run._ITEM_TIMEOUTS["contributor_unreviewed"] >= 1500
+
+
+def test_check_contributor_unreviewed_timeout_budget(workspace):
+    """A single contributor_unreviewed item produces a >= 1500s session timeout."""
+    run = ProjectMonitoringRun(workspace)
+    items = [
+        WorkItem(
+            repo="owner/repo",
+            item_type="contributor_unreviewed",
+            number=200,
+            title="Outside contrib",
+            url="https://github.com/owner/repo/pull/200",
+            details="managed_logins=TimeToBuildBob,ErikBjare",
+        )
+    ]
+    assert run._compute_timeout(items) >= 1500
+
+
+def test_discover_work_calls_check_contributor_unreviewed(workspace):
+    """discover_work includes contributor_unreviewed items from check_contributor_unreviewed."""
+    run = ProjectMonitoringRun(
+        workspace,
+        target_repos=["owner/repo"],
+    )
+    pr = _make_pr(300, author="outside-dev")
+    contributor_item = WorkItem(
+        repo="owner/repo",
+        item_type="contributor_unreviewed",
+        number=300,
+        title="Outside contrib",
+        url=pr["url"],
+        details="managed_logins=TimeToBuildBob,ErikBjare",
+    )
+    # Patch the individual check methods so we isolate discover_work's wiring
+    with (
+        patch.object(run, "check_notifications", return_value=[]),
+        patch.object(run, "check_linear_notifications", return_value=[]),
+        patch.object(run, "discover_repositories", return_value=["owner/repo"]),
+        patch.object(run, "check_pr_updates", return_value=[]),
+        patch.object(run, "check_ci_failures", return_value=[]),
+        patch.object(run, "check_assigned_issues", return_value=[]),
+        patch.object(
+            run, "check_contributor_unreviewed", return_value=[contributor_item]
+        ),
+    ):
+        work = run.discover_work()
+
+    assert any(w.item_type == "contributor_unreviewed" for w in work)
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_contributor_reviews_execute_in_isolated_review_only_sessions(workspace, mixed):
+    """Legacy execution must never combine contributor reviews with repair prompts."""
+    from gptme_runloops.utils.execution import ExecutionResult
+
+    executor = MagicMock()
+    executor.execute.return_value = ExecutionResult(exit_code=0)
+    run = ProjectMonitoringRun(workspace, executor=executor, author="TimeToBuildBob")
+    contributors = [
+        WorkItem(
+            repo="owner/repo",
+            item_type="contributor_unreviewed",
+            number=number,
+            title="Outside contribution",
+            url=f"https://github.com/owner/repo/pull/{number}",
+            details="managed_logins=TimeToBuildBob,ErikBjare",
+        )
+        for number in (301, 302)
+    ]
+    run._discovered_work = contributors + (
+        [
+            WorkItem("team/repo", "pr_update", 400, "Repair", "url", "repair #400"),
+            WorkItem(
+                "owner/repo",
+                "ci_failure",
+                301,
+                "Same contributor",
+                "url",
+                "fix contributor #301",
+            ),
+        ]
+        if mixed
+        else []
+    )
+    result = run.execute(run.generate_prompt())
+
+    assert result.success
+    calls = executor.execute.call_args_list
+    assert len(calls) == 2 + int(mixed)
+    review_prompts = [
+        c.kwargs["prompt"]
+        for c in calls
+        if "Contributor Initial Review" in c.kwargs["prompt"]
+    ]
+    assert len(review_prompts) == 2
+    for number, prompt in zip((301, 302), review_prompts):
+        assert f"PR: #{number}" in prompt
+        assert "Never push, commit" in prompt
+        assert "commit_id" in prompt
+        assert '["TimeToBuildBob", "ErikBjare"]' in prompt
+        assert "Implement fixes, test, commit, push" not in prompt
+        assert "repair #400" not in prompt
+    if mixed:
+        repair_prompt = next(
+            c.kwargs["prompt"] for c in calls if "repair #400" in c.kwargs["prompt"]
+        )
+        assert "Implement fixes, test, commit, push" in repair_prompt
+        assert "Outside contribution" not in repair_prompt
+        assert "Contributor Unreviewed" not in repair_prompt
+        assert "fix contributor #301" not in repair_prompt
+
+
+@pytest.mark.parametrize("lookup", ["ci", "review"])
+def test_contributor_review_timeout_does_not_abort_later_candidates(workspace, lookup):
+    """A timed-out lookup skips only the unobservable PR, not its siblings."""
+    import subprocess
+
+    run = ProjectMonitoringRun(workspace)
+    visited = []
+
+    def fake_run(cmd, **kwargs):
+        if "/pulls?" in cmd[-1]:
+            return MagicMock(
+                returncode=0,
+                stdout=json.dumps([[_rest_pr(_make_pr(n)) for n in (401, 402)]]),
+            )
+        is_ci = "view" in cmd
+        if is_ci == (lookup == "ci"):
+            visited.append(cmd)
+            if "401" in cmd or "/401/" in cmd[-1]:
+                raise subprocess.TimeoutExpired(cmd, 30)
+        if is_ci:
+            return MagicMock(returncode=0, stdout=json.dumps(_make_pr(int(cmd[3]))))
+        return MagicMock(returncode=0, stdout="[[]]")
+
+    with patch(
+        "gptme_runloops.project_monitoring.subprocess.run", side_effect=fake_run
+    ):
+        items = run.check_contributor_unreviewed("owner/repo")
+
+    assert [item.number for item in items] == [402]
+    assert len(visited) == 2
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_contributor_sessions_record_each_trajectory_once(workspace, mixed):
+    from gptme_runloops.utils.execution import ExecutionResult
+
+    results = [ExecutionResult(exit_code=1), ExecutionResult(exit_code=0)]
+    executor = MagicMock()
+    executor.execute.side_effect = results
+    run = ProjectMonitoringRun(workspace, executor=executor)
+    run._discovered_work = [
+        WorkItem(
+            "owner/repo",
+            "contributor_unreviewed",
+            1,
+            "Review",
+            "url",
+            "managed_logins=Bob",
+        ),
+        WorkItem(
+            "owner/repo",
+            "pr_update" if mixed else "contributor_unreviewed",
+            2,
+            "Other",
+            "url",
+            "managed_logins=Bob",
+        ),
+    ]
+    original_timeout = run.timeout
+    with patch.object(run, "_record_session") as record:
+        result = run.execute(run.generate_prompt())
+        run.post_run(result)
+    assert record.call_count == 2
+    assert record.call_args_list[0].args[0] is results[0]
+    assert record.call_args_list[1].args[0] is results[1]
+    assert not result.success
+    assert result.exit_code == 1
+    assert run.timeout == original_timeout
+    assert results[1].exit_code == 0
+    assert results[1].success
+
+
+def test_notification_takes_priority_over_initial_contributor_review(workspace):
+    """Discovery must not consume a notification and then suppress its handler."""
+    run = ProjectMonitoringRun(workspace, target_repos=["owner/repo"])
+    notification = WorkItem(
+        "owner/repo", "notification", 301, "Mention", "url", "answer mention"
+    )
+    contributor = WorkItem(
+        "owner/repo",
+        "contributor_unreviewed",
+        301,
+        "Review",
+        "url",
+        "managed_logins=Bob",
+    )
+    with (
+        patch.object(run, "check_notifications", return_value=[notification]),
+        patch.object(run, "check_linear_notifications", return_value=[]),
+        patch.object(run, "discover_repositories", return_value=["owner/repo"]),
+        patch.object(run, "check_pr_updates", return_value=[]),
+        patch.object(run, "check_ci_failures", return_value=[]),
+        patch.object(run, "check_assigned_issues", return_value=[]),
+        patch.object(run, "check_contributor_unreviewed", return_value=[contributor]),
+    ):
+        run._discovered_work = run.discover_work()
+    assert run._discovered_work == [notification]
+    assert "answer mention" in run.generate_prompt()
+
+
+@pytest.mark.parametrize(
+    "checks,eligible",
+    [
+        ([{"__typename": "StatusContext", "state": "SUCCESS"}], True),
+        (
+            [
+                {"conclusion": "SUCCESS"},
+                {"__typename": "StatusContext", "state": "SUCCESS"},
+            ],
+            True,
+        ),
+        ([{"state": "PENDING"}], False),
+        ([{"state": "FAILURE"}], False),
+        ([{"conclusion": "FAILURE", "state": "SUCCESS"}], False),
+        ([None], False),
+        ([{"conclusion": "SUCCESS"}, None], False),
+    ],
+)
+def test_contributor_ci_gate_handles_checks_and_commit_statuses(
+    workspace, checks, eligible
+):
+    run = ProjectMonitoringRun(workspace)
+    pr = _make_pr(501)
+    pr["statusCheckRollup"] = checks
+    items = _run_check_contributor_unreviewed(run, [pr])
+    assert bool(items) is eligible
