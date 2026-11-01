@@ -46,6 +46,12 @@ repos:
     exclude: ^(packages/(bobutils|gptme-backoff|gptme-bob-status|gptme-lessons-extras|gptme-runloops|gptme-contrib-lib|gptodo|gptmail|gptme-activity-summary|gptme-voice|gptme-dashboard|gptme-sessions|gptme-daily-briefing|gptme-codegraph|gptme-coordination|gptme-rag|gptme-cc-memory|gptme-vision-node)/|plugins/|scripts/hooks/worktree-(push-)?guard$)
 - repo: local
   hooks:
+  - id: validate-bash-continuation-comment
+    name: Reject comment lines inside backslash-continued shell commands
+    entry: python3 scripts/precommit/validators/validate_bash_continuation_comment.py
+    language: system
+    types: [shell]
+
   - id: check-markdown-links
     name: Check markdown links
     description: Verifies that relative links in markdown files are valid.
