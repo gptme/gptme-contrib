@@ -192,6 +192,16 @@ check_repo() {
         return
     fi
 
+    # `--branch` matches the run's head branch, so a fork PR opened from the
+    # fork's own `master` lands in this list with the fork's headSha
+    # (ActivityWatch/aw-qt 2026-10-19: 0xbrayo/aw-qt PR runs reported as
+    # master CI, flagged stale against HEAD). A same-repo PR cannot have the
+    # default branch as its head, so these rows never describe default-branch
+    # health. Drop them without fallback; the push fallback below still runs.
+    run_json=$(echo "$run_json" | jq '[.[] | select(
+        (.event // "") != "pull_request" and (.event // "") != "pull_request_target"
+    )]')
+
     # Filter out runs from manually disabled workflows (e.g. stale fork workflows)
     local disabled_json
     disabled_json=$(_disabled_workflows "$repo")
@@ -217,25 +227,7 @@ check_repo() {
         (.conclusion != "startup_failure")
         or ((.name // "") != "")
     )]')
-    if [ "$(echo "$run_json" | jq 'length')" -eq 0 ]; then
-        echo -e "${YELLOW}-${NC} $label: No runs (only ghost startup_failure runs from deleted workflows)"
-        return
-    fi
-
-    # A fork PR whose head branch is named "master" reports headBranch=master,
-    # so `--branch master` returns its pull_request runs next to the real push
-    # runs (ActivityWatch/aw-qt 2026-10-19: a fork-master PR run on 3f2e243
-    # masked green push runs on HEAD and printed "Stale passing run"). Those
-    # runs tested a fork merge ref, never a default-branch commit. Keep them
-    # only if no reportable non-PR run remains. Select this window before
-    # skipped/Dependabot preferences can discard its non-PR alternatives.
-    local push_json
-    push_json=$(echo "$run_json" | jq '[.[] | select(
-        (.event // "") != "pull_request" and (.event // "") != "pull_request_target"
-    )]')
-    if [ "$(echo "$push_json" | jq 'length')" -gt 0 ]; then
-        run_json="$push_json"
-    fi
+    # An empty filtered window must still reach the push fallback below.
 
     # Filter out runs with "skipped" conclusion — conditional workflows that don't apply
     # to the current event type (e.g. gptme-bot only runs on PR/issue events, gets
@@ -253,15 +245,51 @@ check_repo() {
     # SHA → compact context reported the repo Failing). operator-health.py
     # already excludes event=dynamic from master-red escalation
     # (MASTER_CI_NONBLOCKING_EVENTS). Do not drop workflow_dispatch here —
-    # nightly full-suite failures are still useful status. Only drop these
+    # nightly full-suite failures are still useful status. workflow_run can
+    # also trigger product CI (e.g. chained Integration Tests), so exclude only
+    # the known "Comment" follow-up, not the event as a whole. That bot kept
+    # the push fallback from firing on ActivityWatch/aw-webui 2026-10-26 while
+    # Build/Lint had fallen out of the window. Only drop these non-product
     # rows when a product-CI run remains to report.
     local product_json
     product_json=$(echo "$run_json" | jq '[.[] | select(
-        ((.event // "") != "dynamic")
+        (.conclusion != "skipped")
+        and ((.event // "") != "dynamic")
+        and (((.event // "") == "workflow_run" and .name == "Comment") | not)
         and ((.name // "") | test("[Dd]ependabot") | not)
+        and ((.conclusion != "startup_failure") or ((.name // "") != ""))
     )]')
+    # Dependabot churn can fill the whole --limit 20 window (aw-server
+    # 2026-10-23: 28 dynamic + 45 "Dependabot Auto-merge" workflow_run rows
+    # in the last 100, push CI green) — the fallback below then reported the
+    # Dependabot update job as the repo's master CI. Before falling back,
+    # look for product CI once more, scoped to push events. An all-skipped
+    # window is also unusable; retain it only if the push query finds no CI.
+    if [ "$(echo "$product_json" | jq 'length')" -eq 0 ]; then
+        local push_json
+        push_json=$(gh run list --repo "$repo" --branch "$default_branch" --event push --limit 20 --json "$run_fields" 2>/dev/null) || push_json="[]"
+        # As with the initial query, a successful exit need not return an array.
+        # An unusable fallback must quietly preserve the original run window.
+        if ! echo "$push_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            push_json="[]"
+        fi
+        product_json=$(echo "$push_json" | jq --argjson disabled "$disabled_json" '[.[]? | select(
+            (.name as $n | $disabled | index($n) | not)
+            and (.conclusion != "skipped")
+            and ((.event // "") != "dynamic")
+            and ((.name // "") | test("[Dd]ependabot") | not)
+            and ((.conclusion != "startup_failure") or ((.name // "") != ""))
+        )]' 2>/dev/null) || product_json="[]"
+    fi
     if [ "$(echo "$product_json" | jq 'length')" -gt 0 ]; then
         run_json="$product_json"
+    fi
+
+    # Both run windows exclude ghosts; an empty result after the push fallback
+    # must report No runs rather than falling through to Unknown ().
+    if [ "$(echo "$run_json" | jq 'length')" -eq 0 ]; then
+        echo -e "${YELLOW}-${NC} $label: No runs (only fork PR runs or ghost startup_failure runs from deleted workflows)"
+        return
     fi
 
     # Report a red workflow even when a newer run of a DIFFERENT workflow passed.

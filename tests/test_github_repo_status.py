@@ -14,6 +14,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "github" / "repo-status.sh"
 
@@ -48,9 +50,17 @@ if argv[:2] == ["run", "list"]:
         if mode == "null":
             print("null")
         raise SystemExit(0)
+    push_raw = os.environ.get("FAKE_GH_PUSH_RUNS")
+    if "--event" in argv and push_raw is not None:
+        print(push_raw, end="")
+        raise SystemExit(0)
     raw = os.environ.get("FAKE_GH_RUNS")
     if raw:
-        emit_json(json.loads(raw))
+        runs = json.loads(raw)
+        if "--event" in argv:
+            event = argv[argv.index("--event") + 1]
+            runs = [run for run in runs if run.get("event") == event]
+        emit_json(runs)
     else:
         emit_json(
             [
@@ -67,7 +77,7 @@ if argv[:2] == ["run", "list"]:
     raise SystemExit(0)
 
 if argv[:2] == ["workflow", "list"]:
-    emit_json([])
+    emit_json(json.loads(os.environ.get("FAKE_GH_DISABLED_WORKFLOWS", "[]")))
     raise SystemExit(0)
 
 raise SystemExit(f"unexpected gh invocation: {argv}")
@@ -184,6 +194,229 @@ def test_dependabot_only_still_reports_failing() -> None:
     assert result.returncode == 0, result.stderr
     assert "gptme-cloud: Failing" in result.stdout
     assert "https://example.test/run/dependabot" in result.stdout
+
+
+def test_dependabot_filled_window_falls_back_to_push_ci() -> None:
+    """Dependabot churn filling the window must not hide green push CI.
+
+    aw-server 2026-10-23: the newest 20 master runs were all Dependabot update
+    jobs and auto-merge runs, so the Dependabot failure was reported as
+    master CI while push CI was green.
+    """
+    runs = [
+        {
+            "conclusion": "failure",
+            "status": "completed",
+            "url": "https://example.test/run/dependabot",
+            "name": "pip in /. for black - Update #1",
+            "headSha": "abc1234",
+            "event": "dynamic",
+        },
+        {
+            "conclusion": "skipped",
+            "status": "completed",
+            "url": "https://example.test/run/automerge",
+            "name": "Dependabot Auto-merge",
+            "headSha": "abc1234",
+            "event": "workflow_run",
+        },
+    ]
+    push_runs = [
+        {
+            "conclusion": "success",
+            "status": "completed",
+            "url": "https://example.test/run/build",
+            "name": "Build",
+            "headSha": "abc1234",
+            "event": "push",
+        }
+    ]
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_RUNS": json.dumps(runs),
+            "FAKE_GH_PUSH_RUNS": json.dumps(push_runs),
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Passing" in result.stdout
+    assert "Failing" not in result.stdout
+    assert "dependabot" not in result.stdout.lower()
+
+
+def test_dependabot_filled_window_with_red_push_ci_reports_push_failure() -> None:
+    runs = [
+        {
+            "conclusion": "failure",
+            "status": "completed",
+            "url": "https://example.test/run/dependabot",
+            "name": "Dependabot Updates",
+            "headSha": "abc1234",
+            "event": "dynamic",
+        }
+    ]
+    push_runs = [
+        {
+            "conclusion": "failure",
+            "status": "completed",
+            "url": "https://example.test/run/build",
+            "name": "Build",
+            "headSha": "abc1234",
+            "event": "push",
+        }
+    ]
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_RUNS": json.dumps(runs),
+            "FAKE_GH_PUSH_RUNS": json.dumps(push_runs),
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Failing" in result.stdout
+    assert "https://example.test/run/build" in result.stdout
+    assert "run/dependabot" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("push_conclusion", "expected"),
+    [("failure", "Failing"), ("success", "Passing"), (None, "Skipped")],
+)
+def test_all_skipped_window_checks_push_ci_before_reporting_skipped(
+    push_conclusion: str | None, expected: str
+) -> None:
+    runs = [
+        _run(
+            "Dependabot Auto-merge",
+            "skipped",
+            "abc1234",
+            "https://example.test/run/automerge",
+            "workflow_run",
+        ),
+        _run("Build", "skipped", "abc1234", "https://example.test/run/skipped"),
+    ]
+    push_runs = (
+        [_run("Build", push_conclusion, "oldsha00", "https://example.test/run/build")]
+        if push_conclusion is not None
+        else []
+    )
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_RUNS": json.dumps(runs),
+            "FAKE_GH_PUSH_RUNS": json.dumps(push_runs),
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"gptme-cloud: {expected}" in result.stdout
+    if push_conclusion == "failure":
+        assert "https://example.test/run/build" in result.stdout
+    if push_conclusion is not None:
+        assert "stale; HEAD=abc1234, run=oldsha0" in result.stdout
+        assert "Skipped" not in result.stdout
+
+
+def test_push_fallback_excludes_disabled_workflow_failure() -> None:
+    """Disabled historical failures must stay excluded after the push refetch."""
+    runs = [
+        _run(
+            "Dependabot Updates",
+            "failure",
+            "abc1234",
+            "https://example.test/run/dependabot",
+            "dynamic",
+        )
+    ]
+    push_runs = [
+        _run("Build", "failure", "oldsha00", "https://example.test/run/disabled-build"),
+        _run("Tests", "success", "abc1234", "https://example.test/run/tests"),
+    ]
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_RUNS": json.dumps(runs),
+            "FAKE_GH_PUSH_RUNS": json.dumps(push_runs),
+            "FAKE_GH_DISABLED_WORKFLOWS": json.dumps(["Build"]),
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Passing" in result.stdout
+    assert "Failing" not in result.stdout
+    assert "disabled-build" not in result.stdout
+
+
+def test_ghost_run_does_not_prevent_push_fallback() -> None:
+    """A ghost in a Dependabot-filled window is not usable product CI."""
+    runs = [
+        _run(
+            "Dependabot Updates",
+            "failure",
+            "abc1234",
+            "https://example.test/run/dependabot",
+            "dynamic",
+        ),
+        _run("", "startup_failure", "abc1234", "https://example.test/run/ghost"),
+    ]
+    push_runs = [_run("Build", "success", "abc1234", "https://example.test/run/build")]
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_RUNS": json.dumps(runs),
+            "FAKE_GH_PUSH_RUNS": json.dumps(push_runs),
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Passing" in result.stdout
+    assert "No runs" not in result.stdout
+    assert "Failing" not in result.stdout
+
+
+def test_ghost_only_push_response_keeps_original_failure() -> None:
+    """An unusable push response must not discard the original fallback."""
+    runs = [
+        _run(
+            "Dependabot Updates",
+            "failure",
+            "abc1234",
+            "https://example.test/run/dependabot",
+            "dynamic",
+        ),
+        _run("", "startup_failure", "abc1234", "https://example.test/run/ghost"),
+    ]
+    push_runs = [
+        _run("", "startup_failure", "abc1234", "https://example.test/run/ghost")
+    ]
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_RUNS": json.dumps(runs),
+            "FAKE_GH_PUSH_RUNS": json.dumps(push_runs),
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Failing" in result.stdout
+    assert "https://example.test/run/dependabot" in result.stdout
+    assert "No runs" not in result.stdout
+
+
+@pytest.mark.parametrize("push_response", ["", " \n", "null", "{}", "[", "[]"])
+def test_unusable_push_response_keeps_original_failure_quietly(
+    push_response: str,
+) -> None:
+    runs = [
+        _run(
+            "Dependabot Updates",
+            "failure",
+            "abc1234",
+            "https://example.test/run/dependabot",
+            "dynamic",
+        )
+    ]
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_RUNS": json.dumps(runs),
+            "FAKE_GH_PUSH_RUNS": push_response,
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Failing" in result.stdout
+    assert "https://example.test/run/dependabot" in result.stdout
+    assert "integer expression" not in result.stdout
+    assert result.stderr == ""
 
 
 def test_workflow_dispatch_nightly_failure_still_visible() -> None:
@@ -447,7 +680,7 @@ def test_fork_failure_does_not_mask_skipped_default_branch_run() -> None:
     assert "Failing" not in result.stdout
 
 
-def test_pr_with_only_ghost_alternative_still_reports_status() -> None:
+def test_pr_with_only_ghost_alternative_reports_no_runs() -> None:
     """A deleted workflow is not a usable non-PR fallback."""
     runs = [
         _fork_master_pr_run("success"),
@@ -455,14 +688,118 @@ def test_pr_with_only_ghost_alternative_still_reports_status() -> None:
     ]
     result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
     assert result.returncode == 0, result.stderr
-    assert "gptme-cloud: Passing" in result.stdout
-    assert "HEAD=abc1234" in result.stdout
-    assert "No runs" not in result.stdout
+    assert "gptme-cloud: No runs" in result.stdout
+    assert "Passing" not in result.stdout
 
 
-def test_pr_only_window_still_reports_status() -> None:
+def test_pr_only_window_reports_no_runs() -> None:
     runs = [_fork_master_pr_run("success")]
     result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
     assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: No runs" in result.stdout
+    assert "Passing" not in result.stdout
+
+
+def test_fork_pr_runs_on_master_named_branch_are_not_default_branch_ci() -> None:
+    """A fork PR whose head branch is `master` must not stand in for master CI.
+
+    ActivityWatch/aw-qt 2026-10-19: 0xbrayo/aw-qt PR runs matched
+    `--branch master` and were reported as stale master CI.
+    """
+    runs = [
+        {
+            "conclusion": "failure",
+            "status": "completed",
+            "url": "https://example.test/run/fork-pr",
+            "name": "Build",
+            "headSha": "f0f0f0f",
+            "event": "pull_request",
+        },
+        {
+            "conclusion": "success",
+            "status": "completed",
+            "url": "https://example.test/run/push",
+            "name": "Build",
+            "headSha": "abc1234",
+            "event": "push",
+        },
+    ]
+    result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
+    assert result.returncode == 0, result.stderr
     assert "gptme-cloud: Passing" in result.stdout
-    assert "HEAD=abc1234" in result.stdout
+    assert "Failing" not in result.stdout
+    assert "stale" not in result.stdout
+
+
+def test_chained_product_workflow_failure_is_not_masked_by_green_push() -> None:
+    """workflow_run is a trigger, not evidence that a workflow is non-product."""
+    runs = [
+        _run("Build", "success", "abc1234", "https://example.test/run/build"),
+        _run(
+            "Integration Tests",
+            "failure",
+            "abc1234",
+            "https://example.test/run/integration",
+            "workflow_run",
+        ),
+    ]
+    result = _run_script(extra_env={"FAKE_GH_RUNS": json.dumps(runs)})
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Failing" in result.stdout
+    assert "https://example.test/run/integration" in result.stdout
+    assert "Passing" not in result.stdout
+
+
+def test_workflow_run_window_falls_back_to_push_ci() -> None:
+    """Known comment-only follow-ups must not count as default-branch CI.
+
+    ActivityWatch/aw-webui 2026-10-26: a "Comment" workflow_run was reported
+    while Build/Lint push runs had fallen out of the window.
+    """
+    runs = [
+        {
+            "conclusion": "success",
+            "status": "completed",
+            "url": "https://example.test/run/comment",
+            "name": "Comment",
+            "headSha": "abc1234",
+            "event": "workflow_run",
+        }
+    ]
+    push_runs = [
+        {
+            "conclusion": "failure",
+            "status": "completed",
+            "url": "https://example.test/run/build",
+            "name": "Build",
+            "headSha": "abc1234",
+            "event": "push",
+        }
+    ]
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_RUNS": json.dumps(runs),
+            "FAKE_GH_PUSH_RUNS": json.dumps(push_runs),
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Failing" in result.stdout
+    assert "https://example.test/run/build" in result.stdout
+
+
+@pytest.mark.parametrize("window", ["fork", "ghost", "fork_and_ghost"])
+def test_filtered_empty_window_still_queries_push_ci(window: str) -> None:
+    fork = _fork_master_pr_run("failure")
+    ghost = _run("", "startup_failure", "abc1234", "https://example.test/run/ghost")
+    runs = {"fork": [fork], "ghost": [ghost], "fork_and_ghost": [fork, ghost]}[window]
+    result = _run_script(
+        extra_env={
+            "FAKE_GH_RUNS": json.dumps(runs),
+            "FAKE_GH_PUSH_RUNS": json.dumps([_push_run()]),
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert "gptme-cloud: Passing" in result.stdout
+    assert "No runs" not in result.stdout
+    assert "stale" not in result.stdout
+    assert result.stderr == ""
