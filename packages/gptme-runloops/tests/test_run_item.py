@@ -4201,3 +4201,71 @@ def test_contributor_review_skip_probe_uses_managed_logins_from_detail(
     )
     assert run_post_session(plan, item, outcome, config, hooks) == "observed"
     assert calls == [("Alice", "Bob")]
+
+
+@pytest.mark.parametrize("delivery", [None, "orphan_no_delivery"])
+@pytest.mark.parametrize("duration,infra", [(25, None), (120, "cc_auth"), (120, None)])
+def test_failed_execution_never_consumes_unanswered_notification(
+    tmp_path, cooldown_dir, monkeypatch, delivery, duration, infra
+):
+    """Execution failure is bounded by dispatch recovery, not reply promotion."""
+    from gptme_runloops.run_item import promote_notification_states
+
+    monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "0")
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path,
+        exit_code=1,
+        item_kwargs={
+            "notification_states": [{"id": "555", "updated_at": "2026-11-02T12:00:00Z"}]
+        },
+    )
+    outcome.duration_seconds = duration
+    outcome.infra_failure = infra
+    if delivery is None:
+        run_cmd.on("/fake/check-delivery.py", returncode=1, stdout="")
+    else:
+        run_cmd.on(
+            "/fake/check-delivery.py",
+            stdout=json.dumps({"outcome": delivery, "fallback_reply_posted": False}),
+        )
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("2026-11-02T12:00:00Z")
+    marker = cooldown_dir / "gptme-gptme-contrib-1234.event"
+    marker.write_text("event")
+    for _ in range(3):
+        run_post_session(plan, item, outcome, config, hooks)
+        promote_notification_states(config)
+    assert not (config.state_dir / "notif-555.state").exists()
+    assert not marker.exists()
+    counter = redelivery_attempts_file(config, item.repo, item.number)
+    assert counter is not None and not counter.exists()
+
+
+@pytest.mark.parametrize("delivery", ["handled", "orphan_no_delivery"])
+def test_failed_execution_with_verified_reply_consumes_carried_notification(
+    tmp_path, cooldown_dir, monkeypatch, delivery
+):
+    """A reply delivered before a later failure must not be dispatched twice."""
+    monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "0")
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path,
+        exit_code=1,
+        item_kwargs={
+            "notification_states": [{"id": "555", "updated_at": "2026-11-02T12:00:00Z"}]
+        },
+    )
+    run_cmd.on(
+        "/fake/check-delivery.py",
+        stdout=json.dumps(
+            {
+                "outcome": delivery,
+                "needs_fallback_reply": delivery == "orphan_no_delivery",
+                "fallback_reply_posted": delivery == "orphan_no_delivery",
+            }
+        ),
+    )
+    run_cmd.on("/fake/gate.py", returncode=1)
+    run_post_session(plan, item, outcome, config, hooks)
+    assert (config.state_dir / "notif-555.state").read_text() == "2026-11-02T12:00:00Z"

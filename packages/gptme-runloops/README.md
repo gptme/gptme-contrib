@@ -222,6 +222,25 @@ set proves the local fail-closed skip without a GitHub request. Dispatch ledger
 `types` likewise reflect only the review; mixed inputs remain available as
 per-item `original_types`, never credited as completed repairs.
 
+## Failed execution and notification delivery
+
+For thread-deliverable items with a configured delivery checker, a nonzero
+worker exit without a verified handled reply or posted fallback reply leaves
+notification watermarks unconsumed. This includes immutable launch snapshots.
+The executor clears launch-event fingerprints and purges owned pending
+notifications so end-of-run blanket promotion cannot consume them. Valid PR
+and master-CI observations still promote independently of reply delivery.
+
+Execution failures do not spend the no-reply redelivery budget: the dispatcher's
+existing failure/infra backoff, finite retry budget and visible escalation own
+execution recovery. The caller must retain that recovery policy; this change
+is not an unbounded automatic retry loop. Successful executions with unverified
+or orphan delivery retain the existing delivery cap. A verified reply before a
+later process failure still promotes notifications to prevent duplicates.
+Without a delivery hook, historical compatibility behavior is unchanged; no
+new claim of observed delivery is implied. Review-only suppressed work retains
+its separate non-promotion contract above.
+
 ## Development
 
 ```bash

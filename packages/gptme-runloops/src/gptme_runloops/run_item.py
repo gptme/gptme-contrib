@@ -2828,6 +2828,30 @@ def run_post_session(
         # A submitted review does not handle that work: leave both pending and
         # carried watermarks unconsumed so the gate can emit it again.
         pass
+    elif (
+        exit_code != 0
+        and hooks.delivery_check is not None
+        and THREAD_DELIVERABLE_TYPES & set(item.types)
+        and not (delivery_verified and delivery_outcome == "handled")
+        and not (delivery_verified and fallback_posted == "true")
+    ):
+        # Execution failure is not a no-reply disposition. Dispatch recovery
+        # owns its bounded retries/escalation; the delivery cap must not consume
+        # an unanswered human event, including an immutable carried watermark.
+        clear_slot_event_markers(config, resolve_slot_key(config, item))
+        purge_pending_notif_state(config, item.repo, item.number)
+        # PR/master-CI observations remain valid independently of a reply.
+        promote_item_state(
+            config,
+            item.repo,
+            item.number,
+            reset_redelivery_counter=False,
+            include_master_ci="master_ci_failure" in item.types,
+        )
+        _log(
+            f"WARN: failed execution without verified delivery for {item.repo}#{item.number} "
+            f"(exit {exit_code}); leaving notification unhandled for dispatch recovery"
+        )
     elif delivery_outcome == "orphan_no_delivery":
         rollback_slot_key = resolve_slot_key(config, item)
         if rollback_failed_delivery(config, item.repo, item.number, rollback_slot_key):
