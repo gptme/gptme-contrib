@@ -180,22 +180,10 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         _dest_push_url="$(git remote get-url --push "$PUSH_REMOTE_NAME" 2>/dev/null || true)"
     fi
     _dest_push_identity="$(_canonical_remote_url "$_dest_push_url")"
-    # When pushing by bare URL, PUSH_REMOTE_NAME is the URL itself and
-    # refs/remotes/<url>/ does not exist. Track the configured remote name
-    # (if any) whose fetch AND push URLs match the destination so the new-branch
-    # path can use its tracking history for for-each-ref range scoping.
-    _dest_remote_name=""
-    _dest_name_matched="false"   # true when PUSH_REMOTE_NAME matched a configured name
-    _dest_url_alias=""           # first URL alias (used only when no name match)
+
     while IFS= read -r _r; do
-        # Skip by name — record that we found the configured destination remote
-        # so URL aliases below do not override it even if they appear first.
+        # The named destination is never independent published history.
         if [ "$_r" = "$PUSH_REMOTE_NAME" ]; then
-            _dest_name_matched="true"
-            _r_fetch_url="$(git remote get-url "$_r" 2>/dev/null || true)"
-            if [ "$(_canonical_remote_url "$_r_fetch_url")" = "$_dest_push_identity" ]; then
-                _dest_remote_name="$_r"
-            fi
             _protect_remote_refs "$_r"
             continue
         fi
@@ -214,12 +202,7 @@ if [ -n "$_GUARD_SCRIPT" ]; then
                 fi
             done < <(git remote get-url --push --all "$_r" 2>/dev/null)
             if [ "$_r_push_matches" = true ]; then
-                # A push alias protects refs, but only a matching FETCH
-                # endpoint can supply destination history as a baseline.
-                _r_fetch_url="$(git remote get-url "$_r" 2>/dev/null || true)"
-                if [ "$(_canonical_remote_url "$_r_fetch_url")" = "$_dest_push_identity" ]; then
-                    [ -z "$_dest_url_alias" ] && _dest_url_alias="$_r"
-                fi
+
                 _protect_remote_refs "$_r"
                 continue
             fi
@@ -286,26 +269,7 @@ if [ -n "$_GUARD_SCRIPT" ]; then
             _other_remotes="$_other_remotes $_oid"
         fi
     done < <(git for-each-ref --format='%(refname) %(objectname) %(symref)' refs/ 2>/dev/null)
-    # Post-loop: if PUSH_REMOTE_NAME was not matched as a configured name (bare
-    # URL push), substitute the first URL alias we found — it carries tracking refs.
-    # A named remote with a different fetch endpoint supplies no baseline.
-    if [ "$_dest_name_matched" = "false" ] && [ -n "$_dest_url_alias" ]; then
-        _dest_remote_name="$_dest_url_alias"
-    fi
 
-    # A different remote may fetch into the destination's conventional
-    # namespace. Such refs cannot establish destination history merely by name.
-    _non_dest_fetch_patterns=()
-    while IFS= read -r _r; do
-        [ "$_r" = "$_dest_remote_name" ] && continue
-        while IFS= read -r _spec; do
-            [[ "$_spec" == ^* || "$_spec" != *:* ]] && continue
-            _target="${_spec#*:}"
-            if [ -n "$_target" ]; then
-                _non_dest_fetch_patterns+=("$_target")
-            fi
-        done < <(git config --get-all "remote.${_r}.fetch" 2>/dev/null)
-    done < <(git remote 2>/dev/null)
 
     for line in "${STDIN_LINES[@]}"; do
         read -r local_ref local_sha remote_ref remote_sha <<< "$line"
@@ -324,115 +288,16 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         # human force-reset the remote behind this clone's back), and blindly
         # excluding it would hide the destructive commit from the scan.
         if [ "$remote_sha" = "$ZERO" ]; then
-            # New branch: no destination tracking ref from git, but the clone may
-            # retain a stale one (e.g. if the branch was deleted remotely). Build
-            # an exclusion from the destination's OTHER tracking refs (to scope
-            # the range to new commits efficiently) but skip this branch's own
-            # tracking ref — it may be stale and could hide a destructive commit.
-            # Other destination branches are a safe baseline only as *strict
-            # ancestors* of the pushed tip. Equality (stale dest/main=D while
-            # creating dest/topic=D) produces `D --not D` and silently permits
-            # restoring D. Descendants and unrelated tips are also not safe
-            # exclusions; they would empty or hide the scan the same way.
-            _branch_name="${remote_ref#refs/heads/}"
-            _dest_other_excl=""
-            if [ -n "$_dest_remote_name" ]; then
-                # Map the pushed source ref through each positive fetch
-                # refspec. The stale ref may be renamed locally, so comparing
-                # only refs/remotes/<remote>/<branch> is insufficient.
-                _dest_fetch_patterns=()
-                _pushed_tracking_refs=("refs/remotes/${_dest_remote_name}/${_branch_name}")
-                while IFS= read -r _spec; do
-                    [[ "$_spec" == ^* || "$_spec" != *:* ]] && continue
-                    _source="${_spec%%:*}"
-                    _source="${_source#+}"
-                    _target="${_spec#*:}"
-                    [ -z "$_target" ] && continue
-                    _dest_fetch_patterns+=("$_target")
-                    if [[ "$_source" == *\** ]]; then
-                        _source_prefix="${_source%%\**}"
-                        _source_suffix="${_source#*\*}"
-                        if [[ "$remote_ref" == "$_source_prefix"*"$_source_suffix" ]]; then
-                            _capture="${remote_ref#"$_source_prefix"}"
-                            _capture="${_capture%"$_source_suffix"}"
-                            _pushed_tracking_refs+=("${_target/\*/"$_capture"}")
-                        fi
-                    elif [ "$_source" = "$remote_ref" ]; then
-                        _pushed_tracking_refs+=("$_target")
-                    fi
-                done < <(git config --get-all "remote.${_dest_remote_name}.fetch" 2>/dev/null)
-                while read -r _dest_ref _dest_oid _dest_symref; do
-                    # Symbolic aliases do not supply independent fetched history.
-                    # Skip all of them, including custom names and alias chains,
-                    # so they cannot reintroduce the pushed branch's stale tip.
-                    [ -n "$_dest_symref" ] && continue
-                    # Apply the same local-ref boundary to destination baselines.
-                    case "$_dest_ref" in refs/heads/*|refs/tags/*) continue ;; esac
-                    # Fetch destinations can live outside the conventional
-                    # namespace (even outside refs/remotes). Do not admit
-                    # unrelated local branches or tags from the wider walk.
-                    _dest_owned=false
-                    if [[ "$_dest_ref" == "refs/remotes/${_dest_remote_name}/"* ]]; then
-                        _dest_owned=true
-                    fi
-                    for _pattern in "${_dest_fetch_patterns[@]}"; do
-                        # shellcheck disable=SC2053
-                        if [[ "$_dest_ref" == $_pattern ]]; then
-                            _dest_owned=true
-                            break
-                        fi
-                    done
-                    [ "$_dest_owned" = true ] || continue
-                    # for-each-ref recursively includes configured remotes such
-                    # as team/fork under team/. Their refs are not team branch
-                    # baselines, even when both remotes share a destination URL.
-                    _nested_remote=false
-                    for _prefix in "${_protected_ref_prefixes[@]}" "${_other_remote_prefixes[@]}"; do
-                        [ "$_prefix" = "refs/remotes/${_dest_remote_name}/" ] && continue
-                        if [[ "$_prefix" == "refs/remotes/${_dest_remote_name}/"* && "$_dest_ref" == "$_prefix"* ]]; then
-                            _nested_remote=true
-                            break
-                        fi
-                    done
-                    [ "$_nested_remote" = true ] && continue
-                    _foreign_fetch=false
-                    for _pattern in "${_non_dest_fetch_patterns[@]}"; do
-                        # shellcheck disable=SC2053
-                        if [[ "$_dest_ref" == $_pattern ]]; then
-                            _foreign_fetch=true
-                            break
-                        fi
-                    done
-                    [ "$_foreign_fetch" = true ] && continue
-                    _pushed_tracking=false
-                    for _tracking_ref in "${_pushed_tracking_refs[@]}"; do
-                        if [ "$_dest_ref" = "$_tracking_ref" ]; then
-                            _pushed_tracking=true
-                            break
-                        fi
-                    done
-                    [ "$_pushed_tracking" = true ] && continue
-                    [ "$_dest_ref" = "refs/remotes/${_dest_remote_name}/HEAD" ] && continue
-                    # Equality is not ancestry for this purpose: dest/main=D must
-                    # not exclude D itself from the new dest/topic=D scan.
-                    [ "$_dest_oid" = "$local_sha" ] && continue
-                    git merge-base --is-ancestor "$_dest_oid" "$local_sha" 2>/dev/null || continue
-                    _dest_other_excl="$_dest_other_excl $_dest_oid"
-                done < <(git for-each-ref refs/ \
-                    --format='%(refname) %(objectname) %(symref)' 2>/dev/null)
-            fi
-            if [ -n "$_dest_other_excl" ] || [ -n "$_other_remotes" ]; then
-                # shellcheck disable=SC2086
-                range="$local_sha --not${_dest_other_excl}${_other_remotes}"
-            else
-                range="$local_sha"
-            fi
+            # Cached destination refs cannot prove the server still has their
+            # history, even when they are strict ancestors of the pushed tip.
+            # New branches therefore use only the other-remote exemption.
+            range="$local_sha${_other_remotes:+ --not $_other_remotes}"
         else
             # shellcheck disable=SC2086
             range="$local_sha --not $remote_sha${_other_remotes:+ $_other_remotes}"
         fi
 
-        # O(N) protection: skip the per-commit scan when the push range is huge.
+        # O(N) protection: block an over-limit scan, never silently skip it.
         #
         # The loop below is O(commits). A first push to a NEW remote (a mirror, a
         # backup forge, a fork) has a range of the entire history. Measured
@@ -442,15 +307,10 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         # running, so it reads as "the remote is broken" or "the repo is too
         # big" — both wrong, and both send you down a dead end.
         #
-        # That makes any new remote unusable without --no-verify, which is
-        # exactly the habit this hook exists to avoid teaching.
+        # Count first, then require a deliberate full scan or override rather
+        # than assuming imported history was checked by our pre-commit hook.
         #
-        # One rev-list --count is fast even on huge ranges. The per-commit
-        # guard is a backstop anyway: pre-commit already checks each commit's
-        # staged diff as it is created, so a skip here does not leave the
-        # commits unexamined.
-        #
-        # 0 means "no limit — always scan", which is what the skip message below
+        # 0 means "no limit — always scan", which is what the message below
         # tells you to set. It has to be special-cased: `_range_count -gt 0` is
         # true for every non-empty range, so a plain comparison made
         # MASS_DELETE_COMMIT_RANGE_LIMIT=0 disable the guard on every push —
@@ -472,12 +332,13 @@ if [ -n "$_GUARD_SCRIPT" ]; then
             exit 1
         fi
         if [ "$_range_limit" -ne 0 ] && [ "$_range_count" -gt "$_range_limit" ]; then
-            # Never skip silently — a quiet downgrade of a safety check is its own trap.
-            echo "ℹ️  pre-push: skipping per-commit mass-delete scan" >&2
-            echo "   Range: $_range_count commits (limit $_range_limit)." >&2
-            echo "   Normal for a first push to a new remote. Each commit was still" >&2
-            echo "   checked by pre-commit when it was created." >&2
-            echo "   Force the full scan with: MASS_DELETE_COMMIT_RANGE_LIMIT=0 (very slow)" >&2
+            if [ "${ALLOW_MASS_DELETE:-}" != "1" ]; then
+                echo "PUSH BLOCKED: mass-delete scan range exceeds limit" >&2
+                echo "   Range: $_range_count commits (limit $_range_limit)." >&2
+                echo "   Run the full scan: MASS_DELETE_COMMIT_RANGE_LIMIT=0 git push ... (may be slow)" >&2
+                echo "   After inspecting history, deliberately override: ALLOW_MASS_DELETE=1 git push ..." >&2
+                exit 1
+            fi
             continue
         fi
 
