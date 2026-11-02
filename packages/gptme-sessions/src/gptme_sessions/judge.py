@@ -41,9 +41,12 @@ CONFIG_PATHS = (
     Path.home() / ".config" / "gptme" / "config.toml",
     Path.home() / ".config" / "gptme" / "config.local.toml",
 )
+# Working judges share JUDGE/LLM_JUDGE aliases and the unscoped key.
+# Isolated EVAL is a measurement exception: EVAL may borrow working keys,
+# but working payloads must never borrow EVAL.
 CONTEXT_FALLBACKS = {
-    "JUDGE": ("JUDGE", "LLM_JUDGE", "EVAL"),
-    "LLM_JUDGE": ("LLM_JUDGE", "JUDGE", "EVAL"),
+    "JUDGE": ("JUDGE", "LLM_JUDGE"),
+    "LLM_JUDGE": ("LLM_JUDGE", "JUDGE"),
     "EVAL": ("EVAL", "JUDGE", "LLM_JUDGE"),
 }
 
@@ -518,10 +521,25 @@ def _resolve_openrouter_api_key(
     context: str,
     *,
     environ: dict[str, str] | None = None,
-    config_paths: tuple[Path, ...] = CONFIG_PATHS,
+    config_paths: tuple[Path, ...] | None = None,
 ) -> str | None:
-    """Resolve a scoped OpenRouter key, falling back to the shared default."""
+    """Resolve a scoped OpenRouter key, falling back to the shared default.
+
+    Working contexts (JUDGE, LLM_JUDGE) share aliases and unscoped
+    ``OPENROUTER_API_KEY``. Isolated EVAL is not a working-context candidate.
+    EVAL itself may still fall back to those working keys.
+
+    All environment candidates are checked before any config candidate, so a
+    scoped env key outranks a more-specific config key. Interleaving env and
+    config per candidate is a separate decision; this resolver keeps the
+    existing env-then-config order.
+
+    ``config_paths`` defaults to the module ``CONFIG_PATHS`` at call time so
+    tests can point the promotion path at synthetic files without reading
+    operator config.
+    """
     env = os.environ if environ is None else environ
+    paths = CONFIG_PATHS if config_paths is None else config_paths
     candidates = _candidate_openrouter_env_var_names(context)
 
     for name in candidates:
@@ -529,7 +547,7 @@ def _resolve_openrouter_api_key(
         if value:
             return value
 
-    config_env = _load_config_env(config_paths)
+    config_env = _load_config_env(paths)
     for name in candidates:
         value = config_env.get(name, "")
         if value:
@@ -540,11 +558,15 @@ def _resolve_openrouter_api_key(
 
 @contextlib.contextmanager
 def _judge_openrouter_env(model: str) -> Iterator[None]:
-    """Temporarily promote the judge-scoped OpenRouter key for judge calls."""
+    """Temporarily promote the working-judge OpenRouter key for gptme calls.
+
+    Uses the JUDGE chain (JUDGE → LLM_JUDGE → shared). Isolated EVAL is never
+    promoted. Non-OpenRouter models leave the environment unchanged.
+    """
     if not model.startswith("openrouter/"):
         yield
         return
-    judge_key = _resolve_openrouter_api_key("JUDGE")
+    judge_key = _resolve_openrouter_api_key("JUDGE", config_paths=CONFIG_PATHS)
     if not judge_key:
         yield
         return
