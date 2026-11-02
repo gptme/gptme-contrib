@@ -1042,6 +1042,7 @@ def promote_item_state(
     *,
     reset_redelivery_counter: bool = True,
     include_master_ci: bool = False,
+    include_issue: bool = True,
 ) -> None:
     """Copy the item's pending activity-gate state files to the real state dir.
 
@@ -1085,10 +1086,9 @@ def promote_item_state(
             if f.is_file() and not f.with_suffix(".map").is_file():
                 shutil.copy(f, state / f.name)
     else:
-        patterns = [
-            f"{repo_safe}-pr-{number}*.state",
-            f"{repo_safe}-issue-{number}*.state",
-        ]
+        patterns = [f"{repo_safe}-pr-{number}*.state"]
+        if include_issue:
+            patterns.append(f"{repo_safe}-issue-{number}*.state")
         if include_master_ci:
             patterns.append(f"{repo_safe}-master-ci.state")
     for pattern in patterns:
@@ -2851,13 +2851,15 @@ def run_post_session(
         # an unanswered human event, including an immutable carried watermark.
         clear_slot_event_markers(config, resolve_slot_key(config, item))
         purge_pending_notif_state(config, item.repo, item.number)
-        # PR/master-CI observations remain valid independently of a reply.
+        # PR/master-CI observations remain valid independently of a reply;
+        # an unanswered issue assignment's activity watermark does not.
         promote_item_state(
             config,
             item.repo,
             item.number,
             reset_redelivery_counter=False,
             include_master_ci="master_ci_failure" in item.types,
+            include_issue=False,
         )
         _log(
             f"WARN: failed execution without verified delivery for {item.repo}#{item.number} "

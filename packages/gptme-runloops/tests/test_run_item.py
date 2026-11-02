@@ -4277,3 +4277,19 @@ def test_failed_execution_with_verified_reply_consumes_carried_notification(
     run_cmd.on("/fake/gate.py", returncode=1)
     run_post_session(plan, item, outcome, config, hooks)
     assert (config.state_dir / "notif-555.state").read_text() == "2026-11-02T12:00:00Z"
+
+
+def test_failed_assignment_does_not_consume_issue_activity(tmp_path, cooldown_dir):
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path,
+        exit_code=1,
+        types=("assigned_issue",),
+    )
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome":"orphan_no_delivery"}')
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    issue = config.pending_state_dir / "gptme-gptme-contrib-issue-1234.state"
+    issue.write_text("unanswered-assignment")
+    run_post_session(plan, item, outcome, config, hooks)
+    assert issue.exists()
+    assert not (config.state_dir / issue.name).exists()
