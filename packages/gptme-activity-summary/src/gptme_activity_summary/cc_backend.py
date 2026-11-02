@@ -37,6 +37,7 @@ _PERMANENT_SUBSCRIPTION_FAILURE_MARKERS = (
     "you've hit your weekly limit",
     "you've reached your fable limit",
     "your organization has disabled claude subscription access",
+    "claude code can't use your claude subscription",
 )
 
 # OAuth session expiry is distinct from permanent failures: the session CAN be
