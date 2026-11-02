@@ -290,14 +290,14 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         # the push destination's. Its tracking ref may be stale (e.g. after a
         # human force-reset the remote behind this clone's back), and blindly
         # excluding it would hide the destructive commit from the scan.
-        if [ "$remote_sha" = "$ZERO" ]; then
+        if [ "$remote_sha" != "$ZERO" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+            range="$local_sha --not $remote_sha${_other_remotes:+ $_other_remotes}"
+        else
+            # Git advertises the old tip without downloading it. If it is not
+            # available locally, scan conservatively as for a new branch.
             # Cached destination refs cannot prove the server still has their
             # history, even when they are strict ancestors of the pushed tip.
-            # New branches therefore use only the other-remote exemption.
             range="$local_sha${_other_remotes:+ --not $_other_remotes}"
-        else
-            # shellcheck disable=SC2086
-            range="$local_sha --not $remote_sha${_other_remotes:+ $_other_remotes}"
         fi
 
         # O(N) protection: block an over-limit scan, never silently skip it.

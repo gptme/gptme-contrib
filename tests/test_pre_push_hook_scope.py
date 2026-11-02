@@ -1569,6 +1569,56 @@ def test_other_remote_still_scopes_fork_rebase_under_tight_limit(
     assert "PUSH BLOCKED" not in proc.stderr
 
 
+@pytest.mark.parametrize(
+    ("scenario", "expected_code", "diagnostic"),
+    [
+        ("safe", 0, ""),
+        ("destructive", 1, "deletes 3 files"),
+        ("override", 0, ""),
+        ("over-limit", 1, "scan range exceeds limit"),
+        ("other-remote", 0, ""),
+    ],
+)
+def test_unfetched_advertised_old_sha_uses_conservative_scan(
+    tmp_path: Path, scenario: str, expected_code: int, diagnostic: str
+) -> None:
+    """Pre-push advertises the server's old tip without downloading its object."""
+    repo, _base, deletion = _repo_with_mass_deletion(tmp_path)
+    if scenario == "safe":
+        _git(repo, "checkout", "-q", "HEAD~1")
+    tip = _commit(repo, "local.txt")
+    server_root = tmp_path / "server"
+    server_root.mkdir()
+    server = _init(server_root)
+    advertised = _commit(server, "server-only.txt")
+    assert (
+        subprocess.run(
+            ["git", "-C", str(repo), "cat-file", "-e", advertised], capture_output=True
+        ).returncode
+        != 0
+    )
+    _git(repo, "remote", "set-url", "mirror", str(server))
+    if scenario == "other-remote":
+        _git(repo, "update-ref", "refs/remotes/origin/master", deletion)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {tip} refs/heads/topic {advertised}\n",
+        "mirror",
+        str(server),
+        env={
+            "MASS_DELETE_THRESHOLD": "1",
+            "MASS_DELETE_COMMIT_RANGE_LIMIT": (
+                "1" if scenario in {"over-limit", "other-remote"} else "0"
+            ),
+            "ALLOW_MASS_DELETE": "1" if scenario == "override" else "0",
+        },
+    )
+    assert proc.returncode == expected_code, proc.stderr
+    assert "cannot enumerate mass-delete scan" not in proc.stderr, proc.stderr
+    if diagnostic:
+        assert diagnostic in proc.stderr, proc.stderr
+
+
 def test_existing_branch_uses_advertised_old_sha_under_tight_limit(
     tmp_path: Path,
 ) -> None:
