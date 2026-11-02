@@ -1043,6 +1043,7 @@ def promote_item_state(
     reset_redelivery_counter: bool = True,
     include_master_ci: bool = False,
     include_issue: bool = True,
+    include_pr: bool = True,
 ) -> None:
     """Copy the item's pending activity-gate state files to the real state dir.
 
@@ -1086,7 +1087,7 @@ def promote_item_state(
             if f.is_file() and not f.with_suffix(".map").is_file():
                 shutil.copy(f, state / f.name)
     else:
-        patterns = [f"{repo_safe}-pr-{number}*.state"]
+        patterns = [f"{repo_safe}-pr-{number}*.state"] if include_pr else []
         if include_issue:
             patterns.append(f"{repo_safe}-issue-{number}*.state")
         if include_master_ci:
@@ -2860,6 +2861,7 @@ def run_post_session(
             reset_redelivery_counter=False,
             include_master_ci="master_ci_failure" in item.types,
             include_issue=False,
+            include_pr=delivery_outcome != "orphan_no_delivery",
         )
         _log(
             f"WARN: failed execution without verified delivery for {item.repo}#{item.number} "
