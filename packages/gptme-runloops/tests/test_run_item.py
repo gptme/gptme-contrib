@@ -4298,3 +4298,29 @@ def test_failed_assignment_does_not_consume_issue_activity(
     run_post_session(plan, item, outcome, config, hooks)
     assert issue.exists()
     assert not (config.state_dir / issue.name).exists()
+
+
+def test_failed_delivery_does_not_promote_repopulated_notifications(
+    tmp_path, cooldown_dir, monkeypatch
+):
+    import gptme_runloops.run_item as mod
+
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, exit_code=1
+    )
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome":"orphan_no_delivery"}')
+    run_cmd.on("/fake/gate.py", returncode=1)
+    original = mod.purge_pending_notif_state
+
+    def repopulate(*args):
+        result = original(*args)
+        config.pending_state_dir.mkdir(parents=True, exist_ok=True)
+        (config.pending_state_dir / "notif-555.map").write_text(
+            "gptme/gptme-contrib#1234"
+        )
+        (config.pending_state_dir / "notif-555.state").write_text("new-human-event")
+        return result
+
+    monkeypatch.setattr(mod, "purge_pending_notif_state", repopulate)
+    run_post_session(plan, item, outcome, config, hooks)
+    assert not (config.state_dir / "notif-555.state").exists()

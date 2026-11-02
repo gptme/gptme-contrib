@@ -1044,6 +1044,7 @@ def promote_item_state(
     include_master_ci: bool = False,
     include_issue: bool = True,
     include_pr: bool = True,
+    include_notifications: bool = True,
 ) -> None:
     """Copy the item's pending activity-gate state files to the real state dir.
 
@@ -1096,7 +1097,7 @@ def promote_item_state(
         for f in pending.glob(pattern):
             if f.is_file():
                 shutil.copy(f, state / f.name)
-    if not is_zero:
+    if not is_zero and include_notifications:
         for map_file, state_file in _mapped_notif_state_files(pending, repo, number):
             for f in (map_file, state_file):
                 if f.is_file():
@@ -2862,6 +2863,7 @@ def run_post_session(
             include_master_ci="master_ci_failure" in item.types,
             include_issue=False,
             include_pr=delivery_outcome != "orphan_no_delivery",
+            include_notifications=False,
         )
         _log(
             f"WARN: failed execution without verified delivery for {item.repo}#{item.number} "
