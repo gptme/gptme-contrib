@@ -42,8 +42,10 @@ CONFIG_PATHS = (
     Path.home() / ".config" / "gptme" / "config.local.toml",
 )
 CONTEXT_FALLBACKS = {
-    "JUDGE": ("JUDGE", "LLM_JUDGE", "EVAL"),
-    "LLM_JUDGE": ("LLM_JUDGE", "JUDGE", "EVAL"),
+    # Session journals are working context, not isolated evaluation payloads.
+    # EVAL may borrow working keys below; working judges must not borrow EVAL.
+    "JUDGE": ("JUDGE", "LLM_JUDGE"),
+    "LLM_JUDGE": ("LLM_JUDGE", "JUDGE"),
     "EVAL": ("EVAL", "JUDGE", "LLM_JUDGE"),
 }
 
@@ -546,8 +548,9 @@ def _judge_openrouter_env(model: str) -> Iterator[None]:
         return
     judge_key = _resolve_openrouter_api_key("JUDGE")
     if not judge_key:
-        yield
-        return
+        # Do not let downstream initialization independently discover an EVAL
+        # credential when this working-context resolver has no permitted key.
+        raise ValueError("OpenRouter judge requires a JUDGE, LLM_JUDGE or shared API key")
     backup = os.environ.get("OPENROUTER_API_KEY")
     if backup == judge_key:
         yield

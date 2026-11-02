@@ -185,6 +185,14 @@ for the judge APIs and CLI (an explicit `--model` still takes precedence). For e
 `GPTME_SESSIONS_JUDGE_MODEL=openrouter/anthropic/claude-haiku-5.5` selects the cheaper
 OpenRouter route for short prompts. This route requires the optional `gptme` package
 and an OpenRouter key; it does not replace the Anthropic-direct default for other installs.
+The working judge resolves `OPENROUTER_API_KEY_JUDGE`, then
+`OPENROUTER_API_KEY_LLM_JUDGE`, then shared `OPENROUTER_API_KEY`, checking the
+process environment before gptme configuration. It never borrows an isolated
+`OPENROUTER_API_KEY_EVAL`: journal/session material is working context even when
+used for measurement. If no permitted key resolves, the OpenRouter judge returns
+no score before initialization or inference. This key-purpose boundary does not
+attest the provider's effective data policy; retain provider/account privacy
+controls separately. Non-OpenRouter routes are unchanged.
 
 ### Session provenance (`blame`)
 
