@@ -2634,14 +2634,21 @@ def test_post_session_mixed_merge_ready_keeps_delivery_signal(tmp_path) -> None:
     assert effect == "observed"
 
 
-def test_post_session_merge_ready_only_merge_without_reply_promotes(tmp_path) -> None:
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_post_session_merge_ready_only_merge_without_reply_promotes(
+    tmp_path, exit_code
+) -> None:
     """A pure merge_ready session that merged the PR but posted no reply must
     grade observed AND promote state — not roll back into the dispatch queue
     (an already-settled PR must not re-enter and produce another comment)."""
     config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
-        tmp_path, types=("merge_ready",)
+        tmp_path,
+        exit_code=exit_code,
+        types=("merge_ready",),
+        item_kwargs={
+            "notification_states": [{"id": "555", "updated_at": "2026-11-02T12:00:00Z"}]
+        },
     )
-    item = make_item(types=["merge_ready"])
     hooks.wait_merge_gate = None
     hooks.arc_manager = None
     # Default fixture snapshot: MERGED, new head, merge commit — the merge landed.
@@ -2654,6 +2661,7 @@ def test_post_session_merge_ready_only_merge_without_reply_promotes(tmp_path) ->
     effect = run_post_session(plan, item, outcome, config, hooks)
 
     assert effect == "observed"
+    assert (config.state_dir / "notif-555.state").exists()
     assert (
         config.state_dir / sentinel.name
     ).exists(), "state must be promoted — rollback would re-queue an already-merged PR"

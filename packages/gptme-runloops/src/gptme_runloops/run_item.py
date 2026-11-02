@@ -2842,6 +2842,7 @@ def run_post_session(
         exit_code != 0
         and hooks.delivery_check is not None
         and THREAD_DELIVERABLE_TYPES & set(item.types)
+        and set(item.types) != {"merge_ready"}
         and not (delivery_verified and delivery_outcome == "handled")
         and not (delivery_verified and fallback_posted == "true")
     ):
