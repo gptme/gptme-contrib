@@ -4248,7 +4248,7 @@ def test_failed_execution_with_verified_reply_consumes_carried_notification(
     tmp_path, cooldown_dir, monkeypatch, delivery
 ):
     """A reply delivered before a later failure must not be dispatched twice."""
-    monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "0")
+    monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "2")
     config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
         tmp_path,
         exit_code=1,

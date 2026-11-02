@@ -2828,6 +2828,16 @@ def run_post_session(
         # A submitted review does not handle that work: leave both pending and
         # carried watermarks unconsumed so the gate can emit it again.
         pass
+    elif delivery_verified and fallback_posted == "true":
+        # The checker posted the owed reply even if the worker/check outcome
+        # still says orphan. Do not queue another reply through the orphan cap.
+        promote_item_state(
+            config,
+            item.repo,
+            item.number,
+            include_master_ci="master_ci_failure" in item.types,
+        )
+        promote_carried_notification_states(config, item)
     elif (
         exit_code != 0
         and hooks.delivery_check is not None
