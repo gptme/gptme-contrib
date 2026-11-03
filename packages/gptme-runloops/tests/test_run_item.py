@@ -2634,14 +2634,21 @@ def test_post_session_mixed_merge_ready_keeps_delivery_signal(tmp_path) -> None:
     assert effect == "observed"
 
 
-def test_post_session_merge_ready_only_merge_without_reply_promotes(tmp_path) -> None:
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_post_session_merge_ready_only_merge_without_reply_promotes(
+    tmp_path, exit_code
+) -> None:
     """A pure merge_ready session that merged the PR but posted no reply must
     grade observed AND promote state — not roll back into the dispatch queue
     (an already-settled PR must not re-enter and produce another comment)."""
     config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
-        tmp_path, types=("merge_ready",)
+        tmp_path,
+        exit_code=exit_code,
+        types=("merge_ready",),
+        item_kwargs={
+            "notification_states": [{"id": "555", "updated_at": "2026-11-02T12:00:00Z"}]
+        },
     )
-    item = make_item(types=["merge_ready"])
     hooks.wait_merge_gate = None
     hooks.arc_manager = None
     # Default fixture snapshot: MERGED, new head, merge commit — the merge landed.
@@ -2654,6 +2661,7 @@ def test_post_session_merge_ready_only_merge_without_reply_promotes(tmp_path) ->
     effect = run_post_session(plan, item, outcome, config, hooks)
 
     assert effect == "observed"
+    assert (config.state_dir / "notif-555.state").exists()
     assert (
         config.state_dir / sentinel.name
     ).exists(), "state must be promoted — rollback would re-queue an already-merged PR"
@@ -4201,3 +4209,118 @@ def test_contributor_review_skip_probe_uses_managed_logins_from_detail(
     )
     assert run_post_session(plan, item, outcome, config, hooks) == "observed"
     assert calls == [("Alice", "Bob")]
+
+
+@pytest.mark.parametrize("delivery", [None, "orphan_no_delivery"])
+@pytest.mark.parametrize("duration,infra", [(25, None), (120, "cc_auth"), (120, None)])
+def test_failed_execution_never_consumes_unanswered_notification(
+    tmp_path, cooldown_dir, monkeypatch, delivery, duration, infra
+):
+    """Execution failure is bounded by dispatch recovery, not reply promotion."""
+    from gptme_runloops.run_item import promote_notification_states
+
+    monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "0")
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path,
+        exit_code=1,
+        item_kwargs={
+            "notification_states": [{"id": "555", "updated_at": "2026-11-02T12:00:00Z"}]
+        },
+    )
+    outcome.duration_seconds = duration
+    outcome.infra_failure = infra
+    if delivery is None:
+        run_cmd.on("/fake/check-delivery.py", returncode=1, stdout="")
+    else:
+        run_cmd.on(
+            "/fake/check-delivery.py",
+            stdout=json.dumps({"outcome": delivery, "fallback_reply_posted": False}),
+        )
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    (config.pending_state_dir / "notif-555.map").write_text("gptme/gptme-contrib#1234")
+    (config.pending_state_dir / "notif-555.state").write_text("2026-11-02T12:00:00Z")
+    marker = cooldown_dir / "gptme-gptme-contrib-1234.event"
+    marker.write_text("event")
+    for _ in range(3):
+        run_post_session(plan, item, outcome, config, hooks)
+        promote_notification_states(config)
+    assert not (config.state_dir / "notif-555.state").exists()
+    assert not marker.exists()
+    counter = redelivery_attempts_file(config, item.repo, item.number)
+    assert counter is not None and not counter.exists()
+
+
+@pytest.mark.parametrize("delivery", ["handled", "orphan_no_delivery"])
+def test_failed_execution_with_verified_reply_consumes_carried_notification(
+    tmp_path, cooldown_dir, monkeypatch, delivery
+):
+    """A reply delivered before a later failure must not be dispatched twice."""
+    monkeypatch.setenv("PM_MAX_REDELIVERY_ATTEMPTS", "2")
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path,
+        exit_code=1,
+        item_kwargs={
+            "notification_states": [{"id": "555", "updated_at": "2026-11-02T12:00:00Z"}]
+        },
+    )
+    run_cmd.on(
+        "/fake/check-delivery.py",
+        stdout=json.dumps(
+            {
+                "outcome": delivery,
+                "needs_fallback_reply": delivery == "orphan_no_delivery",
+                "fallback_reply_posted": delivery == "orphan_no_delivery",
+            }
+        ),
+    )
+    run_cmd.on("/fake/gate.py", returncode=1)
+    run_post_session(plan, item, outcome, config, hooks)
+    assert (config.state_dir / "notif-555.state").read_text() == "2026-11-02T12:00:00Z"
+
+
+@pytest.mark.parametrize(
+    "kind,types", [("issue", ("assigned_issue",)), ("pr", ("pr_update",))]
+)
+def test_failed_assignment_does_not_consume_issue_activity(
+    tmp_path, cooldown_dir, kind, types
+):
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path,
+        exit_code=1,
+        types=types,
+    )
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome":"orphan_no_delivery"}')
+    run_cmd.on("/fake/gate.py", returncode=1)
+    config.pending_state_dir.mkdir(parents=True)
+    issue = config.pending_state_dir / f"gptme-gptme-contrib-{kind}-1234.state"
+    issue.write_text("unanswered-assignment")
+    run_post_session(plan, item, outcome, config, hooks)
+    assert issue.exists()
+    assert not (config.state_dir / issue.name).exists()
+
+
+def test_failed_delivery_does_not_promote_repopulated_notifications(
+    tmp_path, cooldown_dir, monkeypatch
+):
+    import gptme_runloops.run_item as mod
+
+    config, item, plan, outcome, hooks, run_cmd, _ = _post_session_fixture(
+        tmp_path, exit_code=1
+    )
+    run_cmd.on("/fake/check-delivery.py", stdout='{"outcome":"orphan_no_delivery"}')
+    run_cmd.on("/fake/gate.py", returncode=1)
+    original = mod.purge_pending_notif_state
+
+    def repopulate(*args):
+        result = original(*args)
+        config.pending_state_dir.mkdir(parents=True, exist_ok=True)
+        (config.pending_state_dir / "notif-555.map").write_text(
+            "gptme/gptme-contrib#1234"
+        )
+        (config.pending_state_dir / "notif-555.state").write_text("new-human-event")
+        return result
+
+    monkeypatch.setattr(mod, "purge_pending_notif_state", repopulate)
+    run_post_session(plan, item, outcome, config, hooks)
+    assert not (config.state_dir / "notif-555.state").exists()

@@ -1042,6 +1042,9 @@ def promote_item_state(
     *,
     reset_redelivery_counter: bool = True,
     include_master_ci: bool = False,
+    include_issue: bool = True,
+    include_pr: bool = True,
+    include_notifications: bool = True,
 ) -> None:
     """Copy the item's pending activity-gate state files to the real state dir.
 
@@ -1085,17 +1088,16 @@ def promote_item_state(
             if f.is_file() and not f.with_suffix(".map").is_file():
                 shutil.copy(f, state / f.name)
     else:
-        patterns = [
-            f"{repo_safe}-pr-{number}*.state",
-            f"{repo_safe}-issue-{number}*.state",
-        ]
+        patterns = [f"{repo_safe}-pr-{number}*.state"] if include_pr else []
+        if include_issue:
+            patterns.append(f"{repo_safe}-issue-{number}*.state")
         if include_master_ci:
             patterns.append(f"{repo_safe}-master-ci.state")
     for pattern in patterns:
         for f in pending.glob(pattern):
             if f.is_file():
                 shutil.copy(f, state / f.name)
-    if not is_zero:
+    if not is_zero and include_notifications:
         for map_file, state_file in _mapped_notif_state_files(pending, repo, number):
             for f in (map_file, state_file):
                 if f.is_file():
@@ -2828,6 +2830,45 @@ def run_post_session(
         # A submitted review does not handle that work: leave both pending and
         # carried watermarks unconsumed so the gate can emit it again.
         pass
+    elif delivery_verified and fallback_posted == "true":
+        # The checker posted the owed reply even if the worker/check outcome
+        # still says orphan. Do not queue another reply through the orphan cap.
+        promote_item_state(
+            config,
+            item.repo,
+            item.number,
+            include_master_ci="master_ci_failure" in item.types,
+        )
+        promote_carried_notification_states(config, item)
+    elif (
+        exit_code != 0
+        and hooks.delivery_check is not None
+        and THREAD_DELIVERABLE_TYPES & set(item.types)
+        and set(item.types) != {"merge_ready"}
+        and not (delivery_verified and delivery_outcome == "handled")
+        and not (delivery_verified and fallback_posted == "true")
+    ):
+        # Execution failure is not a no-reply disposition. Dispatch recovery
+        # owns its bounded retries/escalation; the delivery cap must not consume
+        # an unanswered human event, including an immutable carried watermark.
+        clear_slot_event_markers(config, resolve_slot_key(config, item))
+        purge_pending_notif_state(config, item.repo, item.number)
+        # PR/master-CI observations remain valid independently of a reply;
+        # an unanswered issue assignment's activity watermark does not.
+        promote_item_state(
+            config,
+            item.repo,
+            item.number,
+            reset_redelivery_counter=False,
+            include_master_ci="master_ci_failure" in item.types,
+            include_issue=False,
+            include_pr=delivery_outcome != "orphan_no_delivery",
+            include_notifications=False,
+        )
+        _log(
+            f"WARN: failed execution without verified delivery for {item.repo}#{item.number} "
+            f"(exit {exit_code}); leaving notification unhandled for dispatch recovery"
+        )
     elif delivery_outcome == "orphan_no_delivery":
         rollback_slot_key = resolve_slot_key(config, item)
         if rollback_failed_delivery(config, item.repo, item.number, rollback_slot_key):
