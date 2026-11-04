@@ -13,6 +13,22 @@ func string(_ element: AXUIElement, _ name: String) -> String? {
     return attribute(element, name) as? String
 }
 
+func fieldText(_ element: AXUIElement) -> String? {
+    if let value = string(element, kAXValueAttribute) { return value }
+    // Notes exposes its editor through AXStringForRange instead of AXValue.
+    // AX character offsets are UTF-16 units; bound before requesting the text.
+    guard let count = attribute(element, kAXNumberOfCharactersAttribute) as? NSNumber,
+          count.intValue >= 0, count.intValue <= 20000 else { return nil }
+    var range = CFRange(location: 0, length: count.intValue)
+    guard let parameter = AXValueCreate(.cfRange, &range) else { return nil }
+    var value: CFTypeRef?
+    guard AXUIElementCopyParameterizedAttributeValue(
+        element, kAXStringForRangeParameterizedAttribute as CFString,
+        parameter, &value
+    ) == .success else { return nil }
+    return value as? String
+}
+
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
     exit(1)
@@ -45,7 +61,7 @@ guard ["AXTextField", "AXTextArea", "AXComboBox"].contains(role) else { fail("Un
 var writable: DarwinBoolean = false
 let writableStatus = AXUIElementIsAttributeSettable(field, kAXValueAttribute as CFString, &writable)
 guard writableStatus == .success && writable.boolValue else { fail("Field is not writable") }
-guard let text = string(field, kAXValueAttribute) else { fail("No accessible field value") }
+guard let text = fieldText(field) else { fail("No accessible field value") }
 guard text.utf8.count <= 20000 else { fail("Field too large for bounded capture") }
 let range = selectedRange(field)
 let selectedText = string(field, kAXSelectedTextAttribute)
@@ -57,7 +73,7 @@ if let rawWindow = attribute(application, kAXFocusedWindowAttribute), CFGetTypeI
 }
 // Re-read field content and selection as well as identity. AX has no atomic
 // snapshot transaction; this detects observed changes, not every possible ABA.
-guard string(field, kAXValueAttribute) == text,
+guard fieldText(field) == text,
       selectedRange(field) == range,
       string(field, kAXSelectedTextAttribute) == selectedText else {
     fail("Field text or selection changed during capture")
