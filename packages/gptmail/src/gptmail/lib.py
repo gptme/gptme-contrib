@@ -924,6 +924,15 @@ class AgentEmail:
                 )
             self._send_unlocked(message_id)
 
+    def _guard_email_outbound(self, text: str) -> None:
+        """Apply existing secret policy without exposing scanner exception payloads."""
+        try:
+            allowed = guard_outbound(text, "email", self.workspace)
+        except Exception:
+            raise ValueError("Outbound secret scan unavailable; refusing delivery") from None
+        if not allowed:
+            raise ValueError("Outbound redact gate blocked a secret")
+
     def _send_unlocked(self, message_id: str) -> None:
         """Deliver a draft and archive it; callers must hold the send lock."""
         filename = self._format_filename(message_id)
@@ -935,8 +944,7 @@ class AgentEmail:
 
         # Read content before moving
         content = draft_path.read_text()
-        if not guard_outbound(content, "email", self.workspace):
-            raise ValueError("Outbound redact gate blocked a secret")
+        self._guard_email_outbound(content)
 
         # Actually send via msmtp first
         try:
@@ -1050,6 +1058,25 @@ class AgentEmail:
                     MIMEText(html_body, "html", _charset=_utf8_qp)  # type: ignore[arg-type]
                 )
                 mime_bytes = msg.as_string().encode("utf-8")
+
+            # Scan what the recipient receives, not only the Markdown source:
+            # header unfolding, RFC2047 and MIME transfer decoding can reconstruct
+            # literals that were not contiguous in the draft. This also includes
+            # default headers and the rendered HTML alternative.
+            final_message = message_from_bytes(mime_bytes, policy=default)
+            # Structured header objects can discard wire-visible comments (Date
+            # in particular). Retain raw unfolded values as well as semantic ones.
+            outbound_parts = [mime_bytes.decode("utf-8")]
+            outbound_parts.extend(
+                re.sub(r"\r?\n[ \t]+", " ", value) for _, value in final_message.raw_items()
+            )
+            outbound_parts.extend(str(value) for _, value in final_message.items())
+            for part in final_message.walk():
+                if part.get_content_maintype() == "text":
+                    payload = part.get_payload(decode=True)
+                    if isinstance(payload, bytes):
+                        outbound_parts.append(payload.decode(part.get_content_charset() or "utf-8"))
+            self._guard_email_outbound("\n".join(outbound_parts))
 
             # Get appropriate msmtp account
             # Extract just email address from "Name <email>" format
