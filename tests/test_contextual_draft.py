@@ -419,3 +419,31 @@ sys.exit(2)
     assert proc.returncode == 0, proc.stderr
     assert not output.exists()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_preview_prepare_only_uses_fixture_without_model(database, tmp_path):
+    target = tmp_path / "target.json"
+    target.write_text(json.dumps(TARGET), encoding="utf-8")
+    preview = SCRIPT.parent / "contextual-draft" / "preview.py"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(preview),
+            "--target",
+            str(target),
+            "--goldfish-db",
+            str(database),
+            "--prepare-only",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    path = Path(result.stdout.split("Private request: ", 1)[1].strip())
+    request = json.loads(path.read_text(encoding="utf-8"))
+    assert request["target"] == TARGET
+    assert request["observations"][0]["snapshot_id"] == "s1"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+    assert not list(path.parent.glob("**/draft.txt"))

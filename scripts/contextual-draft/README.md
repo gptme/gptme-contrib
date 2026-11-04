@@ -11,8 +11,9 @@ Implemented: read-only Goldfish retrieval, full-source fetching after search,
 bounded context composition, one-shot macOS focused-field capture, and explicit
 model generation to a private preview file.
 
-Not implemented: graphical preview, installed global hotkey, automatic agent
-memory search, surrounding live-window capture, insertion, or sending. A saved
+A user-invoked Tk preview launcher is available below. Not implemented: installed
+global hotkey, automatic agent memory search, surrounding live-window capture,
+insertion, or sending. A saved
 request is a historical capture, **not** an insertion handle. No complete
 end-to-end live application acceptance is claimed. The native helper can refuse
 apps whose editable fields aren't exposed through macOS Accessibility.
@@ -105,7 +106,7 @@ will capture the terminal instead of the intended field. No shortcut is installe
 by this prototype. Use fresh output filenames per invocation; a repeated fixed
 filename fails instead of overwriting earlier private captures.
 
-The next UI integration should present progress/cancel and a user-invoked preview.
+The preview launcher below provides a user-invoked UI and local cancellation.
 Insertion needs a separate live target identity/revalidation mechanism and tests;
 the PID/role/window metadata here is deliberately insufficient to authorize it.
 
@@ -151,3 +152,30 @@ Tests use real temporary SQLite databases, a loopback impersonator that must
 receive no requests or credentials, and synthetic generator executables. They
 cover oversized inputs, special-file refusal, nonzero/empty/timeout generation,
 and private output. They do not read a personal archive, call a model, or edit an app.
+
+## User-invoked preview launcher
+
+`preview.py` captures the focused field and prepares a private request **before**
+creating its Tk window. Run it through a non-activating shortcut launcher:
+
+```sh
+python3 /absolute/path/to/scripts/contextual-draft/preview.py
+```
+
+The window shows the request/source evidence, an editable instruction and model
+field, and a Generate button. No model is called until Generate is clicked with
+an explicit model. That click discloses the prepared request to that model.
+Generation runs off the UI thread. Close / Cancel terminates the launcher's local
+generation process group; it cannot recall input already disclosed to a provider.
+There is no insertion, copy button, clipboard mutation, or send action.
+
+Requires Python with tkinter support and POSIX process groups. `--model` prefills
+the model without invoking it; `--context`, `--query`, and `--limit` control the
+prepared context. `--target` accepts a fixture for tests; `--prepare-only` saves
+without opening a window. Requests/drafts are retained in private temporary
+session directories printed by the launcher; choose their retention yourself.
+No global shortcut is installed automatically.
+
+Live Notes validation: empty editor, exact title/body including trailing newlines,
+and a four-character selection at UTF-16 offset 12 passed read-only capture.
+This does not establish other apps, secure-field acceptance, or insertion safety.
