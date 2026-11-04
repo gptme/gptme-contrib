@@ -44,6 +44,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from email import message_from_bytes
+from email.errors import HeaderParseError
 from email.header import Header, decode_header
 from email.message import EmailMessage, Message
 from email.mime.multipart import MIMEMultipart
@@ -56,6 +57,7 @@ from email.utils import (
     parseaddr,
     parsedate_to_datetime,
 )
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, NamedTuple, Tuple
 
@@ -90,6 +92,17 @@ def _body_dedup_snippet(body: str, *, local_sent: bool = False) -> str:
             body,
         )
     return "".join(body[:200].split())
+
+
+class _HTMLTextCollector(HTMLParser):
+    """Collect another scan representation without markup separating literals."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
 
 
 def _is_html(text: str) -> bool:
@@ -1071,8 +1084,19 @@ class AgentEmail:
             for _, value in final_message.raw_items():
                 unfolded = re.sub(r"\r?\n[ \t]+", " ", value)
                 outbound_parts.append(unfolded)
+                try:
+                    fragments = decode_header(unfolded)
+                except HeaderParseError:
+                    # A malformed word must not hide valid encoded words next to
+                    # it, or make a previously deliverable raw header unsendable.
+                    fragments = []
+                    for word in re.split(r"(=\?[^?\s]+\?[bBqQ]\?[^?]*\?=)", unfolded):
+                        try:
+                            fragments.extend(decode_header(word))
+                        except HeaderParseError:
+                            fragments.append((word, None))
                 decoded_parts = []
-                for fragment, charset in decode_header(unfolded):
+                for fragment, charset in fragments:
                     if isinstance(fragment, bytes):
                         try:
                             fragment = fragment.decode(charset or "ascii", errors="replace")
@@ -1091,6 +1115,10 @@ class AgentEmail:
                         outbound_parts.append(text)
                         if part.get_content_type() == "text/html":
                             outbound_parts.append(html.unescape(text))
+                            collector = _HTMLTextCollector()
+                            collector.feed(text)
+                            collector.close()
+                            outbound_parts.append("".join(collector.parts))
             self._guard_email_outbound("\n".join(outbound_parts))
 
             # Get appropriate msmtp account

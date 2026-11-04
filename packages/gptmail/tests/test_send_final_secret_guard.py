@@ -201,7 +201,8 @@ def test_folded_date_comment_is_not_lost_by_semantic_parser(recording_send, body
 
 @pytest.mark.parametrize("body", ["Hello", "<html><body>Hello</body></html>"])
 @pytest.mark.parametrize(
-    "encoded", ["=?x-example?q?hello?=", "=?utf-8?b?/w==?=", "=?idna?q?hello?="]
+    "encoded",
+    ["=?x-example?q?hello?=", "=?utf-8?b?/w==?=", "=?idna?q?hello?=", "=?utf-8?b?a?="],
 )
 def test_unrecognized_or_invalid_header_charset_remains_deliverable(recording_send, body, encoded):
     agent, draft, calls = recording_send
@@ -221,6 +222,7 @@ def test_unrecognized_or_invalid_header_charset_remains_deliverable(recording_se
     [
         "=?x-example?q?synthetic_forbidden_phrase?=",
         "=?x-example?q?hello?= =?utf-8?q?synthetic_forbidden_phrase?=",
+        "=?utf-8?b?a?= =?utf-8?q?synthetic_forbidden_phrase?=",
     ],
 )
 def test_unknown_charset_does_not_skip_decoded_secret_scan(recording_send, body, encoded, capsys):
@@ -243,6 +245,9 @@ def test_unknown_charset_does_not_skip_decoded_secret_scan(recording_send, body,
         "<html><body>SYNTHETIC_TOKEN&amp;ONLY</body></html>",
         "<html><body>SYNTHETIC_TOKEN&#38;ONLY</body></html>",
         "<html><body>SYNTHETIC_TOKEN&#x26;ONLY</body></html>",
+        "<html><body>SYNTHETIC_TOKEN&#38;<b>ONLY</b></body></html>",
+        "SYNTHETIC\\_TOKEN&**ONLY**",
+        "<html><body>SYNTHETIC_TOKEN&amp;<!-- comment -->ONLY</body></html>",
     ],
 )
 def test_html_character_references_are_scanned(recording_send, monkeypatch, body, capsys):
