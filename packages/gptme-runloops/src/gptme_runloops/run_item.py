@@ -114,6 +114,11 @@ from gptme_runloops.prompt_templates import (
     render_mention_constraint,
     render_preheld_claim_block,
 )
+from gptme_runloops.runner_env import (
+    DOTENV_DISABLE_VAR,
+    MissingRunnerEnv,
+    runner_env_from_spec,
+)
 from gptme_runloops.utils.state import atomic_write_text, locked_state_file
 from gptme_runloops.worker_records import (
     KNOWN_DELIVERY_OUTCOMES,
@@ -443,6 +448,13 @@ class RunItemConfig:
     # Ambient-harness env tagging (project-monitoring.sh:417-422). Empty =
     # set nothing; the brain config sets "BOB_AMBIENT_HARNESS".
     ambient_harness_env: str = ""
+
+    # Explicit runner-environment contract (:mod:`gptme_runloops.runner_env`).
+    # Empty = legacy inheritance of ``os.environ`` (default). A table must
+    # declare ``mode``: ``legacy`` (explicit opt-out) or ``explicit`` (replace
+    # the runner environment with the named contract). An unknown mode is a
+    # configuration error, never a silent fallback.
+    runner_env: dict[str, Any] = field(default_factory=dict)
 
     poll_budget_sec: int = 1800
     claim_ttl_minutes: int = 60
@@ -3360,6 +3372,27 @@ def _ambient_env(config: RunItemConfig, backend: str, model: str) -> dict[str, s
     return env
 
 
+def _resolve_runner_base_env(
+    config: RunItemConfig, backend: str
+) -> dict[str, str] | None:
+    """Resolve ``config.runner_env`` once per work file (before lock/claim).
+
+    Returns ``None`` for legacy inheritance, the explicit mapping otherwise.
+    Raises :class:`MissingRunnerEnv` or ``ValueError`` on a misdeclared
+    contract; the caller turns that into a fail-closed exit code 78.
+    """
+    spec = config.runner_env or {}
+    if not spec:
+        return None
+    env = runner_env_from_spec(spec, backend=backend)
+    if env is not None:
+        _log(
+            "Runner environment: explicit contract "
+            f"({len(env)} variables; dotenv disabled={env.get(DOTENV_DISABLE_VAR, '0')})"
+        )
+    return env
+
+
 def run_work_file(
     work_file: Path,
     config: RunItemConfig,
@@ -3388,6 +3421,14 @@ def run_work_file(
     if not items:
         _log(f"ERROR: work file ('{work_file}') is empty")
         return 1
+
+    try:
+        runner_base_env = _resolve_runner_base_env(config, backend)
+    except (MissingRunnerEnv, ValueError) as exc:
+        # Fail closed before claiming or locking: a misdeclared contract must
+        # never silently degrade to ambient inheritance.
+        _log(f"ERROR: {exc}")
+        return 78
 
     _log(
         f"--- Detached dispatch (slot={slot_key or 'none'} lane={lane}): "
@@ -3452,6 +3493,12 @@ def run_work_file(
             pass
 
         ambient = _ambient_env(config, backend, model)
+        # ``runner_base_env`` replaces the ambient environment wholesale, so the
+        # per-item ambient-harness tag (consumed by the memory pipeline) must be
+        # added explicitly instead of being inherited.
+        item_runner_env = (
+            None if runner_base_env is None else {**runner_base_env, **ambient}
+        )
         # Stage 1 (shadow mode): load the bandit but do not use it for routing.
         # Gated by AGENT_PM_BANDIT_SHADOW; live only when the slot launcher
         # forwards that env into the transient unit.
@@ -3576,6 +3623,7 @@ def run_work_file(
                     config,
                     hooks,
                     ambient_env=ambient,
+                    runner_base_env=item_runner_env,
                     latency_context_json=latency_context_json,
                     ack_result_json=ack_result_json,
                 )
