@@ -104,9 +104,14 @@ def test_impersonator_receives_no_requests_or_token(database, tmp_path):
 
 def test_sqlite_source_truncation(database):
     with sqlite3.connect(database) as db:
-        db.execute("UPDATE snapshots SET content=?", ("x" * 20000,))
+        db.execute(
+            "UPDATE snapshots SET content=?", ("START" + "x" * 20000 + "LATEST",)
+        )
     row = module.Goldfish(database).snapshots(None, 1)[0]
-    assert row["content_truncated"] and len(row["content"]) == 12000
+    assert row["content_truncated"] and len(row["content"]) <= 12000
+    assert row["content"].startswith("START")
+    assert row["content"].endswith("LATEST")
+    assert "middle omitted" in row["content"]
 
 
 @pytest.mark.parametrize(

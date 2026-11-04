@@ -53,6 +53,37 @@ def run(args: argparse.Namespace) -> None:
         execute(args)
 
 
+def start_progress(target: dict) -> subprocess.Popen | None:
+    """Best-effort non-activating HUD, coupled to this process by stdin EOF."""
+    if sys.platform != "darwin":
+        return None
+    bounds = target.get("field_bounds") or {}
+    command = ["swift", str(Path(__file__).with_name("progress.swift"))]
+    if "x" in bounds and "y" in bounds:
+        command.extend([str(bounds["x"]), str(bounds["y"])])
+    try:
+        return subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+
+
+def stop_progress(progress: subprocess.Popen | None) -> None:
+    if progress is None:
+        return
+    if progress.stdin is not None:
+        progress.stdin.close()
+    try:
+        progress.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        progress.terminate()
+        progress.wait(timeout=3)
+
+
 def execute(args: argparse.Namespace) -> None:
     directory = Path(tempfile.mkdtemp(prefix="contextual-draft-"))
     source = Path(__file__).with_name("capture.swift")
@@ -62,12 +93,14 @@ def execute(args: argparse.Namespace) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
+    progress = None
     try:
         target = core.validate_target(json.loads(read_line(native, 30)))
         if (target.get("selection") or {}).get("length") != 0:
             raise core.DraftError(
                 "Direct draft needs a cursor, not a selection; use preview"
             )
+        progress = start_progress(target)
         target_file = directory / "target.json"
         core.private_write(target_file, json.dumps(target, ensure_ascii=False))
         request = directory / "request.json"
@@ -109,6 +142,7 @@ def execute(args: argparse.Namespace) -> None:
             "Direct drafting failed; private request/draft retained, no fallback insertion"
         ) from exc
     finally:
+        stop_progress(progress)
         if native.poll() is None:
             native.terminate()
         try:

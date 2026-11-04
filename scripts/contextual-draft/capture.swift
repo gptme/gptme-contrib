@@ -83,7 +83,21 @@ guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processI
       let after = attribute(application, kAXFocusedUIElementAttribute), CFEqual(raw, after) else {
     fail("Focus changed during capture")
 }
+var fieldBounds: Any = NSNull()
+if let rawPosition = attribute(field, kAXPositionAttribute),
+   let rawSize = attribute(field, kAXSizeAttribute),
+   CFGetTypeID(rawPosition) == AXValueGetTypeID(),
+   CFGetTypeID(rawSize) == AXValueGetTypeID() {
+    var position = CGPoint.zero
+    var size = CGSize.zero
+    if AXValueGetValue(unsafeBitCast(rawPosition, to: AXValue.self), .cgPoint, &position),
+       AXValueGetValue(unsafeBitCast(rawSize, to: AXValue.self), .cgSize, &size) {
+        fieldBounds = ["x": position.x, "y": position.y,
+                       "width": size.width, "height": size.height]
+    }
+}
 let result: [String: Any] = [
+    "field_bounds": fieldBounds,
     "schema_version": 1,
     "captured_at": ISO8601DateFormatter().string(from: Date()),
     "platform": "macos",

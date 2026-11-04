@@ -204,3 +204,18 @@ opening a terminal. Preview defaults to the same model and context-first task, b
 retains the instruction field for debugging and does not insert. Current retrieval
 is bounded Goldfish working memory plus explicitly configured context files, not
 an automatic complete personal-context search. No claim of Goldfish drafting parity.
+
+### Draft relevance and progress
+
+Direct mode displays a best-effort non-activating, click-through native spinner
+near the captured field while preparing/generating/inserting. Its stdin lifetime
+is tied to the launcher, with a timeout fail-safe. It does not activate the app or
+move the text cursor. Placement is field-level, not a caret-tracking animation.
+
+Default retrieval now samples the recent snapshot timeline, with related FTS
+hits for project/issue identifiers in the window title. Long snapshots preserve
+both the beginning and recent end, explicitly marking omitted middle content.
+This is still a lexical baseline, not Goldfish's semantic retrieval or full agent
+memory. Model instructions prohibit writing assistant-style clarification questions
+into a recipient field; insufficient evidence should abstain. Draft quality and
+privacy still need realistic user testing. No quality parity is claimed.
