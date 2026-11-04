@@ -219,3 +219,33 @@ This is still a lexical baseline, not Goldfish's semantic retrieval or full agen
 memory. Model instructions prohibit writing assistant-style clarification questions
 into a recipient field; insufficient evidence should abstain. Draft quality and
 privacy still need realistic user testing. No quality parity is claimed.
+
+### Diagnostics and recovery
+
+Direct sessions persist under `${XDG_STATE_HOME:-~/.local/state}/contextual-draft/runs/`.
+The launcher prints the exact private session path before capture. Each directory
+is mode 0700 and files are mode 0600. `events.jsonl` records stage timestamps,
+model/exit status, source IDs, request/output byte counts and elapsed generation
+time, without message bodies. `native-stderr.txt` preserves capture/insertion
+errors. Provider stderr, when present, is saved privately beside the draft; it may
+contain sensitive request data and must not be copied into issues or notifications.
+`request.json` and `draft.txt` permit inspection/recovery without another model call.
+No automatic retry or retention deletion occurs. These files are private evidence,
+not a safe-to-publish log bundle. Do not recursively dump sessions into transcripts.
+
+Producer, direct insertion and preview share a 16,000-byte draft limit. Generated
+whitespace is preserved; only the framing newline added by the gptme plain-text
+CLI is removed. Whitespace-only responses are checked separately for abstention.
+Preview workers are non-daemon so closing during process creation cannot abandon
+a model process before its cancellation check. Notifications use terminal-notifier
+when available; its absence does not replace the original error with a traceback.
+
+### External personal context
+
+Use explicit `--context` files for approved writing preferences or selected factual
+material. A short distilled style profile is preferable to loading a raw personal
+conversation corpus. Agent journals/tasks can provide facts unavailable in desktop
+history, but their timestamps and statuses need checking; an old task is not current
+truth. A future retrieval adapter should reuse existing agent memory recall rather
+than create another corpus/index. This prototype does not automatically search a
+private agent repository or disclose its contents simply because it exists.

@@ -271,7 +271,7 @@ def test_generation_subprocess_contract(generation, tmp_path):
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     assert proc.returncode == 0, proc.stderr
-    assert generation.output.read_text() == "How about after lunch?\n"
+    assert generation.output.read_text() == "How about after lunch?"
     assert generation.output.stat().st_mode & 0o777 == 0o600
     assert "after lunch" not in proc.stdout
     assert subprocess.run(cmd, capture_output=True, env=env).returncode != 0
@@ -322,7 +322,8 @@ def test_unicode_prepare_and_generate_under_ascii_locale(database, tmp_path):
         env=env,
         check=True,
     )
-    assert probe.stdout.strip().lower() in (b"ascii", b"ansi_x3.4-1968", b"us-ascii")
+    if probe.stdout.strip().lower() not in (b"ascii", b"ansi_x3.4-1968", b"us-ascii"):
+        pytest.skip("Interpreter does not expose ASCII locale defaults")
     target = tmp_path / "unicode-target.json"
     target.write_text(
         json.dumps(TARGET | {"text": "café 日本語"}, ensure_ascii=False),
@@ -381,7 +382,7 @@ def test_unicode_prepare_and_generate_under_ascii_locale(database, tmp_path):
         env=env,
     )
     assert gen.returncode == 0, gen.stderr
-    assert output.read_bytes() == "café 日本語\n".encode()
+    assert output.read_bytes() == "café 日本語".encode()
 
 
 @pytest.mark.parametrize("failure", ["fsync", "link"])
@@ -483,6 +484,7 @@ def test_direct_retained_session_protocol(database, tmp_path, accept):
             **os.environ,
             "PYTHONPATH": str(direct.parent),
             "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "XDG_STATE_HOME": str(tmp_path / "state"),
         },
         capture_output=True,
         text=True,
@@ -503,3 +505,29 @@ def test_target_window_retrieval_skips_empty_echo_and_keeps_recent_evidence(data
         )
     rows = module.Goldfish(database).snapshots(None, 2, window_title="PR target")
     assert [row["snapshot_id"] for row in rows] == ["s1"]
+
+
+@pytest.mark.parametrize("body", [" world", "\n    indented\n", "x" * 16001])
+def test_generation_preserves_whitespace_and_bounds_size(
+    generation, tmp_path, monkeypatch, body
+):
+    exe = tmp_path / "gptme"
+    exe.write_text(
+        "#!/usr/bin/env python3\nprint(" + repr(body) + ")\n", encoding="utf-8"
+    )
+    exe.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    if len(body.encode()) > module.MAX_DRAFT:
+        with pytest.raises(module.DraftError, match="16000-byte"):
+            module.generate(generation)
+        assert not generation.output.exists()
+    else:
+        module.generate(generation)
+        assert generation.output.read_text() == body
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "events.jsonl").read_text().splitlines()
+    ]
+    assert events[0]["stage"] == "generation_started"
+    assert events[1]["returncode"] == 0
+    assert all(body not in json.dumps(e) for e in events)

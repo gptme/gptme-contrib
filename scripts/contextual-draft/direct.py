@@ -10,10 +10,13 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import os
 import selectors
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from preview import core
@@ -85,14 +88,34 @@ def stop_progress(progress: subprocess.Popen | None) -> None:
 
 
 def execute(args: argparse.Namespace) -> None:
-    directory = Path(tempfile.mkdtemp(prefix="contextual-draft-"))
-    source = Path(__file__).with_name("capture.swift")
-    native = subprocess.Popen(
-        ["swift", str(source), "--insert-session"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+    root = (
+        Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
+        / "contextual-draft"
+        / "runs"
     )
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory = Path(tempfile.mkdtemp(prefix="run-", dir=root))
+    print(f"Private session: {directory}", flush=True)
+    core.log_event(directory, "started", model=args.model)
+    started = time.monotonic()
+    source = Path(__file__).with_name("capture.swift")
+    native_errors = (directory / "native-stderr.txt").open("xb")
+    os.chmod(directory / "native-stderr.txt", 0o600)
+    try:
+        native = subprocess.Popen(
+            ["swift", str(source), "--insert-session"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=native_errors,
+        )
+    except OSError as exc:
+        native_errors.close()
+        core.log_event(
+            directory, "capture_launch_failed", error_type=type(exc).__name__
+        )
+        raise core.DraftError(
+            f"Cannot start native capture; diagnostics: {directory}"
+        ) from exc
     progress = None
     try:
         target = core.validate_target(json.loads(read_line(native, 30)))
@@ -100,6 +123,13 @@ def execute(args: argparse.Namespace) -> None:
             raise core.DraftError(
                 "Direct draft needs a cursor, not a selection; use preview"
             )
+        core.log_event(
+            directory,
+            "captured",
+            app=target.get("bundle_id"),
+            text_characters=len(target["text"]),
+            elapsed_s=time.monotonic() - started,
+        )
         progress = start_progress(target)
         target_file = directory / "target.json"
         core.private_write(target_file, json.dumps(target, ensure_ascii=False))
@@ -116,6 +146,14 @@ def execute(args: argparse.Namespace) -> None:
                 output=request,
             )
         )
+        prepared = core.read_json(request)
+        core.log_event(
+            directory,
+            "prepared",
+            source_ids=[r["snapshot_id"] for r in prepared["observations"]],
+            reference_sources=[r["source"] for r in prepared["agent_context"]],
+            request_bytes=request.stat().st_size,
+        )
         output = directory / "draft.txt"
         core.generate(
             argparse.Namespace(
@@ -125,8 +163,8 @@ def execute(args: argparse.Namespace) -> None:
                 output=output,
             )
         )
-        draft = core.read_bounded(output, 100000).decode("utf-8").strip()
-        if not draft:
+        draft = core.read_bounded(output, core.MAX_DRAFT).decode("utf-8")
+        if not draft.strip():
             raise core.DraftError("Insufficient context; no draft inserted")
         assert native.stdin is not None
         native.stdin.write(
@@ -136,13 +174,28 @@ def execute(args: argparse.Namespace) -> None:
         reply = json.loads(read_line(native, 10))
         if reply.get("inserted") is not True:
             raise core.DraftError("Insertion not confirmed; draft retained privately")
+        core.log_event(directory, "inserted", elapsed_s=time.monotonic() - started)
         print("Draft inserted. Nothing sent.")
-    except (OSError, ValueError) as exc:
+    except core.DraftError as exc:
+        core.log_event(
+            directory, "failed", reason=str(exc), elapsed_s=time.monotonic() - started
+        )
         raise core.DraftError(
-            "Direct drafting failed; private request/draft retained, no fallback insertion"
+            f"{exc}; diagnostics and retained draft: {directory}"
+        ) from exc
+    except (OSError, ValueError) as exc:
+        core.log_event(
+            directory,
+            "failed",
+            error_type=type(exc).__name__,
+            elapsed_s=time.monotonic() - started,
+        )
+        raise core.DraftError(
+            f"Direct drafting failed; diagnostics and retained draft: {directory}; no fallback insertion"
         ) from exc
     finally:
         stop_progress(progress)
+        native_errors.close()
         if native.poll() is None:
             native.terminate()
         try:
@@ -170,9 +223,12 @@ def main() -> None:
     except core.DraftError as exc:
         print(f"contextual-draft: {exc}", file=sys.stderr)
         # Fixed notification text only: no captured contents or draft in arguments.
+        notifier = shutil.which("terminal-notifier")
+        if notifier is None:
+            sys.exit(1)
         subprocess.run(
             [
-                "/opt/homebrew/bin/terminal-notifier",
+                notifier,
                 "-title",
                 "Contextual draft",
                 "-message",

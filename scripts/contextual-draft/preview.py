@@ -122,7 +122,7 @@ def launch(request: Path, model: str) -> None:
                     )
                 )
             else:
-                text = core.read_bounded(output, 100000).decode("utf-8")
+                text = core.read_bounded(output, core.MAX_DRAFT).decode("utf-8")
                 results.put((True, text))
         except (OSError, UnicodeError, core.DraftError):
             results.put((False, "Could not generate/read preview. No field changed."))
@@ -153,7 +153,9 @@ def launch(request: Path, model: str) -> None:
         threading.Thread(
             target=worker,
             args=(run_request, run_dir / "draft.txt", chosen),
-            daemon=True,
+            # Non-daemon: closing during Popen cannot let the interpreter exit
+            # before the worker registers and stops the newly created process.
+            daemon=False,
         ).start()
 
     def poll() -> None:
