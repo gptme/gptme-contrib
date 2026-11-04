@@ -48,7 +48,9 @@ class Goldfish:
     def __init__(self, database: Path):
         self.database = database
 
-    def snapshots(self, query: str | None, limit: int) -> list[dict]:
+    def snapshots(
+        self, query: str | None, limit: int, window_title: str | None = None
+    ) -> list[dict]:
         if not 1 <= limit <= 5:
             raise DraftError("Observation limit must be between one and five")
         try:
@@ -73,13 +75,19 @@ class Goldfish:
                     substr(s.focused_name,1,2000) AS focused_name,
                     substr(s.focused_role,1,1000) AS focused_role,
                     substr(s.focused_path,1,2000) AS focused_path"""
-                if query:
+                if window_title:
+                    sql = f"""SELECT {columns} FROM snapshots s
+                        WHERE s.window_title=? AND length(s.content)>100
+                        ORDER BY s.last_seen_at DESC LIMIT ?"""
+                    params: tuple[str | int, ...] = (window_title, limit)
+                elif query:
                     # Literal phrase rather than accepting arbitrary FTS syntax.
                     phrase = '"' + query.replace('"', '""') + '"'
                     sql = f"""SELECT {columns} FROM snapshots_fts f
                         JOIN snapshots s ON s.rowid=f.rowid
-                        WHERE snapshots_fts MATCH ? ORDER BY rank LIMIT ?"""
-                    params: tuple[str | int, ...] = (phrase, limit)
+                        WHERE snapshots_fts MATCH ?
+                        ORDER BY s.last_seen_at DESC, rank LIMIT ?"""
+                    params = (phrase, limit)
                 else:
                     sql = f"""SELECT {columns} FROM snapshots s
                         ORDER BY s.last_seen_at DESC LIMIT ?"""
@@ -222,7 +230,9 @@ def prepare(args: argparse.Namespace) -> None:
         import re
 
         identifiers = re.findall(r"[\w.-]+/[\w.-]+|\b\d{3,}\b", target["window_title"])
-        related = []
+        related = provider.snapshots(None, 2, window_title=target["window_title"])
+        # Specific issue/PR numbers precede broad repository matches.
+        identifiers.sort(key=lambda term: not term.isdigit())
         for term in identifiers[:2]:
             related.extend(provider.snapshots(term, 3))
         seen: set[str] = set()
@@ -296,9 +306,13 @@ def generate(args: argparse.Namespace) -> None:
         raise DraftError(
             "Generation unavailable or timed out; no field changed"
         ) from exc
-    if proc.returncode or not proc.stdout.strip():
+    if proc.returncode:
         # Provider errors can include request data; do not echo stderr.
-        raise DraftError("Generation failed or returned no draft; no field changed")
+        raise DraftError("Model process failed; no field changed")
+    if not proc.stdout.strip():
+        raise DraftError(
+            "Model returned no draft (possibly insufficient context); no field changed"
+        )
     private_write(args.output, proc.stdout.strip() + "\n")
     print(
         "Draft saved privately for preview. No field, clipboard, or message was changed."

@@ -490,3 +490,16 @@ def test_direct_retained_session_protocol(database, tmp_path, accept):
     )
     assert (result.returncode == 0) is accept, result.stderr
     assert ("Draft inserted. Nothing sent." in result.stdout) is accept
+
+
+def test_target_window_retrieval_skips_empty_echo_and_keeps_recent_evidence(database):
+    with sqlite3.connect(database) as db:
+        db.execute(
+            "UPDATE snapshots SET content=?,window_title=?",
+            ("Useful evidence " * 20, "PR target"),
+        )
+        db.execute(
+            "INSERT INTO snapshots VALUES ('echo','Empty compose','test','PR target',NULL,NULL,300,400,NULL,'AXTextArea',NULL)"
+        )
+    rows = module.Goldfish(database).snapshots(None, 2, window_title="PR target")
+    assert [row["snapshot_id"] for row in rows] == ["s1"]

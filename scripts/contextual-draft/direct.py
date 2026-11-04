@@ -176,7 +176,11 @@ def main() -> None:
                 "-title",
                 "Contextual draft",
                 "-message",
-                "Draft not inserted. Check the private launcher log or use preview.",
+                (
+                    "No draft: the model abstained or returned an empty response. Use preview to inspect context."
+                    if "returned no draft" in str(exc)
+                    else "Draft failed before insertion. Use preview or inspect the private launcher log."
+                ),
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
