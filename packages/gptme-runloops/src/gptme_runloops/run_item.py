@@ -3392,7 +3392,9 @@ def _resolve_runner_base_env(
         return None
     env = runner_env_from_spec(spec, backend=backend)
     if env is not None:
-        if env.get("HOME") and not Path(env["HOME"]).is_absolute():
+        # Run-item trajectory discovery needs a stable child home even when the
+        # generic environment builder's required-setting check is relaxed.
+        if not env.get("HOME") or not Path(env["HOME"]).is_absolute():
             raise ValueError("runner environment HOME must be an absolute path")
         _log(
             "Runner environment: explicit contract "

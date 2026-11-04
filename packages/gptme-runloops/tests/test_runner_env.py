@@ -472,3 +472,32 @@ def test_relative_runner_home_fails_before_launch(tmp_path, monkeypatch, caplog)
     )
     assert not runner.runner_envs()
     assert "HOME must be an absolute path" in caplog.text
+
+
+@pytest.mark.parametrize("home", [None, ""])
+def test_run_item_requires_home_even_with_empty_require(tmp_path, monkeypatch, home):
+    import gptme_runloops.run_item as run_item
+
+    monkeypatch.setenv("HOME", str(tmp_path / "parent-home"))
+    monkeypatch.setenv("PATH", PARENT["PATH"])
+    runner = _RecordingRunCmd()
+    config = _config(
+        tmp_path,
+        runner_env={
+            "mode": "explicit",
+            "passthrough": ["PATH"],
+            "prefixes": [],
+            "require": [],
+            "set": {} if home is None else {"HOME": home},
+        },
+    )
+
+    def unexpected_lock(_self):
+        pytest.fail("invalid HOME reached lock acquisition")
+
+    monkeypatch.setattr(run_item.SlotLock, "acquire", unexpected_lock)
+    work = _work_file(tmp_path)
+    assert run_work_file(work, config, _hooks(runner), backend="codex") == 78
+    assert runner.calls == []
+    with pytest.raises(ValueError, match="HOME"):
+        run_item.build_execution_plan(work, config, _hooks(runner), backend="codex")
