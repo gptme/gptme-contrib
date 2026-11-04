@@ -3,7 +3,7 @@
 The agent workspace may provide the ``redact`` package. When it does, critical
 findings block delivery and are recorded in the workspace state ledger. A
 standalone gptme-contrib install does not require that package, so its absence is
-reported and the gate is skipped.
+reported and the gate is skipped unless the caller requires scanning.
 """
 
 from __future__ import annotations
@@ -16,10 +16,13 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def guard_outbound(text: str, channel: str, workspace: Path) -> bool:
+def guard_outbound(
+    text: str, channel: str, workspace: Path, *, require_scanner: bool = False
+) -> bool:
     """Return whether ``text`` may be sent through ``channel``.
 
-    Missing optional redaction support warns and allows delivery. A detected
+    Missing redaction support refuses delivery when ``require_scanner`` is set;
+    otherwise it warns and allows delivery for standalone compatibility. A detected
     critical secret blocks delivery and writes only finding metadata, never the
     outbound text, to ``state/outbound-redact-blocks.jsonl``.
     """
@@ -29,6 +32,9 @@ def guard_outbound(text: str, channel: str, workspace: Path) -> bool:
     except ModuleNotFoundError as exc:
         if exc.name != "redact":
             raise
+        if require_scanner:
+            logger.error("Outbound content blocked: required secret scanner unavailable")
+            return False
         logger.warning("redact package not available — skipping outbound secret scan")
         return True
 
