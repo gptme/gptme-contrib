@@ -70,6 +70,24 @@ TWITTER_ACCESS_SECRET=your_access_secret
 
 2. Configure interaction parameters in `config/config.yml`
 
+## Outbound secret gate
+
+Raw `twitter.py post` requires the workspace `redact` scanner. Missing or broken
+scanner support refuses publication; `--force` overrides only duplicate detection.
+The CLI scans before URL requests/OAuth and again at `_post_now`, checking all
+rendered thread segments before the first `create_tweet` call. A forbidden later
+segment therefore cannot leave a partially published thread. Clean text and reply/
+quote targets are passed unchanged. Scanner errors do not echo content or exception
+payloads. Block metadata goes to `AGENT_WORKSPACE` (legacy `BOB_WORKSPACE`, otherwise
+the current directory) under `state/outbound-redact-blocks.jsonl`.
+
+This uses `gptmail.communication_utils.outbound_redact.guard_outbound` with
+`require_scanner=True`; existing optional callers retain their compatibility
+policy. Install/provide the workspace scanner in the same Python environment as
+the CLI before using raw posting. This is deterministic wrapper defense in depth,
+not protection against a same-user process with direct API credentials. No live
+publication is required to run the recording-client tests.
+
 ## Usage
 
 ### Command Line Usage

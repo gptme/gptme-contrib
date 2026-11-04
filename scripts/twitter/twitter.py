@@ -950,6 +950,8 @@ def post(
     if quote_id and reply_to:
         console.print("[red]--quote cannot be combined with --reply-to")
         sys.exit(1)
+    # Scan before URL validation (which can make network requests) or OAuth.
+    _require_safe_outbound(text)
     if thread:
         _abort_on_bad_urls([message.text for message in split_thread(text)])
     else:
@@ -979,6 +981,25 @@ def post(
         _post_now(client, text, reply_to, thread, quote_id, mark_posted)
 
 
+def _require_safe_outbound(text: str) -> None:
+    """Refuse unscannable/forbidden output without echoing text or exceptions."""
+    try:
+        from gptmail.communication_utils.outbound_redact import guard_outbound
+
+        workspace = Path(
+            os.getenv("AGENT_WORKSPACE") or os.getenv("BOB_WORKSPACE") or Path.cwd()
+        )
+        allowed = guard_outbound(text, "twitter", workspace, require_scanner=True)
+    except Exception:
+        # Scanner/import failures must not become a bypass or disclose exception
+        # payloads (which can contain the original secret).
+        console.print("[red]Outbound secret scan unavailable; refusing to post")
+        sys.exit(1)
+    if not allowed:
+        console.print("[red]Outbound secret gate blocked publication")
+        sys.exit(1)
+
+
 def _post_now(
     client,
     text: str,
@@ -990,9 +1011,13 @@ def _post_now(
     # ``on_posted`` runs only once the first tweet is *confirmed created* (the
     # response carries a tweet id), so a failed first call writes no marker while
     # a thread that fails part-way still counts as posted and a retry is refused.
-    # Handle thread posting
+    # Validate every actual segment before the first irreversible API call.
+    # Keep this at the sink too: direct callers need not go through post().
+    thread_messages = split_thread(text) if thread else []
+    _require_safe_outbound(
+        "\n".join(message.text for message in thread_messages) if thread else text
+    )
     if thread:
-        thread_messages = split_thread(text)
         reply_to_id: str | None = None
 
         for message in thread_messages:

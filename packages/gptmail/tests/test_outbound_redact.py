@@ -98,3 +98,12 @@ def test_guard_outbound_allows_clean_content(
 
     assert guard_outbound("ordinary text", "email", tmp_path) is True
     assert not (tmp_path / "state" / "outbound-redact-blocks.jsonl").exists()
+
+
+def test_required_scanner_blocks_when_optional_package_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setitem(sys.modules, "redact", None)
+    assert guard_outbound("ordinary text", "twitter", tmp_path, require_scanner=True) is False
+    assert "required secret scanner unavailable" in caplog.text
+    assert "ordinary text" not in caplog.text

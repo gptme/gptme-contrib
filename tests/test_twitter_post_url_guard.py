@@ -67,6 +67,9 @@ def _load_twitter_module() -> tuple[Any, dict[str, Any], list[str]]:
     auth_tokens_stub: Any = types.ModuleType("gptmail.communication_utils.auth.tokens")
     auth_tokens_stub.TokenInfo = SimpleNamespace
 
+    outbound_stub: Any = types.ModuleType("gptmail.communication_utils.outbound_redact")
+    outbound_stub.guard_outbound = lambda *args, **kwargs: True
+
     messaging_stub: Any = types.ModuleType("gptmail.communication_utils.messaging")
     messaging_stub.split_thread = lambda text: [SimpleNamespace(text=text)]
 
@@ -91,6 +94,7 @@ def _load_twitter_module() -> tuple[Any, dict[str, Any], list[str]]:
         "gptmail.communication_utils.auth.oauth": auth_oauth_stub,
         "gptmail.communication_utils.auth.tokens": auth_tokens_stub,
         "gptmail.communication_utils.messaging": messaging_stub,
+        "gptmail.communication_utils.outbound_redact": outbound_stub,
     }
 
     original_modules = {
