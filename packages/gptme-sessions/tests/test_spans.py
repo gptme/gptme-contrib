@@ -457,6 +457,57 @@ def test_gptme_single_shell_span(tmp_path: Path) -> None:
     assert s.output_size > 0
 
 
+@pytest.mark.parametrize("separator", ["-", "_"])
+def test_gptme_call_id_formats_populate_aggregates(tmp_path: Path, separator: str) -> None:
+    from gptme_sessions.record import SessionRecord
+
+    records = [
+        {
+            "role": "assistant",
+            "timestamp": "2026-04-21T10:00:00",
+            "content": f"\n@shell(call{separator}34f429474ef14b79a121e8841e29d070): "
+            '{"command": "printf fixture"}',
+        },
+        _gptme_result("<system_warning>not a result", "2026-04-21T10:00:00.5"),
+        _gptme_result("fixture", "2026-04-21T10:00:01"),
+    ]
+    path = _write_gptme_session(tmp_path, records, "call-id-formats")
+    spans = extract_spans_from_gptme_jsonl(path)
+    assert len(spans) == 1
+    assert spans[0].tool_name == "shell"
+    assert spans[0].duration_ms == 1000
+    assert spans[0].output_size == len("fixture")
+
+    record = SessionRecord(session_id="synthetic", harness="gptme", trajectory_path=str(path))
+    assert record.populate_span_aggregates()
+    assert record.span_aggregates is not None
+    assert record.span_aggregates["total_spans"] == 1
+    assert record.span_aggregates["tool_counts"] == {"shell": 1}
+
+
+@pytest.mark.parametrize(
+    "role,content",
+    [
+        ("user", '@shell(call_abc): {"command": "fixture"}'),
+        ("assistant", 'Example: @shell(call_abc): {"command": "fixture"}'),
+        ("assistant", '`@shell(call_abc): {"command": "fixture"}`'),
+        ("assistant", '@shell(callXabc): {"command": "fixture"}'),
+    ],
+)
+def test_gptme_call_id_format_does_not_match_non_dispatches(
+    tmp_path: Path, role: str, content: str
+) -> None:
+    path = _write_gptme_session(
+        tmp_path,
+        [
+            {"role": role, "content": content, "timestamp": "2026-04-21T10:00:00"},
+            _gptme_result("fixture", "2026-04-21T10:00:01"),
+        ],
+        "non-dispatch",
+    )
+    assert extract_spans_from_gptme_jsonl(path) == []
+
+
 def test_gptme_usage_metadata_attached_to_span(tmp_path: Path) -> None:
     records = [
         {
