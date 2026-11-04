@@ -282,6 +282,42 @@ def test_run_work_file_misdeclared_contract_fails_before_launch(
     assert "runner_env.mode" in caplog.text
 
 
+@pytest.mark.parametrize(
+    "spec",
+    [None, [], False, 0, "", ["synthetic-private-value"], 1, "synthetic-private-value"],
+)
+def test_non_table_runner_env_fails_before_lock(tmp_path, monkeypatch, caplog, spec):
+    import gptme_runloops.run_item as run_item
+
+    caplog.set_level(logging.INFO, logger="gptme_runloops.run_item")
+    monkeypatch.setenv("PM_UNRELATED_SECRET", "synthetic-unrelated")
+    runner = _RecordingRunCmd()
+    config = _config(tmp_path, runner_env=spec)
+
+    def unexpected_lock(_self):
+        pytest.fail("malformed runner_env reached lock acquisition")
+
+    monkeypatch.setattr(run_item.SlotLock, "acquire", unexpected_lock)
+    work = _work_file(tmp_path)
+    assert run_work_file(work, config, _hooks(runner), backend="gptme") == 78
+    assert runner.calls == []
+    assert "runner_env must be a table" in caplog.text
+    assert "synthetic-private-value" not in caplog.text
+    with pytest.raises(ValueError, match="runner_env must be a table"):
+        run_item.build_execution_plan(work, config, _hooks(runner), backend="gptme")
+
+
+def test_empty_runner_env_table_keeps_legacy_inheritance(tmp_path, monkeypatch):
+    monkeypatch.setenv("PM_UNRELATED_SECRET", "synthetic-unrelated")
+    runner = _RecordingRunCmd()
+    config = _config(tmp_path, runner_env={})
+    assert (
+        run_work_file(_work_file(tmp_path), config, _hooks(runner), backend="gptme")
+        == 0
+    )
+    assert runner.runner_envs()[0]["PM_UNRELATED_SECRET"] == "synthetic-unrelated"
+
+
 def test_run_work_file_missing_required_setting_names_only(
     tmp_path, monkeypatch, caplog
 ) -> None:

@@ -3387,7 +3387,9 @@ def _resolve_runner_base_env(
     Raises :class:`MissingRunnerEnv` or ``ValueError`` on a misdeclared
     contract; the caller turns that into a fail-closed exit code 78.
     """
-    spec = config.runner_env or {}
+    spec = config.runner_env
+    if not isinstance(spec, Mapping):
+        raise ValueError("runner_env must be a table")
     if not spec:
         return None
     env = runner_env_from_spec(spec, backend=backend)
