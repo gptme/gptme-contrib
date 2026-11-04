@@ -205,10 +205,12 @@ def main() -> None:
     parser.add_argument("--target", type=Path, help="Fixture instead of live capture")
     parser.add_argument(
         "--instruction",
-        default="Draft an appropriate response; rewrite selected text if present",
+        default="Draft the message that belongs in this field from the conversation and available context. Return only the message body; do not treat a selection as a rewrite request.",
     )
     parser.add_argument(
-        "--model", default="", help="Prefill only; never generates automatically"
+        "--model",
+        default="openai-subscription/gpt-6.1-sol",
+        help="Prefill only; never generates automatically",
     )
     parser.add_argument("--context", type=Path, action="append", default=[])
     parser.add_argument("--query")

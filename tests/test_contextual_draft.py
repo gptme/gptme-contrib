@@ -447,3 +447,41 @@ def test_preview_prepare_only_uses_fixture_without_model(database, tmp_path):
     assert path.stat().st_mode & 0o777 == 0o600
     assert path.parent.stat().st_mode & 0o777 == 0o700
     assert not list(path.parent.glob("**/draft.txt"))
+
+
+@pytest.mark.parametrize("accept", [True, False])
+def test_direct_retained_session_protocol(database, tmp_path, accept):
+    native = tmp_path / "swift"
+    target = TARGET | {"selection": {"location": 0, "length": 0}}
+    native.write_text(
+        "#!/usr/bin/env python3\nimport json,sys\n"
+        + "print("
+        + repr(json.dumps(target))
+        + ",flush=True)\n"
+        + "command=json.loads(sys.stdin.readline())\nassert command['draft']=='Synthetic contextual reply'\n"
+        + ("print('{\"inserted\":true}',flush=True)\n" if accept else "sys.exit(1)\n"),
+        encoding="utf-8",
+    )
+    native.chmod(0o700)
+    generator = tmp_path / "gptme"
+    generator.write_text(
+        "#!/usr/bin/env python3\nimport sys\nsys.stdin.read()\nprint('Synthetic contextual reply')\n",
+        encoding="utf-8",
+    )
+    generator.chmod(0o700)
+    direct = SCRIPT.parent / "contextual-draft" / "direct.py"
+    # Call execute directly: no notifications, platform override or real AX writes.
+    code = "import runpy,argparse,pathlib,sys; m=runpy.run_path(sys.argv[1]); m['execute'](argparse.Namespace(context=[],query=None,goldfish_db=pathlib.Path(sys.argv[2]),model='test/synthetic'))"
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(direct), str(database)],
+        env={
+            **os.environ,
+            "PYTHONPATH": str(direct.parent),
+            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+        },
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert (result.returncode == 0) is accept, result.stderr
+    assert ("Draft inserted. Nothing sent." in result.stdout) is accept

@@ -13,7 +13,7 @@ model generation to a private preview file.
 
 A user-invoked Tk preview launcher is available below. Not implemented: installed
 global hotkey, automatic agent memory search, surrounding live-window capture,
-insertion, or sending. A saved
+automatic sending. Experimental direct insertion is described below. A saved
 request is a historical capture, **not** an insertion handle. No complete
 end-to-end live application acceptance is claimed. The native helper can refuse
 apps whose editable fields aren't exposed through macOS Accessibility.
@@ -179,3 +179,28 @@ No global shortcut is installed automatically.
 Live Notes validation: empty editor, exact title/body including trailing newlines,
 and a four-character selection at UTF-16 offset 12 passed read-only capture.
 This does not establish other apps, secure-field acceptance, or insertion safety.
+
+## Direct draft action (experimental macOS)
+
+`direct.py` is the primary context-first action: invoke at a cursor with no text
+selection, generate using `openai-subscription/gpt-6.1-sol` by default, then insert
+through the retained native AX element only if focus, field contents and selection
+are unchanged. Invoking this action authorizes model disclosure and insertion.
+It never sends, activates a window, replaces the clipboard, or simulates keys.
+It refuses selected-text rewriting; that is lower priority than contextual drafting.
+Unsupported selected-text insertion fails with no keyboard fallback. A local lock
+prevents overlapping direct drafts. Private request/draft files remain available
+when insertion fails. Actual insertion compatibility still needs per-app validation.
+
+Example shortcut bindings (install deliberately in your own skhd configuration):
+
+```text
+cmd + alt - g : /absolute/path/to/launcher direct
+cmd + alt + shift - g : /absolute/path/to/launcher preview
+```
+
+The launcher should set PATH explicitly and execute direct.py or preview.py without
+opening a terminal. Preview defaults to the same model and context-first task, but
+retains the instruction field for debugging and does not insert. Current retrieval
+is bounded Goldfish working memory plus explicitly configured context files, not
+an automatic complete personal-context search. No claim of Goldfish drafting parity.

@@ -101,6 +101,33 @@ let result: [String: Any] = [
     "editable": true,
     "coverage": "Focused field only; surrounding conversation comes from historical observations and may be incomplete. Not an insertion handle."
 ]
-let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+let interactive = CommandLine.arguments.contains("--insert-session")
+let data = try JSONSerialization.data(withJSONObject: result, options: interactive ? [.sortedKeys] : [.prettyPrinted, .sortedKeys])
 FileHandle.standardOutput.write(data)
 FileHandle.standardOutput.write(Data("\n".utf8))
+if interactive {
+    // Keep the actual AX element alive across generation; metadata is not a handle.
+    // Selected-text rewriting is intentionally not part of this draft action.
+    guard let originalRange = range, originalRange["length"] == 0 else {
+        fail("Direct drafting requires a cursor, not a text selection")
+    }
+    guard let line = readLine(), line.utf8.count <= 100000,
+          let payload = line.data(using: .utf8),
+          let command = try? JSONSerialization.jsonObject(with: payload) as? [String: String],
+          let draft = command["draft"], !draft.isEmpty else { fail("No draft to insert") }
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
+          let current = attribute(application, kAXFocusedUIElementAttribute), CFEqual(raw, current),
+          fieldText(field) == text, selectedRange(field) == range,
+          string(field, kAXSelectedTextAttribute) == selectedText else {
+        fail("Target changed; draft retained but not inserted")
+    }
+    var canInsert: DarwinBoolean = false
+    guard AXUIElementIsAttributeSettable(field, kAXSelectedTextAttribute as CFString, &canInsert) == .success,
+          canInsert.boolValue else { fail("Target does not support selected-text insertion") }
+    // One targeted AX write. No clipboard, keyboard simulation, focus activation,
+    // whole-field replacement, Return, or fallback into another control.
+    guard AXUIElementSetAttributeValue(field, kAXSelectedTextAttribute as CFString, draft as CFString) == .success else {
+        fail("Native insertion failed; no keyboard fallback attempted")
+    }
+    FileHandle.standardOutput.write(Data("{\"inserted\":true}\n".utf8))
+}
