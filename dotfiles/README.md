@@ -23,6 +23,19 @@ The dotfiles install global git hooks that apply to ALL repositories:
 - **Pre-commit integration**: Auto-stages files modified by formatters
 
 #### pre-push
+- **Mass-deletion guard**: Scans pushed commits, exempting history already tracked
+  on configured non-destination remotes (an accident-prevention trust assumption,
+  not protection against hostile local configuration). Existing branches use
+  Git's advertised old SHA when its commit object is available locally. An
+  unfetched old tip falls back to scanning local history with only the same
+  non-destination exemption, bounded-scan limit and deliberate override. New
+  branches never trust cached destination refs, even cached ancestors, because
+  the server may have reset them.
+- **Bounded scans fail closed**: More than `MASS_DELETE_COMMIT_RANGE_LIMIT`
+  commits (default 500) blocks the push. Use `MASS_DELETE_COMMIT_RANGE_LIMIT=0`
+  for a full scan, or deliberately set `ALLOW_MASS_DELETE=1` after inspecting
+  the history. A first push without usable other-remote history can require
+  this explicit choice; the hook never silently skips an over-limit scan.
 - **Master push protection**: Blocks direct pushes to master/main in external repos
 - **Worktree tracking**: Validates upstream tracking before push
 - Prevents pushing to wrong branches
