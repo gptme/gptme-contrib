@@ -245,6 +245,29 @@ def test_run_work_file_explicit_contract_excludes_unrelated_secret(
     assert env["AGENT_AMBIENT_HARNESS"].startswith("gptme:")
 
 
+@pytest.mark.parametrize(
+    ("value", "disabled"), [("synthetic-private-value", False), ("1", True)]
+)
+def test_runner_environment_log_does_not_disclose_setting_values(
+    tmp_path, monkeypatch, caplog, value, disabled
+) -> None:
+    monkeypatch.setenv("PATH", PARENT["PATH"])
+    monkeypatch.setenv("HOME", str(tmp_path / "runner-home"))
+    caplog.set_level(logging.INFO, logger="gptme_runloops.run_item")
+    runner = _RecordingRunCmd()
+    config = _config(
+        tmp_path,
+        runner_env={"mode": "explicit", "set": {DOTENV_DISABLE_VAR: value}},
+    )
+    assert (
+        run_work_file(_work_file(tmp_path), config, _hooks(runner), backend="gptme")
+        == 0
+    )
+    assert runner.runner_envs()[0][DOTENV_DISABLE_VAR] == value
+    assert "synthetic-private-value" not in caplog.text
+    assert f"dotenv disabled={disabled})" in caplog.text
+
+
 def test_run_work_file_legacy_mode_keeps_inheritance(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("PM_UNRELATED_SECRET", "synthetic-unrelated")
     run_cmd = _RecordingRunCmd()

@@ -3400,7 +3400,7 @@ def _resolve_runner_base_env(
             raise ValueError("runner environment HOME must be an absolute path")
         _log(
             "Runner environment: explicit contract "
-            f"({len(env)} variables; dotenv disabled={env.get(DOTENV_DISABLE_VAR, '0')})"
+            f"({len(env)} variables; dotenv disabled={env.get(DOTENV_DISABLE_VAR) == '1'})"
         )
     return env
 
