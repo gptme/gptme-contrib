@@ -1124,3 +1124,61 @@ def test_discord_missing_token_alerts_without_wedging_channel(tmp_path, monkeypa
     rec = ra.load_state()["gptme/gptme#v1.2.3"]
     assert rec["discord_111_id"] == "msg-111"
     assert rec["discord_222_id"] == "msg-222"
+
+
+SPEND_CAP_403 = (
+    "Traceback (most recent call last):\n"
+    '  File "twitter.py", line 1029, in _post_now\n'
+    "    response = client.create_tweet(\n"
+    "tweepy.errors.Forbidden: 403 Forbidden\n"
+    "Your monthly spend cap has been reached.\n"
+)
+
+
+def test_is_post_never_created_predicate():
+    """A 4xx means the tweet was never created; a timeout stays ambiguous."""
+    assert ra._is_post_never_created(SPEND_CAP_403)
+    assert ra._is_post_never_created(
+        "tweepy.errors.TooManyRequests: 429 Too Many Requests"
+    )
+    assert not ra._is_post_never_created("tweepy.errors.TwitterServerError: 503 x")
+    assert not ra._is_post_never_created("ReadTimeout: HTTPSConnectionPool")
+
+
+def test_main_retries_after_definite_org_tweet_rejection(monkeypatch, tmp_path):
+    """A refused announcement must not wedge the tag behind a pending marker.
+
+    Regression for gptme/gptme v0.36.0 on 2026-11-02: ``create_tweet`` raised
+    ``403 Forbidden — Your monthly spend cap has been reached``, so no tweet
+    existed, but the pending marker survived and every later timer run refused
+    to retry — failing forever over a side effect that never happened.
+    """
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    monkeypatch.setattr(
+        ra,
+        "latest_release",
+        lambda repo, tag: {
+            "tagName": "v0.33.0",
+            "isPrerelease": False,
+            "body": NOTES,
+            "url": "https://github.com/gptme/gptme/releases/tag/v0.33.0",
+            "publishedAt": _fresh_published_at(),
+        },
+    )
+    calls: list[tuple] = []
+
+    def fake_post(args, account=None):
+        calls.append((account, args))
+        return False, None, SPEND_CAP_403
+
+    monkeypatch.setattr(ra, "_post", fake_post)
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+
+    # The rejection is real, so this run still fails.
+    assert ra.main() == 1
+    rec = json.loads(ra.STATE_FILE.read_text())["gptme/gptme#v0.33.0"]
+    assert "org_tweet_pending_at" not in rec
+
+    # Next run attempts again instead of refusing blind retry.
+    assert ra.main() == 1
+    assert len(calls) == 2
