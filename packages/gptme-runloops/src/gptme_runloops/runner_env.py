@@ -124,6 +124,8 @@ def build_runner_base_env(
     Raises:
         MissingRunnerEnv: A name in ``require`` is absent or empty. The
             message lists names only, never values.
+        ValueError: A selected name or value cannot cross a subprocess
+            environment boundary. Values are never included in the error.
     """
     selected = set(passthrough if passthrough is not None else DEFAULT_PASSTHROUGH)
     name_prefixes = tuple(
@@ -150,6 +152,14 @@ def build_runner_base_env(
     if extra:
         for name, value in extra.items():
             env[str(name)] = str(value)
+
+    # Validate the final mapping, including selected parent entries, before
+    # callers acquire locks/claims. subprocess rejects these at launch time.
+    for name, value in env.items():
+        if not name or "=" in name or "\0" in name:
+            raise ValueError("runner environment contains an invalid variable name")
+        if "\0" in value:
+            raise ValueError("runner environment contains a NUL in a variable value")
 
     required = DEFAULT_REQUIRED if require is None else tuple(require)
     missing = [name for name in required if not env.get(name)]

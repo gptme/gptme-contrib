@@ -501,3 +501,46 @@ def test_run_item_requires_home_even_with_empty_require(tmp_path, monkeypatch, h
     assert runner.calls == []
     with pytest.raises(ValueError, match="HOME"):
         run_item.build_execution_plan(work, config, _hooks(runner), backend="codex")
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        {"BAD=NAME": "synthetic-private-value"},
+        {"BAD\0NAME": "synthetic-private-value"},
+        {"": "synthetic-private-value"},
+        {"API_KEY": "synthetic-private-value\0suffix"},
+    ],
+)
+def test_invalid_subprocess_environment_fails_before_lock(
+    tmp_path, monkeypatch, caplog, setting
+):
+    import gptme_runloops.run_item as run_item
+
+    monkeypatch.setenv("PATH", PARENT["PATH"])
+    monkeypatch.setenv("HOME", str(tmp_path / "runner-home"))
+    caplog.set_level(logging.INFO, logger="gptme_runloops.run_item")
+    runner = _RecordingRunCmd()
+    config = _config(tmp_path, runner_env={"mode": "explicit", "set": setting})
+
+    def unexpected_lock(_self):
+        pytest.fail("invalid environment reached lock acquisition")
+
+    monkeypatch.setattr(run_item.SlotLock, "acquire", unexpected_lock)
+    work = _work_file(tmp_path)
+    assert run_work_file(work, config, _hooks(runner), backend="codex") == 78
+    assert runner.calls == []
+    assert "synthetic-private-value" not in caplog.text
+    with pytest.raises(ValueError, match="runner environment") as excinfo:
+        run_item.build_execution_plan(work, config, _hooks(runner), backend="codex")
+    assert "synthetic-private-value" not in str(excinfo.value)
+
+
+def test_builder_validates_selected_parent_environment_without_logging_values():
+    with pytest.raises(ValueError, match="runner environment") as excinfo:
+        build_runner_base_env(
+            {**PARENT, "API_KEY": "synthetic-private-value\0suffix"},
+            "gptme",
+            credentials=["API_KEY"],
+        )
+    assert "synthetic-private-value" not in str(excinfo.value)
