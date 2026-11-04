@@ -80,7 +80,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -3429,6 +3429,23 @@ def run_work_file(
         # never silently degrade to ambient inheritance.
         _log(f"ERROR: {exc}")
         return 78
+
+    if runner_base_env is not None and runner_base_env.get("HOME"):
+        # Planning, transcript snapshots/discovery and credential inspection must
+        # agree with the child HOME, without mutating the caller's frozen config
+        # or the parent environment. Explicit config paths still take precedence.
+        home = Path(runner_base_env["HOME"])
+        config = replace(
+            config,
+            cc_projects_dir=config.cc_projects_dir or home / ".claude/projects",
+            cc_credentials_path=config.cc_credentials_path
+            or home / ".claude/.credentials.json",
+            copilot_state_dir=config.copilot_state_dir
+            or home / ".copilot/session-state",
+            codex_sessions_dir=config.codex_sessions_dir or home / ".codex/sessions",
+            gptme_log_root=config.gptme_log_root
+            or home / "data/trajectories/gptme-runs",
+        )
 
     _log(
         f"--- Detached dispatch (slot={slot_key or 'none'} lane={lane}): "

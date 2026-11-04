@@ -200,6 +200,9 @@ Semantics:
   credential is simply absent, so the backend fails closed on its own.
 - `require` defaults to `PATH` and `HOME`; a missing name aborts the launch and
   the error lists names only, never values.
+- With an explicit runner `HOME`, backend transcript/state and Claude credential
+  paths default beneath that home rather than the parent's. Configured path
+  overrides still win; the caller's config and parent environment are unchanged.
 - `disable_dotenv` sets `PYTHON_DOTENV_DISABLED=1` so a Python backend cannot
   rehydrate a workspace `.env` behind this boundary.
 - The per-item `ambient_env` tag is merged explicitly when the contract is

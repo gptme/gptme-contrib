@@ -300,3 +300,87 @@ def test_run_work_file_missing_required_setting_names_only(
     assert rc == 78
     assert run_cmd.runner_envs() == []
     assert "HOME" in caplog.text
+
+
+@pytest.mark.parametrize("mode", ["explicit", "legacy"])
+@pytest.mark.parametrize("path_override", [False, True])
+def test_run_work_file_backend_paths_follow_runner_home(
+    tmp_path, monkeypatch, mode, path_override
+) -> None:
+    import os
+
+    import gptme_runloops.run_item as run_item
+
+    parent_home = tmp_path / "parent-home"
+    runner_home = tmp_path / "runner-home"
+    monkeypatch.setenv("HOME", str(parent_home))
+    monkeypatch.setenv("PATH", PARENT["PATH"])
+    suffixes = {
+        "cc_projects_dir": Path(".claude/projects"),
+        "cc_credentials_path": Path(".claude/.credentials.json"),
+        "copilot_state_dir": Path(".copilot/session-state"),
+        "codex_sessions_dir": Path(".codex/sessions"),
+        "gptme_log_root": Path("data/trajectories/gptme-runs"),
+    }
+    paths = {
+        name: tmp_path / "custom" / suffix if path_override else None
+        for name, suffix in suffixes.items()
+    }
+    config = _config(
+        tmp_path,
+        runner_env={"mode": mode, "set": {"HOME": str(runner_home)}},
+        **paths,
+    )
+    execute = run_item.execute_plan
+    seen = []
+
+    def check_paths(plan, item, effective_config, hooks, **kwargs):
+        home = runner_home if mode == "explicit" else parent_home
+        for name, suffix in suffixes.items():
+            expected = paths[name] if path_override else home / suffix
+            assert getattr(effective_config, f"resolved_{name}") == expected
+        assert plan.trajectory_path.startswith(
+            str(effective_config.resolved_cc_projects_dir) + "/"
+        )
+        seen.append(plan.trajectory_path)
+        run_cmd = hooks.run_cmd
+
+        def write_transcript(argv, **run_kwargs):
+            if "/fake/run.sh" in argv:
+                transcript = Path(plan.trajectory_path)
+                transcript.parent.mkdir(parents=True, exist_ok=True)
+                transcript.write_text("x" * (run_item.CC_TRAJECTORY_MIN_BYTES + 1))
+                # Avoid sleeping to cross the resolver's integer-second floor.
+                import time
+
+                fresh = int(time.time()) + 2
+                os.utime(transcript, (fresh, fresh))
+            return run_cmd(argv, **run_kwargs)
+
+        from dataclasses import replace
+
+        outcome = execute(
+            plan,
+            item,
+            effective_config,
+            replace(hooks, run_cmd=write_transcript),
+            **kwargs,
+        )
+        assert outcome.trajectory_path == plan.trajectory_path
+        assert Path(outcome.trajectory_path).is_file()
+        return outcome
+
+    monkeypatch.setattr(run_item, "execute_plan", check_paths)
+    assert (
+        run_work_file(
+            _work_file(tmp_path),
+            config,
+            _hooks(_RecordingRunCmd()),
+            backend="claude-code",
+        )
+        == 0
+    )
+    assert len(seen) == 1
+    assert os.environ["HOME"] == str(parent_home)
+    for name in suffixes:
+        assert getattr(config, name) == paths[name]
