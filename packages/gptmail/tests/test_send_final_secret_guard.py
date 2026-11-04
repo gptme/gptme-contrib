@@ -161,6 +161,32 @@ def test_normal_markdown_escape_removal_is_scanned(recording_send, monkeypatch):
 
 
 @pytest.mark.parametrize("body", ["Hello", "<html><body>Hello</body></html>"])
+@pytest.mark.parametrize(
+    "comment",
+    [
+        "=?utf-8?q?synthetic_forbidden_phrase?=",
+        "=?utf-8?b?c3ludGhldGljIGZvcmJpZGRlbiBwaHJhc2U=?=",
+        "=?utf-8?q?synthetic_?=\n =?utf-8?q?forbidden_phrase?=",
+    ],
+)
+def test_encoded_date_comment_is_scanned(recording_send, body, comment, capsys):
+    agent, draft, calls = recording_send
+    draft.write_text(
+        "To: recipient@example.com\nSubject: Clean\n"
+        f"Date: Tue, 01 Jan 2030 12:00:00 +0000 ({comment})\n\n" + body
+    )
+    original = draft.read_text()
+    assert "synthetic forbidden phrase" not in original
+    with pytest.raises(ValueError, match="Outbound"):
+        agent.send("fixture")
+    assert not calls
+    assert draft.read_text() == original
+    assert not (agent.email_dir / "sent/fixture.md").exists()
+    captured = capsys.readouterr()
+    assert "synthetic forbidden phrase" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("body", ["Hello", "<html><body>Hello</body></html>"])
 def test_folded_date_comment_is_not_lost_by_semantic_parser(recording_send, body):
     agent, draft, calls = recording_send
     draft.write_text(

@@ -43,7 +43,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from email import message_from_bytes
-from email.header import Header
+from email.header import Header, decode_header, make_header
 from email.message import EmailMessage, Message
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -1065,11 +1065,12 @@ class AgentEmail:
             # default headers and the rendered HTML alternative.
             final_message = message_from_bytes(mime_bytes, policy=default)
             # Structured header objects can discard wire-visible comments (Date
-            # in particular). Retain raw unfolded values as well as semantic ones.
+            # in particular). Decode raw values too, before that information is lost.
             outbound_parts = [mime_bytes.decode("utf-8")]
-            outbound_parts.extend(
-                re.sub(r"\r?\n[ \t]+", " ", value) for _, value in final_message.raw_items()
-            )
+            for _, value in final_message.raw_items():
+                unfolded = re.sub(r"\r?\n[ \t]+", " ", value)
+                outbound_parts.append(unfolded)
+                outbound_parts.append(str(make_header(decode_header(unfolded))))
             outbound_parts.extend(str(value) for _, value in final_message.items())
             for part in final_message.walk():
                 if part.get_content_maintype() == "text":
