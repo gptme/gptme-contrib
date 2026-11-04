@@ -1891,6 +1891,7 @@ def execute_plan(
     hooks: RunItemHooks,
     *,
     ambient_env: dict[str, str] | None = None,
+    runner_base_env: Mapping[str, str] | None = None,
     latency_context_json: str = "[]",
     ack_result_json: str = "",
 ) -> RunItemOutcome:
@@ -1900,6 +1901,13 @@ def execute_plan(
     confirmed rate-limit rejection (writing the per-sub block file only on a
     confirmed *rejected* event — the 2026-06-14 401-misclassification guard),
     and resolves the backend trajectory.
+
+    ``runner_base_env=None`` preserves the legacy merge of ``os.environ`` and
+    ``ambient_env``. A supplied mapping (including an empty one) replaces both
+    for the runner subprocess. Plan metadata is then overlaid, followed by the
+    executor-owned occupancy identity. The supplied mapping is not mutated;
+    callers must explicitly include needed credentials and execution settings.
+    Other hooks and subprocesses are outside this runner-only boundary.
 
     ``latency_context_json`` / ``ack_result_json`` are captured by the caller
     BEFORE the coordination claim, preserving the bash ordering
@@ -1935,8 +1943,11 @@ def execute_plan(
         except (OSError, subprocess.SubprocessError):
             pr_before_json = ""
 
-    env = os.environ.copy()
-    env.update(ambient_env or {})
+    if runner_base_env is None:
+        env = os.environ.copy()
+        env.update(ambient_env or {})
+    else:
+        env = dict(runner_base_env)
     env.update(plan.runner_env)
     # The project-monitoring executor owns one item at a time. Give occupancy
     # one executor-scoped identity while preserving the per-item session id

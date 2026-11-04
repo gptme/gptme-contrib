@@ -27,7 +27,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 from gptme_runloops.merge_lifecycle import (
@@ -3190,6 +3190,97 @@ def test_execute_plan_generic_nonzero_exit_is_counted_failure(tmp_path) -> None:
     )
     outcome = execute_plan(plan, item, config, hooks)
     assert outcome.counted_failure is True
+
+
+@pytest.mark.parametrize("base_mode", ["omitted", "none", "mapping", "empty"])
+@pytest.mark.parametrize("backend", ["codex", "claude-code", "grok-build"])
+def test_execute_plan_runner_base_environment(
+    tmp_path, monkeypatch, base_mode, backend
+):
+    """Replacement is opt-in, even for {}, and plan/occupancy metadata wins."""
+    # Use only synthetic values so failures cannot print the live session env.
+    inherited = {
+        "UNRELATED_SYNTHETIC_SECRET": "synthetic-only",
+        "ENV_PRECEDENCE": "inherited",
+        "INHERITED_ONLY": "inherited",
+        "AGENT_SESSION_ID": "inherited-session",
+    }
+    monkeypatch.setattr(os, "environ", inherited)
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    hooks = make_hooks(run_cmd=run_cmd)
+    item = make_item(types=["notification"], number=0)
+    plan = plan_item(
+        item,
+        index=1,
+        config=config,
+        backend=backend,
+        model="",
+        monitoring_rules="",
+        lifecycle=LifecycleResult(),
+        arc=None,
+        run_salt=1,
+        records_dir=tmp_path,
+        runner=hooks.runner,
+        sysprompt_file="",
+    )
+    plan.runner_env.update(
+        {
+            "ENV_PRECEDENCE": "plan",
+            "PLAN_METADATA": "intended",
+            "BOB_AUTONOMOUS_AGENT_ID": "stale-plan-holder",
+            "BOB_SESSION_PID": "stale-plan-pid",
+        }
+    )
+    ambient = {
+        "AMBIENT_ONLY": "ambient",
+        "ENV_PRECEDENCE": "ambient",
+        "AGENT_SESSION_ID": "ambient-session",
+    }
+    base = (
+        {
+            "PATH": "/explicit/bin",
+            "ENV_PRECEDENCE": "base",
+            "AGENT_SESSION_ID": "base-session",
+            "BOB_AUTONOMOUS_AGENT_ID": "base-holder",
+            "BOB_SESSION_PID": "base-pid",
+        }
+        if base_mode == "mapping"
+        else {}
+    )
+    original_base = base.copy()
+    original_plan_env = plan.runner_env.copy()
+    kwargs = {}
+    if base_mode != "omitted":
+        kwargs["runner_base_env"] = (
+            None if base_mode == "none" else MappingProxyType(base)
+        )
+
+    outcome = execute_plan(plan, item, config, hooks, ambient_env=ambient, **kwargs)
+
+    assert outcome.exit_code == 0
+    runner_env = run_cmd.find("/fake/run.sh")[0]["env"]
+    if base_mode in ("omitted", "none"):
+        expected = {**inherited, **ambient}
+        assert "UNRELATED_SYNTHETIC_SECRET" in runner_env
+        assert "AMBIENT_ONLY" in runner_env
+    else:
+        expected = base.copy()
+        assert "UNRELATED_SYNTHETIC_SECRET" not in runner_env
+        assert "INHERITED_ONLY" not in runner_env
+        assert "AMBIENT_ONLY" not in runner_env
+    expected.update(plan.runner_env)
+    expected["BOB_AUTONOMOUS_AGENT_ID"] = f"project-monitoring-{os.getpid()}"
+    expected["BOB_SESSION_PID"] = str(os.getpid())
+    assert runner_env == expected
+    assert runner_env["AGENT_SESSION_ID"] == plan.session_id
+    assert runner_env["BOB_SESSION_ID"] == plan.session_id
+    if backend == "claude-code":
+        assert runner_env["CC_SESSION_ID"] == plan.session_id
+    elif backend == "grok-build":
+        assert runner_env["GROK_BUILD_SESSION_ID"] == plan.session_id
+    assert base == original_base
+    assert plan.runner_env == original_plan_env
 
 
 def test_execute_plan_pr_before_snapshot_only_for_pr_items(tmp_path) -> None:
