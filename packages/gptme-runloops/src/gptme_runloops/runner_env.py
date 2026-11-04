@@ -117,7 +117,7 @@ def build_runner_base_env(
         extra: Additional fixed settings (e.g. ``BOB_BACKEND``). Values are
             stringified; an explicit value wins over a passthrough one.
         require: Names that must be present and non-empty in the result.
-            ``None`` disables the check; ``()`` requires nothing.
+            ``None`` uses :data:`DEFAULT_REQUIRED`; ``()`` requires nothing.
         disable_dotenv: Set :data:`DOTENV_DISABLE_VAR` so a Python backend
             cannot load a workspace ``.env`` behind this boundary.
 

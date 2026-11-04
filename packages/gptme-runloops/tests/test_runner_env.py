@@ -79,6 +79,14 @@ def test_missing_required_setting_fails_closed_without_values() -> None:
     assert "synthetic-inference" not in message
 
 
+def test_empty_require_relaxes_only_the_structural_check() -> None:
+    env = build_runner_base_env(
+        {"OPENROUTER_API_KEY": "synthetic-inference"}, "gptme", require=()
+    )
+    assert "HOME" not in env and "PATH" not in env
+    assert "PM_UNRELATED_SECRET" not in env
+
+
 def test_extra_values_win_and_input_is_not_mutated() -> None:
     before = dict(PARENT)
     env = build_runner_base_env(
