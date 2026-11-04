@@ -14,6 +14,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -142,15 +143,30 @@ def read_json(path: Path) -> dict:
 
 
 def private_write(path: Path, text: str) -> None:
-    """Exclusive create, including symlink protection; caller chooses a private location."""
+    """Publish only a completed private file, without overwriting any destination."""
+    temporary: Path | None = None
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except OSError as exc:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=".contextual-draft-",
+            delete=False,
+        ) as out:
+            temporary = Path(out.name)
+            out.write(text)
+            out.flush()
+            os.fsync(out.fileno())
+        # Same-directory hard link is atomic and fails if the destination exists,
+        # including a dangling symlink. Never use replace(), which overwrites.
+        os.link(temporary, path)
+    except (OSError, UnicodeError) as exc:
         raise DraftError(
-            "Cannot create output (must be a new file in an existing directory)"
+            "Cannot publish completed output; destination must be new and storage writable"
         ) from exc
-    with os.fdopen(fd, "w", encoding="utf-8") as out:
-        out.write(text)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def capture() -> dict:

@@ -18,6 +18,16 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
+func selectedRange(_ element: AXUIElement) -> [String: Int]? {
+    guard let raw = attribute(element, kAXSelectedTextRangeAttribute),
+          CFGetTypeID(raw) == AXValueGetTypeID() else { return nil }
+    let value = unsafeBitCast(raw, to: AXValue.self)
+    var range = CFRange()
+    guard AXValueGetType(value) == .cfRange,
+          AXValueGetValue(value, .cfRange, &range) else { return nil }
+    return ["location": range.location, "length": range.length]
+}
+
 // Do not trigger a permission dialog or activate any app.
 guard AXIsProcessTrusted() else { fail("Accessibility permission is required") }
 guard let app = NSWorkspace.shared.frontmostApplication else { fail("No foreground application") }
@@ -37,18 +47,20 @@ let writableStatus = AXUIElementIsAttributeSettable(field, kAXValueAttribute as 
 guard writableStatus == .success && writable.boolValue else { fail("Field is not writable") }
 guard let text = string(field, kAXValueAttribute) else { fail("No accessible field value") }
 guard text.utf8.count <= 20000 else { fail("Field too large for bounded capture") }
-var rangeJSON: Any = NSNull()
-if let rawRange = attribute(field, kAXSelectedTextRangeAttribute), CFGetTypeID(rawRange) == AXValueGetTypeID() {
-    let axRange = unsafeBitCast(rawRange, to: AXValue.self)
-    var range = CFRange()
-    if AXValueGetType(axRange) == .cfRange && AXValueGetValue(axRange, .cfRange, &range) {
-        rangeJSON = ["location": range.location, "length": range.length]
-    }
-}
+let range = selectedRange(field)
+let selectedText = string(field, kAXSelectedTextAttribute)
+let identifier = string(field, kAXIdentifierAttribute)
 var windowTitle: Any = NSNull()
 if let rawWindow = attribute(application, kAXFocusedWindowAttribute), CFGetTypeID(rawWindow) == AXUIElementGetTypeID() {
     let window = unsafeBitCast(rawWindow, to: AXUIElement.self)
     windowTitle = string(window, kAXTitleAttribute) as Any? ?? NSNull()
+}
+// Re-read field content and selection as well as identity. AX has no atomic
+// snapshot transaction; this detects observed changes, not every possible ABA.
+guard string(field, kAXValueAttribute) == text,
+      selectedRange(field) == range,
+      string(field, kAXSelectedTextAttribute) == selectedText else {
+    fail("Field text or selection changed during capture")
 }
 // Reject app/field switches during the read instead of mixing two targets.
 guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
@@ -65,10 +77,10 @@ let result: [String: Any] = [
     "window_title": windowTitle,
     "role": role,
     "subrole": subrole,
-    "identifier": string(field, kAXIdentifierAttribute) as Any? ?? NSNull(),
+    "identifier": identifier as Any? ?? NSNull(),
     "text": text,
-    "selection": rangeJSON,
-    "selected_text": string(field, kAXSelectedTextAttribute) as Any? ?? NSNull(),
+    "selection": range as Any? ?? NSNull(),
+    "selected_text": selectedText as Any? ?? NSNull(),
     "secure": false,
     "editable": true,
     "coverage": "Focused field only; surrounding conversation comes from historical observations and may be incomplete. Not an insertion handle."

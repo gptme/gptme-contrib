@@ -377,3 +377,45 @@ def test_unicode_prepare_and_generate_under_ascii_locale(database, tmp_path):
     )
     assert gen.returncode == 0, gen.stderr
     assert output.read_bytes() == "café 日本語\n".encode()
+
+
+@pytest.mark.parametrize("failure", ["fsync", "link"])
+def test_output_publication_failure_leaves_no_partial_file(
+    tmp_path, monkeypatch, failure
+):
+    output = tmp_path / "draft.txt"
+
+    def fail(*args, **kwargs):
+        raise OSError("synthetic storage failure")
+
+    monkeypatch.setattr(module.os, failure, fail)
+    with pytest.raises(module.DraftError, match="publish completed"):
+        module.private_write(output, "private draft")
+    assert not output.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_partial_write_failure_with_real_file_limit(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("POSIX file size limits required")
+    output = tmp_path / "draft.txt"
+    code = """
+import runpy,resource,signal,sys
+from pathlib import Path
+m=runpy.run_path(sys.argv[1])
+resource.setrlimit(resource.RLIMIT_FSIZE,(1024,1024))
+signal.signal(signal.SIGXFSZ,signal.SIG_IGN)
+try:
+    m['private_write'](Path(sys.argv[2]), 'x'*100000)
+except m['DraftError']:
+    sys.exit(0)
+sys.exit(2)
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", code, str(SCRIPT), str(output)],
+        capture_output=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert not output.exists()
+    assert list(tmp_path.iterdir()) == []
