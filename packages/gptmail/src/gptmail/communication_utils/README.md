@@ -21,7 +21,7 @@ communication_utils/
 │                               #   CallbackServer (needs gptmail[oauth])
 ├── monitoring/                 # get_logger, configure_logging, MetricsCollector
 ├── error_handling/             # retry, RetryConfig, exponential_backoff, error classes
-└── outbound_redact.py          # secret gate; require_scanner=True refuses missing redact, optional callers warn/skip
+└── outbound_redact.py          # secret gate; optional by default, required by AgentTransport and direct Twitter publication
 ```
 
 ## Examples

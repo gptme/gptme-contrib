@@ -18,6 +18,8 @@ from gptmail.chatgpt_bridge import (
 )
 from gptmail.transport.agent import AgentTransport
 
+pytestmark = pytest.mark.usefixtures("clean_agent_scanner")
+
 
 def _make_request(headers: dict[str, str]) -> Request:
     """Build a Starlette Request carrying the given headers (no ASGI server)."""

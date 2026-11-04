@@ -24,6 +24,8 @@ from gptmail.agent_cli import agent
 from gptmail.communication_utils.state.tracking import ConversationTracker, MessageState
 from gptmail.transport.agent import meta_of
 
+pytestmark = pytest.mark.usefixtures("clean_agent_scanner")
+
 
 @pytest.fixture
 def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -1385,3 +1387,35 @@ def test_reply_rechecks_replied_under_lock(
     assert result.exit_code == 0, result.output
     assert "already replied" in result.output
     assert _peer_inbox_count(workspace) == 0
+
+
+@pytest.mark.parametrize("command", ["send", "reply", "broadcast"])
+def test_forbidden_cli_output_never_delivered_or_marked_replied(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    import sys
+    import types
+    from types import SimpleNamespace
+
+    secret = "synthetic-cli-forbidden-literal"
+    scanner = types.ModuleType("redact")
+    scanner.collect_secret_literals = lambda: {secret}  # type: ignore[attr-defined]
+    scanner.redact = lambda text, literals: SimpleNamespace(  # type: ignore[attr-defined]
+        blocked=secret in text, block_reasons=["1× literal (critical)"]
+    )
+    monkeypatch.setitem(sys.modules, "redact", scanner)
+    name = _seed_inbox(workspace)
+    if command == "reply":
+        args = ["reply", name, secret]
+    elif command == "broadcast":
+        args = ["broadcast", "Hello", secret]
+    else:
+        args = ["send", "bob", "Hello", secret, "--force"]
+    result = CliRunner().invoke(agent, args)
+    assert result.exit_code != 0
+    assert secret not in result.output
+    assert isinstance(result.exception, ValueError)
+    assert secret not in str(result.exception)
+    assert not list((workspace / "messages" / "outbox").glob("*.md"))
+    assert not list((workspace / "bob" / "messages" / "inbox").glob("*.md"))
+    assert not _frontmatter(workspace / "messages" / "inbox" / name).get("replied")
