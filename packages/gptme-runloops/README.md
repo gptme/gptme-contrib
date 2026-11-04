@@ -152,6 +152,29 @@ Other modules:
 
 The legacy import path `run_loops` is kept as a symlink to `gptme_runloops` in source checkouts.
 
+### Explicit runner environment (PM Python API)
+
+`gptme_runloops.run_item.execute_plan(..., runner_base_env=...)` optionally
+replaces the runner subprocess's inherited environment:
+
+- Omitted or `None`: legacy precedence is `os.environ`, then `ambient_env`,
+  then `plan.runner_env`, then executor-owned occupancy identity.
+- Any mapping, including `{}`: start with a copy of that mapping, ignoring both
+  `os.environ` and `ambient_env`; then apply `plan.runner_env` and occupancy
+  identity in the same order. The caller's mapping is not mutated.
+
+Plan metadata includes `AGENT_SESSION_ID`, `BOB_SESSION_ID`, and applicable
+backend aliases (`CC_SESSION_ID` / `GROK_BUILD_SESSION_ID`). The executor always
+sets `BOB_AUTONOMOUS_AGENT_ID` and `BOB_SESSION_PID` last. Callers opting in must
+explicitly supply any needed credentials, `PATH`, `HOME`, backend configuration,
+and other execution settings; `ambient_env` cannot add them back in this mode.
+No environment values are logged by this API.
+
+This is an opt-in Python API boundary for the runner only, not a sandbox or a
+fleet rollout. `run_work_file` and the CLI retain legacy behavior; lifecycle,
+GitHub observation, system-prompt, and post-run hooks are not isolated by this
+argument. Adopting callers must assemble and pass their intended environment.
+
 ## Contributor initial reviews (PM)
 
 `contributor_unreviewed` is a slow-lane `pr-review` session, never an
