@@ -1198,14 +1198,18 @@ def promote_notification_states(config: RunItemConfig) -> None:
 
 
 def snapshot_copilot_dirs(state_dir: Path) -> set[str] | None:
-    """Pre-dispatch snapshot of copilot session-state dir names (worker.sh:52-59)."""
+    """Snapshot session dirs; a missing root is an empty first-run baseline."""
+    if not state_dir.exists():
+        return set()
     if not state_dir.is_dir():
         return None
     return {p.name for p in state_dir.iterdir()}
 
 
 def snapshot_codex_rollouts(sessions_dir: Path) -> set[str] | None:
-    """Pre-dispatch snapshot of codex rollout file paths (worker.sh:63-70)."""
+    """Snapshot rollouts; a missing root is an empty first-run baseline."""
+    if not sessions_dir.exists():
+        return set()
     if not sessions_dir.is_dir():
         return None
     return {str(p) for p in sessions_dir.rglob("rollout-*.jsonl")}

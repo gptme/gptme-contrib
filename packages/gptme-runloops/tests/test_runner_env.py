@@ -384,3 +384,47 @@ def test_run_work_file_backend_paths_follow_runner_home(
     assert os.environ["HOME"] == str(parent_home)
     for name in suffixes:
         assert getattr(config, name) == paths[name]
+
+
+@pytest.mark.parametrize("backend", ["codex", "copilot-cli"])
+def test_fresh_runner_home_retains_first_backend_trajectory(
+    tmp_path, monkeypatch, backend
+):
+    import gptme_runloops.run_item as run_item
+
+    home = tmp_path / "fresh-home"
+    monkeypatch.setenv("PATH", PARENT["PATH"])
+    config = _config(
+        tmp_path,
+        runner_env={"mode": "explicit", "set": {"HOME": str(home)}},
+        codex_sessions_dir=None,
+        copilot_state_dir=None,
+    )
+    suffix = (
+        ".codex/sessions/2026/11/04/rollout-first.jsonl"
+        if backend == "codex"
+        else ".copilot/session-state/first/events.jsonl"
+    )
+    trajectory = home / suffix
+    recorder = _RecordingRunCmd()
+
+    def run_cmd(argv, **kwargs):
+        if "/fake/run.sh" in argv:
+            trajectory.parent.mkdir(parents=True)
+            trajectory.write_text('{"role":"assistant","content":"synthetic"}\n')
+        return recorder(argv, **kwargs)
+
+    outcomes = []
+    execute = run_item.execute_plan
+
+    def capture(*args, **kwargs):
+        outcome = execute(*args, **kwargs)
+        outcomes.append(outcome)
+        return outcome
+
+    monkeypatch.setattr(run_item, "execute_plan", capture)
+    assert (
+        run_work_file(_work_file(tmp_path), config, _hooks(run_cmd), backend=backend)
+        == 0
+    )
+    assert outcomes[0].trajectory_path == str(trajectory)
