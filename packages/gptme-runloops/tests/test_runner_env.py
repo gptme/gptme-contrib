@@ -210,6 +210,8 @@ def _work_file(tmp_path: Path) -> Path:
 def test_run_work_file_explicit_contract_excludes_unrelated_secret(
     tmp_path, monkeypatch
 ) -> None:
+    monkeypatch.setenv("PATH", PARENT["PATH"])
+    monkeypatch.setenv("HOME", str(tmp_path / "runner-home"))
     monkeypatch.setenv("OPENROUTER_API_KEY", "synthetic-inference")
     monkeypatch.setenv("PM_UNRELATED_SECRET", "synthetic-unrelated")
     run_cmd = _RecordingRunCmd()
