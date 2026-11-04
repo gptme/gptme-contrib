@@ -29,10 +29,10 @@ _EXIT_CODE_RE = re.compile(r"(?:Exit code|exit code):\s*(\d+)")
 # "Process exited with code N".
 _CODEX_EXIT_CODE_RE = re.compile(r"Process exited with code (\d+)")
 
-# gptme tool-use marker: `@tool_name(call-UUID-N): {json_args}` at the start
-# of a line. Args may be absent (e.g. `@todo(call-...-4): {}`).
+# gptme tool-use marker: legacy `call-UUID-N` or current `call_UUID` at the
+# start of a line. Args may be absent (e.g. `@todo(call-...-4): {}`).
 _GPTME_TOOL_RE = re.compile(
-    r"^@(\w+)\(call-([0-9a-f-]+)\):\s*(\{.*\})?\s*$",
+    r"^@(\w+)\(call[-_]([0-9a-f-]+)\):\s*(\{.*\})?\s*$",
     re.MULTILINE,
 )
 
@@ -551,7 +551,8 @@ def extract_spans_from_gptme_jsonl(
     """Extract ToolSpan objects from a gptme conversation.jsonl trajectory.
 
     gptme tool invocations appear in assistant messages as
-    ``@tool_name(call-UUID-N): {json_args}``. Results arrive as the next
+    ``@tool_name(call-UUID-N): {json_args}`` or ``@tool_name(call_UUID): {json_args}``.
+    Results arrive as the next
     non-pinned system message that isn't a lesson injection, system warning,
     or shellcheck note. Pairing is by sequential FIFO order (gptme doesn't
     echo the call-ID in the result).
