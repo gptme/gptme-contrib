@@ -394,7 +394,16 @@ from gptmail.transport.agent import AgentTransport  # filesystem inbox/outbox, n
 ```
 
 `AgentTransport` writes only local files. Delivery is a `deliver(path, recipient) -> bool`
-callback you inject; the CLI's callback uses SSH/SCP. Shared building blocks (rate
+callback you inject; the CLI's callback uses SSH/SCP. Sending (including CLI reply
+and broadcast) requires the workspace `redact` scanner. The complete rendered
+message, including subject and reply metadata, is checked before its outbox file
+is created or delivery is called. Critical findings, missing scanner, and scanner
+errors refuse with a payload-free `ValueError`; blocked metadata is recorded under
+`<messages_dir>/../state/outbound-redact-blocks.jsonl`. This also applies to
+local-only outboxes, which may be synced independently. Standalone installations
+without that workspace scanner can still read/list messages but cannot send.
+This guard is defense in depth, not recipient authentication or a same-user
+credential boundary. Shared building blocks (rate
 limiting, file locks, the `ConversationTracker`, OAuth/token helpers, retry and
 structured logging) live in
 [`gptmail.communication_utils`](src/gptmail/communication_utils/README.md).

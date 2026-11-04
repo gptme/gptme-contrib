@@ -31,6 +31,8 @@ from pathlib import Path
 
 import yaml
 
+from gptmail.communication_utils.outbound_redact import guard_outbound
+
 # A delivery hook: given the local outbox path and the recipient name, place the
 # message in the recipient's inbox (SSH/SCP, shared repo, …) and return whether
 # delivery succeeded. None means local-only (tests, single-host).
@@ -221,21 +223,31 @@ class AgentTransport:
         single ``in_reply_to`` link rather than a full ancestor chain, so only
         the immediate parent (``reply_to``) is recorded. ``reply_expected=False``
         marks an informational message that receivers omit from their reply queue.
-        Returns the message ID (outbox filename).
+        Returns the message ID (outbox filename). Requires the workspace secret
+        scanner even for local-only sends; raises a payload-free ``ValueError``
+        before publication when scanning is unavailable, fails, or blocks.
         """
+        message = self._format(
+            self._self,
+            to.lower(),
+            subject,
+            content,
+            mailbox=self.mailbox,
+            in_reply_to=reply_to,
+            reply_expected=reply_expected,
+        )
+        # Local outboxes can be synced independently of the delivery callback.
+        # Check the exact rendered bytes before either publication boundary.
+        try:
+            allowed = guard_outbound(message, self.channel, self._root.parent, require_scanner=True)
+        except Exception:
+            # Scanner/collector exceptions may embed the outbound secret.
+            raise ValueError("Outbound agent message blocked: secret scan failed") from None
+        if not allowed:
+            raise ValueError("Outbound agent message blocked by secret policy")
         filename = self._make_filename(self._self, subject)
         local_path = self.outbox / filename
-        local_path.write_text(
-            self._format(
-                self._self,
-                to.lower(),
-                subject,
-                content,
-                mailbox=self.mailbox,
-                in_reply_to=reply_to,
-                reply_expected=reply_expected,
-            )
-        )
+        local_path.write_text(message)
         if self._deliver is not None and not self._deliver(local_path, to.lower()):
             self._stamp_delivery_failed(local_path)
         return filename

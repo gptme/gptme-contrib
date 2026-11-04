@@ -16,6 +16,8 @@ import pytest
 from gptmail.transport import Transport
 from gptmail.transport.agent import AgentTransport, meta_of, split_frontmatter
 
+pytestmark = pytest.mark.usefixtures("clean_agent_scanner")
+
 
 def _transport(tmp_path: Path, deliver=None) -> AgentTransport:
     return AgentTransport(tmp_path / "messages", "alice", deliver=deliver)
