@@ -197,3 +197,38 @@ def test_folded_date_comment_is_not_lost_by_semantic_parser(recording_send, body
         agent.send("fixture")
     assert not calls
     assert draft.exists()
+
+
+@pytest.mark.parametrize("body", ["Hello", "<html><body>Hello</body></html>"])
+@pytest.mark.parametrize("encoded", ["=?x-example?q?hello?=", "=?utf-8?b?/w==?="])
+def test_unrecognized_or_invalid_header_charset_remains_deliverable(recording_send, body, encoded):
+    agent, draft, calls = recording_send
+    subject = f"Discuss {encoded}"
+    draft.write_text(f"To: recipient@example.com\nSubject: {subject}\n\n{body}")
+    agent.send("fixture")
+    assert len(calls) == 1
+    message = BytesParser(policy=policy.default).parsebytes(calls[0][1]["input"])
+    assert dict(message.raw_items())["Subject"] == subject
+    assert not draft.exists()
+    assert (agent.email_dir / "sent/fixture.md").exists()
+
+
+@pytest.mark.parametrize("body", ["Hello", "<html><body>Hello</body></html>"])
+@pytest.mark.parametrize(
+    "encoded",
+    [
+        "=?x-example?q?synthetic_forbidden_phrase?=",
+        "=?x-example?q?hello?= =?utf-8?q?synthetic_forbidden_phrase?=",
+    ],
+)
+def test_unknown_charset_does_not_skip_decoded_secret_scan(recording_send, body, encoded, capsys):
+    agent, draft, calls = recording_send
+    draft.write_text(f"To: recipient@example.com\nSubject: {encoded}\n\n{body}")
+    original = draft.read_text()
+    with pytest.raises(ValueError, match="Outbound"):
+        agent.send("fixture")
+    assert not calls
+    assert draft.read_text() == original
+    assert not (agent.email_dir / "sent/fixture.md").exists()
+    captured = capsys.readouterr()
+    assert "synthetic forbidden phrase" not in captured.out + captured.err

@@ -43,7 +43,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from email import message_from_bytes
-from email.header import Header, decode_header, make_header
+from email.header import Header, decode_header
 from email.message import EmailMessage, Message
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -1070,7 +1070,17 @@ class AgentEmail:
             for _, value in final_message.raw_items():
                 unfolded = re.sub(r"\r?\n[ \t]+", " ", value)
                 outbound_parts.append(unfolded)
-                outbound_parts.append(str(make_header(decode_header(unfolded))))
+                decoded_parts = []
+                for fragment, charset in decode_header(unfolded):
+                    if isinstance(fragment, bytes):
+                        try:
+                            fragment = fragment.decode(charset or "ascii", errors="replace")
+                        except LookupError:
+                            # Unknown labels must not prevent scanning other words
+                            # or hide ASCII/UTF-8 literals in this decoded payload.
+                            fragment = fragment.decode("utf-8", errors="replace")
+                    decoded_parts.append(fragment)
+                outbound_parts.append("".join(decoded_parts))
             outbound_parts.extend(str(value) for _, value in final_message.items())
             for part in final_message.walk():
                 if part.get_content_maintype() == "text":
