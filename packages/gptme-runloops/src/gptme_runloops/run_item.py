@@ -3392,6 +3392,8 @@ def _resolve_runner_base_env(
         return None
     env = runner_env_from_spec(spec, backend=backend)
     if env is not None:
+        if env.get("HOME") and not Path(env["HOME"]).is_absolute():
+            raise ValueError("runner environment HOME must be an absolute path")
         _log(
             "Runner environment: explicit contract "
             f"({len(env)} variables; dotenv disabled={env.get(DOTENV_DISABLE_VAR, '0')})"

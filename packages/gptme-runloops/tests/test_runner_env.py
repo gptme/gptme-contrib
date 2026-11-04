@@ -305,12 +305,13 @@ def test_run_work_file_missing_required_setting_names_only(
 @pytest.mark.parametrize("mode", ["explicit", "legacy"])
 @pytest.mark.parametrize("path_override", [False, True])
 def test_run_work_file_backend_paths_follow_runner_home(
-    tmp_path, monkeypatch, mode, path_override
+    tmp_path, monkeypatch, caplog, mode, path_override
 ) -> None:
     import os
 
     import gptme_runloops.run_item as run_item
 
+    caplog.set_level(logging.INFO, logger="gptme_runloops.run_item")
     parent_home = tmp_path / "parent-home"
     runner_home = tmp_path / "runner-home"
     monkeypatch.setenv("HOME", str(parent_home))
@@ -381,6 +382,9 @@ def test_run_work_file_backend_paths_follow_runner_home(
         == 0
     )
     assert len(seen) == 1
+    # The resolver returns the predicted path even on rejection with no fallback;
+    # require its acceptance event, not just the unchanged path string.
+    assert "Found monitoring trajectory (JSONL by session id," in caplog.text
     assert os.environ["HOME"] == str(parent_home)
     for name in suffixes:
         assert getattr(config, name) == paths[name]
@@ -453,3 +457,18 @@ def test_dry_run_uses_explicit_home_and_validates_contract(tmp_path, monkeypatch
         build_execution_plan(
             work, bad_config, _hooks(_RecordingRunCmd()), backend="claude-code"
         )
+
+
+def test_relative_runner_home_fails_before_launch(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("PATH", PARENT["PATH"])
+    caplog.set_level(logging.INFO, logger="gptme_runloops.run_item")
+    runner = _RecordingRunCmd()
+    config = _config(
+        tmp_path, runner_env={"mode": "explicit", "set": {"HOME": "runner-home"}}
+    )
+    assert (
+        run_work_file(_work_file(tmp_path), config, _hooks(runner), backend="codex")
+        == 78
+    )
+    assert not runner.runner_envs()
+    assert "HOME must be an absolute path" in caplog.text

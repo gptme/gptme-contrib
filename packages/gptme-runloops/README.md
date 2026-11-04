@@ -203,6 +203,8 @@ Semantics:
 - With an explicit runner `HOME`, backend transcript/state and Claude credential
   paths default beneath that home rather than the parent's. Configured path
   overrides still win; the caller's config and parent environment are unchanged.
+  A non-empty explicit `HOME` must be absolute (exit 78 before lock/claim on a
+  relative value), so child launch and parent discovery cannot disagree on cwd.
 - `disable_dotenv` sets `PYTHON_DOTENV_DISABLED=1` so a Python backend cannot
   rehydrate a workspace `.env` behind this boundary.
 - The per-item `ambient_env` tag is merged explicitly when the contract is
