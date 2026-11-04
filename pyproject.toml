@@ -71,6 +71,7 @@ asyncio_mode = "auto"
 cache_dir = ".pytest_cache"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "allow_live_openrouter_config: opt out of OpenRouter live-key isolation",
 ]
 
 [tool.ruff]
