@@ -89,6 +89,25 @@ def test_extract_features_strips_author_with_trailing_comma():
     assert ra.extract_features(notes) == ["improve caching"]
 
 
+def test_extract_features_strips_git_cliff_markdown_links():
+    # git-cliff renders PR and commit refs as markdown links, which X would post
+    # literally. Seen on the real v0.36.0 release body.
+    notes = (
+        "* feat(models): add OpenCode Go DeepSeek support "
+        "([#4516](https://github.com/gptme/gptme/issues/4516)) "
+        "([`46a43eb40`](https://github.com/gptme/gptme/commit/46a43eb40c8b515fa6db9259ae11f974e5e3b416))"
+    )
+    assert ra.extract_features(notes) == ["add OpenCode Go DeepSeek support"]
+
+
+def test_extract_features_keeps_unrelated_parenthetical_links():
+    # Only PR-number and commit-sha links are stripped; other link text is left alone.
+    notes = "* feat(docs): add guide ([see docs](https://example.com/guide))"
+    assert ra.extract_features(notes) == [
+        "add guide ([see docs](https://example.com/guide))"
+    ]
+
+
 def test_extract_features_strips_github_pr_url_in_parens():
     # URL wrapped in parentheses must still be stripped.
     notes = "* feat(docs): add guide (https://github.com/gptme/gptme/pull/123)"

@@ -93,6 +93,13 @@ _RELEASE_URL_TRAIL_RE = re.compile(
     r"\s+(?:in\s+)?\(?https?://(?:www\.)?github\.com/[^/\s]+/[^/\s]+/"
     r"(?:pull|issues)/\d+/?\)?[.,;:!?]*\s*$"
 )
+# git-cliff (the notes generator gptme releases use) renders the PR reference and
+# the commit hash as markdown links:
+#   add OpenCode Go DeepSeek support ([#4516](https://github.com/o/r/issues/4516)) ([`46a43eb40`](https://github.com/o/r/commit/...))
+# X has no markdown, so those would post literally. Only the PR-number and
+# commit-sha variants are stripped; a parenthetical holding other link text is
+# left alone rather than guessed at.
+_CLIFF_LINK_TRAIL_RE = re.compile(r"\s+\(\[(?:#\d+|`[0-9a-f]{7,40}`)\]\([^)\s]*\)\)")
 
 MAX_TWEET = 270  # headroom under 280
 
@@ -191,6 +198,7 @@ def extract_features(body: str, limit: int = 5) -> list[str]:
         while True:
             stripped = _AUTHOR_TRAIL_RE.sub("", desc)
             stripped = _PR_NUMBER_TRAIL_RE.sub("", stripped)
+            stripped = _CLIFF_LINK_TRAIL_RE.sub("", stripped)
             stripped = _RELEASE_URL_TRAIL_RE.sub("", stripped).strip()
             if stripped == desc:
                 break
