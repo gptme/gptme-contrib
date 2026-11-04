@@ -222,8 +222,9 @@ Sending a reply marks the original replied automatically.
 
 **Outbound secret gate.** Before sending, `send` scans both the draft and the final
 semantic message: decoded/unfolded headers, default sender, and decoded plain/HTML
-alternatives after rendering. This catches literals reconstructed by header folding,
-RFC2047 decoding or Markdown rendering, before msmtp delivery or sent/reply state
+alternatives after rendering, including HTML character-reference decoding. This catches
+literals reconstructed by header folding, RFC2047 decoding or Markdown rendering,
+before msmtp delivery or sent/reply state
 advances. Scanner exceptions refuse with a generic error rather than printing their
 payloads. It uses the optional `redact` package if importable. A critical finding blocks
 the send and is logged to `state/outbound-redact-blocks.jsonl`. If `redact` is not

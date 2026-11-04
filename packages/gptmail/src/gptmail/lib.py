@@ -34,6 +34,7 @@ Example:
 
 import email.charset
 import hashlib
+import html
 import inspect
 import logging
 import os
@@ -1075,7 +1076,7 @@ class AgentEmail:
                     if isinstance(fragment, bytes):
                         try:
                             fragment = fragment.decode(charset or "ascii", errors="replace")
-                        except LookupError:
+                        except (LookupError, UnicodeError):
                             # Unknown labels must not prevent scanning other words
                             # or hide ASCII/UTF-8 literals in this decoded payload.
                             fragment = fragment.decode("utf-8", errors="replace")
@@ -1086,7 +1087,10 @@ class AgentEmail:
                 if part.get_content_maintype() == "text":
                     payload = part.get_payload(decode=True)
                     if isinstance(payload, bytes):
-                        outbound_parts.append(payload.decode(part.get_content_charset() or "utf-8"))
+                        text = payload.decode(part.get_content_charset() or "utf-8")
+                        outbound_parts.append(text)
+                        if part.get_content_type() == "text/html":
+                            outbound_parts.append(html.unescape(text))
             self._guard_email_outbound("\n".join(outbound_parts))
 
             # Get appropriate msmtp account

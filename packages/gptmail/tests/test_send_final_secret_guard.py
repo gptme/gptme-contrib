@@ -200,7 +200,9 @@ def test_folded_date_comment_is_not_lost_by_semantic_parser(recording_send, body
 
 
 @pytest.mark.parametrize("body", ["Hello", "<html><body>Hello</body></html>"])
-@pytest.mark.parametrize("encoded", ["=?x-example?q?hello?=", "=?utf-8?b?/w==?="])
+@pytest.mark.parametrize(
+    "encoded", ["=?x-example?q?hello?=", "=?utf-8?b?/w==?=", "=?idna?q?hello?="]
+)
 def test_unrecognized_or_invalid_header_charset_remains_deliverable(recording_send, body, encoded):
     agent, draft, calls = recording_send
     subject = f"Discuss {encoded}"
@@ -232,3 +234,35 @@ def test_unknown_charset_does_not_skip_decoded_secret_scan(recording_send, body,
     assert not (agent.email_dir / "sent/fixture.md").exists()
     captured = capsys.readouterr()
     assert "synthetic forbidden phrase" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "SYNTHETIC\\_TOKEN&ONLY",
+        "<html><body>SYNTHETIC_TOKEN&amp;ONLY</body></html>",
+        "<html><body>SYNTHETIC_TOKEN&#38;ONLY</body></html>",
+        "<html><body>SYNTHETIC_TOKEN&#x26;ONLY</body></html>",
+    ],
+)
+def test_html_character_references_are_scanned(recording_send, monkeypatch, body, capsys):
+    agent, draft, calls = recording_send
+    literal = "SYNTHETIC_TOKEN&ONLY"
+    monkeypatch.setattr(sys.modules["redact"], "collect_secret_literals", lambda: [literal])
+    monkeypatch.setattr(
+        sys.modules["redact"],
+        "redact",
+        lambda text, literals: SimpleNamespace(
+            blocked=literal in text, block_reasons=["1× literal (critical)"]
+        ),
+    )
+    draft.write_text(f"To: recipient@example.com\nSubject: Clean\n\n{body}")
+    original = draft.read_text()
+    assert literal not in original
+    with pytest.raises(ValueError, match="Outbound"):
+        agent.send("fixture")
+    assert not calls
+    assert draft.read_text() == original
+    assert not (agent.email_dir / "sent/fixture.md").exists()
+    captured = capsys.readouterr()
+    assert literal not in captured.out + captured.err
