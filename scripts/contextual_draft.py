@@ -149,7 +149,7 @@ def private_write(path: Path, text: str) -> None:
         raise DraftError(
             "Cannot create output (must be a new file in an existing directory)"
         ) from exc
-    with os.fdopen(fd, "w") as out:
+    with os.fdopen(fd, "w", encoding="utf-8") as out:
         out.write(text)
 
 
@@ -251,7 +251,9 @@ def generate(args: argparse.Namespace) -> None:
             command,
             input=prompt,
             text=True,
+            encoding="utf-8",
             capture_output=True,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             timeout=GENERATION_TIMEOUT,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:

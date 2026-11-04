@@ -296,3 +296,84 @@ def test_generation_failure_never_publishes_or_echoes(
     assert "SENSITIVE" not in str(error.value) + captured.out + captured.err
     assert "partial private" not in captured.out + captured.err
     assert not generation.output.exists()
+
+
+def test_unicode_prepare_and_generate_under_ascii_locale(database, tmp_path):
+    env = {
+        **os.environ,
+        "LC_ALL": "C",
+        "PYTHONUTF8": "0",
+        "PYTHONCOERCECLOCALE": "0",
+        "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+    }
+    # Confirm this really exercises ASCII defaults, not an implicitly UTF-8 host.
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import locale; print(locale.getpreferredencoding(False))",
+        ],
+        capture_output=True,
+        env=env,
+        check=True,
+    )
+    assert probe.stdout.strip().lower() in (b"ascii", b"ansi_x3.4-1968", b"us-ascii")
+    target = tmp_path / "unicode-target.json"
+    target.write_text(
+        json.dumps(TARGET | {"text": "café 日本語"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    context = tmp_path / "context.txt"
+    context.write_text("café 日本語", encoding="utf-8")
+    request = tmp_path / "request.json"
+    prep = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "prepare",
+            "--target",
+            str(target),
+            "--context",
+            str(context),
+            "--goldfish-db",
+            str(database),
+            "--instruction",
+            "Reply",
+            "--output",
+            str(request),
+        ],
+        capture_output=True,
+        env=env,
+    )
+    assert prep.returncode == 0, prep.stderr
+    assert (
+        json.loads(request.read_text(encoding="utf-8"))["target"]["text"]
+        == "café 日本語"
+    )
+    exe = tmp_path / "gptme"
+    exe.write_text(
+        "#!/usr/bin/env python3\nimport sys\n"
+        "p=sys.stdin.read()\nassert 'caf\\u00e9' in p\n"
+        "print('caf\\u00e9 \\u65e5\\u672c\\u8a9e')\n",
+        encoding="utf-8",
+    )
+    exe.chmod(0o700)
+    output = tmp_path / "draft.txt"
+    gen = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "generate",
+            "--request",
+            str(request),
+            "--model",
+            "test/synthetic",
+            "--allow-model-disclosure",
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        env=env,
+    )
+    assert gen.returncode == 0, gen.stderr
+    assert output.read_bytes() == "café 日本語\n".encode()
