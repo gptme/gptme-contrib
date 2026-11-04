@@ -428,3 +428,28 @@ def test_fresh_runner_home_retains_first_backend_trajectory(
         == 0
     )
     assert outcomes[0].trajectory_path == str(trajectory)
+
+
+def test_dry_run_uses_explicit_home_and_validates_contract(tmp_path, monkeypatch):
+    from gptme_runloops.run_item import build_execution_plan
+
+    home = tmp_path / "runner-home"
+    monkeypatch.setenv("PATH", PARENT["PATH"])
+    work = _work_file(tmp_path)
+    config = _config(
+        tmp_path,
+        cc_projects_dir=None,
+        runner_env={"mode": "explicit", "set": {"HOME": str(home)}},
+    )
+    plan = build_execution_plan(
+        work, config, _hooks(_RecordingRunCmd()), backend="claude-code"
+    )
+    assert plan.items[0].trajectory_path.startswith(
+        str(home / ".claude/projects") + "/"
+    )
+    assert not home.exists()  # planning does not create backend state
+    bad_config = _config(tmp_path, runner_env={"mode": "invalid"})
+    with pytest.raises(ValueError, match="runner_env.mode"):
+        build_execution_plan(
+            work, bad_config, _hooks(_RecordingRunCmd()), backend="claude-code"
+        )

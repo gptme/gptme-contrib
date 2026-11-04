@@ -3190,6 +3190,8 @@ def build_execution_plan(
     (read-only gate/status calls still run; merge/trigger become recorded
     intents, with self-merge assumed to succeed).
     """
+    runner_base_env = _resolve_runner_base_env(config, backend)
+    config = _config_for_runner_home(config, runner_base_env)
     items = read_work_items(work_file)
     lock_file, lock_scope = derive_lock_paths(config, slot_key or None)
     monitoring_rules = _read_monitoring_rules(config)
@@ -3397,6 +3399,24 @@ def _resolve_runner_base_env(
     return env
 
 
+def _config_for_runner_home(
+    config: RunItemConfig, runner_base_env: Mapping[str, str] | None
+) -> RunItemConfig:
+    """Use the child HOME for default backend paths, without mutating inputs."""
+    if runner_base_env is None or not runner_base_env.get("HOME"):
+        return config
+    home = Path(runner_base_env["HOME"])
+    return replace(
+        config,
+        cc_projects_dir=config.cc_projects_dir or home / ".claude/projects",
+        cc_credentials_path=config.cc_credentials_path
+        or home / ".claude/.credentials.json",
+        copilot_state_dir=config.copilot_state_dir or home / ".copilot/session-state",
+        codex_sessions_dir=config.codex_sessions_dir or home / ".codex/sessions",
+        gptme_log_root=config.gptme_log_root or home / "data/trajectories/gptme-runs",
+    )
+
+
 def run_work_file(
     work_file: Path,
     config: RunItemConfig,
@@ -3434,22 +3454,7 @@ def run_work_file(
         _log(f"ERROR: {exc}")
         return 78
 
-    if runner_base_env is not None and runner_base_env.get("HOME"):
-        # Planning, transcript snapshots/discovery and credential inspection must
-        # agree with the child HOME, without mutating the caller's frozen config
-        # or the parent environment. Explicit config paths still take precedence.
-        home = Path(runner_base_env["HOME"])
-        config = replace(
-            config,
-            cc_projects_dir=config.cc_projects_dir or home / ".claude/projects",
-            cc_credentials_path=config.cc_credentials_path
-            or home / ".claude/.credentials.json",
-            copilot_state_dir=config.copilot_state_dir
-            or home / ".copilot/session-state",
-            codex_sessions_dir=config.codex_sessions_dir or home / ".codex/sessions",
-            gptme_log_root=config.gptme_log_root
-            or home / "data/trajectories/gptme-runs",
-        )
+    config = _config_for_runner_home(config, runner_base_env)
 
     _log(
         f"--- Detached dispatch (slot={slot_key or 'none'} lane={lane}): "
