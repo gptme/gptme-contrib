@@ -1,15 +1,16 @@
-"""Real local HTTP/subprocess fixtures; no model or personal archive required."""
+"""Real SQLite/subprocess fixtures; no model or personal archive required."""
 
 import argparse
 import importlib.util
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
+import tracemalloc
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -29,83 +30,83 @@ TARGET = {
 
 
 @pytest.fixture
-def daemon(tmp_path):
-    calls = []
-    state = {"service": "goldfish_d", "redirect": False}
+def database(tmp_path):
+    path = tmp_path / "goldfish.db"
+    with sqlite3.connect(path) as db:
+        db.executescript("""
+            CREATE TABLE snapshots (
+                snapshot_id TEXT, content TEXT, app TEXT, window_title TEXT,
+                url TEXT, domain TEXT, captured_at INTEGER, last_seen_at INTEGER,
+                focused_name TEXT, focused_role TEXT, focused_path TEXT);
+            CREATE VIRTUAL TABLE snapshots_fts USING fts5(content,
+                content='snapshots', content_rowid='rowid');
+            CREATE TABLE working_memory (snapshot_id TEXT, added_at INTEGER);
+            INSERT INTO snapshots VALUES ('s1','A synthetic meeting conversation',
+                'test','test',NULL,NULL,100,200,NULL,'AXTextArea',NULL);
+            INSERT INTO snapshots_fts(rowid,content)
+                SELECT rowid,content FROM snapshots;
+            INSERT INTO working_memory VALUES ('s1',200);
+        """)
+    return path
 
-    class Handler(BaseHTTPRequestHandler):
+
+def test_sqlite_retrieval_is_read_only(database):
+    before = database.read_bytes()
+    client = module.Goldfish(database)
+    for query in (None, "meeting"):
+        rows = client.snapshots(query, 1)
+        assert rows[0]["content"] == "A synthetic meeting conversation"
+        assert rows[0]["is_live_target"] is False
+        assert rows[0]["captured_at"] == 100
+    assert database.read_bytes() == before
+    assert client.snapshots('" OR nonexistent', 1) == []
+
+
+def test_missing_or_incompatible_database_fails_closed(tmp_path):
+    path = tmp_path / "missing.db"
+    with pytest.raises(module.DraftError):
+        module.Goldfish(path).snapshots(None, 1)
+    assert not path.exists()
+    with sqlite3.connect(path):
+        pass
+    with pytest.raises(module.DraftError, match="schema"):
+        module.Goldfish(path).snapshots(None, 1)
+
+
+def test_impersonator_receives_no_requests_or_token(database, tmp_path):
+    calls = []
+
+    class Impersonator(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
         def do_GET(self):
-            calls.append((self.path, self.headers.get("Authorization")))
-            if state["redirect"]:
-                self.send_response(302)
-                self.send_header("Location", "/elsewhere")
-                self.end_headers()
-                return
-            payload: Any
-            if self.path == "/health":
-                payload = {"service": state["service"], "status": "ok"}
-            elif self.path.startswith("/search?"):
-                payload = [
-                    {"snapshot_id": "s1", "content_excerpt": "not full evidence"}
-                ]
-            else:
-                payload = [
-                    {
-                        "snapshot_id": "s1",
-                        "content": "A synthetic conversation",
-                        "captured_at": "2026-01-01T12:00:00Z",
-                    }
-                ]
-            data = json.dumps(payload).encode()
+            calls.append(self.headers.get("Authorization"))
             self.send_response(200)
-            self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(data)
+            self.wfile.write(b'{"service":"goldfish_d","status":"ok"}')
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Impersonator)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    home = tmp_path / "goldfish"
-    home.mkdir()
-    (home / "effective-port").write_text(str(server.server_port))
-    (home / "api-token").write_text("synthetic-test-token")
+    # Legacy discovery files exist and advertise an impostor with the expected
+    # health JSON. The adapter ignores them entirely, including the token file.
+    (tmp_path / "effective-port").write_text(str(server.server_port))
+    (tmp_path / "api-token").write_text("synthetic-test-token")
     try:
-        yield home, calls, state
+        assert module.Goldfish(database).snapshots(None, 1)
+        assert calls == []
     finally:
         server.shutdown()
         server.server_close()
         thread.join()
 
 
-def test_health_before_auth_and_full_snapshot_fetch(daemon):
-    home, calls, _ = daemon
-    rows = module.Goldfish(home).snapshots("meeting", 1)
-    assert calls[0] == ("/health", None)
-    assert calls[1][0].startswith("/search?")
-    assert calls[2][0] == "/snapshots?ids=s1"
-    assert all(auth == "Bearer synthetic-test-token" for _, auth in calls[1:])
-    assert rows[0]["content"] == "A synthetic conversation"
-    assert rows[0]["is_live_target"] is False
-
-
-def test_wrong_service_never_receives_token(daemon):
-    home, calls, state = daemon
-    state["service"] = "another_service"
-    with pytest.raises(module.DraftError, match="no token sent"):
-        module.Goldfish(home)
-    assert calls == [("/health", None)]
-
-
-def test_redirect_is_refused(daemon):
-    home, calls, state = daemon
-    client = module.Goldfish(home)
-    state["redirect"] = True
-    with pytest.raises(module.DraftError, match="redirected"):
-        client.snapshots(None, 1)
-    assert len(calls) == 2
+def test_sqlite_source_truncation(database):
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE snapshots SET content=?", ("x" * 20000,))
+    row = module.Goldfish(database).snapshots(None, 1)[0]
+    assert row["content_truncated"] and len(row["content"]) == 12000
 
 
 @pytest.mark.parametrize(
@@ -128,11 +129,6 @@ def test_excerpts_are_not_full_evidence():
         module.normalize_snapshot({"snapshot_id": "s", "content_excerpt": "partial"})
 
 
-def test_truncation_is_explicit():
-    row = module.normalize_snapshot({"snapshot_id": "s", "content": "x" * 15000})
-    assert row["content_truncated"] and len(row["content"]) == 12000
-
-
 def test_private_output_no_overwrite_or_symlink(tmp_path):
     path = tmp_path / "request.json"
     module.private_write(path, "private")
@@ -146,53 +142,89 @@ def test_private_output_no_overwrite_or_symlink(tmp_path):
     assert path.read_text() == "private"
 
 
-def test_prepare_cli_combines_explicit_context(daemon, tmp_path):
-    home, _, _ = daemon
+def test_large_json_read_is_bounded(tmp_path):
+    path = tmp_path / "huge.json"
+    with path.open("wb") as out:
+        out.truncate(32 * 1024 * 1024)
+    tracemalloc.start()
+    try:
+        with pytest.raises(module.DraftError, match="byte limit"):
+            module.read_json(path)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 1_000_000
+
+
+@pytest.mark.parametrize("size,accepted", [(20000, True), (20001, False)])
+def test_reference_actual_byte_limit(tmp_path, size, accepted):
+    path = tmp_path / "context.txt"
+    path.write_bytes(b"x" * size)
+    if accepted:
+        assert len(module.read_bounded(path, 20000)) == size
+    else:
+        with pytest.raises(module.DraftError, match="byte limit"):
+            module.read_bounded(path, 20000)
+
+
+def test_fifo_input_rejected_without_blocking(tmp_path):
+    fifo = tmp_path / "input"
+    os.mkfifo(fifo)
+    code = "import runpy,pathlib; m=runpy.run_path(__import__('sys').argv[1]); m['read_bounded'](pathlib.Path(__import__('sys').argv[2]),20000)"
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(SCRIPT), str(fifo)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode != 0
+    assert "regular file" in result.stderr
+
+
+def test_prepare_cli_combines_explicit_context(database, tmp_path):
     target = tmp_path / "target.json"
     target.write_text(json.dumps(TARGET))
     context = tmp_path / "preferences.txt"
     context.write_text("Prefer meetings after lunch.")
     out = tmp_path / "request.json"
-    proc = subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPT),
-            "prepare",
-            "--target",
-            str(target),
-            "--context",
-            str(context),
-            "--goldfish-home",
-            str(home),
-            "--instruction",
-            "Draft a reply",
-            "--output",
-            str(out),
-        ],
-        capture_output=True,
-        text=True,
-    )
+    cmd = [
+        sys.executable,
+        str(SCRIPT),
+        "prepare",
+        "--target",
+        str(target),
+        "--context",
+        str(context),
+        "--goldfish-db",
+        str(database),
+        "--instruction",
+        "Draft a reply",
+        "--output",
+        str(out),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
     request = json.loads(out.read_text())
     assert request["agent_context"][0]["content"] == context.read_text()
     assert len(request["observations"]) == 1
     assert "Prefer meetings" not in proc.stdout
+    # The same read bound is used in preparation, before retrieval or publication.
+    context.write_bytes(b"x" * 21000)
+    rejected = tmp_path / "rejected.json"
+    cmd[-1] = str(rejected)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    assert proc.returncode != 0 and "byte limit" in proc.stderr
+    assert not rejected.exists()
 
 
-def test_generate_requires_disclosure_flag(tmp_path):
+def test_generate_requires_disclosure_flag():
     args = argparse.Namespace(allow_model_disclosure=False)
     with pytest.raises(module.DraftError, match="allow-model-disclosure"):
         module.generate(args)
 
 
-def test_generation_subprocess_contract(tmp_path):
-    # A tiny executable fixture, not an actual provider call. Verifies stdin,
-    # model selection, clean output and error handling without inference spend.
-    exe = tmp_path / "gptme"
-    exe.write_text(
-        "#!/usr/bin/env python3\nimport sys,json\nassert sys.argv[1:3] == ['llm','generate']\nassert '--model' in sys.argv\np=sys.stdin.read()\nassert 'Prefer meetings after lunch' in p\nprint('How about after lunch?')\n"
-    )
-    exe.chmod(0o700)
+@pytest.fixture
+def generation(tmp_path):
     request = tmp_path / "request.json"
     request.write_text(
         json.dumps(
@@ -204,23 +236,63 @@ def test_generation_subprocess_contract(tmp_path):
             }
         )
     )
-    output = tmp_path / "draft.txt"
+    args = argparse.Namespace(
+        allow_model_disclosure=True,
+        request=request,
+        output=tmp_path / "draft.txt",
+        model="test/synthetic",
+    )
+    return args
+
+
+def test_generation_subprocess_contract(generation, tmp_path):
+    exe = tmp_path / "gptme"
+    exe.write_text(
+        "#!/usr/bin/env python3\nimport sys\nassert sys.argv[1:3] == ['llm','generate']\nassert '--model' in sys.argv\nassert 'Prefer meetings after lunch' in sys.stdin.read()\nprint('How about after lunch?')\n"
+    )
+    exe.chmod(0o700)
     env = os.environ | {"PATH": str(tmp_path) + os.pathsep + os.environ["PATH"]}
     cmd = [
         sys.executable,
         str(SCRIPT),
         "generate",
         "--request",
-        str(request),
+        str(generation.request),
         "--model",
-        "test/synthetic",
+        generation.model,
         "--allow-model-disclosure",
         "--output",
-        str(output),
+        str(generation.output),
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     assert proc.returncode == 0, proc.stderr
-    assert output.read_text() == "How about after lunch?\n"
-    assert output.stat().st_mode & 0o777 == 0o600
+    assert generation.output.read_text() == "How about after lunch?\n"
+    assert generation.output.stat().st_mode & 0o777 == 0o600
     assert "after lunch" not in proc.stdout
     assert subprocess.run(cmd, capture_output=True, env=env).returncode != 0
+
+
+@pytest.mark.parametrize("mode", ["nonzero", "empty", "timeout"])
+def test_generation_failure_never_publishes_or_echoes(
+    generation, tmp_path, monkeypatch, capsys, mode
+):
+    exe = tmp_path / "gptme"
+    body = {
+        "nonzero": "print('partial private draft'); sys.exit(1)",
+        "empty": "pass",
+        "timeout": "time.sleep(10)",
+    }[mode]
+    exe.write_text(
+        "#!/usr/bin/env python3\nimport sys,time\nprint('SENSITIVE_PROVIDER_ERROR',file=sys.stderr,flush=True)\n"
+        + body
+        + "\n"
+    )
+    exe.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setattr(module, "GENERATION_TIMEOUT", 0.2)
+    with pytest.raises(module.DraftError) as error:
+        module.generate(generation)
+    captured = capsys.readouterr()
+    assert "SENSITIVE" not in str(error.value) + captured.out + captured.err
+    assert "partial private" not in captured.out + captured.err
+    assert not generation.output.exists()

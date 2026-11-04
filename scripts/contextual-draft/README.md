@@ -20,8 +20,11 @@ apps whose editable fields aren't exposed through macOS Accessibility.
 ## Requirements
 
 - Python 3.10+, standard library only.
-- Running Goldfish with its local API enabled. The adapter verifies the health
-  service before reading/sending its token, refuses redirects, and bypasses proxies.
+- A local Goldfish SQLite database with the inspected snapshot/working-memory/FTS5
+  schema (observed user_version 62). Use `--goldfish-db /absolute/path/to/goldfish.db`
+  to override the macOS default. Goldfish need not be running. The adapter opens
+  SQLite with `mode=ro` and `query_only=ON`; it never reads API discovery/token files
+  or connects to the daemon. Private schema changes can break this adapter.
 - macOS and Swift command-line tools for `--capture`, plus Accessibility permission
   for the launching process. The helper does not prompt for permissions or change
   focus. Synthetic target JSON works on other platforms for development.
@@ -48,8 +51,9 @@ python3 "$DRAFT_SCRIPT" prepare --capture \
 
 `--context` is repeatable and optional. Select only relevant material; the
 prototype does not read the whole agent workspace. Omit `--query` to retrieve
-bounded recent working memory instead. Search hits are fetched as full snapshots,
-not used as excerpts. Large observations are truncated with an explicit marker.
+bounded recent working memory instead. Search uses a literal FTS5 phrase and
+returns source snapshots, not excerpts. This is not Goldfish's API ranking or
+semantic retrieval. Large observations are truncated with an explicit marker.
 The resulting request records source IDs and coverage limitations.
 
 The output must not exist. Files are created with mode 0600. The prepare command
@@ -109,8 +113,9 @@ the PID/role/window metadata here is deliberately insufficient to authorize it.
 
 - Secure fields, unsupported roles, unavailable AX permissions, focus switches
   during capture, and non-writable fields fail closed. A focused field over 20 KB
-  is refused; explicit context files are limited to 20 KB each, API responses to
-  2 MB, observations to five, and the complete request to 100 KB.
+  is refused; explicit context files are limited to 20 KB each, source content
+  to 12,000 characters per observation, observations to five, and the complete
+  request to 100 KB. Source metadata is also bounded during SQL selection.
 - These checks cannot detect every sensitive *non-secure* field. Pick the target
   deliberately, keep Goldfish exclusions configured, and review the local request.
 - Observations and reference files are untrusted evidence. The generation prompt
@@ -118,9 +123,20 @@ the PID/role/window metadata here is deliberately insufficient to authorize it.
   not a guarantee against injection or private-information disclosure. Review drafts.
 - A request is not an accepted task; a draft is not a sent promise. This tool does
   not mutate Goldfish, import tasks, or learn durable memories.
-- Access uses the documented local API rather than depending on Goldfish's private
-  SQLite schema. Linux capture/insertion and alternate observation providers are
-  future work; the JSON/retrieval/generation path is platform independent.
+- Retrieval deliberately uses read-only SQLite instead of the bearer-token HTTP
+  API: an unauthenticated loopback health response does not prove daemon identity.
+  A PID/port precheck alone would have a replacement race. No API token is needed
+  or accessed, and there is no HTTP fallback. A future API adapter requires
+  daemon-supported server authentication, not another health check.
+- The database and selected reference files are trusted local input locations,
+  not authenticated remote sources. Protect their filesystem permissions. This
+  adapter does not defend against another process already able to alter the user's
+  private files. SQLite manages its ordinary WAL reader coordination; this tool
+  performs no application-data or schema writes and never checkpoints the DB.
+- Input files must be regular files. Actual reads are bounded before decoding,
+  including reference files; FIFOs and other special files are refused without
+  waiting for a writer. Linux capture/insertion and alternate observation providers
+  remain future work; retrieval/generation are platform independent.
 
 ## Validation
 
@@ -131,5 +147,7 @@ python3 -m pytest tests/test_contextual_draft.py
 swiftc -typecheck scripts/contextual-draft/capture.swift
 ```
 
-Tests use a real loopback HTTP fixture and a synthetic generator executable.
-They do not read a personal Goldfish archive, call a model, or edit an app.
+Tests use real temporary SQLite databases, a loopback impersonator that must
+receive no requests or credentials, and synthetic generator executables. They
+cover oversized inputs, special-file refusal, nonzero/empty/timeout generation,
+and private output. They do not read a personal archive, call a model, or edit an app.
