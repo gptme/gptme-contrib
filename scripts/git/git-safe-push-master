@@ -36,8 +36,10 @@
 # git-safe-commit in the workspace blocks behind a single dead network call.
 # GIT_SAFE_PUSH_TIMEOUT (default 300s, 0 disables) therefore wraps `git push` in
 # `timeout --signal=TERM --kill-after=5`. Close fd 9 in the push child so even a
-# surviving hook/transport cannot retain the parent's flock. A timeout preserves
-# local commits but leaves remote publication uncertain (an acknowledgement may
+# surviving hook/transport cannot retain the parent's flock.
+# Interactive pushes use --foreground to retain credential-prompt TTY access;
+# that mode bounds Git itself, not its descendants (which still cannot hold fd 9).
+# A timeout preserves local commits but leaves remote publication uncertain (an acknowledgement may
 # have been lost after the ref update); inspect the remote before retrying.
 #
 # Design: creates a single squash commit (one parent = remote trunk) to avoid merge
@@ -169,10 +171,17 @@ push_with_output() {
     local output_file="$1" trace_file="$2"
     shift 2
     local rc=0
+    local timeout_options=(--signal=TERM --kill-after=5)
+    # GNU timeout otherwise puts Git in a background process group: reads from
+    # /dev/tty (e.g. SSH key passphrases) then stop with SIGTTIN. Foreground mode
+    # cannot time out descendants, but closing fd 9 still prevents lock leaks.
+    if [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; then
+        timeout_options+=(--foreground)
+    fi
     if [ -n "$TIMEOUT_BIN" ]; then
         # The parent retains the flock throughout the push. Children must not
         # inherit it: a detached or TERM-resistant hook may outlive Git/timeout.
-        GIT_TRACE2_EVENT="$trace_file" "$TIMEOUT_BIN" --signal=TERM --kill-after=5 "$PUSH_TIMEOUT" \
+        GIT_TRACE2_EVENT="$trace_file" "$TIMEOUT_BIN" "${timeout_options[@]}" "$PUSH_TIMEOUT" \
             git push "$@" 9>&- >"$output_file" 2>&1 || rc=$?
     else
         GIT_TRACE2_EVENT="$trace_file" git push "$@" 9>&- >"$output_file" 2>&1 || rc=$?

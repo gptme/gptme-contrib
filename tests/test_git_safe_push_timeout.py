@@ -14,9 +14,12 @@ real repository while the transfer never completes.
 """
 
 import os
+import pty
+import select
 import shutil
 import signal
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -231,6 +234,55 @@ def test_zero_disables_the_bound(repo):
     diagnostic = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert result.returncode == 0, diagnostic
     assert "no progress within" not in result.stderr, diagnostic
+
+
+def test_interactive_push_can_read_controlling_terminal(repo):
+    """The timeout must not move an interactive credential prompt off the TTY."""
+    shim = Path(repo["env"]["PATH"].split(os.pathsep)[0]) / "git"
+    shim.write_text(
+        "#!/bin/bash\n"
+        'if [ "${1:-}" = "push" ]; then\n'
+        "    echo credential-prompt >/dev/tty\n"
+        "    IFS= read -r answer </dev/tty || exit 98\n"
+        '    [ "$answer" = "synthetic-response" ] || exit 99\n'
+        "    exit 0\n"
+        "fi\n"
+        f'exec "{REAL_GIT}" "$@"\n'
+    )
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(repo["local"])
+        os.execve(str(SCRIPT), [str(SCRIPT)], repo["env"])
+    output = b""
+    status = None
+    try:
+        deadline = time.monotonic() + 12
+        answered = False
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([fd], [], [], 0.1)
+            if ready:
+                try:
+                    output += os.read(fd, 65536)
+                except OSError:
+                    break
+                if b"credential-prompt" in output and not answered:
+                    os.write(fd, b"synthetic-response\n")
+                    answered = True
+            done, status_now = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = status_now
+                break
+        if status is None:
+            done, status_now = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = status_now
+        assert status is not None, output.decode(errors="replace")
+        assert os.waitstatus_to_exitcode(status) == 0, output.decode(errors="replace")
+    finally:
+        os.close(fd)
+        if status is None:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
 
 
 def test_term_resistant_push_is_killed_and_releases_lock(repo):
