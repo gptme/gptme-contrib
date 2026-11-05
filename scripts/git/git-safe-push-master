@@ -17,6 +17,7 @@
 # Usage: git-safe-push-master [-h|--help] [--dry-run]
 #        --dry-run fetches and previews without publishing or updating local trunk.
 #        GIT_SAFE_PUSH_LOCK_TIMEOUT=30 git-safe-push-master
+#        GIT_SAFE_PUSH_TIMEOUT=60 git-safe-push-master     # bound the push itself
 #        GIT_SAFE_TRUNK=main git-safe-push-master          # override derived trunk
 #        GIT_SAFE_REMOTE=upstream git-safe-push-master     # override remote
 #
@@ -28,6 +29,14 @@
 # Push retry: the squash-push step retries up to 3 times only when the remote
 # actually advances between our rejected push and a refetch. Local hook/auth/policy
 # failures are surfaced verbatim and stop immediately; they are not remote races.
+#
+# Push bound: the lock timeout only bounds waiting for flock. A push that loses its
+# TCP connection mid-transfer never returns — it sleeps on a peer that will never
+# answer while still holding fd 9 on .git/commit.lock, so every cooperating
+# git-safe-commit in the workspace blocks behind a single dead network call.
+# GIT_SAFE_PUSH_TIMEOUT (default 300s, 0 disables) therefore wraps `git push` in
+# `timeout --signal=TERM`. Ref updates are atomic, so a timed-out push leaves the
+# remote unchanged and the local commits intact; the caller retries.
 #
 # Design: creates a single squash commit (one parent = remote trunk) to avoid merge
 # commits, which are prohibited by some repository rulesets. The squash collapses
@@ -53,7 +62,8 @@ Publish local trunk using the shared commit lock and off-tree reconciliation.
               Fetch updates tracking refs; merge-tree may write git objects.
 
 Environment: GIT_SAFE_REMOTE (origin), GIT_SAFE_TRUNK (remote HEAD, else master),
-             GIT_SAFE_PUSH_LOCK_TIMEOUT (60 seconds).
+             GIT_SAFE_PUSH_LOCK_TIMEOUT (60 seconds),
+             GIT_SAFE_PUSH_TIMEOUT (300 seconds per push; 0 disables the bound).
 Exit codes: 0 success/clean preview, 1 conflict, 2 error/invalid argument.
 EOF
 }
@@ -96,6 +106,20 @@ case "$LOCK_TIMEOUT" in
     *) [ "$LOCK_TIMEOUT" -ge 1 ] || { echo "error: GIT_SAFE_PUSH_LOCK_TIMEOUT must be >= 1" >&2; exit 2; } ;;
 esac
 
+# Bound the push itself, not just the flock wait. Without this a push whose
+# connection dies mid-transfer runs forever while holding the commit lock.
+PUSH_TIMEOUT=${GIT_SAFE_PUSH_TIMEOUT:-300}
+case "$PUSH_TIMEOUT" in
+    *[!0-9]*) echo "error: GIT_SAFE_PUSH_TIMEOUT must be a non-negative integer (0 disables)" >&2; exit 2 ;;
+esac
+TIMEOUT_BIN=""
+if [ "$PUSH_TIMEOUT" -gt 0 ]; then
+    TIMEOUT_BIN=$(command -v timeout || command -v gtimeout || true)
+    if [ -z "$TIMEOUT_BIN" ]; then
+        echo "warning: no 'timeout'/'gtimeout' binary on PATH; running git push unbounded" >&2
+    fi
+fi
+
 # Cleanup trap: release the lock
 trap 'exec 9>&-' EXIT
 
@@ -136,12 +160,29 @@ if [ "$LOCAL_COMMIT_COUNT" -eq 0 ]; then
     exit 0
 fi
 
+# Returns 0 on success, 1 on an ordinary push failure, 3 when the push was
+# aborted by the timeout bound (a dead connection, not a rejected ref).
 push_with_output() {
     local output_file="$1" trace_file="$2"
     shift 2
-    if GIT_TRACE2_EVENT="$trace_file" git push "$@" >"$output_file" 2>&1; then
+    local rc=0
+    if [ -n "$TIMEOUT_BIN" ]; then
+        GIT_TRACE2_EVENT="$trace_file" "$TIMEOUT_BIN" --signal=TERM "$PUSH_TIMEOUT" \
+            git push "$@" >"$output_file" 2>&1 || rc=$?
+    else
+        GIT_TRACE2_EVENT="$trace_file" git push "$@" >"$output_file" 2>&1 || rc=$?
+    fi
+    if [ "$rc" -eq 0 ]; then
         cat "$output_file"
         return 0
+    fi
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 143 ]; then
+        cat "$output_file" >&2
+        echo "error: git push made no progress within ${PUSH_TIMEOUT}s; aborted." >&2
+        echo "       The connection is dead, not slow and not rejected: ref updates are" >&2
+        echo "       atomic, so nothing was published. Commit(s) remain local and" >&2
+        echo "       $REMOTE/$TRUNK was not advanced. Retry the push." >&2
+        return 3
     fi
     return 1
 }
@@ -214,10 +255,18 @@ if [ "$LOCAL_MERGE_COUNT" -eq 0 ] && git merge-base --is-ancestor "$REMOTE_SHA" 
     fi
     PUSH_OUTPUT=$(mktemp)
     PUSH_TRACE=$(mktemp)
-    if push_with_output "$PUSH_OUTPUT" "$PUSH_TRACE" "$REMOTE" "$TRUNK"; then
+    push_with_output "$PUSH_OUTPUT" "$PUSH_TRACE" "$REMOTE" "$TRUNK"
+    push_rc=$?
+    if [ "$push_rc" -eq 0 ]; then
         rm -f "$PUSH_OUTPUT" "$PUSH_TRACE"
         echo "✓ Fast-forward pushed $LOCAL_COMMIT_COUNT commit(s) to $REMOTE/$TRUNK"
         exit 0
+    fi
+    if [ "$push_rc" -eq 3 ]; then
+        # Timeout: the remote did not advance, so the squash path would only
+        # retry the same dead connection. Stop here with the timeout diagnostic.
+        rm -f "$PUSH_OUTPUT" "$PUSH_TRACE"
+        exit 2
     fi
     push_failure_or_retry_race "$PUSH_OUTPUT" "$PUSH_TRACE" 1 "$REMOTE_SHA"
     status=$?
@@ -311,9 +360,15 @@ while [ "$PUSH_ATTEMPT" -lt "$MAX_PUSH_RETRIES" ]; do
     PUSH_ATTEMPT=$((PUSH_ATTEMPT + 1))
     PUSH_OUTPUT=$(mktemp)
     PUSH_TRACE=$(mktemp)
-    if push_with_output "$PUSH_OUTPUT" "$PUSH_TRACE" "$REMOTE" "${SQUASH_COMMIT}:refs/heads/$TRUNK"; then
+    push_with_output "$PUSH_OUTPUT" "$PUSH_TRACE" "$REMOTE" "${SQUASH_COMMIT}:refs/heads/$TRUNK"
+    push_rc=$?
+    if [ "$push_rc" -eq 0 ]; then
         rm -f "$PUSH_OUTPUT" "$PUSH_TRACE"
         break  # success — fall through to update-ref below
+    fi
+    if [ "$push_rc" -eq 3 ]; then
+        rm -f "$PUSH_OUTPUT" "$PUSH_TRACE"
+        exit 2
     fi
     push_failure_or_retry_race "$PUSH_OUTPUT" "$PUSH_TRACE" "$PUSH_ATTEMPT" "$REMOTE_SHA"
     status=$?
