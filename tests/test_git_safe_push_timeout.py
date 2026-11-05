@@ -15,6 +15,7 @@ real repository while the transfer never completes.
 
 import os
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 
@@ -145,10 +146,11 @@ def test_hung_push_times_out_and_reports_no_progress(repo):
 
     diagnostic = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert result.returncode != 0, diagnostic
-    assert "no progress within 2s" in result.stderr, diagnostic
-    assert "Commit(s) remain local" in result.stderr, diagnostic
-    assert "was not advanced" in result.stderr, diagnostic
-    # Commit(s) and remote are both untouched: a ref update is atomic.
+    assert "exceeded 2s" in result.stderr, diagnostic
+    assert "Local commits are preserved" in result.stderr, diagnostic
+    assert "Remote publication status is unknown" in result.stderr, diagnostic
+    assert "was not advanced" not in result.stderr, diagnostic
+    # This shim never publishes; a real timed-out push may have published already.
     assert (
         _git(repo["local"], "rev-parse", "HEAD", env=repo["env"]).strip() == local_head
     )
@@ -188,7 +190,7 @@ def test_hung_squash_path_push_exits_without_squash_retry_loop(repo):
 
     diagnostic = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert result.returncode != 0, diagnostic
-    assert "no progress within 2s" in result.stderr, diagnostic
+    assert "exceeded 2s" in result.stderr, diagnostic
     assert repo["push_log"].read_text().split().count("push") == 1, diagnostic
     assert (
         _git(repo["remote"], "rev-parse", "main", env=repo["env"]).strip()
@@ -200,7 +202,12 @@ def test_zero_disables_the_bound(repo):
     """GIT_SAFE_PUSH_TIMEOUT=0 must not wrap the push at all."""
     env = dict(repo["env"])
     env["GIT_SAFE_PUSH_TIMEOUT"] = "0"
-    # A shim that would time out at 2s but succeeds immediately when unbounded.
+    # Fail observably if either timeout executable is invoked, even with duration 0.
+    shim_dir = Path(env["PATH"].split(os.pathsep)[0])
+    for name in ("timeout", "gtimeout"):
+        timeout_shim = shim_dir / name
+        timeout_shim.write_text("#!/bin/sh\necho unexpected-timeout >&2\nexit 99\n")
+        timeout_shim.chmod(0o755)
     shim = Path(env["PATH"].split(os.pathsep)[0]) / "git"
     shim.write_text(
         "#!/bin/bash\n"
@@ -224,6 +231,89 @@ def test_zero_disables_the_bound(repo):
     diagnostic = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert result.returncode == 0, diagnostic
     assert "no progress within" not in result.stderr, diagnostic
+
+
+def test_term_resistant_push_is_killed_and_releases_lock(repo):
+    """Even a push ignoring TERM cannot keep the wrapper or flock alive."""
+    shim = Path(repo["env"]["PATH"].split(os.pathsep)[0]) / "git"
+    pid_file = repo["local"].parent / "push.pid"
+    shim.write_text(
+        "#!/bin/bash\n"
+        'if [ "${1:-}" = "push" ]; then\n'
+        "    trap '' TERM\n"
+        f'    echo $$ > "{pid_file}"\n'
+        "    exec sleep 60\n"
+        "fi\n"
+        f'exec "{REAL_GIT}" "$@"\n'
+    )
+    proc = subprocess.Popen(
+        [str(SCRIPT)],
+        cwd=repo["local"],
+        env=repo["env"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        try:
+            rc = proc.wait(timeout=12)
+        except subprocess.TimeoutExpired:
+            pytest.fail("TERM-resistant push exceeded timeout plus kill grace")
+        assert rc == 2
+        lock = repo["local"] / ".git" / "commit.lock"
+        result = subprocess.run(
+            ["flock", "--nonblock", str(lock), "true"],
+            timeout=5,
+        )
+        assert result.returncode == 0, "push descendant retained the commit lock"
+    finally:
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+
+
+def test_push_does_not_inherit_commit_lock_fd(repo):
+    """A hook/transport must not retain the parent's flock if it outlives Git."""
+    shim = Path(repo["env"]["PATH"].split(os.pathsep)[0]) / "git"
+    shim.write_text(
+        "#!/bin/bash\n"
+        'if [ "${1:-}" = "push" ]; then\n'
+        "    if { true >&9; } 2>/dev/null; then\n"
+        "        echo inherited-lock-fd >&2\n"
+        "        exit 99\n"
+        "    fi\n"
+        "    exit 0\n"
+        "fi\n"
+        f'exec "{REAL_GIT}" "$@"\n'
+    )
+    result = _run(repo)
+    assert result.returncode == 0, result.stderr
+    assert "inherited-lock-fd" not in result.stderr
+
+
+def test_timeout_after_publication_reports_uncertainty(repo):
+    """A lost acknowledgement does not roll back a completed remote update."""
+    shim = Path(repo["env"]["PATH"].split(os.pathsep)[0]) / "git"
+    shim.write_text(
+        "#!/bin/bash\n"
+        'if [ "${1:-}" = "push" ]; then\n'
+        f'    "{REAL_GIT}" "$@" || exit $?\n'
+        "    exec sleep 60\n"
+        "fi\n"
+        f'exec "{REAL_GIT}" "$@"\n'
+    )
+    result = _run(repo)
+    assert result.returncode == 2, result.stderr
+    assert "Remote publication status is unknown" in result.stderr
+    assert "nothing was published" not in result.stderr
+    assert "was not advanced" not in result.stderr
+    assert _git(repo["remote"], "rev-parse", "main", env=repo["env"]) == _git(
+        repo["local"], "rev-parse", "HEAD", env=repo["env"]
+    )
 
 
 @pytest.mark.parametrize("value", ["-1", "abc", "1.5"])

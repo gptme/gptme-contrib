@@ -35,8 +35,10 @@
 # answer while still holding fd 9 on .git/commit.lock, so every cooperating
 # git-safe-commit in the workspace blocks behind a single dead network call.
 # GIT_SAFE_PUSH_TIMEOUT (default 300s, 0 disables) therefore wraps `git push` in
-# `timeout --signal=TERM`. Ref updates are atomic, so a timed-out push leaves the
-# remote unchanged and the local commits intact; the caller retries.
+# `timeout --signal=TERM --kill-after=5`. Close fd 9 in the push child so even a
+# surviving hook/transport cannot retain the parent's flock. A timeout preserves
+# local commits but leaves remote publication uncertain (an acknowledgement may
+# have been lost after the ref update); inspect the remote before retrying.
 #
 # Design: creates a single squash commit (one parent = remote trunk) to avoid merge
 # commits, which are prohibited by some repository rulesets. The squash collapses
@@ -63,7 +65,8 @@ Publish local trunk using the shared commit lock and off-tree reconciliation.
 
 Environment: GIT_SAFE_REMOTE (origin), GIT_SAFE_TRUNK (remote HEAD, else master),
              GIT_SAFE_PUSH_LOCK_TIMEOUT (60 seconds),
-             GIT_SAFE_PUSH_TIMEOUT (300 seconds per push; 0 disables the bound).
+             GIT_SAFE_PUSH_TIMEOUT (300 seconds per push, then 5 seconds kill
+                                    grace; 0 disables the bound).
 Exit codes: 0 success/clean preview, 1 conflict, 2 error/invalid argument.
 EOF
 }
@@ -161,27 +164,29 @@ if [ "$LOCAL_COMMIT_COUNT" -eq 0 ]; then
 fi
 
 # Returns 0 on success, 1 on an ordinary push failure, 3 when the push was
-# aborted by the timeout bound (a dead connection, not a rejected ref).
+# aborted by the timeout bound (publication uncertain, do not retry blindly).
 push_with_output() {
     local output_file="$1" trace_file="$2"
     shift 2
     local rc=0
     if [ -n "$TIMEOUT_BIN" ]; then
-        GIT_TRACE2_EVENT="$trace_file" "$TIMEOUT_BIN" --signal=TERM "$PUSH_TIMEOUT" \
-            git push "$@" >"$output_file" 2>&1 || rc=$?
+        # The parent retains the flock throughout the push. Children must not
+        # inherit it: a detached or TERM-resistant hook may outlive Git/timeout.
+        GIT_TRACE2_EVENT="$trace_file" "$TIMEOUT_BIN" --signal=TERM --kill-after=5 "$PUSH_TIMEOUT" \
+            git push "$@" 9>&- >"$output_file" 2>&1 || rc=$?
     else
-        GIT_TRACE2_EVENT="$trace_file" git push "$@" >"$output_file" 2>&1 || rc=$?
+        GIT_TRACE2_EVENT="$trace_file" git push "$@" 9>&- >"$output_file" 2>&1 || rc=$?
     fi
     if [ "$rc" -eq 0 ]; then
         cat "$output_file"
         return 0
     fi
-    if [ "$rc" -eq 124 ] || [ "$rc" -eq 143 ]; then
+    if [ -n "$TIMEOUT_BIN" ] && { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 143 ]; }; then
         cat "$output_file" >&2
-        echo "error: git push made no progress within ${PUSH_TIMEOUT}s; aborted." >&2
-        echo "       The connection is dead, not slow and not rejected: ref updates are" >&2
-        echo "       atomic, so nothing was published. Commit(s) remain local and" >&2
-        echo "       $REMOTE/$TRUNK was not advanced. Retry the push." >&2
+        echo "error: git push exceeded ${PUSH_TIMEOUT}s (plus up to 5s kill grace); aborted." >&2
+        echo "       Remote publication status is unknown: the update may have completed" >&2
+        echo "       before its acknowledgement was lost. Local commits are preserved." >&2
+        echo "       Inspect $REMOTE/$TRUNK before retrying; no automatic retry was attempted." >&2
         return 3
     fi
     return 1
@@ -263,8 +268,7 @@ if [ "$LOCAL_MERGE_COUNT" -eq 0 ] && git merge-base --is-ancestor "$REMOTE_SHA" 
         exit 0
     fi
     if [ "$push_rc" -eq 3 ]; then
-        # Timeout: the remote did not advance, so the squash path would only
-        # retry the same dead connection. Stop here with the timeout diagnostic.
+        # Timeout: publication is uncertain. Do not retry via the squash path.
         rm -f "$PUSH_OUTPUT" "$PUSH_TRACE"
         exit 2
     fi
