@@ -236,7 +236,8 @@ def test_zero_disables_the_bound(repo):
     assert "no progress within" not in result.stderr, diagnostic
 
 
-def test_interactive_push_can_read_controlling_terminal(repo):
+@pytest.mark.parametrize("redirect_stdio", [False, True])
+def test_interactive_push_can_read_controlling_terminal(repo, redirect_stdio):
     """The timeout must not move an interactive credential prompt off the TTY."""
     shim = Path(repo["env"]["PATH"].split(os.pathsep)[0]) / "git"
     shim.write_text(
@@ -252,19 +253,40 @@ def test_interactive_push_can_read_controlling_terminal(repo):
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(repo["local"])
+        if redirect_stdio:
+            # A real interactive shell keeps its terminal open while the child
+            # redirects stdio. Retain a slave descriptor to model that shell;
+            # otherwise closing 0/1/2 hangs up this synthetic terminal entirely.
+            terminal_fd = os.dup(0)
+            os.set_inheritable(terminal_fd, True)
+            null_fd = os.open(os.devnull, os.O_RDWR)
+            for target in (0, 1, 2):
+                os.dup2(null_fd, target)
+            if null_fd > 2:
+                os.close(null_fd)
         os.execve(str(SCRIPT), [str(SCRIPT)], repo["env"])
     output = b""
     status = None
     try:
         deadline = time.monotonic() + 12
         answered = False
+        terminal_closed = False
+        ready: list[int]
         while time.monotonic() < deadline:
-            ready, _, _ = select.select([fd], [], [], 0.1)
+            if terminal_closed:
+                time.sleep(0.01)
+                ready = []
+            else:
+                ready, _, _ = select.select([fd], [], [], 0.1)
             if ready:
                 try:
-                    output += os.read(fd, 65536)
+                    chunk = os.read(fd, 65536)
+                    output += chunk
+                    terminal_closed = not chunk
                 except OSError:
-                    break
+                    # EIO/EOF can precede the child becoming waitable. Continue
+                    # bounded waitpid polling instead of assuming it exited.
+                    terminal_closed = True
                 if b"credential-prompt" in output and not answered:
                     os.write(fd, b"synthetic-response\n")
                     answered = True

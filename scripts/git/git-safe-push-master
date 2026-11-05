@@ -175,7 +175,8 @@ push_with_output() {
     # GNU timeout otherwise puts Git in a background process group: reads from
     # /dev/tty (e.g. SSH key passphrases) then stop with SIGTTIN. Foreground mode
     # cannot time out descendants, but closing fd 9 still prevents lock leaks.
-    if [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; then
+    # Standard streams may all be redirected while /dev/tty remains available.
+    if ( : </dev/tty ) 2>/dev/null; then
         timeout_options+=(--foreground)
     fi
     if [ -n "$TIMEOUT_BIN" ]; then
