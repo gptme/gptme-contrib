@@ -227,6 +227,8 @@ def parse_jsonl_lines(lines: object) -> list[tuple[datetime, dict]]:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(rec, dict):
+            continue
         ts = _parse_record_ts(rec)
         if ts is None:
             continue
@@ -289,7 +291,7 @@ def inference_status_from_records(
         metrics["outage_since"] = since.isoformat()
         detail = (
             f"0 productive in {window_hours}h; {reason} since "
-            f"{since:%Y-%m-%d %H:%M UTC} ({len(streak)} consecutive failures)"
+            f"{since.astimezone(timezone.utc):%Y-%m-%d %H:%M UTC} ({len(streak)} consecutive failures)"
         )
         return "down", detail, metrics
 
