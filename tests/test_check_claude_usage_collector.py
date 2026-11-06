@@ -76,7 +76,7 @@ def _write_executable(path: Path, content: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def _fake_home(tmp_path: Path, payload: str) -> Path:
+def _fake_home(tmp_path: Path, payload: str, *, delayed_payload: str = "") -> Path:
     """Install no-op sleep + a tmux stub that serves ``payload`` after init."""
     home = tmp_path / "home"
     bin_dir = home / ".local" / "bin"
@@ -86,6 +86,8 @@ def _fake_home(tmp_path: Path, payload: str) -> Path:
 
     payload_file = tmp_path / "payload.txt"
     payload_file.write_text(payload)
+    delayed_file = tmp_path / "delayed-payload.txt"
+    delayed_file.write_text(delayed_payload)
     counter_file = tmp_path / "capture-count.txt"
     right_file = tmp_path / "right-count.txt"
     counter_file.write_text("0")
@@ -127,6 +129,9 @@ def _fake_home(tmp_path: Path, payload: str) -> Path:
                         printf 'shortcuts\\n'
                     else
                         cat "$payload_file"
+                        if [ "$(cat "$right_file")" -ge 2 ]; then
+                            cat {shlex.quote(str(delayed_file))}
+                        fi
                     fi
                     ;;
                 *)
@@ -145,8 +150,9 @@ def _run_collector(
     payload: str,
     *args: str,
     timeout: int = 20,
+    delayed_payload: str = "",
 ) -> subprocess.CompletedProcess[str]:
-    home = _fake_home(tmp_path, payload)
+    home = _fake_home(tmp_path, payload, delayed_payload=delayed_payload)
     env = os.environ.copy()
     env.update(
         {
@@ -217,3 +223,18 @@ def test_legacy_session_weekly_layout_retains_session_utilization(
     assert parsed["seven_day_sonnet"]["utilization"] == 0.19
     rights = _right_count(tmp_path)
     assert rights < 12, f"legacy layout exhausted cycles: {rights}"
+
+
+def test_weekly_only_captures_sonnet_on_next_render(tmp_path: Path) -> None:
+    """Weekly-all alone must allow a bounded follow-up for late model bars."""
+    result = _run_collector(
+        tmp_path,
+        "shortcuts\nCurrent week (all models)\n33% used\n",
+        "--raw",
+        "--no-cache",
+        delayed_payload="Current week (Sonnet only)\n95% used\n",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Current week (Sonnet only)" in result.stdout
+    assert "95% used" in result.stdout
+    assert _right_count(tmp_path) == 2

@@ -264,9 +264,10 @@ done
 #
 # CC 2.1.318+ dropped Current session from /usage and renamed
 # "Current week (Sonnet only)" to "Current week (Fable)" (or another model).
-# A weekly-only pane is valid: stop once the all-models weekly bar is
-# captured. Optional model windows must not force all 12 tab cycles, and
-# must not be counted as seven_day. Legacy session+weekly layouts still
+# A weekly-only pane is valid: after the all-models weekly bar, allow one
+# additional render cycle for a late model-specific bar. Optional model
+# windows must not force all 12 tab cycles or be counted as seven_day.
+# Legacy session+weekly layouts still
 # stop as soon as weekly-all is present (session paints first, so it is
 # already in ACCUM).
 #
@@ -279,6 +280,7 @@ done
 # Do NOT use the 'w' week toggle — it can retrigger the scan.
 OUTPUT=""
 ACCUM=""
+_weekly_seen_cycle=0
 for _outer in $(seq 1 12); do
     tmux send-keys -t "$SESSION_NAME" Right   # away to Stats
     sleep 0.5
@@ -295,11 +297,15 @@ for _outer in $(seq 1 12); do
         fi
         sleep 0.3
     done
-    # All-models weekly anchors a complete capture. Optional
-    # "Current week (Sonnet only)" / "Current week (Fable)" / other
-    # "Current week (<model>)" labels are not required.
+    # Preserve legacy session+weekly completion. Weekly-only renders get
+    # one extra cycle for a delayed Sonnet/Fable/etc. bar, not 12 cycles
+    # waiting for a model window that may never be present.
     if grep -qi 'Current week (all models)' <<< "$ACCUM"; then
-        break
+        if grep -qi 'Current session' <<< "$ACCUM" \
+            || [ "$_weekly_seen_cycle" -gt 0 ]; then
+            break
+        fi
+        _weekly_seen_cycle=$_outer
     fi
     if grep -qi 'Nothing over 10%' <<< "$ACCUM"; then
         break
