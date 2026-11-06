@@ -262,3 +262,34 @@ def test_gate_and_probe_agree_on_contract_keys() -> None:
     # The nested field the gate divides on must exist on both sides too.
     assert UTIL_FIELD in gate
     assert UTIL_FIELD in parser
+
+
+def _usage_weekly_only(weekly: float, *, five: float | None = None) -> str:
+    """Weekly JSON with five_hour omitted (CC >=2.1.318) or explicitly 0."""
+    parts = [
+        f'"seven_day": {{"utilization": {weekly}, "time_left": "3d"}}, ',
+        '"seven_day_sonnet": {"utilization": 0.0, "time_left": "3d"}, ',
+        '"_pacing": {"status": "on_track", "pace_gap": 0.0}',
+    ]
+    if five is not None:
+        parts.insert(0, f'"five_hour": {{"utilization": {five}, "time_left": "1h"}}, ')
+    return "{" + "".join(parts) + "}"
+
+
+def test_absent_five_hour_prints_na_not_zero() -> None:
+    """Missing five_hour is N/A in success wording, never a fabricated 0%."""
+    r = _run_gate(_usage_weekly_only(weekly=0.09))
+    assert r.returncode == 0, r.stderr
+    assert "quota OK" in r.stderr
+    assert "weekly:" in r.stderr
+    assert "9%" in r.stderr
+    assert "5h: N/A" in r.stderr
+    assert "5h: 0%" not in r.stderr
+
+
+def test_present_zero_five_hour_still_prints_zero() -> None:
+    """A real 0% session window must not be rewritten as N/A."""
+    r = _run_gate(_usage_weekly_only(weekly=0.09, five=0.0))
+    assert r.returncode == 0, r.stderr
+    assert "5h: 0%" in r.stderr
+    assert "5h: N/A" not in r.stderr

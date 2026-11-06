@@ -53,8 +53,12 @@ quota_gate_check() {
         return 0
     fi
 
-    local five_hour_util seven_day_util session_ok weekly_ok
-    five_hour_util=$(echo "$quota_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('five_hour',{}).get('utilization',0))" 2>/dev/null || echo "0")
+    local five_hour_present five_hour_util seven_day_util session_ok weekly_ok five_hour_display
+    # Absent five_hour (CC >=2.1.318 weekly-only panes) is not 0% quota.
+    # Session cost summaries are not quota data. All-model weekly remains
+    # the primary weekly counter unless --model sonnet is passed.
+    five_hour_present=$(echo "$quota_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print('yes' if isinstance(d.get('five_hour'), dict) and 'utilization' in d['five_hour'] else 'no')" 2>/dev/null || echo "no")
+    five_hour_util=$(echo "$quota_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('five_hour',{}).get('utilization',0) if isinstance(d.get('five_hour'), dict) else 0)" 2>/dev/null || echo "0")
     seven_day_util=$(echo "$quota_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('seven_day',{}).get('utilization',0))" 2>/dev/null || echo "0")
 
     # Sonnet uses a separate weekly counter
@@ -64,13 +68,19 @@ quota_gate_check() {
         seven_day_util=$(echo "$quota_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('seven_day_sonnet',{}).get('utilization',0))" 2>/dev/null || echo "0")
     fi
 
-    session_ok=$(python3 -c "print('ok' if $five_hour_util < $QUOTA_GATE_SESSION_THRESHOLD else 'blocked')" 2>/dev/null || echo "ok")
+    if [ "$five_hour_present" = "yes" ]; then
+        session_ok=$(python3 -c "print('ok' if $five_hour_util < $QUOTA_GATE_SESSION_THRESHOLD else 'blocked')" 2>/dev/null || echo "ok")
+        five_hour_display=$(python3 -c "print(f'{$five_hour_util:.0%}')")
+    else
+        session_ok="ok"
+        five_hour_display="N/A"
+    fi
     weekly_ok=$(python3 -c "print('ok' if $seven_day_util < $QUOTA_GATE_WEEKLY_THRESHOLD else 'blocked')" 2>/dev/null || echo "ok")
 
     if [ "$session_ok" = "blocked" ]; then
         local five_hour_resets
         five_hour_resets=$(echo "$quota_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('five_hour',{}).get('time_left','unknown'))" 2>/dev/null || echo "unknown")
-        echo "$log_prefix SKIPPING — 5h session quota at $(python3 -c "print(f'{$five_hour_util:.0%}')") (threshold: $(python3 -c "print(f'{$QUOTA_GATE_SESSION_THRESHOLD:.0%}')")), resets $five_hour_resets" >&2
+        echo "$log_prefix SKIPPING — 5h session quota at $five_hour_display (threshold: $(python3 -c "print(f'{$QUOTA_GATE_SESSION_THRESHOLD:.0%}')")), resets $five_hour_resets" >&2
         return 1
     fi
 
@@ -86,7 +96,7 @@ quota_gate_check() {
     pacing_status=$(echo "$quota_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('_pacing',{}).get('status','unknown'))" 2>/dev/null || echo "unknown")
     pacing_gap=$(echo "$quota_json" | python3 -c "import json,sys; d=json.load(sys.stdin); p=d.get('_pacing',{}); print(f\"{p.get('pace_gap',0):+.1%}\")" 2>/dev/null || echo "")
 
-    echo "$log_prefix quota OK — 5h: $(python3 -c "print(f'{$five_hour_util:.0%}')"), weekly: $(python3 -c "print(f'{$seven_day_util:.0%}')"), pacing: $pacing_status $pacing_gap" >&2
+    echo "$log_prefix quota OK — 5h: $five_hour_display, weekly: $(python3 -c "print(f'{$seven_day_util:.0%}')"), pacing: $pacing_status $pacing_gap" >&2
     return 0
 }
 
