@@ -7,11 +7,13 @@ genuine parse failure still reports the version hint.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PARSER = REPO_ROOT / "scripts" / "check-claude-usage-parser.py"
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "cc-usage"
 
 
 def run_parser(text: str) -> subprocess.CompletedProcess:
@@ -137,3 +139,58 @@ def test_normal_usage_parses() -> None:
     assert proc.returncode == 0
     assert '"five_hour"' in proc.stdout
     assert '"seven_day"' in proc.stdout
+
+
+def test_cc_2_1_319_weekly_only_pane_is_valid_and_names_the_absent_window() -> None:
+    """CC >= 2.1.318 renders only weekly windows; that is not a parse error.
+
+    The fixture is a verbatim 2.1.319 capture: `Current week (all models)` and
+    `Current week (Fable)`, no `Current session` block. The 5h absence must be
+    stamped explicitly, never reported as the "requires v2.1.183" version error.
+    """
+    proc = run_parser((FIXTURES / "usage-pane-2.1.319.pane").read_text())
+    assert proc.returncode == 0, proc.stderr
+    assert "requires Claude Code v2.1.183" not in proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["seven_day"]["utilization"] == 0.09
+    assert data["seven_day_fable"]["utilization"] == 0.0
+    assert "seven_day_sonnet" not in data
+    assert "five_hour" not in data
+    assert data["_window_state"] == {
+        "five_hour": "absent_from_pane",
+        "weekly_windows": ["seven_day", "seven_day_fable"],
+    }
+    assert "five_hour window absent" in proc.stderr
+
+
+def test_pane_with_session_window_is_stamped_present() -> None:
+    """Older panes keep five_hour and are stamped present, with no warning."""
+    raw = (
+        "Current session\n"
+        "  ██████████████░░░░░░░░░░░░░░░░ 45% used\n"
+        "  Resets 9pm\n"
+        "Current week (all models)\n"
+        "  ██████████████░░░░░░░░░░░░░░░░ 45% used\n"
+        "  Resets Thu, 12am\n"
+        "Current week (Sonnet only)\n"
+        "  ██████░░░░░░░░░░░░░░░░░░░░░░░░ 20% used\n"
+        "  Resets Thu, 12am\n"
+    )
+    proc = run_parser(raw)
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["seven_day_sonnet"]["utilization"] == 0.2
+    assert data["_window_state"]["five_hour"] == "present"
+    assert data["_window_state"]["weekly_windows"] == [
+        "seven_day",
+        "seven_day_sonnet",
+    ]
+    assert "absent" not in proc.stderr
+
+
+def test_lone_non_weekly_header_is_still_a_parse_failure() -> None:
+    """A single stray session header, with no weekly window, is not usage data."""
+    raw = "Current session\n  ████ 45% used\n  Resets 9pm\n"
+    proc = run_parser(raw)
+    assert proc.returncode == 1
+    assert "Could not parse usage data" in proc.stderr
