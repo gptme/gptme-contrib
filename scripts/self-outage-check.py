@@ -60,6 +60,10 @@ from pathlib import Path
 # a human to pay/renew, switch to an API key, or enable failover. Kept separate
 # from the token-class reasons so remediation can be failure-mode-specific.
 BILLING_OUTAGE_REASONS = frozenset({"api_error_403"})
+# Substrings in an error string that identify a 403/billing outage.  Kept in
+# sync with the checks in _is_billing_outage() so sample_error selection and
+# remediation classification agree.
+BILLING_ERROR_SUBSTRINGS = ("api_error_403", "oauth_not_allowed_for_organization")
 
 # Default classifier for "the credential is dead and a human (or self-reauth)
 # must fix it out-of-band", as opposed to transient/capacity failures.
@@ -191,7 +195,20 @@ def assess(
             key=lambda r: _parse_ts(r.get("timestamp", ""))
             or datetime.min.replace(tzinfo=timezone.utc),
         )
-        err = (most_recent.get("error") or "").strip()
+        # Prefer a record that carries billing-indicator keywords: the newest
+        # record may have an empty error field even during a sustained billing
+        # outage (the recorder only populates it intermittently).  Fall back to
+        # the most-recent error so we always surface *something* useful.
+        billing_errors = [
+            (r.get("error") or "").strip()
+            for r in auth_failure_records
+            if any(kw in (r.get("error") or "") for kw in BILLING_ERROR_SUBSTRINGS)
+        ]
+        err = (
+            billing_errors[0]
+            if billing_errors
+            else (most_recent.get("error") or "").strip()
+        )
         sample_error = err[:400] or None
 
     last_prod = last_productive_ts(records_file, now)
@@ -334,7 +351,7 @@ def _is_billing_outage(status: dict) -> bool:
     if status.get("dominant_reason") in BILLING_OUTAGE_REASONS:
         return True
     sample = (status.get("sample_error") or "").lower()
-    return "api_error_403" in sample or "oauth_not_allowed_for_organization" in sample
+    return any(kw in sample for kw in BILLING_ERROR_SUBSTRINGS)
 
 
 def _remediation(cfg: Config, status: dict) -> str:
