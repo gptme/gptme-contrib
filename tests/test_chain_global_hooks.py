@@ -229,8 +229,10 @@ def test_commit_wrapper_does_not_wait_for_stdin(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("manager", ["prek", "pre-commit", "custom"])
+@pytest.mark.parametrize("runner_available", [False, True])
+@pytest.mark.parametrize("relative_global", [False, True])
 def test_chained_precommit_runner_runs_once_and_keeps_guards(
-    tmp_path: Path, manager: str
+    tmp_path: Path, manager: str, runner_available: bool, relative_global: bool
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -272,19 +274,38 @@ def test_chained_precommit_runner_runs_once_and_keeps_guards(
     )
     # Installed global hooks are symlinked, and their adjacent allowlist must
     # remain the installing agent's config, not the contrib source directory.
-    global_dir = tmp_path / "installed/git/hooks"
+    global_dir = (repo if relative_global else tmp_path) / "installed/git/hooks"
     global_dir.parent.mkdir(parents=True)
     global_dir.symlink_to(CHAIN.parent / ".config/git/hooks")
     (global_dir.parent / "allowed-identities.conf").write_text(
         'IDENTITY_ALLOWLIST=("test@test.com")\n'
     )
     env.pop("ALLOW_GIT_IDENTITY")
-    assert (
-        _run(
-            ["--hooks-dir", str(local_dir), "--global-dir", str(global_dir)], env=env
-        ).returncode
-        == 0
-    )
+    args = ["--hooks-dir", str(local_dir), "--global-dir", str(global_dir)]
+    if relative_global:
+        subprocess.run(
+            ["git", "config", "--global", "core.hooksPath", "installed/git/hooks"],
+            env=env,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "core.hooksPath", ".hooks"],
+            env=env,
+            check=True,
+        )
+        args = [str(repo)]
+    assert _run(args, env=env).returncode == 0
+    if not runner_available:
+        import shutil
+
+        # Keep shell/git utilities but hide both managers. The saved generated
+        # runner could still work by absolute path; never skip it as success.
+        for name in ["bash", "dirname", "git", "grep", "wc"]:
+            executable = shutil.which(name)
+            assert executable is not None
+            (binary / name).symlink_to(executable)
+        (binary / "prek").unlink()
+        env["PATH"] = str(binary)
     result = subprocess.run(
         [str(local_dir / "pre-commit")],
         cwd=repo,
@@ -293,6 +314,10 @@ def test_chained_precommit_runner_runs_once_and_keeps_guards(
         text=True,
         timeout=10,
     )
+    if not runner_available:
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert not log.exists()
+        return
     assert result.returncode == 0, result.stdout + result.stderr
     expected = ["run --files .pre-commit-config.yaml"] * (
         2 if manager == "custom" else 1
