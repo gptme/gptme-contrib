@@ -2889,14 +2889,16 @@ def primary_model_exhausted(
     return all(name.casefold() in quarantined for name in allowed)
 
 
-#: Ordered allowlist for ``deepseek-v4-flash-0731`` since 2026-09-10. Shared
-#: with ``consensus-merge-gate._GATE_PROVIDER_ALLOWLIST`` (a test pins the two
+#: Ordered allowlist for ``deepseek-v4-flash-0731``. Shared with
+#: ``consensus-merge-gate._GATE_PROVIDER_ALLOWLIST`` (a test pins the two
 #: together) so the reviewer and the gate cannot drift apart again.
-DEEPSEEK_V4_FLASH_0731_PROVIDERS: tuple[str, ...] = (
-    "together",
-    "fireworks",
-    "inceptron",
-)
+#:
+#: 2026-09-10: the no-train probe set was together/fireworks/inceptron.
+#: 2026-11-06: OpenRouter's live catalog for this model lists only Inceptron
+#: (38/38 successful local reviews that requested Together were served by
+#: Inceptron). Together and Fireworks stay out until they reappear in the
+#: catalog.
+DEEPSEEK_V4_FLASH_0731_PROVIDERS: tuple[str, ...] = ("inceptron",)
 
 PROVIDER_POLICY: dict[str, dict] = {
     "deepseek/deepseek-v4-flash-0731": {
@@ -2905,13 +2907,13 @@ PROVIDER_POLICY: dict[str, dict] = {
         # launched. Every request carrying `only: ["deepseek"]` now 404s
         # ("No allowed providers are available ... permits only: deepseek"),
         # so the 2026-09-09 official-first pin below is dead, not degraded.
-        # 28 third-party endpoints remain. The replacement is the cleanest
-        # no-train allowlist from the 2026-09-09 subprovider probe (correct
-        # tool call + cache hit on every pass; see knowledge/research/
-        # 2026-09-09-openrouter-subprovider-probe-deepseek-v4-flash-glm-5-3-flash.md):
-        # together, fireworks, inceptron — an ORDERED allowlist with
-        # `allow_fallbacks: false`, not a single official host. Baidu is out
-        # (not in the probe's clean set).
+        # 28 third-party endpoints remain. The 2026-09-09 probe's clean
+        # no-train set was together/fireworks/inceptron (see
+        # knowledge/research/2026-09-09-openrouter-subprovider-probe-deepseek-v4-flash-glm-5-3-flash.md).
+        # 2026-11-06 catalog: only Inceptron still serves this model, so the
+        # pin is a single-host allowlist with `allow_fallbacks: false`. Baidu
+        # is out (not in the probe's clean set). Together/Fireworks return
+        # only if they re-list and the catalog fixture is refreshed.
         #
         # History: the 2026-09-09 re-pin (Erik) put review-class traffic on
         # session-proven models at their first-party providers; the
@@ -2922,11 +2924,10 @@ PROVIDER_POLICY: dict[str, dict] = {
         # `json_object` is kept as the JSON mode: it is the weaker contract
         # the official endpoint honoured and the one every probed reseller
         # accepted; `json_schema` + require_parameters was never verified on
-        # these three, and a 404 on a merge-critical call is worse than a
-        # prompt contract. Failover when the whole allowlist is dead:
-        # `_pin_blocks_reroute` drops the pin (unpinned, data-policy still
-        # applied) — last resort, not the default. In-list reroutes
-        # (ignore the blamed host, keep `only`) come first.
+        # Inceptron, and a 404 on a merge-critical call is worse than a
+        # prompt contract. With a single-host allowlist, blaming that host
+        # drops the pin (`_pin_blocks_reroute` → unpinned, data-policy still
+        # applied). In-list reroutes return if a second catalog host is added.
         #
         # `deepseek/deepseek-v4.1-flash` is the succession candidate for this
         # slot pending session volume (bandit arm / eval runs) — it is NOT in
