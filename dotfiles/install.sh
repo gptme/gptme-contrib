@@ -89,6 +89,42 @@ check_agent_environment() {
     fi
 }
 
+# --- Repo-local core.hooksPath silently replaces the global dir ---
+# prek and similar tools set core.hooksPath=.git/hooks, which is why Alice and
+# Gordon currently get 0 Git-Session-Id trailers even with the global hook
+# installed. Detect the agent workspace and either warn or chain.
+warn_or_chain_local_hooks_override() {
+    local workspace=""
+    local local_path=""
+    local chain="$DOTFILES_DIR/chain-global-hooks.sh"
+
+    if [ -n "${AGENT_WORKSPACE:-}" ] && [ -e "${AGENT_WORKSPACE}/.git" ]; then
+        workspace="$AGENT_WORKSPACE"
+    elif [ -f "$DOTFILES_DIR/../../gptme.toml" ] && \
+         grep -q '\[agent\]' "$DOTFILES_DIR/../../gptme.toml" 2>/dev/null; then
+        workspace="$(cd "$DOTFILES_DIR/../.." && pwd)"
+    fi
+    [ -n "$workspace" ] || return 0
+
+    local_path="$(git -C "$workspace" config --local --get core.hooksPath 2>/dev/null || true)"
+    [ -n "$local_path" ] || return 0
+
+    echo -e "${YELLOW}⚠️  $workspace has repo-local core.hooksPath=$local_path${NC}"
+    echo "   That overrides the global hooks dir, so Git-Session-Id trailers never run."
+    if [ "${CHAIN_HOOKS:-0}" = "1" ]; then
+        if [ -x "$chain" ]; then
+            echo "   CHAIN_HOOKS=1 — installing wrappers via chain-global-hooks.sh"
+            "$chain" "$workspace" || echo -e "${YELLOW}   chain-global-hooks.sh failed (non-fatal)${NC}"
+        else
+            echo -e "${YELLOW}   chain-global-hooks.sh missing at $chain${NC}"
+        fi
+    else
+        echo "   Fix:  $chain $workspace"
+        echo "   Or:   CHAIN_HOOKS=1 $0"
+        echo "   Docs: $DOTFILES_DIR/README.md (core.hooksPath override)"
+    fi
+}
+
 # --- Handle existing hooks directory ---
 handle_existing_hooks_dir() {
     local target="$HOME/.config/git/hooks"
@@ -220,6 +256,10 @@ echo -e "${GREEN}✓${NC} Linked ~/.config/git/hooks -> $DOTFILES_DIR/.config/gi
 git config --global core.hooksPath ~/.config/git/hooks
 echo -e "${GREEN}✓${NC} Set core.hooksPath to ~/.config/git/hooks"
 
+# A repo-local core.hooksPath (prek sets .git/hooks) silently disables the
+# global dir, so prepare-commit-msg never runs. Warn, and chain when asked.
+warn_or_chain_local_hooks_override
+
 # Ensure the hook's identity allowlist covers this agent (no-op for Bob)
 install_allowed_identities
 
@@ -243,7 +283,10 @@ echo "Global git hooks are now active:"
 echo "  - pre-commit: Branch validation + submodule validation + pre-commit auto-staging"
 echo "  - pre-push: Worktree tracking validation"
 echo "  - post-checkout: Branch base warning on checkout"
-echo "  - prepare-commit-msg: Git-Session-Id trailer when GIT_COMMITTER_SESSION_ID is set"
+echo "  - prepare-commit-msg: Git-Session-Id trailer (env, AGENT_SESSION_ID, cgroup recovery)"
+echo ""
+echo "If a repo sets core.hooksPath locally (prek does this), global hooks do not run."
+echo "Chain them with: $DOTFILES_DIR/chain-global-hooks.sh /path/to/repo"
 echo ""
 echo "Seeded allowed-repos.conf (gptme/gptme-superuser) and allowed-identities.conf"
 echo "under \$HOME/.config/git/. Add more repos where direct master commits/pushes"
