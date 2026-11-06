@@ -203,6 +203,7 @@ def test_writes_allowed_repos_conf_with_shared_coordination_repo(fake_home):
 def test_warns_when_agent_workspace_overrides_hooks_path(fake_home, tmp_path):
     """prek-style local core.hooksPath must be visible in install output."""
     env = _set_identity(fake_home, "agent@example.com")
+    env["CHAIN_HOOKS"] = "0"
     workspace = tmp_path / "agent-workspace"
     workspace.mkdir()
     subprocess.run(
