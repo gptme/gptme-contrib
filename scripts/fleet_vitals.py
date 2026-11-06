@@ -277,9 +277,11 @@ def inference_status_from_records(
     # 0 productive in window — is there an active auth/billing outage? Walk from
     # the most recent record backwards while it's an auth/billing failure; the
     # start of that trailing streak is when the outage began.
+    # Exclude future-dated records: a future productive would terminate the scan
+    # early (hiding a real outage), and a future 403 would open a false one.
     streak: list[tuple[datetime, dict]] = []
     reason: str | None = None
-    for t, r in reversed(records):
+    for t, r in reversed([(t, r) for (t, r) in records if t <= now]):
         lbl = authbilling_reason(r)
         if lbl is None:
             break
@@ -413,9 +415,8 @@ if __name__ == "__main__":
     )
     # Non-string timestamp must not raise — record is skipped, not fatal.
     _check([{"timestamp": 123, "outcome": "productive"}, _r(1, "noop")], "degraded")
-    # Future-dated productive record must not make real failures appear "healthy".
-    # (It may break the authbilling streak detection, returning "degraded" instead
-    # of "down", but the critical property is that exit-0/"healthy" is not returned.)
+    # Future-dated productive record must not mask a real auth/billing outage.
+    # With future record excluded from streak scan, the 403 at 2h is correctly detected.
     _check(
         [
             {
@@ -423,6 +424,19 @@ if __name__ == "__main__":
                 "outcome": "productive",
             },
             _r(2, "failed", failure_reason="api_error_403", error="status:403"),
+        ],
+        "down",
+    )
+    # Future-dated 403 must not open a false outage when recent activity is benign.
+    _check(
+        [
+            {
+                "timestamp": (_now + timedelta(hours=1)).isoformat(),
+                "outcome": "failed",
+                "failure_reason": "api_error_403",
+                "error": "status:403",
+            },
+            _r(2, "noop"),
         ],
         "degraded",
     )
