@@ -23,6 +23,7 @@ Two deliberate design choices, both resolved with Bob (see task
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from collections.abc import Callable
@@ -44,6 +45,26 @@ Deliver = Callable[[Path, str], bool]
 # The correct delimiter is three dashes occupying an entire line.
 _FM_DELIM = re.compile(r"^---[ \t]*$", re.MULTILINE)
 _MAILBOX_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+# Env chain naming the sending agent's current session — same order as the
+# Git-Session-Id commit hook and gptme_coordination.worktree_guard, so a message
+# and the commits from the session that sent it carry the same id.
+SESSION_ID_ENV_VARS = (
+    "GIT_COMMITTER_SESSION_ID",
+    "AGENT_SESSION_ID",
+    "BOB_SESSION_ID",
+    "CC_SESSION_ID",
+)
+
+
+def current_session_id() -> str | None:
+    """The sender's session id from the standard env chain, or ``None``."""
+    for var in SESSION_ID_ENV_VARS:
+        value = os.environ.get(var, "").strip()
+        if value and "\n" not in value:
+            return value
+    return None
 
 
 def split_frontmatter(content: str) -> tuple[dict | None, str]:
@@ -167,6 +188,7 @@ class AgentTransport:
         mailbox: str = "default",
         in_reply_to: str | None = None,
         reply_expected: bool = True,
+        session_id: str | None = None,
     ) -> str:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         meta: dict[str, object] = {
@@ -179,6 +201,10 @@ class AgentTransport:
         }
         if in_reply_to:
             meta["in_reply_to"] = in_reply_to
+        if session_id:
+            # Cross-agent session lineage: a receiver that replies can link its
+            # session to this one (reply.in_reply_to -> original.session_id).
+            meta["session_id"] = session_id
         if not reply_expected:
             meta["reply_expected"] = False
         frontmatter = yaml.dump(
@@ -235,6 +261,7 @@ class AgentTransport:
             mailbox=self.mailbox,
             in_reply_to=reply_to,
             reply_expected=reply_expected,
+            session_id=current_session_id(),
         )
         # Local outboxes can be synced independently of the delivery callback.
         # Check the exact rendered bytes before either publication boundary.
