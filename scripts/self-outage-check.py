@@ -49,9 +49,17 @@ import json
 import os
 import subprocess
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# Failure reasons that are a 403/billing problem (subscription payment past due
+# or org-level access disabled, e.g. `oauth_not_allowed_for_organization`),
+# NOT a bad/expired token. Re-authenticating does nothing for these — they need
+# a human to pay/renew, switch to an API key, or enable failover. Kept separate
+# from the token-class reasons so remediation can be failure-mode-specific.
+BILLING_OUTAGE_REASONS = frozenset({"api_error_403"})
 
 # Default classifier for "the credential is dead and a human (or self-reauth)
 # must fix it out-of-band", as opposed to transient/capacity failures.
@@ -165,6 +173,25 @@ def assess(
     auth_failures = len(auth_failure_records)
     productive = sum(1 for r in records if r.get("outcome") == "productive")
 
+    # Capture the dominant failure reason and a sample of the real error string
+    # so the escalation can give failure-mode-specific remediation instead of a
+    # generic "re-auth" hint (which is wrong for 403/billing outages).
+    dominant_reason: str | None = None
+    sample_error: str | None = None
+    if auth_failure_records:
+        reason_counts = Counter(
+            r.get("failure_reason")
+            for r in auth_failure_records
+            if r.get("failure_reason")
+        )
+        if reason_counts:
+            dominant_reason = reason_counts.most_common(1)[0][0]
+        most_recent = max(
+            auth_failure_records, key=lambda r: r.get("timestamp", "") or ""
+        )
+        err = (most_recent.get("error") or "").strip()
+        sample_error = err[:400] or None
+
     last_prod = last_productive_ts(records_file, now)
     if last_prod is not None:
         hours_since_prod: float | None = (now - last_prod).total_seconds() / 3600
@@ -196,6 +223,8 @@ def assess(
             round(hours_since_prod, 1) if hours_since_prod is not None else None
         ),
         "last_productive_at": last_prod.isoformat() if last_prod else None,
+        "dominant_reason": dominant_reason,
+        "sample_error": sample_error,
         "outage": outage,
     }
 
@@ -293,19 +322,47 @@ def _closed_during_outage(issue: dict, status: dict, now: datetime) -> bool:
     return (now - closed) <= timedelta(hours=status["window_hours"])
 
 
+def _remediation(cfg: Config, status: dict) -> str:
+    """Failure-mode-specific remediation line.
+
+    A 403/billing outage (payment past due, org access disabled) cannot be fixed
+    by re-authenticating — the token is valid, the *account* is blocked. Telling
+    the operator to re-auth there sends them down a dead end, so for 403-dominant
+    outages we point at pay/renew, API-key, and failover instead.
+    """
+    if status.get("dominant_reason") in BILLING_OUTAGE_REASONS:
+        return (
+            "This is a **403 / billing** outage (e.g. "
+            "`oauth_not_allowed_for_organization` — subscription payment past due "
+            "or org access disabled). **Re-authenticating will not fix it** "
+            "(the token is valid; the account is blocked). Instead: pay/renew at "
+            "https://claude.ai/settings/billing, switch to an Anthropic API key, "
+            "or enable the already-built alternate-harness failover so the loop "
+            "doesn't go dark during billing gaps."
+        )
+    return f"Fix: {cfg.reauth_cmd}."
+
+
 def _issue_body(cfg: Config, status: dict) -> str:
+    error_block = (
+        f"- observed error: `{status['sample_error']}`\n"
+        if status.get("sample_error")
+        else ""
+    )
     return (
         f"**Self-detected auth outage** — agent `{cfg.agent_name}`'s autonomous "
         f"loop is 401/403ing (bad token or org disabled subscription access) and "
         f"landing zero productive work.\n\n"
         f"- auth-outage sessions (401/403, last {status['window_hours']:.0f}h): "
         f"{status['auth_failures_in_window']}\n"
+        f"- dominant failure reason: {status.get('dominant_reason') or 'unknown'}\n"
+        f"{error_block}"
         f"- productive sessions in window: {status['productive_in_window']}\n"
         f"- hours since last productive session: "
         f"{status['hours_since_last_productive']}\n"
         f"- last productive at: {status['last_productive_at']}\n\n"
         f"The loop exits 0 on auth-cooldown, so systemd shows success — this is "
-        f"why it can go silent for weeks. Fix: {cfg.reauth_cmd}. "
+        f"why it can go silent for weeks. {_remediation(cfg, status)} "
         f"Detector: `scripts/self-outage-check.py`.\n\n"
         f"_Auto-filed at {status['checked_at']}._"
     )
@@ -374,10 +431,11 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
         if not dry_run:
             cfg.alert_file.write_text(
                 f"SELF-OUTAGE (auth) detected at {status['checked_at']}\n"
-                f"{status['auth_failures_in_window']} auth failures, "
+                f"{status['auth_failures_in_window']} auth failures "
+                f"(reason: {status.get('dominant_reason') or 'unknown'}), "
                 f"0 productive in {status['window_hours']:.0f}h; "
                 f"{status['hours_since_last_productive']}h since last productive.\n"
-                f"Fix: {cfg.reauth_cmd}.\n"
+                f"{_remediation(cfg, status)}\n"
             )
         _supplementary_notify_pending = False
         if cfg.repo:

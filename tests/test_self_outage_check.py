@@ -378,3 +378,48 @@ def test_custom_reasons_override(tmp_path: Path) -> None:
     )
     assert status["auth_failures_in_window"] == 4
     assert status["outage"] is True
+
+
+def test_dominant_reason_and_sample_error_captured(tmp_path: Path) -> None:
+    # Mixed auth failures: 403/billing dominates; the most recent one's error
+    # string should be surfaced for the operator.
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "api_error_403")
+        r["error"] = (
+            "api_error_status:403; oauth_not_allowed_for_organization; payment past due"
+        )
+        records.append(r)
+    records.append(rec(5, "failed", "api_error_401"))  # minority token failure
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    assert status["dominant_reason"] == "api_error_403"
+    assert "oauth_not_allowed_for_organization" in status["sample_error"]
+
+
+def test_remediation_is_billing_aware_for_403(tmp_path: Path) -> None:
+    cfg = cfg_for(tmp_path)
+    billing = soc._remediation(cfg, {"dominant_reason": "api_error_403"})
+    assert "billing" in billing.lower()
+    assert "run the reauth script" not in billing  # reauth is NOT the fix here
+    token = soc._remediation(cfg, {"dominant_reason": "api_error_401"})
+    assert "run the reauth script" in token
+
+
+def test_issue_body_surfaces_error_for_403(tmp_path: Path) -> None:
+    cfg = cfg_for(tmp_path)
+    status = {
+        "window_hours": 36.0,
+        "auth_failures_in_window": 10,
+        "productive_in_window": 0,
+        "hours_since_last_productive": 277.0,
+        "last_productive_at": "2026-10-25T18:18:18+00:00",
+        "dominant_reason": "api_error_403",
+        "sample_error": "api_error_status:403; oauth_not_allowed_for_organization",
+        "checked_at": "2026-11-06T10:38:00+00:00",
+        "outage": True,
+    }
+    body = soc._issue_body(cfg, status)
+    assert "oauth_not_allowed_for_organization" in body
+    assert "billing" in body.lower()
+    assert "api_error_403" in body
