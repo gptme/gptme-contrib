@@ -73,6 +73,11 @@ def test_no_wait_by_default(workspace: Path) -> None:
     [
         ("---\nwait: 2026-12-01\n---\nDetails", True),
         ("---\nwait: 2026-12-01\npriority: high\n---", True),
+        ("---\n# gate\nwait: 2099-01-15\n---", True),
+        ("---\nwait: 2099-01-15\ntags:\n  - followup\n---", True),
+        ("---\nwait: 2099-01-15\nnext_action: |\n  Follow up later\n---", True),
+        ("---\n---", False),
+        ("---\n# Just a comment\n---", False),
         ("Plain body", False),
         ("---\nJust a horizontal rule above prose\n---", False),
         ("---\nwait: 2026-12-01\nno closing delimiter", False),
@@ -83,12 +88,20 @@ def test_body_looks_like_frontmatter(body: str, expected: bool) -> None:
     assert _body_looks_like_frontmatter(body) is expected
 
 
-def test_frontmatter_like_body_warns(workspace: Path) -> None:
-    result = CliRunner().invoke(
-        cli, ["add", "--body-stdin", "Piped gate"], input="---\nwait: 2099-01-15\n---\nBody"
-    )
+@pytest.mark.parametrize(
+    "block",
+    [
+        "wait: 2099-01-15",
+        "wait: 2099-01-15\ntags:\n  - followup",
+        "# A deferred task\nwait: 2099-01-15",
+        "wait: 2099-01-15\nnext_action: |\n  Follow up later",
+    ],
+)
+def test_frontmatter_like_body_warns(workspace: Path, block: str) -> None:
+    body = f"---\n{block}\n---\nBody"
+    result = CliRunner().invoke(cli, ["add", "--body-stdin", "Piped gate"], input=body)
     assert result.exit_code == 0, result.output
     assert "stored as body text" in result.stderr
     assert "wait" not in _meta(workspace, "piped-gate")
     task = frontmatter.load(workspace / "tasks" / "piped-gate.md")
-    assert task.content.endswith("---\nwait: 2099-01-15\n---\nBody")
+    assert task.content.endswith(body)

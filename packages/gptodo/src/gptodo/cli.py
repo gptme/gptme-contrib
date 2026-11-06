@@ -5744,15 +5744,18 @@ def add(
 
 
 def _body_looks_like_frontmatter(body: str) -> bool:
-    """True when a body opens with a ``---`` delimited block of ``key:`` lines."""
+    """True when a body opens with a delimited block containing a ``key:`` line."""
     lines = body.splitlines()
     if not lines or lines[0].strip() != "---":
         return False
+    has_key = False
     for line in lines[1:]:
         if line.strip() == "---":
-            return True
-        if not re.match(r"^[A-Za-z_][\w-]*:", line) and line.strip():
-            return False
+            return has_key
+        # This is a warning heuristic, not a YAML validator: comments, lists,
+        # and multiline values must not hide an inert top-level metadata key.
+        if re.match(r"^[A-Za-z_][\w-]*:", line):
+            has_key = True
     return False
 
 
