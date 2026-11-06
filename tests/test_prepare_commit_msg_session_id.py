@@ -44,7 +44,7 @@ def _clean_env(**extra: str) -> dict[str, str]:
     keys are dropped unless the caller sets them.
     """
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    for key in SCRUBBED:
+    for key in (*SCRUBBED, "AGENT_SESSION_TRAILER"):
         env.pop(key, None)
     env.update(extra)
     return env
@@ -153,8 +153,7 @@ def test_hook_recovers_identity_from_parent_after_env_is_scrubbed(
 ) -> None:
     message = tmp_path / "message"
     message.write_text("fix: parent identity\n")
-    env = os.environ.copy()
-    env.update(GIT_COMMITTER_SESSION_ID="parent42", AGENT_SESSION_ID="parent42")
+    env = _clean_env(GIT_COMMITTER_SESSION_ID="parent42", AGENT_SESSION_ID="parent42")
     subprocess.run(
         [
             sys.executable,
@@ -306,3 +305,18 @@ def test_non_utf8_trailer_does_not_block_or_corrupt_message(tmp_path: Path) -> N
     assert b"Signed-off-by: Ren\xe9 <rene@example.com>" in msg.read_bytes()
     assert b"Git-Session-Id: encoding42" in msg.read_bytes()
 
+
+def test_parent_mapping_uses_parents_tmpdir(tmp_path: Path) -> None:
+    state = tmp_path / "parent-tmp/agent-provenance-state"
+    state.mkdir(parents=True)
+    (state / "native42.json").write_text('{"agent_session_id": "parent-mapped42"}')
+    proc = tmp_path / "proc"
+    _process(proc, 30, 20)
+    _process(proc, 20, 1, f"CC_SESSION_ID=native42\0TMPDIR={state.parent}\0")
+    assert resolve_session_id({}, proc_root=proc, pid=30) == "parent-mapped42"
+
+
+def test_clean_test_env_does_not_inherit_opt_out(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_SESSION_TRAILER", "0")
+    inherited = "AGENT_SESSION_TRAILER" in _clean_env()
+    assert not inherited
