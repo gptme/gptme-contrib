@@ -202,6 +202,7 @@ def authbilling_reason(rec: dict) -> str | None:
         or "403" in fr
         or "oauth_not_allowed" in err
         or "status:403" in err
+        or (isinstance(err_raw, dict) and err_raw.get("status") == 403)
     )
     if not is_403:
         return None
@@ -451,6 +452,19 @@ if __name__ == "__main__":
                 "failed",
                 failure_reason="api_error_403",
                 error={"message": "payment is past due"},
+            )
+        ],
+        "down",
+    )
+    # Structured error.status == 403 with no failure_reason must be detected as down.
+    # json.dumps({"status": 403}) produces '"status": 403' — the colon-spaced form
+    # does not match the "status:403" string check, so we need the dict path.
+    _check(
+        [
+            _r(
+                2,
+                "failed",
+                error={"status": 403, "message": "payment is past due"},
             )
         ],
         "down",
