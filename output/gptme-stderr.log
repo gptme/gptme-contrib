@@ -1,0 +1,21 @@
+· Skipping all confirmation prompts.                                            
+· ERROR    Fatal error occurred                                                 
+· ERROR    No provider configured, couldn't auto-detect model.                  
+                                                                                
+           Sign in with a subscription you already pay for:                     
+             gptme-auth openai-subscription    # ChatGPT Plus/Pro               
+             gptme-auth grok-subscription      # SuperGrok (reuses grok CLI     
+           login)                                                               
+                                                                                
+           Or set an API key:                                                   
+             export ANTHROPIC_API_KEY='sk-ant-...'                              
+             export OPENAI_API_KEY='sk-...'                                     
+             export OPENROUTER_API_KEY='sk-or-...'                              
+                                                                                
+           Or run interactively: gptme                                          
+           Or run the setup wizard: gptme-onboard                               
+                                                                                
+           Full guide: https://gptme.org/docs/getting-started.html              
+· ERROR      at                                                                 
+           /home/runner/.local/share/uv/tools/gptme/lib/python3.11/site-packages
+           /gptme/init.py:194 in init_model                                     
