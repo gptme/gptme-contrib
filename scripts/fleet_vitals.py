@@ -195,7 +195,8 @@ def authbilling_reason(rec: dict) -> str | None:
     if rec.get("outcome") != "failed":
         return None
     fr = (rec.get("failure_reason") or "").lower()
-    err = (rec.get("error") or "").lower()
+    err_raw = rec.get("error") or ""
+    err = (err_raw if isinstance(err_raw, str) else json.dumps(err_raw)).lower()
     is_403 = (
         fr == "api_error_403"
         or "403" in fr
@@ -281,7 +282,9 @@ def inference_status_from_records(
     # early (hiding a real outage), and a future 403 would open a false one.
     streak: list[tuple[datetime, dict]] = []
     reason: str | None = None
-    for t, r in reversed([(t, r) for (t, r) in records if t <= now]):
+    for t, r in reversed(
+        sorted([(t, r) for (t, r) in records if t <= now], key=lambda x: x[0])
+    ):
         lbl = authbilling_reason(r)
         if lbl is None:
             break
@@ -440,4 +443,38 @@ if __name__ == "__main__":
         ],
         "degraded",
     )
+    # Dict-typed error field must not raise AttributeError in authbilling_reason.
+    _check(
+        [
+            _r(
+                2,
+                "failed",
+                failure_reason="api_error_403",
+                error={"message": "payment is past due"},
+            )
+        ],
+        "down",
+    )
+    # Unsorted records must still return the correct status (fix for direct callers).
+    # Pass [(11:00, noop), (10:00, 403)] — without sorting, reversed scan treats older
+    # 403 as the latest record and would incorrectly return "down".
+    _recs_unsorted = [
+        (
+            _now - timedelta(hours=1),
+            {"outcome": "noop", "timestamp": (_now - timedelta(hours=1)).isoformat()},
+        ),
+        (
+            _now - timedelta(hours=2),
+            {
+                "outcome": "failed",
+                "failure_reason": "api_error_403",
+                "error": "status:403",
+                "timestamp": (_now - timedelta(hours=2)).isoformat(),
+            },
+        ),
+    ]
+    status_unsorted = inference_status_from_records(_recs_unsorted, _now, 24)[0]
+    assert (
+        status_unsorted == "degraded"
+    ), f"unsorted input: expected degraded, got {status_unsorted}"
     print("OK: inference detector covers healthy/degraded/stale/down + recovery")
