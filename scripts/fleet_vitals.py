@@ -213,6 +213,31 @@ def authbilling_reason(rec: dict) -> str | None:
     return "403 auth/billing"
 
 
+def is_launch_artifact(rec: dict) -> bool:
+    """True for records that carry no evidence about inference health.
+
+    Two kinds, both "the model never actually ran for this record":
+
+    - ``model == "<synthetic>"`` without ``outcome == "failed"``: Claude Code
+      writes a synthetic assistant turn when the API call itself errors, and a
+      trajectory sweep (``gptme-sessions sync``) later imports that transcript
+      as a ``noop`` — typically a *duplicate* of the runner's own ``failed``
+      record for the same launch, timestamped at launch start (so it sorts just
+      before that failure).
+    - ``outcome == "skipped"``: the run was gated off before any model call
+      (quota/rate-limit), by the recording convention.
+
+    The trailing auth/billing walk must step over these rather than stop on
+    them: during the Oct–Nov 2026 billing outage every 403 ``failed`` record had
+    a synthetic ``noop`` twin interleaved before it, which cut the streak to one
+    record and turned an obvious ``down`` (904 consecutive 403s) into a
+    non-escalating ``degraded``.
+    """
+    if rec.get("outcome") == "skipped":
+        return True
+    return rec.get("model") == "<synthetic>" and rec.get("outcome") != "failed"
+
+
 def parse_jsonl_lines(lines: object) -> list[tuple[datetime, dict]]:
     """Parse an iterable of JSONL lines into sorted (timestamp, record) pairs.
 
@@ -288,6 +313,8 @@ def inference_status_from_records(
     for t, r in reversed(
         sorted([(t, r) for (t, r) in records if t <= now], key=lambda x: x[0])
     ):
+        if is_launch_artifact(r):
+            continue
         lbl = authbilling_reason(r)
         if lbl is None:
             break
@@ -501,4 +528,31 @@ if __name__ == "__main__":
         now=datetime(2026, 11, 6, 12),
     )[0]
     assert status_naive == "healthy", f"naive now: expected healthy, got {status_naive}"
+    # Synthetic launch twins interleaved with 403 failures must not break the
+    # streak (Oct-Nov 2026 outage: each failure had a `<synthetic>` noop twin
+    # timestamped at launch start, i.e. just before it).
+    _twin = []
+    for h in (5, 3, 1):
+        _twin.append(_r(h + 0.01, "noop", model="<synthetic>"))
+        _twin.append(
+            _r(h, "failed", failure_reason="api_error_403", error="payment past due")
+        )
+    st, det, met = inference_status_from_records(
+        parse_jsonl_lines(json.dumps(x) for x in _twin), _now, 24
+    )
+    assert st == "down" and met.get("authbilling_streak") == 3, (st, det, met)
+    # A skipped (gated, no model call) record between failures is also neutral.
+    _check(
+        [
+            _r(3, "failed", failure_reason="api_error_403"),
+            _r(2, "skipped", failure_reason="rate_limited"),
+            _r(1, "failed", failure_reason="api_error_403"),
+        ],
+        "down",
+    )
+    # But a real noop (a model actually ran) still ends the streak.
+    _check(
+        [_r(3, "failed", failure_reason="api_error_403"), _r(1, "noop")],
+        "degraded",
+    )
     print("OK: inference detector covers healthy/degraded/stale/down + recovery")
