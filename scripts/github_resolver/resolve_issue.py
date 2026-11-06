@@ -261,14 +261,17 @@ def _exclude_pathspecs(
     ).resolve()
     magic = "top,literal,exclude" if negative else "top,literal"
     for raw in exclude:
-        # Git tracks the final symlink, not the directory it points at. Resolve
-        # parent aliases but keep that final entry in the exclusion.
+        # Git tracks the final symlink, while output writes follow it. Exclude
+        # both the entry and its destination when they are in this worktree.
         path = Path(raw).absolute()
-        try:
-            rel = (path.parent.resolve() / path.name).relative_to(root)
-        except ValueError:
-            continue
-        specs.append(f":({magic}){rel.as_posix()}")
+        for candidate in (path.parent.resolve() / path.name, path.resolve()):
+            try:
+                rel = candidate.relative_to(root)
+            except ValueError:
+                continue
+            spec = f":({magic}){rel.as_posix()}"
+            if spec not in specs:
+                specs.append(spec)
     return specs
 
 

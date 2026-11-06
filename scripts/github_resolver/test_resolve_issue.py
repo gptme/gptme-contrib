@@ -565,10 +565,13 @@ def test_nested_workdir_preserves_repository_wide_changes(monkeypatch, local_git
     assert not resolve_issue.has_git_changes(nested, exclude=[out])
 
 
+@pytest.mark.parametrize("internal_destination", [False, True])
 def test_output_symlink_is_excluded_without_hiding_agent_work(
-    monkeypatch, local_git_repo
+    monkeypatch, local_git_repo, internal_destination
 ):
     repo, destination = local_git_repo
+    if internal_destination:
+        destination = repo / "logs"
     destination.mkdir()
     out = repo / "output"
     out.symlink_to(destination, target_is_directory=True)
