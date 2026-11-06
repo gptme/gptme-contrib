@@ -120,11 +120,15 @@ def parse_section_headers(lines: list[str]) -> dict:
         for i, line in enumerate(lines):
             if header in line:
                 for j in range(i + 1, min(i + 10, len(lines))):
+                    if any(h in lines[j] for h, _ in section_headers):
+                        break
                     pct_m = re.search(r"(\d+)%\s*used", lines[j])
                     if pct_m:
                         pct = int(pct_m.group(1)) / 100.0
                         reset_str = None
                         for k in range(j + 1, min(j + 5, len(lines))):
+                            if any(h in lines[k] for h, _ in section_headers):
+                                break
                             reset_m = re.search(r"Resets\s+(.+)", lines[k])
                             if reset_m:
                                 reset_str = reset_m.group(1).strip()

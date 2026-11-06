@@ -194,3 +194,32 @@ def test_lone_non_weekly_header_is_still_a_parse_failure() -> None:
     proc = run_parser(raw)
     assert proc.returncode == 1
     assert "Could not parse usage data" in proc.stderr
+
+
+def test_incomplete_weekly_total_does_not_borrow_fable_percentage() -> None:
+    raw = (
+        "Current week (all models)\n"
+        "Loading...\n"
+        "Current week (Fable)\n"
+        "0% used\n"
+        "Resets Nov 13, 8am (UTC)\n"
+    )
+    proc = run_parser(raw)
+    assert proc.returncode == 1
+    assert "Could not parse usage data" in proc.stderr
+
+
+def test_weekly_total_does_not_borrow_fable_reset() -> None:
+    raw = (
+        "Current week (all models)\n"
+        "90% used\n"
+        "Current week (Fable)\n"
+        "0% used\n"
+        "Resets Nov 13, 8am (UTC)\n"
+    )
+    proc = run_parser(raw)
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["seven_day"]["utilization"] == 0.9
+    assert data["seven_day"]["resets"] == "unknown"
+    assert data["seven_day_fable"]["resets"] == "Nov 13, 8am (UTC)"
