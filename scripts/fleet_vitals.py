@@ -194,7 +194,7 @@ def authbilling_reason(rec: dict) -> str | None:
     """
     if rec.get("outcome") != "failed":
         return None
-    fr = (rec.get("failure_reason") or "").lower()
+    fr = str(rec.get("failure_reason") or "").lower()
     err_raw = rec.get("error") or ""
     err = (err_raw if isinstance(err_raw, str) else json.dumps(err_raw)).lower()
     is_403 = (
@@ -256,6 +256,8 @@ def inference_status_from_records(
       auth/billing failures; detail names the reason and how long it's run.
     - ``stale``    — no records at all in the window (loop may not be running).
     """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     cutoff = now - timedelta(hours=window_hours)
     in_window = [(t, r) for (t, r) in records if cutoff <= t <= now]
 
@@ -491,4 +493,12 @@ if __name__ == "__main__":
     assert (
         status_unsorted == "degraded"
     ), f"unsorted input: expected degraded, got {status_unsorted}"
+    # Non-string failure_reason (e.g. int 403) must not crash the status call.
+    _check([_r(2, "failed", failure_reason=403, error="payment is past due")], "down")
+    # Naive `now` is treated as UTC (record timestamps are normalized to UTC).
+    status_naive = inference_status_from_lines(
+        ['{"timestamp":"2026-11-06T11:00:00","outcome":"productive"}'],
+        now=datetime(2026, 11, 6, 12),
+    )[0]
+    assert status_naive == "healthy", f"naive now: expected healthy, got {status_naive}"
     print("OK: inference detector covers healthy/degraded/stale/down + recovery")
