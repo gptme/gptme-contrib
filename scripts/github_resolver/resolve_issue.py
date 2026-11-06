@@ -244,20 +244,26 @@ def count_write_tool_calls(gptme_output: str) -> int:
     return len(_WRITE_TOOL_RE.findall(gptme_output))
 
 
-def _exclude_pathspecs(cwd: Path, exclude: Sequence[str]) -> list[str]:
-    """Return ``:(exclude)`` pathspecs for *exclude* entries inside *cwd*.
+def _exclude_pathspecs(
+    cwd: Path, exclude: Sequence[str], *, negative: bool = True
+) -> list[str]:
+    """Return literal, repository-rooted pathspecs for excluded paths.
+
+    Use positive specs when unstaging the excluded entries, negative specs
+    when selecting everything else.
 
     Entries outside the worktree are skipped: they cannot be staged there, so
     excluding them would only make git error out on an unmatched pathspec.
     """
     specs: list[str] = []
-    root = cwd.resolve()
+    root = Path(git(["rev-parse", "--show-toplevel"], cwd=cwd).strip()).resolve()
+    magic = "top,literal,exclude" if negative else "top,literal"
     for raw in exclude:
         try:
             rel = Path(raw).resolve().relative_to(root)
         except ValueError:
             continue
-        specs.append(f":(exclude){rel.as_posix()}")
+        specs.append(f":({magic}){rel.as_posix()}")
     return specs
 
 
@@ -273,7 +279,7 @@ def has_git_changes(cwd: Path, *, exclude: Sequence[str] = ()) -> bool:
     args = ["status", "--porcelain"]
     specs = _exclude_pathspecs(cwd, exclude)
     if specs:
-        args += ["--", ".", *specs]
+        args += ["--", ":/", *specs]
     out = git(args, cwd=cwd)
     return bool(out.strip())
 
@@ -477,7 +483,14 @@ def commit_and_push(
     git(["checkout", "-B", branch], cwd=cwd)
     specs = _exclude_pathspecs(cwd, exclude)
     if specs:
-        git(["add", "-A", "--", ".", *specs], cwd=cwd)
+        # Filtered add does not remove logs an agent already staged. Reset
+        # only the excluded paths to HEAD, preserving their on-disk contents
+        # and any previously tracked output without committing new artifacts.
+        git(
+            ["reset", "HEAD", "--", *_exclude_pathspecs(cwd, exclude, negative=False)],
+            cwd=cwd,
+        )
+        git(["add", "-A", "--", ":/", *specs], cwd=cwd)
         staged = git(["diff", "--cached", "--name-only"], cwd=cwd)
         if not staged.strip():
             return False
