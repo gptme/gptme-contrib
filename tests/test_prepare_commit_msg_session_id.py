@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 HOOK = (
     Path(__file__).resolve().parents[1]
     / "dotfiles"
@@ -148,6 +150,10 @@ def test_missing_message_file_is_a_noop() -> None:
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.skipif(
+    not Path("/proc/self/cgroup").is_file(),
+    reason="real ancestor recovery requires Linux procfs cgroup data",
+)
 def test_hook_recovers_identity_from_parent_after_env_is_scrubbed(
     tmp_path: Path,
 ) -> None:

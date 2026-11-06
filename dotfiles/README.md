@@ -81,7 +81,12 @@ its guards and the check suite once using explicit `run --files`, retaining
 formatter auto-staging without the generated runner's stash/restore cycle.
 The wrapper skips that generated runner only when the global hook declares
 ownership of these checks. Arbitrary local hooks still run after the global
-check suite. Git-configured `~/` hook paths are expanded before installation.
+check suite. Generated runners with a custom or missing config are refused
+before any hook is rewritten: this slice supports an existing standard
+`.pre-commit-config.yaml` and an explicit standard `--config` in the runner.
+It does not silently discard custom validation. Git-configured `~/` hook paths
+are expanded before installation; relative global paths use the repository's
+hook working directory, like relative local paths.
 
 ## Customization
 
