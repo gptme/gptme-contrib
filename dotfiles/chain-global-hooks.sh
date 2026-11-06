@@ -72,13 +72,12 @@ if [ -z "$HOOKS_DIR" ] || [ -z "$GLOBAL_DIR" ]; then
             echo "no repo-local core.hooksPath in $REPO — global hooks already run" >&2
             exit 0
         fi
-        repo_abs="$(cd "$REPO" && pwd -P)"
-        git_dir="$(git -C "$REPO" rev-parse --absolute-git-dir)"
-        if [ -d "$repo_abs/$local_path" ] || [ -e "$repo_abs/$local_path" ]; then
-            HOOKS_DIR="$(cd "$repo_abs/$local_path" && pwd -P)"
+        if [ "$(git -C "$REPO" rev-parse --is-bare-repository)" = "true" ]; then
+            hook_base="$(git -C "$REPO" rev-parse --absolute-git-dir)"
         else
-            HOOKS_DIR="$(resolve_dir "$git_dir" "$local_path")"
+            hook_base="$(git -C "$REPO" rev-parse --show-toplevel)"
         fi
+        HOOKS_DIR="$(resolve_dir "$hook_base" "$local_path")"
     fi
     if [ -z "$GLOBAL_DIR" ]; then
         GLOBAL_DIR="$(git config --global --get core.hooksPath 2>/dev/null || true)"
@@ -92,12 +91,12 @@ fi
 
 mkdir -p "$HOOKS_DIR"
 
-# Physical paths so a symlink of the global dir onto the local dir is detected
-# as the same directory (logical pwd would wrap a dir into itself).
-GLOBAL_DIR="$(cd "$GLOBAL_DIR" && pwd -P)"
+# Compare physical paths to avoid wrapping a directory into itself, but invoke
+# global hooks through the installed path: they read agent config beside it.
+GLOBAL_DIR="$(cd "$GLOBAL_DIR" && pwd -L)"
 HOOKS_DIR="$(cd "$HOOKS_DIR" && pwd -P)"
 
-if [ "$HOOKS_DIR" = "$GLOBAL_DIR" ]; then
+if [ "$HOOKS_DIR" = "$(cd "$GLOBAL_DIR" && pwd -P)" ]; then
     echo "local hooksPath is already the global dir — nothing to chain" >&2
     exit 0
 fi
@@ -113,18 +112,33 @@ write_wrapper() {
 set -euo pipefail
 GLOBAL_HOOK=$(printf '%q' "$global_hook")
 LOCAL_HOOK=$(printf '%q' "$local_hook")
-INPUT=\$(mktemp)
-trap 'rm -f "\$INPUT"' EXIT
-cat >"\$INPUT"
-status=0
-if [ -x "\$GLOBAL_HOOK" ]; then
-    "\$GLOBAL_HOOK" "\$@" <"\$INPUT" || status=\$?
-    [ "\$status" -eq 0 ] || exit "\$status"
-fi
-if [ -x "\$LOCAL_HOOK" ]; then
-    "\$LOCAL_HOOK" "\$@" <"\$INPUT" || status=\$?
-fi
-exit "\$status"
+# Only these hooks receive a finite stdin protocol. Reading stdin for e.g.
+# prepare-commit-msg can block forever on an inherited interactive terminal.
+case $(printf '%q' "$name") in
+    pre-push|pre-receive|post-receive|post-rewrite)
+        INPUT=\$(mktemp)
+        trap 'rm -f "\$INPUT"' EXIT
+        cat >"\$INPUT"
+        if [ -x "\$GLOBAL_HOOK" ]; then
+            "\$GLOBAL_HOOK" "\$@" <"\$INPUT" || exit \$?
+        fi
+        if [ -x "\$LOCAL_HOOK" ]; then
+            "\$LOCAL_HOOK" "\$@" <"\$INPUT" || exit \$?
+        fi
+        ;;
+    *)
+        if [ -x "\$GLOBAL_HOOK" ]; then
+            if [ $(printf '%q' "$name") = pre-commit ]; then
+                GPTME_CHAIN_LOCAL_PRECOMMIT="\$LOCAL_HOOK" "\$GLOBAL_HOOK" "\$@" || exit \$?
+            else
+                "\$GLOBAL_HOOK" "\$@" || exit \$?
+            fi
+        fi
+        if [ -x "\$LOCAL_HOOK" ]; then
+            exec "\$LOCAL_HOOK" "\$@"
+        fi
+        ;;
+esac
 EOF
     chmod +x "$dest"
 }
