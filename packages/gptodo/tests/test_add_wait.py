@@ -63,6 +63,17 @@ def test_invalid_wait_rejected_without_creating(workspace: Path, value: str) -> 
     assert not (workspace / "tasks" / "bad.md").exists()
 
 
+def test_wait_rejected_for_ready_for_review(workspace: Path) -> None:
+    result = CliRunner().invoke(
+        cli,
+        ["add", "--state", "ready_for_review", "--wait", "2099-01-15", "Later review"],
+        input="",
+    )
+    assert result.exit_code != 0
+    assert "--wait cannot be used with --state ready_for_review" in result.output
+    assert not (workspace / "tasks" / "later-review.md").exists()
+
+
 def test_no_wait_by_default(workspace: Path) -> None:
     CliRunner().invoke(cli, ["add", "Plain"], input="")
     assert "wait" not in _meta(workspace, "plain")

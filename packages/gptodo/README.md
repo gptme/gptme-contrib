@@ -130,6 +130,8 @@ To defer a task at creation, use `gptodo add --wait 2099-01-15 "Later task"`.
 keeps the task out of `ready` until that date/time, and does not change the
 task's state. Datetimes accept an uppercase `T` or a space separator and an
 optional timezone offset; malformed values are rejected before task creation.
+`--wait` is rejected with `--state ready_for_review`, because review tasks
+bypass wait gates. Use `--state todo` for deferred work instead.
 
 Piped input is **body text**, not frontmatter. A leading `---` key block in
 that input produces a warning but is preserved as body text; set metadata

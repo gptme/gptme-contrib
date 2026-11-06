@@ -5646,6 +5646,11 @@ def add(
 
     wait_iso: str | None = None
     if wait_value is not None:
+        if state == "ready_for_review":
+            raise click.UsageError(
+                "--wait cannot be used with --state ready_for_review: "
+                "review tasks bypass wait gates. Use --state todo to defer the task."
+            )
         from gptodo.utils import parse_wait
 
         raw_wait = wait_value.strip()
