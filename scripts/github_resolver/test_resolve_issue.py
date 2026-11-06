@@ -565,6 +565,62 @@ def test_nested_workdir_preserves_repository_wide_changes(monkeypatch, local_git
     assert not resolve_issue.has_git_changes(nested, exclude=[out])
 
 
+def test_output_exclusion_in_repository_with_trailing_space(local_git_repo):
+    repo, _ = local_git_repo
+    renamed = repo.with_name("repo ")
+    repo.rename(renamed)
+    out = renamed / "output"
+    out.mkdir()
+    (out / "stdout.log").write_text("log\n")
+    assert not resolve_issue.has_git_changes(renamed, exclude=[out])
+
+
+def test_direct_commit_preserved_when_remaining_dirt_is_only_submodule(
+    monkeypatch, local_git_repo
+):
+    repo, out_dir = local_git_repo
+    resolve_issue.git(["config", "core.hooksPath", "/dev/null"], cwd=repo)
+    child = repo / "child"
+    child.mkdir()
+    resolve_issue.git(["init"], cwd=child)
+    resolve_issue.git(["config", "core.hooksPath", "/dev/null"], cwd=child)
+    (child / "file.txt").write_text("initial\n")
+    resolve_issue.git(["add", "file.txt"], cwd=child)
+    resolve_issue.git(
+        [
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "initial",
+        ],
+        cwd=child,
+    )
+    resolve_issue.git(["add", "child"], cwd=repo)
+    resolve_issue.git(["commit", "-m", "add gitlink"], cwd=repo)
+    baseline = resolve_issue.git(["rev-parse", "HEAD"], cwd=repo).strip()
+    pushes = []
+    monkeypatch.setattr(resolve_issue, "push_branch", lambda *a, **kw: pushes.append(a))
+
+    def fake_run_gptme(prompt, *, model=None, workdir):
+        (repo / "note.txt").write_text("direct agent commit\n")
+        resolve_issue.git(["add", "note.txt"], cwd=repo)
+        resolve_issue.git(["commit", "-m", "agent work"], cwd=repo)
+        (child / "file.txt").write_text("uncommitted child work\n")
+        return "RESOLVER_STATUS: no_changes\nRESOLVER_SUMMARY: Stopped.\n", ""
+
+    rc, comments, draft_prs = _run_resolver(
+        monkeypatch, repo, out_dir, "", fake_run_gptme=fake_run_gptme
+    )
+    assert rc == 0
+    assert draft_prs == []
+    assert len(pushes) == 1
+    assert "Partial attempt preserved" in comments[0]
+    assert resolve_issue.git(["rev-parse", "HEAD"], cwd=repo).strip() != baseline
+
+
 def test_open_draft_pr_retrigger_returns_existing_url(monkeypatch):
     # On re-trigger, `gh pr create` exits 1. open_draft_pr must probe for an
     # existing open PR via `gh pr list --head` and return its URL so the caller

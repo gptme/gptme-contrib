@@ -256,7 +256,9 @@ def _exclude_pathspecs(
     excluding them would only make git error out on an unmatched pathspec.
     """
     specs: list[str] = []
-    root = Path(git(["rev-parse", "--show-toplevel"], cwd=cwd).strip()).resolve()
+    root = Path(
+        git(["rev-parse", "--show-toplevel"], cwd=cwd).removesuffix("\n")
+    ).resolve()
     magic = "top,literal,exclude" if negative else "top,literal"
     for raw in exclude:
         try:
@@ -491,11 +493,11 @@ def commit_and_push(
             cwd=cwd,
         )
         git(["add", "-A", "--", ":/", *specs], cwd=cwd)
-        staged = git(["diff", "--cached", "--name-only"], cwd=cwd)
-        if not staged.strip():
-            return False
     else:
         git(["add", "-A"], cwd=cwd)
+    staged = git(["diff", "--cached", "--name-only"], cwd=cwd)
+    if not staged.strip():
+        return False
     # Preserve even broken attempts: ambient quality hooks must not veto the
     # orchestrator's archival commit or push. Normal developer commits are unchanged.
     # Configure the attempt commit author explicitly; the workflow runs as the
@@ -818,7 +820,7 @@ def main(argv: list[str] | None = None) -> int:
                     exclude=exclude_paths,
                 ):
                     partial_branch = branch
-            else:
+            if partial_branch is None and preserve_existing_head:
                 push_existing_head(
                     args.workdir,
                     branch,
