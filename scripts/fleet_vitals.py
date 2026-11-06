@@ -179,7 +179,7 @@ def _parse_record_ts(rec: dict) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(ts)
-    except ValueError:
+    except (ValueError, TypeError):
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
@@ -255,7 +255,7 @@ def inference_status_from_records(
     - ``stale``    — no records at all in the window (loop may not be running).
     """
     cutoff = now - timedelta(hours=window_hours)
-    in_window = [(t, r) for (t, r) in records if t >= cutoff]
+    in_window = [(t, r) for (t, r) in records if cutoff <= t <= now]
 
     productive = sum(1 for _, r in in_window if r.get("outcome") == "productive")
     metrics: dict[str, object] = {
@@ -410,5 +410,20 @@ if __name__ == "__main__":
             _r(2, "productive"),
         ],
         "healthy",
+    )
+    # Non-string timestamp must not raise — record is skipped, not fatal.
+    _check([{"timestamp": 123, "outcome": "productive"}, _r(1, "noop")], "degraded")
+    # Future-dated productive record must not make real failures appear "healthy".
+    # (It may break the authbilling streak detection, returning "degraded" instead
+    # of "down", but the critical property is that exit-0/"healthy" is not returned.)
+    _check(
+        [
+            {
+                "timestamp": (_now + timedelta(hours=1)).isoformat(),
+                "outcome": "productive",
+            },
+            _r(2, "failed", failure_reason="api_error_403", error="status:403"),
+        ],
+        "degraded",
     )
     print("OK: inference detector covers healthy/degraded/stale/down + recovery")
