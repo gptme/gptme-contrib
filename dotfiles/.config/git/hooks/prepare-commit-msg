@@ -96,7 +96,10 @@ def resolve_session_id(
         except (OSError, ValueError, IndexError):
             break
         parent_env = dict(entry.split("=", 1) for entry in entries if "=" in entry)
-        identity = identity_from_env(parent_env, state_dirs)
+        parent_state_dirs = (
+            [state_dir] if state_dir is not None else _default_state_dirs(parent_env)
+        )
+        identity = identity_from_env(parent_env, parent_state_dirs)
         if identity:
             return identity
     return None
