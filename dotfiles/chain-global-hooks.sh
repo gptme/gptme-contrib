@@ -57,11 +57,11 @@ resolve_dir() {
         /*) printf '%s\n' "$configured"; return ;;
     esac
     if [ -d "$base/$configured" ] || [ -e "$base/$configured" ]; then
-        (cd "$base/$configured" && pwd)
+        (cd "$base/$configured" && pwd -P)
         return
     fi
     mkdir -p "$base/$configured"
-    (cd "$base/$configured" && pwd)
+    (cd "$base/$configured" && pwd -P)
 }
 
 if [ -z "$HOOKS_DIR" ] || [ -z "$GLOBAL_DIR" ]; then
@@ -72,10 +72,10 @@ if [ -z "$HOOKS_DIR" ] || [ -z "$GLOBAL_DIR" ]; then
             echo "no repo-local core.hooksPath in $REPO — global hooks already run" >&2
             exit 0
         fi
-        repo_abs="$(cd "$REPO" && pwd)"
+        repo_abs="$(cd "$REPO" && pwd -P)"
         git_dir="$(git -C "$REPO" rev-parse --absolute-git-dir)"
         if [ -d "$repo_abs/$local_path" ] || [ -e "$repo_abs/$local_path" ]; then
-            HOOKS_DIR="$(cd "$repo_abs/$local_path" && pwd)"
+            HOOKS_DIR="$(cd "$repo_abs/$local_path" && pwd -P)"
         else
             HOOKS_DIR="$(resolve_dir "$git_dir" "$local_path")"
         fi
@@ -92,9 +92,10 @@ fi
 
 mkdir -p "$HOOKS_DIR"
 
-# Resolve to real paths so wrappers survive a later symlink swap of the global dir.
-GLOBAL_DIR="$(cd "$GLOBAL_DIR" && pwd)"
-HOOKS_DIR="$(cd "$HOOKS_DIR" && pwd)"
+# Physical paths so a symlink of the global dir onto the local dir is detected
+# as the same directory (logical pwd would wrap a dir into itself).
+GLOBAL_DIR="$(cd "$GLOBAL_DIR" && pwd -P)"
+HOOKS_DIR="$(cd "$HOOKS_DIR" && pwd -P)"
 
 if [ "$HOOKS_DIR" = "$GLOBAL_DIR" ]; then
     echo "local hooksPath is already the global dir — nothing to chain" >&2
@@ -112,12 +113,18 @@ write_wrapper() {
 set -euo pipefail
 GLOBAL_HOOK=$(printf '%q' "$global_hook")
 LOCAL_HOOK=$(printf '%q' "$local_hook")
+INPUT=\$(mktemp)
+trap 'rm -f "\$INPUT"' EXIT
+cat >"\$INPUT"
+status=0
 if [ -x "\$GLOBAL_HOOK" ]; then
-    "\$GLOBAL_HOOK" "\$@" || exit \$?
+    "\$GLOBAL_HOOK" "\$@" <"\$INPUT" || status=\$?
+    [ "\$status" -eq 0 ] || exit "\$status"
 fi
 if [ -x "\$LOCAL_HOOK" ]; then
-    exec "\$LOCAL_HOOK" "\$@"
+    "\$LOCAL_HOOK" "\$@" <"\$INPUT" || status=\$?
 fi
+exit "\$status"
 EOF
     chmod +x "$dest"
 }
@@ -129,12 +136,13 @@ for name in "${HOOK_NAMES[@]}"; do
     local_hook="$HOOKS_DIR/${name}.local"
     [ -x "$global_hook" ] || [ -e "$dest" ] || continue
 
-    if [ -e "$dest" ] && [ ! -e "$local_hook" ]; then
+    if [ -e "$dest" ]; then
         if grep -qF "$MARKER" "$dest" 2>/dev/null; then
             write_wrapper "$name"
             chained=$((chained + 1))
             continue
         fi
+        # dest is a real local hook: first install, or prek overwrote the wrapper.
         mv "$dest" "$local_hook"
     fi
     write_wrapper "$name"
