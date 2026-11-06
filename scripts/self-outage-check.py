@@ -187,7 +187,9 @@ def assess(
         if reason_counts:
             dominant_reason = reason_counts.most_common(1)[0][0]
         most_recent = max(
-            auth_failure_records, key=lambda r: r.get("timestamp", "") or ""
+            auth_failure_records,
+            key=lambda r: _parse_ts(r.get("timestamp", ""))
+            or datetime.min.replace(tzinfo=timezone.utc),
         )
         err = (most_recent.get("error") or "").strip()
         sample_error = err[:400] or None
@@ -322,23 +324,37 @@ def _closed_during_outage(issue: dict, status: dict, now: datetime) -> bool:
     return (now - closed) <= timedelta(hours=status["window_hours"])
 
 
+def _is_billing_outage(status: dict) -> bool:
+    """True when the outage looks like a 403/billing block rather than a bad token.
+
+    Checks both dominant_reason (ideal path) and sample_error (fallback for
+    recorders that emit generic ``auth`` reason even for 403s — the error string
+    then carries the real signal).
+    """
+    if status.get("dominant_reason") in BILLING_OUTAGE_REASONS:
+        return True
+    sample = (status.get("sample_error") or "").lower()
+    return "api_error_403" in sample or "oauth_not_allowed_for_organization" in sample
+
+
 def _remediation(cfg: Config, status: dict) -> str:
     """Failure-mode-specific remediation line.
 
-    A 403/billing outage (payment past due, org access disabled) cannot be fixed
-    by re-authenticating — the token is valid, the *account* is blocked. Telling
-    the operator to re-auth there sends them down a dead end, so for 403-dominant
-    outages we point at pay/renew, API-key, and failover instead.
+    For 403/billing outages (payment past due, org access disabled): try a fresh
+    login first — it may clear OAuth session state even on a 403 — then escalate
+    to billing/API-key/failover if that doesn't work.
+
+    For token failures (401): the standard reauth hint.
     """
-    if status.get("dominant_reason") in BILLING_OUTAGE_REASONS:
+    if _is_billing_outage(status):
         return (
-            "This is a **403 / billing** outage (e.g. "
+            "Fix: try `/login` on the agent host first — a fresh login may clear "
+            "OAuth session state even on a 403. If that doesn't resolve it: "
+            "this looks like a **billing** outage (e.g. "
             "`oauth_not_allowed_for_organization` — subscription payment past due "
-            "or org access disabled). **Re-authenticating will not fix it** "
-            "(the token is valid; the account is blocked). Instead: pay/renew at "
+            "or org access disabled); pay/renew at "
             "https://claude.ai/settings/billing, switch to an Anthropic API key, "
-            "or enable the already-built alternate-harness failover so the loop "
-            "doesn't go dark during billing gaps."
+            "or enable the already-built alternate-harness failover."
         )
     return f"Fix: {cfg.reauth_cmd}."
 

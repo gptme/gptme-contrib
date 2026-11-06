@@ -401,9 +401,51 @@ def test_remediation_is_billing_aware_for_403(tmp_path: Path) -> None:
     cfg = cfg_for(tmp_path)
     billing = soc._remediation(cfg, {"dominant_reason": "api_error_403"})
     assert "billing" in billing.lower()
-    assert "run the reauth script" not in billing  # reauth is NOT the fix here
+    assert (
+        cfg.reauth_cmd not in billing
+    )  # agent-specific reauth cmd is NOT the fix here
     token = soc._remediation(cfg, {"dominant_reason": "api_error_401"})
-    assert "run the reauth script" in token
+    assert cfg.reauth_cmd in token
+
+
+def test_billing_remediation_via_error_string_when_reason_is_auth(
+    tmp_path: Path,
+) -> None:
+    # Recorders often emit failure_reason="auth" for 401/403 indiscriminately.
+    # dominant_reason will be "auth", not "api_error_403", but the error string
+    # reveals a billing block — remediation must still pick the billing path.
+    cfg = cfg_for(tmp_path)
+    billing = soc._remediation(
+        cfg,
+        {
+            "dominant_reason": "auth",
+            "sample_error": "api_error_status:403; oauth_not_allowed_for_organization; payment past due",
+        },
+    )
+    assert "billing" in billing.lower()
+    assert cfg.reauth_cmd not in billing
+
+
+def test_most_recent_error_uses_parsed_timestamp(tmp_path: Path) -> None:
+    # Timestamps with the same wall-clock hour but different UTC offsets sort
+    # incorrectly by string comparison.  "2026-09-18T12:00:00+02:00" (= 10:00 UTC)
+    # beats "2026-09-18T11:00:00+00:00" (= 11:00 UTC) lexicographically, but the
+    # 11:00 UTC record is actually the most recent and should supply sample_error.
+    r_older = {
+        "timestamp": "2026-09-18T12:00:00+02:00",  # 10:00 UTC — older
+        "outcome": "failed",
+        "failure_reason": "api_error_403",
+        "error": "older_error",
+    }
+    r_newer = {
+        "timestamp": "2026-09-18T11:00:00+00:00",  # 11:00 UTC — newer
+        "outcome": "failed",
+        "failure_reason": "api_error_403",
+        "error": "newer_error",
+    }
+    write_records(tmp_path, [rec(40, "productive"), r_older, r_newer])
+    status = assess(tmp_path)
+    assert status["sample_error"] == "newer_error"
 
 
 def test_issue_body_surfaces_error_for_403(tmp_path: Path) -> None:
