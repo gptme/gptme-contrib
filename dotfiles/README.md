@@ -45,10 +45,31 @@ The dotfiles install global git hooks that apply to ALL repositories:
 - Helps catch branching issues early
 
 #### prepare-commit-msg
-- **Git-Session-Id trailer**: When `GIT_COMMITTER_SESSION_ID` is set, appends a
-  `Git-Session-Id` commit trailer. No-ops if the env var is absent or the
-  trailer already exists. This is source-of-truth parity with the live agent
-  hook — not a new attribution feature.
+- **Git-Session-Id trailer**: Appends `Git-Session-Id: <id>` from
+  `GIT_COMMITTER_SESSION_ID`, then `AGENT_SESSION_ID` /
+  `GIT_SAFE_COMMIT_SESSION_ID` / `BOB_SESSION_ID` (compatibility). If those are
+  absent it maps `CC_SESSION_ID` / `CLAUDE_CODE_SESSION_ID` through
+  `$TMPDIR/agent-provenance-state/<id>.json` (`agent_session_id` or
+  `bob_session_id`), and if the environment was scrubbed it walks same-cgroup
+  ancestors. Existing singular or plural trailers are left alone. Opt out with
+  `AGENT_SESSION_TRAILER=0`.
+
+## core.hooksPath override (prek)
+
+Git's `core.hooksPath` is exclusive. A repo-local value (prek sets
+`.git/hooks`) silently disables `~/.config/git/hooks`, so the session trailer
+never runs. `install.sh` warns when the agent workspace has a local override.
+Chain the global hooks into that local dir:
+
+```bash
+./chain-global-hooks.sh /path/to/agent-workspace
+# or re-run install with chaining:
+CHAIN_HOOKS=1 ./install.sh
+```
+
+The helper wraps each git hook name: global first, then the original local
+hook (renamed `*.local`). It is idempotent. Re-running prek may overwrite a
+wrapper; run the helper again after that.
 
 ## Customization
 
@@ -105,9 +126,10 @@ dotfiles/
 │           ├── pre-commit               # Main pre-commit hook
 │           ├── pre-push                 # Pre-push protection + validation
 │           ├── post-checkout            # Post-checkout warnings
-│           ├── prepare-commit-msg       # Git-Session-Id trailer (when env is set)
+│           ├── prepare-commit-msg       # Git-Session-Id trailer (env + cgroup recovery)
 │           ├── validate-branch-base.sh  # Branch base checking
 │           └── validate-worktree-tracking.sh  # Worktree validation
+├── chain-global-hooks.sh                # Wrap local hooksPath so global hooks still run
 ├── install.sh                           # Installation script
 └── README.md                            # This file
 ```
@@ -118,7 +140,9 @@ After installation, git will use `~/.config/git/hooks` as the global hooks path 
 - `core.hooksPath` set to `~/.config/git/hooks`
 - `init.templateDir` set for pre-commit integration
 
-These hooks run BEFORE any repo-local hooks, providing a safety net across all repositories.
+These hooks run only when `core.hooksPath` points at them. A repo-local
+`core.hooksPath` replaces the global dir rather than chaining; see
+[core.hooksPath override](#corehookspath-override-prek).
 
 ## Origin
 
