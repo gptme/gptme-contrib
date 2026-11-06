@@ -76,9 +76,12 @@ installer discovers both `workspace/dotfiles` and `workspace/contrib/dotfiles`;
 
 Stdin is replayed to both hooks for `pre-push`, `pre-receive`, `post-receive`
 and `post-rewrite`; commit hooks do not buffer stdin. When the saved local
-`pre-commit` is a generated prek/pre-commit runner, the global hook runs its
-guards but delegates the check suite to that local runner, avoiding duplicate
-checks. Arbitrary local hooks do not suppress the global check suite.
+`pre-commit` is a generated prek/pre-commit runner, the contrib global hook runs
+its guards and the check suite once using explicit `run --files`, retaining
+formatter auto-staging without the generated runner's stash/restore cycle.
+The wrapper skips that generated runner only when the global hook declares
+ownership of these checks. Arbitrary local hooks still run after the global
+check suite. Git-configured `~/` hook paths are expanded before installation.
 
 ## Customization
 
