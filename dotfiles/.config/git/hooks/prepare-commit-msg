@@ -118,10 +118,10 @@ def main() -> int:
         return 0
     message = sys.argv[1]
     trailers = subprocess.check_output(
-        ["git", "interpret-trailers", "--parse", message], text=True
+        ["git", "interpret-trailers", "--parse", message]
     )
     if any(
-        line.partition(":")[0].lower() in ("git-session-id", "git-session-ids")
+        line.partition(b":")[0].lower() in (b"git-session-id", b"git-session-ids")
         for line in trailers.splitlines()
     ):
         return 0

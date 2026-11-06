@@ -256,3 +256,13 @@ def test_invalid_identity_and_broken_proc_are_unknown(tmp_path: Path) -> None:
     _process(tmp_path, 20, 1)
     (tmp_path / "20/stat").write_text("malformed")
     assert resolve_session_id({}, proc_root=tmp_path, pid=20) is None
+
+
+def test_non_utf8_trailer_does_not_block_or_corrupt_message(tmp_path: Path) -> None:
+    msg = tmp_path / "COMMIT_EDITMSG"
+    original = b"feat: encoding\n\nSigned-off-by: Ren\xe9 <rene@example.com>\n"
+    msg.write_bytes(original)
+    result = _run_hook(msg, _clean_env(GIT_COMMITTER_SESSION_ID="encoding42"))
+    assert result.returncode == 0, result.stderr
+    assert b"Signed-off-by: Ren\xe9 <rene@example.com>" in msg.read_bytes()
+    assert b"Git-Session-Id: encoding42" in msg.read_bytes()

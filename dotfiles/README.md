@@ -69,7 +69,16 @@ CHAIN_HOOKS=1 ./install.sh
 
 The helper wraps each git hook name: global first, then the original local
 hook (renamed `*.local`). It is idempotent. Re-running prek may overwrite a
-wrapper; run the helper again after that.
+wrapper; run the helper again after that. Relative local paths are resolved
+against the worktree root (the Git directory for bare repositories). The
+installer discovers both `workspace/dotfiles` and `workspace/contrib/dotfiles`;
+`AGENT_WORKSPACE` explicitly selects a different workspace.
+
+Stdin is replayed to both hooks for `pre-push`, `pre-receive`, `post-receive`
+and `post-rewrite`; commit hooks do not buffer stdin. When the saved local
+`pre-commit` is a generated prek/pre-commit runner, the global hook runs its
+guards but delegates the check suite to that local runner, avoiding duplicate
+checks. Arbitrary local hooks do not suppress the global check suite.
 
 ## Customization
 

@@ -100,9 +100,16 @@ warn_or_chain_local_hooks_override() {
 
     if [ -n "${AGENT_WORKSPACE:-}" ] && [ -e "${AGENT_WORKSPACE}/.git" ]; then
         workspace="$AGENT_WORKSPACE"
-    elif [ -f "$DOTFILES_DIR/../../gptme.toml" ] && \
-         grep -q '\[agent\]' "$DOTFILES_DIR/../../gptme.toml" 2>/dev/null; then
-        workspace="$(cd "$DOTFILES_DIR/../.." && pwd)"
+    else
+        # Support both workspace/dotfiles and workspace/contrib/dotfiles.
+        local candidate
+        for candidate in "$DOTFILES_DIR/.." "$DOTFILES_DIR/../.."; do
+            if [ -e "$candidate/.git" ] && [ -f "$candidate/gptme.toml" ] && \
+               grep -q '\[agent\]' "$candidate/gptme.toml" 2>/dev/null; then
+                workspace="$(cd "$candidate" && pwd)"
+                break
+            fi
+        done
     fi
     [ -n "$workspace" ] || return 0
 

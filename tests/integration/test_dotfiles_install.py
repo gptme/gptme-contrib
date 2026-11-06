@@ -265,3 +265,32 @@ def test_existing_allowed_repos_conf_is_not_overwritten(fake_home):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_discovers_workspace_without_explicit_env(fake_home, tmp_path, nested):
+    env = _set_identity(fake_home, "agent@example.com")
+    env.pop("AGENT_WORKSPACE", None)
+    env["CHAIN_HOOKS"] = "1"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q", str(workspace)], env=env, check=True)
+    subprocess.run(
+        ["git", "-C", str(workspace), "config", "core.hooksPath", ".hooks"],
+        env=env,
+        check=True,
+    )
+    (workspace / "gptme.toml").write_text('[agent]\nname = "Test"\n')
+    target = workspace / "contrib/dotfiles" if nested else workspace / "dotfiles"
+    shutil.copytree(DOTFILES_DIR, target)
+    result = subprocess.run(
+        ["bash", str(target / "install.sh")],
+        env=env,
+        cwd=fake_home,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "repo-local core.hooksPath" in result.stdout
+    assert (workspace / ".hooks/prepare-commit-msg").exists(), result.stdout
