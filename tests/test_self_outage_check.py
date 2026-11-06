@@ -512,3 +512,24 @@ def test_billing_detected_when_403_records_outnumbered_by_401(tmp_path: Path) ->
     write_records(tmp_path, records)
     status = assess(tmp_path)
     assert status["billing_outage"] is True
+
+
+def test_sample_error_uses_newest_nonempty_error(tmp_path: Path) -> None:
+    # When the newest auth-failure record has no error field, sample_error must
+    # still be populated from the newest record that carries one — not silently
+    # dropped because most_recent.error happens to be empty.
+    r_older = {
+        "timestamp": (NOW - timedelta(hours=3)).isoformat(),
+        "outcome": "failed",
+        "failure_reason": "auth",
+        "error": "invalid API key",
+    }
+    r_newer = {
+        "timestamp": (NOW - timedelta(hours=1)).isoformat(),
+        "outcome": "failed",
+        "failure_reason": "auth",
+        # no error field — newest record, but empty
+    }
+    write_records(tmp_path, [rec(40, "productive"), r_older, r_newer])
+    status = assess(tmp_path)
+    assert status["sample_error"] == "invalid API key"

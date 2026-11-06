@@ -195,11 +195,6 @@ def assess(
         )
         if reason_counts:
             dominant_reason = reason_counts.most_common(1)[0][0]
-        most_recent = max(
-            auth_failure_records,
-            key=lambda r: _parse_ts(r.get("timestamp", ""))
-            or datetime.min.replace(tzinfo=timezone.utc),
-        )
         # Classify billing-vs-token over the FULL, case-folded error strings of
         # *every* auth-failure record, up front — before any truncation. A long
         # or mixed-case error must not be able to hide the 403/billing signal,
@@ -223,11 +218,24 @@ def assess(
         # Prefer a billing-bearing record for the display sample too: the newest
         # record may have an empty error field even during a sustained billing
         # outage (the recorder only populates it intermittently). Fall back to
-        # the most-recent error so we always surface *something* useful.
+        # the newest record that carries any error, so we always surface
+        # *something* useful even when the most-recent record has an empty field.
         err = (
             billing_errors[0]
             if billing_errors
-            else (most_recent.get("error") or "").strip()
+            else next(
+                (
+                    (r.get("error") or "").strip()
+                    for r in sorted(
+                        auth_failure_records,
+                        key=lambda r: _parse_ts(r.get("timestamp", ""))
+                        or datetime.min.replace(tzinfo=timezone.utc),
+                        reverse=True,
+                    )
+                    if r.get("error")
+                ),
+                "",
+            )
         )
         sample_error = err[:400] or None
 
