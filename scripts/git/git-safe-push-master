@@ -18,6 +18,7 @@
 #        --dry-run fetches and previews without publishing or updating local trunk.
 #        GIT_SAFE_PUSH_LOCK_TIMEOUT=30 git-safe-push-master
 #        GIT_SAFE_PUSH_TIMEOUT=60 git-safe-push-master     # bound the push itself
+#        GIT_SAFE_FETCH_TIMEOUT=30 git-safe-push-master    # bound the fetch under the lock
 #        GIT_SAFE_TRUNK=main git-safe-push-master          # override derived trunk
 #        GIT_SAFE_REMOTE=upstream git-safe-push-master     # override remote
 #
@@ -68,7 +69,9 @@ Publish local trunk using the shared commit lock and off-tree reconciliation.
 Environment: GIT_SAFE_REMOTE (origin), GIT_SAFE_TRUNK (remote HEAD, else master),
              GIT_SAFE_PUSH_LOCK_TIMEOUT (60 seconds),
              GIT_SAFE_PUSH_TIMEOUT (300 seconds per push, then 5 seconds kill
-                                    grace; 0 disables the bound).
+                                    grace; 0 disables the bound),
+             GIT_SAFE_FETCH_TIMEOUT (default: the push bound; the fetch also
+                                     runs while the commit lock is held).
 Exit codes: 0 success/clean preview, 1 conflict, 2 error/invalid argument.
 EOF
 }
@@ -117,13 +120,50 @@ PUSH_TIMEOUT=${GIT_SAFE_PUSH_TIMEOUT:-300}
 case "$PUSH_TIMEOUT" in
     *[!0-9]*) echo "error: GIT_SAFE_PUSH_TIMEOUT must be a non-negative integer (0 disables)" >&2; exit 2 ;;
 esac
+# The fetch that runs under the same lock needs the same bound: a fetch whose
+# connection dies holds fd 9 exactly as a dead push does. Separate knob (default:
+# the push bound) so a slow fetch can be tuned independently; 0 disables.
+FETCH_TIMEOUT=${GIT_SAFE_FETCH_TIMEOUT:-$PUSH_TIMEOUT}
+case "$FETCH_TIMEOUT" in
+    *[!0-9]*) echo "error: GIT_SAFE_FETCH_TIMEOUT must be a non-negative integer (0 disables)" >&2; exit 2 ;;
+esac
 TIMEOUT_BIN=""
-if [ "$PUSH_TIMEOUT" -gt 0 ]; then
+if [ "$PUSH_TIMEOUT" -gt 0 ] || [ "$FETCH_TIMEOUT" -gt 0 ]; then
     TIMEOUT_BIN=$(command -v timeout || command -v gtimeout || true)
     if [ -z "$TIMEOUT_BIN" ]; then
-        echo "warning: no 'timeout'/'gtimeout' binary on PATH; running git push unbounded" >&2
+        echo "warning: no 'timeout'/'gtimeout' binary on PATH; running git push/fetch unbounded" >&2
     fi
 fi
+# GNU timeout otherwise puts Git in a background process group: reads from
+# /dev/tty (e.g. SSH key passphrases) then stop with SIGTTIN. Foreground mode
+# cannot time out descendants, but closing fd 9 still prevents lock leaks.
+# Standard streams may all be redirected while /dev/tty remains available.
+TIMEOUT_OPTIONS=(--signal=TERM --kill-after=5)
+if ( : </dev/tty ) 2>/dev/null; then
+    TIMEOUT_OPTIONS+=(--foreground)
+fi
+
+# Fetch under the lock, bounded. Returns 0 on success, 1 on an ordinary failure,
+# 3 when aborted by the bound. A fetch only writes objects and tracking refs, so
+# an aborted one leaves local trunk and the working tree unchanged. The parent
+# keeps the flock; the child must not inherit it.
+fetch_trunk() {
+    local rc=0
+    if [ -n "$TIMEOUT_BIN" ] && [ "$FETCH_TIMEOUT" -gt 0 ]; then
+        "$TIMEOUT_BIN" "${TIMEOUT_OPTIONS[@]}" "$FETCH_TIMEOUT" \
+            git fetch "$REMOTE" "$TRUNK" 9>&- >/dev/null 2>&1 || rc=$?
+    else
+        git fetch "$REMOTE" "$TRUNK" 9>&- >/dev/null 2>&1 || rc=$?
+    fi
+    [ "$rc" -eq 0 ] && return 0
+    if [ -n "$TIMEOUT_BIN" ] && [ "$FETCH_TIMEOUT" -gt 0 ] \
+        && { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 143 ]; }; then
+        echo "error: git fetch $REMOTE $TRUNK made no progress within ${FETCH_TIMEOUT}s (plus up to 5s kill grace); aborted." >&2
+        echo "       Lock released; local $TRUNK and the working tree are unchanged." >&2
+        return 3
+    fi
+    return 1
+}
 
 # Cleanup trap: release the lock
 trap 'exec 9>&-' EXIT
@@ -135,7 +175,11 @@ if ! flock --timeout "$LOCK_TIMEOUT" 9; then
     exit 2
 fi
 
-if ! git fetch "$REMOTE" "$TRUNK" 2>/dev/null; then
+fetch_rc=0
+fetch_trunk || fetch_rc=$?
+if [ "$fetch_rc" -eq 3 ]; then
+    exit 2
+elif [ "$fetch_rc" -ne 0 ]; then
     echo "error: git fetch $REMOTE $TRUNK failed" >&2
     exit 2
 fi
@@ -171,18 +215,10 @@ push_with_output() {
     local output_file="$1" trace_file="$2"
     shift 2
     local rc=0
-    local timeout_options=(--signal=TERM --kill-after=5)
-    # GNU timeout otherwise puts Git in a background process group: reads from
-    # /dev/tty (e.g. SSH key passphrases) then stop with SIGTTIN. Foreground mode
-    # cannot time out descendants, but closing fd 9 still prevents lock leaks.
-    # Standard streams may all be redirected while /dev/tty remains available.
-    if ( : </dev/tty ) 2>/dev/null; then
-        timeout_options+=(--foreground)
-    fi
-    if [ -n "$TIMEOUT_BIN" ]; then
+    if [ -n "$TIMEOUT_BIN" ] && [ "$PUSH_TIMEOUT" -gt 0 ]; then
         # The parent retains the flock throughout the push. Children must not
         # inherit it: a detached or TERM-resistant hook may outlive Git/timeout.
-        GIT_TRACE2_EVENT="$trace_file" "$TIMEOUT_BIN" "${timeout_options[@]}" "$PUSH_TIMEOUT" \
+        GIT_TRACE2_EVENT="$trace_file" "$TIMEOUT_BIN" "${TIMEOUT_OPTIONS[@]}" "$PUSH_TIMEOUT" \
             git push "$@" 9>&- >"$output_file" 2>&1 || rc=$?
     else
         GIT_TRACE2_EVENT="$trace_file" git push "$@" 9>&- >"$output_file" 2>&1 || rc=$?
@@ -191,7 +227,7 @@ push_with_output() {
         cat "$output_file"
         return 0
     fi
-    if [ -n "$TIMEOUT_BIN" ] && { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 143 ]; }; then
+    if [ -n "$TIMEOUT_BIN" ] && [ "$PUSH_TIMEOUT" -gt 0 ] && { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 143 ]; }; then
         cat "$output_file" >&2
         echo "error: git push exceeded ${PUSH_TIMEOUT}s (plus up to 5s kill grace); aborted." >&2
         echo "       Remote publication status is unknown: the update may have completed" >&2
@@ -235,9 +271,11 @@ push_failure_or_retry_race() {
         echo "error: local pre-push hook rejected the push; not retrying." >&2
         return 2
     fi
-    if ! git fetch "$REMOTE" "$TRUNK" >/dev/null 2>&1; then
+    local fetch_rc=0
+    fetch_trunk || fetch_rc=$?
+    if [ "$fetch_rc" -ne 0 ]; then
         cat "$output_file" >&2
-        echo "error: git fetch $REMOTE $TRUNK failed after rejected push" >&2
+        [ "$fetch_rc" -eq 3 ] || echo "error: git fetch $REMOTE $TRUNK failed after rejected push" >&2
         return 2
     fi
     refreshed_remote=$(git rev-parse "$REMOTE/$TRUNK" 2>/dev/null) || {

@@ -397,3 +397,76 @@ def test_invalid_timeout_is_rejected(repo, value):
     assert result.returncode == 2
     assert "GIT_SAFE_PUSH_TIMEOUT must be a non-negative integer" in result.stderr
     assert not repo["push_log"].exists()
+
+
+def _hang_on_fetch_shim(repo) -> Path:
+    shim = Path(repo["env"]["PATH"].split(os.pathsep)[0]) / "git"
+    shim.write_text(
+        "#!/bin/bash\n"
+        'if [ "${1:-}" = "fetch" ]; then\n'
+        '    echo "fetch" >> "$TEST_PUSH_LOG"\n'
+        "    exec sleep 60\n"
+        "fi\n"
+        'if [ "${1:-}" = "push" ]; then\n'
+        '    echo "push" >> "$TEST_PUSH_LOG"\n'
+        "    exit 0\n"
+        "fi\n"
+        f'exec "{REAL_GIT}" "$@"\n'
+    )
+    shim.chmod(0o755)
+    return shim
+
+
+def test_hung_fetch_under_lock_times_out_before_any_push(repo):
+    """The fetch runs while the commit lock is held; a dead one must not freeze it."""
+    _hang_on_fetch_shim(repo)
+    local_head = _git(repo["local"], "rev-parse", "HEAD", env=repo["env"]).strip()
+
+    started = time.monotonic()
+    result = _run(repo, GIT_SAFE_FETCH_TIMEOUT="2")
+    elapsed = time.monotonic() - started
+
+    diagnostic = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert result.returncode == 2, diagnostic
+    assert (
+        "git fetch origin main made no progress within 2s" in result.stderr
+    ), diagnostic
+    assert "local main and the working tree are unchanged" in result.stderr, diagnostic
+    assert "timed out waiting for commit lock" not in result.stderr, diagnostic
+    assert "git fetch origin main failed" not in result.stderr, diagnostic
+    assert elapsed < 30, diagnostic
+    invocations = repo["push_log"].read_text().split()
+    assert invocations == ["fetch"], f"no push may follow a dead fetch: {invocations}"
+    assert (
+        _git(repo["local"], "rev-parse", "HEAD", env=repo["env"]).strip() == local_head
+    )
+
+
+def test_hung_fetch_releases_the_commit_lock(repo):
+    """After the abort a cooperating process can take the lock immediately."""
+    _hang_on_fetch_shim(repo)
+    result = _run(repo, GIT_SAFE_FETCH_TIMEOUT="2")
+    assert result.returncode == 2, result.stderr
+
+    lock = repo["local"] / ".git" / "commit.lock"
+    taken = subprocess.run(
+        ["flock", "--nonblock", str(lock), "true"],
+        capture_output=True,
+        timeout=30,
+    )
+    assert taken.returncode == 0, "commit.lock still held after the fetch abort"
+
+
+def test_fetch_bound_defaults_to_push_bound(repo):
+    """With no dedicated knob, GIT_SAFE_PUSH_TIMEOUT also bounds the fetch."""
+    _hang_on_fetch_shim(repo)
+    result = _run(repo)  # GIT_SAFE_PUSH_TIMEOUT=2 from the fixture
+    assert result.returncode == 2, result.stderr
+    assert "made no progress within 2s" in result.stderr, result.stderr
+
+
+def test_invalid_fetch_timeout_is_rejected(repo):
+    result = _run(repo, GIT_SAFE_FETCH_TIMEOUT="soon")
+    assert result.returncode == 2
+    assert "GIT_SAFE_FETCH_TIMEOUT must be a non-negative integer" in result.stderr
+    assert repo["push_log"].exists() is False
