@@ -47,9 +47,9 @@ _FM_DELIM = re.compile(r"^---[ \t]*$", re.MULTILINE)
 _MAILBOX_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
-# Env chain naming the sending agent's current session — same order as the
-# Git-Session-Id commit hook and gptme_coordination.worktree_guard, so a message
-# and the commits from the session that sent it carry the same id.
+# Env chain naming the sending agent's current session — same order as
+# gptme_coordination.worktree_guard. The Git-Session-Id commit hook reads only
+# GIT_COMMITTER_SESSION_ID; when that is set, messages and commits share the id.
 SESSION_ID_ENV_VARS = (
     "GIT_COMMITTER_SESSION_ID",
     "AGENT_SESSION_ID",
