@@ -223,3 +223,19 @@ def test_weekly_total_does_not_borrow_fable_reset() -> None:
     assert data["seven_day"]["utilization"] == 0.9
     assert data["seven_day"]["resets"] == "unknown"
     assert data["seven_day_fable"]["resets"] == "Nov 13, 8am (UTC)"
+
+
+def test_low_usage_fallback_does_not_claim_observed_windows() -> None:
+    proc = run_parser("Nothing over 10%\n")
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    # Preserve the legacy estimates without mislabelling them as pane data.
+    assert data["five_hour"]["utilization"] == 0.0
+    assert data["seven_day"]["utilization"] == 0.0
+    assert data["_window_state"] == {
+        "five_hour": "absent_from_pane",
+        "weekly_windows": [],
+    }
+    assert "five_hour window absent" in proc.stderr
+    assert "synthetic" in proc.stderr
+    assert "reporting weekly windows only" not in proc.stderr

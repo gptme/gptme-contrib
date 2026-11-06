@@ -290,6 +290,8 @@ def main():
 
     # Try section-header parser first (CC v2.1.183+)
     result = parse_section_headers(lines)
+    # Record observed windows before the legacy fallback adds synthetic estimates.
+    window_state = build_window_state(result)
 
     # Fallback: low usage / empty result
     if not result:
@@ -340,12 +342,15 @@ def main():
         promo_active = promo_start <= now_utc <= promo_end
     else:
         promo_active = False
-    result["_window_state"] = build_window_state(result)
-    if result["_window_state"]["five_hour"] == "absent_from_pane":
+    result["_window_state"] = window_state
+    if window_state["five_hour"] == "absent_from_pane":
+        detail = (
+            "reporting weekly windows only."
+            if window_state["weekly_windows"]
+            else "reporting synthetic low-usage estimates, not observed windows."
+        )
         print(
-            "Warning: five_hour window absent from /usage pane "
-            "(Claude Code >= 2.1.318 no longer renders it); "
-            "reporting weekly windows only.",
+            f"Warning: five_hour window absent from /usage pane; {detail}",
             file=sys.stderr,
         )
     result["_off_peak"] = {
