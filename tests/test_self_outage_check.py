@@ -397,13 +397,32 @@ def test_dominant_reason_and_sample_error_captured(tmp_path: Path) -> None:
     assert "oauth_not_allowed_for_organization" in status["sample_error"]
 
 
+def test_billing_classified_despite_truncation_and_case(tmp_path: Path) -> None:
+    # Regression: assess() must classify the billing outage over the FULL,
+    # case-folded error string, not the 400-char display sample. Here the
+    # billing keyword is both mixed-case AND pushed past the truncation point,
+    # so a classifier reading only sample_error would wrongly return token.
+    records = [rec(40, "productive")]
+    long_error = "x" * 450 + " OAuth_Not_Allowed_For_Organization"
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "auth")  # generic reason hides the signal
+        r["error"] = long_error
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    assert status["billing_outage"] is True
+    assert soc._is_billing_outage(status) is True
+    # Display sample is still capped; classification does not depend on it.
+    assert len(status["sample_error"]) == 400
+
+
 def test_remediation_is_billing_aware_for_403(tmp_path: Path) -> None:
     cfg = cfg_for(tmp_path)
     billing = soc._remediation(cfg, {"dominant_reason": "api_error_403"})
     assert "billing" in billing.lower()
-    assert (
-        cfg.reauth_cmd not in billing
-    )  # agent-specific reauth cmd is NOT the fix here
+    # Remediation stays harness-agnostic: the configured reauth cmd leads even
+    # for a billing block (a fresh login cleared a real 403 on 2026-11-06).
+    assert cfg.reauth_cmd in billing
     token = soc._remediation(cfg, {"dominant_reason": "api_error_401"})
     assert cfg.reauth_cmd in token
 
@@ -423,7 +442,7 @@ def test_billing_remediation_via_error_string_when_reason_is_auth(
         },
     )
     assert "billing" in billing.lower()
-    assert cfg.reauth_cmd not in billing
+    assert cfg.reauth_cmd in billing
 
 
 def test_most_recent_error_uses_parsed_timestamp(tmp_path: Path) -> None:

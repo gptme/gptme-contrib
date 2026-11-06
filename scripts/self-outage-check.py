@@ -182,6 +182,7 @@ def assess(
     # generic "re-auth" hint (which is wrong for 403/billing outages).
     dominant_reason: str | None = None
     sample_error: str | None = None
+    billing_outage = False
     if auth_failure_records:
         reason_counts = Counter(
             r.get("failure_reason")
@@ -195,15 +196,25 @@ def assess(
             key=lambda r: _parse_ts(r.get("timestamp", ""))
             or datetime.min.replace(tzinfo=timezone.utc),
         )
-        # Prefer a record that carries billing-indicator keywords: the newest
-        # record may have an empty error field even during a sustained billing
-        # outage (the recorder only populates it intermittently).  Fall back to
-        # the most-recent error so we always surface *something* useful.
+        # Classify billing-vs-token over the FULL, case-folded error strings of
+        # *every* auth-failure record, up front — before any truncation. A long
+        # or mixed-case error must not be able to hide the 403/billing signal,
+        # and the display sample (below) is capped at 400 chars. The resulting
+        # flag is authoritative; _is_billing_outage() reads it directly.
         billing_errors = [
             (r.get("error") or "").strip()
             for r in auth_failure_records
-            if any(kw in (r.get("error") or "") for kw in BILLING_ERROR_SUBSTRINGS)
+            if any(
+                kw in (r.get("error") or "").lower() for kw in BILLING_ERROR_SUBSTRINGS
+            )
         ]
+        billing_outage = bool(billing_errors) or (
+            dominant_reason in BILLING_OUTAGE_REASONS
+        )
+        # Prefer a billing-bearing record for the display sample too: the newest
+        # record may have an empty error field even during a sustained billing
+        # outage (the recorder only populates it intermittently). Fall back to
+        # the most-recent error so we always surface *something* useful.
         err = (
             billing_errors[0]
             if billing_errors
@@ -244,6 +255,7 @@ def assess(
         "last_productive_at": last_prod.isoformat() if last_prod else None,
         "dominant_reason": dominant_reason,
         "sample_error": sample_error,
+        "billing_outage": billing_outage,
         "outage": outage,
     }
 
@@ -344,10 +356,13 @@ def _closed_during_outage(issue: dict, status: dict, now: datetime) -> bool:
 def _is_billing_outage(status: dict) -> bool:
     """True when the outage looks like a 403/billing block rather than a bad token.
 
-    Checks both dominant_reason (ideal path) and sample_error (fallback for
-    recorders that emit generic ``auth`` reason even for 403s — the error string
-    then carries the real signal).
+    assess() classifies this over the full, case-folded error strings of every
+    auth-failure record (before truncation) and stores the authoritative result
+    in ``billing_outage``; prefer it. Fall back to dominant_reason / sample_error
+    for status dicts constructed elsewhere (tests, issue-reopen paths).
     """
+    if "billing_outage" in status:
+        return bool(status["billing_outage"])
     if status.get("dominant_reason") in BILLING_OUTAGE_REASONS:
         return True
     sample = (status.get("sample_error") or "").lower()
@@ -357,23 +372,33 @@ def _is_billing_outage(status: dict) -> bool:
 def _remediation(cfg: Config, status: dict) -> str:
     """Failure-mode-specific remediation line.
 
-    For 403/billing outages (payment past due, org access disabled): try a fresh
-    login first — it may clear OAuth session state even on a 403 — then escalate
-    to billing/API-key/failover if that doesn't work.
+    Kept harness-agnostic: the fix always leads with the *configured* reauth
+    command (``cfg.reauth_cmd``), never a hard-coded provider action. A fresh
+    login cleared a real 403 on 2026-11-06, so it's the first thing to try even
+    for a billing/org-access block. Provider-specific billing guidance (the
+    Anthropic account URL) is only appended when the evidence actually names the
+    Anthropic org-access error, so a non-Anthropic agent is never pointed at
+    claude.ai.
 
-    For token failures (401): the standard reauth hint.
+    For token failures (401): just the reauth hint.
     """
-    if _is_billing_outage(status):
-        return (
-            "Fix: try `/login` on the agent host first — a fresh login may clear "
-            "OAuth session state even on a 403. If that doesn't resolve it: "
-            "this looks like a **billing** outage (e.g. "
-            "`oauth_not_allowed_for_organization` — subscription payment past due "
-            "or org access disabled); pay/renew at "
-            "https://claude.ai/settings/billing, switch to an Anthropic API key, "
-            "or enable the already-built alternate-harness failover."
+    if not _is_billing_outage(status):
+        return f"Fix: {cfg.reauth_cmd}."
+
+    line = (
+        f"Fix: {cfg.reauth_cmd} first (a fresh login cleared a 403 on "
+        "2026-11-06). If it persists, this looks like a billing/org-access "
+        "block: renew the subscription, switch to an API key, or enable the "
+        "already-built alternate-harness failover."
+    )
+    if (
+        "oauth_not_allowed_for_organization"
+        in (status.get("sample_error") or "").lower()
+    ):
+        line += (
+            " (Anthropic org access — pay/renew at https://claude.ai/settings/billing)"
         )
-    return f"Fix: {cfg.reauth_cmd}."
+    return line
 
 
 def _issue_body(cfg: Config, status: dict) -> str:
