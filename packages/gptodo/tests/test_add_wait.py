@@ -16,6 +16,7 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (tmp_path / "tasks").mkdir()
     (tmp_path / "gptme.toml").write_text('[agent]\nname = "Bob"\n')
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GPTODO_TASKS_DIR", raising=False)
     monkeypatch.delenv("GPTODO_AGENT_NAME", raising=False)
     return tmp_path
 
