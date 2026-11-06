@@ -57,7 +57,7 @@ quota_gate_check() {
     # Absent five_hour (CC >=2.1.318 weekly-only panes) is not 0% quota.
     # Session cost summaries are not quota data. All-model weekly remains
     # the primary weekly counter unless --model sonnet is passed.
-    five_hour_present=$(echo "$quota_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print('yes' if isinstance(d.get('five_hour'), dict) and 'utilization' in d['five_hour'] else 'no')" 2>/dev/null || echo "no")
+    five_hour_present=$(echo "$quota_json" | python3 -c "import json,sys; d=json.load(sys.stdin); w=d.get('five_hour'); u=w.get('utilization') if isinstance(w, dict) else None; print('yes' if type(u) in (int, float) else 'no')" 2>/dev/null || echo "no")
     five_hour_util=$(echo "$quota_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('five_hour',{}).get('utilization',0) if isinstance(d.get('five_hour'), dict) else 0)" 2>/dev/null || echo "0")
     seven_day_util=$(echo "$quota_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('seven_day',{}).get('utilization',0))" 2>/dev/null || echo "0")
 

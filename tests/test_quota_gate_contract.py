@@ -46,6 +46,7 @@ def _run_gate(
     *,
     model: str = "",
     env: dict[str, str] | None = None,
+    strict: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Source quota-gate.sh, point it at a fake usage probe, call the function.
 
@@ -75,7 +76,7 @@ def _run_gate(
         if env:
             run_env.update(env)
         return subprocess.run(
-            ["bash", "-c", script],
+            ["bash", *(["-e"] if strict else []), "-c", script],
             capture_output=True,
             text=True,
             env=run_env,
@@ -293,3 +294,14 @@ def test_present_zero_five_hour_still_prints_zero() -> None:
     assert r.returncode == 0, r.stderr
     assert "5h: 0%" in r.stderr
     assert "5h: N/A" not in r.stderr
+
+
+def test_null_session_utilization_is_unavailable_under_errexit() -> None:
+    r = _run_gate(
+        '{"five_hour":{"utilization":null},"seven_day":{"utilization":0.5}}',
+        strict=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "5h: N/A" in r.stderr
+    assert "weekly: 50%" in r.stderr
+    assert "Traceback" not in r.stderr
