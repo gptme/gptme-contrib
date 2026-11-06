@@ -454,6 +454,36 @@ def test_main_reclassifies_status_when_two_identical_write_errors_despite_dirty_
     assert "Patch failed" in comments[0]
 
 
+def test_output_dir_only_dirt_is_not_a_preserved_attempt(monkeypatch, local_git_repo):
+    """Regression: the resolver's own logs must not masquerade as agent work.
+
+    The workflow runs from the target worktree with ``--output-dir output``, so
+    ``output/`` sits inside it. Staging with ``git add -A`` then reported a
+    "partial attempt preserved" branch whose entire content was the resolver's
+    stdout/stderr/status files. A log-only dirty worktree is not an attempt.
+    """
+    repo, _ = local_git_repo
+    out_dir = repo / "output"
+    gptme_stdout = "RESOLVER_STATUS: no_changes\nRESOLVER_SUMMARY: Nothing to do.\n"
+
+    def fake_run_gptme(prompt, *, model=None, workdir):
+        return (gptme_stdout, "")
+
+    rc, comments, draft_prs = _run_resolver(
+        monkeypatch, repo, out_dir, gptme_stdout, fake_run_gptme=fake_run_gptme
+    )
+
+    assert rc == 0
+    assert draft_prs == []
+    assert len(comments) == 1
+    assert "preserved" not in comments[0].lower()
+    # The output directory itself is still written, and still excluded from
+    # the dirtiness probe that decides preservation.
+    assert (out_dir / "resolver-status.json").is_file()
+    assert resolve_issue.has_git_changes(repo) is True
+    assert resolve_issue.has_git_changes(repo, exclude=[out_dir]) is False
+
+
 def test_open_draft_pr_retrigger_returns_existing_url(monkeypatch):
     # On re-trigger, `gh pr create` exits 1. open_draft_pr must probe for an
     # existing open PR via `gh pr list --head` and return its URL so the caller

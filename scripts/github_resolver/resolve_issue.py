@@ -46,6 +46,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -243,8 +244,37 @@ def count_write_tool_calls(gptme_output: str) -> int:
     return len(_WRITE_TOOL_RE.findall(gptme_output))
 
 
-def has_git_changes(cwd: Path) -> bool:
-    out = git(["status", "--porcelain"], cwd=cwd)
+def _exclude_pathspecs(cwd: Path, exclude: Sequence[str]) -> list[str]:
+    """Return ``:(exclude)`` pathspecs for *exclude* entries inside *cwd*.
+
+    Entries outside the worktree are skipped: they cannot be staged there, so
+    excluding them would only make git error out on an unmatched pathspec.
+    """
+    specs: list[str] = []
+    root = cwd.resolve()
+    for raw in exclude:
+        try:
+            rel = Path(raw).resolve().relative_to(root)
+        except ValueError:
+            continue
+        specs.append(f":(exclude){rel.as_posix()}")
+    return specs
+
+
+def has_git_changes(cwd: Path, *, exclude: Sequence[str] = ()) -> bool:
+    """Whether the worktree has changes, ignoring paths matched by *exclude*.
+
+    The resolver's own ``--output-dir`` usually lives inside the target
+    worktree (the workflow runs from ``$GITHUB_WORKSPACE`` with
+    ``--output-dir output``). Its logs must not count as agent work: a
+    log-only dirty worktree reported a "preserved attempt" branch whose entire
+    content was the resolver's own artifacts.
+    """
+    args = ["status", "--porcelain"]
+    specs = _exclude_pathspecs(cwd, exclude)
+    if specs:
+        args += ["--", ".", *specs]
+    out = git(args, cwd=cwd)
     return bool(out.strip())
 
 
@@ -436,10 +466,23 @@ def commit_and_push(
     auth_token: str | None = None,
     author_name: str = "gptme-resolver",
     author_email: str = "gptme-resolver@users.noreply.github.com",
-) -> None:
-    """Commit all pending changes onto ``branch`` and push to origin."""
+    exclude: Sequence[str] = (),
+) -> bool:
+    """Commit pending changes onto ``branch`` and push to origin.
+
+    Returns ``False`` when *exclude* removed every staged change, i.e. there
+    was no agent work to preserve. The caller must then not claim an attempt
+    branch and must not open a draft PR.
+    """
     git(["checkout", "-B", branch], cwd=cwd)
-    git(["add", "-A"], cwd=cwd)
+    specs = _exclude_pathspecs(cwd, exclude)
+    if specs:
+        git(["add", "-A", "--", ".", *specs], cwd=cwd)
+        staged = git(["diff", "--cached", "--name-only"], cwd=cwd)
+        if not staged.strip():
+            return False
+    else:
+        git(["add", "-A"], cwd=cwd)
     # Preserve even broken attempts: ambient quality hooks must not veto the
     # orchestrator's archival commit or push. Normal developer commits are unchanged.
     # Configure the attempt commit author explicitly; the workflow runs as the
@@ -459,6 +502,7 @@ def commit_and_push(
         cwd=cwd,
     )
     push_branch(cwd, branch, repo=repo, auth_token=auth_token)
+    return True
 
 
 def push_existing_head(
@@ -644,7 +688,11 @@ def main(argv: list[str] | None = None) -> int:
 
     branch = branch_for_issue(issue.number)
     pr_url: str | None = None
-    worktree_dirty = has_git_changes(args.workdir)
+    # The output directory usually lives inside the target worktree. Exclude
+    # it everywhere we judge or commit worktree state, so the resolver's own
+    # logs are never mistaken for agent work.
+    exclude_paths = [args.output_dir]
+    worktree_dirty = has_git_changes(args.workdir, exclude=exclude_paths)
     repo_state_violation = detect_repo_state_violation(baseline_state, args.workdir)
     preserve_existing_head = (
         repo_state_violation is not None
@@ -681,13 +729,25 @@ def main(argv: list[str] | None = None) -> int:
             if args.dry_run:
                 print(f"[dry-run] Would push {branch} and open draft PR: {message}")
                 return 0
-            commit_and_push(
+            if not commit_and_push(
                 args.workdir,
                 branch,
                 commit_message=f"gptme-resolver attempt for #{issue.number}\n\n{message}",
                 repo=args.repo,
                 auth_token=auth_token,
-            )
+                exclude=exclude_paths,
+            ):
+                # Nothing outside the output directory changed; there is no
+                # commit to turn into a draft PR.
+                status = "error"
+                message = (
+                    "gptme reported changes but no files were modified. "
+                    f"Upstream message: {message}"
+                )
+                comment_on_issue(
+                    args.repo, issue.number, status=status, message=message
+                )
+                return 0
             pr_url = open_draft_pr(args.repo, issue.number, branch, message)
             comment_on_issue(
                 args.repo,
@@ -731,7 +791,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[dry-run] Would {action} on {branch}")
         else:
             if worktree_dirty:
-                commit_and_push(
+                # Only claim a preserved attempt when something outside the
+                # output directory was actually committed.
+                if commit_and_push(
                     args.workdir,
                     branch,
                     commit_message=(
@@ -740,7 +802,9 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     repo=args.repo,
                     auth_token=auth_token,
-                )
+                    exclude=exclude_paths,
+                ):
+                    partial_branch = branch
             else:
                 push_existing_head(
                     args.workdir,
@@ -748,7 +812,7 @@ def main(argv: list[str] | None = None) -> int:
                     repo=args.repo,
                     auth_token=auth_token,
                 )
-            partial_branch = branch
+                partial_branch = branch
 
     if args.dry_run:
         print(f"[dry-run] Would comment on issue — status={status}, message={message}")
