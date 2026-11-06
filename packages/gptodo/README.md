@@ -125,6 +125,16 @@ tags: ["docs"]
 # Write project README
 ```
 
+To defer a task at creation, use `gptodo add --wait 2099-01-15 "Later task"`.
+`--wait` accepts a date or ISO datetime (for example `2099-01-15T09:30`),
+keeps the task out of `ready` until that date/time, and does not change the
+task's state. Datetimes accept an uppercase `T` or a space separator and an
+optional timezone offset; malformed values are rejected before task creation.
+
+Piped input is **body text**, not frontmatter. A leading `---` key block in
+that input produces a warning but is preserved as body text; set metadata
+with command flags or `gptodo edit --set` instead.
+
 ## Task files
 
 - **Location.** Tasks are `tasks/*.md` at the workspace root. gptodo looks for the root in

@@ -5648,7 +5648,14 @@ def add(
     if wait_value is not None:
         from gptodo.utils import parse_wait
 
-        parsed_wait = parse_wait(wait_value.strip())
+        raw_wait = wait_value.strip()
+        # The legacy metadata reader truncates date-only strings to ten
+        # characters. CLI input must not silently lose a suffix or time.
+        parsed_wait = (
+            parse_wait(raw_wait)
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[T ].+)?", raw_wait)
+            else None
+        )
         if parsed_wait is None:
             raise click.UsageError("Invalid --wait format. Use YYYY-MM-DD or YYYY-MM-DDTHH:MM")
         wait_iso = parsed_wait.isoformat()

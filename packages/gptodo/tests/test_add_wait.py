@@ -30,11 +30,18 @@ def test_wait_date_written_to_frontmatter(workspace: Path) -> None:
     assert str(_meta(workspace, "later-task")["wait"]) == "2099-01-15"
 
 
-def test_wait_datetime_written_to_frontmatter(workspace: Path) -> None:
-    result = CliRunner().invoke(cli, ["add", "--wait", "2099-01-15T09:30", "Timed task"], input="")
+@pytest.mark.parametrize(
+    "value", ["2099-01-15T09:30", "2099-01-15 09:30", "2099-01-15T09:30:00+02:00"]
+)
+def test_wait_datetime_written_to_frontmatter(workspace: Path, value: str) -> None:
+    from datetime import datetime
+
+    result = CliRunner().invoke(cli, ["add", "--wait", value, "Timed task"], input="")
     assert result.exit_code == 0, result.output
-    assert str(_meta(workspace, "timed-task")["wait"]).startswith("2099-01-15")
-    assert "09:30" in (workspace / "tasks" / "timed-task.md").read_text()
+    assert _meta(workspace, "timed-task")["wait"] == datetime.fromisoformat(value)
+    ready = CliRunner().invoke(cli, ["ready", "--json"])
+    assert ready.exit_code == 0, ready.output
+    assert "timed-task" not in ready.output
 
 
 def test_wait_hides_task_from_ready(workspace: Path) -> None:
@@ -46,8 +53,11 @@ def test_wait_hides_task_from_ready(workspace: Path) -> None:
     assert "hidden" not in out
 
 
-def test_invalid_wait_rejected_without_creating(workspace: Path) -> None:
-    result = CliRunner().invoke(cli, ["add", "--wait", "next tuesday", "Bad"], input="")
+@pytest.mark.parametrize(
+    "value", ["next tuesday", "2099-01-15junk", "2099-01-15t09:30", "2099-02-30", ""]
+)
+def test_invalid_wait_rejected_without_creating(workspace: Path, value: str) -> None:
+    result = CliRunner().invoke(cli, ["add", "--wait", value, "Bad"], input="")
     assert result.exit_code != 0
     assert "Invalid --wait" in result.output
     assert not (workspace / "tasks" / "bad.md").exists()
@@ -78,5 +88,7 @@ def test_frontmatter_like_body_warns(workspace: Path) -> None:
         cli, ["add", "--body-stdin", "Piped gate"], input="---\nwait: 2099-01-15\n---\nBody"
     )
     assert result.exit_code == 0, result.output
-    assert "stored as body text" in result.output
+    assert "stored as body text" in result.stderr
     assert "wait" not in _meta(workspace, "piped-gate")
+    task = frontmatter.load(workspace / "tasks" / "piped-gate.md")
+    assert task.content.endswith("---\nwait: 2099-01-15\n---\nBody")
