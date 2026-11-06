@@ -22,6 +22,7 @@ contract spec lives in alice's
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -202,6 +203,7 @@ def authbilling_reason(rec: dict) -> str | None:
         or "403" in fr
         or "oauth_not_allowed" in err
         or "status:403" in err
+        or re.search(r"\b(?:http|status|code)\W{0,3}403\b", err) is not None
         or (isinstance(err_raw, dict) and err_raw.get("status") == 403)
     )
     if not is_403:
@@ -286,7 +288,11 @@ def inference_status_from_records(
     cutoff = now - timedelta(hours=window_hours)
     in_window = [(t, r) for (t, r) in records if cutoff <= t <= now]
 
-    productive = sum(1 for _, r in in_window if r.get("outcome") == "productive")
+    productive = sum(
+        1
+        for _, r in in_window
+        if r.get("outcome") == "productive" and not is_launch_artifact(r)
+    )
     metrics: dict[str, object] = {
         "window_hours": window_hours,
         "records_in_window": len(in_window),
@@ -554,5 +560,15 @@ if __name__ == "__main__":
     _check(
         [_r(3, "failed", failure_reason="api_error_403"), _r(1, "noop")],
         "degraded",
+    )
+    # A 403 named only in a free-text error string (no failure_reason) is down.
+    _check([_r(1, "failed", error="HTTP 403: payment past due")], "down")
+    # A <synthetic> "productive" record carries no inference evidence either.
+    _check(
+        [
+            _r(2, "failed", failure_reason="api_error_403"),
+            _r(1, "productive", model="<synthetic>"),
+        ],
+        "down",
     )
     print("OK: inference detector covers healthy/degraded/stale/down + recovery")
