@@ -484,3 +484,31 @@ def test_issue_body_surfaces_error_for_403(tmp_path: Path) -> None:
     assert "oauth_not_allowed_for_organization" in body
     assert "billing" in body.lower()
     assert "api_error_403" in body
+
+
+def test_billing_detected_for_api_error_status_403_spelling(tmp_path: Path) -> None:
+    # BILLING_ERROR_SUBSTRINGS must catch "api_error_status:403" (the recorder
+    # spelling), not only "api_error_403". A generic "Forbidden" response with
+    # failure_reason="auth" and no oauth substring must still classify as billing.
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "auth")
+        r["error"] = "api_error_status:403; Forbidden"
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    assert status["billing_outage"] is True
+    assert soc._is_billing_outage(status) is True
+
+
+def test_billing_detected_when_403_records_outnumbered_by_401(tmp_path: Path) -> None:
+    # Even if api_error_401 records outnumber api_error_403, billing detection
+    # must trigger because at least one record has a billing reason.
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3):
+        records.append(rec(h, "failed", "api_error_401"))
+    r = rec(4, "failed", "api_error_403")  # billing record — outnumbered but present
+    records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    assert status["billing_outage"] is True

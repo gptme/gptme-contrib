@@ -63,7 +63,11 @@ BILLING_OUTAGE_REASONS = frozenset({"api_error_403"})
 # Substrings in an error string that identify a 403/billing outage.  Kept in
 # sync with the checks in _is_billing_outage() so sample_error selection and
 # remediation classification agree.
-BILLING_ERROR_SUBSTRINGS = ("api_error_403", "oauth_not_allowed_for_organization")
+BILLING_ERROR_SUBSTRINGS = (
+    "api_error_403",
+    "api_error_status:403",
+    "oauth_not_allowed_for_organization",
+)
 
 # Default classifier for "the credential is dead and a human (or self-reauth)
 # must fix it out-of-band", as opposed to transient/capacity failures.
@@ -208,8 +212,13 @@ def assess(
                 kw in (r.get("error") or "").lower() for kw in BILLING_ERROR_SUBSTRINGS
             )
         ]
-        billing_outage = bool(billing_errors) or (
-            dominant_reason in BILLING_OUTAGE_REASONS
+        billing_outage = (
+            bool(billing_errors)
+            or (dominant_reason in BILLING_OUTAGE_REASONS)
+            or any(
+                r.get("failure_reason") in BILLING_OUTAGE_REASONS
+                for r in auth_failure_records
+            )
         )
         # Prefer a billing-bearing record for the display sample too: the newest
         # record may have an empty error field even during a sustained billing
