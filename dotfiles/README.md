@@ -84,7 +84,15 @@ ownership of these checks. Arbitrary local hooks still run after the global
 check suite. Generated runners with a custom or missing config are refused
 before any hook is rewritten: this slice supports an existing standard
 `.pre-commit-config.yaml` and an explicit standard `--config` in the runner.
-It does not silently discard custom validation. Git-configured `~/` hook paths
+It does not silently discard custom validation. When using `--hooks-dir` inside
+`.git` (including linked-worktree metadata), also pass the repository argument;
+the helper refuses ambiguous repository discovery before rewriting any hook.
+Because `run --files` validates worktree bytes, the global hook refuses partially
+staged files before running checks, leaving both index and worktree unchanged.
+Stage only the intended complete file, or use an isolated worktree for a partial
+commit. Unstaged changes in other files do not block checks. No stash/restore is
+introduced, so concurrent work is not hidden or restored over other sessions.
+Git-configured `~/` hook paths
 are expanded before installation; relative global paths use the repository's
 hook working directory, like relative local paths.
 
