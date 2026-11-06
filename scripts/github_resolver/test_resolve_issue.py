@@ -565,6 +565,28 @@ def test_nested_workdir_preserves_repository_wide_changes(monkeypatch, local_git
     assert not resolve_issue.has_git_changes(nested, exclude=[out])
 
 
+def test_output_symlink_is_excluded_without_hiding_agent_work(
+    monkeypatch, local_git_repo
+):
+    repo, destination = local_git_repo
+    destination.mkdir()
+    out = repo / "output"
+    out.symlink_to(destination, target_is_directory=True)
+    (out / "stdout.log").write_text("log\n")
+    assert not resolve_issue.has_git_changes(repo, exclude=[out])
+    resolve_issue.git(["config", "core.hooksPath", "/dev/null"], cwd=repo)
+    (repo / "note.txt").write_text("agent edit\n")
+    monkeypatch.setattr(resolve_issue, "push_branch", lambda *a, **kw: None)
+    assert resolve_issue.commit_and_push(
+        repo, "attempt", commit_message="agent work", exclude=[out]
+    )
+    assert resolve_issue.git(
+        ["diff", "HEAD^", "HEAD", "--name-only"], cwd=repo
+    ).splitlines() == ["note.txt"]
+    assert out.is_symlink()
+    assert (out / "stdout.log").read_text() == "log\n"
+
+
 def test_output_exclusion_in_repository_with_trailing_space(local_git_repo):
     repo, _ = local_git_repo
     renamed = repo.with_name("repo ")
