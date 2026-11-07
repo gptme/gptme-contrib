@@ -1330,3 +1330,39 @@ def test_active_hook_symlink_to_saved_path_keeps_implementation(tmp_path: Path) 
     message.write_text("subject\n")
     _run_wrapper(active, str(message))
     assert message.read_text().splitlines() == ["subject", "global", "local"]
+
+
+@pytest.mark.parametrize("link_style", ["relative", "absolute", "indirect"])
+def test_saved_symlink_to_active_hook_keeps_independent_implementation(
+    tmp_path: Path, link_style: str
+) -> None:
+    global_dir = tmp_path / "global"
+    local_dir = tmp_path / "local"
+    global_dir.mkdir()
+    local_dir.mkdir()
+    name = "prepare-commit-msg"
+    original = '#!/bin/bash\necho local >>"$1"\n'
+    active = local_dir / name
+    _write_exec(active, original)
+    active.chmod(0o750)
+    saved = local_dir / f"{name}.local"
+    if link_style == "indirect":
+        intermediate = local_dir / "original-link"
+        intermediate.symlink_to(active.name)
+        saved.symlink_to(intermediate.name)
+    else:
+        saved.symlink_to(active if link_style == "absolute" else active.name)
+    _write_exec(global_dir / name, '#!/bin/bash\necho global >>"$1"\n')
+    args = ["--hooks-dir", str(local_dir), "--global-dir", str(global_dir)]
+
+    for _ in range(2):
+        result = _run(args)
+        assert result.returncode == 0, result.stderr
+        # Check preservation before execution: the broken wrapper recurses.
+        assert not saved.is_symlink()
+        assert saved.read_text() == original
+        assert stat.S_IMODE(saved.stat().st_mode) == 0o750
+        message = tmp_path / "message"
+        message.write_text("subject\n")
+        _run_wrapper(active, str(message))
+        assert message.read_text().splitlines() == ["subject", "global", "local"]

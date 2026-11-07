@@ -374,13 +374,19 @@ for name in "${HOOK_NAMES[@]}"; do
         # Keep the real hook active until write_wrapper atomically publishes its
         # replacement. Any failure preparing or publishing leaves Git's current
         # validation intact. Preserve symlinks and access bits in the saved hook.
-        # The active hook may already point at the saved implementation. Do
-        # not replace that implementation with a symlink back to itself.
-        if [ ! "$dest" -ef "$local_hook" ]; then
+        # An active hook pointing at a regular saved implementation is safe
+        # already. The reverse direction is not: a saved symlink to the active
+        # path would point at our wrapper after publication and recurse.
+        copy_links=-Pp
+        if [ "$dest" -ef "$local_hook" ] && [ -L "$local_hook" ]; then
+            # Materialize the implementation, including indirect symlink aliases.
+            copy_links=-Lp
+        fi
+        if [ ! "$dest" -ef "$local_hook" ] || [ -L "$local_hook" ]; then
             backup="$(mktemp "$HOOKS_DIR/.${name}.backup.XXXXXX")"
             # Publish the copy by rename too: cp onto an existing .local symlink
             # would follow it and overwrite a shared script outside this directory.
-            if ! cp -Pp "$dest" "$backup" || ! mv -f "$backup" "$local_hook"; then
+            if ! cp "$copy_links" "$dest" "$backup" || ! mv -f "$backup" "$local_hook"; then
                 rm -f "$backup"
                 exit 1
             fi
