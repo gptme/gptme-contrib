@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from html import escape
 from pathlib import Path, PurePosixPath
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 
 class RouteRegistryError(ValueError):
@@ -152,6 +152,7 @@ class RouteRegistry:
     nav_groups: tuple[tuple[str, tuple[str, ...]], ...] = ()
     _by_slug: dict[str, DashboardRoute] = field(init=False, repr=False, compare=False)
     _by_href: dict[str, DashboardRoute] = field(init=False, repr=False, compare=False)
+    _by_output: dict[str, DashboardRoute] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         by_slug: dict[str, DashboardRoute] = {}
@@ -186,6 +187,15 @@ class RouteRegistry:
                 raise RouteRegistryError(f"routes missing from nav groups: {missing}")
         object.__setattr__(self, "_by_slug", by_slug)
         object.__setattr__(self, "_by_href", by_href)
+        object.__setattr__(
+            self,
+            "_by_output",
+            {
+                r.output_path: r
+                for r in (*self.routes, *((self.portal,) if self.portal else ()))
+                if r.output_path
+            },
+        )
 
     # -- lookup -----------------------------------------------------------
 
@@ -260,11 +270,13 @@ class RouteRegistry:
             if not raw_current or raw_current.endswith("/"):
                 raw_current += "index.html"
             current_path = PurePosixPath(raw_current)
-        raw_path = parsed.path
-        if raw_path.startswith("/"):
-            manifest_route = self.get_by_href(raw_path)
-            if manifest_route is not None:
-                return manifest_route.static_target(site_root)
+        # Decode first: `%20` is a space on disk, and `%2e%2e` must be normalised
+        # (and contained) like a literal `..`, not slip past the dot-segment check.
+        raw_path = unquote(parsed.path)
+        if not raw_path:
+            # Query-only link (`?tab=1`): the target is the current page itself.
+            relative = current_path
+        elif raw_path.startswith("/"):
             relative = PurePosixPath(raw_path.lstrip("/"))
         else:
             relative = current_path.parent / raw_path
@@ -272,15 +284,34 @@ class RouteRegistry:
         normalized = _normalize_relative_path(relative)
         if normalized is None:
             return None
+        # Resolve the destination URL first and consult the registry, so a
+        # relative link to a dynamic or differently-pathed route gets the same
+        # answer as the root-relative spelling of it.
+        route = self._route_for_path(normalized, directory=raw_path.endswith("/"))
+        if route is not None:
+            return route.static_target(site_root)
         if raw_path.endswith("/") or not normalized.suffix:
             normalized /= "index.html"
         return site_root / normalized
+
+    def _route_for_path(
+        self, path: PurePosixPath, *, directory: bool
+    ) -> DashboardRoute | None:
+        """The registered route a normalised site-relative path refers to."""
+        text = "" if path == PurePosixPath(".") else path.as_posix()
+        for candidate in (f"/{text}", f"/{text}/" if text else "/"):
+            route = self._by_href.get(candidate)
+            if route is not None and (candidate.endswith("/") or not directory):
+                return route
+        return self._by_output.get(text)
 
     # -- rendering --------------------------------------------------------
 
     def render_shared_nav(self, current_href: str) -> str:
         """Render Portal plus every navigable route, grouped, current page marked."""
-        links = ['<a class="nav-portal" href="/">Portal</a>']
+        portal_href = escape(self.portal.href if self.portal else "/", quote=True)
+        portal_label = escape(self.portal.label if self.portal else "Portal")
+        links = [f'<a class="nav-portal" href="{portal_href}">{portal_label}</a>']
         for group_label, slugs in self.nav_groups:
             links.append('<span class="nav-sep" aria-hidden="true">|</span>')
             links.append(f'<span class="nav-group">{escape(group_label)}</span>')

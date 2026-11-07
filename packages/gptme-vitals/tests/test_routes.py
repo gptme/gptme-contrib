@@ -284,3 +284,76 @@ def test_resolve_treats_unlisted_directory_routes_as_directories(
         )
         == tmp_path / "tasks/other.html"
     )
+
+
+def test_relative_links_consult_the_registry(tmp_path: Path) -> None:
+    """`../decisions/` must agree with `/decisions/`: dynamic routes have no file."""
+    resolve = _registry().resolve_internal_target
+    assert resolve("/decisions/", current_route="/tasks/", site_root=tmp_path) is None
+    assert resolve("../decisions/", current_route="/tasks/", site_root=tmp_path) is None
+    # A registered static route resolves through its own output_path.
+    assert (
+        resolve("../services/", current_route="/tasks/", site_root=tmp_path)
+        == tmp_path / "services/index.html"
+    )
+    assert (
+        resolve("../services/index.html", current_route="/tasks/", site_root=tmp_path)
+        == tmp_path / "services/index.html"
+    )
+
+
+def test_registered_output_path_wins_over_the_href_convention(tmp_path: Path) -> None:
+    odd = _route("odd", href="/odd/", output_path="elsewhere/page.html")
+    reg = RouteRegistry((odd,))
+    assert (
+        reg.resolve_internal_target("/odd/", current_route="/", site_root=tmp_path)
+        == tmp_path / "elsewhere/page.html"
+    )
+    assert (
+        reg.resolve_internal_target(
+            "elsewhere/page.html", current_route="/", site_root=tmp_path
+        )
+        == tmp_path / "elsewhere/page.html"
+    )
+
+
+def test_query_and_fragment_only_links_keep_the_current_file(tmp_path: Path) -> None:
+    resolve = _registry().resolve_internal_target
+    assert (
+        resolve("?tab=1", current_route="/tasks/lessons/foo.html", site_root=tmp_path)
+        == tmp_path / "tasks/lessons/foo.html"
+    )
+    assert (
+        resolve("?tab=1", current_route="/tasks/", site_root=tmp_path)
+        == tmp_path / "tasks/index.html"
+    )
+    assert resolve("#top", current_route="/tasks/", site_root=tmp_path) is None
+
+
+def test_encoded_filenames_are_decoded_but_stay_contained(tmp_path: Path) -> None:
+    resolve = _registry().resolve_internal_target
+    assert (
+        resolve("/tasks/my%20file.html", current_route="/tasks/", site_root=tmp_path)
+        == tmp_path / "tasks/my file.html"
+    )
+    assert (
+        resolve("my%20file.html", current_route="/tasks/", site_root=tmp_path)
+        == tmp_path / "tasks/my file.html"
+    )
+    # An encoded dot-segment is normalised, so it cannot escape the site root.
+    assert (
+        resolve("%2e%2e/%2e%2e/x", current_route="/tasks/", site_root=tmp_path) is None
+    )
+
+
+def test_nav_portal_link_uses_the_registered_portal() -> None:
+    portal = _route(
+        "home", label="Home", href="/dashboard/", output_path="dashboard/index.html"
+    )
+    nav = RouteRegistry((_route("a"),), portal=portal, nav_groups=(("G", ("a",)),))
+    first = _anchors(nav.render_shared_nav("/a/"))[0]
+    assert first == {"class": "nav-portal", "href": "/dashboard/"}
+    assert ">Home</a>" in nav.render_shared_nav("/a/")
+    assert (
+        _anchors(RouteRegistry((_route("a"),)).render_shared_nav("/"))[0]["href"] == "/"
+    )
