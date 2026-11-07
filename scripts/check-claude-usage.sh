@@ -217,7 +217,7 @@ tmux new-session -d -s "$SESSION_NAME" -x 120 -y 50 \
 # Wait for CC to initialize
 for _ in $(seq 1 "$TIMEOUT"); do
     content=$(tmux capture-pane -t "$SESSION_NAME" -p 2>/dev/null || true)
-    if echo "$content" | grep -qE '(❯|shortcuts)'; then
+    if grep -qE '(❯|shortcuts)' <<< "$content"; then
         break
     fi
     sleep 1
@@ -227,12 +227,12 @@ done
 # on first run from a new directory). After trust, wait for the real CC
 # prompt before sending commands.
 content=$(tmux capture-pane -t "$SESSION_NAME" -p 2>/dev/null || true)
-if echo "$content" | grep -qi "Yes, I trust this folder"; then
+if grep -qi "Yes, I trust this folder" <<< "$content"; then
     tmux send-keys -t "$SESSION_NAME" Enter
     # Wait for CC to fully initialize after trust (up to 10s)
     for _ in $(seq 1 10); do
         content=$(tmux capture-pane -t "$SESSION_NAME" -p 2>/dev/null || true)
-        if echo "$content" | grep -qE '(shortcuts|Try )' && ! echo "$content" | grep -qi "Yes, I trust"; then
+        if grep -qE '(shortcuts|Try )' <<< "$content" && ! grep -qi "Yes, I trust" <<< "$content"; then
             break
         fi
         sleep 1
@@ -247,7 +247,7 @@ tmux send-keys -t "$SESSION_NAME" Enter
 # Wait for the /usage TUI to load (CC v2.1.168 tab-based layout)
 for _ in $(seq 1 "$TIMEOUT"); do
     content=$(tmux capture-pane -t "$SESSION_NAME" -p -S -80 2>/dev/null || true)
-    if echo "$content" | grep -qiE '(Esc to cancel|d to day|w to week|Nothing over 10%)'; then
+    if grep -qiE '(Esc to cancel|d to day|w to week|Nothing over 10%)' <<< "$content"; then
         break
     fi
     sleep 1
@@ -256,22 +256,31 @@ done
 #
 # Quirk (CC v2.1.168): the usage bars render *alongside* a "Scanning local
 # sessions…" pass that runs continuously and periodically redraws the pane,
-# briefly wiping the bars — so they visibly blink. Worse, the three windows
-# (Current session = 5h, Current week (all models) = 7d, Current week (Sonnet
-# only) = 7d Sonnet) paint progressively, so a single capture often catches only
-# the first one or two before the redraw (the intermittent "quota bars don't
-# show" / "Sonnet window missing" bug). No single fixed delay reliably catches
-# all three.
+# briefly wiping the bars — so they visibly blink. Worse, the windows
+# (Current session = 5h, Current week (all models) = 7d, optional
+# Current week (<model>) = 7d model-specific) paint progressively, so a
+# single capture often catches only the first one or two before the redraw.
+# No single fixed delay reliably catches every window.
+#
+# CC 2.1.318+ dropped Current session from /usage and renamed
+# "Current week (Sonnet only)" to "Current week (Fable)" (or another model).
+# A weekly-only pane is valid: after the all-models weekly bar, allow one
+# additional render cycle for a late model-specific bar. Optional model
+# windows must not force all 12 tab cycles or be counted as seven_day.
+# Legacy session+weekly layouts still
+# stop as soon as weekly-all is present (session paints first, so it is
+# already in ACCUM).
 #
 # Robust approach: tab away and back (Usage -> Stats -> Usage) to force fresh
 # renders, sample the pane many times, and ACCUMULATE every frame that contains
 # a bar into one buffer. The parser takes the last occurrence of each window
-# (later frames are more fully rendered), so all three are assembled across
-# frames even when no single frame has all of them. Stop early once all three
-# labels have been seen.
+# (later frames are more fully rendered). Probe ACCUM with here-strings —
+# ``echo "$ACCUM" | grep`` SIGPIPEs under pipefail once ACCUM exceeds the
+# pipe buffer (large weekly-only captures).
 # Do NOT use the 'w' week toggle — it can retrigger the scan.
 OUTPUT=""
 ACCUM=""
+_weekly_seen_cycle=0
 for _outer in $(seq 1 12); do
     tmux send-keys -t "$SESSION_NAME" Right   # away to Stats
     sleep 0.5
@@ -279,27 +288,26 @@ for _outer in $(seq 1 12); do
     sleep 0.8
     for _inner in $(seq 1 8); do
         content=$(tmux capture-pane -t "$SESSION_NAME" -p -S -80 2>/dev/null || true)
-        if echo "$content" | grep -qE '[0-9]+% used'; then
+        if grep -qE '[0-9]+% used' <<< "$content"; then
             ACCUM="${ACCUM}"$'\n'"${content}"
         fi
-        if echo "$content" | grep -qi 'Nothing over 10%'; then
+        if grep -qi 'Nothing over 10%' <<< "$content"; then
             ACCUM="${ACCUM}"$'\n'"${content}"
             break
         fi
         sleep 0.3
     done
-    # Stop once at least 2 window labels have been accumulated.
-    # CC v2.1.183+ occasionally omits "Current week (Sonnet only)" when Sonnet
-    # has no usage data, so requiring all 3 causes the loop to exhaust all
-    # iterations and time out (~150s).
-    _found_count=0
-    echo "$ACCUM" | grep -qi 'Current session' && _found_count=$((_found_count + 1))
-    echo "$ACCUM" | grep -qi 'Current week (all models)' && _found_count=$((_found_count + 1))
-    echo "$ACCUM" | grep -qi 'Current week (Sonnet only)' && _found_count=$((_found_count + 1))
-    if [ "$_found_count" -ge 2 ]; then
-        break
+    # Preserve legacy session+weekly completion. Weekly-only renders get
+    # one extra cycle for a delayed Sonnet/Fable/etc. bar, not 12 cycles
+    # waiting for a model window that may never be present.
+    if grep -qi 'Current week (all models)' <<< "$ACCUM"; then
+        if grep -qi 'Current session' <<< "$ACCUM" \
+            || [ "$_weekly_seen_cycle" -gt 0 ]; then
+            break
+        fi
+        _weekly_seen_cycle=$_outer
     fi
-    if echo "$ACCUM" | grep -qi 'Nothing over 10%'; then
+    if grep -qi 'Nothing over 10%' <<< "$ACCUM"; then
         break
     fi
 done
@@ -315,8 +323,8 @@ fi
 # The "Scanning local sessions…" line coexists with the rendered bars (it is a
 # continuous background pass), so it is NOT on its own an error. Only warn when
 # we captured no usage bars at all — that's the genuine stuck/auth-failure case.
-if ! echo "$OUTPUT" | grep -qE '[0-9]+% used' \
-    && echo "$OUTPUT" | grep -qi 'Scanning local sessions'; then
+if ! grep -qE '[0-9]+% used' <<< "$OUTPUT" \
+    && grep -qi 'Scanning local sessions' <<< "$OUTPUT"; then
     echo "Warning: CC /usage produced no usage bars (still scanning / likely auth failure). Using fallback data." >&2
 fi
 
