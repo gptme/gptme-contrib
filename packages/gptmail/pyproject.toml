@@ -48,11 +48,14 @@ bridge = [
     "uvicorn>=0.23",
 ]
 # Outbound secret scanner for `gptmail agent send` (require_scanner=True fails
-# closed without it). `redact` is not on PyPI yet, so this extra declares the
-# requirement without being installable on its own: install the package from its
-# source tree with `--with /path/to/redact` (see README).
+# closed without it). The scanner is not published yet, so this extra names the
+# distribution we control (`gptme-redact`) rather than `redact`: PyPI `redact`
+# 0.1.1 is an unrelated config-template renderer, and a requirement naming it
+# would install the wrong package. Until `gptme-redact` exists, install the
+# scanner from its source tree with `--with /path/to/redact` (see README);
+# `gptmail agent doctor` reports whether it is importable.
 secrets = [
-    "redact>=0.1",
+    "gptme-redact>=0.1",
 ]
 test = [
     "pytest>=7.0",

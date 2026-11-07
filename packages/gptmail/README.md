@@ -87,9 +87,9 @@ callback server in `communication_utils.auth`. The Twitter script uses it; plain
 does not.
 
 **Outbound secret scanner (needed by `gptmail agent send`).** Inter-agent sends run
-the `redact` scanner and fail closed when it is missing — nothing is delivered. The
-`secrets` extra declares that requirement, but `redact` is not on PyPI yet, so an
-extra cannot resolve it on its own. Install it from its source tree instead:
+the scanner and fail closed when it is missing — nothing is delivered. The scanner is
+not published, so the `secrets` extra declares it under the name we control
+(`gptme-redact`) and cannot resolve on its own yet. Install it from its source tree:
 
 ```bash
 uv tool install --force \
@@ -98,8 +98,13 @@ uv tool install --force \
 ```
 
 A later `uv tool install`/`uv tool upgrade` without `--with /path/to/redact` drops it
-again. `gptmail agent doctor` reports whether the scanner is currently importable, so
-the failure shows up as a check rather than as a mysteriously blocked send.
+again. `gptmail agent doctor` reports whether the scanner is importable, so the
+failure shows up as a check rather than as a mysteriously blocked send.
+
+> **Do not add a bare `redact` dependency.** PyPI `redact` 0.1.1 is an unrelated
+> config-template renderer (Feng Zhou): installing it would satisfy the name and
+> then fail the import. The import name stays `redact`; only the distribution name
+> is ours.
 
 **External tools.** Email delivery shells out to `msmtp`. Fetching mail is done by
 `mbsync` (isync), which writes a local Maildir that `gptmail sync-maildir` imports.
