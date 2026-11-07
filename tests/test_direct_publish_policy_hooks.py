@@ -407,6 +407,86 @@ def test_commit_downstream_guards_still_run_for_approved_diff(
     assert "Submodule validation failed" in proc.stdout
 
 
+@pytest.mark.parametrize("mode", ["commit", "push"])
+@pytest.mark.parametrize(
+    "layout", [".git/modules/sub/hooks", ".git/modules/dotfiles/.config/git/hooks"]
+)
+def test_copied_submodule_hook_never_executes_superproject_checker(
+    install: Path, tmp_path: Path, mode: str, layout: str
+) -> None:
+    repo = _repo(tmp_path)
+    base = _commit(repo, {"README.md": "seed\n"})
+    marker = tmp_path / "untrusted-checker-ran"
+    hooks = repo / layout
+    hooks.mkdir(parents=True)
+    # Place the payload exactly where the old blind four-level walk lands,
+    # including the suffix-shaped gitdir case whose candidate is inside .git.
+    scripts = hooks.parents[3] / "scripts/git"
+    scripts.mkdir(parents=True)
+    (scripts / "direct-publish-policy.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+    )
+    shutil.copy2(_hook(install, f"pre-{mode}"), hooks / f"pre-{mode}")
+    for name in (
+        "direct-publish.json",
+        "allowed-repos.conf",
+        "allowed-identities.conf",
+    ):
+        shutil.copy2(install / "dotfiles/.config/git" / name, hooks.parent / name)
+    if mode == "commit":
+        _stage(repo, {"_posts/a.md": "prose\n"})
+        args = [str(hooks / "pre-commit")]
+        stdin = None
+    else:
+        new = _commit(repo, {"_posts/a.md": "prose\n"})
+        args = [str(hooks / "pre-push"), "origin", SITE]
+        stdin = _tuple(new, base) + "\n"
+    proc = subprocess.run(
+        args, cwd=repo, input=stdin, capture_output=True, text=True, env=_env()
+    )
+    assert not marker.exists(), proc.stdout + proc.stderr
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize(
+    "runner_action", ["auto-stage-mode", "stage-code", "safe-format"]
+)
+def test_commit_rechecks_final_index_after_runner(
+    install: Path, tmp_path: Path, runner_action: str
+) -> None:
+    repo = _repo(tmp_path, PROFILE)
+    _commit(repo, {"README.md": "seed\n", ".pre-commit-config.yaml": "repos: []\n"})
+    _stage(repo, {"README.md": "edited\n"})
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    runner = bin_dir / "prek"
+    action = {
+        "auto-stage-mode": "chmod +x README.md\nexit 1\n",
+        "stage-code": "mkdir -p scripts\nprintf code > scripts/run.py\ngit add scripts/run.py\n",
+        "safe-format": "printf formatted >> README.md\nexit 1\n",
+    }[runner_action]
+    runner.write_text(
+        "#!/bin/bash\nif [ ! -f .runner-ran ]; then\n"
+        "touch .runner-ran\n" + action + "fi\nexit 0\n"
+    )
+    runner.chmod(0o755)
+    env = _env()
+    env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+    proc = subprocess.run(
+        [str(_hook(install, "pre-commit"))],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert (repo / ".runner-ran").exists()
+    if runner_action == "safe-format":
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+    else:
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "direct-publish-policy" in proc.stderr
+
+
 # ----------------------------------------------------------------- pre-push
 
 

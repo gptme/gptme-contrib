@@ -496,9 +496,20 @@ for _dp_line in "${STDIN_LINES[@]}"; do
 done
 if [ "$is_allowed" = false ] && [ "$_dp_protected_tuple" = true ] &&
     [ -f "$HOOK_CONF_DIR/direct-publish.json" ]; then
-    # Resolve the symlink before Bash normalizes the parent components.
+    # Resolve symlinks first and require the installation layout; a blind
+    # walk from .git/modules/sub/hooks lands in an untrusted superproject.
     # Config still comes from the installed HOOK_CONF_DIR above.
-    _DP_ROOT="$(cd "$SCRIPT_DIR" && cd -P ../../../.. && pwd -P)" || _DP_ROOT=""
+    _DP_HOOKS_REAL="$(cd "$SCRIPT_DIR" && pwd -P)" || _DP_HOOKS_REAL=""
+    _DP_ROOT=""
+    case "$_DP_HOOKS_REAL" in
+        */dotfiles/.config/git/hooks)
+            _DP_CANDIDATE="${_DP_HOOKS_REAL%/dotfiles/.config/git/hooks}"
+            case "$_DP_CANDIDATE" in
+                */.git|*/.git/*) ;;
+                *) _DP_ROOT="$_DP_CANDIDATE" ;;
+            esac
+            ;;
+    esac
     if [ -n "$_DP_ROOT" ] && [ -f "$_DP_ROOT/scripts/git/direct-publish-policy.py" ] &&
         printf '%s\n' "${STDIN_LINES[@]}" | python3 "$_DP_ROOT/scripts/git/direct-publish-policy.py" push \
             --config "$HOOK_CONF_DIR/direct-publish.json" --remote-url "${2:-}" >&2; then

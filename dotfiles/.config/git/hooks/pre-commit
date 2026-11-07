@@ -214,14 +214,38 @@ if [ "$BRANCH" = "master" ] || [ "$BRANCH" = "main" ]; then
     # repository being committed; anything missing, malformed or not approved
     # (exit != 0) leaves the repo blocked. Every guard below still runs.
     if [ "$is_allowed" = false ] && [ -f "$HOOK_CONF_DIR/direct-publish.json" ]; then
-        # Resolve the symlink before Bash normalizes the parent components.
+        # Resolve symlinks first and require the installation layout; a blind
+        # walk from .git/modules/sub/hooks lands in an untrusted superproject.
         # Config still comes from the installed HOOK_CONF_DIR above.
-        _DP_ROOT="$(cd "$HOOK_DIR" && cd -P ../../../.. && pwd -P)" || _DP_ROOT=""
+        _DP_HOOKS_REAL="$(cd "$HOOK_DIR" && pwd -P)" || _DP_HOOKS_REAL=""
+        _DP_ROOT=""
+        case "$_DP_HOOKS_REAL" in
+            */dotfiles/.config/git/hooks)
+                _DP_CANDIDATE="${_DP_HOOKS_REAL%/dotfiles/.config/git/hooks}"
+                case "$_DP_CANDIDATE" in
+                    */.git|*/.git/*) ;;
+                    *) _DP_ROOT="$_DP_CANDIDATE" ;;
+                esac
+                ;;
+        esac
         if [ -n "$_DP_ROOT" ] && [ -f "$_DP_ROOT/scripts/git/direct-publish-policy.py" ] &&
             python3 "$_DP_ROOT/scripts/git/direct-publish-policy.py" commit \
                 --config "$HOOK_CONF_DIR/direct-publish.json" \
                 --remote-url "$REMOTE_URL" --branch "$BRANCH" >&2; then
             is_allowed=true
+            # Downstream validators/formatters can stage more files or change
+            # modes. Recheck every successful exit, including auto-staging and
+            # the no-runner paths, against the index Git will actually commit.
+            # shellcheck disable=SC2317 # Invoked indirectly by the EXIT trap.
+            _dp_revalidate_on_exit() {
+                local status=$?
+                if [ "$status" -eq 0 ]; then
+                    python3 "$_DP_ROOT/scripts/git/direct-publish-policy.py" commit \
+                        --config "$HOOK_CONF_DIR/direct-publish.json" \
+                        --remote-url "$REMOTE_URL" --branch "$BRANCH" >&2 || exit 1
+                fi
+            }
+            trap _dp_revalidate_on_exit EXIT
         fi
     fi
 
