@@ -457,3 +457,64 @@ def test_self_only_mention_does_not_make_an_edge():
     nodes = [S(0, id=sid, short="abcd", sessions_mentioned=["abcd", "abcdef12", sid])]
     edges, _ = L.mine_edges(nodes)
     assert not edges
+
+
+@pytest.mark.parametrize("sid", ["shared-id", "abcdef12"])
+@pytest.mark.parametrize("label_length", [None, 4, 8])
+def test_commit_ownership_never_falls_back_to_another_agent(sid, label_length):
+    reference = sid if label_length is None else "abcdef12"[:label_length]
+    loaded_id = sid if label_length is None else "abcdef12-0000-0000-0000-000000000001"
+    nodes = [S(0, "alice", id=loaded_id)]
+    st = L.attach_commits(
+        nodes,
+        [{"agent": "bob", "sha": "abcdef1000", "ts": nodes[0]["end"], "sids": [reference]}],
+    )
+    assert st["unresolved"] == 1
+    assert not nodes[0].get("delivered_shas")
+
+
+@pytest.mark.parametrize("reference", ["shared-id", "abcdef12"])
+def test_message_sender_never_falls_back_to_another_agent(reference):
+    nodes = [S(0, "alice", id=reference), S(1, "gordon")]
+    msgs = [
+        {"id": "m1", "from": "bob", "session_id": reference, "ts": nodes[0]["start"] + 100},
+        {
+            "id": "m2",
+            "from": "gordon",
+            "session_id": "gordon-1",
+            "ts": nodes[1]["start"] + 100,
+            "in_reply_to": "m1",
+        },
+    ]
+    edges, st = L.mine_edges(nodes, msgs)
+    assert not edges
+    assert st["message_unresolved"] == 1
+
+
+def test_missing_explicit_sender_can_use_own_agent_temporal_fallback():
+    nodes = [S(0, "alice", id="shared-id"), S(1, "bob"), S(2, "gordon")]
+    msgs = [
+        {"id": "m1", "from": "bob", "session_id": "shared-id", "ts": nodes[1]["start"] + 100},
+        {
+            "id": "m2",
+            "from": "gordon",
+            "session_id": "gordon-2",
+            "ts": nodes[2]["start"] + 100,
+            "in_reply_to": "m1",
+        },
+    ]
+    edges, _ = L.mine_edges(nodes, msgs)
+    assert kinds(edges, 1, 2) == {"message"}
+    assert not kinds(edges, 0, 2)
+    assert edges[(1, 2, "message")]["w"] == pytest.approx(0.9 * 0.9)
+
+
+def test_exact_cross_agent_mention_and_linked_journal_still_resolve():
+    nodes = [
+        S(0, "alice", id="shared-id", journal="journal/alice.md"),
+        S(1, "bob", sessions_mentioned=["shared-id"]),
+        S(2, "bob", journal_links=["journal/alice.md"]),
+    ]
+    edges, _ = L.mine_edges(nodes)
+    assert kinds(edges, 0, 1) == {"mention"}
+    assert kinds(edges, 0, 2) == {"mention"}

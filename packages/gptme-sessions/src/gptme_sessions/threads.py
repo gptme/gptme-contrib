@@ -101,9 +101,15 @@ class _Index:
                 self.short_any[lb].append(i)
 
     def resolve(
-        self, sid: str, agent: str | None, t: float | None = None, *, exclude: int | None = None
+        self,
+        sid: str,
+        agent: str | None,
+        t: float | None = None,
+        *,
+        exclude: int | None = None,
+        allow_cross_agent: bool = True,
     ) -> int | None:
-        """Session for an id or label; exclude a referencing node before ranking."""
+        """Resolve references; ownership lookups must disable cross-agent fallback."""
         sid = str(sid).strip()
         if sid in self.by_id:
             exact = [i for i in self.by_id[sid] if i != exclude]
@@ -111,14 +117,16 @@ class _Index:
             if own:
                 return nearest(self.nodes, own, t) if t is not None else own[-1]
             # A unique exact id can name a cross-agent parent. A collision cannot.
-            return exact[0] if len(exact) == 1 else None
+            return exact[0] if allow_cross_agent and len(exact) == 1 else None
         # Only an actual short label may fall back to the label index. Never
         # discard characters from an absent full ID or an unmatched longer label.
         if not re.fullmatch(r"[0-9a-f]{4,8}", sid):
             return None
         cands = [i for i in self.short.get((agent, sid), []) if i != exclude] if agent else []
         cands = cands or (
-            [i for i in self.short_any.get(sid, []) if i != exclude] if len(sid) == 8 else []
+            [i for i in self.short_any.get(sid, []) if i != exclude]
+            if allow_cross_agent and len(sid) == 8
+            else []
         )
         if cands:
             return nearest(self.nodes, cands, t) if t is not None else cands[-1]
@@ -145,7 +153,7 @@ def attach_commits(nodes: list[dict], commits: Iterable[dict]) -> Counter:
         if len(c["sids"]) != 1:
             st["plural"] += 1
             continue
-        i = idx.resolve(c["sids"][0], c["agent"], c.get("ts"))
+        i = idx.resolve(c["sids"][0], c["agent"], c.get("ts"), allow_cross_agent=False)
         if i is None:
             st["unresolved"] += 1
             continue
@@ -358,7 +366,7 @@ def mine_edges(
     def sender_session(m: dict) -> tuple[int | None, bool]:
         agent = aliases.get(m["from"], m["from"])
         if m.get("session_id"):
-            j = idx.resolve(m["session_id"], agent, m["ts"])
+            j = idx.resolve(m["session_id"], agent, m["ts"], allow_cross_agent=False)
             if j is not None:
                 return j, True
         return session_at(nodes, by_agent, agent, m["ts"], m.get("subj") or ""), False
