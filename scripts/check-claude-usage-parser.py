@@ -102,23 +102,33 @@ def parse_section_headers(lines: list[str]) -> dict:
          N% used
       Resets ...
 
-    Returns dict with five_hour, seven_day, seven_day_sonnet keys, or empty.
+    Returns dict with five_hour, seven_day, seven_day_sonnet, seven_day_fable
+    keys (whichever windows the pane actually emits), or empty.
+
+    CC >= 2.1.318 dropped the ``Current session`` (5h) block from the TUI and
+    renamed ``Current week (Sonnet only)`` to ``Current week (Fable)``, so a
+    weekly-only pane is a valid result: the weekly window alone anchors it.
     """
     section_headers = [
         ("Current session", "five_hour"),
         ("Current week (all models)", "seven_day"),
         ("Current week (Sonnet only)", "seven_day_sonnet"),
+        ("Current week (Fable)", "seven_day_fable"),
     ]
     result = {}
     for header, key in section_headers:
         for i, line in enumerate(lines):
             if header in line:
                 for j in range(i + 1, min(i + 10, len(lines))):
+                    if any(h in lines[j] for h, _ in section_headers):
+                        break
                     pct_m = re.search(r"(\d+)%\s*used", lines[j])
                     if pct_m:
                         pct = int(pct_m.group(1)) / 100.0
                         reset_str = None
                         for k in range(j + 1, min(j + 5, len(lines))):
+                            if any(h in lines[k] for h, _ in section_headers):
+                                break
                             reset_m = re.search(r"Resets\s+(.+)", lines[k])
                             if reset_m:
                                 reset_str = reset_m.group(1).strip()
@@ -128,7 +138,24 @@ def parse_section_headers(lines: list[str]) -> dict:
                             "resets": reset_str if reset_str else "unknown",
                         }
                         break
-    return result if len(result) >= 2 else {}
+    # The weekly window anchors a valid pane. Without it, keep requiring two
+    # matches so a single stray header line is not mistaken for usage data.
+    if "seven_day" in result or len(result) >= 2:
+        return result
+    return {}
+
+
+def build_window_state(result: dict) -> dict:
+    """Describe which windows the pane emitted, so absence is explicit.
+
+    ``five_hour`` is ``absent_from_pane`` on CC >= 2.1.318, where the TUI no
+    longer renders a session block. The 5h figure cannot be reconstructed from
+    the pane, so consumers must treat it as unavailable rather than as 0%.
+    """
+    return {
+        "five_hour": "present" if "five_hour" in result else "absent_from_pane",
+        "weekly_windows": sorted(k for k in result if k.startswith("seven_day")),
+    }
 
 
 # Signals are matched as case-insensitive substrings, so they must be
@@ -263,6 +290,8 @@ def main():
 
     # Try section-header parser first (CC v2.1.183+)
     result = parse_section_headers(lines)
+    # Record observed windows before the legacy fallback adds synthetic estimates.
+    window_state = build_window_state(result)
 
     # Fallback: low usage / empty result
     if not result:
@@ -313,6 +342,17 @@ def main():
         promo_active = promo_start <= now_utc <= promo_end
     else:
         promo_active = False
+    result["_window_state"] = window_state
+    if window_state["five_hour"] == "absent_from_pane":
+        detail = (
+            "reporting weekly windows only."
+            if window_state["weekly_windows"]
+            else "reporting synthetic low-usage estimates, not observed windows."
+        )
+        print(
+            f"Warning: five_hour window absent from /usage pane; {detail}",
+            file=sys.stderr,
+        )
     result["_off_peak"] = {
         "active": promo_active and not is_peak_hour,
         "promo_active": promo_active,
@@ -361,6 +401,7 @@ def main():
             ("five_hour", "Session (5h)"),
             ("seven_day", "Weekly (all)"),
             ("seven_day_sonnet", "Weekly (Sonnet)"),
+            ("seven_day_fable", "Weekly (Fable)"),
         ]:
             info = result.get(key)
             if info and isinstance(info, dict):
