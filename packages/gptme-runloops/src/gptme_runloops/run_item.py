@@ -1576,7 +1576,17 @@ def plan_item(
     claim_key = issue_coordination_key(item.types, item.repo, item.number)
     slug = item_slug(item.repo, item.number_str, index)
     session_id = derive_session_id(slug, run_salt)
-    claim_agent = f"project-monitoring-{backend or 'unknown'}-{session_id}"
+    # Tie liveness to the outer autonomous session when one is present. With a
+    # shaped id the coordination reaper can determine whether the holder is dead
+    # (session_label sentinel gone from the process table) and free stale claims
+    # on contention instead of blocking forever on "unknown" liveness.
+    # Falls back to the per-worker project-monitoring id when no outer session
+    # label is available (interactive PM runs, CI, non-autonomous contexts).
+    _outer_label = os.environ.get("BOB_SESSION_LABEL", "")
+    if _outer_label and re.fullmatch(r"[a-z0-9]{4,}", _outer_label) and backend:
+        claim_agent = f"bob-autonomous-{backend}-{_outer_label}"
+    else:
+        claim_agent = f"project-monitoring-{backend or 'unknown'}-{session_id}"
 
     preheld_block = ""
     if claim_mode == "preheld" and claim_key:

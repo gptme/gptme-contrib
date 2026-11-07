@@ -430,7 +430,9 @@ def test_plan_cross_repo_needs_re_review_injects_refresh(tmp_path) -> None:
     assert "Address Greptile Review Findings (cross-repo)" in plan.prompt
 
 
-def test_plan_assigned_issue_tier_claim_and_ack(tmp_path) -> None:
+def test_plan_assigned_issue_tier_claim_and_ack(tmp_path, monkeypatch) -> None:
+    # Isolate from any outer autonomous session in the test runner environment.
+    monkeypatch.delenv("BOB_SESSION_LABEL", raising=False)
     item = make_item(
         types=["assigned_issue"], detail="assigned; updated: 2026-07-11T00:00:00Z"
     )
@@ -439,6 +441,38 @@ def test_plan_assigned_issue_tier_claim_and_ack(tmp_path) -> None:
     assert plan.claim_key == "github:gptme/gptme-contrib#1234"
     assert plan.claim_agent == f"project-monitoring-claude-code-{plan.session_id}"
     assert plan.ack_intent is True
+
+
+def test_plan_claim_agent_uses_outer_session_label(tmp_path, monkeypatch) -> None:
+    """Worker claims inherit the outer autonomous session label for liveness checking.
+
+    When BOB_SESSION_LABEL is set (we're inside an autonomous session), the
+    claim_agent uses bob-autonomous-{backend}-{label} so reap_dead_holders can
+    determine liveness via the session_label sentinel in the process table.
+    When the outer session dies its sentinel disappears and stale worker claims
+    can be reaped automatically on the next contention.
+    """
+    monkeypatch.setenv("BOB_SESSION_LABEL", "0081")
+    item = make_item(
+        types=["assigned_issue"], detail="assigned; updated: 2026-07-11T00:00:00Z"
+    )
+    plan, _, _ = _plan_for(tmp_path, item, FakeLifecycleIO())
+    assert plan.claim_agent == "bob-autonomous-claude-code-0081"
+    # session_id is still derived (used for subagent env vars and trajectory path)
+    assert plan.session_id is not None
+
+
+def test_plan_claim_agent_ignores_invalid_outer_label(tmp_path, monkeypatch) -> None:
+    """Invalid/non-alphanumeric labels fall back to per-worker project-monitoring ID."""
+    for bad_label in ("", "ab", "has-hyphen", "HAS_UPPER"):
+        monkeypatch.setenv("BOB_SESSION_LABEL", bad_label)
+        item = make_item(
+            types=["assigned_issue"], detail="assigned; updated: 2026-07-11T00:00:00Z"
+        )
+        plan, _, _ = _plan_for(tmp_path, item, FakeLifecycleIO())
+        assert (
+            plan.claim_agent == f"project-monitoring-claude-code-{plan.session_id}"
+        ), f"bad label {bad_label!r} should fall back to project-monitoring id"
 
 
 def test_plan_pending_reply_followup_skips_ack(tmp_path) -> None:
