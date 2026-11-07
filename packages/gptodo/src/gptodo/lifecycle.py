@@ -482,7 +482,7 @@ def transform_post(
 
 
 _TICKED_RE = re.compile(r"^(\s*(?:>\s*)?[-*+] )\[[xX]\]")
-_FENCE_RE = re.compile(r"^\s*(?:>\s*)?(`{3,}|~{3,})")
+_FENCE_RE = re.compile(r"^\s*(?:>\s*)?(?:(?:[-*+]|[0-9]+[.)])\s+)?(`{3,}|~{3,})")
 
 
 def untick_checklist(content: str) -> str:

@@ -189,6 +189,9 @@ class TestRecurResetUnticksChecklist:
             "~~~markdown\n```\n- [x] example\n~~~",
             "> ```markdown\n> - [x] example\n> ```",
             "```markdown\n```not-a-closer\n- [x] example\n```",
+            "- ```markdown\n  - [x] example\n  ```",
+            "1. ~~~markdown\n   - [x] example\n   ~~~",
+            "> - ```markdown\n>   - [x] example\n>   ```",
         ],
     )
     def test_reset_preserves_fenced_examples(self, workspace: Path, example: str):
