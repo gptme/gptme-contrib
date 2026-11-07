@@ -79,6 +79,10 @@ and `post-rewrite`; commit hooks do not buffer stdin. A single `proc-receive`
 handler keeps its live bidirectional connection. Two such handlers require
 explicit protocol integration: installation refuses them before rewriting any
 hook, and existing wrappers also refuse a second handler added later.
+The same single-handler restriction applies to `fsmonitor-watchman`: its opaque
+update token and NUL-delimited response cannot be combined with another handler.
+Aliased directories count as one handler and are left untouched. Wrapper refreshes
+publish a complete executable by atomic rename, never by truncating a live wrapper.
 When the saved local
 `pre-commit` is a generated prek/pre-commit runner, the contrib global hook runs
 its guards and the check suite once using explicit `run --files`, retaining

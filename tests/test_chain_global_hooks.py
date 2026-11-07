@@ -1098,3 +1098,100 @@ def test_stock_generated_runner_templates_are_validated_in_full(
     else:
         assert result.returncode == 0, result.stderr
         assert (hooks / "pre-commit.local").read_text() == original
+
+
+def test_aliased_receive_proc_handler_does_not_block_commit_wrappers(
+    tmp_path: Path,
+) -> None:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_CONFIG_GLOBAL"] = str(tmp_path / "gitconfig")
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], env=env, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "core.hooksPath", ".hooks"],
+        env=env,
+        check=True,
+    )
+    global_dir = repo / ".git/.hooks"
+    global_dir.mkdir()
+    handler = global_dir / "proc-receive"
+    _write_exec(handler, "#!/bin/sh\necho protocol-handler\n")
+    original = handler.read_bytes()
+    _write_exec(global_dir / "prepare-commit-msg", "#!/bin/sh\necho stamped\n")
+    result = _run([str(repo), "--global-dir", str(global_dir)], env=env)
+    assert result.returncode == 0, result.stderr
+    assert handler.read_bytes() == original
+    assert not (global_dir / "proc-receive.local").exists()
+    assert (repo / ".hooks/prepare-commit-msg").is_file()
+
+
+def test_refresh_never_truncates_live_wrapper(tmp_path: Path) -> None:
+    global_dir = tmp_path / "global"
+    local_dir = tmp_path / "local"
+    global_dir.mkdir()
+    local_dir.mkdir()
+    _write_exec(global_dir / "prepare-commit-msg", "#!/bin/sh\nexit 0\n")
+    args = ["--hooks-dir", str(local_dir), "--global-dir", str(global_dir)]
+    assert _run(args).returncode == 0
+    wrapper = local_dir / "prepare-commit-msg"
+    reference = tmp_path / "reference"
+    reference.write_bytes(wrapper.read_bytes())
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    # Intercept the heredoc writer exactly when a concurrent Git would see it.
+    _write_exec(
+        tools / "cat",
+        '#!/bin/sh\ncmp -s "$LIVE_WRAPPER" "$REFERENCE_WRAPPER" || exit 77\nexec /bin/cat "$@"\n',
+    )
+    env = dict(
+        os.environ,
+        PATH=f"{tools}:{os.environ['PATH']}",
+        LIVE_WRAPPER=str(wrapper),
+        REFERENCE_WRAPPER=str(reference),
+    )
+    result = _run(args, env=env)
+    assert result.returncode == 0, result.stderr
+    assert wrapper.read_bytes() == reference.read_bytes()
+    assert wrapper.stat().st_mode & stat.S_IXUSR
+
+
+@pytest.mark.parametrize("owner", ["global", "local", "both"])
+def test_fsmonitor_preserves_one_protocol_and_refuses_dual_handlers(
+    tmp_path: Path, owner: str
+) -> None:
+    global_dir = tmp_path / "global"
+    local_dir = tmp_path / "local"
+    global_dir.mkdir()
+    local_dir.mkdir()
+    for who, directory in (("global", global_dir), ("local", local_dir)):
+        if owner in (who, "both"):
+            _write_exec(
+                directory / "fsmonitor-watchman",
+                f"#!/bin/sh\nprintf '{who}-token\\0file\\0'\n",
+            )
+    args = ["--hooks-dir", str(local_dir), "--global-dir", str(global_dir)]
+    result = _run(args)
+    if owner == "both":
+        assert result.returncode != 0
+        assert "cannot chain two fsmonitor-watchman" in result.stderr
+        assert not (local_dir / "fsmonitor-watchman.local").exists()
+        return
+    assert result.returncode == 0, result.stderr
+    wrapper = local_dir / "fsmonitor-watchman"
+    ran = subprocess.run(
+        [str(wrapper), "2", "old-token"], capture_output=True, check=True
+    )
+    assert ran.stdout == f"{owner}-token\0file\0".encode()
+    other = (
+        local_dir / "fsmonitor-watchman.local"
+        if owner == "global"
+        else global_dir / "fsmonitor-watchman"
+    )
+    _write_exec(other, "#!/bin/sh\nprintf 'other-token\\0other-file\\0'\n")
+    before = wrapper.read_bytes()
+    assert _run(args).returncode != 0
+    assert wrapper.read_bytes() == before
+    ran = subprocess.run([str(wrapper), "2", "old-token"], capture_output=True)
+    assert ran.returncode != 0
+    assert ran.stdout == b""
+    assert b"cannot chain two fsmonitor-watchman" in ran.stderr

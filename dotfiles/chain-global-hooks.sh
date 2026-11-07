@@ -122,8 +122,21 @@ saved_proc_receive="$RECEIVE_HOOKS_DIR/proc-receive"
 if grep -qF "$MARKER" "$saved_proc_receive" 2>/dev/null; then
     saved_proc_receive="$saved_proc_receive.local"
 fi
-if [ -x "$RECEIVE_GLOBAL_DIR/proc-receive" ] && [ -x "$saved_proc_receive" ]; then
+if [ "$RECEIVE_HOOKS_DIR" != "$(cd "$RECEIVE_GLOBAL_DIR" && pwd -P)" ] && \
+   [ -x "$RECEIVE_GLOBAL_DIR/proc-receive" ] && [ -x "$saved_proc_receive" ]; then
     echo "cannot chain two proc-receive handlers; explicit protocol integration required; hooks unchanged" >&2
+    exit 1
+fi
+
+# fsmonitor returns one opaque token and a NUL-delimited path list. Two handlers
+# cannot share a token or concatenate their responses; keep a single live owner.
+saved_fsmonitor="$HOOKS_DIR/fsmonitor-watchman"
+if grep -qF "$MARKER" "$saved_fsmonitor" 2>/dev/null; then
+    saved_fsmonitor="$saved_fsmonitor.local"
+fi
+if [ "$HOOKS_DIR" != "$(cd "$GLOBAL_DIR" && pwd -P)" ] && \
+   [ -x "$GLOBAL_DIR/fsmonitor-watchman" ] && [ -x "$saved_fsmonitor" ]; then
+    echo "cannot chain two fsmonitor-watchman handlers; explicit protocol integration required; hooks unchanged" >&2
     exit 1
 fi
 
@@ -239,7 +252,9 @@ write_wrapper() {
     local dest="$HOOKS_DIR/$name"
     local global_hook="$GLOBAL_DIR/$name"
     local local_hook="$HOOKS_DIR/${name}.local"
-    cat >"$dest" <<EOF
+    local temp
+    temp="$(mktemp "$HOOKS_DIR/.${name}.XXXXXX")"
+    if ! cat >"$temp" <<EOF
 #!/usr/bin/env bash
 # ${MARKER}. Do not edit.
 set -euo pipefail
@@ -249,10 +264,10 @@ VALIDATED_PRECOMMIT_HASH=$(printf '%q' "$validated_precommit_hash")
 # Only these hooks receive a finite stdin protocol. Reading stdin for e.g.
 # prepare-commit-msg can block forever on an inherited interactive terminal.
 case $(printf '%q' "$name") in
-    proc-receive)
+    proc-receive|fsmonitor-watchman)
         # Recheck at runtime: a second handler may be installed later.
         if [ -x "\$GLOBAL_HOOK" ] && [ -x "\$LOCAL_HOOK" ]; then
-            echo 'cannot chain two proc-receive handlers; explicit protocol integration required' >&2
+            echo 'cannot chain two ${name} handlers; explicit protocol integration required' >&2
             exit 1
         fi
         if [ -x "\$GLOBAL_HOOK" ]; then
@@ -302,7 +317,14 @@ case $(printf '%q' "$name") in
         ;;
 esac
 EOF
-    chmod +x "$dest"
+    then
+        rm -f "$temp"
+        return 1
+    fi
+    if ! chmod +x "$temp" || ! mv -f "$temp" "$dest"; then
+        rm -f "$temp"
+        return 1
+    fi
 }
 
 chained=0
