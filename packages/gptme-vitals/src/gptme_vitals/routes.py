@@ -1,0 +1,360 @@
+"""Route registry: the typed inventory every dashboard surface reads.
+
+An agent registers its pages once, as ``DashboardRoute`` rows in a
+``RouteRegistry``. The portal cards, the grouped navigation, the link crawler
+and (in later slices) the per-page build timers are all derived from that one
+table, so no surface keeps its own list of pages.
+
+The registry is a *contract*, not a table: this module ships no routes. Each
+agent's concrete pages stay in the agent's own repository and are handed to
+``RouteRegistry`` at import time. Page-specific rendering (what a "Decisions"
+page is, which tasks belong on it) is the agent's business too.
+
+Three fields exist because of measured failure modes, see the README:
+
+* ``visibility`` is *not* ``is_internal``. ``is_internal`` means "hosted by us,
+  not an outbound link" and drives link crawling; using it as a publish gate
+  would invert its meaning.
+* ``core_dimension`` names the fixed ``core.json`` dimension a page contributes
+  to, so the derived rollup never depends on a page's private ``detail``.
+* ``is_headline`` marks the single page whose envelope owns ``headline.json``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import StrEnum
+from html import escape
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
+
+
+class RouteRegistryError(ValueError):
+    """The registered routes violate the registry contract."""
+
+
+class RouteKind(StrEnum):
+    """How a dashboard route is made available."""
+
+    STATIC = "static"
+    DYNAMIC = "dynamic"
+    EXTERNAL = "external"
+
+
+class RefreshCadence(StrEnum):
+    """Expected refresh cadence for the route."""
+
+    FIVE_MIN = "5min"
+    TEN_MIN = "10min"
+    FIFTEEN_MIN = "15min"
+    TWENTY_MIN = "20min"
+    THIRTY_MIN = "30min"
+    HOURLY = "hourly"
+    MANUAL = "manual"
+    N_A = "n/a"
+
+
+class Visibility(StrEnum):
+    """Whether a route's output may appear in the served (public) tree.
+
+    ``PRIVATE`` routes are built into the private root only; they are neither
+    linked from the public nav nor written under the HTTP root.
+    """
+
+    PUBLIC = "public"
+    PRIVATE = "private"
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardRoute:
+    """One canonical destination displayed by the portal."""
+
+    slug: str
+    label: str
+    href: str
+    kind: RouteKind
+    section: str
+    cadence: RefreshCadence
+    description: str
+    output_path: str | None = None
+    summary_source: str | None = None
+    badge: str = ""
+    visibility: Visibility = Visibility.PUBLIC
+    core_dimension: str | None = None
+    is_headline: bool = False
+
+    @property
+    def is_internal(self) -> bool:
+        return self.kind is not RouteKind.EXTERNAL
+
+    @property
+    def is_external(self) -> bool:
+        return self.kind is RouteKind.EXTERNAL
+
+    @property
+    def is_public(self) -> bool:
+        return self.visibility is Visibility.PUBLIC
+
+    def static_target(self, site_root: Path) -> Path | None:
+        """Return the generated file backing this static route."""
+        if self.kind is not RouteKind.STATIC or self.output_path is None:
+            return None
+        return site_root / self.output_path
+
+    def validate(self) -> None:
+        """Raise ``RouteRegistryError`` when the row is internally inconsistent."""
+        if not (self.slug and self.label and self.href):
+            raise RouteRegistryError(
+                f"route {self.slug!r}: slug, label and href are required"
+            )
+        if self.kind is RouteKind.STATIC and not self.output_path:
+            raise RouteRegistryError(
+                f"route {self.slug!r}: static routes need output_path"
+            )
+        if self.kind is not RouteKind.STATIC and self.output_path is not None:
+            raise RouteRegistryError(
+                f"route {self.slug!r}: only static routes have an output_path"
+            )
+        if self.kind is RouteKind.EXTERNAL and not self.href.startswith(
+            ("http://", "https://")
+        ):
+            raise RouteRegistryError(
+                f"route {self.slug!r}: external href must be absolute"
+            )
+        if self.core_dimension is not None and self.summary_source is None:
+            # A page with no envelope source has nothing to roll up; declaring a
+            # dimension for it would make the dimension permanently blind.
+            raise RouteRegistryError(
+                f"route {self.slug!r}: core_dimension needs a summary_source"
+            )
+        if self.is_headline and self.summary_source is None:
+            raise RouteRegistryError(
+                f"route {self.slug!r}: is_headline needs a summary_source"
+            )
+        if self.visibility is Visibility.PRIVATE and self.kind is RouteKind.EXTERNAL:
+            raise RouteRegistryError(
+                f"route {self.slug!r}: an external link cannot be private"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class RouteRegistry:
+    """The validated set of routes one agent's dashboard serves.
+
+    ``nav_groups`` is the portal's reading order: ``(label, (slug, ...))``.
+    Every internal public route must appear in exactly one group so each page is
+    one click from every other; unknown or duplicated slugs raise at
+    construction, not when a page is rendered.
+    """
+
+    routes: tuple[DashboardRoute, ...]
+    portal: DashboardRoute | None = None
+    nav_groups: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    _by_slug: dict[str, DashboardRoute] = field(init=False, repr=False, compare=False)
+    _by_href: dict[str, DashboardRoute] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        by_slug: dict[str, DashboardRoute] = {}
+        by_href: dict[str, DashboardRoute] = {}
+        for route in (*self.routes, *((self.portal,) if self.portal else ())):
+            route.validate()
+            if route.slug in by_slug:
+                raise RouteRegistryError(f"duplicate slug {route.slug!r}")
+            if route.href in by_href:
+                raise RouteRegistryError(f"duplicate href {route.href!r}")
+            by_slug[route.slug] = route
+            by_href[route.href] = route
+        headlines = [r.slug for r in self.routes if r.is_headline]
+        if len(headlines) > 1:
+            raise RouteRegistryError(
+                f"exactly one route may set is_headline, got {headlines}"
+            )
+        grouped = [slug for _, slugs in self.nav_groups for slug in slugs]
+        if len(grouped) != len(set(grouped)):
+            raise RouteRegistryError("a slug appears in more than one nav group")
+        for slug in grouped:
+            route = by_slug.get(slug)
+            if route is None or route is self.portal:
+                raise RouteRegistryError(f"nav group names unknown route {slug!r}")
+            if not route.is_internal or not route.is_public:
+                raise RouteRegistryError(
+                    f"nav group names {slug!r}, which is external or private"
+                )
+        if self.nav_groups:
+            missing = [r.slug for r in self.navigable() if r.slug not in set(grouped)]
+            if missing:
+                raise RouteRegistryError(f"routes missing from nav groups: {missing}")
+        object.__setattr__(self, "_by_slug", by_slug)
+        object.__setattr__(self, "_by_href", by_href)
+
+    # -- lookup -----------------------------------------------------------
+
+    def get_by_slug(self, slug: str) -> DashboardRoute | None:
+        return self._by_slug.get(slug)
+
+    def get_by_href(self, href: str) -> DashboardRoute | None:
+        return self._by_href.get(href)
+
+    def in_section(self, section: str) -> tuple[DashboardRoute, ...]:
+        return tuple(r for r in self.routes if r.section == section)
+
+    def internal(self) -> tuple[DashboardRoute, ...]:
+        return tuple(r for r in self.routes if r.is_internal)
+
+    def public(self) -> tuple[DashboardRoute, ...]:
+        """Routes allowed in the served tree."""
+        return tuple(r for r in self.routes if r.is_public)
+
+    def navigable(self) -> tuple[DashboardRoute, ...]:
+        """Internal public routes: the set the shared nav must reach."""
+        return tuple(r for r in self.routes if r.is_internal and r.is_public)
+
+    def envelope_routes(self) -> tuple[DashboardRoute, ...]:
+        """Routes that emit a page envelope (declare a ``summary_source``)."""
+        return tuple(r for r in self.routes if r.summary_source is not None)
+
+    # -- core.json derivation --------------------------------------------
+
+    def core_dimensions(self) -> dict[str, tuple[DashboardRoute, ...]]:
+        """Routes grouped by the ``core.json`` dimension they contribute to."""
+        grouped: dict[str, list[DashboardRoute]] = {}
+        for route in self.routes:
+            if route.core_dimension is not None:
+                grouped.setdefault(route.core_dimension, []).append(route)
+        return {name: tuple(rows) for name, rows in grouped.items()}
+
+    def headline_route(self) -> DashboardRoute:
+        """The route that owns ``headline.json``; raises unless exactly one."""
+        for route in self.routes:
+            if route.is_headline:
+                return route
+        raise RouteRegistryError(
+            "no route sets is_headline; headline.json is undefined"
+        )
+
+    # -- link crawling ----------------------------------------------------
+
+    def resolve_internal_target(
+        self, href: str, *, current_route: str, site_root: Path
+    ) -> Path | None:
+        """Resolve a generated-site href to a file, or ``None`` when not crawlable."""
+        parsed = urlsplit(href)
+        if (
+            parsed.scheme
+            or parsed.netloc
+            or href.startswith(("#", "mailto:", "javascript:"))
+        ):
+            return None
+
+        current = self.get_by_href(current_route)
+        if current is not None and current.output_path is not None:
+            current_path = PurePosixPath(current.output_path)
+        else:
+            # A route ending in "/" is a directory URL: a browser resolves
+            # relative links against that directory, so the path we take
+            # `.parent` of must be the directory's own index page. Without the
+            # explicit "index.html" the trailing slash is dropped and `.parent`
+            # climbs one level too far, which reports false broken links for
+            # every generated detail page below a directory route.
+            raw_current = current_route.lstrip("/")
+            if not raw_current or raw_current.endswith("/"):
+                raw_current += "index.html"
+            current_path = PurePosixPath(raw_current)
+        raw_path = parsed.path
+        if raw_path.startswith("/"):
+            manifest_route = self.get_by_href(raw_path)
+            if manifest_route is not None:
+                return manifest_route.static_target(site_root)
+            relative = PurePosixPath(raw_path.lstrip("/"))
+        else:
+            relative = current_path.parent / raw_path
+
+        normalized = _normalize_relative_path(relative)
+        if normalized is None:
+            return None
+        if raw_path.endswith("/") or not normalized.suffix:
+            normalized /= "index.html"
+        return site_root / normalized
+
+    # -- rendering --------------------------------------------------------
+
+    def render_shared_nav(self, current_href: str) -> str:
+        """Render Portal plus every navigable route, grouped, current page marked."""
+        links = ['<a class="nav-portal" href="/">Portal</a>']
+        for group_label, slugs in self.nav_groups:
+            links.append('<span class="nav-sep" aria-hidden="true">|</span>')
+            links.append(f'<span class="nav-group">{escape(group_label)}</span>')
+            for slug in slugs:
+                route = self._by_slug[slug]
+                href = escape(route.href, quote=True)
+                label = escape(route.label)
+                if route.href == current_href:
+                    links.append(
+                        f'<a class="nav-current" aria-current="page" '
+                        f'href="{href}">{label}</a>'
+                    )
+                else:
+                    links.append(f'<a href="{href}">{label}</a>')
+        return (
+            '<nav class="vitals-nav" aria-label="Dashboard navigation">'
+            + "".join(links)
+            + "</nav>"
+        )
+
+    def render_portal_cards(
+        self,
+        *,
+        meta_html: dict[str, str] | None = None,
+        preview_html: dict[str, str] | None = None,
+    ) -> str:
+        """Render one portal card per public route, in registry order.
+
+        ``meta_html`` / ``preview_html`` are pre-escaped fragments keyed by
+        slug; the portal builds them from page envelopes.
+        """
+        meta_html = meta_html or {}
+        preview_html = preview_html or {}
+        cards: list[str] = []
+        for route in self.public():
+            target = ' target="_blank" rel="noreferrer"' if route.is_external else ""
+            badge_class = "badge-yellow" if route.is_external else "badge-green"
+            cards.append(
+                f'<a class="card" data-route="{escape(route.slug, quote=True)}" '
+                f'href="{escape(route.href, quote=True)}"{target}>'
+                f'<div class="card-title">{escape(route.label)}</div>'
+                f'<div class="card-desc">{escape(route.description)}</div>'
+                f"{meta_html.get(route.slug, '')}{preview_html.get(route.slug, '')}"
+                f'<span class="badge {badge_class}">{escape(route.badge)}</span>'
+                "</a>"
+            )
+        return "\n".join(cards)
+
+
+def _normalize_relative_path(path: PurePosixPath) -> PurePosixPath | None:
+    """Collapse dot segments while keeping the target inside the generated site."""
+    parts: list[str] = []
+    for part in path.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                return None
+            parts.pop()
+            continue
+        parts.append(part)
+    return PurePosixPath(*parts) if parts else PurePosixPath(".")
+
+
+NAV_CSS = """
+.vitals-nav { display:flex; flex-wrap:wrap; gap:8px; align-items:center;
+  padding:8px 0; margin-bottom:16px; border-bottom:1px solid var(--border, #30363d); }
+.vitals-nav a { color:var(--dim, #8b949e); font-size:12px; text-decoration:none;
+  padding:4px 8px; border-radius:4px; }
+.vitals-nav a:hover { color:var(--accent, #58a6ff); background:var(--tile-bg, #1d2433); }
+.vitals-nav .nav-portal { color:var(--accent, #58a6ff); font-weight:600; }
+.vitals-nav .nav-sep { color:var(--dim, #8b949e); font-size:11px; }
+.vitals-nav .nav-group { color:var(--dim, #8b949e); font-size:10px; text-transform:uppercase;
+  letter-spacing:0.06em; opacity:0.7; }
+.vitals-nav .nav-current { color:var(--text, #e6e9ef); background:var(--tile-bg, #1d2433);
+  font-weight:600; }
+""".strip()
