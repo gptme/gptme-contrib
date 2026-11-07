@@ -339,3 +339,77 @@ def test_default_date_retry_across_midnight_reuses_original(tmp_path: Path, monk
     assert retry == first
     assert retry.read_text() == "session started yesterday"
     assert not (tmp_path / "journal" / Clock.day / first.name).exists()
+
+
+@pytest.mark.parametrize(
+    "owner_value",
+    [
+        {},
+        {"journal_path": "placeholder"},
+        {"run_id": ""},
+        {"run_id": 123},
+        {"run_id": "another-run"},
+        {"run_id": "another-run", "journal_path": None},
+        {"run_id": "another-run", "journal_path": "wrong-path"},
+    ],
+)
+def test_default_date_retry_rejects_corrupt_historical_owner(
+    tmp_path: Path, monkeypatch, capsys, owner_value
+):
+    import gptme_sessions.journal_path as allocator
+
+    class Clock:
+        day = "2026-11-07"
+
+        @classmethod
+        def now(cls, tz):
+            return datetime.datetime.fromisoformat(cls.day).replace(tzinfo=tz)
+
+    monkeypatch.setattr(allocator, "datetime", Clock)
+    journal_dir = tmp_path / "journal"
+    first = allocator.allocate_journal_path(journal_dir, "autonomous", "abcd", "11111111")
+    first.write_text("session started yesterday")
+    owner_path = (
+        tmp_path
+        / "state"
+        / "session-journal-reservations"
+        / "journal"
+        / Clock.day
+        / f"{first.name}.json"
+    )
+    owner_path.write_text(json.dumps(owner_value))
+    Clock.day = "2026-11-08"
+
+    with pytest.raises(JournalReservationError, match="invalid owner record|path mismatch"):
+        allocator.allocate_journal_path(journal_dir, "autonomous", "abcd", "11111111")
+    assert (
+        main(
+            [
+                "--journal-dir",
+                str(journal_dir),
+                "--run-type",
+                "autonomous",
+                "--label",
+                "abcd",
+                "--uuid",
+                "11111111",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert "integrity failure" in captured.err
+    assert "Traceback" not in captured.err
+    assert first.read_text() == "session started yesterday"
+    assert not (journal_dir / Clock.day).exists()
+
+
+def test_default_date_lookup_skips_valid_historical_other_run(tmp_path: Path):
+    first = allocate_journal_path(
+        tmp_path / "journal", "autonomous", "abcd", "11111111", date="2000-01-01"
+    )
+    second = allocate_journal_path(tmp_path / "journal", "autonomous", "abcd", "22222222")
+    assert first.parent != second.parent
+    assert first.name == second.name == "autonomous-session-abcd.md"
+    assert allocate_journal_path(tmp_path / "journal", "autonomous", "abcd", "22222222") == second

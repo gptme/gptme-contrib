@@ -50,6 +50,29 @@ def try_create(path: Path) -> bool:
         return False
 
 
+def read_owner_run_id(owner_path: Path, path: Path) -> str:
+    """Read a complete owner record, validating it before comparing run ids."""
+    try:
+        owner = json.loads(owner_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise JournalReservationError(f"invalid owner record {owner_path}: {exc}") from exc
+    if (
+        not isinstance(owner, dict)
+        or not isinstance(owner.get("run_id"), str)
+        or not owner["run_id"]
+        or not isinstance(owner.get("journal_path"), str)
+    ):
+        raise JournalReservationError(
+            f"invalid owner record {owner_path}: expected run/path object"
+        )
+    if owner["journal_path"] != str(path):
+        raise JournalReservationError(
+            f"owner record path mismatch for {path}: {owner['journal_path']!r}"
+        )
+    run_id: str = owner["run_id"]
+    return run_id
+
+
 def reserve_candidate(path: Path, owner_path: Path, run_id: str) -> bool:
     """Reserve *path* for *run_id*, returning False on a normal collision.
 
@@ -65,24 +88,7 @@ def reserve_candidate(path: Path, owner_path: Path, run_id: str) -> bool:
     with owner_path.with_suffix(".lock").open("a") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         if owner_path.exists():
-            try:
-                owner = json.loads(owner_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                raise JournalReservationError(f"invalid owner record {owner_path}: {exc}") from exc
-            if (
-                not isinstance(owner, dict)
-                or not isinstance(owner.get("run_id"), str)
-                or not owner["run_id"]
-                or not isinstance(owner.get("journal_path"), str)
-            ):
-                raise JournalReservationError(
-                    f"invalid owner record {owner_path}: expected run/path object"
-                )
-            if owner["journal_path"] != str(path):
-                raise JournalReservationError(
-                    f"owner record path mismatch for {path}: {owner['journal_path']!r}"
-                )
-            if owner["run_id"] != run_id:
+            if read_owner_run_id(owner_path, path) != run_id:
                 return False
             if path.is_symlink() or not path.is_file():
                 raise JournalReservationError(f"owned journal path is not a regular file: {path}")
@@ -167,17 +173,7 @@ def allocate_journal_path(
                     owner_path = previous / f"{candidate.name}.json"
                     if not owner_path.exists():
                         continue
-                    try:
-                        owner = json.loads(owner_path.read_text(encoding="utf-8"))
-                    except (OSError, ValueError) as exc:
-                        raise JournalReservationError(
-                            f"invalid owner record {owner_path}: {exc}"
-                        ) from exc
-                    if not isinstance(owner, dict):
-                        raise JournalReservationError(
-                            f"invalid owner record {owner_path}: expected object"
-                        )
-                    if owner.get("run_id") == run_id:
+                    if read_owner_run_id(owner_path, candidate) == run_id:
                         if reserve_candidate(candidate, owner_path, run_id):
                             return candidate
         owner_dir = owner_root / date_str
