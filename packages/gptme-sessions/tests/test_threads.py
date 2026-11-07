@@ -54,6 +54,21 @@ def test_plural_trailer_is_not_attributed():
     assert st["plural"] == 1 and not nodes[0].get("delivered_shas")
 
 
+@pytest.mark.parametrize("kind", ["ref", "commit"])
+@pytest.mark.parametrize(
+    "gap, factor",
+    [(-200000, 1.0), (-1, 1.0), (0, 1.0), (43199, 1.0), (43200, 0.85), (172800, 0.7)],
+)
+def test_weak_evidence_decays_only_across_idle_gaps(kind, gap, factor):
+    work = {"task": "t-x"} if kind == "ref" else {"delivered_shas": ["abcdef1234"]}
+    citation = {"tasks_mentioned": ["t-x"]} if kind == "ref" else {"shas_mentioned": ["abcdef1234"]}
+    nodes = [S(0, start=0, dur=200001, **work), S(1, start=200001 + gap, **citation)]
+    edges, _ = L.mine_edges(nodes)
+    assert edges[(0, 1, kind)]["w"] == pytest.approx(L.WEIGHT[kind] * factor)
+    if factor == 1.0:
+        assert L.best_predecessors(nodes, edges) == [-1, 0]
+
+
 def test_consecutive_sessions_on_same_task_chain():
     nodes = [S(0, task="t-x"), S(1, task="t-y"), S(2, task="t-x")]
     edges, _ = L.mine_edges(nodes)

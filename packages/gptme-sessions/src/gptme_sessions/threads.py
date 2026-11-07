@@ -226,7 +226,7 @@ def mine_edges(
 
     def decay(a: int, b: int) -> float:
         # weak evidence across a long gap is usually context ("HEAD at 90c0abb"), not follow-up
-        gap = abs(nodes[b]["start"] - nodes[a]["end"]) / 3600
+        gap = max(0, nodes[b]["start"] - nodes[a]["end"]) / 3600
         return 1.0 if gap < 12 else 0.85 if gap < 48 else 0.7
 
     def spec(count: int, ok: int) -> float:
