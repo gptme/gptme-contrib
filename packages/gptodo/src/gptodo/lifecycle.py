@@ -481,12 +481,12 @@ def transform_post(
     return post
 
 
-_TICKED_RE = re.compile(r"^(\s*(?:>\s*)?[-*+] )\[[xX]\]")
+_TICKED_RE = re.compile(r"^(\s*(?:>\s*)?[-*+] )(?:\[[xX]\]|✅)")
 _FENCE_RE = re.compile(r"^\s*(?:>\s*)?(?:(?:[-*+]|[0-9]+[.)])\s+)?(`{3,}|~{3,})")
 
 
 def untick_checklist(content: str) -> str:
-    """Reset `- [x]` checklist items to `- [ ]` for a new recurrence cycle.
+    """Reset `- [x]` and `- ✅` items to `- [ ]` for a new recurrence cycle.
 
     Fenced code blocks are left alone (they hold examples, not the task's
     checklist). `- [-]` skipped items keep their marker and reason: a skip is a

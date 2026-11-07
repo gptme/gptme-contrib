@@ -203,6 +203,27 @@ class TestRecurResetUnticksChecklist:
         assert example in body
         assert "- [ ] real step" in body
 
+    def test_reset_reopens_completed_emoji_items(self, workspace: Path):
+        from gptodo.utils import count_subtasks
+
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(
+            path.read_text() + "\n\n- ✅ shipped\n  - ✅ nested\n> - ✅ quoted\n* ✅ star bullet\n"
+            "\n```markdown\n- ✅ example\n```\n\nprose with - ✅ inline\n"
+        )
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert "- [ ] shipped" in post.content
+        assert "  - [ ] nested" in post.content
+        assert "> - [ ] quoted" in post.content
+        assert "* [ ] star bullet" in post.content
+        assert "```markdown\n- ✅ example\n```" in post.content
+        assert "prose with - ✅ inline" in post.content
+        assert count_subtasks(post.content, checklist_only=True).completed == 0
+
     def test_non_recurring_done_keeps_ticks(self, workspace: Path):
         path = write_task(workspace, "one-off", state="active")
         path.write_text(path.read_text() + "\n\n- [x] did it\n")
