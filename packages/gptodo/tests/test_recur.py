@@ -203,6 +203,16 @@ class TestRecurResetUnticksChecklist:
         assert example in body
         assert "- [ ] real step" in body
 
+    @pytest.mark.parametrize("inline", ["```example```", "- ```example```", "> ```example```"])
+    def test_reset_does_not_treat_inline_code_as_fence(self, workspace: Path, inline: str):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{inline}\n\n- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        body = frontmatter.load(path).content
+        assert inline in body
+        assert "- [ ] real step" in body
+
     def test_reset_reopens_completed_emoji_items(self, workspace: Path):
         from gptodo.utils import count_subtasks
 

@@ -501,7 +501,11 @@ def untick_checklist(content: str) -> str:
             candidate = re.sub(r"^\s*(?:>\s*)?", "", line)
             if re.fullmatch(rf"{re.escape(fence[0])}{{{len(fence)},}}\s*", candidate):
                 fence = ""
-        elif opening := _FENCE_RE.match(line):
+        elif (opening := _FENCE_RE.match(line)) and not (
+            opening.group(1).startswith("`") and "`" in line[opening.end() :]
+        ):
+            # Backtick fence info strings cannot contain backticks: a line
+            # like ```example``` is an inline code span, not a fence opener.
             fence = opening.group(1)
         else:
             line = _TICKED_RE.sub(r"\1[ ]", line, count=1)
