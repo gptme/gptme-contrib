@@ -592,3 +592,57 @@ def test_billing_sample_is_newest_billing_error(tmp_path: Path) -> None:
         status["sample_error"]
         == "api_error_status:403; oauth_not_allowed_for_organization"
     )
+
+
+def test_issue_body_redacts_credentials_in_error(tmp_path: Path) -> None:
+    # Regression (contrib#2038 review): the error sample is published to the
+    # GitHub issue body and supplementary notifiers, so a credential echoed in
+    # a provider error must be scrubbed before it leaves the machine.
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "auth")
+        r["error"] = (
+            "Invalid API key: sk-example-secret; Authorization: Bearer "
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk "
+            "token=ghp_abcdef123456"
+        )
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    body = soc._issue_body(cfg_for(tmp_path), status)
+    for secret in ("sk-example-secret", "eyJhbGciOiJIUzI1NiJ9", "ghp_abcdef123456"):
+        assert secret not in status["sample_error"]
+        assert secret not in body
+    assert "[REDACTED]" in body
+
+
+def test_redaction_keeps_error_codes_for_classification(tmp_path: Path) -> None:
+    # Redaction must not eat the long snake_case error codes remediation keys on.
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "api_error_403")
+        r["error"] = "api_error_status:403; oauth_not_allowed_for_organization"
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    assert "oauth_not_allowed_for_organization" in status["sample_error"]
+    assert soc._is_oauth_org_block(status) is True
+
+
+def test_non_string_error_does_not_crash_assess(tmp_path: Path) -> None:
+    # Regression (contrib#2038 review): load_records() doesn't validate `error`,
+    # so a structured (dict) error must not raise inside assess() and suppress
+    # escalation for an otherwise-detected outage.
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3):
+        records.append(rec(h, "failed", "auth"))
+    weird = rec(4, "failed", "auth")
+    weird["error"] = {"message": "invalid token", "code": 403}
+    records.append(weird)
+    num = rec(5, "failed", "auth")
+    num["error"] = 401
+    records.append(num)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    assert status["outage"] is True
+    assert "invalid token" in status["sample_error"]

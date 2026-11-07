@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -83,6 +84,62 @@ BILLING_ERROR_SUBSTRINGS = (
 DEFAULT_AUTH_OUTAGE_REASONS = frozenset(
     {"auth", "auth_failure", "api_error_401", "api_error_403"}
 )
+
+# Credential-shaped substrings scrubbed from the error sample before it is
+# published (GitHub issue body, supplementary notifiers, dry-run output).
+# Deliberately broad: a false-positive redaction costs a little diagnostic
+# detail, a false negative leaks a secret to every reader of the issue.
+_SECRET_PATTERNS = (
+    # Provider-prefixed keys: sk-..., sk-ant-..., ghp_/gho_/ghs_/github_pat_, xox?-, AIza...
+    re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9_\-]{6,}"),
+    re.compile(r"\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{6,}"),
+    re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{6,}"),
+    re.compile(r"\bAIza[A-Za-z0-9_\-]{10,}"),
+    # Authorization headers / bearer tokens.
+    re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{6,}"),
+    # key=value / key: value for secret-ish keys.
+    re.compile(
+        r"(?i)\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|"
+        r"password|passwd|authorization|x-api-key)[\"']?\s*[:=]\s*[\"']?)[^\s\"',;}]+"
+    ),
+    # Any remaining long opaque token (JWTs, hex/base64 blobs). Must mix letters
+    # and digits so long snake_case error codes such as
+    # ``oauth_not_allowed_for_organization`` survive — remediation keys on them.
+    re.compile(
+        r"\b(?=[A-Za-z0-9_\-]*\d)(?=[A-Za-z0-9_\-]*[A-Za-z])[A-Za-z0-9_\-]{32,}"
+        r"(?:\.[A-Za-z0-9_\-]{10,}){0,2}\b"
+    ),
+)
+
+
+def _redact(text: str) -> str:
+    """Scrub credential-shaped substrings from text bound for outbound channels."""
+    for pat in _SECRET_PATTERNS:
+        if pat.groups:
+            text = pat.sub(lambda m: m.group(1) + "[REDACTED]", text)
+        else:
+            text = pat.sub("[REDACTED]", text)
+    return text
+
+
+def _error_text(record: dict) -> str:
+    """Return a record's ``error`` field as stripped text, whatever its JSON type.
+
+    ``load_records()`` doesn't validate the field, so an error may be a dict or
+    list (structured provider payload) or a number. Serialize those instead of
+    crashing ``assess()`` — one malformed record must not suppress escalation.
+    """
+    raw = record.get("error")
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw.strip()
+    try:
+        text = json.dumps(raw, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        text = str(raw)
+    return text.strip()
+
 
 # Only re-comment on an existing open issue this often, to avoid daily spam.
 UPDATE_INTERVAL_HOURS = 20
@@ -214,9 +271,7 @@ def assess(
             or datetime.min.replace(tzinfo=timezone.utc),
             reverse=True,
         )
-        errors_newest_first = [
-            e for e in ((r.get("error") or "").strip() for r in newest_first) if e
-        ]
+        errors_newest_first = [e for e in (_error_text(r) for r in newest_first) if e]
         billing_errors = [
             e
             for e in errors_newest_first
@@ -236,7 +291,9 @@ def assess(
         # the newest record that carries any error, so we always surface
         # *something* useful even when the most-recent record has an empty field.
         err = next(iter(billing_errors or errors_newest_first), "")
-        sample_error = err[:400] or None
+        # Redact BEFORE truncating, so a secret straddling the cap can't leave
+        # an unredacted prefix. Classification above ran on the raw errors.
+        sample_error = _redact(err)[:400] or None
         # Same reasoning as billing_outage: decide on the full errors, not the
         # truncated display sample, so a long error can't hide the provider hint.
         oauth_org_block = any(
