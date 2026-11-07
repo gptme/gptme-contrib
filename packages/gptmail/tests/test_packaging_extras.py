@@ -22,6 +22,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -39,13 +43,26 @@ def _requirements(metadata: dict) -> list[str]:
 
 
 def _names(requirements: list[str]) -> set[str]:
-    return {
-        req.split(">")[0].split("=")[0].split(" ")[0].split(";")[0].strip().lower()
-        for req in requirements
-    }
+    return {canonicalize_name(Requirement(req).name) for req in requirements}
 
 
 def test_no_dependency_names_the_scanner() -> None:
     names = _names(_requirements(tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))))
     assert "redact" not in names, "PyPI redact is an unrelated project"
     assert "gptme-redact" not in names, "an unpublished extra breaks --all-extras"
+
+
+@pytest.mark.parametrize(
+    ("requirement", "name"),
+    [
+        ("redact<1", "redact"),
+        ("redact[templates]>=0.1", "redact"),
+        ('REDACT!=0.1; python_version >= "3.10"', "redact"),
+        ("redact @ https://example.invalid/redact.whl", "redact"),
+        ("gptme_redact~=0.1", "gptme-redact"),
+        ("GPTME.Redact[scanner]<=1", "gptme-redact"),
+        ("requests>=2.28", "requests"),
+    ],
+)
+def test_requirement_names(requirement: str, name: str) -> None:
+    assert _names([requirement]) == {name}

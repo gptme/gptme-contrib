@@ -54,6 +54,7 @@ bridge = [
 # outright. Install it from its source tree with `--with /path/to/redact` (see
 # README); `gptmail agent doctor` reports whether it is importable.
 test = [
+    "packaging>=23.0",
     "tomli>=2.0; python_version < '3.11'",
     "pytest>=7.0",
     "pytest-cov>=4.0",
