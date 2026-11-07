@@ -47,11 +47,32 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# Failure reasons that are a 403/billing problem (subscription payment past due
+# or org-level access disabled, e.g. `oauth_not_allowed_for_organization`),
+# rather than a plain bad/expired token. Re-authenticating is still the first
+# thing to try (a fresh login cleared a real 403 on 2026-11-06), but if it
+# persists these need a human to pay/renew, switch to an API key, or enable
+# failover. Kept separate from the token-class reasons so remediation can be
+# failure-mode-specific.
+BILLING_OUTAGE_REASONS = frozenset({"api_error_403"})
+# Substrings in an error string that identify a 403/billing outage.  Kept in
+# sync with the checks in _is_billing_outage() so sample_error selection and
+# remediation classification agree.
+# Anthropic's org-level access block; selects the provider-specific billing URL.
+OAUTH_ORG_BLOCK_SUBSTRING = "oauth_not_allowed_for_organization"
+BILLING_ERROR_SUBSTRINGS = (
+    "api_error_403",
+    "api_error_status:403",
+    OAUTH_ORG_BLOCK_SUBSTRING,
+)
 
 # Default classifier for "the credential is dead and a human (or self-reauth)
 # must fix it out-of-band", as opposed to transient/capacity failures.
@@ -63,6 +84,88 @@ from pathlib import Path
 DEFAULT_AUTH_OUTAGE_REASONS = frozenset(
     {"auth", "auth_failure", "api_error_401", "api_error_403"}
 )
+
+# Credential-shaped substrings scrubbed from the error sample before it is
+# published (GitHub issue body, supplementary notifiers, dry-run output).
+# Deliberately broad: a false-positive redaction costs a little diagnostic
+# detail, a false negative leaks a secret to every reader of the issue.
+_SECRET_PATTERNS = (
+    # Provider-prefixed keys: sk-..., sk-ant-..., ghp_/gho_/ghs_/github_pat_, xox?-, AIza...
+    re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9_\-]{6,}"),
+    re.compile(r"\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{6,}"),
+    re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{6,}"),
+    re.compile(r"\bAIza[A-Za-z0-9_\-]{10,}"),
+    # Authorization headers / bearer tokens.
+    re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{6,}"),
+    # key=value / key: value for secret-ish keys. A quoted value is removed
+    # whole (passphrases contain spaces; escaped quotes don't end it), and an
+    # unterminated quote — e.g. cut off by an upstream cap — runs to the end
+    # rather than letting the tail of the secret through.
+    re.compile(
+        r"(?i)\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|"
+        r"password|passwd|authorization|x-api-key)[\"']?\s*[:=]\s*)"
+        r"(?:\"(?:[^\"\\]|\\.)*(?:\"|$)|'(?:[^'\\]|\\.)*(?:'|$)|[^\s\"',;}]+)"
+    ),
+    # Any remaining long opaque token (JWTs, hex/base64 blobs). Must mix letters
+    # and digits so long snake_case error codes such as
+    # ``oauth_not_allowed_for_organization`` survive — remediation keys on them.
+    re.compile(
+        r"\b(?=[A-Za-z0-9_\-]*\d)(?=[A-Za-z0-9_\-]*[A-Za-z])[A-Za-z0-9_\-]{32,}"
+        r"(?:\.[A-Za-z0-9_\-]{10,}){0,2}\b"
+    ),
+)
+
+
+def _redact(text: str) -> str:
+    """Scrub credential-shaped substrings from text bound for outbound channels."""
+    for pat in _SECRET_PATTERNS:
+        if pat.groups:
+            text = pat.sub(lambda m: m.group(1) + "[REDACTED]", text)
+        else:
+            text = pat.sub("[REDACTED]", text)
+    return text
+
+
+_STATUS_KEYS = frozenset({"code", "status", "status_code", "statuscode", "http_status"})
+
+
+def _is_structured_403(raw: object) -> bool:
+    """True when a structured (dict/list) error carries HTTP status 403.
+
+    Serializing a payload like ``{"message": "Forbidden", "code": 403}`` yields
+    none of the textual BILLING_ERROR_SUBSTRINGS, so without this the billing
+    classification silently falls back to the token-reauth hint.
+    """
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            if isinstance(k, str) and k.lower() in _STATUS_KEYS:
+                if not isinstance(v, bool) and str(v).strip() == "403":
+                    return True
+            if _is_structured_403(v):
+                return True
+    elif isinstance(raw, list):
+        return any(_is_structured_403(v) for v in raw)
+    return False
+
+
+def _error_text(record: dict) -> str:
+    """Return a record's ``error`` field as stripped text, whatever its JSON type.
+
+    ``load_records()`` doesn't validate the field, so an error may be a dict or
+    list (structured provider payload) or a number. Serialize those instead of
+    crashing ``assess()`` — one malformed record must not suppress escalation.
+    """
+    raw = record.get("error")
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw.strip()
+    try:
+        text = json.dumps(raw, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        text = str(raw)
+    return text.strip()
+
 
 # Only re-comment on an existing open issue this often, to avoid daily spam.
 UPDATE_INTERVAL_HOURS = 20
@@ -165,6 +268,65 @@ def assess(
     auth_failures = len(auth_failure_records)
     productive = sum(1 for r in records if r.get("outcome") == "productive")
 
+    # Capture the dominant failure reason and a sample of the real error string
+    # so the escalation can give failure-mode-specific remediation instead of a
+    # generic "re-auth" hint (which is wrong for 403/billing outages).
+    dominant_reason: str | None = None
+    sample_error: str | None = None
+    billing_outage = False
+    oauth_org_block = False
+    if auth_failure_records:
+        reason_counts = Counter(
+            r.get("failure_reason")
+            for r in auth_failure_records
+            if r.get("failure_reason")
+        )
+        if reason_counts:
+            dominant_reason = reason_counts.most_common(1)[0][0]
+        # Classify billing-vs-token over the FULL, case-folded error strings of
+        # *every* auth-failure record, up front — before any truncation. A long
+        # or mixed-case error must not be able to hide the 403/billing signal,
+        # and the display sample (below) is capped at 400 chars. The resulting
+        # flag is authoritative; _is_billing_outage() reads it directly.
+        # Errors are ordered newest-first by parsed timestamp (JSONL file order
+        # is not guaranteed chronological) and whitespace-only errors dropped,
+        # so neither an older record nor an empty one can win the sample.
+        newest_first = sorted(
+            auth_failure_records,
+            key=lambda r: _parse_ts(r.get("timestamp", ""))
+            or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        errors_newest_first = [e for e in (_error_text(r) for r in newest_first) if e]
+        billing_errors = [
+            e
+            for e in errors_newest_first
+            if any(kw in e.lower() for kw in BILLING_ERROR_SUBSTRINGS)
+        ]
+        billing_outage = (
+            bool(billing_errors)
+            or any(_is_structured_403(r.get("error")) for r in auth_failure_records)
+            or (dominant_reason in BILLING_OUTAGE_REASONS)
+            or any(
+                r.get("failure_reason") in BILLING_OUTAGE_REASONS
+                for r in auth_failure_records
+            )
+        )
+        # Prefer a billing-bearing record for the display sample too: the newest
+        # record may have an empty error field even during a sustained billing
+        # outage (the recorder only populates it intermittently). Fall back to
+        # the newest record that carries any error, so we always surface
+        # *something* useful even when the most-recent record has an empty field.
+        err = next(iter(billing_errors or errors_newest_first), "")
+        # Redact BEFORE truncating, so a secret straddling the cap can't leave
+        # an unredacted prefix. Classification above ran on the raw errors.
+        sample_error = _redact(err)[:400] or None
+        # Same reasoning as billing_outage: decide on the full errors, not the
+        # truncated display sample, so a long error can't hide the provider hint.
+        oauth_org_block = any(
+            OAUTH_ORG_BLOCK_SUBSTRING in e.lower() for e in errors_newest_first
+        )
+
     last_prod = last_productive_ts(records_file, now)
     if last_prod is not None:
         hours_since_prod: float | None = (now - last_prod).total_seconds() / 3600
@@ -196,6 +358,10 @@ def assess(
             round(hours_since_prod, 1) if hours_since_prod is not None else None
         ),
         "last_productive_at": last_prod.isoformat() if last_prod else None,
+        "dominant_reason": dominant_reason,
+        "sample_error": sample_error,
+        "billing_outage": billing_outage,
+        "oauth_org_block": oauth_org_block,
         "outage": outage,
     }
 
@@ -293,19 +459,82 @@ def _closed_during_outage(issue: dict, status: dict, now: datetime) -> bool:
     return (now - closed) <= timedelta(hours=status["window_hours"])
 
 
+def _is_billing_outage(status: dict) -> bool:
+    """True when the outage looks like a 403/billing block rather than a bad token.
+
+    assess() classifies this over the full, case-folded error strings of every
+    auth-failure record (before truncation) and stores the authoritative result
+    in ``billing_outage``; prefer it. Fall back to dominant_reason / sample_error
+    for status dicts constructed elsewhere (tests, issue-reopen paths).
+    """
+    if "billing_outage" in status:
+        return bool(status["billing_outage"])
+    if status.get("dominant_reason") in BILLING_OUTAGE_REASONS:
+        return True
+    sample = (status.get("sample_error") or "").lower()
+    return any(kw in sample for kw in BILLING_ERROR_SUBSTRINGS)
+
+
+def _is_oauth_org_block(status: dict) -> bool:
+    """True when the evidence names Anthropic's org-access block.
+
+    Prefer assess()'s ``oauth_org_block`` (computed over the full errors); fall
+    back to the display sample for status dicts constructed elsewhere.
+    """
+    if "oauth_org_block" in status:
+        return bool(status["oauth_org_block"])
+    return OAUTH_ORG_BLOCK_SUBSTRING in (status.get("sample_error") or "").lower()
+
+
+def _remediation(cfg: Config, status: dict) -> str:
+    """Failure-mode-specific remediation line.
+
+    Kept harness-agnostic: the fix always leads with the *configured* reauth
+    command (``cfg.reauth_cmd``), never a hard-coded provider action. A fresh
+    login cleared a real 403 on 2026-11-06, so it's the first thing to try even
+    for a billing/org-access block. Provider-specific billing guidance (the
+    Anthropic account URL) is only appended when the evidence actually names the
+    Anthropic org-access error, so a non-Anthropic agent is never pointed at
+    claude.ai.
+
+    For token failures (401): just the reauth hint.
+    """
+    if not _is_billing_outage(status):
+        return f"Fix: {cfg.reauth_cmd}."
+
+    line = (
+        f"Fix: {cfg.reauth_cmd} first (a fresh login cleared a 403 on "
+        "2026-11-06). If it persists, this looks like a billing/org-access "
+        "block: renew the subscription, switch to an API key, or enable the "
+        "already-built alternate-harness failover."
+    )
+    if _is_oauth_org_block(status):
+        line += (
+            " (Anthropic org access — pay/renew at https://claude.ai/settings/billing)"
+        )
+    return line
+
+
 def _issue_body(cfg: Config, status: dict) -> str:
+    error_block = (
+        f"- observed error: `{status['sample_error']}`\n"
+        if status.get("sample_error")
+        else ""
+    )
     return (
         f"**Self-detected auth outage** — agent `{cfg.agent_name}`'s autonomous "
         f"loop is 401/403ing (bad token or org disabled subscription access) and "
         f"landing zero productive work.\n\n"
         f"- auth-outage sessions (401/403, last {status['window_hours']:.0f}h): "
         f"{status['auth_failures_in_window']}\n"
+        f"- dominant failure reason: {status.get('dominant_reason') or 'unknown'}\n"
+        f"{error_block}"
         f"- productive sessions in window: {status['productive_in_window']}\n"
         f"- hours since last productive session: "
         f"{status['hours_since_last_productive']}\n"
         f"- last productive at: {status['last_productive_at']}\n\n"
         f"The loop exits 0 on auth-cooldown, so systemd shows success — this is "
-        f"why it can go silent for weeks. Fix: {cfg.reauth_cmd}. "
+        f"why it can go silent for weeks. {_remediation(cfg, status)} "
         f"Detector: `scripts/self-outage-check.py`.\n\n"
         f"_Auto-filed at {status['checked_at']}._"
     )
@@ -374,10 +603,11 @@ def escalate(cfg: Config, status: dict, dry_run: bool, now: datetime) -> None:
         if not dry_run:
             cfg.alert_file.write_text(
                 f"SELF-OUTAGE (auth) detected at {status['checked_at']}\n"
-                f"{status['auth_failures_in_window']} auth failures, "
+                f"{status['auth_failures_in_window']} auth failures "
+                f"(reason: {status.get('dominant_reason') or 'unknown'}), "
                 f"0 productive in {status['window_hours']:.0f}h; "
                 f"{status['hours_since_last_productive']}h since last productive.\n"
-                f"Fix: {cfg.reauth_cmd}.\n"
+                f"{_remediation(cfg, status)}\n"
             )
         _supplementary_notify_pending = False
         if cfg.repo:
