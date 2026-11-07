@@ -348,7 +348,9 @@ _PATTERNS: list[Pattern] = [
     # segment (`:password@`) so passwordless URLs are not matched.
     Pattern(
         re.compile(
-            r"postgres(?:ql)?://[A-Za-z0-9._~!$&'()*+,;=%-]+:[^@\s]+@[a-zA-Z0-9_.-]+(?::[0-9]+)?(?:/[a-zA-Z0-9_-]*)?"
+            r"postgres(?:ql)?://[A-Za-z0-9._~!$&'()*+,;=%-]+:[^@\s]+@"
+            r"(?:\[[A-Za-z0-9:.%_-]+\]|[a-zA-Z0-9_.-]+)"
+            r"(?::[0-9]+)?(?:/[a-zA-Z0-9_-]*)?"
         ),
         Severity.CRITICAL,
         "connection_string",
@@ -377,7 +379,7 @@ _PATTERNS: list[Pattern] = [
     ),
     Pattern(
         re.compile(
-            r"-----BEGIN (?P<key_label>(?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY(?: BLOCK)?)-----"
+            r"-----BEGIN (?P<key_label>(?:RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----"
             r".*?"
             r"-----END (?P=key_label)-----",
             re.DOTALL,
@@ -483,7 +485,7 @@ _PATTERNS: list[Pattern] = [
             # Truncated snippets end at a line boundary or EOF instead of a
             # closing quote; a final backslash is still part of the secret.
             # Unquoted values stop at ordinary config/JSON separators.
-            r"(?P<quote>['\"])?"
+            r"(?P<quote>\"\"\"|'''|['\"])?"
             r"(?P<value>(?(quote)"
             r"(?:(?:\\[\s\S]|(?!(?P=quote))[^\\])+(?=(?P=quote))"
             r"|(?:\\[^\r\n]|\\(?=[\r\n]|\Z)|(?!(?P=quote))[^\\\r\n])+)"

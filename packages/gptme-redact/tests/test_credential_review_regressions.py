@@ -7,8 +7,9 @@ from redact.cli import main
 
 @pytest.mark.parametrize("scheme", ["postgres", "postgresql"])
 @pytest.mark.parametrize("username", ["app.user", "app%40example", "app+user"])
-def test_postgres_userinfo_is_fully_masked(scheme, username):
-    uri = f"{scheme}://{username}:synthetic-password@localhost/db"
+@pytest.mark.parametrize("host", ["localhost", "[::1]", "[2001:db8::1]:5432"])
+def test_postgres_userinfo_is_fully_masked(scheme, username, host):
+    uri = f"{scheme}://{username}:synthetic-password@{host}/db"
     result = redact(uri, literals=[])
     assert result.blocked
     assert result.redacted == "[REDACTED:connection_string]"
@@ -32,8 +33,9 @@ PGP_PRIVATE = (
 )
 
 
-def test_pgp_private_key_armor_is_fully_masked():
-    result = redact(PGP_PRIVATE, literals=[])
+@pytest.mark.parametrize("label", ["PGP PRIVATE KEY BLOCK", "ENCRYPTED PRIVATE KEY"])
+def test_private_key_armor_is_fully_masked(label):
+    result = redact(PGP_PRIVATE.replace("PGP PRIVATE KEY BLOCK", label), literals=[])
     assert result.blocked
     assert result.redacted == "[REDACTED:private_key]"
     assert [(f.category, f.count, f.preview) for f in result.findings] == [
@@ -47,7 +49,7 @@ def test_pgp_public_key_is_not_a_private_key():
     assert not any(f.category == "private_key" for f in result.findings)
 
 
-@pytest.mark.parametrize("quote", ["'", '"'])
+@pytest.mark.parametrize("quote", ["'", '"', "'''", '"""'])
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
 @pytest.mark.parametrize("prefix", ["", "first-line"])
 def test_multiline_password_is_fully_masked(quote, newline, prefix):
