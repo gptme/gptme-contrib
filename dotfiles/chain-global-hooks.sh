@@ -374,7 +374,13 @@ for name in "${HOOK_NAMES[@]}"; do
         # Keep the real hook active until write_wrapper atomically publishes its
         # replacement. Any failure preparing or publishing leaves Git's current
         # validation intact. Preserve symlinks and access bits in the saved hook.
-        cp -Pp "$dest" "$local_hook"
+        backup="$(mktemp "$HOOKS_DIR/.${name}.backup.XXXXXX")"
+        # Publish the copy by rename too: cp onto an existing .local symlink
+        # would follow it and overwrite a shared script outside this directory.
+        if ! cp -Pp "$dest" "$backup" || ! mv -f "$backup" "$local_hook"; then
+            rm -f "$backup"
+            exit 1
+        fi
     fi
     write_wrapper "$name"
     chained=$((chained + 1))

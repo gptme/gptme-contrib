@@ -1275,3 +1275,35 @@ def test_failed_wrapper_install_keeps_active_hook(
     )
     if refresh:
         assert (local_dir / f"{name}.local").read_text() == original
+
+
+def test_replacing_saved_symlink_does_not_overwrite_shared_target(
+    tmp_path: Path,
+) -> None:
+    global_dir = tmp_path / "global"
+    local_dir = tmp_path / "local"
+    global_dir.mkdir()
+    local_dir.mkdir()
+    name = "prepare-commit-msg"
+    shared = tmp_path / "shared-hook"
+    original = '#!/bin/bash\necho shared >>"$1"\n'
+    _write_exec(shared, original)
+    active = local_dir / name
+    active.symlink_to(shared)
+    _write_exec(global_dir / name, '#!/bin/bash\necho global >>"$1"\n')
+    args = ["--hooks-dir", str(local_dir), "--global-dir", str(global_dir)]
+    assert _run(args).returncode == 0
+    saved = local_dir / f"{name}.local"
+    assert saved.is_symlink()
+    replacement = '#!/bin/bash\necho replacement >>"$1"\n'
+    _write_exec(active, replacement)
+
+    result = _run(args)
+    assert result.returncode == 0, result.stderr
+    assert shared.read_text() == original
+    assert not saved.is_symlink()
+    assert saved.read_text() == replacement
+    message = tmp_path / "message"
+    message.write_text("subject\n")
+    _run_wrapper(active, str(message))
+    assert message.read_text().splitlines() == ["subject", "global", "replacement"]
