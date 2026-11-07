@@ -977,3 +977,61 @@ def test_escaped_observation_is_truncated_not_dropped():
     content = fit["kept"][0]["content"]
     assert module.BUDGET_MARKER in content
     assert content.count("\x01") > 2000
+
+
+def test_direct_late_insertion_is_killed_before_failure(database, tmp_path):
+    native = tmp_path / "swift"
+    marker = tmp_path / "inserted-late"
+    target = TARGET | {"selection": {"location": 0, "length": 0}}
+    native.write_text(
+        "#!/usr/bin/env python3\nimport json,pathlib,sys,time\n"
+        # Progress HUD invocations just wait for stdin EOF.
+        "if '--insert-session' not in sys.argv:\n    sys.stdin.read(); sys.exit(0)\n"
+        + "print("
+        + repr(json.dumps(target))
+        + ",flush=True)\n"
+        "command=json.loads(sys.stdin.readline())\n"
+        "assert 0 < command['budget_s'] < 10\n"
+        # Slow revalidation: confirms only after the launcher's reply deadline.
+        "time.sleep(2)\n"
+        f"pathlib.Path({str(marker)!r}).write_text('late')\n"
+        "print('{\"inserted\":true}',flush=True)\n",
+        encoding="utf-8",
+    )
+    native.chmod(0o700)
+    generator = tmp_path / "gptme"
+    generator.write_text(
+        "#!/usr/bin/env python3\nimport sys\nsys.stdin.read()\nprint('Synthetic reply')\n",
+        encoding="utf-8",
+    )
+    generator.chmod(0o700)
+    direct = SCRIPT.parent / "contextual-draft" / "direct.py"
+    code = (
+        "import runpy,argparse,pathlib,sys,time; m=runpy.run_path(sys.argv[1]); "
+        "m['execute'].__globals__['INSERT_REPLY_TIMEOUT']=0.5; t=time.monotonic()\n"
+        "try:\n"
+        "    m['execute'](argparse.Namespace(context=[],query=None,"
+        "goldfish_db=pathlib.Path(sys.argv[2]),model='test/synthetic'))\n"
+        "finally:\n"
+        "    print('elapsed', time.monotonic()-t, flush=True)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(direct), str(database)],
+        env={
+            **os.environ,
+            "PYTHONPATH": str(direct.parent),
+            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "XDG_STATE_HOME": str(tmp_path / "state"),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert "timed out" in result.stderr
+    assert "Draft inserted" not in result.stdout
+    # The helper was killed when the deadline passed, not after cleanup waits.
+    elapsed = float(result.stdout.rsplit("elapsed", 1)[1])
+    assert elapsed < 2
+    time.sleep(2.5)
+    assert not marker.exists(), "helper inserted after failure was reported"

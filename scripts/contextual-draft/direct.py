@@ -34,6 +34,11 @@ field. Never send or submit anything."""
 
 
 MAX_LINE = core.MAX_PROTOCOL_LINE  # Derivation and worst cases: see core.
+# The helper must finish insertion strictly inside the reply deadline: it aborts
+# before its single AX write once INSERT_BUDGET has elapsed since it received
+# the draft, and that write is bounded by its 2s AX messaging timeout.
+INSERT_REPLY_TIMEOUT = 10.0
+INSERT_BUDGET = INSERT_REPLY_TIMEOUT - 4.0
 
 
 def read_line(proc: subprocess.Popen, timeout: float) -> bytes:
@@ -169,6 +174,7 @@ def execute(args: argparse.Namespace) -> None:
             f"Cannot start native capture; diagnostics: {directory}"
         ) from exc
     progress = None
+    native_stopped = False
     try:
         target = core.validate_target(json.loads(read_line(native, 30)))
         if (target.get("selection") or {}).get("length") != 0:
@@ -222,12 +228,22 @@ def execute(args: argparse.Namespace) -> None:
         draft = core.read_bounded(output, core.MAX_DRAFT).decode("utf-8")
         if not draft.strip():
             raise core.DraftError("Insufficient context; no draft inserted")
-        write_line(
-            native,
-            (json.dumps({"draft": draft}, ensure_ascii=False) + "\n").encode("utf-8"),
-            10,
-        )
-        reply = json.loads(read_line(native, 10))
+        command = {"draft": draft, "budget_s": INSERT_BUDGET}
+        try:
+            write_line(
+                native,
+                (json.dumps(command, ensure_ascii=False) + "\n").encode("utf-8"),
+                INSERT_REPLY_TIMEOUT,
+            )
+            reply = json.loads(read_line(native, INSERT_REPLY_TIMEOUT))
+        except BaseException:
+            # No confirmed outcome: kill the helper's group now, before any
+            # other cleanup wait, so a late insertion cannot follow a reported
+            # failure (and a retry cannot duplicate the draft).
+            core.kill_group(native)
+            native.wait()
+            native_stopped = True
+            raise
         if reply.get("inserted") is not True:
             raise core.DraftError("Insertion not confirmed; draft retained privately")
         core.log_event(directory, "inserted", elapsed_s=time.monotonic() - started)
@@ -253,10 +269,12 @@ def execute(args: argparse.Namespace) -> None:
         stop_progress(progress)
         native_errors.close()
         # The helper exits by itself after replying; otherwise stop its group.
-        deadline = time.monotonic() + 5
-        while not core.leader_exited(native) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        core.stop_group(native, grace=5)
+        # A group already killed and reaped above is never signalled again.
+        if not native_stopped:
+            deadline = time.monotonic() + 5
+            while not core.leader_exited(native) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            core.stop_group(native, grace=5)
         for stream in (native.stdin, native.stdout):
             if stream is not None:
                 try:

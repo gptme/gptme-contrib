@@ -264,8 +264,13 @@ if interactive {
     }
     guard let line = readLine(), line.utf8.count <= maxLine,
           let payload = line.data(using: .utf8),
-          let command = try? JSONSerialization.jsonObject(with: payload) as? [String: String],
-          let draft = command["draft"], !draft.isEmpty else { fail("No draft to insert") }
+          let command = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+          let draft = command["draft"] as? String, !draft.isEmpty,
+          let budget = (command["budget_s"] as? NSNumber)?.doubleValue, budget > 0 else {
+        fail("No draft to insert")
+    }
+    // Insertion budget from the launcher, strictly inside its reply deadline.
+    let received = Date()
     guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
           let current = attribute(application, kAXFocusedUIElementAttribute), CFEqual(raw, current),
           fieldSecurity(field) == security,
@@ -276,6 +281,10 @@ if interactive {
     var canInsert: DarwinBoolean = false
     guard AXUIElementIsAttributeSettable(field, kAXSelectedTextAttribute as CFString, &canInsert) == .success,
           canInsert.boolValue else { fail("Target does not support selected-text insertion") }
+    // Revalidation can be slow; never write once the launcher may have given up.
+    guard Date().timeIntervalSince(received) <= budget else {
+        fail("Insertion budget exceeded; draft retained but not inserted")
+    }
     // One targeted AX write. No clipboard, keyboard simulation, focus activation,
     // whole-field replacement, Return, or fallback into another control.
     guard AXUIElementSetAttributeValue(field, kAXSelectedTextAttribute as CFString, draft as CFString) == .success else {

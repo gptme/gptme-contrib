@@ -225,6 +225,12 @@ class Generation:
         while True:
             with self._lock:
                 returncode = self.proc.poll()
+                # Residual window, accepted: poll() reaps the leader, and if it
+                # had no surviving descendants its pid/pgid could in principle be
+                # reused before kill_group() below. Closing it needs a pidfd or
+                # waitid(WNOWAIT), which macOS < Python 3.13 lacks; the window is
+                # one lock-held step, and with descendants alive the pgid stays
+                # reserved, which is the case this kill exists for.
                 if returncode is not None and not self._released:
                     # First reaper: kill leftover descendants while this object
                     # still owns the group, then release it for good.
