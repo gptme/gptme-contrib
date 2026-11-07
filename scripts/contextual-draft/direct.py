@@ -67,6 +67,32 @@ def read_line(proc: subprocess.Popen, timeout: float) -> bytes:
     return line
 
 
+def write_line(proc: subprocess.Popen, line: bytes, timeout: float) -> None:
+    """Write one protocol line against an overall deadline.
+
+    A helper that stops reading must not block this process (and its exclusive
+    drafting lock) on a full pipe, so each write waits only for the time left.
+    """
+    assert proc.stdin is not None
+    fd = proc.stdin.fileno()
+    deadline = time.monotonic() + timeout
+    view = memoryview(line)
+    os.set_blocking(fd, False)
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(fd, selectors.EVENT_WRITE)
+            while view:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise core.DraftError("Native target session timed out")
+                try:
+                    view = view[os.write(fd, view) :]
+                except BlockingIOError:
+                    continue
+    finally:
+        os.set_blocking(fd, True)
+
+
 def run(args: argparse.Namespace) -> None:
     cache = Path.home() / ".cache" / "contextual-draft"
     cache.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -106,7 +132,11 @@ def stop_progress(progress: subprocess.Popen | None) -> None:
         progress.wait(timeout=3)
     except subprocess.TimeoutExpired:
         progress.terminate()
-        progress.wait(timeout=3)
+        try:
+            progress.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            progress.kill()
+            progress.wait()
 
 
 def execute(args: argparse.Namespace) -> None:
@@ -174,6 +204,10 @@ def execute(args: argparse.Namespace) -> None:
             "prepared",
             source_ids=[r["snapshot_id"] for r in prepared["observations"]],
             reference_sources=[r["source"] for r in prepared["agent_context"]],
+            budget_dropped_ids=prepared["coverage"]["budget"]["dropped_snapshot_ids"],
+            budget_truncated_ids=prepared["coverage"]["budget"][
+                "truncated_snapshot_ids"
+            ],
             request_bytes=request.stat().st_size,
         )
         output = directory / "draft.txt"
@@ -188,11 +222,11 @@ def execute(args: argparse.Namespace) -> None:
         draft = core.read_bounded(output, core.MAX_DRAFT).decode("utf-8")
         if not draft.strip():
             raise core.DraftError("Insufficient context; no draft inserted")
-        assert native.stdin is not None
-        native.stdin.write(
-            (json.dumps({"draft": draft}, ensure_ascii=False) + "\n").encode("utf-8")
+        write_line(
+            native,
+            (json.dumps({"draft": draft}, ensure_ascii=False) + "\n").encode("utf-8"),
+            10,
         )
-        native.stdin.flush()
         reply = json.loads(read_line(native, 10))
         if reply.get("inserted") is not True:
             raise core.DraftError("Insertion not confirmed; draft retained privately")

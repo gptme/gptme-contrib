@@ -228,6 +228,82 @@ def validate_target(target: Any) -> dict:
     return target
 
 
+MIN_TRUNCATED_CONTENT = 2000
+BUDGET_MARKER = "\n[... middle omitted to fit request budget ...]\n"
+
+
+def _fit_bytes(text: str, budget: int) -> str:
+    """Bound text to budget UTF-8 bytes, keeping head and (larger) tail."""
+    raw = text.encode("utf-8")
+    if len(raw) <= budget:
+        return text
+    room = max(budget - len(BUDGET_MARKER.encode("utf-8")), 0)
+    head = room // 3
+    tail = room - head
+    return (
+        raw[:head].decode("utf-8", errors="ignore")
+        + BUDGET_MARKER
+        + raw[len(raw) - tail :].decode("utf-8", errors="ignore")
+    )
+
+
+def compose_request(base: dict, observations: list[dict]) -> tuple[str, dict]:
+    """Fit observations, in retrieval-priority order, into the request byte budget.
+
+    Source content is bounded in characters, so multibyte text can exceed the
+    byte limit. Target and explicit context are mandatory; observations are added
+    in order until the next would not fit, which is truncated if a useful amount
+    fits, and the rest are dropped. Only snapshot IDs are recorded, never content.
+    """
+    ids = [row["snapshot_id"] for row in observations]
+
+    def encode(selected: list[dict], dropped: list, truncated: list) -> str:
+        coverage = dict(
+            base["coverage"],
+            budget={
+                "max_request_bytes": MAX_REQUEST,
+                "dropped_snapshot_ids": dropped,
+                "truncated_snapshot_ids": truncated,
+            },
+        )
+        request = dict(base, observations=selected, coverage=coverage)
+        return json.dumps(request, ensure_ascii=False, indent=2) + "\n"
+
+    def size(selected: list[dict]) -> int:
+        # Measure with every ID in both lists: the final record is a subset,
+        # so the final encoding can only be smaller.
+        return len(encode(selected, ids, ids).encode("utf-8"))
+
+    if size([]) > MAX_REQUEST:
+        raise DraftError(
+            "Target and explicit context exceed 100 KB; reduce context files"
+        )
+    selected: list[dict] = []
+    dropped: list = []
+    truncated: list = []
+    for index, row in enumerate(observations):
+        if size(selected + [row]) <= MAX_REQUEST:
+            selected.append(row)
+            continue
+        budget = MAX_REQUEST - size(selected + [dict(row, content="")])
+        while budget >= MIN_TRUNCATED_CONTENT:
+            candidate = dict(
+                row, content=_fit_bytes(row["content"], budget), content_truncated=True
+            )
+            excess = size(selected + [candidate]) - MAX_REQUEST
+            if excess <= 0:
+                selected.append(candidate)
+                truncated.append(row["snapshot_id"])
+                break
+            budget -= excess
+        # Everything after this row, and this row itself unless truncated in.
+        dropped = ids[index + len(truncated) :]
+        break
+    encoded = encode(selected, dropped, truncated)
+    assert len(encoded.encode("utf-8")) <= MAX_REQUEST
+    return encoded, {"dropped": dropped, "truncated": truncated, "kept": selected}
+
+
 def prepare(args: argparse.Namespace) -> None:
     target = capture() if args.capture else validate_target(read_json(args.target))
     references = []
@@ -258,11 +334,10 @@ def prepare(args: argparse.Namespace) -> None:
                 seen.add(row["snapshot_id"])
                 combined.append(row)
         observations = combined[: args.limit]
-    request = {
+    base = {
         "schema_version": 1,
         "instruction": args.instruction,
         "target": target,
-        "observations": observations,
         "agent_context": references,
         "coverage": {
             "retrieval": "sqlite literal-phrase FTS search"
@@ -272,14 +347,12 @@ def prepare(args: argparse.Namespace) -> None:
             "note": "Bounded observed context, not a complete conversation or user history. No automatic agent workspace loading.",
         },
     }
-    encoded = json.dumps(request, ensure_ascii=False, indent=2) + "\n"
-    if len(encoded.encode()) > MAX_REQUEST:
-        raise DraftError(
-            "Combined context exceeds 100 KB; reduce --limit or context files"
-        )
+    encoded, fit = compose_request(base, observations)
     private_write(args.output, encoded)
     print(
-        f"Prepared private request: {len(observations)} observations, {len(references)} explicit context files. No model called."
+        f"Prepared private request: {len(fit['kept'])} observations"
+        f" ({len(fit['truncated'])} truncated, {len(fit['dropped'])} dropped to fit 100 KB),"
+        f" {len(references)} explicit context files. No model called."
     )
 
 

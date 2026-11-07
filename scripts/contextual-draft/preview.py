@@ -6,11 +6,14 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import queue
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "contextual_draft.py"
@@ -86,12 +89,14 @@ def launch(request: Path, model: str) -> None:
         row=4, column=0, sticky="w"
     )
     results: queue.Queue[tuple[bool, str]] = queue.Queue()
-    processes: list[subprocess.Popen] = []
+    # Live generations only: entries are removed once reaped, and close() only
+    # stops generations that are still unreaped.
+    generations: list[Generation] = []
     cancelled = threading.Event()
 
     def worker(run_request: Path, output: Path, chosen_model: str) -> None:
         try:
-            proc = subprocess.Popen(
+            generation = Generation(
                 [
                     sys.executable,
                     str(SCRIPT),
@@ -103,18 +108,18 @@ def launch(request: Path, model: str) -> None:
                     "--allow-model-disclosure",
                     "--output",
                     str(output),
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
+                ]
             )
-            processes.append(proc)
-            if cancelled.is_set():
-                stop_process(proc)
-            proc.communicate()
+            generations.append(generation)
+            try:
+                if cancelled.is_set():
+                    generation.stop()
+                returncode = generation.wait()
+            finally:
+                generations.remove(generation)
             if cancelled.is_set():
                 return
-            if proc.returncode:
+            if returncode:
                 results.put(
                     (
                         False,
@@ -176,8 +181,8 @@ def launch(request: Path, model: str) -> None:
 
     def close() -> None:
         cancelled.set()
-        for proc in processes:
-            stop_process(proc)
+        for generation in list(generations):
+            generation.stop()
         root.destroy()
 
     button = ttk.Button(
@@ -190,37 +195,65 @@ def launch(request: Path, model: str) -> None:
     root.mainloop()
 
 
-def stop_process(proc: subprocess.Popen, grace: float = 2.0) -> None:
-    """Stop this launcher's generation group, including its model subprocess.
+class Generation:
+    """One generator process group whose signalling and reaping share a lock.
 
-    The generator runs in its own session (start_new_session), so its pid is
-    the process group id. SIGTERM the group, give it a grace period to exit,
-    then SIGKILL whatever remains (a model process may ignore SIGTERM or
-    outlive its parent) and reap the leader so the worker's communicate()
-    returns.
+    The generator runs in its own session, so its pid is also its process group
+    id. Signals go to the group only while this object holds the leader
+    unreaped: until then neither the pid nor the group id can be reused, so a
+    completed generation can never be mistaken for an unrelated process group.
+    Output is discarded (provider output is withheld from the UI anyway), so no
+    pipe can block reaping.
     """
-    import os
-    import signal
-    import time
 
-    def signal_group(sig: int) -> bool:
-        try:
-            os.killpg(proc.pid, sig)
-        except (ProcessLookupError, PermissionError):
-            # Gone, or (macOS) only unreaped zombies remain in the group.
+    def __init__(self, command: list[str]):
+        self._lock = threading.Lock()
+        self.proc = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    def wait(self, interval: float = 0.1) -> int:
+        """Reap the leader, polling so stop() can take the lock in between."""
+        while True:
+            with self._lock:
+                returncode = self.proc.poll()
+            if returncode is not None:
+                return returncode
+            time.sleep(interval)
+
+    def _leader_exited(self) -> bool:
+        # Non-reaping check (WNOWAIT): the zombie keeps the pid/pgid reserved.
+        if not hasattr(os, "waitid"):
             return False
-        return True
+        try:
+            info = os.waitid(
+                os.P_PID, self.proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+            )
+        except ChildProcessError:
+            return True
+        return info is not None
 
-    if proc.poll() is None:
-        signal_group(signal.SIGTERM)
-    deadline = time.monotonic() + grace
-    # Probe the whole group, not only the leader: a SIGTERM-ignoring model
-    # process can survive after the launcher process itself has exited.
-    while signal_group(0) and time.monotonic() < deadline:
-        proc.poll()
-        time.sleep(0.05)
-    signal_group(signal.SIGKILL)
-    proc.wait()
+    def stop(self, grace: float = 2.0) -> None:
+        """SIGTERM the group, wait for the leader, then SIGKILL survivors and reap."""
+        with self._lock:
+            if self.proc.returncode is not None:
+                return  # Already reaped: the group id may now belong to others.
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(self.proc.pid, sig)
+                except (ProcessLookupError, PermissionError):
+                    pass  # No signallable members, e.g. only the zombie leader.
+                if sig == signal.SIGTERM:
+                    deadline = time.monotonic() + grace
+                    while not self._leader_exited() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+            # A SIGTERM-ignoring model process can outlive its launcher; the
+            # SIGKILL above reached it while the leader still reserved the group.
+            self.proc.wait()
 
 
 def main() -> None:

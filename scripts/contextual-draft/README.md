@@ -116,7 +116,11 @@ the PID/role/window metadata here is deliberately insufficient to authorize it.
   during capture, and non-writable fields fail closed. A focused field over 20 KB
   is refused; explicit context files are limited to 20 KB each, source content
   to 12,000 characters per observation, observations to five, and the complete
-  request to 100 KB. Source metadata is also bounded during SQL selection.
+  request to 100 KB. Target and explicit context always fit or the request is
+  refused; observations are then added in retrieval order against the remaining
+  byte budget, truncating the first that does not fit and dropping the rest (their
+  snapshot IDs are recorded under `coverage.budget`). Source metadata is also
+  bounded during SQL selection.
 - These checks cannot detect every sensitive *non-secure* field. Pick the target
   deliberately, keep Goldfish exclusions configured, and review the local request.
 - Observations and reference files are untrusted evidence. The generation prompt

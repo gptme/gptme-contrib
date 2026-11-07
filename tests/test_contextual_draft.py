@@ -610,6 +610,23 @@ def test_direct_read_line_partial_line_times_out(monkeypatch):
         helper.wait()
 
 
+def test_direct_write_line_to_stalled_helper_times_out(monkeypatch):
+    direct = _load_launcher("direct", monkeypatch)
+    # Helper never reads stdin, so the pipe fills and a blocking write would hang.
+    helper = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.PIPE,
+    )
+    try:
+        started = time.monotonic()
+        with pytest.raises(direct.core.DraftError, match="timed out"):
+            direct.write_line(helper, b"x" * 4_000_000 + b"\n", 0.5)
+        assert time.monotonic() - started < 3
+    finally:
+        helper.kill()
+        helper.wait()
+
+
 def test_direct_read_line_joins_chunks_until_newline(monkeypatch):
     direct = _load_launcher("direct", monkeypatch)
     helper = subprocess.Popen(
@@ -628,37 +645,84 @@ def test_direct_read_line_joins_chunks_until_newline(monkeypatch):
         helper.wait()
 
 
-def test_preview_stop_process_escalates_for_sigterm_ignoring_group(
-    monkeypatch, tmp_path
-):
+def test_preview_generation_escalates_for_sigterm_ignoring_group(monkeypatch, tmp_path):
     preview = _load_launcher("preview", monkeypatch)
-    pidfile = tmp_path / "grandchild.pid"
+    beat = tmp_path / "heartbeat"
     ignore = "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-    # Leader and its model-like child both ignore SIGTERM, as a hung generator might.
+    # Leader and its model-like child both ignore SIGTERM, as a hung generator
+    # might. The child's heartbeat shows whether it still runs: unlike PID
+    # existence, it is independent of when init reaps the killed orphan.
+    child = ignore + (
+        "import pathlib,sys\n"
+        "while True:\n"
+        "    with open(sys.argv[1], 'a') as f: f.write('.')\n"
+        "    time.sleep(0.02)"
+    )
     code = (
         ignore
-        + "import subprocess,sys,pathlib; "
-        + "c=subprocess.Popen([sys.executable,'-c',"
-        + repr(ignore + "time.sleep(60)")
-        + "]); pathlib.Path(sys.argv[1]).write_text(str(c.pid)); time.sleep(60)"
+        + "import subprocess,sys; subprocess.Popen([sys.executable,'-c',"
+        + repr(child)
+        + ",sys.argv[1]]); time.sleep(60)"
     )
-    proc = subprocess.Popen(
-        [sys.executable, "-c", code, str(pidfile)], start_new_session=True
-    )
+    generation = preview.Generation([sys.executable, "-c", code, str(beat)])
     deadline = time.monotonic() + 10
-    while not pidfile.exists() or not pidfile.read_text():
+    while not beat.exists():
         assert time.monotonic() < deadline
         time.sleep(0.05)
-    grandchild = int(pidfile.read_text())
     started = time.monotonic()
-    preview.stop_process(proc, grace=0.3)
+    generation.stop(grace=0.3)
     assert time.monotonic() - started < 5
-    assert proc.returncode == -signal.SIGKILL
-    # The orphaned grandchild must be gone too (reaped by init once killed).
-    while True:
-        try:
-            os.kill(grandchild, 0)
-        except ProcessLookupError:
-            break
-        assert time.monotonic() - started < 5, "SIGTERM-ignoring child survived"
-        time.sleep(0.05)
+    assert generation.proc.returncode == -signal.SIGKILL
+    size = beat.stat().st_size
+    time.sleep(0.3)
+    assert beat.stat().st_size == size, "SIGTERM-ignoring child survived"
+
+
+def test_preview_generation_never_signals_reaped_group(monkeypatch):
+    preview = _load_launcher("preview", monkeypatch)
+    generation = preview.Generation([sys.executable, "-c", "pass"])
+    assert generation.wait() == 0
+    signalled = []
+    monkeypatch.setattr(preview.os, "killpg", lambda *a: signalled.append(a))
+    # Once reaped, the pid/pgid may be reused: closing must not signal it.
+    generation.stop()
+    assert signalled == []
+
+
+def test_prepare_fits_multibyte_observations_to_byte_budget(database, tmp_path):
+    rows = [(f"cjk{i}", "文" * 12000, 300 - i) for i in range(5)]
+    with sqlite3.connect(database) as db:
+        db.execute("DELETE FROM snapshots")
+        db.executemany(
+            "INSERT INTO snapshots VALUES (?,?,'test','t',NULL,NULL,1,?,NULL,NULL,NULL)",
+            rows,
+        )
+    target = tmp_path / "target.json"
+    target.write_text(json.dumps(TARGET | {"text": ""}))
+    context = tmp_path / "context.md"
+    context.write_text("Explicit context wins. " * 400)
+    output = tmp_path / "request.json"
+    module.prepare(
+        argparse.Namespace(
+            capture=False,
+            target=target,
+            context=[context],
+            goldfish_db=database,
+            query=None,
+            limit=5,
+            instruction="Reply",
+            output=output,
+        )
+    )
+    raw = output.read_bytes()
+    assert len(raw) <= module.MAX_REQUEST
+    request = json.loads(raw)
+    # Explicit context is kept whole; observations fill the rest in order.
+    assert request["agent_context"][0]["content"] == context.read_text()
+    kept = [row["snapshot_id"] for row in request["observations"]]
+    budget = request["coverage"]["budget"]
+    assert kept == ["cjk0", "cjk1", "cjk2"]
+    assert budget["truncated_snapshot_ids"] == ["cjk2"]
+    assert budget["dropped_snapshot_ids"] == ["cjk3", "cjk4"]
+    assert request["observations"][2]["content_truncated"] is True
+    assert request["observations"][0]["content"] == "文" * 12000
