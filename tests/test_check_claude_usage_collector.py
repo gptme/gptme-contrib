@@ -80,9 +80,11 @@ def _fake_home(tmp_path: Path, payload: str, *, delayed_payload: str = "") -> Pa
     """Install no-op sleep + a tmux stub that serves ``payload`` after init."""
     home = tmp_path / "home"
     bin_dir = home / ".local" / "bin"
-    bin_dir.mkdir(parents=True)
-    (home / ".claude").mkdir(parents=True)
-    (home / ".claude" / ".credentials.json").write_text("{}\n")
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    creds = home / ".claude" / ".credentials.json"
+    if not creds.exists():  # keep inode:mtime stable across re-runs (cache fingerprint)
+        creds.write_text("{}\n")
 
     payload_file = tmp_path / "payload.txt"
     payload_file.write_text(payload)
@@ -238,3 +240,17 @@ def test_weekly_only_captures_sonnet_on_next_render(tmp_path: Path) -> None:
     assert "Current week (Sonnet only)" in result.stdout
     assert "95% used" in result.stdout
     assert _right_count(tmp_path) == 2
+
+
+def test_cached_human_render_shows_fable_window(tmp_path: Path) -> None:
+    """The cached human render must list the Fable window, not drop it."""
+    payload = (
+        "shortcuts\nCurrent week (all models)\n33% used\n"
+        "Current week (Fable)\n12% used\n"
+    )
+    first = _run_collector(tmp_path, payload, "--json")
+    assert first.returncode == 0, first.stderr
+    assert "seven_day_fable" in first.stdout, first.stdout
+    cached = _run_collector(tmp_path, payload)
+    assert cached.returncode == 0, cached.stderr
+    assert "Weekly (Fable)" in cached.stdout, cached.stdout
