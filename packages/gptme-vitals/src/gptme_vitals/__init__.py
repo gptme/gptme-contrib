@@ -39,6 +39,7 @@ from gptme_vitals.theme import (
     render_head_assets,
     render_theme_toggle,
 )
+from gptme_vitals.timers import TimerError, UnitPair, render_unit_pair, render_units
 
 __all__ = [
     "BASE_CSS",
@@ -53,6 +54,10 @@ __all__ = [
     "load_envelope",
     "load_envelopes",
     "publish_page",
+    "TimerError",
+    "UnitPair",
+    "render_unit_pair",
+    "render_units",
     "NAV_CSS",
     "DashboardRoute",
     "RefreshCadence",

@@ -236,7 +236,27 @@ failed, 2 for a usage error (unknown page, bad `module:ATTR`, overlapping roots)
 A page that fails stays at its last published status; it does not turn `stale`
 by itself, so schedule a freshness check on `generated_at` if that matters.
 
+## Per-page timers
+
+```txt
+gptme-vitals timers --registry … --emitters … --private-root … --public-root … \
+    --agent NAME --executable /abs/path/to/gptme-vitals --out DIR [--unit-prefix gptme-vitals]
+```
+
+Writes `<prefix>-<slug>.service` and `.timer` for every envelope route, running
+`gptme-vitals build <slug> …` on the route's `cadence` (`5min`…`30min` →
+`OnCalendar=*:0/N`, `hourly` → `hourly`). A single whole-tree build would
+over-refresh cheap pages or under-refresh expensive ones. It only renders text:
+it never calls systemctl and never creates the data roots; you place the files and
+enable them.
+
+`manual` and `n/a` routes get no unit and are listed as skipped, so a page nobody
+refreshes is visible. Rendering refuses a relative `--executable` (systemd needs
+an absolute path), a slug or prefix outside `[a-z0-9-]`, and any argument with a
+newline or NUL (a newline would end the `ExecStart` directive and let the next
+line be read as a new one). Arguments are quoted by systemd's rules (`%` and `$`
+doubled), not `shlex`'s.
+
 ## Next in slice 1
 
-The portal's single renderer and per-page systemd timers generated from each
-route's `cadence`.
+The portal's single renderer.

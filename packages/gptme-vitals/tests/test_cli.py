@@ -283,3 +283,41 @@ def test_main_usage_errors_exit_2(
     assert main(_argv(app, **bad)) == 2
     assert capsys.readouterr().err.startswith("gptme-vitals:")
     assert not (app / "public").exists()
+
+
+def _timers_argv(tmp: Path, **kw: str) -> list[str]:
+    opts = {
+        "--registry": "vitals_app:REGISTRY",
+        "--emitters": "vitals_app:EMITTERS",
+        "--private-root": str(tmp / "private"),
+        "--public-root": str(tmp / "public"),
+        "--agent": "bob",
+        "--out": str(tmp / "units"),
+        "--executable": "/usr/bin/gptme-vitals",
+    }
+    opts.update(kw)
+    return ["timers", *[x for pair in opts.items() for x in pair]]
+
+
+def test_timers_writes_one_pair_per_scheduled_page(app: Path) -> None:
+    assert main(_timers_argv(app)) == 0
+    service = (app / "units/gptme-vitals-a.service").read_text()
+    assert '"build" "a" "--registry" "vitals_app:REGISTRY"' in service
+    assert f'"--private-root" "{app / "private"}"' in service
+    assert "OnCalendar=hourly" in (app / "units/gptme-vitals-a.timer").read_text()
+    # Rendering units must not create the data roots.
+    assert not (app / "public").exists()
+
+
+def test_timers_relative_executable_exits_2(
+    app: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(_timers_argv(app, **{"--executable": "gptme-vitals"})) == 2
+    assert "absolute" in capsys.readouterr().err
+    assert not (app / "units").exists()
+
+
+def test_timers_refuses_overlapping_roots(app: Path) -> None:
+    argv = _timers_argv(app, **{"--public-root": str(app / "private" / "web")})
+    assert main(argv) == 2
+    assert not (app / "units").exists()
