@@ -240,6 +240,54 @@ def is_launch_artifact(rec: dict) -> bool:
     return rec.get("model") == "<synthetic>" and rec.get("outcome") != "failed"
 
 
+# Outcomes that can carry proof a model call returned. ``failed`` is excluded
+# even with tokens (a rate-limited run may have streamed output before dying —
+# Erik's contract is "never push on rate-limit-only or all-failed runs"), and
+# ``unknown`` is excluded until some agent has validated it against an outage
+# window. Widening this set is the one-line change if that validation lands.
+MODEL_CALL_OUTCOMES = frozenset({"productive", "noop"})
+
+
+def model_call_succeeded(rec: dict) -> bool:
+    """True when a record proves a model call came back (``output_tokens > 0``).
+
+    This is the "did inference work?" predicate, as distinct from "was the
+    session useful?" (``productive``). A noop session that ran the model and
+    correctly found nothing to do is a *successful model call*; gating a
+    dead-man heartbeat on ``productive`` alone ages it toward a false page on
+    every quiet night.
+
+    Validated on two agents before landing: across Alice's Oct 25 → Nov 6 2026
+    billing outage no auth/billing failure and no ``<synthetic>`` launch twin
+    carried ``output_tokens > 0``; on Bob's records noop 356/368 and productive
+    2875/2909 carry tokens while failed only 25/841 do. The converse doesn't
+    hold (thin fallback records omit tokens), so this only *adds* evidence —
+    its absence never implies an outage.
+    """
+    if rec.get("outcome") not in MODEL_CALL_OUTCOMES:
+        return False
+    if is_launch_artifact(rec) or authbilling_reason(rec):
+        return False
+    try:
+        return int(rec.get("output_tokens") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def heartbeat_up(status: str, metrics: dict) -> bool:
+    """Push decision for a dead-man inference heartbeat (e.g. Uptime Kuma).
+
+    Up when ``healthy``, or ``degraded`` with in-window proof a model call
+    returned. Never on ``down``: the field can still be True there (a noop
+    hours before the 403 streak began), and pushing would hide the outage.
+    Never on ``stale``. Consumers should call this rather than re-deriving the
+    policy from ``model_calls_succeeded_in_window`` alone.
+    """
+    if status == "healthy":
+        return True
+    return status == "degraded" and bool(metrics.get("model_calls_succeeded_in_window"))
+
+
 def parse_jsonl_lines(lines: object) -> list[tuple[datetime, dict]]:
     """Parse an iterable of JSONL lines into sorted (timestamp, record) pairs.
 
@@ -282,6 +330,11 @@ def inference_status_from_records(
     - ``down``     — 0 productive in the window AND a trailing streak of
       auth/billing failures; detail names the reason and how long it's run.
     - ``stale``    — no records at all in the window (loop may not be running).
+
+    ``metrics["model_calls_succeeded_in_window"]`` reports whether any in-window
+    record proves a model call returned (see ``model_call_succeeded``); it is
+    what separates a quiet ``degraded`` from a broken one. Use
+    ``heartbeat_up()`` for the push decision.
     """
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
@@ -293,10 +346,13 @@ def inference_status_from_records(
         for _, r in in_window
         if r.get("outcome") == "productive" and not is_launch_artifact(r)
     )
+    model_calls = sum(1 for _, r in in_window if model_call_succeeded(r))
     metrics: dict[str, object] = {
         "window_hours": window_hours,
         "records_in_window": len(in_window),
         "productive_in_window": productive,
+        "model_call_records_in_window": model_calls,
+        "model_calls_succeeded_in_window": model_calls > 0,
     }
 
     if not in_window:
@@ -336,7 +392,10 @@ def inference_status_from_records(
         )
         return "down", detail, metrics
 
-    return "degraded", f"0 productive sessions in {window_hours}h", metrics
+    detail = f"0 productive sessions in {window_hours}h"
+    if model_calls:
+        detail += f"; {model_calls} session(s) with model output"
+    return "degraded", detail, metrics
 
 
 def inference_status_from_lines(
