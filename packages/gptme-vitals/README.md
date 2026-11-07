@@ -151,3 +151,37 @@ first draft measured 4.46:1 on the tile surface.
 ## Next in slice 1
 
 The portal and `build` emitting the derived `core.json`/`headline.json` pair.
+
+## Derived `core.json` / `headline.json`
+
+`derive_core(registry, envelopes, agent=...)` returns the `fleet-vitals/core@1`
+and `headline@1` pair; `write_core_files()` writes them atomically. Nothing is
+hand-built: each dimension is the rollup of the pages that declared it.
+
+```python
+from gptme_vitals import derive_core, write_core_files
+
+core, headline = derive_core(REGISTRY, envelopes, agent="bob")
+write_core_files("state/vitals", core, headline)
+```
+
+- A dimension is `{**allowlisted page core projections, status, pages_total,
+  pages_unknown}`. The computed fields are written last and a page's `core`
+  may not set them; two pages in one dimension may not share a key. `detail`
+  never takes part, so the file is safe to pull across agents by construction.
+- A route that declares a dimension but emitted no envelope is a **counted blind
+  page**: it raises `pages_total` and `pages_unknown`, and a dimension whose
+  pages are all blind is `unknown`, never `healthy`. The overall status is the
+  worst rankable dimension, `unknown` if none is rankable.
+- `headline.json` comes from the one `is_headline` route. Zero or multiple
+  headline routes, or a headline page that emitted nothing, raises `BuildError`
+  rather than producing an undefined file.
+- An envelope for a slug no route owns, or two for one slug, raises.
+
+It does not import `fleet_vitals`; the two share only the schema strings and the
+status vocabulary.
+
+## Next in slice 1
+
+The portal's single renderer and a `gptme-vitals build [page...]` CLI with
+per-page timers generated from each route's `cadence`.
