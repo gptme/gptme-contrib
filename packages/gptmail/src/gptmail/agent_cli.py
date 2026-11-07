@@ -766,7 +766,7 @@ def _scanner_available() -> bool:
     """Whether the outbound secret scanner (``redact``) is importable."""
     try:
         from redact import collect_secret_literals, redact as _scan  # noqa: F401
-    except ModuleNotFoundError as exc:
+    except ImportError as exc:
         if exc.name != "redact":
             raise
         return False
@@ -877,13 +877,13 @@ def doctor() -> None:
     """
     if not _scanner_available():
         raise click.ClickException(
-            "Outbound secret scanner unavailable: the `redact` package is not "
-            "installed, so `gptmail agent send` refuses to deliver.\n"
+            "Outbound secret scanner unavailable: the `redact` package is missing "
+            "or incompatible, so `gptmail agent send` refuses to deliver.\n"
             "Install it alongside the CLI, e.g.\n"
             '  uv tool install --force "git+https://github.com/gptme/gptme-contrib'
             '#subdirectory=packages/gptmail" --with /path/to/redact\n'
-            "`redact` is not on PyPI yet, so the `secrets` extra cannot resolve "
-            "on its own."
+            "PyPI `redact` is an unrelated project; the outbound scanner must "
+            "currently be installed from its source tree."
         )
     click.echo("outbound secret scanner: ok")
 
