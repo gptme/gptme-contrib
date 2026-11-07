@@ -288,3 +288,50 @@ def test_short_session_trailer_matches_all_supplied_characters(label):
     )
     assert st["attached"] == 1
     assert nodes[0]["delivered_shas"] == ["abcdef1000"]
+
+
+@pytest.mark.parametrize("citation_length", [7, 10, 40])
+def test_abbreviated_and_full_delivered_hash_are_one_commit(citation_length):
+    sha = "abcdef1234" + "5" * 30
+    nodes = [S(0, delivered_shas=[sha[:10]]), S(1, shas_mentioned=[sha[:citation_length]])]
+    L.attach_commits(
+        nodes, [{"agent": "bob", "sha": sha, "ts": nodes[0]["end"], "sids": ["bob-0"]}]
+    )
+    edges, _ = L.mine_edges(nodes)
+    assert "commit" in kinds(edges, 0, 1)
+
+
+def test_distinct_full_commits_remain_ambiguous_even_with_one_owner():
+    sha = "abcdef1234" + "5" * 30
+    other = "abcdef1234" + "6" * 30
+    nodes = [S(0, delivered_shas=[sha[:10], sha, other]), S(1, shas_mentioned=[sha[:10]])]
+    edges, _ = L.mine_edges(nodes)
+    assert not edges
+
+
+def test_mixed_hash_representations_preserve_distinct_commit_owners():
+    sha = "abcdef1234" + "5" * 30
+    other = "abcdef1234" + "6" * 30
+    nodes = [
+        S(0, delivered_shas=[sha[:10], sha]),
+        S(1, delivered_shas=[other]),
+        S(2, shas_mentioned=[sha]),
+    ]
+    edges, _ = L.mine_edges(nodes)
+    assert "commit" in kinds(edges, 0, 2)
+    assert "commit" not in kinds(edges, 1, 2)
+
+
+def test_ambiguous_delivered_abbreviation_does_not_invent_an_owner():
+    sha = "abcdef1234" + "5" * 30
+    other = "abcdef1234" + "6" * 30
+    nodes = [
+        S(0, delivered_shas=[sha[:10]]),
+        S(1, delivered_shas=[sha]),
+        S(2, delivered_shas=[other]),
+        S(3, shas_mentioned=[sha]),
+    ]
+    edges, _ = L.mine_edges(nodes)
+    assert "commit" in kinds(edges, 1, 3)
+    assert "commit" not in kinds(edges, 0, 3)
+    assert "commit" not in kinds(edges, 2, 3)

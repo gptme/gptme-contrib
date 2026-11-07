@@ -263,6 +263,18 @@ def mine_edges(
         for s in n.get("delivered_shas") or []:
             deliv[s].add(i)
             prefixes[s[:7]].add(s)
+    # Collapse representations before testing citation ambiguity. A short hash
+    # shared by distinct longer commits cannot safely contribute its owners.
+    canonical: dict[str, set[int]] = defaultdict(set)
+    canonical_prefixes: dict[str, set[str]] = defaultdict(set)
+    for prefix, hashes in prefixes.items():
+        longest = [h for h in hashes if not any(k != h and k.startswith(h) for k in hashes)]
+        for h in hashes:
+            extensions = [k for k in longest if k.startswith(h)]
+            if len(extensions) == 1:
+                canonical[extensions[0]].update(deliv[h])
+        canonical_prefixes[prefix].update(longest)
+    deliv, prefixes = canonical, canonical_prefixes
     for i, n in enumerate(nodes):
         sp = spec(len(n.get("shas_mentioned") or []), 8)
         for s in n.get("shas_mentioned") or []:
