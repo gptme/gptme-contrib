@@ -106,6 +106,17 @@ if [ "$HOOKS_DIR" = "$(cd "$GLOBAL_DIR" && pwd -P)" ]; then
     exit 0
 fi
 
+# proc-receive has a bidirectional pkt-line exchange, not replayable input.
+# Refuse dual handlers before changing any hook, including on repeated installs.
+saved_proc_receive="$HOOKS_DIR/proc-receive"
+if grep -qF "$MARKER" "$saved_proc_receive" 2>/dev/null; then
+    saved_proc_receive="$saved_proc_receive.local"
+fi
+if [ -x "$GLOBAL_DIR/proc-receive" ] && [ -x "$saved_proc_receive" ]; then
+    echo "cannot chain two proc-receive handlers; explicit protocol integration required; hooks unchanged" >&2
+    exit 1
+fi
+
 # Fail before rewriting any hooks if a generated runner cannot be replaced by
 # our standard-config --files invocation. Never execute/source a runner to parse
 # its config. Nonstandard installations need explicit integration, not a bypass.
@@ -142,6 +153,19 @@ LOCAL_HOOK=$(printf '%q' "$local_hook")
 # Only these hooks receive a finite stdin protocol. Reading stdin for e.g.
 # prepare-commit-msg can block forever on an inherited interactive terminal.
 case $(printf '%q' "$name") in
+    proc-receive)
+        # Recheck at runtime: a second handler may be installed later.
+        if [ -x "\$GLOBAL_HOOK" ] && [ -x "\$LOCAL_HOOK" ]; then
+            echo 'cannot chain two proc-receive handlers; explicit protocol integration required' >&2
+            exit 1
+        fi
+        if [ -x "\$GLOBAL_HOOK" ]; then
+            exec "\$GLOBAL_HOOK" "\$@"
+        fi
+        if [ -x "\$LOCAL_HOOK" ]; then
+            exec "\$LOCAL_HOOK" "\$@"
+        fi
+        ;;
     pre-push|pre-receive|post-receive|post-rewrite)
         INPUT=\$(mktemp)
         trap 'rm -f "\$INPUT"' EXIT

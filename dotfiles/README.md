@@ -75,7 +75,11 @@ installer discovers both `workspace/dotfiles` and `workspace/contrib/dotfiles`;
 `AGENT_WORKSPACE` explicitly selects a different workspace.
 
 Stdin is replayed to both hooks for `pre-push`, `pre-receive`, `post-receive`
-and `post-rewrite`; commit hooks do not buffer stdin. When the saved local
+and `post-rewrite`; commit hooks do not buffer stdin. A single `proc-receive`
+handler keeps its live bidirectional connection. Two such handlers require
+explicit protocol integration: installation refuses them before rewriting any
+hook, and existing wrappers also refuse a second handler added later.
+When the saved local
 `pre-commit` is a generated prek/pre-commit runner, the contrib global hook runs
 its guards and the check suite once using explicit `run --files`, retaining
 formatter auto-staging without the generated runner's stash/restore cycle.
@@ -90,7 +94,9 @@ the helper refuses ambiguous repository discovery before rewriting any hook.
 Because `run --files` validates worktree bytes, the global hook refuses partially
 staged files before running checks, leaving both index and worktree unchanged.
 Stage only the intended complete file, or use an isolated worktree for a partial
-commit. Unstaged changes in other files do not block checks. No stash/restore is
+commit. Submodule file edits are ignored here because they cannot enter the
+parent commit; a checked-out submodule commit differing from its staged pointer
+still blocks checks. Unstaged changes in other files do not block checks. No stash/restore is
 introduced, so concurrent work is not hidden or restored over other sessions.
 Git-configured `~/` hook paths
 are expanded before installation; relative global paths use the repository's

@@ -88,7 +88,9 @@ def resolve_session_id(
             stat = (proc_root / str(pid) / "stat").read_text()
             pid = int(stat.rsplit(")", 1)[1].split()[1])
             parent = proc_root / str(pid)
-            if pid <= 1 or (parent / "cgroup").read_text() != cgroup:
+            # PID 1 may be the agent in a container. Inspect it once before
+            # the next loop iteration terminates, still enforcing the cgroup.
+            if pid < 1 or (parent / "cgroup").read_text() != cgroup:
                 break
             entries = (
                 (parent / "environ").read_bytes().decode(errors="replace").split("\0")
