@@ -290,16 +290,17 @@ def test_cascade_task_with_pr_coordination_key_uses_task_id():
 
 
 @pytest.mark.parametrize(
-    ("claimed", "key"),
+    ("claimed", "key", "selected"),
     [
-        ("0", "cascade:task:old-task"),
-        ("0", "cascade:task:new-task"),
-        ("1", "cascade:task:old-task"),
+        ("0", "cascade:task:old-task", "new-task"),
+        ("0", "cascade:task:new-task", "new-task"),
+        ("1", "cascade:task:old-task", "new-task"),
+        ("1", "cascade:task:old-task", "old-task"),
     ],
-    ids=["inactive-other-task", "inactive-same-task", "active-other-task"],
+    ids=["inactive-other-task", "inactive-same-task", "active-other-task", "stale-selection"],
 )
 def test_cli_refresh_does_not_credit_stale_task_claim(
-    tmp_path: Path, capsys, monkeypatch, claimed, key
+    tmp_path: Path, capsys, monkeypatch, claimed, key, selected
 ):
     for name in _PRODUCER_VARS:
         monkeypatch.delenv(name, raising=False)
@@ -307,7 +308,7 @@ def test_cli_refresh_does_not_credit_stale_task_claim(
     monkeypatch.setenv("CASCADE_COORDINATION_CLAIMED", claimed)
     monkeypatch.setenv("CASCADE_COORDINATION_SOURCE", "task")
     monkeypatch.setenv("CASCADE_COORDINATION_KEY", key)
-    monkeypatch.setenv("CASCADE_SELECTED_ID", "new-task")
+    monkeypatch.setenv("CASCADE_SELECTED_ID", selected)
     monkeypatch.setenv("AGENT_DISPATCH_CAUSE", '{"kind": "stale-parent"}')
 
     assert main(["--workspace", str(tmp_path), "--refresh", "--record-start"]) == 0

@@ -137,13 +137,21 @@ def infer_cause(env: Mapping[str, str]) -> dict[str, Any]:
     """Prefer the explicit launch source over incidental selection state."""
     intent = _object(env.get("CASCADE_INTENT", ""))
     task = intent.get("task_id")
-    if env.get("CASCADE_COORDINATION_CLAIMED") == "1" and (
-        env.get("CASCADE_COORDINATION_SOURCE") == "task"
-        or env.get("CASCADE_COORDINATION_KEY", "").startswith("cascade:task:")
-    ):
-        task = env.get("CASCADE_SELECTED_ID") or task
     if not isinstance(task, str) or not task.strip():
         task = None
+    # A fresh intent is authoritative; inherited selection/claim state is
+    # only a fallback when the intent does not identify a task.
+    if (
+        task is None
+        and env.get("CASCADE_COORDINATION_CLAIMED") == "1"
+        and (
+            env.get("CASCADE_COORDINATION_SOURCE") == "task"
+            or env.get("CASCADE_COORDINATION_KEY", "").startswith("cascade:task:")
+        )
+    ):
+        task = env.get("CASCADE_SELECTED_ID") or None
+        if task is not None and not task.strip():
+            task = None
 
     kind = _env(env, "kind")
     cause: dict[str, Any] = {
