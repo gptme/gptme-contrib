@@ -472,3 +472,12 @@ def test_filename_components_rejected_before_writes(tmp_path: Path, field, value
     with pytest.raises(JournalReservationError):
         allocate_journal_path(tmp_path / "journal", **kwargs)
     assert not list(tmp_path.iterdir())
+
+
+def test_shared_uuid_prefix_falls_back_to_full_identity(tmp_path: Path):
+    run_ids = [f"11111111-{n:04d}-0000-0000-000000000000" for n in range(4)]
+    paths = [_alloc(tmp_path, "abcd", run_id) for run_id in run_ids]
+    assert len(set(paths)) == len(run_ids)
+    assert paths[-1].name == f"autonomous-session-abcd-{run_ids[-1]}.md"
+    for run_id, path in zip(run_ids, paths):
+        assert _alloc(tmp_path, "abcd", run_id) == path

@@ -135,6 +135,7 @@ def candidates_for(journal_dir: Path, run_type: str, label: str, run_id: str) ->
         journal_dir / f"{stem}.md",
         journal_dir / f"{stem}-{compact[:4]}.md",
         journal_dir / f"{stem}-{compact[:8]}.md",
+        journal_dir / f"{stem}-{run_id}.md",
     ]
 
 
