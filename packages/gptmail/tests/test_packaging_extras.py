@@ -1,10 +1,20 @@
-"""Packaging metadata must declare the outbound secret scanner.
+"""Packaging metadata must not pretend to resolve the outbound secret scanner.
 
 ``transport/agent.py`` calls ``guard_outbound(..., require_scanner=True)``, which
 imports ``redact``. Without it every inter-agent send refuses to deliver, and the
-failure surfaced as a misleading "blocked by secret policy" (gptme-contrib#2051).
-Declaring the requirement in ``[project.optional-dependencies].secrets`` keeps the
-dependency visible in the metadata even though ``redact`` is not on PyPI yet.
+failure used to surface as a misleading "blocked by secret policy"
+(gptme-contrib#2051).
+
+Declaring the dependency is not yet possible, and declaring it *wrongly* is worse
+than not declaring it:
+
+- PyPI ``redact`` 0.1.1 is an unrelated config-template renderer (Feng Zhou), so a
+  bare ``redact`` requirement installs the wrong package and then fails the import.
+- An extra naming an unpublished package (e.g. ``gptme-redact``) makes
+  ``uv sync --all-extras`` unresolvable, which turns the whole workspace red.
+
+So the requirement stays a documented ``--with /path/to/redact`` install path,
+checked at runtime by ``gptmail agent doctor``.
 """
 
 from __future__ import annotations
@@ -15,18 +25,22 @@ from pathlib import Path
 PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 
 
-def test_secrets_extra_declares_the_scanner() -> None:
-    metadata = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
-    secrets = metadata["project"]["optional-dependencies"]["secrets"]
-    names = {req.split(">")[0].split("=")[0].strip().lower() for req in secrets}
-    assert "gptme-redact" in names
+def _requirements(metadata: dict) -> list[str]:
+    project = metadata["project"]
+    reqs = list(project.get("dependencies", []))
+    for group in project.get("optional-dependencies", {}).values():
+        reqs.extend(group)
+    return reqs
 
 
-def test_secrets_extra_never_names_the_look_alike_package() -> None:
-    """PyPI `redact` 0.1.1 is an unrelated project (Feng Zhou). Naming it would
-    install the wrong distribution and fail the import, so the requirement must
-    stay on the name we control."""
-    metadata = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
-    secrets = metadata["project"]["optional-dependencies"]["secrets"]
-    names = {req.split(">")[0].split("=")[0].strip().lower() for req in secrets}
-    assert "redact" not in names
+def _names(requirements: list[str]) -> set[str]:
+    return {
+        req.split(">")[0].split("=")[0].split(" ")[0].split(";")[0].strip().lower()
+        for req in requirements
+    }
+
+
+def test_no_dependency_names_the_scanner() -> None:
+    names = _names(_requirements(tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))))
+    assert "redact" not in names, "PyPI redact is an unrelated project"
+    assert "gptme-redact" not in names, "an unpublished extra breaks --all-extras"

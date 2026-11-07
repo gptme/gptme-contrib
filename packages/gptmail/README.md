@@ -87,9 +87,10 @@ callback server in `communication_utils.auth`. The Twitter script uses it; plain
 does not.
 
 **Outbound secret scanner (needed by `gptmail agent send`).** Inter-agent sends run
-the scanner and fail closed when it is missing — nothing is delivered. The scanner is
-not published, so the `secrets` extra declares it under the name we control
-(`gptme-redact`) and cannot resolve on its own yet. Install it from its source tree:
+the scanner and fail closed when it is missing — nothing is delivered. There is no
+installable extra for it: the scanner has no published distribution, and an extra
+naming an unpublished package breaks `uv sync --all-extras`. Install it from its
+source tree:
 
 ```bash
 uv tool install --force \
@@ -103,8 +104,8 @@ failure shows up as a check rather than as a mysteriously blocked send.
 
 > **Do not add a bare `redact` dependency.** PyPI `redact` 0.1.1 is an unrelated
 > config-template renderer (Feng Zhou): installing it would satisfy the name and
-> then fail the import. The import name stays `redact`; only the distribution name
-> is ours.
+> then fail the import. Until the scanner is published under a name we control, the
+> requirement stays a documented `--with` path plus the `agent doctor` check.
 
 **External tools.** Email delivery shells out to `msmtp`. Fetching mail is done by
 `mbsync` (isync), which writes a local Maildir that `gptmail sync-maildir` imports.

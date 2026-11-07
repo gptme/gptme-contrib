@@ -47,16 +47,12 @@ bridge = [
     "starlette>=0.27",
     "uvicorn>=0.23",
 ]
-# Outbound secret scanner for `gptmail agent send` (require_scanner=True fails
-# closed without it). The scanner is not published yet, so this extra names the
-# distribution we control (`gptme-redact`) rather than `redact`: PyPI `redact`
-# 0.1.1 is an unrelated config-template renderer, and a requirement naming it
-# would install the wrong package. Until `gptme-redact` exists, install the
-# scanner from its source tree with `--with /path/to/redact` (see README);
-# `gptmail agent doctor` reports whether it is importable.
-secrets = [
-    "gptme-redact>=0.1",
-]
+# No `secrets` extra: the outbound scanner for `gptmail agent send`
+# (require_scanner=True fails closed without it) has no distribution that
+# resolves. PyPI `redact` 0.1.1 is an unrelated config-template renderer, and
+# naming an unpublished package in an extra breaks `uv sync --all-extras`
+# outright. Install it from its source tree with `--with /path/to/redact` (see
+# README); `gptmail agent doctor` reports whether it is importable.
 test = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
