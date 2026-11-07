@@ -60,6 +60,7 @@ members = [
     "gptme-usage",
     "gptme-user-memories",
     "gptme-vision-node",
+    "gptme-vitals",
     "gptme-voice",
     "gptme-voice-node",
     "gptme-warpgrep",
@@ -2694,6 +2695,20 @@ requires-dist = [
     { name = "opencv-python-headless", specifier = ">=4.8,<5" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
 ]
+provides-extras = ["test"]
+
+[[package]]
+name = "gptme-vitals"
+version = "0.1.0"
+source = { editable = "packages/gptme-vitals" }
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" }]
 provides-extras = ["test"]
 
 [[package]]
