@@ -190,16 +190,37 @@ def launch(request: Path, model: str) -> None:
     root.mainloop()
 
 
-def stop_process(proc: subprocess.Popen) -> None:
-    """Stop this launcher's generation group, including its model subprocess."""
+def stop_process(proc: subprocess.Popen, grace: float = 2.0) -> None:
+    """Stop this launcher's generation group, including its model subprocess.
+
+    The generator runs in its own session (start_new_session), so its pid is
+    the process group id. SIGTERM the group, give it a grace period to exit,
+    then SIGKILL whatever remains (a model process may ignore SIGTERM or
+    outlive its parent) and reap the leader so the worker's communicate()
+    returns.
+    """
     import os
     import signal
+    import time
+
+    def signal_group(sig: int) -> bool:
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            # Gone, or (macOS) only unreaped zombies remain in the group.
+            return False
+        return True
 
     if proc.poll() is None:
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        signal_group(signal.SIGTERM)
+    deadline = time.monotonic() + grace
+    # Probe the whole group, not only the leader: a SIGTERM-ignoring model
+    # process can survive after the launcher process itself has exited.
+    while signal_group(0) and time.monotonic() < deadline:
+        proc.poll()
+        time.sleep(0.05)
+    signal_group(signal.SIGKILL)
+    proc.wait()
 
 
 def main() -> None:

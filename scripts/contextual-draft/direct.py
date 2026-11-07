@@ -33,15 +33,37 @@ useful message, output an empty body rather than a clarification in the recipien
 field. Never send or submit anything."""
 
 
-def read_line(proc: subprocess.Popen, timeout: int) -> bytes:
+MAX_LINE = 100000
+
+
+def read_line(proc: subprocess.Popen, timeout: float) -> bytes:
+    """Read one complete protocol line against an overall deadline.
+
+    A helper that writes a partial line and stays alive must not block forever
+    while this process holds the exclusive drafting lock, so every read waits
+    only for the time remaining. The protocol is strict request/response: bytes
+    after the newline are a protocol error rather than a later message.
+    """
     assert proc.stdout is not None
+    fd = proc.stdout.fileno()
+    deadline = time.monotonic() + timeout
+    line = b""
     with selectors.DefaultSelector() as selector:
-        selector.register(proc.stdout, selectors.EVENT_READ)
-        if not selector.select(timeout):
-            raise core.DraftError("Native target session timed out")
-    line: bytes = proc.stdout.readline(100001)
-    if not line or len(line) > 100000:
-        raise core.DraftError("Native target unavailable; no insertion attempted")
+        selector.register(fd, selectors.EVENT_READ)
+        while not line.endswith(b"\n"):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise core.DraftError("Native target session timed out")
+            chunk = os.read(fd, MAX_LINE + 1 - len(line))
+            if not chunk:
+                raise core.DraftError(
+                    "Native target unavailable; no insertion attempted"
+                )
+            line += chunk
+            if len(line) > MAX_LINE or b"\n" in line[:-1]:
+                raise core.DraftError(
+                    "Native target unavailable; no insertion attempted"
+                )
     return line
 
 

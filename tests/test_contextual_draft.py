@@ -4,10 +4,12 @@ import argparse
 import importlib.util
 import json
 import os
+import signal
 import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import tracemalloc
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -576,3 +578,87 @@ def test_retry_after_failed_attempt_keeps_successful_draft(
     for path in diagnostics:
         assert path.read_text() == "provider warning\n"
         assert path.stat().st_mode & 0o777 == 0o600
+
+
+def _load_launcher(name, monkeypatch):
+    directory = SCRIPT.parent / "contextual-draft"
+    monkeypatch.syspath_prepend(str(directory))
+    spec = importlib.util.spec_from_file_location(name, directory / f"{name}.py")
+    assert spec and spec.loader
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    return loaded
+
+
+def test_direct_read_line_partial_line_times_out(monkeypatch):
+    direct = _load_launcher("direct", monkeypatch)
+    helper = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys,time; sys.stdout.write('{'); sys.stdout.flush(); time.sleep(30)",
+        ],
+        stdout=subprocess.PIPE,
+    )
+    try:
+        started = time.monotonic()
+        with pytest.raises(direct.core.DraftError, match="timed out"):
+            direct.read_line(helper, 0.5)
+        assert time.monotonic() - started < 3
+    finally:
+        helper.kill()
+        helper.wait()
+
+
+def test_direct_read_line_joins_chunks_until_newline(monkeypatch):
+    direct = _load_launcher("direct", monkeypatch)
+    helper = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys,time; sys.stdout.write('{\"a\"'); sys.stdout.flush(); "
+            "time.sleep(0.2); sys.stdout.write(': 1}\\n'); sys.stdout.flush(); time.sleep(5)",
+        ],
+        stdout=subprocess.PIPE,
+    )
+    try:
+        assert json.loads(direct.read_line(helper, 5)) == {"a": 1}
+    finally:
+        helper.kill()
+        helper.wait()
+
+
+def test_preview_stop_process_escalates_for_sigterm_ignoring_group(
+    monkeypatch, tmp_path
+):
+    preview = _load_launcher("preview", monkeypatch)
+    pidfile = tmp_path / "grandchild.pid"
+    ignore = "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    # Leader and its model-like child both ignore SIGTERM, as a hung generator might.
+    code = (
+        ignore
+        + "import subprocess,sys,pathlib; "
+        + "c=subprocess.Popen([sys.executable,'-c',"
+        + repr(ignore + "time.sleep(60)")
+        + "]); pathlib.Path(sys.argv[1]).write_text(str(c.pid)); time.sleep(60)"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code, str(pidfile)], start_new_session=True
+    )
+    deadline = time.monotonic() + 10
+    while not pidfile.exists() or not pidfile.read_text():
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    grandchild = int(pidfile.read_text())
+    started = time.monotonic()
+    preview.stop_process(proc, grace=0.3)
+    assert time.monotonic() - started < 5
+    assert proc.returncode == -signal.SIGKILL
+    # The orphaned grandchild must be gone too (reaped by init once killed).
+    while True:
+        try:
+            os.kill(grandchild, 0)
+        except ProcessLookupError:
+            break
+        assert time.monotonic() - started < 5, "SIGTERM-ignoring child survived"
+        time.sleep(0.05)
