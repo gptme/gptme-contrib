@@ -68,8 +68,11 @@ CHAIN_HOOKS=1 ./install.sh
 ```
 
 The helper wraps each git hook name: global first, then the original local
-hook (renamed `*.local`). It is idempotent. Re-running prek may overwrite a
-wrapper; run the helper again after that. Relative local paths are resolved
+hook (copied to `*.local`). It is idempotent. If re-running prek overwrites a
+wrapper, preserve/move the old `*.local` backup before running the helper again.
+An occupied saved path without an active wrapper or same-file alias is ambiguous:
+the helper refuses before rewriting any hook rather than overwrite validation it
+does not own. This includes dangling saved symlinks. Relative local paths are resolved
 against the worktree root (the Git directory for bare repositories). The
 installer discovers both `workspace/dotfiles` and `workspace/contrib/dotfiles`;
 `AGENT_WORKSPACE` explicitly selects a different workspace.

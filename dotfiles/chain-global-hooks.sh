@@ -116,6 +116,28 @@ if [ "$HOOKS_DIR" = "$(cd "$GLOBAL_DIR" && pwd -P)" ] && \
     exit 0
 fi
 
+# Refuse ambiguous saved-hook collisions before rewriting any hook. Once a hook
+# manager overwrites our wrapper we cannot prove ownership of its old .local;
+# the operator must preserve/move that backup explicitly before reinstalling.
+for name in "${HOOK_NAMES[@]}"; do
+    case "$name" in
+        pre-receive|update|proc-receive|post-receive|post-update|push-to-checkout)
+            check_local="$RECEIVE_HOOKS_DIR"
+            check_global="$RECEIVE_GLOBAL_DIR"
+            ;;
+        *) check_local="$HOOKS_DIR"; check_global="$GLOBAL_DIR" ;;
+    esac
+    [ "$check_local" != "$(cd "$check_global" && pwd -P)" ] || continue
+    dest="$check_local/$name"
+    saved="$dest.local"
+    if { [ -e "$saved" ] || [ -L "$saved" ]; } && \
+       ! grep -qF "$MARKER" "$dest" 2>/dev/null && \
+       ! [ "$dest" -ef "$saved" ]; then
+        echo "occupied saved hook: $saved; preserve/move it before rerunning; hooks unchanged" >&2
+        exit 1
+    fi
+done
+
 # proc-receive has a bidirectional pkt-line exchange, not replayable input.
 # Refuse dual handlers before changing any hook, including on repeated installs.
 saved_proc_receive="$RECEIVE_HOOKS_DIR/proc-receive"

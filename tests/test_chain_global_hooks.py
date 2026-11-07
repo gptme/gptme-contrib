@@ -131,7 +131,14 @@ def test_rerun_after_local_overwrite_keeps_new_hook(tmp_path: Path) -> None:
         '#!/bin/bash\necho prek >>"$1"\n',
     )
     result = _run(args)
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0
+    assert "occupied saved hook" in result.stderr
+    assert "echo local" in (local_dir / "prepare-commit-msg.local").read_text()
+    # Ownership cannot be inferred after a manager replaces our wrapper.
+    preserved = local_dir / "old-local-hook"
+    (local_dir / "prepare-commit-msg.local").rename(preserved)
+    assert _run(args).returncode == 0
+    assert "echo local" in preserved.read_text()
     assert "echo prek" in (local_dir / "prepare-commit-msg.local").read_text()
     assert "echo local" not in (local_dir / "prepare-commit-msg.local").read_text()
 
@@ -1302,8 +1309,12 @@ def test_replacing_saved_symlink_does_not_overwrite_shared_target(
     _write_exec(active, replacement)
 
     result = _run(args)
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0
+    assert "occupied saved hook" in result.stderr
     assert shared.read_text() == original
+    assert saved.is_symlink()
+    saved.rename(local_dir / "preserved-shared-link")
+    assert _run(args).returncode == 0
     assert not saved.is_symlink()
     assert saved.read_text() == replacement
     message = tmp_path / "message"
@@ -1369,3 +1380,93 @@ def test_saved_symlink_to_active_hook_keeps_independent_implementation(
         message.write_text("subject\n")
         _run_wrapper(active, str(message))
         assert message.read_text().splitlines() == ["subject", "global", "local"]
+
+
+@pytest.mark.parametrize("saved_kind", ["regular", "symlink", "dangling"])
+def test_unrelated_saved_hook_collision_refused_before_any_rewrite(
+    tmp_path: Path, saved_kind: str
+) -> None:
+    global_dir = tmp_path / "global"
+    local_dir = tmp_path / "local"
+    global_dir.mkdir()
+    local_dir.mkdir()
+    # An earlier hook must not be wrapped before discovering the collision.
+    earlier = local_dir / "applypatch-msg"
+    _write_exec(earlier, "#!/bin/bash\necho earlier\n")
+    active = local_dir / "prepare-commit-msg"
+    _write_exec(
+        active, '#!/bin/bash\nexec "$(dirname "$0")/prepare-commit-msg.local" "$@"\n'
+    )
+    saved = local_dir / "prepare-commit-msg.local"
+    original = '#!/bin/bash\necho validation >>"$1"\n'
+    target = tmp_path / "validation"
+    if saved_kind == "regular":
+        _write_exec(saved, original)
+    else:
+        if saved_kind == "symlink":
+            _write_exec(target, original)
+        saved.symlink_to(target)
+    before = {path: path.read_bytes() for path in [earlier, active]}
+    saved_link = os.readlink(saved) if saved.is_symlink() else None
+    result = _run(["--hooks-dir", str(local_dir), "--global-dir", str(global_dir)])
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "occupied saved hook" in result.stderr
+    assert all(path.read_bytes() == body for path, body in before.items())
+    if saved_link is not None:
+        assert saved.is_symlink() and os.readlink(saved) == saved_link
+    if saved_kind != "dangling":
+        assert saved.read_text() == original
+        message = tmp_path / "message"
+        message.write_text("subject\n")
+        _run_wrapper(active, str(message))
+        assert message.read_text() == "subject\nvalidation\n"
+
+
+@pytest.mark.parametrize("filename", ["café.py", "line\nbreak.py", 'quote"file.py'])
+def test_quoted_filename_reaches_runner_and_formatter_fix_is_staged(
+    tmp_path: Path, filename: str
+) -> None:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=str(tmp_path / "gitconfig"), ALLOW_GIT_IDENTITY="1")
+    repo = tmp_path / "repo"
+    subprocess.run(
+        ["git", "init", "-q", "-b", "feature", str(repo)], env=env, check=True
+    )
+    (repo / ".pre-commit-config.yaml").write_text("repos: []\n")
+    target = repo / filename
+    target.write_text("unformatted\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], env=env, check=True)
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    # A real argv consumer: reject display-quoted paths, format on the first
+    # invocation, then require both index and worktree to contain the fix.
+    _write_exec(
+        binary / "prek",
+        "#!/usr/bin/env python3\n"
+        "import pathlib, subprocess, sys\n"
+        f"filename = {filename!r}\n"
+        "assert sys.argv[1:3] == ['run', '--files']\n"
+        "assert filename in sys.argv[3:], sys.argv\n"
+        "path = pathlib.Path(filename)\n"
+        "if path.read_text() == 'unformatted\\n':\n"
+        "    path.write_text('formatted\\n')\n"
+        "    sys.exit(1)\n"
+        "assert subprocess.check_output(['git', 'show', ':' + filename]) == b'formatted\\n'\n",
+    )
+    env["PATH"] = f"{binary}:{env['PATH']}"
+    result = subprocess.run(
+        [str(CHAIN.parent / ".config/git/hooks/pre-commit")],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert target.read_text() == "formatted\n"
+    assert (
+        subprocess.check_output(
+            ["git", "-C", str(repo), "show", ":" + filename], env=env
+        )
+        == b"formatted\n"
+    )
