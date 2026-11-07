@@ -349,7 +349,7 @@ _PATTERNS: list[Pattern] = [
     Pattern(
         re.compile(
             r"postgres(?:ql)?://[A-Za-z0-9._~!$&'()*+,;=%-]+:[^@\s]+@"
-            r"(?:\[[A-Za-z0-9:.%_-]+\]|[a-zA-Z0-9_.-]+)"
+            r"(?:\[[A-Za-z0-9:.%_-]+\]|[a-zA-Z0-9_.-]+)?"
             r"(?::[0-9]+)?(?:/[a-zA-Z0-9_-]*)?"
         ),
         Severity.CRITICAL,
@@ -485,10 +485,13 @@ _PATTERNS: list[Pattern] = [
             # Truncated snippets end at a line boundary or EOF instead of a
             # closing quote; a final backslash is still part of the secret.
             # Unquoted values stop at ordinary config/JSON separators.
-            r"(?P<quote>\"\"\"|'''|['\"])?"
+            r"(?P<quote>(?P<triple>\"\"\"|''')|['\"])?"
             r"(?P<value>(?(quote)"
             r"(?:(?:\\[\s\S]|(?!(?P=quote))[^\\])+(?=(?P=quote))"
-            r"|(?:\\[^\r\n]|\\(?=[\r\n]|\Z)|(?!(?P=quote))[^\\\r\n])+)"
+            # An incomplete triple-quoted value extends to EOF, not the first
+            # newline. Single-line snippets keep their line-boundary fallback.
+            r"|(?(triple)(?:(?!(?P=quote))[\s\S])+\Z"
+            r"|(?:\\[^\r\n]|\\(?=[\r\n]|\Z)|(?!(?P=quote))[^\\\r\n])+))"
             r"|(?:\[REDACTED:[A-Za-z0-9_:.-]+\][^\s'\",;}\]]*"
             r"|[^\s'\",;}\]]+)))"
             r"(?(quote)(?:(?P=quote)|(?=[\r\n]|\Z)))",

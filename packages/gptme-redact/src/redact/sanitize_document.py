@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from html import unescape
 from html.parser import HTMLParser
 
 from . import Finding, Severity
@@ -67,19 +68,8 @@ _HTML_SCRIPT_REGEX = re.compile(
     # dominance.
     r"<\s*(?:script|iframe|object|embed|form|svg|math)\b"
     r"|"
-    # javascript: / vbscript: / data: URI schemes in Markdown links:
-    # [text](javascript:...) -- the common firecrawl output form.
-    # HTML attributes are parsed separately to decode character references
-    # without turning escaped prose into executable-looking HTML.
-    r"\(\s*<?"
-    r"(?:javascript|vbscript|data)\s*:"
-    r"|"
-    # Reference-style Markdown destinations, including angle brackets and a
-    # destination on the next line. Keep indentation bounded to link-definition
-    # syntax rather than matching an arbitrary bracketed phrase in prose.
-    r"^[ ]{0,3}\[(?:\\.|[^\]\\\r\n])+\]:[ \t]*(?:\r?\n[ \t]*)?<?"
-    r"(?:javascript|vbscript|data)\s*:"
-    r"|"
+    # URI destinations are scanned separately, after decoding character
+    # references only within the destination (never the whole document).
     # Inline event handlers -- every browser still honors these.
     r"\son(?:error|load|click|mouseover|focus|blur|submit|change|input|"
     r"keydown|keyup|keypress|abort|resize|scroll|unload|toggle|wheel)\s*="
@@ -91,6 +81,15 @@ _HTML_SCRIPT_REGEX = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+
+# Inline and reference-definition destinations. The bounded definition indent
+# and link opener avoid interpreting entity-escaped HTML/prose as a destination.
+_MARKDOWN_URI_REGEX = re.compile(
+    r"(?:\]\(\s*|^[ ]{0,3}\[(?:\\.|[^\]\\\r\n])+\]:"
+    r"[ \t]*(?:\r?\n[ \t]*)?)"
+    r"(?:<(?P<angle>[^<>\r\n]*)>|(?P<bare>[^\s)<>]+))",
+    re.MULTILINE,
+)
 
 _URI_ATTRIBUTES = frozenset({"href", "src", "action", "formaction", "xlink:href"})
 _DANGEROUS_SCHEME_REGEX = re.compile(
@@ -243,6 +242,15 @@ def scan_document(
     uri_scanner.close()
     html_matches = [m.group(0) for m in _HTML_SCRIPT_REGEX.finditer(text)]
     html_matches.extend(uri_scanner.matches)
+    for match in _MARKDOWN_URI_REGEX.finditer(text):
+        destination = match.group("angle") or match.group("bare") or ""
+        normalized = (
+            unescape(destination)
+            .translate(_URL_IGNORED_WHITESPACE)
+            .lstrip(_URL_EDGE_CONTROLS)
+        )
+        if _DANGEROUS_SCHEME_REGEX.match(normalized):
+            html_matches.append(match.group(0))
     if html_matches:
         findings["html_script"] = Finding(
             category="html_script",
