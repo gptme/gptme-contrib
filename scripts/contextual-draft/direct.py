@@ -13,6 +13,7 @@ import json
 import os
 import selectors
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -229,6 +230,17 @@ def execute(args: argparse.Namespace) -> None:
         if not draft.strip():
             raise core.DraftError("Insufficient context; no draft inserted")
         command = {"draft": draft, "budget_s": INSERT_BUDGET}
+
+        # SIGTERM/SIGHUP during the exchange must not leave the helper (its own
+        # session) inserting after this process and its lock are gone: raise so
+        # the handler below kills the helper's group before exiting.
+        def terminate(signum: int, frame: object) -> None:
+            raise SystemExit(128 + signum)
+
+        previous = {
+            sig: signal.signal(sig, terminate)
+            for sig in (signal.SIGTERM, signal.SIGHUP)
+        }
         try:
             write_line(
                 native,
@@ -244,6 +256,9 @@ def execute(args: argparse.Namespace) -> None:
             native.wait()
             native_stopped = True
             raise
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
         if reply.get("inserted") is not True:
             raise core.DraftError("Insertion not confirmed; draft retained privately")
         core.log_event(directory, "inserted", elapsed_s=time.monotonic() - started)

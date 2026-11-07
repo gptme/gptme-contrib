@@ -271,8 +271,12 @@ if interactive {
     }
     // Insertion budget from the launcher, strictly inside its reply deadline.
     let received = Date()
-    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
-          let current = attribute(application, kAXFocusedUIElementAttribute), CFEqual(raw, current),
+    func focusUnchanged() -> Bool {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
+              let current = attribute(application, kAXFocusedUIElementAttribute) else { return false }
+        return CFEqual(raw, current)
+    }
+    guard focusUnchanged(),
           fieldSecurity(field) == security,
           fieldText(field) == text, stable(range, selectedRange(field)),
           stable(selectedText, readString(field, kAXSelectedTextAttribute)) else {
@@ -281,6 +285,9 @@ if interactive {
     var canInsert: DarwinBoolean = false
     guard AXUIElementIsAttributeSettable(field, kAXSelectedTextAttribute as CFString, &canInsert) == .success,
           canInsert.boolValue else { fail("Target does not support selected-text insertion") }
+    // Focus can move while the reads above are pending: re-check it as the last
+    // AX operation before the write. (The budget check below is a clock read.)
+    guard focusUnchanged() else { fail("Focus changed; draft retained but not inserted") }
     // Revalidation can be slow; never write once the launcher may have given up.
     guard Date().timeIntervalSince(received) <= budget else {
         fail("Insertion budget exceeded; draft retained but not inserted")

@@ -1035,3 +1035,58 @@ def test_direct_late_insertion_is_killed_before_failure(database, tmp_path):
     assert elapsed < 2
     time.sleep(2.5)
     assert not marker.exists(), "helper inserted after failure was reported"
+
+
+def test_direct_sigterm_during_insertion_kills_helper(database, tmp_path):
+    native = tmp_path / "swift"
+    beat = tmp_path / "beat"
+    marker = tmp_path / "inserted-late"
+    target = TARGET | {"selection": {"location": 0, "length": 0}}
+    native.write_text(
+        "#!/usr/bin/env python3\nimport json,pathlib,sys,time\n"
+        "if '--insert-session' not in sys.argv:\n    sys.stdin.read(); sys.exit(0)\n"
+        + "print("
+        + repr(json.dumps(target))
+        + ",flush=True)\n"
+        "json.loads(sys.stdin.readline())\n"
+        # Slow revalidation with a heartbeat, then a late insertion.
+        "for _ in range(200):\n"
+        f"    open({str(beat)!r}, 'a').write('.'); time.sleep(0.02)\n"
+        f"pathlib.Path({str(marker)!r}).write_text('late')\n"
+        "print('{\"inserted\":true}',flush=True)\n",
+        encoding="utf-8",
+    )
+    native.chmod(0o700)
+    generator = tmp_path / "gptme"
+    generator.write_text(
+        "#!/usr/bin/env python3\nimport sys\nsys.stdin.read()\nprint('Synthetic reply')\n",
+        encoding="utf-8",
+    )
+    generator.chmod(0o700)
+    direct = SCRIPT.parent / "contextual-draft" / "direct.py"
+    code = (
+        "import runpy,argparse,pathlib,sys; m=runpy.run_path(sys.argv[1]); "
+        "m['execute'](argparse.Namespace(context=[],query=None,"
+        "goldfish_db=pathlib.Path(sys.argv[2]),model='test/synthetic'))"
+    )
+    launcher = subprocess.Popen(
+        [sys.executable, "-c", code, str(direct), str(database)],
+        env={
+            **os.environ,
+            "PYTHONPATH": str(direct.parent),
+            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "XDG_STATE_HOME": str(tmp_path / "state"),
+        },
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 20
+    while not beat.exists():
+        assert time.monotonic() < deadline and launcher.poll() is None
+        time.sleep(0.05)
+    launcher.send_signal(signal.SIGTERM)
+    assert launcher.wait(timeout=5) != 0
+    # The helper's group was killed before the launcher (and its lock) went away.
+    _assert_stopped(beat)
+    time.sleep(0.5)
+    assert not marker.exists(), "helper inserted after the launcher terminated"
