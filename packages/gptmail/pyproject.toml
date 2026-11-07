@@ -47,7 +47,15 @@ bridge = [
     "starlette>=0.27",
     "uvicorn>=0.23",
 ]
+# No `secrets` extra: the outbound scanner for `gptmail agent send`
+# (require_scanner=True fails closed without it) has no distribution that
+# resolves. PyPI `redact` 0.1.1 is an unrelated config-template renderer, and
+# naming an unpublished package in an extra breaks `uv sync --all-extras`
+# outright. Install it from its source tree with `--with /path/to/redact` (see
+# README); `gptmail agent doctor` reports whether it is importable.
 test = [
+    "packaging>=23.0",
+    "tomli>=2.0; python_version < '3.11'",
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "mypy>=1.0",
