@@ -14,6 +14,13 @@ if git interpret-trailers --parse "$MSG_FILE" | grep -qi '^Git-Session-Id: '; th
     exit 0
 fi
 
+# `git merge --no-edit` (and `git pull` merges) write the message without a
+# trailing newline; interpret-trailers then glues the trailer onto the subject
+# line, where `%(trailers)` / `--parse` cannot see it. Terminate the last line.
+if [ -s "$MSG_FILE" ] && [ -n "$(tail -c1 "$MSG_FILE")" ]; then
+    printf '\n' >>"$MSG_FILE"
+fi
+
 git interpret-trailers \
     --in-place \
     --if-exists doNothing \
