@@ -76,8 +76,10 @@ def test_missing_or_incompatible_database_fails_closed(tmp_path):
         module.Goldfish(path).snapshots(None, 1)
 
 
-def test_impersonator_receives_no_requests_or_token(database, tmp_path):
+def test_impersonator_receives_no_requests_or_token(database, tmp_path, monkeypatch):
     calls = []
+    connects = []
+    opened = []
 
     class Impersonator(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -92,12 +94,41 @@ def test_impersonator_receives_no_requests_or_token(database, tmp_path):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Impersonator)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    # Legacy discovery files exist and advertise an impostor with the expected
-    # health JSON. The adapter ignores them entirely, including the token file.
-    (tmp_path / "effective-port").write_text(str(server.server_port))
-    (tmp_path / "api-token").write_text("synthetic-test-token")
+    # Legacy discovery files advertise an impostor with the expected health JSON,
+    # both beside the database and at the default Goldfish location under HOME.
+    default_home = tmp_path / "home" / "Library/Application Support/goldfish"
+    default_home.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for home in (tmp_path, default_home):
+        (home / "effective-port").write_text(str(server.server_port))
+        (home / "api-token").write_text("synthetic-test-token")
+    # Intercept the real boundaries: any outbound connection (to this server, a
+    # daemon on its default port, or anywhere else) and any token-file open fail
+    # the test, so isolation does not rely on traffic reaching the impostor.
+    import builtins
+    import io
+    import socket
+
+    def refuse_connect(sock, address, *args):
+        connects.append(address)
+        raise OSError("network disabled in test")
+
+    def record(original):
+        def wrapper(file, *args, **kwargs):
+            opened.append(str(file))
+            return original(file, *args, **kwargs)
+
+        return wrapper
+
+    monkeypatch.setattr(socket.socket, "connect", refuse_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", refuse_connect)
+    monkeypatch.setattr(builtins, "open", record(builtins.open))
+    monkeypatch.setattr(io, "open", record(io.open))
+    monkeypatch.setattr(os, "open", record(os.open))
     try:
         assert module.Goldfish(database).snapshots(None, 1)
+        assert connects == []
+        assert not [path for path in opened if "api-token" in path]
         assert calls == []
     finally:
         server.shutdown()
@@ -779,9 +810,13 @@ def test_generation_timeout_kills_descendants_holding_pipes(
     _assert_stopped(beat)
 
 
+@pytest.mark.parametrize("waitid", [True, False])
 def test_generation_completes_despite_descendant_holding_pipes(
-    generation, tmp_path, monkeypatch
+    generation, tmp_path, monkeypatch, waitid
 ):
+    if not waitid:
+        # macOS Python < 3.13: leader-exit detection reaps the leader.
+        monkeypatch.delattr(os, "waitid", raising=False)
     beat = tmp_path / "beat"
     _generator_with_pipe_holding_child(
         tmp_path / "gptme", beat, "print('Done drafting', flush=True)\n"
@@ -883,3 +918,32 @@ def test_capture_security_policy_fails_closed():
     )
     assert result.returncode == 0, result.stderr
     assert "capture self-test ok" in result.stdout
+
+
+@pytest.mark.parametrize("waitid", [True, False])
+@pytest.mark.parametrize("finish", ["cancel", "wait"])
+def test_preview_kills_descendants_after_leader_exits(
+    monkeypatch, tmp_path, waitid, finish
+):
+    if not waitid:
+        # macOS Python < 3.13: leader-exit detection reaps the leader.
+        monkeypatch.delattr(os, "waitid", raising=False)
+    preview = _load_launcher("preview", monkeypatch)
+    beat = tmp_path / "beat"
+    # Leader spawns a sleeping child holding its pipes, then exits immediately.
+    code = (
+        "import subprocess,sys; subprocess.Popen([sys.executable,'-c',"
+        + repr(HEARTBEAT_CHILD)
+        + ",sys.argv[1]])"
+    )
+    job = preview.Generation([sys.executable, "-c", code, str(beat)])
+    deadline = time.monotonic() + 10
+    while not beat.exists():
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    time.sleep(0.3)  # Leader has exited; the child keeps running.
+    if finish == "cancel":
+        job.stop(grace=0.5)
+    else:
+        assert job.wait() == 0
+    _assert_stopped(beat)

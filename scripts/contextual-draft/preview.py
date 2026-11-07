@@ -222,6 +222,10 @@ class Generation:
         while True:
             with self._lock:
                 returncode = self.proc.poll()
+                if returncode is not None:
+                    # Finished: kill any leftover descendants now, while this
+                    # object still owns the group; stop() is a no-op afterwards.
+                    core.kill_group(self.proc)
             if returncode is not None:
                 return returncode
             time.sleep(interval)

@@ -213,10 +213,9 @@ def private_write(path: Path, text: str) -> None:
 def leader_exited(proc: subprocess.Popen) -> bool:
     """Whether a child exited, without reaping it where the platform allows.
 
-    An unreaped child reserves its pid, and so its process-group id: while this
-    returns False or the zombie is unreaped, signalling the group cannot reach an
-    unrelated process. Without os.waitid (macOS before Python 3.13) this falls
-    back to poll(), which reaps; kill_group() then skips the group.
+    Without os.waitid (macOS before Python 3.13) this falls back to poll(),
+    which reaps. Cleanup never depends on that: kill_group() signals the group
+    regardless of the leader's state.
     """
     if proc.returncode is not None:
         return True
@@ -230,12 +229,20 @@ def leader_exited(proc: subprocess.Popen) -> bool:
 
 
 def kill_group(proc: subprocess.Popen, sig: int = signal.SIGKILL) -> None:
-    """Signal a start_new_session child's group, only while its leader is unreaped."""
-    if proc.returncode is None:
-        try:
-            os.killpg(proc.pid, sig)
-        except (ProcessLookupError, PermissionError):
-            pass  # No signallable members, e.g. only the zombie leader (macOS).
+    """Signal a start_new_session child's whole group, whatever the leader's state.
+
+    The pgid is the leader's pid (start_new_session). A pgid cannot be reused
+    while any member survives, so descendants are always reached, including
+    after the leader was reaped. Called only during the cleanup of a call that
+    started the group; long-lived callers (preview) must not signal a group
+    they have already finished with.
+    """
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        pass  # Group already gone.
+    except PermissionError:
+        pass  # macOS: only the unreaped zombie leader remains.
 
 
 def stop_group(proc: subprocess.Popen, grace: float) -> None:
