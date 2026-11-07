@@ -262,6 +262,36 @@ class TestRecurResetUnticksChecklist:
         assert example in post.content
         assert "- [ ] real step" in post.content
 
+    @pytest.mark.parametrize("quote", ["> ", "> > "])
+    def test_reset_reparses_quote_after_list_fence(self, workspace: Path, quote: str):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        example = "- ```markdown\n  - [x] example"
+        path.write_text(path.read_text() + f"\n\n{example}\n\n{quote}- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert post.content.endswith(f"{example}\n\n{quote}- [ ] real step")
+
+    @pytest.mark.parametrize(
+        "example",
+        [
+            "- ```markdown\n\t- [x] example\n\t```",
+            "1. ~~~markdown\n\t- [x] example\n\t~~~",
+            "-\t```markdown\n    - [x] example\n    ```",
+            "- notes\n\n\t```markdown\n\t- [x] example\n\t```",
+            "> - ```markdown\n> \t- [x] example\n> \t```",
+        ],
+    )
+    def test_reset_preserves_tab_indented_fence(self, workspace: Path, example: str):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{example}\n\n- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert post.content.endswith(f"{example}\n\n- [ ] real step")
+
     @pytest.mark.parametrize("marker", ["1.", "2)", "-", "*", "+"])
     def test_reset_reopens_list_markers(self, workspace: Path, marker: str):
         path = write_task(workspace, "weekly-review", state="active", recur="7d")

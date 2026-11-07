@@ -487,6 +487,11 @@ _FENCE_RE = re.compile(r"^([ \t]*)(?:((?:[-*+]|[0-9]+[.)])[ \t]+))?(`{3,}|~{3,})
 _LIST_RE = re.compile(r"^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+")
 
 
+def _columns(text: str, prefix: str) -> int:
+    """Measure Markdown indentation with four-column tabs at the source offset."""
+    return len((prefix + text).expandtabs(4)) - len(prefix.expandtabs(4))
+
+
 def untick_checklist(content: str) -> str:
     """Reset `- [x]` and `- ✅` items to `- [ ]` for a new recurrence cycle.
 
@@ -511,11 +516,16 @@ def untick_checklist(content: str) -> str:
             container = re.match(rf"^(?:[ \t]*>[ \t]?){{{fence_quotes}}}", line)
             assert container is not None
             candidate = line[container.end() :]
-        indent = len(candidate) - len(candidate.lstrip(" \t"))
+        source_prefix = line[: len(line) - len(candidate)]
+        whitespace = candidate[: len(candidate) - len(candidate.lstrip(" \t"))]
+        indent = _columns(whitespace, source_prefix)
         if fence and (quote_depth < fence_quotes or (candidate.strip() and indent < list_indent)):
             # A container can end a fence without an explicit delimiter. Parse
             # this same line again outside the fence so later work reopens.
             fence = ""
+            candidate = line[len(prefix) :]
+            whitespace = candidate[: len(candidate) - len(candidate.lstrip(" \t"))]
+            indent = _columns(whitespace, prefix)
         if not fence:
             # List context survives blank lines and also owns fences opened on
             # continuation lines, rather than directly after a list marker.
@@ -525,7 +535,7 @@ def untick_checklist(content: str) -> str:
             ):
                 list_containers.pop()
             if item := _LIST_RE.match(candidate):
-                list_containers.append((quote_depth, item.end()))
+                list_containers.append((quote_depth, _columns(item.group(), prefix)))
         if fence:
             # Only a matching delimiter of at least the opening length closes
             # a fence; inner examples and info strings are not closing fences.
