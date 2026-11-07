@@ -228,6 +228,15 @@ python -m gptme_sessions.journal_path --journal-dir journal --run-type autonomou
 - An existing journal with no reservation record is treated as historical and never
   adopted, so a new session cannot overwrite it.
 - The file is created empty; the session writes it.
+- Paths are normalized to absolute paths, so equivalent relative/absolute inputs
+  share retry identity.
+
+Allocation uses a persistent POSIX `flock` file per candidate to serialize threads
+and processes. Ownership is published atomically **after** exclusive journal
+creation. If an allocator crashes before publication, its unowned empty file is
+conservatively skipped on retry; after publication, the reservation is reusable.
+Lock files must not be removed while allocators can be running. This helper
+requires POSIX `flock` support (Linux/macOS).
 
 Reservations default to `<journal-dir>/../state/session-journal-reservations` and can
 be moved with `--reservation-dir`. Corrupt or mismatched reservation metadata fails

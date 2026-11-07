@@ -17,9 +17,11 @@ placeholder body would have to be replaced anyway.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -51,59 +53,64 @@ def try_create(path: Path) -> bool:
 def reserve_candidate(path: Path, owner_path: Path, run_id: str) -> bool:
     """Reserve *path* for *run_id*, returning False on a normal collision.
 
-    The owner file is acquired first with ``O_EXCL``. That closes the crash window
-    between choosing a candidate and creating its journal: a retry by the same run
-    finishes the allocation, while a different run moves to the next candidate.
-    Existing journals without an owner record are treated as historical collisions
-    and never adopted.
+    A persistent POSIX flock file serializes the owner check, journal creation and
+    record publication across both threads and processes. Never unlink the lock:
+    waiters must keep using the same inode. Process exit releases a crashed lock.
+
+    Publish ownership only AFTER exclusive journal creation. A crash before that
+    publication leaves an unowned journal, which is conservatively skipped on
+    retry; a crash after publication leaves a complete, reusable reservation.
     """
     owner_path.parent.mkdir(parents=True, exist_ok=True)
-    owner_tmp = owner_path.with_name(f".{owner_path.name}.{run_id}.{os.getpid()}.tmp")
-    try:
-        with owner_tmp.open("x", encoding="utf-8") as owner_file:
-            json.dump({"run_id": run_id, "journal_path": str(path)}, owner_file)
-            owner_file.write("\n")
-            owner_file.flush()
-            os.fsync(owner_file.fileno())
-        try:
-            # link(2) publishes the complete record without replacing an owner
-            # that another allocator installed first.
-            os.link(owner_tmp, owner_path)
-            owner_created = True
-        except FileExistsError:
-            owner_created = False
-    finally:
-        owner_tmp.unlink(missing_ok=True)
+    with owner_path.with_suffix(".lock").open("a") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        if owner_path.exists():
+            try:
+                owner = json.loads(owner_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise JournalReservationError(f"invalid owner record {owner_path}: {exc}") from exc
+            if (
+                not isinstance(owner, dict)
+                or not isinstance(owner.get("run_id"), str)
+                or not owner["run_id"]
+                or not isinstance(owner.get("journal_path"), str)
+            ):
+                raise JournalReservationError(
+                    f"invalid owner record {owner_path}: expected run/path object"
+                )
+            if owner["journal_path"] != str(path):
+                raise JournalReservationError(
+                    f"owner record path mismatch for {path}: {owner['journal_path']!r}"
+                )
+            if owner["run_id"] != run_id:
+                return False
+            if path.is_symlink() or not path.is_file():
+                raise JournalReservationError(f"owned journal path is not a regular file: {path}")
+            return True
 
-    if not owner_created:
-        try:
-            owner = json.loads(owner_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise JournalReservationError(f"invalid owner record {owner_path}: {exc}") from exc
-        if owner.get("journal_path") != str(path):
-            raise JournalReservationError(
-                f"owner record path mismatch for {path}: {owner.get('journal_path')!r}"
-            )
-        if owner.get("run_id") != run_id:
+        if not try_create(path):
+            # Historical/unowned files are never adopted, including crash orphans.
             return False
 
-    if path.exists():
-        if owner_created:
-            # A historical/unowned journal won the path before this owner record.
-            # Remove only the owner record created by this call, then try a suffix.
-            owner_path.unlink()
-            return False
-        if path.is_symlink() or not path.is_file():
-            raise JournalReservationError(f"owned journal path is not a regular file: {path}")
+        # A unique temporary file belongs to this call alone. link(2) publishes
+        # the complete record without replacing any existing owner.
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=owner_path.parent,
+            prefix=f".{owner_path.name}.",
+            delete=False,
+        ) as owner_file:
+            owner_tmp = Path(owner_file.name)
+            try:
+                json.dump({"run_id": run_id, "journal_path": str(path)}, owner_file)
+                owner_file.write("\n")
+                owner_file.flush()
+                os.fsync(owner_file.fileno())
+                os.link(owner_tmp, owner_path)
+            finally:
+                owner_tmp.unlink(missing_ok=True)
         return True
-
-    if try_create(path):
-        return True
-
-    if owner_created:
-        owner_path.unlink()
-        return False
-    raise JournalReservationError(f"owned journal path appeared concurrently: {path}")
 
 
 def journal_stem(run_type: str, label: str) -> str:
@@ -139,9 +146,10 @@ def allocate_journal_path(
     ``<journal_dir>/../state/session-journal-reservations``.
     """
     date_str = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    day_dir = Path(journal_dir) / date_str
-    default_reservation = Path(journal_dir).parent / "state" / "session-journal-reservations"
-    owner_dir = Path(reservation_dir or default_reservation) / date_str
+    journal_dir = Path(journal_dir).resolve()
+    day_dir = journal_dir / date_str
+    default_reservation = journal_dir.parent / "state" / "session-journal-reservations"
+    owner_dir = Path(reservation_dir or default_reservation).resolve() / date_str
     day_dir.mkdir(parents=True, exist_ok=True)
 
     candidates = candidates_for(day_dir, run_type, label, run_id)

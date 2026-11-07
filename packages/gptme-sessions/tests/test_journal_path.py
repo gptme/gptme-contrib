@@ -116,10 +116,14 @@ def test_corrupt_owned_reservation_fails_closed(tmp_path: Path):
 
 
 def test_three_way_collision_uses_long_suffix(tmp_path: Path):
-    _alloc(tmp_path, "abcd", "11111111-0000-0000-0000-000000000000")
-    # Same 4-char prefix as the canonical run, different full run id.
+    first = _alloc(tmp_path, "abcd", "11111111-0000-0000-0000-000000000000")
+    # All three share a 4-char prefix; the third must reach the 8-char suffix.
     second = _alloc(tmp_path, "abcd", "11111111-2222-0000-0000-000000000000")
+    third = _alloc(tmp_path, "abcd", "11112222-3333-0000-0000-000000000000")
     assert second.name == "autonomous-session-abcd-1111.md"
+    assert third.name == "autonomous-session-abcd-11112222.md"
+    assert len({first, second, third}) == 3
+    assert all(path.exists() for path in (first, second, third))
 
 
 def test_journal_stem_mapping():
@@ -184,3 +188,119 @@ def test_cli_fails_closed_on_corrupt_reservation(tmp_path: Path, capsys):
 
     assert main(args) == 1
     assert "integrity failure" in capsys.readouterr().err
+
+
+def test_interrupted_publication_never_adopts_history(tmp_path: Path, monkeypatch):
+    import gptme_sessions.journal_path as allocator
+
+    historical = tmp_path / _TODAY / "autonomous-session-abcd.md"
+    historical.parent.mkdir()
+    historical.write_text("historical bytes")
+    original_link = allocator.os.link
+
+    def interrupted_link(*args, **kwargs):
+        original_link(*args, **kwargs)
+        raise RuntimeError("simulated crash after publication")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(allocator.os, "link", interrupted_link)
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            _alloc(tmp_path, "abcd", "22222222-0000-0000-0000-000000000000")
+
+    retry = _alloc(tmp_path, "abcd", "22222222-0000-0000-0000-000000000000")
+    assert retry != historical
+    assert historical.read_text() == "historical bytes"
+
+
+def test_relative_and_absolute_directories_share_retry(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    first = _alloc(Path("journal"), "abcd", "11111111")
+    assert first.is_absolute()
+    assert _alloc(tmp_path / "journal", "abcd", "11111111") == first
+
+
+def test_concurrent_same_run_allocations_share_one_path(tmp_path: Path):
+    from threading import Barrier
+
+    barrier = Barrier(8)
+
+    def allocate(_):
+        barrier.wait(timeout=10)
+        return _alloc(tmp_path, "abcd", "11111111")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        paths = list(pool.map(allocate, range(8)))
+    assert len(set(paths)) == 1
+    assert len(list((tmp_path / _TODAY).glob("*.md"))) == 1
+
+
+@pytest.mark.parametrize("value", [None, [], "text", 123, {}, {"journal_path": "bad"}])
+def test_invalid_owner_shapes_fail_closed(tmp_path: Path, value):
+    path = _alloc(tmp_path, "abcd", "11111111")
+    owner = tmp_path / "reservations" / _TODAY / f"{path.name}.json"
+    owner.write_text(json.dumps(value))
+    with pytest.raises(JournalReservationError):
+        _alloc(tmp_path, "abcd", "11111111")
+
+
+@pytest.mark.parametrize("after_publication", [False, True])
+def test_process_crash_releases_lock_and_retries_safely(tmp_path: Path, after_publication):
+    import multiprocessing
+
+    import gptme_sessions.journal_path as allocator
+
+    def crash():
+        original_link = allocator.os.link
+
+        def exit_at_publication(*args, **kwargs):
+            if after_publication:
+                original_link(*args, **kwargs)
+            allocator.os._exit(23)
+
+        allocator.os.link = exit_at_publication
+        _alloc(tmp_path, "abcd", "11111111")
+
+    process = multiprocessing.get_context("fork").Process(target=crash)
+    process.start()
+    process.join(timeout=10)
+    if process.is_alive():
+        process.kill()
+        process.join()
+        pytest.fail("allocator did not reach the crash point")
+    assert process.exitcode == 23
+    canonical = tmp_path / _TODAY / "autonomous-session-abcd.md"
+    assert canonical.exists()
+    retry = _alloc(tmp_path, "abcd", "11111111")
+    assert (retry == canonical) is after_publication
+    assert canonical.read_bytes() == b""
+    assert _alloc(tmp_path, "abcd", "11111111") == retry
+
+
+@pytest.mark.parametrize("value", [None, [], "text", 123])
+def test_cli_handles_non_object_owner(tmp_path: Path, capsys, value):
+    path = _alloc(tmp_path, "abcd", "11111111")
+    owner = tmp_path / "reservations" / _TODAY / f"{path.name}.json"
+    owner.write_text(json.dumps(value))
+    assert (
+        main(
+            [
+                "--journal-dir",
+                str(tmp_path),
+                "--reservation-dir",
+                str(tmp_path / "reservations"),
+                "--run-type",
+                "autonomous",
+                "--label",
+                "abcd",
+                "--uuid",
+                "11111111",
+                "--date",
+                _TODAY,
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert "integrity failure" in captured.err
+    assert "Traceback" not in captured.err
