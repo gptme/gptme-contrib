@@ -210,6 +210,50 @@ gptme-sessions blame src/hello.py --records /path/to/session-records.jsonl
 A runnable, self-contained demo lives in
 [`examples/sessions-blame/`](examples/sessions-blame/README.md).
 
+### Journal path pre-allocation
+
+Concurrent launches can share a short session label, so the journal basename is not
+unique on its own. `journal_path` reserves the file before the session is dispatched,
+using `O_EXCL` creation plus a run-owned reservation record:
+
+```bash
+python -m gptme_sessions.journal_path --journal-dir journal --run-type autonomous \
+  --label ab12 --uuid "$SESSION_UUID"
+# -> /path/to/journal/2026-11-07/autonomous-session-ab12.md
+```
+
+- A colliding label moves to a UUID-suffixed candidate instead of opening another
+  run's journal.
+- A re-dispatched run (same `--uuid`, run type and label) reuses the exact path
+  it already owns, including after UTC midnight when `--date` is omitted. An
+  explicit `--date` scopes lookup to that date. Lookup and allocation share a
+  persistent namespace lock so midnight-straddling callers cannot split a run.
+- An existing journal with no reservation record is treated as historical and never
+  adopted, so a new session cannot overwrite it.
+- The file is created empty; the session writes it.
+- Paths are normalized to absolute paths, so equivalent relative/absolute inputs
+  share retry identity.
+
+Allocation uses a persistent POSIX `flock` file per candidate to serialize threads
+and processes. Ownership is published atomically **after** exclusive journal
+creation. If an allocator crashes before publication, its unowned empty file is
+conservatively skipped on retry; after publication, the reservation is reusable.
+Lock files must not be removed while allocators can be running. This helper
+requires POSIX `flock` support (Linux/macOS).
+
+Reservations default to
+`<journal-dir>/../state/session-journal-reservations/<journal-dir-name>` so sibling
+journal trees have independent owner namespaces. Paths use the resolved journal
+directory name. The location can be moved with `--reservation-dir`; give independent
+journal trees distinct explicit reservation directories. Corrupt or mismatched
+reservation metadata fails closed (exit 1) rather than guessing. Historical lookup
+validates the complete owner record before skipping another run; retries find
+existing owned suffixes before attempting newly available canonical paths.
+
+`--date` must be a valid `YYYY-MM-DD` calendar date. Run type, label and UUID must
+be non-empty filename components without path separators or NUL. Invalid inputs
+fail before any directories or journal files are created.
+
 ## Where trajectories are discovered
 
 | Harness | Default location | Override |
