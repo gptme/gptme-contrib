@@ -117,6 +117,26 @@ def _is_unquotable(output: str) -> bool:
     return bool(_UNQUOTABLE_RE.search(output))
 
 
+# A 4xx from ``create_tweet`` means X rejected the call itself, so no tweet was
+# created. (403 monthly spend cap, 401 expired auth, 429 rate limit.) Contrast
+# with a timeout or a 5xx, where the request may have been accepted before the
+# failure and retrying blind could duplicate a post.
+_DEFINITE_REJECTION_RE = re.compile(
+    r"tweepy\.errors\.(?:Forbidden|Unauthorized|BadRequest|TooManyRequests):\s+4\d\d\b"
+)
+
+
+def _is_post_never_created(output: str) -> bool:
+    """True when the API refused the request outright, creating nothing.
+
+    Such a failure must not leave an ambiguous-side-effect marker behind: the
+    post provably does not exist, so the marker would only wedge this tag until
+    someone reconciles it by hand. Transient failures stay ambiguous and keep
+    their marker.
+    """
+    return bool(_DEFINITE_REJECTION_RE.search(output))
+
+
 def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
@@ -483,10 +503,23 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
     if "org_tweet_id" not in record:
         if not _begin_post(state, key, record, "org_tweet_id"):
             return 1
-        posted, org_id, _ = _post(["post", announcement], account=args.org_account)
+        posted, org_id, out = _post(["post", announcement], account=args.org_account)
         if not posted:
-            # Keep the pending marker so a later run refuses blind retry.
-            # Use --force to reset if certain no tweet was posted.
+            if _is_post_never_created(out):
+                # X rejected the request (e.g. 403 monthly spend cap), so no
+                # tweet exists. Clear the marker so a later run retries instead
+                # of refusing forever over a side effect that never happened.
+                # This run still exits non-zero: the rejection is real and the
+                # timer should surface it.
+                print(
+                    f"{key}: X rejected the announcement (nothing was posted); "
+                    "cleared the pending marker so a later run can retry",
+                    file=sys.stderr,
+                )
+                record.pop(_pending_key("org_tweet_id"), None)
+                save_state(state)
+            # Otherwise keep the pending marker so a later run refuses blind
+            # retry. Use --force to reset if certain no tweet was posted.
             return 1
         _finish_post(state, record, "org_tweet_id", org_id)
     if org_id is None:
@@ -510,11 +543,21 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
     if "link_reply_id" not in record:
         if not _begin_post(state, key, record, "link_reply_id"):
             return 1
-        posted, link_reply_id, _ = _post(
+        posted, link_reply_id, out = _post(
             ["post", link_reply, "--reply-to", org_id], account=args.org_account
         )
         if not posted:
-            # Keep the pending marker so a later run refuses blind retry.
+            if _is_post_never_created(out):
+                # Same reasoning as the announcement step: a definite rejection
+                # means no reply exists, so the marker would only wedge the tag.
+                print(
+                    f"{key}: X rejected the link reply (nothing was posted); "
+                    "cleared the pending marker so a later run can retry",
+                    file=sys.stderr,
+                )
+                record.pop(_pending_key("link_reply_id"), None)
+                save_state(state)
+            # Otherwise keep the pending marker so a later run refuses blind retry.
             return 1
         _finish_post(state, record, "link_reply_id", link_reply_id)
 
