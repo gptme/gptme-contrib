@@ -831,6 +831,30 @@ def test_bare_jwt_with_whitespace_in_header_redacted() -> None:
     )
 
 
+def test_compound_secret_keys_redacted() -> None:
+    # Regression (contrib#2038 review, fp 6f7cd4233de2): ``\b`` does not fire
+    # after the underscore in ``client_secret``, and a 24-char value evades the
+    # opaque-token rule, so the whole credential was published.
+    err = soc._error_text(
+        {
+            "error": {
+                "client_secret": "Abcdefghijklmnop12345678",
+                "message": "invalid credentials",
+            }
+        }
+    )
+    out = soc._redact(err)
+    assert "Abcdefghijklmnop12345678" not in out
+    assert "invalid credentials" in out
+    for key in ("client_secret", "db_password", "aws_secret_access_key", "private-key"):
+        out = soc._redact(f"failed: {key}=hunter2xyz retry")
+        assert out == f"failed: {key}=[REDACTED] retry", out
+    # Non-secret keys and classification codes survive.
+    assert (
+        soc._redact("max_tokens=4096 api_error_403") == "max_tokens=4096 api_error_403"
+    )
+
+
 def test_deeply_nested_structured_403_does_not_crash_assess(tmp_path: Path) -> None:
     # Regression (contrib#2038 review, fp 39d8ac08fea2): a recursive
     # _is_structured_403() hit RecursionError on nesting that json.loads and

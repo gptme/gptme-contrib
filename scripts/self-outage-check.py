@@ -109,12 +109,16 @@ _SECRET_PATTERNS = (
     # quote serializes as ``\\\\\\"`` (encoded backslash + encoded quote) and
     # must be consumed as content, or ``password="a \\"b\\" c"`` would leak
     # ``b`` and ``c``.
+    # The key may carry any ``word_`` / ``word-`` prefix: ``\b`` does not fire
+    # inside ``client_secret`` or ``db_password``, so without the prefix those
+    # compound keys would skip redaction entirely.
     # An unquoted value runs to the next whitespace: commas, semicolons and
     # braces are legal password characters, so stopping there would publish
     # the tail (``password=alpha,beta`` -> ``beta``). Over-redacting a trailing
     # ``,`` or ``}`` only costs diagnostic detail.
     re.compile(
-        r"(?i)\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|"
+        r"(?i)\b((?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?key|private[_-]?key|"
+        r"access[_-]?token|refresh[_-]?token|token|secret|credentials?|"
         r"password|passwd|authorization|x-api-key)(?:\\?[\"'])?\s*[:=]\s*)"
         r"(?:\\\"(?:\\\\\\.|\\\\[^\\]|\\[^\"\\]|[^\\])*(?:\\\"|$)"
         r"|\\'(?:\\\\\\.|\\\\[^\\]|\\[^'\\]|[^\\])*(?:\\'|$)"
@@ -338,8 +342,10 @@ def assess(
         # so neither an older record nor an empty one can win the sample.
         newest_first = sorted(
             auth_failure_records,
-            key=lambda r: _parse_ts(r.get("timestamp", ""))
-            or datetime.min.replace(tzinfo=timezone.utc),
+            key=lambda r: (
+                _parse_ts(r.get("timestamp", ""))
+                or datetime.min.replace(tzinfo=timezone.utc)
+            ),
             reverse=True,
         )
         texts_newest_first = [(r, _error_text(r)) for r in newest_first]
