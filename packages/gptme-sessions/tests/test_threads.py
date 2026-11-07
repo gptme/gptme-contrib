@@ -439,3 +439,21 @@ def test_four_character_mention_does_not_use_cross_agent_fallback():
     ]
     edges, _ = L.mine_edges(nodes)
     assert not edges
+
+
+@pytest.mark.parametrize("label", ["abcd", "abcde", "abcdef", "abcdef1", "abcdef12"])
+def test_mention_label_excludes_self_before_choosing_nearest(label):
+    nodes = [
+        S(0, id="abcdef12-0000-0000-0000-000000000001", short=label),
+        S(1, id="abcdef12-0000-0000-0000-000000000002", short=label, sessions_mentioned=[label]),
+    ]
+    edges, _ = L.mine_edges(nodes)
+    assert kinds(edges, 0, 1) == {"mention"}
+    assert L.best_predecessors(nodes, edges) == [-1, 0]
+
+
+def test_self_only_mention_does_not_make_an_edge():
+    sid = "abcdef12-0000-0000-0000-000000000001"
+    nodes = [S(0, id=sid, short="abcd", sessions_mentioned=["abcd", "abcdef12", sid])]
+    edges, _ = L.mine_edges(nodes)
+    assert not edges

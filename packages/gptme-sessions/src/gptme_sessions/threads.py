@@ -250,11 +250,8 @@ def mine_edges(
 
     # named sessions and linked journals
     for i, n in enumerate(nodes):
-        own = {n.get("short"), str(n["id"])[:4]}
         sp = spec(len(n.get("sessions_mentioned") or []), 6)
         for s in n.get("sessions_mentioned") or []:
-            if s in own:
-                continue
             j = idx.resolve(s, n["agent"], n["end"], exclude=i)
             if j is not None:
                 add(j, i, "mention", "session " + s, sp)
