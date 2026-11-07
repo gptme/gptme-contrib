@@ -149,3 +149,40 @@ def test_concurrent_last_run_leaves_chain_unresolved():
     edges, _ = L.mine_edges(nodes)
     # Without explicit parent evidence, do not guess which concurrent run spawned it.
     assert not any(kind == "chain" for _, _, kind in edges)
+
+
+@pytest.mark.parametrize("sid", ["abcd", "abcdef12", "shared-full-session-id"])
+def test_exact_session_id_collision_prefers_own_agent(sid):
+    nodes = [S(0, "alice", id=sid), S(1, "bob", id=sid)]
+    st = L.attach_commits(
+        nodes, [{"agent": "alice", "sha": "abcdef1000", "ts": nodes[1]["end"], "sids": [sid]}]
+    )
+    assert st["attached"] == 1
+    assert nodes[0]["delivered_shas"] == ["abcdef1000"]
+    assert not nodes[1].get("delivered_shas")
+
+
+def test_repeated_exact_id_within_agent_uses_reference_time():
+    nodes = [S(0, id="abcd"), S(1, id="abcd")]
+    L.attach_commits(
+        nodes, [{"agent": "bob", "sha": "abcdef1000", "ts": nodes[0]["end"], "sids": ["abcd"]}]
+    )
+    assert nodes[0]["delivered_shas"] == ["abcdef1000"]
+    assert not nodes[1].get("delivered_shas")
+
+
+def test_ambiguous_cross_agent_exact_parent_is_unresolved():
+    nodes = [
+        S(0, "alice", id="shared-id"),
+        S(1, "bob", id="shared-id"),
+        S(2, "gordon", parent="shared-id"),
+    ]
+    edges, st = L.mine_edges(nodes)
+    assert st["parent_unresolved"] == 1
+    assert not edges
+
+
+def test_linked_journal_still_resolves():
+    nodes = [S(0, journal="journal/first.md"), S(1, journal_links=["journal/first.md"])]
+    edges, _ = L.mine_edges(nodes)
+    assert "mention" in kinds(edges, 0, 1)

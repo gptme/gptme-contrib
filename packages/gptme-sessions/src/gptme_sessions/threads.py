@@ -78,13 +78,13 @@ class _Index:
 
     def __init__(self, nodes: list[dict]):
         self.nodes = nodes
-        self.by_id: dict[str, int] = {}
+        self.by_id: dict[str, list[int]] = defaultdict(list)
         self.short: dict[tuple[str, str], list[int]] = defaultdict(list)
         self.short_any: dict[str, list[int]] = defaultdict(list)
         for i, n in enumerate(nodes):
-            self.by_id[str(n["id"])] = i
-            if n.get("journal"):
-                self.by_id.setdefault(n["journal"], i)
+            self.by_id[str(n["id"])].append(i)
+            if n.get("journal") and n["journal"] != str(n["id"]):
+                self.by_id[n["journal"]].append(i)
             labels: set[str] = {str(n["id"])[:8]}
             if n.get("short"):
                 labels.add(str(n["short"]))
@@ -98,7 +98,12 @@ class _Index:
         """Session for an id or label; ambiguity is settled by time proximity."""
         sid = str(sid).strip()
         if sid in self.by_id:
-            return self.by_id[sid]
+            exact = self.by_id[sid]
+            own = [i for i in exact if self.nodes[i]["agent"] == agent]
+            if own:
+                return nearest(self.nodes, own, t) if t is not None else own[-1]
+            # A unique exact id can name a cross-agent parent. A collision cannot.
+            return exact[0] if len(exact) == 1 else None
         for key in (sid[:8], sid[:4]) if len(sid) >= 4 else ():
             cands = self.short.get((agent, key)) if agent else None
             cands = cands or (self.short_any.get(key) if len(key) == 8 else None)
@@ -241,7 +246,7 @@ def mine_edges(
             if j is not None:
                 add(j, i, "mention", "session " + s, sp)
         for lk in n.get("journal_links") or []:
-            j = idx.by_id.get(lk)
+            j = idx.resolve(lk, n["agent"], n["end"])
             if j is not None:
                 add(j, i, "mention", lk.split("/")[-1])
 
