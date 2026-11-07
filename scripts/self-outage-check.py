@@ -56,17 +56,21 @@ from pathlib import Path
 
 # Failure reasons that are a 403/billing problem (subscription payment past due
 # or org-level access disabled, e.g. `oauth_not_allowed_for_organization`),
-# NOT a bad/expired token. Re-authenticating does nothing for these — they need
-# a human to pay/renew, switch to an API key, or enable failover. Kept separate
-# from the token-class reasons so remediation can be failure-mode-specific.
+# rather than a plain bad/expired token. Re-authenticating is still the first
+# thing to try (a fresh login cleared a real 403 on 2026-11-06), but if it
+# persists these need a human to pay/renew, switch to an API key, or enable
+# failover. Kept separate from the token-class reasons so remediation can be
+# failure-mode-specific.
 BILLING_OUTAGE_REASONS = frozenset({"api_error_403"})
 # Substrings in an error string that identify a 403/billing outage.  Kept in
 # sync with the checks in _is_billing_outage() so sample_error selection and
 # remediation classification agree.
+# Anthropic's org-level access block; selects the provider-specific billing URL.
+OAUTH_ORG_BLOCK_SUBSTRING = "oauth_not_allowed_for_organization"
 BILLING_ERROR_SUBSTRINGS = (
     "api_error_403",
     "api_error_status:403",
-    "oauth_not_allowed_for_organization",
+    OAUTH_ORG_BLOCK_SUBSTRING,
 )
 
 # Default classifier for "the credential is dead and a human (or self-reauth)
@@ -187,6 +191,7 @@ def assess(
     dominant_reason: str | None = None
     sample_error: str | None = None
     billing_outage = False
+    oauth_org_block = False
     if auth_failure_records:
         reason_counts = Counter(
             r.get("failure_reason")
@@ -232,6 +237,11 @@ def assess(
         # *something* useful even when the most-recent record has an empty field.
         err = next(iter(billing_errors or errors_newest_first), "")
         sample_error = err[:400] or None
+        # Same reasoning as billing_outage: decide on the full errors, not the
+        # truncated display sample, so a long error can't hide the provider hint.
+        oauth_org_block = any(
+            OAUTH_ORG_BLOCK_SUBSTRING in e.lower() for e in errors_newest_first
+        )
 
     last_prod = last_productive_ts(records_file, now)
     if last_prod is not None:
@@ -267,6 +277,7 @@ def assess(
         "dominant_reason": dominant_reason,
         "sample_error": sample_error,
         "billing_outage": billing_outage,
+        "oauth_org_block": oauth_org_block,
         "outage": outage,
     }
 
@@ -380,6 +391,17 @@ def _is_billing_outage(status: dict) -> bool:
     return any(kw in sample for kw in BILLING_ERROR_SUBSTRINGS)
 
 
+def _is_oauth_org_block(status: dict) -> bool:
+    """True when the evidence names Anthropic's org-access block.
+
+    Prefer assess()'s ``oauth_org_block`` (computed over the full errors); fall
+    back to the display sample for status dicts constructed elsewhere.
+    """
+    if "oauth_org_block" in status:
+        return bool(status["oauth_org_block"])
+    return OAUTH_ORG_BLOCK_SUBSTRING in (status.get("sample_error") or "").lower()
+
+
 def _remediation(cfg: Config, status: dict) -> str:
     """Failure-mode-specific remediation line.
 
@@ -402,10 +424,7 @@ def _remediation(cfg: Config, status: dict) -> str:
         "block: renew the subscription, switch to an API key, or enable the "
         "already-built alternate-harness failover."
     )
-    if (
-        "oauth_not_allowed_for_organization"
-        in (status.get("sample_error") or "").lower()
-    ):
+    if _is_oauth_org_block(status):
         line += (
             " (Anthropic org access — pay/renew at https://claude.ai/settings/billing)"
         )

@@ -414,6 +414,25 @@ def test_billing_classified_despite_truncation_and_case(tmp_path: Path) -> None:
     assert soc._is_billing_outage(status) is True
     # Display sample is still capped; classification does not depend on it.
     assert len(status["sample_error"]) == 400
+    assert "oauth_not_allowed" not in status["sample_error"].lower()
+    # The provider-specific hint is also decided on the full error, so the
+    # truncated sample must not drop the Anthropic billing URL.
+    assert status["oauth_org_block"] is True
+    assert "claude.ai/settings/billing" in soc._remediation(cfg_for(tmp_path), status)
+
+
+def test_no_anthropic_url_without_oauth_org_evidence(tmp_path: Path) -> None:
+    # A generic 403 is billing-class but must not point at claude.ai.
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "api_error_403")
+        r["error"] = "api_error_status:403; Forbidden"
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    assert status["billing_outage"] is True
+    assert status["oauth_org_block"] is False
+    assert "claude.ai" not in soc._remediation(cfg_for(tmp_path), status)
 
 
 def test_remediation_is_billing_aware_for_403(tmp_path: Path) -> None:
