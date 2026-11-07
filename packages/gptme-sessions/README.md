@@ -210,6 +210,29 @@ gptme-sessions blame src/hello.py --records /path/to/session-records.jsonl
 A runnable, self-contained demo lives in
 [`examples/sessions-blame/`](examples/sessions-blame/README.md).
 
+### Journal path pre-allocation
+
+Concurrent launches can share a short session label, so the journal basename is not
+unique on its own. `journal_path` reserves the file before the session is dispatched,
+using `O_EXCL` creation plus a run-owned reservation record:
+
+```bash
+python -m gptme_sessions.journal_path --journal-dir journal --run-type autonomous \
+  --label ab12 --uuid "$SESSION_UUID"
+# -> /path/to/journal/2026-11-07/autonomous-session-ab12.md
+```
+
+- A colliding label moves to a UUID-suffixed candidate instead of opening another
+  run's journal.
+- A re-dispatched run (same `--uuid`) reuses the exact path it already owns.
+- An existing journal with no reservation record is treated as historical and never
+  adopted, so a new session cannot overwrite it.
+- The file is created empty; the session writes it.
+
+Reservations default to `<journal-dir>/../state/session-journal-reservations` and can
+be moved with `--reservation-dir`. Corrupt or mismatched reservation metadata fails
+closed (exit 1) rather than guessing.
+
 ## Where trajectories are discovered
 
 | Harness | Default location | Override |
