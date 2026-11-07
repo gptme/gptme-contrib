@@ -104,22 +104,35 @@ _SECRET_PATTERNS = (
     # branches handle JSON-*escaped* quotes (``password=\\"a b\\"``), which is
     # what ``_error_text()`` produces when a structured payload's message
     # carries a quoted secret; they must precede the unquoted branch, which
-    # would otherwise consume only the backslash. Inside an escaped string the
+    # would otherwise stop at the first space. Inside an escaped string the
     # body is tokenized, not scanned for the first ``\\"``: an inner escaped
     # quote serializes as ``\\\\\\"`` (encoded backslash + encoded quote) and
     # must be consumed as content, or ``password="a \\"b\\" c"`` would leak
     # ``b`` and ``c``.
+    # An unquoted value runs to the next whitespace: commas, semicolons and
+    # braces are legal password characters, so stopping there would publish
+    # the tail (``password=alpha,beta`` -> ``beta``). Over-redacting a trailing
+    # ``,`` or ``}`` only costs diagnostic detail.
     re.compile(
         r"(?i)\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|"
         r"password|passwd|authorization|x-api-key)(?:\\?[\"'])?\s*[:=]\s*)"
         r"(?:\\\"(?:\\\\\\.|\\\\[^\\]|\\[^\"\\]|[^\\])*(?:\\\"|$)"
         r"|\\'(?:\\\\\\.|\\\\[^\\]|\\[^'\\]|[^\\])*(?:\\'|$)"
-        r"|\"(?:[^\"\\]|\\.)*(?:\"|$)|'(?:[^'\\]|\\.)*(?:'|$)|[^\s\"',;}]+)"
+        r"|\"(?:[^\"\\]|\\.)*(?:\"|$)|'(?:[^'\\]|\\.)*(?:'|$)|\S+)"
     ),
     # Bare JWTs: the header is always base64url of ``{"`` → ``eyJ``. Segments
     # are short and may lack digits, so the generic opaque-token rule below
     # can miss them entirely.
     re.compile(r"\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]*)?"),
+    # JWTs whose JSON has whitespace after ``{`` (``{ "alg"`` -> ``eyA``,
+    # ``{\n`` -> ``ewo``): any base64url of ``{`` starts with ``e`` + one of
+    # ``w-z0-9_-``. Both header and payload are JSON objects, so require that
+    # shape on both segments (plus a minimum length) to avoid matching prose
+    # such as ``example.com``.
+    re.compile(
+        r"\be[w-z0-9_\-][A-Za-z0-9_\-]{8,}\.e[w-z0-9_\-][A-Za-z0-9_\-]{8,}"
+        r"(?:\.[A-Za-z0-9_\-]*)?"
+    ),
     # Any remaining long opaque token (JWTs, hex/base64 blobs). Must mix letters
     # and digits so long snake_case error codes such as
     # ``oauth_not_allowed_for_organization`` survive — remediation keys on them.

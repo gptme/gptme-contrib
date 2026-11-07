@@ -804,3 +804,28 @@ def test_sample_error_cannot_break_out_of_code_span(tmp_path: Path) -> None:
     body = soc._issue_body(cfg_for(tmp_path), status)
     line = next(ln for ln in body.splitlines() if ln.startswith("- observed error:"))
     assert line == f"- observed error: `{sample}`"
+
+
+def test_unquoted_password_with_punctuation_redacted_whole() -> None:
+    # Regression (contrib#2038 review, fp 452b37a59e66): the unquoted branch
+    # stopped at commas/semicolons/braces, which are legal password chars.
+    for pw in ("alpha,beta", "alpha;beta", "alpha}beta"):
+        out = soc._redact(f"login failed: password={pw} retry later")
+        assert out == "login failed: password=[REDACTED] retry later"
+        assert "beta" not in out
+
+
+def test_bare_jwt_with_whitespace_in_header_redacted() -> None:
+    # Regression (contrib#2038 review, fp 0c1214410aa8): ``{ "alg"`` encodes
+    # to ``eyA``, not ``eyJ``, and a digit-free signature evades the generic
+    # opaque-token rule.
+    jwt = (
+        "eyAiYWxnIjogIkhTMjU2IiB9.eyAic3ViIjogImFsaWNlIiB9."
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ"
+    )
+    out = soc._redact(f"Invalid JWT: {jwt}")
+    assert out == "Invalid JWT: [REDACTED]"
+    # ...but ordinary dotted prose survives.
+    assert soc._redact("see example.com and eyes.everywhere") == (
+        "see example.com and eyes.everywhere"
+    )
