@@ -534,15 +534,23 @@ def untick_checklist(content: str) -> str:
                 or (candidate.strip() and indent < list_containers[-1][1])
             ):
                 list_containers.pop()
+            # Fence indentation is relative to the enclosing container, not
+            # the new list marker (if any) on this line. Four extra columns
+            # denote indented code, not a fence delimiter.
+            container_indent = list_containers[-1][1] if list_containers else 0
             if item := _LIST_RE.match(candidate):
                 list_containers.append((quote_depth, _columns(item.group(), prefix)))
         if fence:
             # Only a matching delimiter of at least the opening length closes
             # a fence; inner examples and info strings are not closing fences.
-            if re.fullmatch(rf"[ \t]*{re.escape(fence[0])}{{{len(fence)},}}\s*", candidate):
+            if indent - list_indent <= 3 and re.fullmatch(
+                rf"[ \t]*{re.escape(fence[0])}{{{len(fence)},}}\s*", candidate
+            ):
                 fence = ""
-        elif (opening := _FENCE_RE.match(candidate)) and not (
-            opening.group(3).startswith("`") and "`" in candidate[opening.end() :]
+        elif (
+            (opening := _FENCE_RE.match(candidate))
+            and indent - container_indent <= 3
+            and not (opening.group(3).startswith("`") and "`" in candidate[opening.end() :])
         ):
             # Backtick fence info strings cannot contain backticks: a line
             # like ```example``` is an inline code span, not a fence opener.

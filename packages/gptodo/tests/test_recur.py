@@ -206,6 +206,63 @@ class TestRecurResetUnticksChecklist:
         assert example in body
         assert "- [ ] real step" in body
 
+    @pytest.mark.parametrize("indent", range(4))
+    @pytest.mark.parametrize("container", ["", "- notes\n\n  ", "1. notes\n\n   "])
+    def test_reset_accepts_fence_indent_within_container(
+        self, workspace: Path, indent: int, container: str
+    ):
+        continuation = container.rsplit("\n", 1)[-1]
+        example = (
+            f"{container}{' ' * indent}```markdown\n"
+            f"{continuation}- [x] example\n{continuation}{' ' * indent}```"
+        )
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{example}\n\n- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert post.content.endswith(f"{example}\n\n- [ ] real step")
+
+    @pytest.mark.parametrize(
+        "example",
+        [
+            "    ```\n    example",
+            "\t~~~\n\texample",
+            ">     ```\n>     example",
+            "- notes\n\n      ```\n      example",
+            "1. notes\n\n       ~~~\n       example",
+        ],
+    )
+    def test_reset_ignores_overindented_fence_opener(self, workspace: Path, example: str):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{example}\n\n- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert post.content.endswith(f"{example}\n\n- [ ] real step")
+
+    @pytest.mark.parametrize(
+        "example",
+        [
+            "```markdown\n    ```\n- [x] example\n```",
+            "~~~markdown\n\t~~~\n- [x] example\n~~~",
+            "> ```markdown\n>     ```\n> - [x] example\n> ```",
+            "- ```markdown\n      ```\n  - [x] example\n  ```",
+            "1. notes\n\n   ~~~markdown\n       ~~~\n   - [x] example\n   ~~~",
+            "   ```markdown\n    ```\n- [x] example\n```",
+        ],
+    )
+    def test_reset_ignores_overindented_fence_closer(self, workspace: Path, example: str):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{example}\n\n- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert post.content.endswith(f"{example}\n\n- [ ] real step")
+
     @pytest.mark.parametrize("inline", ["```example```", "- ```example```", "> ```example```"])
     def test_reset_does_not_treat_inline_code_as_fence(self, workspace: Path, inline: str):
         path = write_task(workspace, "weekly-review", state="active", recur="7d")
