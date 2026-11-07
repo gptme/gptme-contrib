@@ -459,6 +459,26 @@ _PATTERNS: list[Pattern] = [
         Severity.MEDIUM,
         "ethereum_address",
     ),
+    # Shell NAME=VALUE words can concatenate quoted and unquoted fragments.
+    # Discover the entire word, including quote bytes, when multiple fragments
+    # occur. The ordinary fallback below preserves quotes for a single quoted
+    # value and supports JSON/TOML/truncated snippets. Restrict this extra form
+    # to '=' so JSON's closing quote/comma cannot become a shell fragment.
+    Pattern(
+        re.compile(
+            r"\b(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*_)?"
+            r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)\b"
+            r"[ \t]*=[ \t]*"
+            r"(?!\"\"\"|''')"
+            r"(?P<value>(?:[^\s'\"\\]++|\\[^\r\n]"
+            r"|'(?:\\[\s\S]|[^'\\])*'|\"(?:\\[\s\S]|[^\"\\])*\"){2,})"
+            r"(?<![,;])(?=\s|\Z)",
+            re.IGNORECASE,
+        ),
+        Severity.CRITICAL,
+        "secret_assignment",
+        value_only=True,
+    ),
     # Secret-named assignment in free text (e.g. an exported .env snippet or a
     # logged `export COHERE_API_KEY=...` line) — the catch-all net of LAST resort.
     # This is the in-text counterpart of the Layer-1 env-name collector: the

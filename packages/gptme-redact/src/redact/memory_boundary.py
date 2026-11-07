@@ -72,7 +72,7 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
     r"github[_-]?pat|openrouter[_-]?key|anthropic[_-]?key|openai[_-]?key|"
     r"aws[_-]?(?:access|secret)[_-]?key|access[_-]?key[_-]?id|"
     r"private[_-]?key|client[_-]?secret|bearer"
-    r")\s*[=:]\s*\S+"
+    r")[ \t]*[=:][ \t]*\S+"
 )
 # Conservative legacy/placeholder shapes, including short tokens and incomplete
 # private-key blocks. Keep these stricter auditor checks alongside the shared
