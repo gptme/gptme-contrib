@@ -421,3 +421,21 @@ def test_unqualified_pr_does_not_guess_an_owner():
     nodes = [S(0, pr="alice/project#12"), S(1, pr="project#12")]
     edges, _ = L.mine_edges(nodes)
     assert not edges
+
+
+def test_eight_character_mention_uses_cross_agent_fallback():
+    nodes = [
+        S(0, "alice", id="abcdef12-0000-0000-0000-000000000001"),
+        S(1, "bob", sessions_mentioned=["abcdef12"]),
+    ]
+    edges, _ = L.mine_edges(nodes)
+    assert "mention" in kinds(edges, 0, 1)
+
+
+def test_four_character_mention_does_not_use_cross_agent_fallback():
+    nodes = [
+        S(0, "alice", id="abcdef12-0000-0000-0000-000000000001"),
+        S(1, "bob", sessions_mentioned=["abcd"]),
+    ]
+    edges, _ = L.mine_edges(nodes)
+    assert not edges

@@ -255,7 +255,7 @@ def mine_edges(
         for s in n.get("sessions_mentioned") or []:
             if s in own:
                 continue
-            j = nearest(nodes, [c for c in idx.short.get((n["agent"], s), []) if c != i], n["end"])
+            j = idx.resolve(s, n["agent"], n["end"], exclude=i)
             if j is not None:
                 add(j, i, "mention", "session " + s, sp)
         for lk in n.get("journal_links") or []:
