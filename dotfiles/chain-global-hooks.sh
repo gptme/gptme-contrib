@@ -371,8 +371,10 @@ for name in "${HOOK_NAMES[@]}"; do
             chained=$((chained + 1))
             continue
         fi
-        # dest is a real local hook: first install, or prek overwrote the wrapper.
-        mv "$dest" "$local_hook"
+        # Keep the real hook active until write_wrapper atomically publishes its
+        # replacement. Any failure preparing or publishing leaves Git's current
+        # validation intact. Preserve symlinks and access bits in the saved hook.
+        cp -Pp "$dest" "$local_hook"
     fi
     write_wrapper "$name"
     chained=$((chained + 1))

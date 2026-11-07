@@ -1228,3 +1228,50 @@ def test_wrapper_preserves_read_permissions_on_install_and_refresh(
                 stat.S_IMODE((local_dir / f"{name}.local").stat().st_mode)
                 == existing_mode
             )
+
+
+@pytest.mark.parametrize("failed_tool", ["mktemp", "cat", "python3", "mv"])
+@pytest.mark.parametrize("refresh", [False, True])
+def test_failed_wrapper_install_keeps_active_hook(
+    tmp_path: Path, failed_tool: str, refresh: bool
+) -> None:
+    global_dir = tmp_path / "global"
+    local_dir = tmp_path / "local"
+    global_dir.mkdir()
+    local_dir.mkdir()
+    name = "prepare-commit-msg"
+    original = '#!/bin/bash\necho local >>"$1"\n'
+    _write_exec(global_dir / name, '#!/bin/bash\necho global >>"$1"\n')
+    active = local_dir / name
+    _write_exec(active, original)
+    active.chmod(0o750)
+    args = ["--hooks-dir", str(local_dir), "--global-dir", str(global_dir)]
+    if refresh:
+        assert _run(args).returncode == 0
+    before = active.read_bytes()
+    mode = stat.S_IMODE(active.stat().st_mode)
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    failure = "#!/bin/sh\nexit 73\n"
+    if failed_tool == "mv":
+        # Fail publication, not the old implementation's earlier backup move.
+        failure = (
+            f'#!/bin/sh\ncase "$*" in *.{name}.*) exit 73 ;; esac\n'
+            + 'exec /bin/mv "$@"\n'
+        )
+    _write_exec(tools / failed_tool, failure)
+    env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}")
+
+    result = _run(args, env=env)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert active.is_file(), "installation failure removed the active hook"
+    assert active.read_bytes() == before
+    assert stat.S_IMODE(active.stat().st_mode) == mode
+    message = tmp_path / "message"
+    message.write_text("subject\n")
+    _run_wrapper(active, str(message))
+    assert message.read_text().splitlines() == (
+        ["subject", "global", "local"] if refresh else ["subject", "local"]
+    )
+    if refresh:
+        assert (local_dir / f"{name}.local").read_text() == original
