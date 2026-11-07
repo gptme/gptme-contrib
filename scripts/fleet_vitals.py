@@ -277,8 +277,12 @@ def model_call_succeeded(rec: dict) -> bool:
 def heartbeat_up(status: str, metrics: dict) -> bool:
     """Push decision for a dead-man inference heartbeat (e.g. Uptime Kuma).
 
-    Up when ``healthy``, or ``degraded`` with in-window proof a model call
-    returned *and no failed session since that proof*. Never on ``down``: the
+    Up when ``healthy`` or ``degraded`` *and no failed session since the newest
+    success evidence*; ``degraded`` additionally needs in-window proof a model
+    call returned. ``healthy`` gets no exemption from the recency check: a
+    productive session at -6h followed by timeouts/403s is still ``healthy``
+    (status keeps its productive-in-window contract) but must not push. Never
+    on ``down``: the
     field can still be True there (a noop hours before the 403 streak began),
     and pushing would hide the outage. The same logic applies to non-403
     failure runs (rate limit, 5xx, timeouts) after the last success: those
@@ -286,15 +290,13 @@ def heartbeat_up(status: str, metrics: dict) -> bool:
     pushing. Never on ``stale``. Consumers should call this rather than
     re-deriving the policy from ``model_calls_succeeded_in_window`` alone.
     """
+    # Missing = recency unknown (e.g. metrics from an older producer): fail
+    # closed, since a dead-man heartbeat must not push on doubt.
+    if metrics.get("failures_since_last_model_call") != 0:
+        return False
     if status == "healthy":
         return True
-    return (
-        status == "degraded"
-        and bool(metrics.get("model_calls_succeeded_in_window"))
-        # Missing = recency unknown (e.g. metrics from an older producer):
-        # fail closed, since a dead-man heartbeat must not push on doubt.
-        and metrics.get("failures_since_last_model_call") == 0
-    )
+    return status == "degraded" and bool(metrics.get("model_calls_succeeded_in_window"))
 
 
 def parse_jsonl_lines(lines: object) -> list[tuple[datetime, dict]]:
@@ -348,7 +350,11 @@ def inference_status_from_records(
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     cutoff = now - timedelta(hours=window_hours)
-    in_window = [(t, r) for (t, r) in records if cutoff <= t <= now]
+    # Sort: the recency scan below walks newest-first, and direct callers may
+    # pass records in any order (only the JSONL loader pre-sorts).
+    in_window = sorted(
+        ((t, r) for (t, r) in records if cutoff <= t <= now), key=lambda x: x[0]
+    )
 
     productive = sum(
         1
@@ -359,9 +365,13 @@ def inference_status_from_records(
     # Failures *after* the newest model-call success. Old success evidence must
     # not vouch for a run of later failures (rate limit, 5xx, timeouts), so
     # heartbeat_up() requires this to be 0. Window-wide when no success exists.
+    # A productive record is success evidence too, even when it omits tokens
+    # (thin fallback records), so it also ends the scan.
     failures_since = 0
     for _, r in reversed(in_window):
-        if model_call_succeeded(r):
+        if model_call_succeeded(r) or (
+            r.get("outcome") == "productive" and not is_launch_artifact(r)
+        ):
             break
         if r.get("outcome") == "failed" and not is_launch_artifact(r):
             failures_since += 1

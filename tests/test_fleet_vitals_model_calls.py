@@ -208,3 +208,52 @@ def test_degraded_without_recency_field_fails_closed() -> None:
     m = {"model_calls_succeeded_in_window": True}
     assert not fv.heartbeat_up("degraded", m)
     assert fv.heartbeat_up("degraded", {**m, "failures_since_last_model_call": 0})
+
+
+def test_healthy_with_later_failures_does_not_push() -> None:
+    # Regression (contrib#2058 review): a productive session at -6h keeps
+    # status healthy, but the timeout/403/timeout run after it is the newest
+    # evidence — the healthy shortcut must not bypass the recency check.
+    recs = [
+        _r(6, "productive", output_tokens=5000),
+        _r(3, "failed", failure_reason="timeout"),
+        _r(2, "failed", **_403),
+        _r(1, "failed", failure_reason="timeout"),
+    ]
+    status, _, m = _status(recs)
+    assert status == "healthy"  # status contract unchanged
+    assert m["failures_since_last_model_call"] == 3
+    assert not fv.heartbeat_up(status, m)
+
+
+def test_productive_without_tokens_ends_failure_scan() -> None:
+    # A thin productive record (no tokens) after failures is still success
+    # evidence: it must reset the recency count rather than page.
+    recs = [
+        _r(4, "failed", failure_reason="timeout"),
+        _r(3, "failed", failure_reason="timeout"),
+        _r(1, "productive"),
+    ]
+    status, _, m = _status(recs)
+    assert status == "healthy"
+    assert m["failures_since_last_model_call"] == 0
+    assert fv.heartbeat_up(status, m)
+
+
+def test_recency_scan_is_order_independent() -> None:
+    # Regression (contrib#2058 review): direct callers of
+    # inference_status_from_records() may pass unsorted records; the result
+    # must match the sorted case.
+    recs = [_r(6, "noop", output_tokens=4000)] + [
+        _r(h, "failed", failure_reason="timeout") for h in (3, 2, 1)
+    ]
+    pairs = [(datetime.fromisoformat(r["timestamp"]), r) for r in recs]
+    fwd = fv.inference_status_from_records(pairs, now=NOW, window_hours=7)
+    rev = fv.inference_status_from_records(pairs[::-1], now=NOW, window_hours=7)
+    assert fwd[2]["failures_since_last_model_call"] == 3
+    assert rev[2] == fwd[2]
+    assert not fv.heartbeat_up(rev[0], rev[2])
+
+
+def test_healthy_without_recency_field_fails_closed() -> None:
+    assert not fv.heartbeat_up("healthy", {"productive_in_window": 1})
