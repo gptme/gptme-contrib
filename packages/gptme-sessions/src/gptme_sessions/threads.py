@@ -294,7 +294,8 @@ def mine_edges(
                     min(spec(len(nodes[a]["_mk"]), 4), spec(len(nodes[b]["_mk"]), 4)),
                 )
 
-    # chained runs
+    # Chained runs: an overlapping last run is not evidence of continuation.
+    # Leave it unresolved rather than guessing among concurrent sessions.
     last: dict[str, int] = {}
     for i, n in enumerate(nodes):
         if n.get("t", "s") != "s":
@@ -303,7 +304,7 @@ def mine_edges(
         if (
             p is not None
             and n.get("trigger") == "chained"
-            and n["start"] - nodes[p]["end"] < 30 * 60
+            and 0 <= n["start"] - nodes[p]["end"] < 30 * 60
         ):
             add(p, i, "chain")
         last[n["agent"]] = i

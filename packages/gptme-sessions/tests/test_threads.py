@@ -129,3 +129,23 @@ def test_topic_similarity_distinguishes_real_overlap_from_disagreement():
     ]
     sims = L.topic_similarity(nodes, [(0, 1), (0, 2)])
     assert sims == {(0, 1): 1.0, (0, 2): 0.0}
+
+
+@pytest.mark.parametrize(
+    "gap, linked", [(-96400, False), (-1, False), (0, True), (1799, True), (1800, False)]
+)
+def test_chain_requires_a_nonnegative_bounded_gap(gap, linked):
+    nodes = [S(0, start=100, dur=100000), S(1, start=100100 + gap, trigger="chained")]
+    edges, _ = L.mine_edges(nodes)
+    assert ((0, 1, "chain") in edges) is linked
+
+
+def test_concurrent_last_run_leaves_chain_unresolved():
+    nodes = [
+        S(0, start=0, dur=3500),
+        S(1, start=100, dur=99900),
+        S(2, start=3600, trigger="chained"),
+    ]
+    edges, _ = L.mine_edges(nodes)
+    # Without explicit parent evidence, do not guess which concurrent run spawned it.
+    assert not any(kind == "chain" for _, _, kind in edges)
