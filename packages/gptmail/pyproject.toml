@@ -47,6 +47,13 @@ bridge = [
     "starlette>=0.27",
     "uvicorn>=0.23",
 ]
+# Outbound secret scanner for `gptmail agent send` (require_scanner=True fails
+# closed without it). `redact` is not on PyPI yet, so this extra declares the
+# requirement without being installable on its own: install the package from its
+# source tree with `--with /path/to/redact` (see README).
+secrets = [
+    "redact>=0.1",
+]
 test = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

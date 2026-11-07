@@ -65,6 +65,23 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
+def test_doctor_reports_scanner_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agent_cli, "_scanner_available", lambda: True)
+    result = CliRunner().invoke(agent, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "scanner: ok" in result.output
+
+
+def test_doctor_fails_loudly_without_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing scanner blocks every send; `doctor` must say so up front
+    (gptme-contrib#2051) rather than let the failure surface at send time."""
+    monkeypatch.setattr(agent_cli, "_scanner_available", lambda: False)
+    result = CliRunner().invoke(agent, ["doctor"])
+    assert result.exit_code != 0
+    assert "redact" in result.output
+    assert "--with" in result.output
+
+
 def _frontmatter(path: Path) -> dict:
     return yaml.safe_load(path.read_text().split("---", 2)[1])
 

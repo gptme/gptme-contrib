@@ -762,6 +762,17 @@ def _fleet_pending_rows(
 # -- CLI ---------------------------------------------------------------------
 
 
+def _scanner_available() -> bool:
+    """Whether the outbound secret scanner (``redact``) is importable."""
+    try:
+        from redact import collect_secret_literals, redact as _scan  # noqa: F401
+    except ModuleNotFoundError as exc:
+        if exc.name != "redact":
+            raise
+        return False
+    return True
+
+
 @click.group(name="agent")
 def agent() -> None:
     """Inter-agent SSH messaging (filesystem inbox/outbox over AgentTransport)."""
@@ -853,6 +864,28 @@ def broadcast(subject: str, content: str | None, mailbox: str, no_reply: bool) -
     if failures:
         click.echo(f"Broadcast incomplete: {len(failures)} delivery failure(s).", err=True)
         sys.exit(1)
+
+
+@agent.command()
+def doctor() -> None:
+    """Check that this install can actually deliver messages.
+
+    ``agent send`` scans outbound text with ``require_scanner=True`` and refuses
+    to deliver without the scanner, so a missing ``redact`` package blocks every
+    send. Report it here instead of at the first blocked message: a plain
+    reinstall of the CLI drops the extra requirement (gptme-contrib#2051).
+    """
+    if not _scanner_available():
+        raise click.ClickException(
+            "Outbound secret scanner unavailable: the `redact` package is not "
+            "installed, so `gptmail agent send` refuses to deliver.\n"
+            "Install it alongside the CLI, e.g.\n"
+            '  uv tool install --force "git+https://github.com/gptme/gptme-contrib'
+            '#subdirectory=packages/gptmail" --with /path/to/redact\n'
+            "`redact` is not on PyPI yet, so the `secrets` extra cannot resolve "
+            "on its own."
+        )
+    click.echo("outbound secret scanner: ok")
 
 
 @agent.command(name="list")

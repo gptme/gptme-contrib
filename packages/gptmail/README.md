@@ -86,6 +86,21 @@ Optional extra: `gptmail[oauth]` adds Flask/Werkzeug/python-dotenv for the OAuth
 callback server in `communication_utils.auth`. The Twitter script uses it; plain email
 does not.
 
+**Outbound secret scanner (needed by `gptmail agent send`).** Inter-agent sends run
+the `redact` scanner and fail closed when it is missing — nothing is delivered. The
+`secrets` extra declares that requirement, but `redact` is not on PyPI yet, so an
+extra cannot resolve it on its own. Install it from its source tree instead:
+
+```bash
+uv tool install --force \
+  "gptmail @ git+https://github.com/gptme/gptme-contrib.git#subdirectory=packages/gptmail" \
+  --with /path/to/redact
+```
+
+A later `uv tool install`/`uv tool upgrade` without `--with /path/to/redact` drops it
+again. `gptmail agent doctor` reports whether the scanner is currently importable, so
+the failure shows up as a check rather than as a mysteriously blocked send.
+
 **External tools.** Email delivery shells out to `msmtp`. Fetching mail is done by
 `mbsync` (isync), which writes a local Maildir that `gptmail sync-maildir` imports.
 `gptmail agent` needs `git`, `ssh` and `scp`.
