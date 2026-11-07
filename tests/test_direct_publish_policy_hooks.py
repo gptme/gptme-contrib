@@ -526,3 +526,18 @@ def test_push_repo_supplied_policy_script_is_never_executed(
     )
     new = _commit(repo, {"scripts/run.py": "print(1)\n"})
     assert _blocked(_run_push_hook(install, repo, [_tuple(new, base)]))
+
+
+def test_push_to_other_branches_never_consults_the_checker(
+    install: Path, tmp_path: Path
+) -> None:
+    """Ordinary feature-branch pushes must stay silent and unaffected."""
+    repo = _repo(tmp_path, "git@github.com:someone/else.git")
+    base = _commit(repo, {"README.md": "seed\n"})
+    new = _commit(repo, {"scripts/run.py": "print(1)\n"})
+    proc = _run_push_hook(
+        install, repo, [_tuple(new, ZERO, "refs/heads/feature")], dest=""
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "direct-publish-policy" not in proc.stderr
+    assert base != new

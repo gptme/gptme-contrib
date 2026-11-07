@@ -487,7 +487,15 @@ fi
 # destination URL git supplied ($2). It and its config come from this hook's own
 # install root, never from the pushed repository; anything missing, malformed or
 # not approved (exit != 0) leaves the push blocked below.
-if [ "$is_allowed" = false ] && [ -f "$HOOK_CONF_DIR/direct-publish.json" ]; then
+_dp_protected_tuple=false
+for _dp_line in "${STDIN_LINES[@]}"; do
+    read -r _dp_lref _dp_lsha _dp_rref _dp_rsha <<< "$_dp_line"
+    if [[ "$_dp_rref" == "refs/heads/master" || "$_dp_rref" == "refs/heads/main" ]]; then
+        _dp_protected_tuple=true
+    fi
+done
+if [ "$is_allowed" = false ] && [ "$_dp_protected_tuple" = true ] &&
+    [ -f "$HOOK_CONF_DIR/direct-publish.json" ]; then
     _DP_ROOT="$(cd "$SCRIPT_DIR/../../../.." 2>/dev/null && pwd)" || _DP_ROOT=""
     if [ -n "$_DP_ROOT" ] && [ -f "$_DP_ROOT/scripts/git/direct-publish-policy.py" ] &&
         printf '%s\n' "${STDIN_LINES[@]}" | python3 "$_DP_ROOT/scripts/git/direct-publish-policy.py" push \
