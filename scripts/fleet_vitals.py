@@ -273,7 +273,7 @@ def model_call_succeeded(rec: dict) -> bool:
         return False
     try:
         return int(rec.get("output_tokens") or 0) > 0
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # 1e309 → inf
         return False
 
 

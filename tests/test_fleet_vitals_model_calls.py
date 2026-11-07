@@ -284,5 +284,22 @@ def test_unhashable_outcome_does_not_abort_report() -> None:
     assert metrics["model_call_records_in_window"] == 1
 
 
+def test_infinite_output_tokens_does_not_abort_report() -> None:
+    # Regression (contrib#2058 review): json.loads accepts 1e309 as inf, and
+    # int(inf) raises OverflowError. Reject that record's evidence, don't abort.
+    bad = (
+        json.dumps(
+            {"timestamp": (NOW - timedelta(hours=2)).isoformat(), "outcome": "noop"}
+        )[:-1]
+        + ', "output_tokens": 1e309}'
+    )
+    good = json.dumps(_r(1, "noop", output_tokens=4000))
+    pairs = fv.parse_jsonl_lines([bad, good])
+    assert len(pairs) == 2
+    assert not fv.model_call_succeeded(pairs[0][1])
+    _, _, metrics = fv.inference_status_from_records(pairs, now=NOW, window_hours=7)
+    assert metrics["model_call_records_in_window"] == 1
+
+
 def test_healthy_without_recency_field_fails_closed() -> None:
     assert not fv.heartbeat_up("healthy", {"productive_in_window": 1})
