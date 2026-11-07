@@ -58,3 +58,31 @@ A successful preview is not a publication receipt.
 repositories and asserts remote publication independently of local preservation.
 `TEST_SAFE_PUSH_SCRIPT` can point the latter at an exported baseline executable
 for RED verification without replacing the current implementation.
+
+## Path-scoped direct publication (`direct-publish-policy.py`)
+
+The global `pre-commit` and `pre-push` hooks block direct default-branch
+commits and pushes except for allow-listed repositories. `direct-publish.json`
+(next to `allowed-repos.conf`; absent or empty means no exception) can name an
+**exact** `github.com/owner/name` identity, its protected branch, and whole-path
+globs (`*` never crosses `/`, no `**`) that may be published directly.
+
+Both hooks call `scripts/git/direct-publish-policy.py` from *their own install
+root*, never from the repository being committed or pushed. A missing, broken
+or non-approving checker or config leaves the block in place, and every other
+guard (identity, mass-delete, force-reset, submodules, hook runners, worktree
+tracking) still runs on an approved change.
+
+Approval is conservative. Pre-commit checks the staged index; pre-push checks
+each tuple's own `remote_old..local_new` range, **per outgoing commit** (a code
+add/revert cannot hide in the net diff). It denies a zero/unknown/unavailable
+old tip, deletion, non-fast-forward, merge or root commits, ranges over 100
+commits, renames (seen as delete+add), type changes, and any symlink,
+submodule or executable entry. Paths must be plain, free of control characters,
+traversal and dot-components (`.github`, `.git*`), and match an `allow` glob.
+The push destination URL must match the configured identity exactly: hostile
+lookalikes (userinfo, ports, extra path, other hosts) are rejected.
+
+The checker classifies *paths and modes only*. Whether prose contains something
+runnable stays the committer's judgment. Tests:
+`tests/test_direct_publish_policy_hooks.py`.

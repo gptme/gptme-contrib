@@ -481,6 +481,21 @@ if [ "$is_allowed" = false ] && [[ "$REMOTE_URL" == *"gptme-agent-template"* ]];
     is_allowed=true
 fi
 
+# Path-scoped direct publication: an exact repository listed in
+# direct-publish.json may push prose-only history to its default branch. The
+# checker judges each tuple's own remote_old..local_new range, against the push
+# destination URL git supplied ($2). It and its config come from this hook's own
+# install root, never from the pushed repository; anything missing, malformed or
+# not approved (exit != 0) leaves the push blocked below.
+if [ "$is_allowed" = false ] && [ -f "$HOOK_CONF_DIR/direct-publish.json" ]; then
+    _DP_ROOT="$(cd "$SCRIPT_DIR/../../../.." 2>/dev/null && pwd)" || _DP_ROOT=""
+    if [ -n "$_DP_ROOT" ] && [ -f "$_DP_ROOT/scripts/git/direct-publish-policy.py" ] &&
+        printf '%s\n' "${STDIN_LINES[@]}" | python3 "$_DP_ROOT/scripts/git/direct-publish-policy.py" push \
+            --config "$HOOK_CONF_DIR/direct-publish.json" --remote-url "${2:-}" >&2; then
+        is_allowed=true
+    fi
+fi
+
 # If not allowed, check for master/main pushes
 if [ "$is_allowed" = false ]; then
     for line in "${STDIN_LINES[@]}"; do

@@ -208,6 +208,21 @@ if [ "$BRANCH" = "master" ] || [ "$BRANCH" = "main" ]; then
         is_allowed=true
     fi
 
+    # Check 4: path-scoped direct publication. An exact repository listed in
+    # direct-publish.json may take prose-only changes on its default branch. The
+    # checker and config come from this hook's own install root, never from the
+    # repository being committed; anything missing, malformed or not approved
+    # (exit != 0) leaves the repo blocked. Every guard below still runs.
+    if [ "$is_allowed" = false ] && [ -f "$HOOK_CONF_DIR/direct-publish.json" ]; then
+        _DP_ROOT="$(cd "$HOOK_DIR/../../../.." 2>/dev/null && pwd)" || _DP_ROOT=""
+        if [ -n "$_DP_ROOT" ] && [ -f "$_DP_ROOT/scripts/git/direct-publish-policy.py" ] &&
+            python3 "$_DP_ROOT/scripts/git/direct-publish-policy.py" commit \
+                --config "$HOOK_CONF_DIR/direct-publish.json" \
+                --remote-url "$REMOTE_URL" --branch "$BRANCH" >&2; then
+            is_allowed=true
+        fi
+    fi
+
     if [ "$is_allowed" = false ]; then
         echo -e "${RED}❌ ERROR: Cannot commit directly to $BRANCH${NC}"
         echo "   Repo: $REMOTE_URL"
