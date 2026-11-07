@@ -290,9 +290,9 @@ echo -e "${GREEN}Running pre-commit checks (via $PRECOMMIT_CMD)...${NC}"
 # now and when we check later — capturing here ensures we only re-stage our own files.
 # Use 'while read' instead of 'mapfile' for Bash 3.2 compatibility (macOS default shell).
 ORIGINALLY_STAGED_FILES=()
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
     ORIGINALLY_STAGED_FILES+=("$f")
-done < <(git diff --cached --name-only --diff-filter=ACM)
+done < <(git diff --cached --name-only -z --diff-filter=ACM)
 
 # Never run the hook runner without --files: a bare `prek run` (and
 # `pre-commit run`) stashes every unstaged change in the worktree and restores
@@ -303,9 +303,9 @@ done < <(git diff --cached --name-only --diff-filter=ACM)
 # deletions while always_run hooks still run. An empty commit gets a
 # nonexistent placeholder for the same reason.
 HOOK_FILES=()
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
     [ -n "$f" ] && HOOK_FILES+=("$f")
-done < <(git diff --cached --name-only)
+done < <(git diff --cached --name-only -z)
 if [ ${#HOOK_FILES[@]} -eq 0 ]; then
     HOOK_FILES=(".no-staged-files-placeholder")
 fi
@@ -351,14 +351,14 @@ else
     # Do NOT use 'git add -u' — in multi-session environments that picks up
     # other sessions' changes and causes wrong-file commits.
     # Use 'while read' instead of 'for f in $FILES' to handle filenames with spaces.
-    while IFS= read -r f; do
+    while IFS= read -r -d '' f; do
         for staged_file in "${ORIGINALLY_STAGED_FILES[@]}"; do
             if [ "$f" = "$staged_file" ]; then
-                git add "$f"
+                git add -- "$f"
                 break
             fi
         done
-    done < <(git diff --name-only --diff-filter=M)
+    done < <(git diff --name-only -z --diff-filter=M)
 
     echo -e "${GREEN}Auto-staged formatter fixes. Re-running pre-commit...${NC}"
 

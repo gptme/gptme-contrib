@@ -574,9 +574,12 @@ def test_generated_runner_in_git_hooks_requires_explicit_repo(
         assert not (hooks / "prepare-commit-msg").exists()
 
 
+@pytest.mark.parametrize(
+    "filename", ["partial file.txt", "café.py", "line\nbreak.py", 'quote"file.py']
+)
 @pytest.mark.parametrize("formatter", [False, True])
 def test_chained_precommit_refuses_partially_staged_file(
-    tmp_path: Path, formatter: bool
+    tmp_path: Path, formatter: bool, filename: str
 ) -> None:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_CONFIG_GLOBAL"] = str(tmp_path / "gitconfig")
@@ -590,7 +593,7 @@ def test_chained_precommit_refuses_partially_staged_file(
             ["git", "-C", str(repo), "config", key, value], env=env, check=True
         )
     (repo / ".pre-commit-config.yaml").write_text("repos: []\n")
-    target = repo / "partial file.txt"
+    target = repo / filename
     target.write_text("staged contents\n")
     subprocess.run(["git", "-C", str(repo), "add", "."], env=env, check=True)
     target.write_text("staged contents\ndeliberately unstaged\n")
@@ -634,7 +637,7 @@ def test_chained_precommit_refuses_partially_staged_file(
     assert "partially staged" in result.stdout + result.stderr
     assert not log.exists()
     staged = subprocess.run(
-        ["git", "-C", str(repo), "show", ":partial file.txt"],
+        ["git", "-C", str(repo), "show", f":{filename}"],
         env=env,
         capture_output=True,
         text=True,
