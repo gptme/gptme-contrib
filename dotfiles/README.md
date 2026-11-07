@@ -45,10 +45,86 @@ The dotfiles install global git hooks that apply to ALL repositories:
 - Helps catch branching issues early
 
 #### prepare-commit-msg
-- **Git-Session-Id trailer**: When `GIT_COMMITTER_SESSION_ID` is set, appends a
-  `Git-Session-Id` commit trailer. No-ops if the env var is absent or the
-  trailer already exists. This is source-of-truth parity with the live agent
-  hook — not a new attribution feature.
+- **Git-Session-Id trailer**: Appends `Git-Session-Id: <id>` from
+  `GIT_COMMITTER_SESSION_ID`, then `AGENT_SESSION_ID` /
+  `GIT_SAFE_COMMIT_SESSION_ID` / `BOB_SESSION_ID` (compatibility). If those are
+  absent it maps `CC_SESSION_ID` / `CLAUDE_CODE_SESSION_ID` through
+  `$TMPDIR/agent-provenance-state/<id>.json` (`agent_session_id` or
+  `bob_session_id`), and if the environment was scrubbed it walks same-cgroup
+  ancestors. Existing singular or plural trailers are left alone. Opt out with
+  `AGENT_SESSION_TRAILER=0`.
+
+## core.hooksPath override (prek)
+
+Git's `core.hooksPath` is exclusive. A repo-local value (prek sets
+`.git/hooks`) silently disables `~/.config/git/hooks`, so the session trailer
+never runs. `install.sh` warns when the agent workspace has a local override.
+Chain the global hooks into that local dir:
+
+```bash
+./chain-global-hooks.sh /path/to/agent-workspace
+# or re-run install with chaining:
+CHAIN_HOOKS=1 ./install.sh
+```
+
+The helper wraps each git hook name: global first, then the original local
+hook (renamed `*.local`). It is idempotent. Re-running prek may overwrite a
+wrapper; run the helper again after that. Relative local paths are resolved
+against the worktree root (the Git directory for bare repositories). The
+installer discovers both `workspace/dotfiles` and `workspace/contrib/dotfiles`;
+`AGENT_WORKSPACE` explicitly selects a different workspace.
+
+Stdin is replayed to both hooks for `pre-push`, `pre-receive`, `post-receive`
+and `post-rewrite`; commit hooks do not buffer stdin. A single `proc-receive`
+handler keeps its live bidirectional connection. Two such handlers require
+explicit protocol integration: installation refuses them before rewriting any
+hook, and existing wrappers also refuse a second handler added later.
+The same single-handler restriction applies to `fsmonitor-watchman`: its opaque
+update token and NUL-delimited response cannot be combined with another handler.
+Aliased directories count as one handler and are left untouched. Wrapper refreshes
+publish a complete executable by atomic rename, never by truncating a live wrapper.
+When the saved local
+`pre-commit` is a generated prek/pre-commit runner, the contrib global hook runs
+its guards and the check suite once using explicit `run --files`, retaining
+formatter auto-staging without the generated runner's stash/restore cycle.
+The wrapper skips that generated runner only when the global hook declares
+ownership of these checks. Arbitrary local hooks still run after the global
+check suite. Generated runners with a custom or missing config are refused
+before any hook is rewritten. Supported shapes are a single literal standard-config
+`hook-impl` command, the stock prek script-version-4 runner (which defaults to
+`.pre-commit-config.yaml`), and the stock pre-commit standard-config runner.
+The helper validates the complete non-comment script against these bounded shapes,
+without executing it. Extra commands, traps, redirections, substitutions, repeated
+options and unknown generator templates are refused, even with a generated header.
+All supported shapes require an existing `.pre-commit-config.yaml`; custom runners
+need explicit integration rather than silently losing their additional checks.
+Wrappers also record the validated runner's content hash and refuse to skip a
+saved generated runner whose contents later change. Rerun the helper to validate
+the replacement; unsupported configuration changes remain refused.
+It does not silently discard custom validation. When using `--hooks-dir` inside
+`.git` (including linked-worktree metadata), also pass the repository argument;
+the helper refuses ambiguous repository discovery before rewriting any hook.
+Because `run --files` validates worktree bytes, the global hook refuses partially
+staged files before running checks, leaving both index and worktree unchanged.
+Stage only the intended complete file, or use an isolated worktree for a partial
+commit. Submodule file edits are ignored here because they cannot enter the
+parent commit; a checked-out submodule commit differing from its staged pointer
+still blocks checks. Unstaged edits or deletion of `.pre-commit-config.yaml`
+also block checks, even when the configuration is absent from the staged diff:
+the runner must not validate against a different policy than the index holds.
+Unstaged changes in other files do not block checks. No stash/restore is
+introduced, so concurrent work is not hidden or restored over other sessions.
+Git-configured `~/` hook paths
+are expanded before installation; relative global paths use the repository's
+hook working directory, like relative local paths. For non-bare repositories,
+commit-side hooks resolve from the worktree root, while receive-side hooks
+(`pre-receive`, `update`, `proc-receive`, `post-receive`, `post-update` and
+`push-to-checkout`) resolve from the Git directory. The helper installs each group
+in its own effective directory; absolute paths and explicit `--hooks-dir` /
+`--global-dir` overrides name the same concrete directory for both groups.
+Wrappers are published by atomic rename. New wrappers use mode `0755`; replacing
+an existing hook or refreshing a wrapper preserves its access permissions
+(with owner execution enabled), including restricted group/private modes.
 
 ## Customization
 
@@ -105,9 +181,10 @@ dotfiles/
 │           ├── pre-commit               # Main pre-commit hook
 │           ├── pre-push                 # Pre-push protection + validation
 │           ├── post-checkout            # Post-checkout warnings
-│           ├── prepare-commit-msg       # Git-Session-Id trailer (when env is set)
+│           ├── prepare-commit-msg       # Git-Session-Id trailer (env + cgroup recovery)
 │           ├── validate-branch-base.sh  # Branch base checking
 │           └── validate-worktree-tracking.sh  # Worktree validation
+├── chain-global-hooks.sh                # Wrap local hooksPath so global hooks still run
 ├── install.sh                           # Installation script
 └── README.md                            # This file
 ```
@@ -118,7 +195,9 @@ After installation, git will use `~/.config/git/hooks` as the global hooks path 
 - `core.hooksPath` set to `~/.config/git/hooks`
 - `init.templateDir` set for pre-commit integration
 
-These hooks run BEFORE any repo-local hooks, providing a safety net across all repositories.
+These hooks run only when `core.hooksPath` points at them. A repo-local
+`core.hooksPath` replaces the global dir rather than chaining; see
+[core.hooksPath override](#corehookspath-override-prek).
 
 ## Origin
 

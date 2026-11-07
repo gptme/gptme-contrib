@@ -200,6 +200,57 @@ def test_writes_allowed_repos_conf_with_shared_coordination_repo(fake_home):
     assert "gptme/gptme-superuser" in sourced.stdout.splitlines()
 
 
+def test_warns_when_agent_workspace_overrides_hooks_path(fake_home, tmp_path):
+    """prek-style local core.hooksPath must be visible in install output."""
+    env = _set_identity(fake_home, "agent@example.com")
+    env["CHAIN_HOOKS"] = "0"
+    workspace = tmp_path / "agent-workspace"
+    workspace.mkdir()
+    subprocess.run(
+        ["git", "init", "-q"], cwd=workspace, env=env, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "--local", "core.hooksPath", ".git/hooks"],
+        cwd=workspace,
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+    env["AGENT_WORKSPACE"] = str(workspace)
+
+    result = _run_install(env)
+    assert result.returncode == 0, result.stderr
+    assert "repo-local core.hooksPath" in result.stdout
+    assert "chain-global-hooks.sh" in result.stdout
+    # Default is warn-only; the local hook file is not rewritten.
+    assert not (workspace / ".git" / "hooks" / "prepare-commit-msg").exists()
+
+
+def test_chain_hooks_env_installs_wrappers(fake_home, tmp_path):
+    """CHAIN_HOOKS=1 wraps the workspace local hooksPath during install."""
+    env = _set_identity(fake_home, "agent@example.com")
+    workspace = tmp_path / "agent-workspace"
+    workspace.mkdir()
+    subprocess.run(
+        ["git", "init", "-q"], cwd=workspace, env=env, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "--local", "core.hooksPath", ".git/hooks"],
+        cwd=workspace,
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+    env["AGENT_WORKSPACE"] = str(workspace)
+    env["CHAIN_HOOKS"] = "1"
+
+    result = _run_install(env)
+    assert result.returncode == 0, result.stderr
+    wrapper = workspace / ".git" / "hooks" / "prepare-commit-msg"
+    assert wrapper.exists(), result.stdout
+    assert "chain-global-hooks wrapper" in wrapper.read_text()
+
+
 def test_existing_allowed_repos_conf_is_not_overwritten(fake_home):
     """A hand-curated repo allowlist must survive a re-run."""
     env = _set_identity(fake_home, "agent@example.com")
@@ -215,3 +266,32 @@ def test_existing_allowed_repos_conf_is_not_overwritten(fake_home):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_discovers_workspace_without_explicit_env(fake_home, tmp_path, nested):
+    env = _set_identity(fake_home, "agent@example.com")
+    env.pop("AGENT_WORKSPACE", None)
+    env["CHAIN_HOOKS"] = "1"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q", str(workspace)], env=env, check=True)
+    subprocess.run(
+        ["git", "-C", str(workspace), "config", "core.hooksPath", ".hooks"],
+        env=env,
+        check=True,
+    )
+    (workspace / "gptme.toml").write_text('[agent]\nname = "Test"\n')
+    target = workspace / "contrib/dotfiles" if nested else workspace / "dotfiles"
+    shutil.copytree(DOTFILES_DIR, target)
+    result = subprocess.run(
+        ["bash", str(target / "install.sh")],
+        env=env,
+        cwd=fake_home,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "repo-local core.hooksPath" in result.stdout
+    assert (workspace / ".hooks/prepare-commit-msg").exists(), result.stdout
