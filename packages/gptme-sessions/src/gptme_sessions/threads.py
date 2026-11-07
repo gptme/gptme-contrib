@@ -378,8 +378,9 @@ def topic_similarity(
 ) -> dict[tuple[int, int], float]:
     """TF-IDF cosine between the text + work keys of two sessions (0..1).
 
-    -1 means unknown: one side has too little text (e.g. a PM slot with no summary).
-    Missing text must not read as a topic change.
+    -1 means unknown: one side has too little text (e.g. a PM slot with no summary)
+    or no informative terms survive the corpus-frequency filter.
+    Missing evidence must not read as a topic change.
     """
     toks = [_tokens(n) for n in nodes]
     df: Counter = Counter()
@@ -403,6 +404,9 @@ def topic_similarity(
             out[(a, b)] = -1.0
             continue
         (va, na), (vb, nb) = vec(a), vec(b)
+        if not va or not vb:
+            out[(a, b)] = -1.0
+            continue
         if len(va) > len(vb):
             va, vb = vb, va
         out[(a, b)] = round(sum(x * vb.get(t, 0.0) for t, x in va.items()) / (na * nb), 3)

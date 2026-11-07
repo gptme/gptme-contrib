@@ -1,5 +1,7 @@
 """Behaviour of the session-threading core on small synthetic fleets."""
 
+import pytest
+
 from gptme_sessions import threads as L
 
 ALIASES = {"erik": "erbot"}
@@ -102,3 +104,28 @@ def test_unknown_similarity_is_not_penalised():
 
 def test_threads_follow_forest_roots():
     assert L.threads([-1, 0, 1, -1, 3]) == [0, 0, 0, 3, 3]
+
+
+@pytest.mark.parametrize("count", [2, 5, 10, 20])
+def test_filtered_topic_vectors_are_unknown_and_keep_evidence(count):
+    text = "parser socket timeout retry transport failure"
+    nodes = [S(i, title=text) for i in range(count)]
+    sims = L.topic_similarity(nodes, [(0, 1)])
+    assert sims[(0, 1)] == -1.0
+    for kind in ("mention", "commit", "chain"):
+        edges = {(0, 1, kind): {"w": L.WEIGHT[kind]}}
+        assert L.best_predecessors(nodes, edges, sims, coherence=1.0)[1] == 0
+
+
+def test_topic_similarity_distinguishes_real_overlap_from_disagreement():
+    nodes = [
+        S(0, title="parser socket timeout retry transport failure"),
+        S(1, title="parser socket timeout retry transport failure"),
+        S(2, title="garden carrot potato onion tomato spinach"),
+        *[
+            S(i, title=f"unrelated{i} filler{i} document{i} token{i} other{i} unique{i}")
+            for i in range(3, 20)
+        ],
+    ]
+    sims = L.topic_similarity(nodes, [(0, 1), (0, 2)])
+    assert sims == {(0, 1): 1.0, (0, 2): 0.0}
