@@ -394,3 +394,62 @@ def test_partial_build_keeps_blind_pages_visible_on_the_portal(tmp_path: Path) -
 def test_timers_pass_the_title_through(app: Path) -> None:
     assert main(_timers_argv(app, **{"--title": "My Portal"})) == 0
     assert '"--title" "My Portal"' in (app / "units/gptme-vitals-a.service").read_text()
+
+
+def test_served_files_are_world_readable(tmp_path: Path) -> None:
+    import stat
+
+    code, _ = _run_with(tmp_path, _portal_registry())
+    assert code == 0
+    for name in ("core.json", "headline.json", "index.html", "services/summary.json"):
+        mode = stat.S_IMODE((tmp_path / "public" / name).stat().st_mode)
+        assert mode == 0o644, name
+    assert (
+        stat.S_IMODE((tmp_path / "private/cost/summary.json").stat().st_mode) == 0o600
+    )
+
+
+def test_core_write_failure_is_reported_not_raised(tmp_path: Path) -> None:
+    (tmp_path / "public/core.json").mkdir(parents=True)  # os.replace onto a directory
+    code, lines = _run(tmp_path, _all())
+    assert code == 1
+    assert any(line.startswith("FAIL core:") for line in lines)
+
+
+def test_registry_without_a_headline_fails_before_any_page_is_built(
+    tmp_path: Path,
+) -> None:
+    registry = RouteRegistry((_route("services", core_dimension="services"),))
+    with pytest.raises(UsageError, match="is_headline"):
+        run_build(
+            registry,
+            {"services": _emitter("services", Status.HEALTHY)},
+            pages=(),
+            private_root=tmp_path / "private",
+            public_root=tmp_path / "public",
+            agent="bob",
+            out=lambda _: None,
+        )
+    assert not (tmp_path / "private").exists()
+
+
+def test_colliding_outputs_fail_before_any_page_is_built(tmp_path: Path) -> None:
+    from gptme_vitals.publish import PublishError
+
+    registry = RouteRegistry(
+        (
+            _route("services", core_dimension="services", is_headline=True),
+            _route("sessions", summary_source="services/summary.json"),
+        )
+    )
+    with pytest.raises(PublishError, match="more than one output"):
+        run_build(
+            registry,
+            {"services": _emitter("services", Status.HEALTHY)},
+            pages=(),
+            private_root=tmp_path / "private",
+            public_root=tmp_path / "public",
+            agent="bob",
+            out=lambda _: None,
+        )
+    assert not (tmp_path / "private").exists()

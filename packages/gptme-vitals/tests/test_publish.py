@@ -10,6 +10,7 @@ import pytest
 from gptme_vitals.envelope import PageEnvelope, Status
 from gptme_vitals.publish import (
     PublishError,
+    check_outputs,
     check_roots,
     load_envelope,
     load_envelopes,
@@ -225,3 +226,91 @@ def test_load_envelopes_honours_exclude(
     assert {e.slug for e in load_envelopes(registry, private, exclude=["pub"])} == {
         "priv"
     }
+
+
+def test_symlinked_directory_cannot_route_a_private_write_into_the_public_root(
+    registry: RouteRegistry, roots: tuple[Path, Path]
+) -> None:
+    private, public = roots
+    (public / "priv").mkdir(parents=True)
+    private.mkdir()
+    (private / "priv").symlink_to(public / "priv")
+    with pytest.raises(PublishError, match="through a symlink"):
+        publish_page(
+            registry,
+            _env("priv", detail={"secret": "x"}),
+            private_root=private,
+            public_root=public,
+        )
+    assert list(public.rglob("*.json")) == []
+
+
+def test_symlinked_directory_reads_back_as_blind(
+    registry: RouteRegistry, roots: tuple[Path, Path]
+) -> None:
+    private, public = roots
+    elsewhere = private.parent / "elsewhere"
+    publish_page(registry, _env("pub"), private_root=elsewhere, public_root=public)
+    private.mkdir()
+    (private / "pub").symlink_to(elsewhere / "pub")
+    route = registry.get_by_slug("pub")
+    assert route is not None
+    assert load_envelope(route, private) is None
+
+
+def test_route_turned_private_loses_its_old_public_copy(
+    roots: tuple[Path, Path],
+) -> None:
+    private, public = roots
+    was_public = RouteRegistry((_route("page"),))
+    publish_page(
+        was_public,
+        _env("page", lines=("old",)),
+        private_root=private,
+        public_root=public,
+    )
+    served = public / "page/summary.json"
+    assert served.exists()
+    now_private = RouteRegistry((_route("page", visibility=Visibility.PRIVATE),))
+    publish_page(now_private, _env("page"), private_root=private, public_root=public)
+    assert not served.exists()
+    assert (private / "page/summary.json").exists()
+
+
+def test_publishing_a_private_route_with_no_public_copy_is_fine(
+    registry: RouteRegistry, roots: tuple[Path, Path]
+) -> None:
+    private, public = roots
+    publish_page(registry, _env("priv"), private_root=private, public_root=public)
+    publish_page(registry, _env("priv"), private_root=private, public_root=public)
+
+
+def test_outputs_may_not_share_a_summary_source() -> None:
+    reg = RouteRegistry((_route("a"), _route("b", summary_source="a/summary.json")))
+    with pytest.raises(PublishError, match="more than one output"):
+        check_outputs(reg)
+
+
+@pytest.mark.parametrize(
+    "name", ["core.json", "headline.json", "CORE.JSON", "./core.json"]
+)
+def test_a_page_may_not_write_the_derived_files(name: str) -> None:
+    with pytest.raises(PublishError, match="derived file"):
+        check_outputs(RouteRegistry((_route("a", summary_source=name),)))
+
+
+def test_summary_source_may_not_collide_with_the_portal_page() -> None:
+    portal = _route("portal", href="/", output_path="index.html", summary_source=None)
+    reg = RouteRegistry((_route("a", summary_source="index.html"),), portal=portal)
+    with pytest.raises(PublishError, match="portal output_path"):
+        check_outputs(reg)
+
+
+def test_summary_source_may_not_collide_with_another_routes_page() -> None:
+    reg = RouteRegistry((_route("a"), _route("b", summary_source="a/index.html")))
+    with pytest.raises(PublishError, match="a/index.html"):
+        check_outputs(reg)
+
+
+def test_distinct_outputs_pass(registry: RouteRegistry) -> None:
+    check_outputs(registry)

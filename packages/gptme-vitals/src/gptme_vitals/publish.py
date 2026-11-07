@@ -52,7 +52,16 @@ def _relative_inside(slug: str, source: str, root: Path, what: str) -> Path:
         raise PublishError(
             f"route {slug!r}: {what} {source!r} must be a relative path inside the root"
         )
-    return root.joinpath(*rel.parts)
+    target = root.joinpath(*rel.parts)
+    # A symlinked directory inside the root would let a write land elsewhere (a
+    # private page inside the served tree, say). resolve() follows existing
+    # links and tolerates not-yet-created components.
+    if not target.parent.resolve().is_relative_to(root.resolve()):
+        raise PublishError(
+            f"route {slug!r}: {what} {source!r} resolves outside {root} "
+            "through a symlink"
+        )
+    return target
 
 
 def summary_path(route: DashboardRoute, root: Path) -> Path:
@@ -72,6 +81,44 @@ def portal_path(registry: RouteRegistry, root: Path) -> Path | None:
     if portal is None or portal.output_path is None:
         return None
     return _relative_inside(portal.slug, portal.output_path, root, "output_path")
+
+
+#: Files the build derives into the public root; no page may write to them.
+RESERVED_PUBLIC_FILES = ("core.json", "headline.json")
+
+
+def check_outputs(registry: RouteRegistry) -> None:
+    """Raise if two outputs would write the same file under one root.
+
+    Covers summary sources, the portal page, the derived ``core.json`` and
+    ``headline.json``, and other routes' ``output_path`` values. Compared
+    case-insensitively so a case-insensitive filesystem cannot merge two paths
+    that look distinct here. A shared path would otherwise make the later write
+    silently replace the earlier page, which the loader then counts as blind.
+    """
+    owners: dict[tuple[str, ...], list[tuple[str, str]]] = {}
+
+    def claim(kind: str, owner: str, path: str | None) -> None:
+        if path is None:
+            return
+        key = tuple(part.casefold() for part in PurePosixPath(path).parts)
+        owners.setdefault(key, []).append((kind, owner))
+
+    for name in RESERVED_PUBLIC_FILES:
+        claim("derived file", name, name)
+    portal = registry.portal
+    if portal is not None:
+        claim("portal output_path", portal.slug, portal.output_path)
+    for route in registry.routes:
+        claim("summary_source", route.slug, route.summary_source)
+        claim("output_path", route.slug, route.output_path)
+    for key, claims in owners.items():
+        # Plain output_path/output_path repeats are the registry's own business.
+        if len(claims) > 1 and any(kind != "output_path" for kind, _ in claims):
+            who = ", ".join(f"{kind} of {owner!r}" for kind, owner in claims)
+            raise PublishError(
+                f"{'/'.join(key)} is written by more than one output: {who}"
+            )
 
 
 def _atomic_write(path: Path, content: str, *, mode: int) -> None:
@@ -112,6 +159,10 @@ def publish_page(
     if route is None:
         raise PublishError(f"envelope for unregistered slug {envelope.slug!r}")
     written: list[Path] = []
+    if not route.is_public:
+        # A route that used to be public may have a served copy; leaving it would
+        # keep its headline, lines and core reachable at the old URL.
+        summary_path(route, public).unlink(missing_ok=True)
     target = summary_path(route, private)
     _atomic_write(
         target, json.dumps(envelope.to_private(), indent=2) + "\n", mode=0o600

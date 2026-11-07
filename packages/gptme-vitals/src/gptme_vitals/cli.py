@@ -27,13 +27,14 @@ from gptme_vitals.envelope import PageEnvelope
 from gptme_vitals.portal import render_portal
 from gptme_vitals.publish import (
     PublishError,
+    check_outputs,
     check_roots,
     load_envelopes,
     portal_path,
     publish_page,
     write_text,
 )
-from gptme_vitals.routes import RouteRegistry
+from gptme_vitals.routes import RouteRegistry, RouteRegistryError
 from gptme_vitals.timers import TimerError, render_units
 
 Emitter = Callable[[], PageEnvelope]
@@ -69,6 +70,13 @@ def run_build(
 ) -> int:
     """Rebuild ``pages`` (all emitters when empty); return the exit status."""
     check_roots(private_root, public_root)
+    check_outputs(registry)
+    try:
+        registry.headline_route()
+    except RouteRegistryError as exc:
+        # derive_core needs it; failing here means no page is built against a
+        # registry that could never produce core.json.
+        raise UsageError(str(exc)) from exc
     envelope_slugs = {r.slug for r in registry.envelope_routes()}
     for slug in emitters:
         if slug not in envelope_slugs:
@@ -104,7 +112,7 @@ def run_build(
     try:
         core, headline = derive_core(registry, envelopes, agent=agent)
         write_core_files(public_root, core, headline)
-    except BuildError as exc:
+    except (BuildError, OSError) as exc:
         out(f"FAIL core: {exc}")
         return 1
     out(f"ok   core: {core['status']}")
