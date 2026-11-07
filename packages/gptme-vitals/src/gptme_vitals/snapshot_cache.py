@@ -80,7 +80,11 @@ def read_snapshot(
         payload = json.loads(path.read_text())
     except (OSError, ValueError):
         return False, None
-    if not isinstance(payload, dict) or payload.get("key", "") != key:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("name") != name
+        or payload.get("key", "") != key
+    ):
         return False, None
     collected_at = payload.get("collected_at_epoch")
     if not isinstance(collected_at, int | float):

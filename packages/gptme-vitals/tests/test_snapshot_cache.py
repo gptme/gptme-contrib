@@ -56,6 +56,26 @@ def test_key_mismatch_is_a_miss(tmp_path):
     assert value == {"days": 30}
 
 
+def test_colliding_signal_names_never_serve_each_others_values(tmp_path):
+    for name, value in [("a b", 1), ("a_b", 2), ("a b", 3)]:
+        assert (
+            sc.cached_signal(
+                name, lambda: value, cache_dir=tmp_path, ttl_seconds=60, now=0.0
+            )
+            == value
+        )
+        assert (
+            sc.cached_signal(
+                name,
+                lambda: pytest.fail("same-name snapshot should hit"),
+                cache_dir=tmp_path,
+                ttl_seconds=60,
+                now=1.0,
+            )
+            == value
+        )
+
+
 def test_ttl_zero_disables_reads_and_writes(tmp_path):
     calls: list[int] = []
 
