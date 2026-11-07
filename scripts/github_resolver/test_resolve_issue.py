@@ -454,6 +454,198 @@ def test_main_reclassifies_status_when_two_identical_write_errors_despite_dirty_
     assert "Patch failed" in comments[0]
 
 
+def test_output_dir_only_dirt_is_not_a_preserved_attempt(monkeypatch, local_git_repo):
+    """Regression: the resolver's own logs must not masquerade as agent work.
+
+    The workflow runs from the target worktree with ``--output-dir output``, so
+    ``output/`` sits inside it. Staging with ``git add -A`` then reported a
+    "partial attempt preserved" branch whose entire content was the resolver's
+    stdout/stderr/status files. A log-only dirty worktree is not an attempt.
+    """
+    repo, _ = local_git_repo
+    out_dir = repo / "output"
+    gptme_stdout = "RESOLVER_STATUS: no_changes\nRESOLVER_SUMMARY: Nothing to do.\n"
+
+    def fake_run_gptme(prompt, *, model=None, workdir):
+        return (gptme_stdout, "")
+
+    rc, comments, draft_prs = _run_resolver(
+        monkeypatch, repo, out_dir, gptme_stdout, fake_run_gptme=fake_run_gptme
+    )
+
+    assert rc == 0
+    assert draft_prs == []
+    assert len(comments) == 1
+    assert "preserved" not in comments[0].lower()
+    # The output directory itself is still written, and still excluded from
+    # the dirtiness probe that decides preservation.
+    assert (out_dir / "resolver-status.json").is_file()
+    assert resolve_issue.has_git_changes(repo) is True
+    assert resolve_issue.has_git_changes(repo, exclude=[out_dir]) is False
+
+
+@pytest.mark.parametrize("tracked_output", [False, True])
+@pytest.mark.parametrize("output_name", ["output", "output[1]", "output*", "output?"])
+def test_commit_excludes_already_staged_output(
+    monkeypatch, local_git_repo, tracked_output, output_name
+):
+    repo, _ = local_git_repo
+    # Isolate this regression from the ambient-hooks defect tracked in #2035.
+    resolve_issue.git(["config", "core.hooksPath", "/dev/null"], cwd=repo)
+    out = repo / output_name
+    out.mkdir()
+    log = out / "stdout.log"
+    log.write_text("old log\n")
+    if tracked_output:
+        resolve_issue.git(["add", "--", f":(literal){output_name}"], cwd=repo)
+        resolve_issue.git(["commit", "-m", "tracked output baseline"], cwd=repo)
+    log.write_text("private resolver log\n")
+    resolve_issue.git(["add", "--", f":(literal){output_name}"], cwd=repo)
+    (repo / "note.txt").write_text("agent edit\n")
+    monkeypatch.setattr(resolve_issue, "push_branch", lambda *a, **kw: None)
+
+    assert resolve_issue.commit_and_push(
+        repo, "attempt", commit_message="agent work", exclude=[out]
+    )
+    assert resolve_issue.git(
+        ["diff", "HEAD^", "HEAD", "--name-only"], cwd=repo
+    ).splitlines() == ["note.txt"]
+    assert log.read_text() == "private resolver log\n"
+
+
+def test_staged_output_only_does_not_commit_or_push(monkeypatch, local_git_repo):
+    repo, _ = local_git_repo
+    out = repo / "output"
+    out.mkdir()
+    (out / "stdout.log").write_text("resolver log\n")
+    resolve_issue.git(["add", "output"], cwd=repo)
+    before = resolve_issue.git(["rev-parse", "HEAD"], cwd=repo)
+    pushes = []
+    monkeypatch.setattr(resolve_issue, "push_branch", lambda *a, **kw: pushes.append(a))
+
+    assert not resolve_issue.commit_and_push(
+        repo, "attempt", commit_message="not agent work", exclude=[out]
+    )
+    assert resolve_issue.git(["rev-parse", "HEAD"], cwd=repo) == before
+    assert pushes == []
+    assert (out / "stdout.log").read_text() == "resolver log\n"
+
+
+@pytest.mark.parametrize("name", ["output[1]", "output*", "output?"])
+def test_output_directory_names_are_literal(local_git_repo, name):
+    repo, _ = local_git_repo
+    out = repo / name
+    out.mkdir()
+    (out / "stdout.log").write_text("log\n")
+    assert not resolve_issue.has_git_changes(repo, exclude=[out])
+    other = repo / "output1"
+    other.mkdir()
+    (other / "agent.txt").write_text("real work\n")
+    assert resolve_issue.has_git_changes(repo, exclude=[out])
+
+
+def test_nested_workdir_preserves_repository_wide_changes(monkeypatch, local_git_repo):
+    repo, _ = local_git_repo
+    resolve_issue.git(["config", "core.hooksPath", "/dev/null"], cwd=repo)
+    nested = repo / "pkg"
+    nested.mkdir()
+    out = nested / "output"
+    out.mkdir()
+    (out / "stdout.log").write_text("log\n")
+    (repo / "note.txt").write_text("agent edit outside workdir\n")
+    monkeypatch.setattr(resolve_issue, "push_branch", lambda *a, **kw: None)
+
+    assert resolve_issue.has_git_changes(nested, exclude=[out])
+    assert resolve_issue.commit_and_push(
+        nested, "attempt", commit_message="agent work", exclude=[out]
+    )
+    assert resolve_issue.git(
+        ["diff", "HEAD^", "HEAD", "--name-only"], cwd=repo
+    ).splitlines() == ["note.txt"]
+    assert not resolve_issue.has_git_changes(nested, exclude=[out])
+
+
+@pytest.mark.parametrize("internal_destination", [False, True])
+def test_output_symlink_is_excluded_without_hiding_agent_work(
+    monkeypatch, local_git_repo, internal_destination
+):
+    repo, destination = local_git_repo
+    if internal_destination:
+        destination = repo / "logs"
+    destination.mkdir()
+    out = repo / "output"
+    out.symlink_to(destination, target_is_directory=True)
+    (out / "stdout.log").write_text("log\n")
+    assert not resolve_issue.has_git_changes(repo, exclude=[out])
+    resolve_issue.git(["config", "core.hooksPath", "/dev/null"], cwd=repo)
+    (repo / "note.txt").write_text("agent edit\n")
+    monkeypatch.setattr(resolve_issue, "push_branch", lambda *a, **kw: None)
+    assert resolve_issue.commit_and_push(
+        repo, "attempt", commit_message="agent work", exclude=[out]
+    )
+    assert resolve_issue.git(
+        ["diff", "HEAD^", "HEAD", "--name-only"], cwd=repo
+    ).splitlines() == ["note.txt"]
+    assert out.is_symlink()
+    assert (out / "stdout.log").read_text() == "log\n"
+
+
+def test_output_exclusion_in_repository_with_trailing_space(local_git_repo):
+    repo, _ = local_git_repo
+    renamed = repo.with_name("repo ")
+    repo.rename(renamed)
+    out = renamed / "output"
+    out.mkdir()
+    (out / "stdout.log").write_text("log\n")
+    assert not resolve_issue.has_git_changes(renamed, exclude=[out])
+
+
+def test_direct_commit_preserved_when_remaining_dirt_is_only_submodule(
+    monkeypatch, local_git_repo
+):
+    repo, out_dir = local_git_repo
+    resolve_issue.git(["config", "core.hooksPath", "/dev/null"], cwd=repo)
+    child = repo / "child"
+    child.mkdir()
+    resolve_issue.git(["init"], cwd=child)
+    resolve_issue.git(["config", "core.hooksPath", "/dev/null"], cwd=child)
+    (child / "file.txt").write_text("initial\n")
+    resolve_issue.git(["add", "file.txt"], cwd=child)
+    resolve_issue.git(
+        [
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "initial",
+        ],
+        cwd=child,
+    )
+    resolve_issue.git(["add", "child"], cwd=repo)
+    resolve_issue.git(["commit", "-m", "add gitlink"], cwd=repo)
+    baseline = resolve_issue.git(["rev-parse", "HEAD"], cwd=repo).strip()
+    pushes = []
+    monkeypatch.setattr(resolve_issue, "push_branch", lambda *a, **kw: pushes.append(a))
+
+    def fake_run_gptme(prompt, *, model=None, workdir):
+        (repo / "note.txt").write_text("direct agent commit\n")
+        resolve_issue.git(["add", "note.txt"], cwd=repo)
+        resolve_issue.git(["commit", "-m", "agent work"], cwd=repo)
+        (child / "file.txt").write_text("uncommitted child work\n")
+        return "RESOLVER_STATUS: no_changes\nRESOLVER_SUMMARY: Stopped.\n", ""
+
+    rc, comments, draft_prs = _run_resolver(
+        monkeypatch, repo, out_dir, "", fake_run_gptme=fake_run_gptme
+    )
+    assert rc == 0
+    assert draft_prs == []
+    assert len(pushes) == 1
+    assert "Partial attempt preserved" in comments[0]
+    assert resolve_issue.git(["rev-parse", "HEAD"], cwd=repo).strip() != baseline
+
+
 def test_open_draft_pr_retrigger_returns_existing_url(monkeypatch):
     # On re-trigger, `gh pr create` exits 1. open_draft_pr must probe for an
     # existing open PR via `gh pr list --head` and return its URL so the caller
