@@ -291,7 +291,9 @@ def heartbeat_up(status: str, metrics: dict) -> bool:
     return (
         status == "degraded"
         and bool(metrics.get("model_calls_succeeded_in_window"))
-        and not metrics.get("failures_since_last_model_call", 0)
+        # Missing = recency unknown (e.g. metrics from an older producer):
+        # fail closed, since a dead-man heartbeat must not push on doubt.
+        and metrics.get("failures_since_last_model_call") == 0
     )
 
 

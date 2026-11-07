@@ -200,3 +200,11 @@ def test_replay_quiet_night_after_recovery_pushes_on_model_output() -> None:
         t for t, status, up, _ in rows if status == "degraded" and up and t.day == 7
     ]
     assert quiet_up, "expected degraded-but-alive hours on 2026-11-07"
+
+
+def test_degraded_without_recency_field_fails_closed() -> None:
+    # Metrics from an older producer lack failures_since_last_model_call;
+    # recency is unknown, so a dead-man heartbeat must not push.
+    m = {"model_calls_succeeded_in_window": True}
+    assert not fv.heartbeat_up("degraded", m)
+    assert fv.heartbeat_up("degraded", {**m, "failures_since_last_model_call": 0})
