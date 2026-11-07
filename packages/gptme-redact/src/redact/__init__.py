@@ -727,7 +727,23 @@ def redact(
             record(_p.category, _p.severity, matched)
             return f"[REDACTED:{_p.category}]"
 
-        work = pat.regex.sub(_sub, work)
+        if pat.category == "jwt":
+            # Rejected candidates may overlap a real JWT after a dotted prefix.
+            # Retry from the next character on rejection, but consume accepted
+            # tokens once so their segments cannot produce duplicate findings.
+            parts: list[str] = []
+            cursor = search_from = 0
+            while match := pat.regex.search(work, search_from):
+                replacement = _sub(match)
+                if replacement == match.group(0):
+                    search_from = match.start() + 1
+                    continue
+                parts.extend((work[cursor : match.start()], replacement))
+                cursor = search_from = match.end()
+            parts.append(work[cursor:])
+            work = "".join(parts)
+        else:
+            work = pat.regex.sub(_sub, work)
 
     result.redacted = work
     result.findings = sorted(

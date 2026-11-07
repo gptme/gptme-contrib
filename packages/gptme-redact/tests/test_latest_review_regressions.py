@@ -37,6 +37,37 @@ def test_bare_jwt_with_json_whitespace_is_blocked(whitespace, leading):
     assert any(f.category == "jwt" for f in result.findings)
 
 
+@pytest.mark.parametrize("prefix", ["session.", "session.version.", "x.", "e30."])
+def test_dotted_prefix_does_not_hide_jwt(prefix):
+    header = _segment('{"alg":"HS256"}')
+    payload = _segment('{"sub":"example"}')
+    token = f'{header}.{payload}.{"x" * 43}'
+    result = redact(prefix + token, literals=[])
+    assert result.blocked
+    assert result.redacted == prefix + "[REDACTED:jwt]"
+    assert [(f.category, f.count) for f in result.findings] == [("jwt", 1)]
+
+
+def test_multiple_prefixed_jwts_are_masked_once_each():
+    header = _segment('{"alg":"HS256"}')
+    payload = _segment('{"sub":"example"}')
+    token = f'{header}.{payload}.{"x" * 43}'
+    result = redact(f"session.{token} and version.{token}", literals=[])
+    assert result.blocked
+    assert result.redacted == "session.[REDACTED:jwt] and version.[REDACTED:jwt]"
+    assert [(f.category, f.count) for f in result.findings] == [("jwt", 2)]
+
+
+def test_cli_prefixed_jwt_refuses_output(tmp_path):
+    header = _segment('{"alg":"HS256"}')
+    payload = _segment('{"sub":"example"}')
+    source = tmp_path / "input.md"
+    source.write_text(f'session.{header}.{payload}.{"x" * 43}')
+    output = tmp_path / "output.md"
+    assert main([str(source), "--out", str(output), "--no-env-secrets"]) != 0
+    assert not output.exists()
+
+
 @pytest.mark.parametrize(
     "text", ["release.version.number", "abc.def.ghi", "e30.e30.signature"]
 )
