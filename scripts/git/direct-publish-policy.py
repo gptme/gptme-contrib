@@ -103,6 +103,7 @@ def load_entry(config_path: str, identity: str) -> dict:
     repos = config.get("repositories") if isinstance(config, dict) else None
     if not isinstance(repos, list):
         raise SystemExit("direct-publish-policy: config has no repositories list")
+    selected = None
     for entry in repos:
         if not isinstance(entry, dict):
             raise SystemExit("direct-publish-policy: malformed repository entry")
@@ -116,8 +117,10 @@ def load_entry(config_path: str, identity: str) -> dict:
             or not all(isinstance(g, str) and g and "**" not in g for g in allow)
         ):
             raise SystemExit("direct-publish-policy: malformed repository entry")
-        if repo == identity:
-            return entry
+        if repo == identity and selected is None:
+            selected = entry
+    if selected is not None:
+        return selected
     raise Denied(f"{identity} is not configured for direct publication")
 
 
@@ -147,7 +150,15 @@ def path_allowed(path: str, patterns: list[re.Pattern[str]]) -> bool:
 
 def git(*args: str, check: bool = True) -> bytes:
     proc = subprocess.run(
-        ["git", "-c", "diff.external=", "-c", "core.quotepath=off", *args],
+        [
+            "git",
+            "--no-replace-objects",
+            "-c",
+            "diff.external=",
+            "-c",
+            "core.quotepath=off",
+            *args,
+        ],
         capture_output=True,
         check=False,
     )

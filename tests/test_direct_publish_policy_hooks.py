@@ -351,6 +351,26 @@ def test_commit_wrong_branch_denied(install: Path, tmp_path: Path) -> None:
     assert _blocked(_run_commit_hook(install, repo))
 
 
+@pytest.mark.parametrize("malformed_first", [True, False])
+def test_config_invalid_entry_denied_regardless_of_order(
+    install: Path, tmp_path: Path, malformed_first: bool
+) -> None:
+    entries = (
+        [None, *CONFIG["repositories"]]
+        if malformed_first
+        else [*CONFIG["repositories"], None]
+    )
+    (install / "dotfiles/.config/git/direct-publish.json").write_text(
+        json.dumps({"repositories": entries})
+    )
+    repo = _repo(tmp_path)
+    _commit(repo, {"README.md": "seed\n"})
+    _stage(repo, {"_posts/a.md": "prose\n"})
+    proc = _run_commit_hook(install, repo)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "malformed repository entry" in proc.stderr
+
+
 @pytest.mark.parametrize("breakage", ["no-script", "bad-exit", "bad-config"])
 def test_commit_broken_policy_machinery_fails_closed(
     install: Path, tmp_path: Path, breakage: str
@@ -423,6 +443,25 @@ def test_push_code_commit_in_range_denied(install: Path, tmp_path: Path) -> None
     _commit(repo, {"_posts/a.md": "prose\n"})
     new = _commit(repo, {"scripts/run.py": "print(1)\n"})
     assert _blocked(_run_push_hook(install, repo, [_tuple(new, base)]))
+
+
+def test_push_replacement_cannot_disguise_code_commit(
+    install: Path, tmp_path: Path
+) -> None:
+    repo = _repo(tmp_path)
+    base = _commit(repo, {"README.md": "seed\n"})
+    code = _commit(repo, {"scripts/run.py": "print(1)\n"})
+    _git(repo, "checkout", "-q", "-b", "prose", base)
+    prose = _commit(repo, {"_posts/a.md": "prose\n"})
+    _git(repo, "replace", code, prose)
+    _git(repo, "checkout", "-q", "master")
+    assert _git(repo, "diff", "--name-only", base, code) == "_posts/a.md"
+    assert _git(repo, "--no-replace-objects", "diff", "--name-only", base, code) == (
+        "scripts/run.py"
+    )
+    proc = _run_push_hook(install, repo, [_tuple(code, base)])
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "outside the direct-publish scope" in proc.stderr
 
 
 def test_push_historical_code_add_and_revert_denied(
