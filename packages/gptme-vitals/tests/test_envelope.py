@@ -213,6 +213,19 @@ def test_as_dimension_accepts_the_pages_allowlisted_numbers():
     assert rollup.as_dimension(sessions_today=41)["sessions_today"] == 41
 
 
+@pytest.mark.parametrize("status_override", ["healthy", "critical"])
+def test_as_dimension_preserves_computed_fields_on_collision(status_override):
+    rollup = roll_up_envelopes([_env("a", Status.DOWN), _env("b", Status.UNKNOWN)])
+    assert rollup.as_dimension(
+        status=status_override, pages_total=0, pages_unknown=0, sessions_today=41
+    ) == {
+        "status": "down",
+        "pages_total": 2,
+        "pages_unknown": 1,
+        "sessions_today": 41,
+    }
+
+
 # --- the two vocabularies must not drift -----------------------------------
 
 

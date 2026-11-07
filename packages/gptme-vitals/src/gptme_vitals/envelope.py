@@ -173,14 +173,15 @@ class DimensionRollup:
         ``pages_unknown``/``pages_total`` travel with the status on purpose: a
         dimension of one healthy page and one blind page still rolls up
         ``healthy``, and without the counts the blind page simply disappears.
-        Missing evidence must not read as good evidence.
+        Missing evidence must not read as good evidence. Computed fields take
+        precedence over colliding keys in the page's extra projection.
         """
         dimension: dict[str, object] = {
+            **extra,
             "status": str(self.status),
             "pages_total": self.pages_total,
             "pages_unknown": self.pages_unknown,
         }
-        dimension.update(extra)
         return dimension
 
 
