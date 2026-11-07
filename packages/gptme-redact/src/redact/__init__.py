@@ -484,7 +484,8 @@ _PATTERNS: list[Pattern] = [
             # Prefer a complete quoted value, including embedded newlines.
             # Truncated snippets end at a line boundary or EOF instead of a
             # closing quote; a final backslash is still part of the secret.
-            # Unquoted values stop at ordinary config/JSON separators.
+            # Unquoted values retain commas/semicolons: both can be part of
+            # environment values. Prefer conservative masking to a leaked tail.
             r"(?P<quote>(?P<triple>\"\"\"|''')|['\"])?"
             r"(?P<value>(?(quote)"
             r"(?:(?:\\[\s\S]|(?!(?P=quote))[^\\])+(?=(?P=quote))"
@@ -492,8 +493,8 @@ _PATTERNS: list[Pattern] = [
             # newline. Single-line snippets keep their line-boundary fallback.
             r"|(?(triple)(?:(?!(?P=quote))[\s\S])+\Z"
             r"|(?:\\[^\r\n]|\\(?=[\r\n]|\Z)|(?!(?P=quote))[^\\\r\n])+))"
-            r"|(?:\[REDACTED:[A-Za-z0-9_:.-]+\][^\s'\",;}\]]*"
-            r"|[^\s'\",;}\]]+)))"
+            r"|(?:\[REDACTED:[A-Za-z0-9_:.-]+\][^\s'\"}\]]*"
+            r"|[^\s'\"}\]]+)))"
             r"(?(quote)(?:(?P=quote)|(?=[\r\n]|\Z)))",
             re.IGNORECASE,
         ),
@@ -686,13 +687,30 @@ def redact(
 
     work = text
 
-    # Layer 1: deterministic literal redaction (exact env/user secrets).
-    for literal in sorted(literals or [], key=len, reverse=True):
-        if literal and literal in work:
-            n = work.count(literal)
-            work = work.replace(literal, "[REDACTED:literal]")
-            for _ in range(n):
-                record("literal", Severity.CRITICAL, literal)
+    # Layer 1: find intervals in the original text before replacing anything.
+    # Longest-first substitution misses crossing overlaps (abcde + defgh).
+    intervals: list[tuple[int, int]] = []
+    for literal in set(literals or []):
+        if not literal:
+            continue
+        start = 0
+        while (start := text.find(literal, start)) != -1:
+            intervals.append((start, start + len(literal)))
+            start += 1  # include self-overlapping occurrences too
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(intervals):
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    literal_parts: list[str] = []
+    cursor = 0
+    for start, end in merged:
+        literal_parts.extend((text[cursor:start], "[REDACTED:literal]"))
+        record("literal", Severity.CRITICAL, text[start:end])
+        cursor = end
+    literal_parts.append(text[cursor:])
+    work = "".join(literal_parts)
 
     # Layer 2: credential-specific patterns, assignment fallback, then PII.
     # The assignment fallback is declared last for readability, not priority.

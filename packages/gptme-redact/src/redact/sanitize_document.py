@@ -95,6 +95,12 @@ _URI_ATTRIBUTES = frozenset({"href", "src", "action", "formaction", "xlink:href"
 _DANGEROUS_SCHEME_REGEX = re.compile(
     r"^(?:javascript|vbscript|data)\s*:", re.IGNORECASE
 )
+# CommonMark backslash escapes apply only to ASCII punctuation. Process these
+# and character references together so an escaped ampersand is not decoded twice.
+_MARKDOWN_ESCAPE_REGEX = re.compile(
+    r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\]\\^_`{|}~])"
+    r"|&(?:\#[xX][0-9a-fA-F]{1,6}|\#[0-9]{1,7}|[A-Za-z][A-Za-z0-9]+);"
+)
 _URL_EDGE_CONTROLS = "".join(chr(c) for c in range(33))
 _URL_IGNORED_WHITESPACE = str.maketrans("", "", "\t\n\r")
 
@@ -244,10 +250,12 @@ def scan_document(
     html_matches.extend(uri_scanner.matches)
     for match in _MARKDOWN_URI_REGEX.finditer(text):
         destination = match.group("angle") or match.group("bare") or ""
-        normalized = (
-            unescape(destination)
-            .translate(_URL_IGNORED_WHITESPACE)
-            .lstrip(_URL_EDGE_CONTROLS)
+        decoded = _MARKDOWN_ESCAPE_REGEX.sub(
+            lambda m: m.group(1) if m.group(1) is not None else unescape(m.group(0)),
+            destination,
+        )
+        normalized = decoded.translate(_URL_IGNORED_WHITESPACE).lstrip(
+            _URL_EDGE_CONTROLS
         )
         if _DANGEROUS_SCHEME_REGEX.match(normalized):
             html_matches.append(match.group(0))

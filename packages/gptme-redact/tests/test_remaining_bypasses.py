@@ -90,3 +90,48 @@ def test_cli_refuses_remaining_bypasses(text, tmp_path, capsys):
     assert main(args) != 0
     assert not output.exists()
     capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        r"javascript\:alert%281%29",
+        r"java\script:example",
+        r"vbscript\:example",
+        r"data\:text/html,payload",
+    ],
+)
+@pytest.mark.parametrize("template", ["[click]({})", "[click][target]\n\n[target]: {}"])
+def test_markdown_punctuation_escapes_follow_markdown_rules(destination, template):
+    result = scan_document(template.format(destination))
+    # Markdown only unescapes ASCII punctuation, not letters.
+    assert result.blocked == (destination != r"java\script:example")
+
+
+@pytest.mark.parametrize(
+    "value", ["first,second", "first;second", "first,second;third"]
+)
+def test_unquoted_punctuation_secret_has_no_surviving_suffix(value):
+    result = redact(f"PASSWORD={value}", literals=[])
+    assert result.blocked
+    assert result.redacted == "PASSWORD=[REDACTED:secret_assignment]"
+
+
+@pytest.mark.parametrize(
+    "literals",
+    [
+        ["abcdefghij", "fghijklmno"],
+        ["fghijklmno", "abcdefghij"],
+        ["abcdefghij", "fghijklmno", "ijklmnoXYZ"],
+    ],
+)
+def test_crossing_literal_intervals_mask_their_union(literals):
+    text = "abcdefghijklmnoXYZ" if len(literals) == 3 else "abcdefghijklmno"
+    result = redact(text, literals=literals)
+    assert result.blocked
+    assert result.redacted == "[REDACTED:literal]"
+
+
+def test_adjacent_literals_and_empty_literals_preserve_public_text():
+    result = redact("prefix abcdef suffix", literals=["", "abc", "def", "abc"])
+    assert result.redacted == "prefix [REDACTED:literal][REDACTED:literal] suffix"
