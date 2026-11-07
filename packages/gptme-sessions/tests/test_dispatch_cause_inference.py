@@ -237,6 +237,8 @@ def test_cli_refreshes_inherited_cause(tmp_path: Path, capsys):
 
 def test_cli_trigger_prints_classification(tmp_path: Path, capsys):
     with pytest.MonkeyPatch.context() as mp:
+        for key in _PRODUCER_VARS:
+            mp.delenv(key, raising=False)
         mp.setenv("EVENT_ID", "evt-1")
         assert main(["--workspace", str(tmp_path), "--trigger"]) == 0
         assert capsys.readouterr().out.strip() == "dispatch"
