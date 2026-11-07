@@ -362,3 +362,24 @@ def test_exact_self_parent_does_not_fall_back_to_shared_label():
     edges, st = L.mine_edges(nodes)
     assert not edges
     assert st["parent_unresolved"] == 1
+
+
+@pytest.mark.parametrize(
+    "work", [{"task": "t-x"}, {"pr": "owner/project#12"}, {"prs_mentioned": ["owner/project#12"]}]
+)
+def test_topic_similarity_derives_work_keys_without_mining(work):
+    nodes = [
+        S(0, title="parser socket timeout retry transport failure", **work),
+        S(1, title="garden carrot potato onion tomato spinach", **work),
+        *[
+            S(i, title=f"unrelated{i} filler{i} document{i} token{i} other{i} unique{i}")
+            for i in range(2, 20)
+        ],
+    ]
+    direct = L.topic_similarity(nodes, [(0, 1)])
+    assert direct[(0, 1)] > 0
+    L.mine_edges(nodes)
+    assert L.topic_similarity(nodes, [(0, 1)]) == direct
+    # A public-field update must not reuse the miner's now-stale private cache.
+    nodes[1].pop(next(iter(work)))
+    assert L.topic_similarity(nodes, [(0, 1)])[(0, 1)] == 0

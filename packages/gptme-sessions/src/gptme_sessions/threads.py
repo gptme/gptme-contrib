@@ -402,7 +402,8 @@ def _tokens(n: dict) -> list[str]:
     ).lower()
     toks = [t for t in _TOK.findall(text) if t not in _STOP]
     # work keys are strong topic markers: count them twice
-    keys = [k.split(":", 1)[1] for k in sorted(n.get("_pk", set()) | n.get("_mk", set()))]
+    primary, mentioned = node_keys(n)
+    keys = [k.split(":", 1)[1] for k in sorted(primary | mentioned)]
     return toks + keys * 2
 
 
