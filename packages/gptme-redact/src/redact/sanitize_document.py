@@ -68,12 +68,8 @@ _HTML_SCRIPT_REGEX = re.compile(
     # dominance.
     r"<\s*(?:script|iframe|object|embed|form|svg|math)\b"
     r"|"
-    # URI destinations are scanned separately, after decoding character
-    # references only within the destination (never the whole document).
-    # Inline event handlers -- every browser still honors these.
-    r"\son(?:error|load|click|mouseover|focus|blur|submit|change|input|"
-    r"keydown|keyup|keypress|abort|resize|scroll|unload|toggle|wheel)\s*="
-    r"|"
+    # URI destinations and event attributes are scanned separately using the
+    # HTML parser, not by matching attribute-shaped text in prose.
     # Dangerous HTML tags that stage payloads (CSS exfil, meta refresh,
     # base href hijack).
     r"<\s*/?\s*(?:base|link|meta|style|applet|frame|frameset)\b"
@@ -106,7 +102,7 @@ _URL_IGNORED_WHITESPACE = str.maketrans("", "", "\t\n\r")
 
 
 class _HtmlUriScanner(HTMLParser):
-    """Check actual HTML URI attributes, not entity-escaped prose.
+    """Check actual HTML URI and event attributes, not entity-escaped prose.
 
     HTMLParser decodes character references in attribute values exactly once.
     Never unescape the document: escaped tags and payload examples are text,
@@ -119,6 +115,11 @@ class _HtmlUriScanner(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         for name, value in attrs:
+            # Event handlers form an extensible browser attribute family. Treat
+            # on* attributes conservatively rather than maintaining a stale list.
+            if re.fullmatch(r"on[a-z]+", name) and value is not None:
+                self.matches.append(self.get_starttag_text() or tag)
+                continue
             if name not in _URI_ATTRIBUTES or value is None:
                 continue
             # URL parsing removes tabs/newlines anywhere and leading C0

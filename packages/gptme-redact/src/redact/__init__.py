@@ -484,8 +484,9 @@ _PATTERNS: list[Pattern] = [
             # Prefer a complete quoted value, including embedded newlines.
             # Truncated snippets end at a line boundary or EOF instead of a
             # closing quote; a final backslash is still part of the secret.
-            # Unquoted values retain commas/semicolons: both can be part of
-            # environment values. Prefer conservative masking to a leaked tail.
+            # Unquoted values retain punctuation, including brackets: these can
+            # be environment password bytes. Prefer masking to a leaked tail;
+            # quoted JSON values already have their own delimiter handling.
             r"(?P<quote>(?P<triple>\"\"\"|''')|['\"])?"
             r"(?P<value>(?(quote)"
             r"(?:(?:\\[\s\S]|(?!(?P=quote))[^\\])+(?=(?P=quote))"
@@ -493,8 +494,8 @@ _PATTERNS: list[Pattern] = [
             # newline. Single-line snippets keep their line-boundary fallback.
             r"|(?(triple)(?:(?!(?P=quote))[\s\S])+\Z"
             r"|(?:\\[^\r\n]|\\(?=[\r\n]|\Z)|(?!(?P=quote))[^\\\r\n])+))"
-            r"|(?:\[REDACTED:[A-Za-z0-9_:.-]+\][^\s'\"}\]]*"
-            r"|[^\s'\"}\]]+)))"
+            r"|(?:\[REDACTED:[A-Za-z0-9_:.-]+\][^\s'\"]*"
+            r"|[^\s'\"]+)))"
             r"(?(quote)(?:(?P=quote)|(?=[\r\n]|\Z)))",
             re.IGNORECASE,
         ),
@@ -685,7 +686,9 @@ def redact(
         else:
             f.count += 1
 
-    work = text
+    # Discover every layer against the original text. Replacing any layer first
+    # can destroy the context another detector needs (even an assignment key).
+    spans: list[tuple[int, int, int, str, Severity]] = []
 
     # Layer 1: find intervals in the original text before replacing anything.
     # Longest-first substitution misses crossing overlaps (abcde + defgh).
@@ -703,35 +706,26 @@ def redact(
             merged[-1] = (merged[-1][0], max(merged[-1][1], end))
         else:
             merged.append((start, end))
-    literal_parts: list[str] = []
-    cursor = 0
     for start, end in merged:
-        literal_parts.extend((text[cursor:start], "[REDACTED:literal]"))
-        record("literal", Severity.CRITICAL, text[start:end])
-        cursor = end
-    literal_parts.append(text[cursor:])
-    work = "".join(literal_parts)
+        spans.append((start, end, 0, "literal", Severity.CRITICAL))
 
     # Layer 2: credential-specific patterns, assignment fallback, then PII.
     # The assignment fallback is declared last for readability, not priority.
     patterns = [p for p in _PATTERNS if p.severity >= Severity.CRITICAL]
     patterns.extend(p for p in _PATTERNS if p.severity < Severity.CRITICAL)
-    for pat in patterns:
+    for priority, pat in enumerate(patterns, start=1):
 
-        def _sub(m: re.Match[str], _p: Pattern = pat) -> str:
+        def discover(m: re.Match[str], _p: Pattern = pat) -> bool:
             if _p.value_only:
                 value = m.group("value")
                 # Exempt only a whole marker, never a marker-prefixed value.
                 if re.fullmatch(r"\[REDACTED:[A-Za-z0-9_:.-]+\]", value):
-                    return m.group(0)
+                    return False
                 # Allowlist exemption never applies to CRITICAL (fail-closed).
                 if value in allow and _p.severity < Severity.CRITICAL:
-                    return m.group(0)
-                record(_p.category, _p.severity, value)
-                vs = m.start("value") - m.start(0)
-                ve = m.end("value") - m.start(0)
-                whole = m.group(0)
-                return whole[:vs] + f"[REDACTED:{_p.category}]" + whole[ve:]
+                    return False
+                spans.append((*m.span("value"), priority, _p.category, _p.severity))
+                return True
             matched = m.group(0)
             if _p.category == "jwt":
                 try:
@@ -741,36 +735,55 @@ def redact(
                         for s in (header, payload)
                     ]
                 except (ValueError, UnicodeDecodeError, binascii.Error, RecursionError):
-                    return matched
+                    return False
                 if not all(isinstance(obj, dict) for obj in objects):
-                    return matched
+                    return False
                 if not isinstance(objects[0].get("alg"), str):
-                    return matched
+                    return False
             # Exact-literal allowlist exemption — never for CRITICAL matches.
             if matched in allow and _p.severity < Severity.CRITICAL:
-                return matched
-            record(_p.category, _p.severity, matched)
-            return f"[REDACTED:{_p.category}]"
+                return False
+            spans.append((*m.span(), priority, _p.category, _p.severity))
+            return True
 
         if pat.category == "jwt":
             # Rejected candidates may overlap a real JWT after a dotted prefix.
             # Retry from the next character on rejection, but consume accepted
             # tokens once so their segments cannot produce duplicate findings.
-            parts: list[str] = []
-            cursor = search_from = 0
-            while match := pat.regex.search(work, search_from):
-                replacement = _sub(match)
-                if replacement == match.group(0):
-                    search_from = match.start() + 1
-                    continue
-                parts.extend((work[cursor : match.start()], replacement))
-                cursor = search_from = match.end()
-            parts.append(work[cursor:])
-            work = "".join(parts)
+            search_from = 0
+            while match := pat.regex.search(text, search_from):
+                accepted = discover(match)
+                search_from = match.end() if accepted else match.start() + 1
         else:
-            work = pat.regex.sub(_sub, work)
+            for match in pat.regex.finditer(text):
+                discover(match)
 
-    result.redacted = work
+    # Mask the union of crossing spans, retaining the highest-priority detector's
+    # category (literal, specific credential, assignment, PII). Adjacent spans
+    # remain separate. No detector ever sees generated replacement markers.
+    unions: list[tuple[int, int, int, str, Severity]] = []
+    for start, end, priority, category, severity in sorted(spans):
+        if unions and start < unions[-1][1]:
+            old_start, old_end, old_priority, old_category, old_severity = unions[-1]
+            if old_priority <= priority:
+                priority, category = old_priority, old_category
+            unions[-1] = (
+                old_start,
+                max(old_end, end),
+                priority,
+                category,
+                max(old_severity, severity),
+            )
+        else:
+            unions.append((start, end, priority, category, severity))
+    parts: list[str] = []
+    cursor = 0
+    for start, end, _, category, severity in unions:
+        parts.extend((text[cursor:start], f"[REDACTED:{category}]"))
+        record(category, severity, text[start:end])
+        cursor = end
+    parts.append(text[cursor:])
+    result.redacted = "".join(parts)
     result.findings = sorted(
         findings.values(), key=lambda f: (-int(f.severity), f.category)
     )
