@@ -97,7 +97,7 @@ def test_severity_parse_unknown_raises():
 
 def test_clean_text_is_untouched_and_unblocked():
     text = "just a normal sentence with no secrets at all"
-    result = redact(text)
+    result = redact(text, literals=[])
     assert result.redacted == text
     assert result.findings == []
     assert result.blocked is False
@@ -381,7 +381,7 @@ def test_secret_assignment_preserves_surrounding_quotes():
         "commit 0123456789abcdef0123456789abcdef01234567",  # bare hash, no key context
         "VERSION=1.2.3-rc1-build9999",  # not a secret-named key
         "the api key is rotated weekly and stored safely",  # prose
-        "API_KEY=short",  # value below the length floor
+        "API_KEY=",  # no credential value
     ],
 )
 def test_secret_assignment_no_over_redaction(text):
@@ -572,7 +572,7 @@ def test_bare_jwt_redacted_and_blocked():
 
 
 def test_jwt_preview_does_not_leak_token():
-    jwt = "eyJ" + "a" * 20 + ".eyJ" + "b" * 20 + "." + "c" * 30
+    jwt = "eyJhbGciOiJIUzI1NiJ9" ".eyJzdWIiOiJleGFtcGxlIn0" "." + "c" * 30
     result = redact(jwt)
     jwt_finding = next(f for f in result.findings if f.category == "jwt")
     assert "eyJ" not in jwt_finding.preview

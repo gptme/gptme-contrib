@@ -74,6 +74,12 @@ _HTML_SCRIPT_REGEX = re.compile(
     r"\(\s*"
     r"(?:javascript|vbscript|data)\s*:"
     r"|"
+    # Reference-style Markdown destinations, including angle brackets and a
+    # destination on the next line. Keep indentation bounded to link-definition
+    # syntax rather than matching an arbitrary bracketed phrase in prose.
+    r"^[ ]{0,3}\[(?:\\.|[^\]\\\r\n])+\]:[ \t]*(?:\r?\n[ \t]*)?<?"
+    r"(?:javascript|vbscript|data)\s*:"
+    r"|"
     # Inline event handlers -- every browser still honors these.
     r"\son(?:error|load|click|mouseover|focus|blur|submit|change|input|"
     r"keydown|keyup|keypress|abort|resize|scroll|unload|toggle|wheel)\s*="
@@ -82,7 +88,7 @@ _HTML_SCRIPT_REGEX = re.compile(
     # base href hijack).
     r"<\s*/?\s*(?:base|link|meta|style|applet|frame|frameset)\b"
     r")",
-    re.IGNORECASE,
+    re.IGNORECASE | re.MULTILINE,
 )
 
 

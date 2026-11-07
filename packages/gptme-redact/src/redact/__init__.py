@@ -22,6 +22,8 @@ the whole artifact rather than silently redacting it.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import re
@@ -392,13 +394,17 @@ _PATTERNS: list[Pattern] = [
         "bearer_header",
     ),
     # JWT (JSON Web Token) — header.payload.signature in base64url. The header
-    # and payload are both base64url-encoded JSON objects, so each begins with
-    # "eyJ" (base64url of '{"'). Supabase service-role keys, OAuth access
+    # and payload are base64url-encoded JSON objects, which may include JSON
+    # whitespace. Validate decoded objects rather than assuming an eyJ prefix.
+    # Supabase service-role keys, OAuth access
     # tokens, and session tokens commonly ship as *bare* JWTs without a
     # "Bearer " prefix, so the bearer_header pattern above never catches them.
     # Declared after bearer_header so Bearer-prefixed tokens keep that category.
     Pattern(
-        re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+        re.compile(
+            r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}"
+            r"\.[A-Za-z0-9_-]{10,}(?![A-Za-z0-9_-])"
+        ),
         Severity.CRITICAL,
         "jwt",
     ),
@@ -478,9 +484,9 @@ _PATTERNS: list[Pattern] = [
             # Unquoted values stop at ordinary config/JSON separators.
             r"(?P<quote>['\"])?"
             r"(?P<value>(?(quote)"
-            r"(?:\\[^\r\n]|\\(?=[\r\n]|\Z)|(?!(?P=quote))[^\\\r\n]){11,}"
+            r"(?:\\[^\r\n]|\\(?=[\r\n]|\Z)|(?!(?P=quote))[^\\\r\n])+"
             r"|(?:\[REDACTED:[A-Za-z0-9_:.-]+\][^\s'\",;}\]]*"
-            r"|[^\s'\",;}\]]{11,})))"
+            r"|[^\s'\",;}\]]+)))"
             r"(?(quote)(?:(?P=quote)|(?=[\r\n]|\Z)))",
             re.IGNORECASE,
         ),
@@ -702,6 +708,19 @@ def redact(
                 whole = m.group(0)
                 return whole[:vs] + f"[REDACTED:{_p.category}]" + whole[ve:]
             matched = m.group(0)
+            if _p.category == "jwt":
+                try:
+                    header, payload, _ = matched.split(".")
+                    objects = [
+                        json.loads(base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)))
+                        for s in (header, payload)
+                    ]
+                except (ValueError, UnicodeDecodeError, binascii.Error):
+                    return matched
+                if not all(isinstance(obj, dict) for obj in objects):
+                    return matched
+                if not isinstance(objects[0].get("alg"), str):
+                    return matched
             # Exact-literal allowlist exemption — never for CRITICAL matches.
             if matched in allow and _p.severity < Severity.CRITICAL:
                 return matched
