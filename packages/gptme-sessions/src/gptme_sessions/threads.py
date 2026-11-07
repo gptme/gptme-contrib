@@ -137,8 +137,8 @@ def attach_commits(nodes: list[dict], commits: Iterable[dict]) -> Counter:
             st["unresolved"] += 1
             continue
         shas = nodes[i].setdefault("delivered_shas", [])
-        if c["sha"][:10] not in shas:
-            shas.append(c["sha"][:10])
+        if c["sha"] not in shas:
+            shas.append(c["sha"])
             st["attached"] += 1
     return st
 
@@ -252,19 +252,27 @@ def mine_edges(
 
     # cited commits -> the session that made them
     deliv: dict[str, set[int]] = defaultdict(set)
+    prefixes: dict[str, set[str]] = defaultdict(set)
     for i, n in enumerate(nodes):
         for s in n.get("delivered_shas") or []:
-            deliv[s[:7]].add(i)
+            deliv[s].add(i)
+            prefixes[s[:7]].add(s)
     for i, n in enumerate(nodes):
-        mine = {s[:7] for s in n.get("delivered_shas") or []}
         sp = spec(len(n.get("shas_mentioned") or []), 8)
         for s in n.get("shas_mentioned") or []:
-            if s[:7] in mine:
+            if len(s) < 7:
                 continue
-            ds = [d for d in deliv.get(s[:7], ()) if d != i and nodes[d]["start"] <= n["end"]]
+            matches = [h for h in prefixes.get(s[:7], ()) if h.startswith(s) or s.startswith(h)]
+            # Do not turn an ambiguous abbreviation into multiple unrelated links.
+            if len(matches) != 1:
+                continue
+            owners = deliv[matches[0]]
+            if i in owners:
+                continue
+            ds = [d for d in owners if nodes[d]["start"] <= n["end"]]
             if 0 < len(ds) <= 2:
                 for d in ds:
-                    add(d, i, "commit", s[:7], sp)
+                    add(d, i, "commit", s, sp)
 
     # work keys: consecutive workers chain; mentions attach to the nearest prior worker
     primary: dict[str, list[int]] = defaultdict(list)

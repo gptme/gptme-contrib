@@ -186,3 +186,49 @@ def test_linked_journal_still_resolves():
     nodes = [S(0, journal="journal/first.md"), S(1, journal_links=["journal/first.md"])]
     edges, _ = L.mine_edges(nodes)
     assert "mention" in kinds(edges, 0, 1)
+
+
+@pytest.mark.parametrize("citation", ["abcdef1000", "abcdef1000" + "a" * 30])
+def test_precise_commit_citation_disambiguates_shared_prefix(citation):
+    nodes = [
+        S(0, delivered_shas=["abcdef1000"]),
+        S(1, delivered_shas=["abcdef1111"]),
+        S(2, shas_mentioned=[citation]),
+    ]
+    edges, _ = L.mine_edges(nodes)
+    assert "commit" in kinds(edges, 0, 2)
+    assert "commit" not in kinds(edges, 1, 2)
+
+
+def test_ambiguous_short_commit_citation_is_skipped():
+    nodes = [
+        S(0, delivered_shas=["abcdef1000"]),
+        S(1, delivered_shas=["abcdef1111"]),
+        S(2, shas_mentioned=["abcdef1"]),
+    ]
+    edges, _ = L.mine_edges(nodes)
+    assert not edges
+
+
+def test_own_colliding_commit_does_not_hide_precise_external_citation():
+    nodes = [
+        S(0, delivered_shas=["abcdef1000"]),
+        S(1, delivered_shas=["abcdef1111"], shas_mentioned=["abcdef1000"]),
+    ]
+    edges, _ = L.mine_edges(nodes)
+    assert "commit" in kinds(edges, 0, 1)
+
+
+def test_unique_short_commit_citation_still_links():
+    nodes = [S(0, delivered_shas=["abcdef1000"]), S(1, shas_mentioned=["abcdef1"])]
+    edges, _ = L.mine_edges(nodes)
+    assert "commit" in kinds(edges, 0, 1)
+
+
+def test_attach_commits_preserves_full_hash_and_is_idempotent():
+    nodes = [S(0)]
+    sha = "abcdef1234" + "5" * 30
+    commit = {"agent": "bob", "sha": sha, "ts": nodes[0]["end"], "sids": ["bob-0"]}
+    assert L.attach_commits(nodes, [commit])["attached"] == 1
+    assert L.attach_commits(nodes, [commit])["attached"] == 0
+    assert nodes[0]["delivered_shas"] == [sha]
