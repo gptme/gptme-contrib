@@ -86,10 +86,14 @@ formatter auto-staging without the generated runner's stash/restore cycle.
 The wrapper skips that generated runner only when the global hook declares
 ownership of these checks. Arbitrary local hooks still run after the global
 check suite. Generated runners with a custom or missing config are refused
-before any hook is rewritten: this slice supports an existing standard
-`.pre-commit-config.yaml` and one explicit standard `--config` in the runner.
-Shell comments do not count as configuration arguments; conflicting or repeated
-configuration options are refused without executing the runner.
+before any hook is rewritten. Supported shapes are a single literal standard-config
+`hook-impl` command, the stock prek script-version-4 runner (which defaults to
+`.pre-commit-config.yaml`), and the stock pre-commit standard-config runner.
+The helper validates the complete non-comment script against these bounded shapes,
+without executing it. Extra commands, traps, redirections, substitutions, repeated
+options and unknown generator templates are refused, even with a generated header.
+All supported shapes require an existing `.pre-commit-config.yaml`; custom runners
+need explicit integration rather than silently losing their additional checks.
 Wrappers also record the validated runner's content hash and refuse to skip a
 saved generated runner whose contents later change. Rerun the helper to validate
 the replacement; unsupported configuration changes remain refused.
@@ -108,7 +112,12 @@ Unstaged changes in other files do not block checks. No stash/restore is
 introduced, so concurrent work is not hidden or restored over other sessions.
 Git-configured `~/` hook paths
 are expanded before installation; relative global paths use the repository's
-hook working directory, like relative local paths.
+hook working directory, like relative local paths. For non-bare repositories,
+commit-side hooks resolve from the worktree root, while receive-side hooks
+(`pre-receive`, `update`, `proc-receive`, `post-receive`, `post-update` and
+`push-to-checkout`) resolve from the Git directory. The helper installs each group
+in its own effective directory; absolute paths and explicit `--hooks-dir` /
+`--global-dir` overrides name the same concrete directory for both groups.
 
 ## Customization
 
