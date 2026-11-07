@@ -138,7 +138,14 @@ def test_default_reservation_dir_is_outside_the_journal_tree(tmp_path: Path):
         journal_dir, "autonomous", "abcd", "11111111-0000-0000-0000-000000000000"
     )
     assert path.exists()
-    owner = tmp_path / "state" / "session-journal-reservations" / _TODAY / f"{path.name}.json"
+    owner = (
+        tmp_path
+        / "state"
+        / "session-journal-reservations"
+        / "journal"
+        / path.parent.name
+        / f"{path.name}.json"
+    )
     assert json.loads(owner.read_text())["journal_path"] == str(path)
 
 
@@ -304,3 +311,11 @@ def test_cli_handles_non_object_owner(tmp_path: Path, capsys, value):
     assert not captured.out
     assert "integrity failure" in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_sibling_journal_trees_have_independent_default_reservations(tmp_path: Path):
+    first = allocate_journal_path(tmp_path / "journal-a", "autonomous", "abcd", "11111111")
+    second = allocate_journal_path(tmp_path / "journal-b", "autonomous", "abcd", "11111111")
+    assert first != second
+    assert first.name == second.name == "autonomous-session-abcd.md"
+    assert first.exists() and second.exists()

@@ -143,12 +143,14 @@ def allocate_journal_path(
 
     ``date`` defaults to today (UTC) and names the ``YYYY-MM-DD`` subdirectory.
     ``reservation_dir`` defaults to
-    ``<journal_dir>/../state/session-journal-reservations``.
+    ``<journal_dir>/../state/session-journal-reservations/<journal-dir-name>``.
     """
     date_str = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     journal_dir = Path(journal_dir).resolve()
     day_dir = journal_dir / date_str
-    default_reservation = journal_dir.parent / "state" / "session-journal-reservations"
+    default_reservation = (
+        journal_dir.parent / "state" / "session-journal-reservations" / journal_dir.name
+    )
     owner_dir = Path(reservation_dir or default_reservation).resolve() / date_str
     day_dir.mkdir(parents=True, exist_ok=True)
 
@@ -180,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help=(
             "Directory for durable run-owner records (default: "
-            "<journal-dir>/../state/session-journal-reservations)"
+            "<journal-dir>/../state/session-journal-reservations/<journal-dir-name>)"
         ),
     )
     args = parser.parse_args(argv)

@@ -238,9 +238,12 @@ conservatively skipped on retry; after publication, the reservation is reusable.
 Lock files must not be removed while allocators can be running. This helper
 requires POSIX `flock` support (Linux/macOS).
 
-Reservations default to `<journal-dir>/../state/session-journal-reservations` and can
-be moved with `--reservation-dir`. Corrupt or mismatched reservation metadata fails
-closed (exit 1) rather than guessing.
+Reservations default to
+`<journal-dir>/../state/session-journal-reservations/<journal-dir-name>` so sibling
+journal trees have independent owner namespaces. Paths use the resolved journal
+directory name. The location can be moved with `--reservation-dir`; give independent
+journal trees distinct explicit reservation directories. Corrupt or mismatched
+reservation metadata fails closed (exit 1) rather than guessing.
 
 ## Where trajectories are discovered
 
