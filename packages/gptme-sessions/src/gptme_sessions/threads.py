@@ -50,11 +50,14 @@ Edges = dict[tuple[int, int, str], dict]
 
 
 def norm_pr(p: object) -> str | None:
-    """'gptme/gptme#12', 'gptme#12' and PR URLs -> 'gptme#12'."""
+    """Normalize PR references and URLs, preserving the owner when supplied.
+
+    Unqualified ``repo#12`` stays unqualified; never guess its repository owner.
+    """
     if not p:
         return None
-    m = re.search(r"([\w.-]+)#(\d+)$", str(p)) or re.search(
-        r"/([\w.-]+)/(?:pull|issues)/(\d+)", str(p)
+    m = re.fullmatch(r"([\w.-]+(?:/[\w.-]+)?)#(\d+)", str(p).strip()) or re.search(
+        r"/([\w.-]+/[\w.-]+)/(?:pull|issues)/(\d+)", str(p)
     )
     return f"{m.group(1).lower()}#{m.group(2)}" if m else None
 

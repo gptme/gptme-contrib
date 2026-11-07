@@ -383,3 +383,41 @@ def test_topic_similarity_derives_work_keys_without_mining(work):
     # A public-field update must not reuse the miner's now-stale private cache.
     nodes[1].pop(next(iter(work)))
     assert L.topic_similarity(nodes, [(0, 1)])[(0, 1)] == 0
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("Alice/Project#12", "alice/project#12"),
+        ("https://github.com/Alice/Project/pull/12", "alice/project#12"),
+        ("https://github.com/Alice/Project/issues/12", "alice/project#12"),
+        ("Project#12", "project#12"),
+        (None, None),
+    ],
+)
+def test_pr_normalization_preserves_supplied_owner(value, expected):
+    assert L.norm_pr(value) == expected
+
+
+@pytest.mark.parametrize("field", ["pr", "delivered_prs", "prs_mentioned"])
+def test_distinct_repository_owners_do_not_share_pr_edges(field):
+    def work(pr):
+        return {field: pr if field == "pr" else [pr]}
+
+    nodes = [S(0, **work("alice/project#12")), S(1, **work("bob/project#12"))]
+    edges, _ = L.mine_edges(nodes)
+    assert not edges
+    assert L.threads(L.best_predecessors(nodes, edges)) == [0, 1]
+
+
+def test_qualified_pr_url_and_reference_share_a_work_key():
+    nodes = [S(0, pr="alice/project#12"), S(1, pr="https://github.com/Alice/Project/pull/12")]
+    edges, _ = L.mine_edges(nodes)
+    assert kinds(edges, 0, 1) == {"pr"}
+    assert edges[(0, 1, "pr")]["key"] == "pr:alice/project#12"
+
+
+def test_unqualified_pr_does_not_guess_an_owner():
+    nodes = [S(0, pr="alice/project#12"), S(1, pr="project#12")]
+    edges, _ = L.mine_edges(nodes)
+    assert not edges
