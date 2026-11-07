@@ -287,3 +287,23 @@ def test_clean_test_env_does_not_inherit_opt_out(monkeypatch) -> None:
     monkeypatch.setenv("AGENT_SESSION_TRAILER", "0")
     inherited = "AGENT_SESSION_TRAILER" in _clean_env()
     assert not inherited
+
+
+@pytest.mark.parametrize("same_cgroup", [False, True])
+def test_pid_one_can_own_the_session_only_in_same_cgroup(
+    tmp_path: Path, same_cgroup: bool
+) -> None:
+    _process(tmp_path, 30, 20)
+    _process(tmp_path, 20, 1)
+    _process(
+        tmp_path,
+        1,
+        0,
+        "AGENT_SESSION_ID=container42\0",
+        "0::/user.slice/agent-autonomous.service\n"
+        if same_cgroup
+        else "0::/other.service\n",
+    )
+    assert resolve_session_id({}, proc_root=tmp_path, pid=30) == (
+        "container42" if same_cgroup else None
+    )

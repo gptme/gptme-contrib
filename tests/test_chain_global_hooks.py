@@ -625,3 +625,145 @@ def test_chained_precommit_refuses_partially_staged_file(
     )
     assert staged.stdout == "staged contents\n"
     assert target.read_text() == "staged contents\ndeliberately unstaged\n"
+
+
+@pytest.mark.parametrize("restaged", [False, True])
+def test_submodule_partial_staging_checks_pointer_not_worktree_dirt(
+    tmp_path: Path, restaged: bool
+) -> None:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_CONFIG_GLOBAL"] = str(tmp_path / "gitconfig")
+    env["ALLOW_GIT_IDENTITY"] = "1"
+    env["AGENT_SESSION_TRAILER"] = "0"
+
+    def git(repo: Path, *args: str) -> str:
+        return subprocess.check_output(
+            ["git", "-C", str(repo), *args], env=env, text=True
+        ).strip()
+
+    source = tmp_path / "source"
+    repo = tmp_path / "repo"
+    for directory in (source, repo):
+        directory.mkdir()
+        git(directory, "init", "-q", "-b", "feature")
+        git(directory, "config", "user.name", "Test")
+        git(directory, "config", "user.email", "test@test.com")
+    (source / "tracked.txt").write_text("initial\n")
+    git(source, "add", ".")
+    git(source, "commit", "-qm", "initial")
+    git(
+        repo,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        str(source),
+        "child",
+    )
+    git(repo, "commit", "-qm", "add child")
+    child = repo / "child"
+    (source / "tracked.txt").write_text("next\n")
+    git(source, "commit", "-qam", "next")
+    git(child, "fetch", "origin")
+    git(child, "checkout", "--detach", "origin/feature")
+    git(repo, "add", "child")
+    if not restaged:
+        # Move the child away from the newly staged pointer.
+        git(child, "checkout", "--detach", "HEAD~1")
+    (child / "tracked.txt").write_text("unfinished child edits\n")
+    (repo / ".pre-commit-config.yaml").write_text("repos: []\n")
+    git(repo, "add", ".pre-commit-config.yaml")
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    log = tmp_path / "calls"
+    _write_exec(binary / "prek", f'#!/bin/bash\necho ran >>"{log}"\n')
+    env["PATH"] = f"{binary}:{env['PATH']}"
+    before = git(repo, "ls-files", "--stage")
+    result = subprocess.run(
+        [str(CHAIN.parent / ".config/git/hooks/pre-commit")],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    if restaged:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert log.read_text() == "ran\n"
+    else:
+        # Ignoring child dirt must not ignore a different checked-out commit.
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert not log.exists()
+    assert git(repo, "ls-files", "--stage") == before
+    assert (child / "tracked.txt").read_text() == "unfinished child edits\n"
+
+
+def test_dual_proc_receive_is_refused_before_any_hook_is_rewritten(
+    tmp_path: Path,
+) -> None:
+    global_dir = tmp_path / "global"
+    local_dir = tmp_path / "local"
+    global_dir.mkdir()
+    local_dir.mkdir()
+    _write_exec(global_dir / "prepare-commit-msg", "#!/bin/bash\nexit 0\n")
+    for directory in (global_dir, local_dir):
+        _write_exec(
+            directory / "proc-receive", "#!/bin/bash\nread -r line\necho reply\n"
+        )
+    original = (local_dir / "proc-receive").read_bytes()
+    result = _run(["--hooks-dir", str(local_dir), "--global-dir", str(global_dir)])
+    assert result.returncode != 0
+    assert "cannot chain two proc-receive" in result.stderr
+    assert (local_dir / "proc-receive").read_bytes() == original
+    assert not (local_dir / "proc-receive.local").exists()
+    assert not (local_dir / "prepare-commit-msg").exists()
+
+
+@pytest.mark.parametrize("owner", ["global", "local"])
+def test_single_proc_receive_keeps_live_stdin_and_refuses_later_dual_handlers(
+    tmp_path: Path, owner: str
+) -> None:
+    global_dir = tmp_path / "global"
+    local_dir = tmp_path / "local"
+    global_dir.mkdir()
+    local_dir.mkdir()
+    handler = (global_dir if owner == "global" else local_dir) / "proc-receive"
+    _write_exec(handler, "#!/bin/bash\nread -r line\nprintf 'reply:%s\\n' \"$line\"\n")
+    args = ["--hooks-dir", str(local_dir), "--global-dir", str(global_dir)]
+    assert _run(args).returncode == 0
+    process = subprocess.Popen(
+        [str(local_dir / "proc-receive")],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdin is not None
+        process.stdin.write("negotiate\n")
+        process.stdin.flush()
+        assert process.wait(timeout=2) == 0
+        assert process.stdout is not None
+        assert process.stdout.read() == "reply:negotiate\n"
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate()
+    second = (
+        local_dir / "proc-receive.local"
+        if owner == "global"
+        else global_dir / "proc-receive"
+    )
+    _write_exec(second, "#!/bin/bash\necho unexpected\n")
+    before = (local_dir / "proc-receive").read_bytes()
+    assert _run(args).returncode != 0
+    assert (local_dir / "proc-receive").read_bytes() == before
+    result = subprocess.run(
+        [str(local_dir / "proc-receive")],
+        input="negotiate\n",
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+    assert result.returncode != 0
+    assert "cannot chain two proc-receive" in result.stderr
+    assert not result.stdout
