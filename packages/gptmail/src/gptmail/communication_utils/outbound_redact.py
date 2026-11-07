@@ -39,8 +39,11 @@ def guard_outbound(
     try:
         from redact import collect_secret_literals
         from redact import redact as scan
-    except ModuleNotFoundError as exc:
-        if exc.name != "redact":
+    except ImportError as exc:
+        # Also covers a same-named distribution that is not this scanner: PyPI
+        # `redact` is an unrelated template renderer, so the import raises
+        # ImportError rather than ModuleNotFoundError. Either way no scan ran.
+        if getattr(exc, "name", None) != "redact":
             raise
         if require_scanner:
             logger.error("Required secret scanner unavailable: redact is not installed")

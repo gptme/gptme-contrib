@@ -54,6 +54,16 @@ def test_guard_outbound_require_scanner_raises_scanner_unavailable(
     assert not (tmp_path / "state" / "outbound-redact-blocks.jsonl").exists()
 
 
+def test_guard_outbound_require_scanner_raises_for_unrelated_redact_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A same-named PyPI package is not the scanner and must not read as a block."""
+    monkeypatch.setitem(sys.modules, "redact", types.ModuleType("redact"))
+
+    with pytest.raises(SecretScannerUnavailable):
+        guard_outbound("ordinary text", "agent", tmp_path, require_scanner=True)
+
+
 def test_guard_outbound_propagates_internal_import_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
