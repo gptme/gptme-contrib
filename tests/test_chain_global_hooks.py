@@ -1307,3 +1307,26 @@ def test_replacing_saved_symlink_does_not_overwrite_shared_target(
     message.write_text("subject\n")
     _run_wrapper(active, str(message))
     assert message.read_text().splitlines() == ["subject", "global", "replacement"]
+
+
+def test_active_hook_symlink_to_saved_path_keeps_implementation(tmp_path: Path) -> None:
+    global_dir = tmp_path / "global"
+    local_dir = tmp_path / "local"
+    global_dir.mkdir()
+    local_dir.mkdir()
+    name = "prepare-commit-msg"
+    original = '#!/bin/bash\necho local >>"$1"\n'
+    saved = local_dir / f"{name}.local"
+    _write_exec(saved, original)
+    active = local_dir / name
+    active.symlink_to(saved.name)
+    _write_exec(global_dir / name, '#!/bin/bash\necho global >>"$1"\n')
+
+    result = _run(["--hooks-dir", str(local_dir), "--global-dir", str(global_dir)])
+    assert result.returncode == 0, result.stderr
+    assert not saved.is_symlink()
+    assert saved.read_text() == original
+    message = tmp_path / "message"
+    message.write_text("subject\n")
+    _run_wrapper(active, str(message))
+    assert message.read_text().splitlines() == ["subject", "global", "local"]
