@@ -829,3 +829,29 @@ def test_bare_jwt_with_whitespace_in_header_redacted() -> None:
     assert soc._redact("see example.com and eyes.everywhere") == (
         "see example.com and eyes.everywhere"
     )
+
+
+def test_deeply_nested_structured_403_does_not_crash_assess(tmp_path: Path) -> None:
+    # Regression (contrib#2038 review, fp 39d8ac08fea2): a recursive
+    # _is_structured_403() hit RecursionError on nesting that json.loads and
+    # json.dumps still accept, aborting assess() before any escalation.
+    nested: Any = {"message": "Forbidden", "code": 403}
+    for _ in range(600):
+        nested = [nested]
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "auth")
+        r["error"] = nested
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    assert status["outage"] is True
+    assert status["billing_outage"] is True
+
+
+def test_unserializably_deep_error_does_not_crash() -> None:
+    nested: Any = {"code": 403}
+    for _ in range(100_000):
+        nested = [nested]
+    assert soc._is_structured_403(nested) is True
+    assert soc._error_text({"error": nested}) == "<unserializable list error>"

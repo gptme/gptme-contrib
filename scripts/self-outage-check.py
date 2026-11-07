@@ -164,15 +164,20 @@ def _is_structured_403(raw: object) -> bool:
     none of the textual BILLING_ERROR_SUBSTRINGS, so without this the billing
     classification silently falls back to the token-reauth hint.
     """
-    if isinstance(raw, dict):
-        for k, v in raw.items():
-            if isinstance(k, str) and k.lower() in _STATUS_KEYS:
-                if not isinstance(v, bool) and re.match(r"403\b", str(v).strip()):
-                    return True
-            if _is_structured_403(v):
-                return True
-    elif isinstance(raw, list):
-        return any(_is_structured_403(v) for v in raw)
+    # Iterative walk: a recursive one adds a frame per nesting level, so a
+    # deeply nested payload (that json.loads/json.dumps still accept) would
+    # raise RecursionError and abort assess() before escalation.
+    stack = [raw]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if isinstance(k, str) and k.lower() in _STATUS_KEYS:
+                    if not isinstance(v, bool) and re.match(r"403\b", str(v).strip()):
+                        return True
+                stack.append(v)
+        elif isinstance(node, list):
+            stack.extend(node)
     return False
 
 
@@ -200,6 +205,10 @@ def _error_text(record: dict) -> str:
         text = json.dumps(raw, sort_keys=True, default=str)
     except (TypeError, ValueError):
         text = str(raw)
+    except RecursionError:
+        # Too deeply nested to serialize (str() would recurse too). Keep the
+        # record countable rather than crash assess() before escalation.
+        text = f"<unserializable {type(raw).__name__} error>"
     return text.strip()
 
 
@@ -253,7 +262,7 @@ def load_records(records_file: Path, window_hours: float, now: datetime) -> list
                 continue
             try:
                 rec = json.loads(line)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, RecursionError):
                 continue
             ts = _parse_ts(rec.get("timestamp", ""))
             if ts is None or ts < cutoff or ts > now:
@@ -274,7 +283,7 @@ def last_productive_ts(records_file: Path, now: datetime) -> datetime | None:
                 continue
             try:
                 rec = json.loads(line)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, RecursionError):
                 continue
             if rec.get("outcome") != "productive":
                 continue
