@@ -197,6 +197,22 @@ def test_foreign_exact_id_does_not_shadow_own_short_commit_label():
     assert not nodes[0].get("delivered_shas")
 
 
+@pytest.mark.parametrize("label", ["abcd", "abcde", "abcdef", "abcdef1", "abcdef12"])
+@pytest.mark.parametrize("field", ["parent", "sessions_mentioned", "journal_links"])
+def test_own_short_label_precedes_foreign_exact_reference(label, field):
+    reference = {field: label if field == "parent" else [label]}
+    nodes = [
+        S(0, "alice", id=label),
+        S(1, "bob", id="abcdef12-rest"),
+        S(2, "bob", **reference),
+    ]
+    edges, _ = L.mine_edges(nodes)
+    kind = "parent" if field == "parent" else "mention"
+    assert kinds(edges, 1, 2) == {kind}
+    assert not kinds(edges, 0, 2)
+    assert L.best_predecessors(nodes, edges) == [-1, -1, 1]
+
+
 def test_repeated_exact_id_within_agent_uses_reference_time():
     nodes = [S(0, id="abcd"), S(1, id="abcd")]
     L.attach_commits(

@@ -116,10 +116,16 @@ class _Index:
             own = [i for i in exact if self.nodes[i]["agent"] == agent]
             if own:
                 return nearest(self.nodes, own, t) if t is not None else own[-1]
+            # Prefer an owner's short label to a foreign exact id, even for
+            # parent/mention lookups that permit cross-agent references.
+            if exact and agent and re.fullmatch(r"[0-9a-f]{4,8}", sid):
+                own = [i for i in self.short.get((agent, sid), []) if i != exclude]
+                if own:
+                    return nearest(self.nodes, own, t) if t is not None else own[-1]
             # A unique exact id can name a cross-agent parent. A collision cannot.
             if allow_cross_agent:
                 return exact[0] if len(exact) == 1 else None
-            # A foreign exact id must not shadow the owner's short label.
+            # Ownership lookups may still resolve an own-agent short label below.
         # Only an actual short label may fall back to the label index. Never
         # discard characters from an absent full ID or an unmatched longer label.
         if not re.fullmatch(r"[0-9a-f]{4,8}", sid):
