@@ -77,6 +77,9 @@ def install(tmp_path: Path) -> Path:
     conf = root / "dotfiles" / ".config" / "git"
     shutil.copytree(HOOKS_SRC, conf / "hooks")
     (conf / "allowed-repos.conf").write_text("ALLOWED_PATTERNS=()\n")
+    (conf / "allowed-identities.conf").write_text(
+        'IDENTITY_ALLOWLIST=("author@example.com")\n'
+    )
     (conf / "direct-publish.json").write_text(json.dumps(CONFIG))
     scripts = root / "scripts" / "git"
     scripts.mkdir(parents=True)
@@ -96,7 +99,7 @@ def _repo(tmp_path: Path, origin: str = SITE) -> Path:
     subprocess.run(
         ["git", "init", "-q", "-b", "master", str(repo)], check=True, env=_env()
     )
-    _git(repo, "config", "user.email", "bob@superuserlabs.org")
+    _git(repo, "config", "user.email", "author@example.com")
     _git(repo, "config", "user.name", "Bob")
     _git(repo, "remote", "add", "origin", origin)
     return repo
@@ -188,6 +191,57 @@ def test_commit_site_prose_allowed(install: Path, tmp_path: Path) -> None:
     _stage(repo, {"_posts/a.md": "prose\n", "_data/timeline.yml": "- a\n"})
     proc = _run_commit_hook(install, repo)
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize("mode", ["commit", "push"])
+def test_symlink_install_uses_physical_checker_and_installed_config(
+    install: Path, tmp_path: Path, mode: str
+) -> None:
+    conf = tmp_path / "home/.config/git"
+    conf.mkdir(parents=True)
+    conf.joinpath("hooks").symlink_to(_hook(install, "pre-commit").parent)
+    # Only the installed config grants publication; the checkout copy denies it.
+    for name in (
+        "allowed-repos.conf",
+        "allowed-identities.conf",
+        "direct-publish.json",
+    ):
+        shutil.copy2(install / "dotfiles/.config/git" / name, conf / name)
+    (install / "dotfiles/.config/git/direct-publish.json").write_text(
+        '{"repositories": []}'
+    )
+    repo = _repo(tmp_path)
+    base = _commit(repo, {"README.md": "seed\n"})
+    if mode == "commit":
+        _stage(repo, {"_posts/a.md": "prose\n"})
+        args = [str(conf / "hooks/pre-commit")]
+        stdin = None
+    else:
+        new = _commit(repo, {"_posts/a.md": "prose\n"})
+        args = [str(conf / "hooks/pre-push"), "origin", SITE]
+        stdin = _tuple(new, base) + "\n"
+    proc = subprocess.run(
+        args, cwd=repo, input=stdin, capture_output=True, text=True, env=_env()
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_commit_cannot_hide_staged_submodule_update(
+    install: Path, tmp_path: Path
+) -> None:
+    repo = _repo(tmp_path)
+    first = _commit(repo, {"README.md": "seed\n"})
+    second = _commit(repo, {"README.md": "next\n"})
+    _git(repo, "update-index", "--add", "--cacheinfo", f"160000,{first},vendor")
+    _git(repo, "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "gitlink")
+    _write(repo, "_posts/a.md", "prose\n")
+    _git(repo, "add", "_posts/a.md")
+    _git(repo, "update-index", "--cacheinfo", f"160000,{second},vendor")
+    _git(repo, "config", "diff.ignoreSubmodules", "all")
+    assert _git(repo, "diff", "--cached", "--name-only") == "_posts/a.md"
+    proc = _run_commit_hook(install, repo)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "symlink/submodule/executable" in proc.stderr
 
 
 @pytest.mark.parametrize(

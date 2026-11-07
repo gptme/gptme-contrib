@@ -77,9 +77,11 @@ Approval is conservative. Pre-commit checks the staged index; pre-push checks
 each tuple's own `remote_old..local_new` range, **per outgoing commit** (a code
 add/revert cannot hide in the net diff). It denies a zero/unknown/unavailable
 old tip, deletion, non-fast-forward, merge or root commits, ranges over 100
-commits, renames (seen as delete+add), type changes, and any symlink,
-submodule or executable entry. Paths must be plain, free of control characters,
-traversal and dot-components (`.github`, `.git*`), and match an `allow` glob.
+commits, renames crossing the allowed boundary (both paths are checked as a
+deletion and an addition), type changes, and any symlink, submodule or executable
+entry. Renames between two allowed paths qualify. Paths must be plain, free of
+control characters, traversal and dot-components (`.github`, `.git*`), and match
+an `allow` glob.
 The push destination URL must match the configured identity exactly: hostile
 lookalikes (userinfo, ports, extra path, other hosts) are rejected.
 

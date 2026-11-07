@@ -214,7 +214,9 @@ if [ "$BRANCH" = "master" ] || [ "$BRANCH" = "main" ]; then
     # repository being committed; anything missing, malformed or not approved
     # (exit != 0) leaves the repo blocked. Every guard below still runs.
     if [ "$is_allowed" = false ] && [ -f "$HOOK_CONF_DIR/direct-publish.json" ]; then
-        _DP_ROOT="$(cd "$HOOK_DIR/../../../.." 2>/dev/null && pwd)" || _DP_ROOT=""
+        # Resolve the symlink before Bash normalizes the parent components.
+        # Config still comes from the installed HOOK_CONF_DIR above.
+        _DP_ROOT="$(cd "$HOOK_DIR" && cd -P ../../../.. && pwd -P)" || _DP_ROOT=""
         if [ -n "$_DP_ROOT" ] && [ -f "$_DP_ROOT/scripts/git/direct-publish-policy.py" ] &&
             python3 "$_DP_ROOT/scripts/git/direct-publish-policy.py" commit \
                 --config "$HOOK_CONF_DIR/direct-publish.json" \

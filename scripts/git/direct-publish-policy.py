@@ -193,7 +193,10 @@ def run_commit(entry: dict, branch: str) -> None:
     if branch != entry["branch"]:
         raise Denied(f"branch {branch!r} is not the configured {entry['branch']!r}")
     patterns = [glob_regex(g) for g in entry["allow"]]
-    raw = git("diff", "--cached", "--raw", "-z", "--no-renames", "--no-ext-diff")
+    raw = git(
+        "diff", "--cached", "--raw", "-z", "--no-renames", "--no-ext-diff",
+        "--ignore-submodules=none",
+    )  # fmt: skip
     if check_raw_diff(raw, patterns, "staged changes") == 0:
         raise Denied("staged diff is empty or unknown")
 
