@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import json
 import os
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -122,8 +123,15 @@ def test_sqlite_source_truncation(database):
         {"secure": True},
         {"secure": None},
         {"editable": False},
+        {"editable": "false"},
         {"schema_version": 2},
         {"text": None},
+        {"role": None},
+        {"role": "AXSecureTextField"},
+        {"subrole": "AXSecureTextField"},
+        {"subrole": 1},
+        {"role": "AXButton"},
+        {"text": "\x01" * 20000},
     ],
 )
 def test_unsafe_target_refused(update):
@@ -683,7 +691,7 @@ def test_preview_generation_never_signals_reaped_group(monkeypatch):
     generation = preview.Generation([sys.executable, "-c", "pass"])
     assert generation.wait() == 0
     signalled = []
-    monkeypatch.setattr(preview.os, "killpg", lambda *a: signalled.append(a))
+    monkeypatch.setattr(os, "killpg", lambda *a: signalled.append(a))
     # Once reaped, the pid/pgid may be reused: closing must not signal it.
     generation.stop()
     assert signalled == []
@@ -726,3 +734,152 @@ def test_prepare_fits_multibyte_observations_to_byte_budget(database, tmp_path):
     assert budget["dropped_snapshot_ids"] == ["cjk3", "cjk4"]
     assert request["observations"][2]["content_truncated"] is True
     assert request["observations"][0]["content"] == "文" * 12000
+
+
+HEARTBEAT_CHILD = (
+    "import signal,sys,time\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "while True:\n"
+    "    with open(sys.argv[1], 'a') as f: f.write('.')\n"
+    "    time.sleep(0.02)"
+)
+
+
+def _generator_with_pipe_holding_child(path, beat, tail):
+    # The grandchild inherits stdout/stderr and ignores SIGTERM; its heartbeat
+    # shows whether it still runs, independent of when init reaps it.
+    path.write_text(
+        "#!/usr/bin/env python3\nimport subprocess,sys,time\nsys.stdin.read()\n"
+        f"subprocess.Popen([sys.executable,'-c',{HEARTBEAT_CHILD!r},{str(beat)!r}])\n"
+        f"while not __import__('os').path.exists({str(beat)!r}): time.sleep(0.01)\n"
+        + tail,
+        encoding="utf-8",
+    )
+    path.chmod(0o700)
+
+
+def _assert_stopped(beat):
+    size = beat.stat().st_size
+    time.sleep(0.3)
+    assert beat.stat().st_size == size, "descendant survived generation"
+
+
+def test_generation_timeout_kills_descendants_holding_pipes(
+    generation, tmp_path, monkeypatch
+):
+    beat = tmp_path / "beat"
+    _generator_with_pipe_holding_child(tmp_path / "gptme", beat, "time.sleep(30)\n")
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setattr(module, "GENERATION_TIMEOUT", 0.5)
+    started = time.monotonic()
+    with pytest.raises(module.DraftError, match="timed out"):
+        module.generate(generation)
+    assert time.monotonic() - started < 4
+    assert not generation.output.exists()
+    _assert_stopped(beat)
+
+
+def test_generation_completes_despite_descendant_holding_pipes(
+    generation, tmp_path, monkeypatch
+):
+    beat = tmp_path / "beat"
+    _generator_with_pipe_holding_child(
+        tmp_path / "gptme", beat, "print('Done drafting', flush=True)\n"
+    )
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    started = time.monotonic()
+    module.generate(generation)
+    assert time.monotonic() - started < 4
+    assert generation.output.read_text() == "Done drafting"
+    _assert_stopped(beat)
+
+
+def test_preview_cancellation_reaches_generator_session(
+    generation, tmp_path, monkeypatch
+):
+    preview = _load_launcher("preview", monkeypatch)
+    beat = tmp_path / "beat"
+    _generator_with_pipe_holding_child(tmp_path / "gptme", beat, "time.sleep(30)\n")
+    env_path = str(tmp_path) + os.pathsep + os.environ["PATH"]
+    monkeypatch.setenv("PATH", env_path)
+    job = preview.Generation(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "generate",
+            "--request",
+            str(generation.request),
+            "--model",
+            generation.model,
+            "--allow-model-disclosure",
+            "--output",
+            str(generation.output),
+        ]
+    )
+    deadline = time.monotonic() + 10
+    while not beat.exists():
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    # SIGTERM to the launcher must also stop the generator's own session.
+    job.stop(grace=5)
+    assert job.proc.returncode == 128 + signal.SIGTERM
+    _assert_stopped(beat)
+
+
+def test_protocol_line_limit_covers_worst_case_payloads(monkeypatch):
+    direct = _load_launcher("direct", monkeypatch)
+    # Largest accepted text under escaping: each U+0001 encodes as 6 bytes.
+    text = "\x01" * (module.MAX_TARGET_TEXT_JSON // 6)
+    metadata = "\x01" * 1000  # capture.swift caps metadata at 1000 UTF-8 bytes
+    target = TARGET | {
+        "text": text,
+        "selected_text": text,
+        "selection": {"location": 0, "length": len(text)},
+        "subrole": "",
+        "window_title": metadata,
+        "identifier": metadata,
+        "app": metadata,
+        "bundle_id": metadata,
+        "field_bounds": {"x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0},
+        "captured_at": "2026-11-07T00:00:00Z",
+        "platform": "macos",
+        "pid": 99999,
+        "coverage": "x" * 200,
+    }
+    module.validate_target(target)
+    line = (json.dumps(target, ensure_ascii=False, sort_keys=True) + "\n").encode()
+    assert len(line) <= module.MAX_PROTOCOL_LINE
+    helper = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys,time; sys.stdout.buffer.write(sys.stdin.buffer.readline()); "
+            "sys.stdout.flush(); time.sleep(5)",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    )
+    try:
+        direct.write_line(helper, line, 5)
+        assert json.loads(direct.read_line(helper, 5)) == target
+    finally:
+        helper.kill()
+        helper.wait()
+    worst_draft = json.dumps({"draft": "\x01" * module.MAX_DRAFT}, ensure_ascii=False)
+    assert len(worst_draft.encode()) + 1 <= module.MAX_PROTOCOL_LINE
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not shutil.which("swift"),
+    reason="Swift policy self-test needs macOS (no Accessibility permission used)",
+)
+def test_capture_security_policy_fails_closed():
+    source = SCRIPT.parent / "contextual-draft" / "capture.swift"
+    result = subprocess.run(
+        ["swift", str(source), "--self-test"],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "capture self-test ok" in result.stdout

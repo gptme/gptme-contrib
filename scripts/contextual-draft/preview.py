@@ -6,9 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
-import os
 import queue
-import signal
 import subprocess
 import sys
 import tempfile
@@ -138,6 +136,9 @@ def launch(request: Path, model: str) -> None:
             status.set("Enter an instruction and explicit model first.")
             return
         updated = dict(data, instruction=instruction.get())
+        if len(json.dumps(updated, ensure_ascii=False).encode()) > core.MAX_REQUEST:
+            status.set("Request exceeds 100 KB; shorten the instruction.")
+            return
         # A fresh directory per attempt preserves request provenance and avoids
         # silently overwriting a prior preview. All material remains local/private.
         run_dir = Path(tempfile.mkdtemp(prefix="generation-", dir=request.parent))
@@ -225,35 +226,12 @@ class Generation:
                 return returncode
             time.sleep(interval)
 
-    def _leader_exited(self) -> bool:
-        # Non-reaping check (WNOWAIT): the zombie keeps the pid/pgid reserved.
-        if not hasattr(os, "waitid"):
-            return False
-        try:
-            info = os.waitid(
-                os.P_PID, self.proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
-            )
-        except ChildProcessError:
-            return True
-        return info is not None
-
     def stop(self, grace: float = 2.0) -> None:
         """SIGTERM the group, wait for the leader, then SIGKILL survivors and reap."""
         with self._lock:
             if self.proc.returncode is not None:
                 return  # Already reaped: the group id may now belong to others.
-            for sig in (signal.SIGTERM, signal.SIGKILL):
-                try:
-                    os.killpg(self.proc.pid, sig)
-                except (ProcessLookupError, PermissionError):
-                    pass  # No signallable members, e.g. only the zombie leader.
-                if sig == signal.SIGTERM:
-                    deadline = time.monotonic() + grace
-                    while not self._leader_exited() and time.monotonic() < deadline:
-                        time.sleep(0.05)
-            # A SIGTERM-ignoring model process can outlive its launcher; the
-            # SIGKILL above reached it while the leader still reserved the group.
-            self.proc.wait()
+            core.stop_group(self.proc, grace)
 
 
 def main() -> None:

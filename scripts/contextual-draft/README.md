@@ -113,8 +113,11 @@ the PID/role/window metadata here is deliberately insufficient to authorize it.
 ## Safety and limits
 
 - Secure fields, unsupported roles, unavailable AX permissions, focus switches
-  during capture, and non-writable fields fail closed. A focused field over 20 KB
-  is refused; explicit context files are limited to 20 KB each, source content
+  during capture, and non-writable fields fail closed. Any failed role, subrole or
+  selection read refuses the field (only an explicit "no value"/"unsupported"
+  answer counts as an absent subrole), so a transient AX error can never make a
+  secure field look ordinary. A focused field over 20 KB once JSON-encoded is
+  refused, which keeps every valid capture inside the 100 KB protocol line; explicit context files are limited to 20 KB each, source content
   to 12,000 characters per observation, observations to five, and the complete
   request to 100 KB. Target and explicit context always fit or the request is
   refused; observations are then added in retrieval order against the remaining
@@ -150,12 +153,15 @@ From the checkout, run the focused pytest test file and Swift typecheck:
 ```sh
 python3 -m pytest tests/test_contextual_draft.py
 swiftc -typecheck scripts/contextual-draft/capture.swift
+swift scripts/contextual-draft/capture.swift --self-test  # AX-free policy checks
 ```
 
 Tests use real temporary SQLite databases, a loopback impersonator that must
 receive no requests or credentials, and synthetic generator executables. They
 cover oversized inputs, special-file refusal, nonzero/empty/timeout generation,
-and private output. They do not read a personal archive, call a model, or edit an app.
+generators whose descendants hold the output pipes, cancellation, and private
+output. Generation and native helpers run in their own sessions and their whole
+process group is killed before the leader is reaped. They do not read a personal archive, call a model, or edit an app.
 
 ## User-invoked preview launcher
 

@@ -9,8 +9,92 @@ func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
     return value
 }
 
+// Optional, non-security metadata only (identifier, window title). A failed
+// read omits metadata; it never feeds a security or change-detection decision.
 func string(_ element: AXUIElement, _ name: String) -> String? {
     return attribute(element, name) as? String
+}
+
+// Tri-state AX read. Only an explicit "no value"/"unsupported attribute" answer
+// means absent; every other error (timeout, cannot complete, API disabled,
+// invalid element, unexpected type) is a failure, never a benign default.
+enum Read<T: Equatable>: Equatable {
+    case present(T)
+    case absent
+    case failed
+}
+
+func classify<T: Equatable>(_ status: AXError, _ value: T?, hasValue: Bool) -> Read<T> {
+    switch status {
+    case .success:
+        if let value { return .present(value) }
+        return hasValue ? .failed : .absent
+    case .noValue, .attributeUnsupported:
+        return .absent
+    default:
+        return .failed
+    }
+}
+
+func readString(_ element: AXUIElement, _ name: String) -> Read<String> {
+    var value: CFTypeRef?
+    let status = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+    return classify(status, value as? String, hasValue: value != nil)
+}
+
+// Change detection: equal successful-or-absent reads only. Two failed reads
+// are not evidence that nothing changed.
+func stable<T: Equatable>(_ before: Read<T>, _ after: Read<T>) -> Bool {
+    if case .failed = before { return false }
+    return before == after
+}
+
+enum Security: Equatable {
+    case allowed(role: String, subrole: String)
+    case refused(String)
+}
+
+// Fail closed: the value is read only after role and subrole were both read
+// successfully (a subrole may be explicitly absent) and neither marks the
+// field secure. Any read failure refuses the field.
+func securityDecision(role: Read<String>, subrole: Read<String>) -> Security {
+    guard case .present(let roleValue) = role else {
+        return .refused("Cannot verify field role; refused")
+    }
+    let subroleValue: String
+    switch subrole {
+    case .present(let value): subroleValue = value
+    case .absent: subroleValue = ""
+    case .failed: return .refused("Cannot verify field security; refused")
+    }
+    if roleValue == "AXSecureTextField" || subroleValue == "AXSecureTextField" {
+        return .refused("Secure field refused")
+    }
+    guard ["AXTextField", "AXTextArea", "AXComboBox"].contains(roleValue) else {
+        return .refused("Unsupported focused role")
+    }
+    return .allowed(role: roleValue, subrole: subroleValue)
+}
+
+func fieldSecurity(_ element: AXUIElement) -> Security {
+    return securityDecision(role: readString(element, kAXRoleAttribute),
+                            subrole: readString(element, kAXSubroleAttribute))
+}
+
+// Limits shared with contextual_draft.py (MAX_TARGET_TEXT_JSON, MAX_PROTOCOL_LINE).
+let maxTextJSON = 20000
+let maxLine = 100000
+let maxMetadataBytes = 1000
+
+// Size of a string once JSON-encoded, as it travels in the protocol line.
+func jsonEncodedSize(_ text: String) -> Int? {
+    guard let data = try? JSONSerialization.data(withJSONObject: [text]) else { return nil }
+    return data.count - 4  // ["..."]
+}
+
+func boundedMetadata(_ value: String?) -> Any {
+    guard let value else { return NSNull() }
+    return String(decoding: value.utf8.prefix(maxMetadataBytes), as: UTF8.self)
 }
 
 func fieldText(_ element: AXUIElement) -> String? {
@@ -34,15 +118,58 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
-func selectedRange(_ element: AXUIElement) -> [String: Int]? {
-    guard let raw = attribute(element, kAXSelectedTextRangeAttribute),
-          CFGetTypeID(raw) == AXValueGetTypeID() else { return nil }
-    let value = unsafeBitCast(raw, to: AXValue.self)
-    var range = CFRange()
-    guard AXValueGetType(value) == .cfRange,
-          AXValueGetValue(value, .cfRange, &range) else { return nil }
-    return ["location": range.location, "length": range.length]
+func selectedRange(_ element: AXUIElement) -> Read<[String: Int]> {
+    var raw: CFTypeRef?
+    let status = AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &raw)
+    var parsed: [String: Int]?
+    if let raw, CFGetTypeID(raw) == AXValueGetTypeID() {
+        let value = unsafeBitCast(raw, to: AXValue.self)
+        var range = CFRange()
+        if AXValueGetType(value) == .cfRange, AXValueGetValue(value, .cfRange, &range) {
+            parsed = ["location": range.location, "length": range.length]
+        }
+    }
+    return classify(status, parsed, hasValue: raw != nil)
 }
+
+func selfTest() -> Never {
+    func check(_ condition: Bool, _ name: String) {
+        if !condition { fail("self-test failed: \(name)") }
+    }
+    let field: Read<String> = .present("AXTextField")
+    check(securityDecision(role: field, subrole: .failed) == .refused("Cannot verify field security; refused"),
+          "subrole read failure refuses")
+    check(securityDecision(role: .failed, subrole: .absent) == .refused("Cannot verify field role; refused"),
+          "role read failure refuses")
+    check(securityDecision(role: .absent, subrole: .absent) == .refused("Cannot verify field role; refused"),
+          "absent role refuses")
+    check(securityDecision(role: field, subrole: .present("AXSecureTextField")) == .refused("Secure field refused"),
+          "secure subrole refuses")
+    check(securityDecision(role: .present("AXSecureTextField"), subrole: .absent) == .refused("Secure field refused"),
+          "secure role refuses")
+    check(securityDecision(role: .present("AXButton"), subrole: .absent) == .refused("Unsupported focused role"),
+          "unsupported role refuses")
+    check(securityDecision(role: .present("AXTextArea"), subrole: .absent) == .allowed(role: "AXTextArea", subrole: ""),
+          "plain text area allowed")
+    let errors: [AXError] = [.cannotComplete, .failure, .apiDisabled, .invalidUIElement,
+                             .notImplemented, .illegalArgument]
+    for error in errors {
+        check(classify(error, nil as String?, hasValue: false) == .failed, "error \(error.rawValue) is failure")
+    }
+    check(classify(.noValue, nil as String?, hasValue: false) == .absent, "noValue is absent")
+    check(classify(.attributeUnsupported, nil as String?, hasValue: false) == .absent, "unsupported is absent")
+    check(classify(.success, nil as String?, hasValue: true) == .failed, "unexpected type is failure")
+    check(classify(.success, "x", hasValue: true) == .present("x"), "success is present")
+    check(!stable(Read<String>.failed, .failed), "failed reads are not stable")
+    check(stable(Read<String>.absent, .absent), "absent reads are stable")
+    check(!stable(Read<String>.present("a"), .present("b")), "changed reads are not stable")
+    check(jsonEncodedSize(String(repeating: "\u{1}", count: 3)) == 18, "control characters count as escapes")
+    check(jsonEncodedSize("abc") == 3, "plain text counts as bytes")
+    print("capture self-test ok")
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--self-test") { selfTest() }
 
 // Do not trigger a permission dialog or activate any app.
 guard AXIsProcessTrusted() else { fail("Accessibility permission is required") }
@@ -53,29 +180,36 @@ guard let raw = attribute(application, kAXFocusedUIElementAttribute) else { fail
 guard CFGetTypeID(raw) == AXUIElementGetTypeID() else { fail("Invalid focused element") }
 let field = unsafeBitCast(raw, to: AXUIElement.self)
 AXUIElementSetMessagingTimeout(field, 2)
-let role = string(field, kAXRoleAttribute) ?? ""
-let subrole = string(field, kAXSubroleAttribute) ?? ""
-// Secure fields are refused before reading any value or surrounding text.
-guard role != "AXSecureTextField" && subrole != "AXSecureTextField" else { fail("Secure field refused") }
-guard ["AXTextField", "AXTextArea", "AXComboBox"].contains(role) else { fail("Unsupported focused role") }
+// Secure fields are refused before reading any value or surrounding text, and
+// so is any field whose security cannot be established.
+let security = fieldSecurity(field)
+guard case .allowed(let role, let subrole) = security else {
+    if case .refused(let reason) = security { fail(reason) }
+    fail("Cannot verify field security; refused")
+}
 var writable: DarwinBoolean = false
 let writableStatus = AXUIElementIsAttributeSettable(field, kAXValueAttribute as CFString, &writable)
 guard writableStatus == .success && writable.boolValue else { fail("Field is not writable") }
 guard let text = fieldText(field) else { fail("No accessible field value") }
-guard text.utf8.count <= 20000 else { fail("Field too large for bounded capture") }
+guard let textSize = jsonEncodedSize(text), textSize <= maxTextJSON else {
+    fail("Field too large for bounded capture")
+}
 let range = selectedRange(field)
-let selectedText = string(field, kAXSelectedTextAttribute)
+let selectedText = readString(field, kAXSelectedTextAttribute)
+guard range != .failed, selectedText != .failed else { fail("Cannot read field selection") }
 let identifier = string(field, kAXIdentifierAttribute)
 var windowTitle: Any = NSNull()
 if let rawWindow = attribute(application, kAXFocusedWindowAttribute), CFGetTypeID(rawWindow) == AXUIElementGetTypeID() {
     let window = unsafeBitCast(rawWindow, to: AXUIElement.self)
-    windowTitle = string(window, kAXTitleAttribute) as Any? ?? NSNull()
+    AXUIElementSetMessagingTimeout(window, 2)
+    windowTitle = boundedMetadata(string(window, kAXTitleAttribute))
 }
-// Re-read field content and selection as well as identity. AX has no atomic
+// Re-read security, content and selection as well as identity. AX has no atomic
 // snapshot transaction; this detects observed changes, not every possible ABA.
-guard fieldText(field) == text,
-      selectedRange(field) == range,
-      string(field, kAXSelectedTextAttribute) == selectedText else {
+guard fieldSecurity(field) == security,
+      fieldText(field) == text,
+      stable(range, selectedRange(field)),
+      stable(selectedText, readString(field, kAXSelectedTextAttribute)) else {
     fail("Field text or selection changed during capture")
 }
 // Reject app/field switches during the read instead of mixing two targets.
@@ -102,37 +236,41 @@ let result: [String: Any] = [
     "captured_at": ISO8601DateFormatter().string(from: Date()),
     "platform": "macos",
     "pid": Int(app.processIdentifier),
-    "bundle_id": app.bundleIdentifier as Any? ?? NSNull(),
-    "app": app.localizedName as Any? ?? NSNull(),
+    "bundle_id": boundedMetadata(app.bundleIdentifier),
+    "app": boundedMetadata(app.localizedName),
     "window_title": windowTitle,
     "role": role,
     "subrole": subrole,
-    "identifier": identifier as Any? ?? NSNull(),
+    "identifier": boundedMetadata(identifier),
     "text": text,
-    "selection": range as Any? ?? NSNull(),
-    "selected_text": selectedText as Any? ?? NSNull(),
+    "selection": { if case .present(let value) = range { return value as Any }; return NSNull() }(),
+    "selected_text": { if case .present(let value) = selectedText { return value as Any }; return NSNull() }(),
     "secure": false,
     "editable": true,
     "coverage": "Focused field only; surrounding conversation comes from historical observations and may be incomplete. Not an insertion handle."
 ]
 let interactive = CommandLine.arguments.contains("--insert-session")
 let data = try JSONSerialization.data(withJSONObject: result, options: interactive ? [.sortedKeys] : [.prettyPrinted, .sortedKeys])
+// Same limit as the reader (contextual_draft.MAX_PROTOCOL_LINE); with the
+// encoded text and metadata bounds above, a valid capture always fits.
+guard data.count <= maxLine else { fail("Capture exceeds protocol line limit") }
 FileHandle.standardOutput.write(data)
 FileHandle.standardOutput.write(Data("\n".utf8))
 if interactive {
     // Keep the actual AX element alive across generation; metadata is not a handle.
     // Selected-text rewriting is intentionally not part of this draft action.
-    guard let originalRange = range, originalRange["length"] == 0 else {
+    guard case .present(let originalRange) = range, originalRange["length"] == 0 else {
         fail("Direct drafting requires a cursor, not a text selection")
     }
-    guard let line = readLine(), line.utf8.count <= 100000,
+    guard let line = readLine(), line.utf8.count <= maxLine,
           let payload = line.data(using: .utf8),
           let command = try? JSONSerialization.jsonObject(with: payload) as? [String: String],
           let draft = command["draft"], !draft.isEmpty else { fail("No draft to insert") }
     guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
           let current = attribute(application, kAXFocusedUIElementAttribute), CFEqual(raw, current),
-          fieldText(field) == text, selectedRange(field) == range,
-          string(field, kAXSelectedTextAttribute) == selectedText else {
+          fieldSecurity(field) == security,
+          fieldText(field) == text, stable(range, selectedRange(field)),
+          stable(selectedText, readString(field, kAXSelectedTextAttribute)) else {
         fail("Target changed; draft retained but not inserted")
     }
     var canInsert: DarwinBoolean = false

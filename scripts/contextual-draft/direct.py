@@ -33,7 +33,7 @@ useful message, output an empty body rather than a clarification in the recipien
 field. Never send or submit anything."""
 
 
-MAX_LINE = 100000
+MAX_LINE = core.MAX_PROTOCOL_LINE  # Derivation and worst cases: see core.
 
 
 def read_line(proc: subprocess.Popen, timeout: float) -> bytes:
@@ -118,6 +118,8 @@ def start_progress(target: dict) -> subprocess.Popen | None:
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            # Own group so cleanup also reaches the swift driver's frontend.
+            start_new_session=True,
         )
     except OSError:
         return None
@@ -128,15 +130,11 @@ def stop_progress(progress: subprocess.Popen | None) -> None:
         return
     if progress.stdin is not None:
         progress.stdin.close()
-    try:
-        progress.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        progress.terminate()
-        try:
-            progress.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            progress.kill()
-            progress.wait()
+    # Stdin EOF asks the HUD to exit; then stop its whole group, bounded.
+    deadline = time.monotonic() + 3
+    while not core.leader_exited(progress) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    core.stop_group(progress, grace=3)
 
 
 def execute(args: argparse.Namespace) -> None:
@@ -159,6 +157,8 @@ def execute(args: argparse.Namespace) -> None:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=native_errors,
+            # Own group: cleanup must also stop the driver's frontend process.
+            start_new_session=True,
         )
     except OSError as exc:
         native_errors.close()
@@ -252,13 +252,17 @@ def execute(args: argparse.Namespace) -> None:
     finally:
         stop_progress(progress)
         native_errors.close()
-        if native.poll() is None:
-            native.terminate()
-        try:
-            native.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            native.kill()
-            native.wait()
+        # The helper exits by itself after replying; otherwise stop its group.
+        deadline = time.monotonic() + 5
+        while not core.leader_exited(native) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        core.stop_group(native, grace=5)
+        for stream in (native.stdin, native.stdout):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
 
 
 def main() -> None:

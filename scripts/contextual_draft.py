@@ -10,17 +10,32 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import selectors
+import signal
 import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 MAX_REQUEST = 100_000
 MAX_DRAFT = 16_000
+# Focused-field text limit, measured as JSON-encoded UTF-8 (as capture.swift
+# measures it), so escapes such as \u0001 cannot push a valid capture past the
+# protocol line limit or the request budget.
+MAX_TARGET_TEXT_JSON = 20_000
+# One native protocol line (capture JSON or insertion command). Worst cases:
+# capture = text + selected_text (each <= MAX_TARGET_TEXT_JSON encoded) plus
+# metadata strings capped at 1000 UTF-8 bytes each (<= 6 bytes encoded per
+# byte); insertion = MAX_DRAFT bytes at <= 6 encoded bytes each. Both fit.
+MAX_PROTOCOL_LINE = 100_000
+MAX_PROVIDER_STDERR = 256_000
+SECURE_ROLE = "AXSecureTextField"
+SUPPORTED_ROLES = ("AXTextField", "AXTextArea", "AXComboBox")
 
 
 def log_event(directory: Path, stage: str, **fields: Any) -> None:
@@ -195,6 +210,184 @@ def private_write(path: Path, text: str) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def leader_exited(proc: subprocess.Popen) -> bool:
+    """Whether a child exited, without reaping it where the platform allows.
+
+    An unreaped child reserves its pid, and so its process-group id: while this
+    returns False or the zombie is unreaped, signalling the group cannot reach an
+    unrelated process. Without os.waitid (macOS before Python 3.13) this falls
+    back to poll(), which reaps; kill_group() then skips the group.
+    """
+    if proc.returncode is not None:
+        return True
+    if hasattr(os, "waitid"):
+        flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
+        try:
+            return os.waitid(os.P_PID, proc.pid, flags) is not None
+        except ChildProcessError:
+            pass
+    return proc.poll() is not None
+
+
+def kill_group(proc: subprocess.Popen, sig: int = signal.SIGKILL) -> None:
+    """Signal a start_new_session child's group, only while its leader is unreaped."""
+    if proc.returncode is None:
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass  # No signallable members, e.g. only the zombie leader (macOS).
+
+
+def stop_group(proc: subprocess.Popen, grace: float) -> None:
+    """SIGTERM the group, wait for the leader, SIGKILL any survivors, then reap."""
+    if not leader_exited(proc):
+        kill_group(proc, signal.SIGTERM)
+        deadline = time.monotonic() + grace
+        while not leader_exited(proc) and time.monotonic() < deadline:
+            time.sleep(0.05)
+    # Descendants (e.g. a model process ignoring SIGTERM, or a swift driver's
+    # frontend) can outlive the leader; SIGKILL them while the group is reserved.
+    kill_group(proc)
+    proc.wait()
+
+
+class Completed(NamedTuple):
+    returncode: int
+    stdout: bytes
+    stdout_bytes: int
+    stderr: bytes
+    stderr_bytes: int
+
+
+def run_bounded(
+    command: list[str],
+    stdin: bytes,
+    timeout: float,
+    *,
+    max_stdout: int,
+    max_stderr: int,
+    env: dict[str, str] | None = None,
+) -> Completed:
+    """Run a helper in its own session against one overall deadline.
+
+    Unlike subprocess.run, completion does not depend on pipe EOF: a descendant
+    that inherits stdout/stderr cannot extend the call or survive it. On every
+    exit path the whole group is SIGKILLed before the leader is reaped. Output
+    beyond the caps is counted and discarded. SIGTERM/SIGHUP to this process
+    (e.g. preview cancellation) also kill the group. Raises TimeoutExpired.
+    """
+    caps: dict[int, int] = {}
+    kept: dict[int, bytearray] = {}
+    totals: dict[int, int] = {}
+    pending = memoryview(stdin)
+    timed_out = False
+    previous: dict[int, Any] = {}
+    if threading.current_thread() is threading.main_thread():
+
+        def forward(signum: int, frame: Any) -> None:
+            raise SystemExit(128 + signum)
+
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            previous[sig] = signal.signal(sig, forward)
+    proc: subprocess.Popen | None = None
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            start_new_session=True,
+        )
+        assert proc.stdin and proc.stdout and proc.stderr
+        out, err, inp = (
+            proc.stdout.fileno(),
+            proc.stderr.fileno(),
+            proc.stdin.fileno(),
+        )
+        caps = {out: max_stdout, err: max_stderr}
+        kept = {out: bytearray(), err: bytearray()}
+        totals = {out: 0, err: 0}
+        deadline = time.monotonic() + timeout
+        with selectors.DefaultSelector() as selector:
+            for fd in (out, err):
+                os.set_blocking(fd, False)
+                selector.register(fd, selectors.EVENT_READ)
+            if pending:
+                os.set_blocking(inp, False)
+                selector.register(inp, selectors.EVENT_WRITE)
+            else:
+                proc.stdin.close()
+
+            def pump(wait: float) -> None:
+                nonlocal pending
+                if not selector.get_map():
+                    time.sleep(wait)
+                    return
+                for key, _ in selector.select(wait):
+                    fd = key.fd
+                    if fd == inp:
+                        try:
+                            pending = pending[os.write(fd, pending) :]
+                        except BlockingIOError:
+                            continue
+                        except BrokenPipeError:
+                            pending = pending[:0]
+                        if not pending:
+                            selector.unregister(fd)
+                            proc.stdin.close()  # type: ignore[union-attr]
+                        continue
+                    try:
+                        chunk = os.read(fd, 65536)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(fd)
+                        continue
+                    totals[fd] += len(chunk)
+                    room = caps[fd] - len(kept[fd])
+                    if room > 0:
+                        kept[fd] += chunk[:room]
+
+            while not leader_exited(proc):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                pump(min(remaining, 0.05))
+            # Leader gone or deadline passed: kill descendants still holding the
+            # pipes, then briefly drain what was already written. Once every
+            # writer is dead, EOF follows; the drain is bounded regardless.
+            kill_group(proc)
+            drain_until = time.monotonic() + 1
+            while (out in selector.get_map() or err in selector.get_map()) and (
+                time.monotonic() < drain_until
+            ):
+                pump(0.05)
+    finally:
+        if proc is not None:
+            kill_group(proc)
+            proc.wait()
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    if timed_out:
+        raise subprocess.TimeoutExpired(command, timeout)
+    assert proc is not None and proc.returncode is not None
+    return Completed(
+        proc.returncode,
+        bytes(kept[out]),
+        totals[out],
+        bytes(kept[err]),
+        totals[err],
+    )
+
+
 def capture() -> dict:
     if sys.platform != "darwin":
         raise DraftError(
@@ -202,13 +395,22 @@ def capture() -> dict:
         )
     source = Path(__file__).with_name("contextual-draft") / "capture.swift"
     try:
-        proc = subprocess.run(["swift", str(source)], capture_output=True, timeout=30)
+        # Own session + group kill: the swift driver's frontend cannot outlive it.
+        proc = run_bounded(
+            ["swift", str(source)],
+            b"",
+            30,
+            max_stdout=MAX_PROTOCOL_LINE + 1,
+            max_stderr=0,
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise DraftError("Native capture unavailable or timed out") from exc
     if proc.returncode:
         raise DraftError(
             "Native capture failed; check Accessibility permission and focus an editable non-secure field"
         )
+    if proc.stdout_bytes > MAX_PROTOCOL_LINE:
+        raise DraftError("Invalid native capture response")
     try:
         target = json.loads(proc.stdout)
     except (ValueError, UnicodeError) as exc:
@@ -219,12 +421,25 @@ def capture() -> dict:
 def validate_target(target: Any) -> dict:
     if not isinstance(target, dict) or target.get("schema_version") != 1:
         raise DraftError("Unsupported target schema")
+    # Fail closed on every security-relevant field: exact types, no truthiness.
     if target.get("secure") is not False:
         raise DraftError("Secure or unknown-security target refused")
-    if not target.get("role") or not isinstance(target.get("text"), str):
+    role, subrole = target.get("role"), target.get("subrole", "")
+    if not isinstance(role, str) or not isinstance(subrole, str | None):
+        raise DraftError("Target lacks a verifiable role")
+    if SECURE_ROLE in (role, subrole):
+        raise DraftError("Secure or unknown-security target refused")
+    if role not in SUPPORTED_ROLES:
+        raise DraftError("Unsupported target role")
+    if not isinstance(target.get("text"), str):
         raise DraftError("Target lacks text or role")
-    if not target.get("editable"):
+    if target.get("editable") is not True:
         raise DraftError("Target is not a verified editable field")
+    for key in ("text", "selected_text"):
+        value = target.get(key)
+        encoded = json.dumps(value, ensure_ascii=False).encode("utf-8")
+        if isinstance(value, str) and len(encoded) - 2 > MAX_TARGET_TEXT_JSON:
+            raise DraftError("Target field too large for bounded capture")
     return target
 
 
@@ -386,12 +601,15 @@ def generate(args: argparse.Namespace) -> None:
     try:
         # Bytes, not text mode: universal-newline decoding would rewrite \r\n and
         # \r in the generated body before the framing newline could be removed.
-        proc = subprocess.run(
+        # Own session with an EOF-independent deadline: a descendant holding the
+        # pipes can neither extend generation nor outlive it.
+        proc = run_bounded(
             command,
-            input=prompt.encode("utf-8"),
-            capture_output=True,
+            prompt.encode("utf-8"),
+            GENERATION_TIMEOUT,
+            max_stdout=MAX_DRAFT + 2,
+            max_stderr=MAX_PROVIDER_STDERR,
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-            timeout=GENERATION_TIMEOUT,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         log_event(
@@ -407,8 +625,8 @@ def generate(args: argparse.Namespace) -> None:
         args.output.parent,
         "generation_completed",
         returncode=proc.returncode,
-        stdout_bytes=len(proc.stdout),
-        stderr_bytes=len(proc.stderr),
+        stdout_bytes=proc.stdout_bytes,
+        stderr_bytes=proc.stderr_bytes,
         elapsed_s=time.monotonic() - started,
     )
     if proc.stderr:
@@ -416,14 +634,22 @@ def generate(args: argparse.Namespace) -> None:
         # never lose a successful response to an earlier attempt's stderr file.
         # private_write still refuses to overwrite anything.
         diagnostics = f"{args.output.name}.provider-stderr-{time.time_ns()}.txt"
-        private_write(
-            args.output.parent / diagnostics,
-            proc.stderr.decode("utf-8", errors="replace"),
-        )
+        text = proc.stderr.decode("utf-8", errors="replace")
+        if proc.stderr_bytes > len(proc.stderr):
+            text += (
+                f"\n[... {proc.stderr_bytes - len(proc.stderr)} bytes omitted ...]\n"
+            )
+        private_write(args.output.parent / diagnostics, text)
         log_event(args.output.parent, "provider_stderr_saved", file=diagnostics)
     if proc.returncode:
         # Provider errors can include request data; do not echo stderr.
         raise DraftError("Model process failed; no field changed")
+    if proc.stdout_bytes > MAX_DRAFT + 1:
+        # Larger than any accepted draft plus the framing newline; output was capped.
+        log_event(args.output.parent, "draft_rejected", reason="size_limit")
+        raise DraftError(
+            "Draft exceeds 16000-byte insertion/preview limit; no field changed"
+        )
     try:
         stdout = proc.stdout.decode("utf-8")
     except UnicodeError as exc:
