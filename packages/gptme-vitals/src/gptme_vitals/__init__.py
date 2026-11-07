@@ -17,6 +17,12 @@ from gptme_vitals.envelope import (
     roll_up_envelopes,
     utcnow_rfc3339,
 )
+from gptme_vitals.publish import (
+    PublishError,
+    load_envelope,
+    load_envelopes,
+    publish_page,
+)
 from gptme_vitals.routes import (
     NAV_CSS,
     DashboardRoute,
@@ -43,6 +49,10 @@ __all__ = [
     "BuildError",
     "derive_core",
     "write_core_files",
+    "PublishError",
+    "load_envelope",
+    "load_envelopes",
+    "publish_page",
     "NAV_CSS",
     "DashboardRoute",
     "RefreshCadence",

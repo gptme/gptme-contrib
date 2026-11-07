@@ -197,7 +197,46 @@ write_core_files("state/vitals", core, headline)
 It does not import `fleet_vitals`; the two share only the schema strings and the
 status vocabulary.
 
+## Private and public roots
+
+`publish_page` writes each envelope by construction, not by a filter:
+
+| route visibility | private root | public root |
+|---|---|---|
+| `PUBLIC` | `to_private()` (with `detail`), mode 0600 | `to_public()` (no `detail`) |
+| `PRIVATE` | `to_private()` | nothing |
+
+The location under either root is the route's `summary_source`, which must be a
+relative path with no `..`. The roots must not overlap (identical, nested either
+way, or reached through a symlink): that would make the private root reachable
+through the served tree, so it raises `PublishError` before anything is written.
+
+`load_envelope` reads a stored envelope back and drops `detail`. A missing,
+unparsable, wrongly-shaped or unrecognised-status file is a *blind* page (`None`),
+which `derive_core` counts in `pages_unknown`; one corrupt page never stops the
+others rebuilding.
+
+## `gptme-vitals build [page...]`
+
+```txt
+gptme-vitals build [page...] --registry pkg.mod:REGISTRY --emitters pkg.mod:EMITTERS \
+    --private-root DIR --public-root DIR --agent NAME
+```
+
+`REGISTRY` is a `RouteRegistry`; `EMITTERS` maps `slug -> () -> PageEnvelope`.
+Naming pages rebuilds only those. `core.json` and `headline.json` are always
+re-derived over **all** pages, the rest read back from the private root, so a
+partial build never leaves the fleet view describing only what was just touched.
+Reading from the private root (not the served one) means a private page feeding a
+dimension counts the same whether or not it was rebuilt this run.
+
+A failing emitter is reported, the other pages still publish, and the failed
+page keeps its previous file. Exit status is 1 if any page or the derived files
+failed, 2 for a usage error (unknown page, bad `module:ATTR`, overlapping roots).
+A page that fails stays at its last published status; it does not turn `stale`
+by itself, so schedule a freshness check on `generated_at` if that matters.
+
 ## Next in slice 1
 
-The portal's single renderer and a `gptme-vitals build [page...]` CLI with
-per-page timers generated from each route's `cadence`.
+The portal's single renderer and per-page systemd timers generated from each
+route's `cadence`.

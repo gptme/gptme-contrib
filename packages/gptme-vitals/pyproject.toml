@@ -5,6 +5,9 @@ description = "Shared agent-dashboard skeleton for gptme agents: typed page enve
 requires-python = ">=3.11"
 dependencies = []
 
+[project.scripts]
+gptme-vitals = "gptme_vitals.cli:main"
+
 [project.optional-dependencies]
 test = [
     "pytest>=7.0",
