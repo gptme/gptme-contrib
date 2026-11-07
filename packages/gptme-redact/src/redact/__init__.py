@@ -471,12 +471,12 @@ _PATTERNS: list[Pattern] = [
     # patterns: token/PII substitution must not hide a CRITICAL assignment.
     # Specific CRITICAL patterns keep their own category. Only the value group is
     # redacted (value_only), preserving the key name for debuggability. The name
-    # must be SNAKE_CASE with the secret keyword as a `_`-delimited segment (so
+    # must be a secret keyword or SNAKE_CASE ending in that keyword (so
     # "monkey", "MONKEY_BUSINESS", and prose like "the api key" never match).
     Pattern(
         re.compile(
-            r"\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*"
-            r"_(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)\b"
+            r"\b(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*_)?"
+            r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)\b"
             r"['\"]?\s*[:=]\s*"
             # Quoted values include punctuation/spaces and escaped delimiters.
             # Truncated snippets end at a line boundary or EOF instead of a
@@ -715,7 +715,7 @@ def redact(
                         json.loads(base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)))
                         for s in (header, payload)
                     ]
-                except (ValueError, UnicodeDecodeError, binascii.Error):
+                except (ValueError, UnicodeDecodeError, binascii.Error, RecursionError):
                     return matched
                 if not all(isinstance(obj, dict) for obj in objects):
                     return matched

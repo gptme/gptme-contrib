@@ -71,7 +71,7 @@ _HTML_SCRIPT_REGEX = re.compile(
     # [text](javascript:...) -- the common firecrawl output form.
     # HTML attributes are parsed separately to decode character references
     # without turning escaped prose into executable-looking HTML.
-    r"\(\s*"
+    r"\(\s*<?"
     r"(?:javascript|vbscript|data)\s*:"
     r"|"
     # Reference-style Markdown destinations, including angle brackets and a

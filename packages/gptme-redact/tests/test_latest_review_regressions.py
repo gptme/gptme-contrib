@@ -84,3 +84,30 @@ def test_cli_latest_bypasses_refuse_output(text, tmp_path, capsys):
         code = main(["sanitize-doc", str(source), "--json"])
         assert code != 0
         assert json.loads(capsys.readouterr().out)["blocked"]
+
+
+@pytest.mark.parametrize(
+    "text", ["PASSWORD=hunter2", '{"password":"hunter2"}', "TOKEN=x", "monkey=ordinary"]
+)
+def test_standalone_secret_keyword(text):
+    result = redact(text, literals=[])
+    assert result.blocked == (not text.startswith("monkey"))
+    if result.blocked:
+        assert "hunter2" not in result.redacted
+
+
+@pytest.mark.parametrize("scheme", ["javascript", "vbscript", "data"])
+def test_inline_angle_destination_is_blocked(scheme):
+    assert scan_document(f"[click](<{scheme}:payload>)").blocked
+
+
+def test_deeply_nested_jwt_candidate_does_not_crash(monkeypatch):
+    def reject_nested_json(_):
+        raise RecursionError("nested JSON")
+
+    monkeypatch.setattr("redact.json.loads", reject_nested_json)
+    header = _segment('{"alg":"HS256","x":' + "[" * 2000 + "0" + "]" * 2000 + "}")
+    payload = _segment('{"sub":"example"}')
+    token = f'{header}.{payload}.{"x" * 43}'
+    result = redact(token, literals=[])
+    assert result.input_chars == len(token)
