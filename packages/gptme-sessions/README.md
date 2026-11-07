@@ -246,7 +246,13 @@ Reservations default to
 journal trees have independent owner namespaces. Paths use the resolved journal
 directory name. The location can be moved with `--reservation-dir`; give independent
 journal trees distinct explicit reservation directories. Corrupt or mismatched
-reservation metadata fails closed (exit 1) rather than guessing.
+reservation metadata fails closed (exit 1) rather than guessing. Historical lookup
+validates the complete owner record before skipping another run; retries find
+existing owned suffixes before attempting newly available canonical paths.
+
+`--date` must be a valid `YYYY-MM-DD` calendar date. Run type, label and UUID must
+be non-empty filename components without path separators or NUL. Invalid inputs
+fail before any directories or journal files are created.
 
 ## Where trajectories are discovered
 
