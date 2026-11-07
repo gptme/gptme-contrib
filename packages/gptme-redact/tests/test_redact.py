@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 
 import pytest
@@ -713,6 +714,7 @@ def test_collect_secret_literals_ignores_short_values(monkeypatch):
 
 
 def test_collect_secret_literals_ignores_non_secret_names(monkeypatch):
+    monkeypatch.setattr(os, "environ", {})
     monkeypatch.setenv("PLAIN_LONG_VAR", "notasecretbutlong")
     assert "notasecretbutlong" not in collect_secret_literals()
 
