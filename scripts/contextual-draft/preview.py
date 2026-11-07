@@ -209,6 +209,9 @@ class Generation:
 
     def __init__(self, command: list[str]):
         self._lock = threading.Lock()
+        # Set once the first reaper has finished with the group; a released
+        # group id may be reused and is never signalled again.
+        self._released = False
         self.proc = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
@@ -222,10 +225,11 @@ class Generation:
         while True:
             with self._lock:
                 returncode = self.proc.poll()
-                if returncode is not None:
-                    # Finished: kill any leftover descendants now, while this
-                    # object still owns the group; stop() is a no-op afterwards.
+                if returncode is not None and not self._released:
+                    # First reaper: kill leftover descendants while this object
+                    # still owns the group, then release it for good.
                     core.kill_group(self.proc)
+                    self._released = True
             if returncode is not None:
                 return returncode
             time.sleep(interval)
@@ -233,9 +237,10 @@ class Generation:
     def stop(self, grace: float = 2.0) -> None:
         """SIGTERM the group, wait for the leader, then SIGKILL survivors and reap."""
         with self._lock:
-            if self.proc.returncode is not None:
+            if self._released or self.proc.returncode is not None:
                 return  # Already reaped: the group id may now belong to others.
             core.stop_group(self.proc, grace)
+            self._released = True
 
 
 def main() -> None:

@@ -454,19 +454,32 @@ MIN_TRUNCATED_CONTENT = 2000
 BUDGET_MARKER = "\n[... middle omitted to fit request budget ...]\n"
 
 
+def _json_size(text: str) -> int:
+    """Bytes a string occupies inside the encoded request, without its quotes."""
+    return len(json.dumps(text, ensure_ascii=False).encode("utf-8")) - 2
+
+
 def _fit_bytes(text: str, budget: int) -> str:
-    """Bound text to budget UTF-8 bytes, keeping head and (larger) tail."""
-    raw = text.encode("utf-8")
-    if len(raw) <= budget:
+    """Bound text to budget JSON-encoded bytes, keeping head and (larger) tail.
+
+    Measured as encoded, like the request budget: escapes such as \\u0001 take
+    six bytes, so raw UTF-8 size would under-count and drop instead of truncate.
+    """
+    if _json_size(text) <= budget:
         return text
-    room = max(budget - len(BUDGET_MARKER.encode("utf-8")), 0)
-    head = room // 3
-    tail = room - head
-    return (
-        raw[:head].decode("utf-8", errors="ignore")
-        + BUDGET_MARKER
-        + raw[len(raw) - tail :].decode("utf-8", errors="ignore")
-    )
+
+    def cut(keep: int) -> str:
+        head = keep // 3
+        return text[:head] + BUDGET_MARKER + text[len(text) - (keep - head) :]
+
+    low, high = 0, len(text)  # Largest kept-character count that fits.
+    while low < high:
+        middle = (low + high + 1) // 2
+        if _json_size(cut(middle)) <= budget:
+            low = middle
+        else:
+            high = middle - 1
+    return cut(low)
 
 
 def compose_request(base: dict, observations: list[dict]) -> tuple[str, dict]:

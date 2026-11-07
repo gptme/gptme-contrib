@@ -947,3 +947,33 @@ def test_preview_kills_descendants_after_leader_exits(
     else:
         assert job.wait() == 0
     _assert_stopped(beat)
+
+
+def test_stop_then_wait_never_signals_released_group(monkeypatch):
+    preview = _load_launcher("preview", monkeypatch)
+    job = preview.Generation([sys.executable, "-c", "import time; time.sleep(30)"])
+    job.stop(grace=0.5)  # First reaper: kills and releases the group.
+    signalled = []
+    monkeypatch.setattr(os, "killpg", lambda *a: signalled.append(a))
+    # The worker resuming wait() after close() must not signal a released group.
+    assert job.wait() == -signal.SIGTERM
+    job.stop()
+    assert signalled == []
+
+
+def test_escaped_observation_is_truncated_not_dropped():
+    base = {
+        "schema_version": 1,
+        "instruction": "Reply",
+        "target": TARGET,
+        "agent_context": [{"source": "ctx", "content": "a" * 80000}],
+        "coverage": {"retrieval": "test"},
+    }
+    # 12 KB raw but 72 KB JSON-encoded; roughly 19 KB of budget remains.
+    row = {"snapshot_id": "esc", "content": "\x01" * 12000}
+    encoded, fit = module.compose_request(base, [row])
+    assert len(encoded.encode()) <= module.MAX_REQUEST
+    assert fit["truncated"] == ["esc"] and fit["dropped"] == []
+    content = fit["kept"][0]["content"]
+    assert module.BUDGET_MARKER in content
+    assert content.count("\x01") > 2000
