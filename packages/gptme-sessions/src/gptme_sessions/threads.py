@@ -88,8 +88,11 @@ class _Index:
             labels: set[str] = {str(n["id"])[:8]}
             if n.get("short"):
                 labels.add(str(n["short"]))
-            if re.fullmatch(r"[0-9a-f]{4}", str(n["id"])[:4]):
-                labels.add(str(n["id"])[:4])
+            labels.update(
+                str(n["id"])[:length]
+                for length in range(4, 9)
+                if re.fullmatch(r"[0-9a-f]{4,8}", str(n["id"])[:length])
+            )
             for lb in labels - {""}:
                 self.short[(n["agent"], lb)].append(i)
                 self.short_any[lb].append(i)
@@ -104,11 +107,14 @@ class _Index:
                 return nearest(self.nodes, own, t) if t is not None else own[-1]
             # A unique exact id can name a cross-agent parent. A collision cannot.
             return exact[0] if len(exact) == 1 else None
-        for key in (sid[:8], sid[:4]) if len(sid) >= 4 else ():
-            cands = self.short.get((agent, key)) if agent else None
-            cands = cands or (self.short_any.get(key) if len(key) == 8 else None)
-            if cands:
-                return nearest(self.nodes, cands, t) if t is not None else cands[-1]
+        # Only an actual short label may fall back to the label index. Never
+        # discard characters from an absent full ID or an unmatched longer label.
+        if not re.fullmatch(r"[0-9a-f]{4,8}", sid):
+            return None
+        cands = self.short.get((agent, sid)) if agent else None
+        cands = cands or (self.short_any.get(sid) if len(sid) == 8 else None)
+        if cands:
+            return nearest(self.nodes, cands, t) if t is not None else cands[-1]
         return None
 
 

@@ -253,3 +253,38 @@ def test_uuid_four_character_mention_stays_with_own_agent():
     edges, _ = L.mine_edges(nodes)
     assert "mention" in kinds(edges, 1, 2)
     assert "mention" not in kinds(edges, 0, 2)
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "abcdef12-0000-0000-0000-000000000002",
+        "abcdef129999",
+        "abcdef99",
+        "abcdef1f",
+        "journal/absent.md",
+    ],
+)
+def test_absent_identifier_does_not_fall_back_to_a_shorter_prefix(missing):
+    nodes = [
+        S(0, id="abcdef12-0000-0000-0000-000000000001"),
+        S(1, parent=missing, journal_links=[missing]),
+    ]
+    st = L.attach_commits(
+        nodes, [{"agent": "bob", "sha": "abcdef1000", "ts": nodes[0]["end"], "sids": [missing]}]
+    )
+    assert st["unresolved"] == 1
+    assert not nodes[0].get("delivered_shas")
+    edges, st = L.mine_edges(nodes)
+    assert st["parent_unresolved"] == 1
+    assert not edges
+
+
+@pytest.mark.parametrize("label", ["abcd", "abcde", "abcdef", "abcdef1", "abcdef12"])
+def test_short_session_trailer_matches_all_supplied_characters(label):
+    nodes = [S(0, id="abcdef12-0000-0000-0000-000000000001")]
+    st = L.attach_commits(
+        nodes, [{"agent": "bob", "sha": "abcdef1000", "ts": nodes[0]["end"], "sids": [label]}]
+    )
+    assert st["attached"] == 1
+    assert nodes[0]["delivered_shas"] == ["abcdef1000"]
