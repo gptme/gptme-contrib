@@ -693,3 +693,54 @@ def test_structured_401_error_stays_token_outage(tmp_path: Path) -> None:
     status = assess(tmp_path)
     assert status["outage"] is True
     assert status["billing_outage"] is False
+
+
+def test_escaped_quoted_passphrase_in_structured_error_redacted(tmp_path: Path) -> None:
+    # Regression (contrib#2038 review, fp 3a7714caa2f2): json.dumps() of a
+    # structured error escapes the quotes around a secret value, so the
+    # redactor must handle ``password=\"...\"`` too, not just ``password="..."``.
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "auth")
+        r["error"] = {
+            "message": 'login failed: password="correct horse battery staple" '
+            'and \'x\' "api_key": "sk two words"',
+            "code": 401,
+        }
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    body = soc._issue_body(cfg_for(tmp_path), status)
+    for leaked in ("correct", "horse", "battery", "staple", "two words"):
+        assert leaked not in status["sample_error"]
+        assert leaked not in body
+    assert "login failed" in status["sample_error"]
+
+
+def test_bare_jwt_redacted() -> None:
+    # Regression (contrib#2038 review, fp e7e148a81bdd): a JWT with short
+    # header/payload segments and a digit-free signature evaded the generic
+    # opaque-token rule.
+    jwt = (
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPA"
+    )
+    out = soc._redact(f"Invalid JWT: {jwt}")
+    assert out == "Invalid JWT: [REDACTED]"
+    for part in jwt.split("."):
+        assert part not in out
+
+
+def test_structured_403_with_reason_phrase_classified_as_billing(
+    tmp_path: Path,
+) -> None:
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "auth")
+        r["error"] = {"message": "nope", "status": "403 Forbidden"}
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    assert status["billing_outage"] is True
+    # ...but a 4030-ish code must not match.
+    assert soc._is_structured_403({"code": "4031"}) is False

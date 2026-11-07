@@ -100,12 +100,21 @@ _SECRET_PATTERNS = (
     # key=value / key: value for secret-ish keys. A quoted value is removed
     # whole (passphrases contain spaces; escaped quotes don't end it), and an
     # unterminated quote — e.g. cut off by an upstream cap — runs to the end
-    # rather than letting the tail of the secret through.
+    # rather than letting the tail of the secret through. The first two
+    # branches handle JSON-*escaped* quotes (``password=\\"a b\\"``), which is
+    # what ``_error_text()`` produces when a structured payload's message
+    # carries a quoted secret; they must precede the unquoted branch, which
+    # would otherwise consume only the backslash.
     re.compile(
         r"(?i)\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|"
-        r"password|passwd|authorization|x-api-key)[\"']?\s*[:=]\s*)"
-        r"(?:\"(?:[^\"\\]|\\.)*(?:\"|$)|'(?:[^'\\]|\\.)*(?:'|$)|[^\s\"',;}]+)"
+        r"password|passwd|authorization|x-api-key)(?:\\?[\"'])?\s*[:=]\s*)"
+        r"(?:\\\"(?:(?!\\\").)*(?:\\\"|$)|\\'(?:(?!\\').)*(?:\\'|$)"
+        r"|\"(?:[^\"\\]|\\.)*(?:\"|$)|'(?:[^'\\]|\\.)*(?:'|$)|[^\s\"',;}]+)"
     ),
+    # Bare JWTs: the header is always base64url of ``{"`` → ``eyJ``. Segments
+    # are short and may lack digits, so the generic opaque-token rule below
+    # can miss them entirely.
+    re.compile(r"\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]*)?"),
     # Any remaining long opaque token (JWTs, hex/base64 blobs). Must mix letters
     # and digits so long snake_case error codes such as
     # ``oauth_not_allowed_for_organization`` survive — remediation keys on them.
@@ -132,6 +141,7 @@ _STATUS_KEYS = frozenset({"code", "status", "status_code", "statuscode", "http_s
 def _is_structured_403(raw: object) -> bool:
     """True when a structured (dict/list) error carries HTTP status 403.
 
+    Accepts ``403``, ``"403"`` and ``"403 Forbidden"`` status values.
     Serializing a payload like ``{"message": "Forbidden", "code": 403}`` yields
     none of the textual BILLING_ERROR_SUBSTRINGS, so without this the billing
     classification silently falls back to the token-reauth hint.
@@ -139,7 +149,7 @@ def _is_structured_403(raw: object) -> bool:
     if isinstance(raw, dict):
         for k, v in raw.items():
             if isinstance(k, str) and k.lower() in _STATUS_KEYS:
-                if not isinstance(v, bool) and str(v).strip() == "403":
+                if not isinstance(v, bool) and re.match(r"403\b", str(v).strip()):
                     return True
             if _is_structured_403(v):
                 return True
