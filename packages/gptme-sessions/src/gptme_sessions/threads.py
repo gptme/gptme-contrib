@@ -97,11 +97,13 @@ class _Index:
                 self.short[(n["agent"], lb)].append(i)
                 self.short_any[lb].append(i)
 
-    def resolve(self, sid: str, agent: str | None, t: float | None = None) -> int | None:
-        """Session for an id or label; ambiguity is settled by time proximity."""
+    def resolve(
+        self, sid: str, agent: str | None, t: float | None = None, *, exclude: int | None = None
+    ) -> int | None:
+        """Session for an id or label; exclude a referencing node before ranking."""
         sid = str(sid).strip()
         if sid in self.by_id:
-            exact = self.by_id[sid]
+            exact = [i for i in self.by_id[sid] if i != exclude]
             own = [i for i in exact if self.nodes[i]["agent"] == agent]
             if own:
                 return nearest(self.nodes, own, t) if t is not None else own[-1]
@@ -111,8 +113,10 @@ class _Index:
         # discard characters from an absent full ID or an unmatched longer label.
         if not re.fullmatch(r"[0-9a-f]{4,8}", sid):
             return None
-        cands = self.short.get((agent, sid)) if agent else None
-        cands = cands or (self.short_any.get(sid) if len(sid) == 8 else None)
+        cands = [i for i in self.short.get((agent, sid), []) if i != exclude] if agent else []
+        cands = cands or (
+            [i for i in self.short_any.get(sid, []) if i != exclude] if len(sid) == 8 else []
+        )
         if cands:
             return nearest(self.nodes, cands, t) if t is not None else cands[-1]
         return None
@@ -235,7 +239,7 @@ def mine_edges(
     # parent: exact id, else label (own agent first, then fleet-wide: cross-agent parents)
     for i, n in enumerate(nodes):
         if n.get("parent"):
-            j = idx.resolve(n["parent"], n["agent"], n["start"])
+            j = idx.resolve(n["parent"], n["agent"], n["start"], exclude=i)
             if j is not None:
                 add(j, i, "parent")
             else:

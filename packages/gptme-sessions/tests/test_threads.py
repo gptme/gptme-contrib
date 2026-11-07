@@ -335,3 +335,30 @@ def test_ambiguous_delivered_abbreviation_does_not_invent_an_owner():
     assert "commit" in kinds(edges, 1, 3)
     assert "commit" not in kinds(edges, 0, 3)
     assert "commit" not in kinds(edges, 2, 3)
+
+
+@pytest.mark.parametrize("label", ["abcd", "abcde", "abcdef", "abcdef1", "abcdef12"])
+def test_parent_label_excludes_child_before_choosing_nearest(label):
+    nodes = [
+        S(0, id="abcdef12-0000-0000-0000-000000000001"),
+        S(1, id="abcdef12-0000-0000-0000-000000000002", parent=label),
+    ]
+    edges, st = L.mine_edges(nodes)
+    assert "parent" in kinds(edges, 0, 1)
+    assert st["parent_unresolved"] == 0
+    assert L.best_predecessors(nodes, edges) == [-1, 0]
+
+
+def test_self_parent_is_unresolved_without_another_candidate():
+    nodes = [S(0, id="abcdef12-0000-0000-0000-000000000001", parent="abcd")]
+    edges, st = L.mine_edges(nodes)
+    assert not edges
+    assert st["parent_unresolved"] == 1
+
+
+def test_exact_self_parent_does_not_fall_back_to_shared_label():
+    sid = "abcdef12-0000-0000-0000-000000000001"
+    nodes = [S(0, id="abcdef12-0000-0000-0000-000000000002"), S(1, id=sid, parent=sid)]
+    edges, st = L.mine_edges(nodes)
+    assert not edges
+    assert st["parent_unresolved"] == 1
