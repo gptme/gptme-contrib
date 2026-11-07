@@ -5582,6 +5582,12 @@ def list_all_locks(cleanup: bool, output_json: bool):
     help="What/who blocks the task (required with --state waiting)",
 )
 @click.option(
+    "--wait",
+    "wait_value",
+    default=None,
+    help="Hide the task from the queue until this date (YYYY-MM-DD or YYYY-MM-DDTHH:MM).",
+)
+@click.option(
     "--body-stdin",
     is_flag=True,
     help="Read the complete body from stdin until EOF (including slow producers).",
@@ -5594,6 +5600,7 @@ def add(
     state: str,
     task_type: str,
     waiting_for: str | None,
+    wait_value: str | None,
     body_stdin: bool,
 ):
     """Create a new task from title and optional stdin body.
@@ -5611,6 +5618,9 @@ def add(
 
         # With options
         gptodo add --priority high --tags infra,context "Improve context loading"
+
+        # Hidden from the queue until a date
+        gptodo add --wait 2026-12-01 "Re-check after earnings"
 
         # With body from stdin
         echo "Detailed description here" | gptodo add "Task with body"
@@ -5633,6 +5643,27 @@ def add(
         raise click.UsageError("--state waiting requires --waiting-for")
     if waiting_for is not None and state != "waiting":
         raise click.UsageError("--waiting-for is only valid with --state waiting")
+
+    wait_iso: str | None = None
+    if wait_value is not None:
+        if state == "ready_for_review":
+            raise click.UsageError(
+                "--wait cannot be used with --state ready_for_review: "
+                "review tasks bypass wait gates. Use --state todo to defer the task."
+            )
+        from gptodo.utils import parse_wait
+
+        raw_wait = wait_value.strip()
+        # The legacy metadata reader truncates date-only strings to ten
+        # characters. CLI input must not silently lose a suffix or time.
+        parsed_wait = (
+            parse_wait(raw_wait)
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[T ].+)?", raw_wait)
+            else None
+        )
+        if parsed_wait is None:
+            raise click.UsageError("Invalid --wait format. Use YYYY-MM-DD or YYYY-MM-DDTHH:MM")
+        wait_iso = parsed_wait.isoformat()
 
     console = Console()
     repo_root = find_repo_root(Path.cwd())
@@ -5671,6 +5702,15 @@ def add(
             frontmatter_data["tags"] = tag_list
 
     body = sys.stdin.read().strip() if body_stdin else _read_piped_body(sys.stdin)
+    if _body_looks_like_frontmatter(body):
+        # The body goes below gptodo's own frontmatter, so keys in a leading
+        # `---` block are inert text, not metadata (e.g. a piped `wait:` is
+        # silently ignored and the task shows as ready immediately).
+        click.echo(
+            "Warning: body starts with a '---' key block; it is stored as body text, "
+            "not frontmatter. Use flags (e.g. --wait, --state) or `gptodo edit --set`.",
+            err=True,
+        )
 
     # Build file content
     lines = ["---"]
@@ -5689,6 +5729,8 @@ def add(
         lines.append("waiting_spell_count: 1")
     elif state in ("done", "cancelled"):
         lines.append(f"completed: {stamp}")
+    if wait_iso is not None:
+        lines.append(f"wait: {wait_iso}")
     lines.append("---")
     lines.append("")
     lines.append(f"# {title}")
@@ -5704,6 +5746,22 @@ def add(
     filepath.write_text(content)
 
     console.print(f"[green]✓ Created task:[/] {filepath}")
+
+
+def _body_looks_like_frontmatter(body: str) -> bool:
+    """True when a body opens with a delimited block containing a ``key:`` line."""
+    lines = body.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False
+    has_key = False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return has_key
+        # This is a warning heuristic, not a YAML validator: comments, lists,
+        # and multiline values must not hide an inert top-level metadata key.
+        if re.match(r"^[A-Za-z_][\w-]*:", line):
+            has_key = True
+    return False
 
 
 def _read_piped_body(stream: Any, timeout: float = 0.5) -> str:
