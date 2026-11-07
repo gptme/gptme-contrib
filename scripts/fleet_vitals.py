@@ -22,7 +22,8 @@ contract spec lives in alice's
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 CORE_SCHEMA = "fleet-vitals/core@1"
@@ -152,7 +153,251 @@ def emit(vitals_dir: str | Path, core: dict, headline: dict | None = None) -> No
             stale.unlink()
 
 
+# ---------------------------------------------------------------------------
+# Inference-health detector (shared, agent-agnostic)
+#
+# Every pre-existing fleet health signal measured *liveness* — the service ran,
+# a standup was written, ``loggedIn=true`` — none measured whether a model call
+# actually succeeded. So an agent's vitals could read ``healthy`` ("4/4
+# standups") through a multi-day billing outage with 0 productive sessions and
+# thousands of ``api_error_403`` records (the Oct 26 → Nov 5 2026 Alice outage).
+#
+# This detector reads the agent's ``session-records.jsonl`` (no network, no
+# credential — same source every agent already writes) and derives a real
+# inference-health status that *names the reason* when it's down. The schema is
+# shared across all Superuser Labs agents, so this lives in the shared layer:
+# Alice consumes it via her ``inference_health`` shim, Bob/Gordon import these
+# functions or call the ``inference`` CLI subcommand below — no per-agent fork.
+#
+# Status values match the envelope contract above: down > degraded > stale >
+# healthy.
+# ---------------------------------------------------------------------------
+
+
+def _parse_record_ts(rec: dict) -> datetime | None:
+    ts = rec.get("timestamp") or rec.get("end_time") or rec.get("start_time")
+    if not ts:
+        return None
+    try:
+        parsed = datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def authbilling_reason(rec: dict) -> str | None:
+    """Return a human label if a session record is an auth/billing failure, else None.
+
+    Covers the 403 class that silently stalled the fleet: billing (payment past
+    due) and org-level OAuth refusal (``oauth_not_allowed_for_organization``).
+    """
+    if rec.get("outcome") != "failed":
+        return None
+    fr = str(rec.get("failure_reason") or "").lower()
+    err_raw = rec.get("error") or ""
+    err = (err_raw if isinstance(err_raw, str) else json.dumps(err_raw)).lower()
+    is_403 = (
+        fr == "api_error_403"
+        or "403" in fr
+        or "oauth_not_allowed" in err
+        or "status:403" in err
+        or re.search(r"\b(?:http|status|code)\W{0,3}403\b", err) is not None
+        or (isinstance(err_raw, dict) and err_raw.get("status") == 403)
+    )
+    if not is_403:
+        return None
+    if any(w in err for w in ("past due", "payment", "billing", "renew")):
+        return "403 billing (payment past due)"
+    if "oauth_not_allowed" in err:
+        return "403 auth (oauth not allowed for org)"
+    return "403 auth/billing"
+
+
+def is_launch_artifact(rec: dict) -> bool:
+    """True for records that carry no evidence about inference health.
+
+    Two kinds, both "the model never actually ran for this record":
+
+    - ``model == "<synthetic>"`` without ``outcome == "failed"``: Claude Code
+      writes a synthetic assistant turn when the API call itself errors, and a
+      trajectory sweep (``gptme-sessions sync``) later imports that transcript
+      as a ``noop`` — typically a *duplicate* of the runner's own ``failed``
+      record for the same launch, timestamped at launch start (so it sorts just
+      before that failure).
+    - ``outcome == "skipped"``: the run was gated off before any model call
+      (quota/rate-limit), by the recording convention.
+
+    The trailing auth/billing walk must step over these rather than stop on
+    them: during the Oct–Nov 2026 billing outage every 403 ``failed`` record had
+    a synthetic ``noop`` twin interleaved before it, which cut the streak to one
+    record and turned an obvious ``down`` (904 consecutive 403s) into a
+    non-escalating ``degraded``.
+    """
+    if rec.get("outcome") == "skipped":
+        return True
+    return rec.get("model") == "<synthetic>" and rec.get("outcome") != "failed"
+
+
+def parse_jsonl_lines(lines: object) -> list[tuple[datetime, dict]]:
+    """Parse an iterable of JSONL lines into sorted (timestamp, record) pairs.
+
+    Shared by the path loader and by callers that already hold the records as
+    text (e.g. a tail fetched over SSH by a fleet trust layer), so the detector
+    logic stays single-source. Unparseable or timestamp-less lines are skipped.
+    """
+    out: list[tuple[datetime, dict]] = []
+    for line in lines:  # type: ignore[attr-defined]
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        ts = _parse_record_ts(rec)
+        if ts is None:
+            continue
+        out.append((ts, rec))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def inference_status_from_records(
+    records: list[tuple[datetime, dict]],
+    now: datetime,
+    window_hours: int,
+) -> tuple[str, str, dict]:
+    """Core detector: derive (status, detail, metrics) from parsed records.
+
+    Pure — takes already-loaded records so every caller (path CLI, SSH-tail
+    trust layer) shares one implementation.
+
+    - ``healthy``  — at least one productive session in the window.
+    - ``degraded`` — 0 productive in the window, no clear auth/billing failure
+      streak (idle/noop starvation, not an outage).
+    - ``down``     — 0 productive in the window AND a trailing streak of
+      auth/billing failures; detail names the reason and how long it's run.
+    - ``stale``    — no records at all in the window (loop may not be running).
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    cutoff = now - timedelta(hours=window_hours)
+    in_window = [(t, r) for (t, r) in records if cutoff <= t <= now]
+
+    productive = sum(
+        1
+        for _, r in in_window
+        if r.get("outcome") == "productive" and not is_launch_artifact(r)
+    )
+    metrics: dict[str, object] = {
+        "window_hours": window_hours,
+        "records_in_window": len(in_window),
+        "productive_in_window": productive,
+    }
+
+    if not in_window:
+        return "stale", f"no autonomous sessions recorded in {window_hours}h", metrics
+
+    if productive > 0:
+        return (
+            "healthy",
+            f"{productive} productive session(s) in {window_hours}h",
+            metrics,
+        )
+
+    # 0 productive in window — is there an active auth/billing outage? Walk from
+    # the most recent record backwards while it's an auth/billing failure; the
+    # start of that trailing streak is when the outage began.
+    # Exclude future-dated records: a future productive would terminate the scan
+    # early (hiding a real outage), and a future 403 would open a false one.
+    streak: list[tuple[datetime, dict]] = []
+    reason: str | None = None
+    for t, r in reversed(
+        sorted([(t, r) for (t, r) in records if t <= now], key=lambda x: x[0])
+    ):
+        if is_launch_artifact(r):
+            continue
+        lbl = authbilling_reason(r)
+        if lbl is None:
+            break
+        reason = reason or lbl
+        streak.append((t, r))
+    if streak:
+        since = streak[-1][0]
+        metrics["authbilling_streak"] = len(streak)
+        metrics["outage_since"] = since.isoformat()
+        detail = (
+            f"0 productive in {window_hours}h; {reason} since "
+            f"{since.astimezone(timezone.utc):%Y-%m-%d %H:%M UTC} ({len(streak)} consecutive failures)"
+        )
+        return "down", detail, metrics
+
+    return "degraded", f"0 productive sessions in {window_hours}h", metrics
+
+
+def inference_status_from_lines(
+    lines: object,
+    now: datetime | None = None,
+    window_hours: int = 24,
+) -> tuple[str, str, dict]:
+    """Inference health from JSONL lines already in memory.
+
+    Used by a fleet trust layer that fetches a records tail over SSH rather
+    than reading a local path.
+    """
+    now = now or datetime.now(timezone.utc)
+    return inference_status_from_records(parse_jsonl_lines(lines), now, window_hours)
+
+
+def inference_status_from_path(
+    path: str | Path,
+    now: datetime | None = None,
+    window_hours: int = 24,
+) -> tuple[str, str, dict]:
+    """Inference health from a ``session-records.jsonl`` path (credential-free)."""
+    now = now or datetime.now(timezone.utc)
+    p = Path(path)
+    if not p.exists():
+        return inference_status_from_records([], now, window_hours)
+    with p.open() as f:
+        return inference_status_from_records(parse_jsonl_lines(f), now, window_hours)
+
+
+def _inference_cli(argv: list[str] | None = None) -> int:
+    """CLI contract for agents that call the detector as a subprocess.
+
+    ``python3 fleet_vitals.py inference --records PATH [--window-hours N] [--json]``
+
+    Prints ``status: detail`` (or JSON with ``--json``) and exits 0 only when
+    ``healthy`` — so a shell heartbeat can gate a Kuma ``up`` push on exit code.
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(prog="fleet_vitals.py inference")
+    ap.add_argument("--records", required=True, help="path to session-records.jsonl")
+    ap.add_argument("--window-hours", type=int, default=24)
+    ap.add_argument("--json", action="store_true", help="emit JSON")
+    args = ap.parse_args(argv)
+    status, detail, metrics = inference_status_from_path(
+        args.records, window_hours=args.window_hours
+    )
+    if args.json:
+        print(json.dumps({"status": status, "detail": detail, **metrics}))
+    else:
+        print(f"{status}: {detail}")
+    return 0 if status == "healthy" else 1
+
+
 if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "inference":
+        raise SystemExit(_inference_cli(sys.argv[2:]))
+
     # Smoke test / usage example.
     core = make_core(
         "demo",
@@ -171,3 +416,159 @@ if __name__ == "__main__":
     print(json.dumps({"core": core, "headline": headline}, indent=2))
     assert core["status"] == "degraded", "rollup should pick worst dimension"
     print("\nOK: rollup picked worst-of dimension status =", core["status"])
+
+    # Inference detector self-check — the four states (regression guard for the
+    # Oct 26 → Nov 5 2026 silent billing outage that read as healthy).
+    _now = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
+
+    def _r(hours_ago: float, outcome: str, **extra: object) -> dict:
+        return {
+            "timestamp": (_now - timedelta(hours=hours_ago)).isoformat(),
+            "outcome": outcome,
+            **extra,
+        }
+
+    def _check(recs: list[dict], expect: str) -> None:
+        status, _, _ = inference_status_from_records(
+            parse_jsonl_lines(json.dumps(r) for r in recs), _now, 24
+        )
+        assert status == expect, f"expected {expect}, got {status}"
+
+    _check([_r(2, "productive"), _r(1, "noop")], "healthy")
+    _check([_r(5, "noop"), _r(1, "noop")], "degraded")
+    _check([_r(40, "productive")], "stale")
+    _check(
+        [
+            _r(h, "failed", failure_reason="api_error_403", error="payment is past due")
+            for h in range(5, 0, -1)
+        ],
+        "down",
+    )
+    # A productive session after failures = recovered, not down.
+    _check(
+        [
+            _r(5, "failed", failure_reason="api_error_403", error="status:403"),
+            _r(2, "productive"),
+        ],
+        "healthy",
+    )
+    # Non-string timestamp must not raise — record is skipped, not fatal.
+    _check([{"timestamp": 123, "outcome": "productive"}, _r(1, "noop")], "degraded")
+    # Future-dated productive record must not mask a real auth/billing outage.
+    # With future record excluded from streak scan, the 403 at 2h is correctly detected.
+    _check(
+        [
+            {
+                "timestamp": (_now + timedelta(hours=1)).isoformat(),
+                "outcome": "productive",
+            },
+            _r(2, "failed", failure_reason="api_error_403", error="status:403"),
+        ],
+        "down",
+    )
+    # Future-dated 403 must not open a false outage when recent activity is benign.
+    _check(
+        [
+            {
+                "timestamp": (_now + timedelta(hours=1)).isoformat(),
+                "outcome": "failed",
+                "failure_reason": "api_error_403",
+                "error": "status:403",
+            },
+            _r(2, "noop"),
+        ],
+        "degraded",
+    )
+    # Dict-typed error field must not raise AttributeError in authbilling_reason.
+    _check(
+        [
+            _r(
+                2,
+                "failed",
+                failure_reason="api_error_403",
+                error={"message": "payment is past due"},
+            )
+        ],
+        "down",
+    )
+    # Structured error.status == 403 with no failure_reason must be detected as down.
+    # json.dumps({"status": 403}) produces '"status": 403' — the colon-spaced form
+    # does not match the "status:403" string check, so we need the dict path.
+    _check(
+        [
+            _r(
+                2,
+                "failed",
+                error={"status": 403, "message": "payment is past due"},
+            )
+        ],
+        "down",
+    )
+    # Unsorted records must still return the correct status (fix for direct callers).
+    # Pass [(11:00, noop), (10:00, 403)] — without sorting, reversed scan treats older
+    # 403 as the latest record and would incorrectly return "down".
+    _recs_unsorted = [
+        (
+            _now - timedelta(hours=1),
+            {"outcome": "noop", "timestamp": (_now - timedelta(hours=1)).isoformat()},
+        ),
+        (
+            _now - timedelta(hours=2),
+            {
+                "outcome": "failed",
+                "failure_reason": "api_error_403",
+                "error": "status:403",
+                "timestamp": (_now - timedelta(hours=2)).isoformat(),
+            },
+        ),
+    ]
+    status_unsorted = inference_status_from_records(_recs_unsorted, _now, 24)[0]
+    assert (
+        status_unsorted == "degraded"
+    ), f"unsorted input: expected degraded, got {status_unsorted}"
+    # Non-string failure_reason (e.g. int 403) must not crash the status call.
+    _check([_r(2, "failed", failure_reason=403, error="payment is past due")], "down")
+    # Naive `now` is treated as UTC (record timestamps are normalized to UTC).
+    status_naive = inference_status_from_lines(
+        ['{"timestamp":"2026-11-06T11:00:00","outcome":"productive"}'],
+        now=datetime(2026, 11, 6, 12),
+    )[0]
+    assert status_naive == "healthy", f"naive now: expected healthy, got {status_naive}"
+    # Synthetic launch twins interleaved with 403 failures must not break the
+    # streak (Oct-Nov 2026 outage: each failure had a `<synthetic>` noop twin
+    # timestamped at launch start, i.e. just before it).
+    _twin = []
+    for h in (5, 3, 1):
+        _twin.append(_r(h + 0.01, "noop", model="<synthetic>"))
+        _twin.append(
+            _r(h, "failed", failure_reason="api_error_403", error="payment past due")
+        )
+    st, det, met = inference_status_from_records(
+        parse_jsonl_lines(json.dumps(x) for x in _twin), _now, 24
+    )
+    assert st == "down" and met.get("authbilling_streak") == 3, (st, det, met)
+    # A skipped (gated, no model call) record between failures is also neutral.
+    _check(
+        [
+            _r(3, "failed", failure_reason="api_error_403"),
+            _r(2, "skipped", failure_reason="rate_limited"),
+            _r(1, "failed", failure_reason="api_error_403"),
+        ],
+        "down",
+    )
+    # But a real noop (a model actually ran) still ends the streak.
+    _check(
+        [_r(3, "failed", failure_reason="api_error_403"), _r(1, "noop")],
+        "degraded",
+    )
+    # A 403 named only in a free-text error string (no failure_reason) is down.
+    _check([_r(1, "failed", error="HTTP 403: payment past due")], "down")
+    # A <synthetic> "productive" record carries no inference evidence either.
+    _check(
+        [
+            _r(2, "failed", failure_reason="api_error_403"),
+            _r(1, "productive", model="<synthetic>"),
+        ],
+        "down",
+    )
+    print("OK: inference detector covers healthy/degraded/stale/down + recovery")
