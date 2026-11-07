@@ -272,6 +272,32 @@ def test_cli_refreshes_inherited_cause(tmp_path: Path, capsys):
         assert capsys.readouterr().out.strip() == "spawn"
 
 
+def test_cascade_task_with_pr_coordination_key_uses_task_id():
+    """When a task is inferred from CASCADE_INTENT but the coordination key is a PR key,
+    the cause ID must be the task id, not the unrelated PR coordination key."""
+    cause = infer_cause(
+        {
+            "CASCADE_INTENT": '{"task_id": "t1"}',
+            "CASCADE_COORDINATION_CLAIMED": "1",
+            "CASCADE_COORDINATION_SOURCE": "pr",
+            "CASCADE_COORDINATION_KEY": "cascade:pr:repo:42",
+        }
+    )
+    assert cause["kind"] == "cascade-task"
+    assert cause["task"] == "t1"
+    # The PR coordination key must not bleed into the task cause ID.
+    assert cause["id"] == "t1"
+
+
+def test_pm_ci_failure_slot_is_credited_to_pr(tmp_path: Path):
+    """PM CI failure items use type=ci_failure (not ci_failure_pr); the PR must be credited."""
+    work_file = tmp_path / "work.jsonl"
+    work_file.write_text(json.dumps({"repo": "gptme/gptme", "number": 99, "type": "ci_failure"}))
+    cause = infer_cause({"PM_DISPATCH_ID": "slot-ci", "PM_WORK_FILE": str(work_file)})
+    assert cause["kind"] == "pm-slot"
+    assert cause["pr"] == "gptme/gptme#99"
+
+
 def test_cli_trigger_prints_classification(tmp_path: Path, capsys):
     with pytest.MonkeyPatch.context() as mp:
         for key in _PRODUCER_VARS:

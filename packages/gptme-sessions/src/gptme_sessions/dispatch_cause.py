@@ -54,7 +54,7 @@ PR_TYPES = frozenset(
         "reviewer_needs_fix",
         "reviewer_needs_improvement",
         "pr_changes_requested_stale",
-        "ci_failure_pr",
+        "ci_failure",
         "review_requested",
     }
 )
@@ -176,7 +176,10 @@ def infer_cause(env: Mapping[str, str]) -> dict[str, Any]:
             pr=next(iter(prs)) if len(prs) == 1 else None,
         )
     elif task:
-        cause.update(kind="cascade-task", id=env.get("CASCADE_COORDINATION_KEY") or task)
+        coord_key = env.get("CASCADE_COORDINATION_KEY") or ""
+        cause.update(
+            kind="cascade-task", id=coord_key if coord_key.startswith("cascade:task:") else task
+        )
     elif env.get("INVOCATION_ID"):
         # systemd also starts manually requested services; its invocation ID
         # establishes a service run, not proof that a timer fired.
