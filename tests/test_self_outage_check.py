@@ -646,3 +646,50 @@ def test_non_string_error_does_not_crash_assess(tmp_path: Path) -> None:
     status = assess(tmp_path)
     assert status["outage"] is True
     assert "invalid token" in status["sample_error"]
+
+
+def test_quoted_passphrase_redacted_whole(tmp_path: Path) -> None:
+    # Regression (contrib#2038 review): a quoted secret value with spaces must
+    # be removed entirely, not just up to the first space.
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "auth")
+        r["error"] = (
+            'login failed: password="correct horse battery staple"; '
+            "secret='two words' token=\"cut off mid secr"
+        )
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    body = soc._issue_body(cfg_for(tmp_path), status)
+    for leaked in ("correct", "horse", "battery", "staple", "two words", "mid secr"):
+        assert leaked not in status["sample_error"]
+        assert leaked not in body
+    assert status["sample_error"].startswith("login failed: password=[REDACTED]")
+
+
+def test_structured_403_error_classified_as_billing(tmp_path: Path) -> None:
+    # Regression (contrib#2038 review): a structured 403 payload serializes to
+    # none of the textual billing substrings, but is still a 403 outage and must
+    # get the billing/org-access remediation, not the token-reauth hint.
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "auth")
+        r["error"] = {"message": "Forbidden", "code": 403}
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    assert status["outage"] is True
+    assert status["billing_outage"] is True
+
+
+def test_structured_401_error_stays_token_outage(tmp_path: Path) -> None:
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "auth")
+        r["error"] = {"error": {"message": "invalid x-api-key", "status": 401}}
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    assert status["outage"] is True
+    assert status["billing_outage"] is False

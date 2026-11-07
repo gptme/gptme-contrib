@@ -97,10 +97,14 @@ _SECRET_PATTERNS = (
     re.compile(r"\bAIza[A-Za-z0-9_\-]{10,}"),
     # Authorization headers / bearer tokens.
     re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{6,}"),
-    # key=value / key: value for secret-ish keys.
+    # key=value / key: value for secret-ish keys. A quoted value is removed
+    # whole (passphrases contain spaces; escaped quotes don't end it), and an
+    # unterminated quote — e.g. cut off by an upstream cap — runs to the end
+    # rather than letting the tail of the secret through.
     re.compile(
         r"(?i)\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|"
-        r"password|passwd|authorization|x-api-key)[\"']?\s*[:=]\s*[\"']?)[^\s\"',;}]+"
+        r"password|passwd|authorization|x-api-key)[\"']?\s*[:=]\s*)"
+        r"(?:\"(?:[^\"\\]|\\.)*(?:\"|$)|'(?:[^'\\]|\\.)*(?:'|$)|[^\s\"',;}]+)"
     ),
     # Any remaining long opaque token (JWTs, hex/base64 blobs). Must mix letters
     # and digits so long snake_case error codes such as
@@ -120,6 +124,28 @@ def _redact(text: str) -> str:
         else:
             text = pat.sub("[REDACTED]", text)
     return text
+
+
+_STATUS_KEYS = frozenset({"code", "status", "status_code", "statuscode", "http_status"})
+
+
+def _is_structured_403(raw: object) -> bool:
+    """True when a structured (dict/list) error carries HTTP status 403.
+
+    Serializing a payload like ``{"message": "Forbidden", "code": 403}`` yields
+    none of the textual BILLING_ERROR_SUBSTRINGS, so without this the billing
+    classification silently falls back to the token-reauth hint.
+    """
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            if isinstance(k, str) and k.lower() in _STATUS_KEYS:
+                if not isinstance(v, bool) and str(v).strip() == "403":
+                    return True
+            if _is_structured_403(v):
+                return True
+    elif isinstance(raw, list):
+        return any(_is_structured_403(v) for v in raw)
+    return False
 
 
 def _error_text(record: dict) -> str:
@@ -279,6 +305,7 @@ def assess(
         ]
         billing_outage = (
             bool(billing_errors)
+            or any(_is_structured_403(r.get("error")) for r in auth_failure_records)
             or (dominant_reason in BILLING_OUTAGE_REASONS)
             or any(
                 r.get("failure_reason") in BILLING_OUTAGE_REASONS
