@@ -122,6 +122,9 @@ commit-side hooks resolve from the worktree root, while receive-side hooks
 `push-to-checkout`) resolve from the Git directory. The helper installs each group
 in its own effective directory; absolute paths and explicit `--hooks-dir` /
 `--global-dir` overrides name the same concrete directory for both groups.
+Wrappers are published by atomic rename. New wrappers use mode `0755`; replacing
+an existing hook or refreshing a wrapper preserves its access permissions
+(with owner execution enabled), including restricted group/private modes.
 
 ## Customization
 

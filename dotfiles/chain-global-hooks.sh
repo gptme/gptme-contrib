@@ -321,7 +321,24 @@ EOF
         rm -f "$temp"
         return 1
     fi
-    if ! chmod +x "$temp" || ! mv -f "$temp" "$dest"; then
+    # mktemp starts at 0600: +x alone leaves shared scripts unreadable.
+    # Preserve the wrapper/original hook's access bits; new hooks use 0755.
+    local permission_source="$dest"
+    [ -e "$permission_source" ] || permission_source="$local_hook"
+    if ! python3 - "$temp" "$permission_source" <<'PY'
+import os
+import stat
+import sys
+
+source = sys.argv[2]
+mode = stat.S_IMODE(os.stat(source).st_mode) & 0o777 if os.path.exists(source) else 0o755
+os.chmod(sys.argv[1], mode | stat.S_IXUSR)
+PY
+    then
+        rm -f "$temp"
+        return 1
+    fi
+    if ! mv -f "$temp" "$dest"; then
         rm -f "$temp"
         return 1
     fi

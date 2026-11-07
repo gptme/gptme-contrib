@@ -1195,3 +1195,36 @@ def test_fsmonitor_preserves_one_protocol_and_refuses_dual_handlers(
     assert ran.returncode != 0
     assert ran.stdout == b""
     assert b"cannot chain two fsmonitor-watchman" in ran.stderr
+
+
+@pytest.mark.parametrize("existing_mode", [None, 0o755, 0o750, 0o700, 0o775])
+def test_wrapper_preserves_read_permissions_on_install_and_refresh(
+    tmp_path: Path, existing_mode: int | None
+) -> None:
+    global_dir = tmp_path / "global"
+    local_dir = tmp_path / "local"
+    global_dir.mkdir()
+    local_dir.mkdir()
+    name = "prepare-commit-msg"
+    _write_exec(global_dir / name, '#!/bin/bash\necho global >>"$1"\n')
+    wrapper = local_dir / name
+    if existing_mode is not None:
+        _write_exec(wrapper, '#!/bin/bash\necho local >>"$1"\n')
+        wrapper.chmod(existing_mode)
+    expected_mode = 0o755 if existing_mode is None else existing_mode
+    args = ["--hooks-dir", str(local_dir), "--global-dir", str(global_dir)]
+
+    for _ in range(2):
+        result = _run(args)
+        assert result.returncode == 0, result.stderr
+        assert stat.S_IMODE(wrapper.stat().st_mode) == expected_mode
+        msg = tmp_path / "COMMIT_EDITMSG"
+        msg.write_text("feat: permission check\n")
+        _run_wrapper(wrapper, str(msg))
+        assert "global" in msg.read_text()
+        if existing_mode is not None:
+            assert "local" in msg.read_text()
+            assert (
+                stat.S_IMODE((local_dir / f"{name}.local").stat().st_mode)
+                == existing_mode
+            )
