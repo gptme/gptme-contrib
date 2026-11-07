@@ -71,7 +71,6 @@ def render_head_assets() -> str:
 def render_theme_toggle() -> str:
     """A button that cycles auto/light/dark; the script binds to the button before it."""
     return (
-        '<button type="button" class="theme-toggle" aria-label="Switch colour theme">'
-        "Theme: auto</button>"
+        '<button type="button" class="theme-toggle">Theme: auto</button>'
         f"<script>{_TOGGLE_JS}</script>"
     )

@@ -99,6 +99,9 @@ def test_head_assets_and_toggle() -> None:
     assert head.index("<style>") < head.index("<script>")
     toggle = render_theme_toggle()
     assert 'class="theme-toggle"' in toggle
+    # The visible text carries the current mode; a fixed aria-label would hide it
+    # from screen-reader users.
+    assert "aria-label" not in toggle
     assert "localStorage" in toggle
     # Storage access is guarded: a throwing localStorage must not break the page.
     assert "try{" in THEME_INIT_JS and "catch(e)" in THEME_INIT_JS
