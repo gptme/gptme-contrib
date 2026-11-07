@@ -321,3 +321,76 @@ def test_timers_refuses_overlapping_roots(app: Path) -> None:
     argv = _timers_argv(app, **{"--public-root": str(app / "private" / "web")})
     assert main(argv) == 2
     assert not (app / "units").exists()
+
+
+def _portal_registry(output_path: str | None = "index.html") -> RouteRegistry:
+    portal = _route(
+        "portal", href="/", output_path=output_path, summary_source=None, section="root"
+    )
+    return RouteRegistry(_registry().routes, portal=portal)
+
+
+def _run_with(
+    tmp_path: Path, registry: RouteRegistry, *, title: str | None = None
+) -> tuple[int, list[str]]:
+    lines: list[str] = []
+    code = run_build(
+        registry,
+        _all(),
+        pages=(),
+        private_root=tmp_path / "private",
+        public_root=tmp_path / "public",
+        agent="bob",
+        title=title,
+        out=lines.append,
+    )
+    return code, lines
+
+
+def test_build_renders_the_portal_from_public_pages_only(tmp_path: Path) -> None:
+    code, lines = _run_with(tmp_path, _portal_registry(), title="Bob <vitals>")
+    assert code == 0
+    assert "ok   portal" in lines
+    html = (tmp_path / "public/index.html").read_text()
+    assert "<title>Bob &lt;vitals&gt;</title>" in html
+    assert 'data-route="services"' in html
+    assert 'data-route="cost"' not in html  # private route
+
+
+def test_portal_title_defaults_to_the_agent(tmp_path: Path) -> None:
+    _run_with(tmp_path, _portal_registry())
+    assert "<title>bob</title>" in (tmp_path / "public/index.html").read_text()
+
+
+def test_no_portal_route_means_no_portal_file(tmp_path: Path) -> None:
+    code, lines = _run_with(tmp_path, _registry())
+    assert code == 0
+    assert "ok   portal" not in lines
+    assert not (tmp_path / "public/index.html").exists()
+
+
+def test_portal_output_path_cannot_escape_the_public_root(tmp_path: Path) -> None:
+    code, lines = _run_with(tmp_path, _portal_registry("../outside.html"))
+    assert code == 1
+    assert any(line.startswith("FAIL portal:") for line in lines)
+    assert not (tmp_path / "outside.html").exists()
+
+
+def test_partial_build_keeps_blind_pages_visible_on_the_portal(tmp_path: Path) -> None:
+    run_build(
+        _portal_registry(),
+        _all(),
+        pages=("services",),
+        private_root=tmp_path / "private",
+        public_root=tmp_path / "public",
+        agent="bob",
+        out=lambda _: None,
+    )
+    html = (tmp_path / "public/index.html").read_text()
+    sessions_card = html.split('data-route="sessions"')[1].split("</a>")[0]
+    assert "no data" in sessions_card
+
+
+def test_timers_pass_the_title_through(app: Path) -> None:
+    assert main(_timers_argv(app, **{"--title": "My Portal"})) == 0
+    assert '"--title" "My Portal"' in (app / "units/gptme-vitals-a.service").read_text()

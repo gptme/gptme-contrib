@@ -257,6 +257,24 @@ newline or NUL (a newline would end the `ExecStart` directive and let the next
 line be read as a new one). Arguments are quoted by systemd's rules (`%` and `$`
 doubled), not `shlex`'s.
 
+## The portal
+
+`render_portal(registry, envelopes, title=…)` is the one renderer: every card is
+the page's `status` badge, `headline` and up to four `lines`, so no page needs a
+bespoke preview function. Only `PUBLIC` routes get a card, and only those three
+fields are read, so `detail` and `core` cannot reach the page even if a caller
+hands over unfiltered envelopes. Every envelope string is HTML-escaped (headlines
+come from collectors that read ticket titles and error messages). A route with a
+`summary_source` but no envelope shows `no data`, never a healthy-looking card.
+
+`gptme-vitals build` writes the portal to the registry's `portal.output_path`
+under the public root after `core.json`, from the same envelopes (so a partial
+build still shows every page). Pass `--title` to name it. `head_html` and
+`toolbar_html` take the theme fragments (`theme.render_head_assets()` /
+`render_theme_toggle()`); the CLI does not pass them yet because the theme module
+lands in its own PR, so until then the page carries only the portal's own CSS.
+
 ## Next in slice 1
 
-The portal's single renderer.
+Wire the theme fragments into the CLI once the theme PR merges, and switch Bob's
+own repo onto the package.

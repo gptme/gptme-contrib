@@ -46,6 +46,15 @@ def check_roots(private_root: Path, public_root: Path) -> None:
         )
 
 
+def _relative_inside(slug: str, source: str, root: Path, what: str) -> Path:
+    rel = PurePosixPath(source)
+    if rel.is_absolute() or ".." in rel.parts or not rel.parts:
+        raise PublishError(
+            f"route {slug!r}: {what} {source!r} must be a relative path inside the root"
+        )
+    return root.joinpath(*rel.parts)
+
+
 def summary_path(route: DashboardRoute, root: Path) -> Path:
     """Where ``route``'s envelope lives under ``root``.
 
@@ -54,13 +63,15 @@ def summary_path(route: DashboardRoute, root: Path) -> Path:
     """
     if route.summary_source is None:
         raise PublishError(f"route {route.slug!r} has no summary_source")
-    rel = PurePosixPath(route.summary_source)
-    if rel.is_absolute() or ".." in rel.parts or not rel.parts:
-        raise PublishError(
-            f"route {route.slug!r}: summary_source {route.summary_source!r} "
-            "must be a relative path inside the root"
-        )
-    return root.joinpath(*rel.parts)
+    return _relative_inside(route.slug, route.summary_source, root, "summary_source")
+
+
+def portal_path(registry: RouteRegistry, root: Path) -> Path | None:
+    """Where the portal page is written, or ``None`` if the registry has none."""
+    portal = registry.portal
+    if portal is None or portal.output_path is None:
+        return None
+    return _relative_inside(portal.slug, portal.output_path, root, "output_path")
 
 
 def _atomic_write(path: Path, content: str, *, mode: int) -> None:
@@ -76,6 +87,11 @@ def _atomic_write(path: Path, content: str, *, mode: int) -> None:
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
         raise
+
+
+def write_text(path: Path, content: str, *, mode: int = 0o644) -> None:
+    """Atomically write ``content`` to ``path`` (parents created)."""
+    _atomic_write(path, content, mode=mode)
 
 
 def publish_page(

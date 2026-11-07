@@ -24,11 +24,14 @@ from pathlib import Path
 
 from gptme_vitals.build import BuildError, derive_core, write_core_files
 from gptme_vitals.envelope import PageEnvelope
+from gptme_vitals.portal import render_portal
 from gptme_vitals.publish import (
     PublishError,
     check_roots,
     load_envelopes,
+    portal_path,
     publish_page,
+    write_text,
 )
 from gptme_vitals.routes import RouteRegistry
 from gptme_vitals.timers import TimerError, render_units
@@ -61,6 +64,7 @@ def run_build(
     private_root: Path,
     public_root: Path,
     agent: str,
+    title: str | None = None,
     out: Callable[[str], None] = print,
 ) -> int:
     """Rebuild ``pages`` (all emitters when empty); return the exit status."""
@@ -104,6 +108,20 @@ def run_build(
         out(f"FAIL core: {exc}")
         return 1
     out(f"ok   core: {core['status']}")
+    try:
+        target = portal_path(registry, public_root)
+        if target is not None:
+            html = render_portal(
+                registry,
+                envelopes,
+                title=title or agent,
+                generated_at=str(core["generated_at"]),
+            )
+            write_text(target, html)
+            out("ok   portal")
+    except (OSError, PublishError) as exc:
+        out(f"FAIL portal: {exc}")
+        return 1
     return 1 if failed else 0
 
 
@@ -136,6 +154,7 @@ def _add_page_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--private-root", required=True, type=Path)
     parser.add_argument("--public-root", required=True, type=Path)
     parser.add_argument("--agent", required=True)
+    parser.add_argument("--title", help="portal page title (default: the agent name)")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -178,6 +197,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     str(args.public_root),
                     "--agent",
                     args.agent,
+                    *(["--title", args.title] if args.title else []),
                 ],
             )
         return run_build(
@@ -187,6 +207,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             private_root=args.private_root,
             public_root=args.public_root,
             agent=args.agent,
+            title=args.title,
         )
     except (UsageError, PublishError, TimerError) as exc:
         print(f"gptme-vitals: {exc}", file=sys.stderr)
