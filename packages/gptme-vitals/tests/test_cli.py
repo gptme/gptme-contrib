@@ -453,3 +453,104 @@ def test_colliding_outputs_fail_before_any_page_is_built(tmp_path: Path) -> None
             out=lambda _: None,
         )
     assert not (tmp_path / "private").exists()
+
+
+def test_timers_resolve_relative_roots_to_absolute_paths(
+    app: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(app)
+    argv = _timers_argv(
+        app, **{"--private-root": "rel-private", "--public-root": "rel-public"}
+    )
+    assert main(argv) == 0
+    service = (app / "units/gptme-vitals-a.service").read_text()
+    assert f'"--private-root" "{app / "rel-private"}"' in service
+    assert f'"--public-root" "{app / "rel-public"}"' in service
+
+
+def test_shared_writes_happen_under_the_build_lock_and_emitters_do_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import contextlib
+
+    from gptme_vitals import cli
+
+    held = False
+    seen: dict[str, bool] = {}
+    real_lock = cli.build_lock
+    real_publish = cli.publish_page
+    real_core = cli.write_core_files
+    real_text = cli.write_text
+
+    @contextlib.contextmanager
+    def tracking_lock(root: Path):  # noqa: ANN202
+        nonlocal held
+        with real_lock(root):
+            held = True
+            try:
+                yield
+            finally:
+                held = False
+
+    def spy(name: str, fn):  # noqa: ANN001, ANN202
+        def wrapped(*a, **kw):  # noqa: ANN002, ANN003, ANN202
+            seen[name] = held
+            return fn(*a, **kw)
+
+        return wrapped
+
+    monkeypatch.setattr(cli, "build_lock", tracking_lock)
+    monkeypatch.setattr(cli, "publish_page", spy("publish", real_publish))
+    monkeypatch.setattr(cli, "write_core_files", spy("core", real_core))
+    monkeypatch.setattr(cli, "write_text", spy("portal", real_text))
+
+    def emitting() -> PageEnvelope:
+        seen["emitter"] = held
+        return PageEnvelope(
+            slug="services",
+            status=Status.HEALTHY,
+            headline="services",
+            generated_at=NOW,
+        )
+
+    code, _ = _run_with_emitters(tmp_path, _portal_registry(), _all(services=emitting))
+    assert code == 0
+    assert seen == {"emitter": False, "publish": True, "core": True, "portal": True}
+
+
+def _run_with_emitters(
+    tmp_path: Path, registry: RouteRegistry, emitters: dict
+) -> tuple[int, list[str]]:
+    lines: list[str] = []
+    code = run_build(
+        registry,
+        emitters,
+        pages=(),
+        private_root=tmp_path / "private",
+        public_root=tmp_path / "public",
+        agent="bob",
+        out=lines.append,
+    )
+    return code, lines
+
+
+def test_a_second_build_waits_for_the_first_to_release_the_lock(
+    tmp_path: Path,
+) -> None:
+    import threading
+    import time
+
+    from gptme_vitals.cli import build_lock
+
+    result: list[int] = []
+    with build_lock(tmp_path / "private"):
+        worker = threading.Thread(
+            target=lambda: result.append(_run(tmp_path, _all())[0])
+        )
+        worker.start()
+        time.sleep(0.3)
+        assert result == []  # still blocked on the lock
+        assert not (tmp_path / "public/core.json").exists()
+    worker.join(timeout=10)
+    assert result == [0]
+    assert (tmp_path / "public/core.json").exists()

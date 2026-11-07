@@ -17,9 +17,11 @@ could not be written (other pages are still published), 2 for a usage error.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import importlib
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 
 from gptme_vitals.build import BuildError, derive_core, write_core_files
@@ -38,6 +40,28 @@ from gptme_vitals.routes import RouteRegistry, RouteRegistryError
 from gptme_vitals.timers import TimerError, render_units
 
 Emitter = Callable[[], PageEnvelope]
+
+LOCK_NAME = ".gptme-vitals.lock"
+
+
+@contextlib.contextmanager
+def build_lock(private_root: Path) -> Iterator[None]:
+    """Hold an exclusive lock on ``<private_root>/.gptme-vitals.lock``.
+
+    Per-page timers share the top of the hour, so two builds can overlap. Each
+    rewrites the shared ``core.json``/``headline.json``/portal; without one lock
+    from the read of the stored envelopes to the last write, an older build can
+    finish second and replace a newer build's view (a page that just went down
+    would read healthy again). The lock lives in the private root so a pull of
+    the served tree never sees it. Unix only (``fcntl.flock``), like systemd.
+    """
+    private_root.mkdir(parents=True, exist_ok=True)
+    with open(private_root / LOCK_NAME, "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 class UsageError(ValueError):
@@ -87,7 +111,9 @@ def run_build(
             raise UsageError(f"no emitter registered for page {slug!r}")
 
     failed = 0
-    built: list[PageEnvelope] = []
+    # Emitters run outside the lock: a slow collector must not hold up the
+    # others. Only the publish -> derive -> shared-write section is serialised.
+    emitted: list[PageEnvelope] = []
     for slug in wanted:
         try:
             envelope = emitters[slug]()
@@ -95,15 +121,47 @@ def run_build(
                 raise PublishError(
                     f"emitter {slug!r} returned envelope for {envelope.slug!r}"
                 )
-            publish_page(
-                registry, envelope, private_root=private_root, public_root=public_root
-            )
         except Exception as exc:  # one broken page must not stop the others
             failed += 1
             out(f"FAIL {slug}: {type(exc).__name__}: {exc}")
             continue
-        built.append(envelope)
-        out(f"ok   {slug}: {envelope.status}")
+        emitted.append(envelope)
+
+    with build_lock(private_root):
+        return _publish_and_derive(
+            registry,
+            emitted,
+            failed=failed,
+            private_root=private_root,
+            public_root=public_root,
+            agent=agent,
+            title=title,
+            out=out,
+        )
+
+
+def _publish_and_derive(
+    registry: RouteRegistry,
+    emitted: Sequence[PageEnvelope],
+    *,
+    failed: int,
+    private_root: Path,
+    public_root: Path,
+    agent: str,
+    title: str | None,
+    out: Callable[[str], None],
+) -> int:
+    """Publish ``emitted``, then re-derive core/headline/portal. Hold the build lock."""
+    for envelope in emitted:
+        try:
+            publish_page(
+                registry, envelope, private_root=private_root, public_root=public_root
+            )
+        except Exception as exc:
+            failed += 1
+            out(f"FAIL {envelope.slug}: {type(exc).__name__}: {exc}")
+            continue
+        out(f"ok   {envelope.slug}: {envelope.status}")
 
     # Freshly built pages are re-read from disk with the others, so every page
     # reaches the rollup by the same path (and a failed page keeps its previous
@@ -200,9 +258,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "--emitters",
                     args.emitters,
                     "--private-root",
-                    str(args.private_root),
+                    str(args.private_root.resolve()),
                     "--public-root",
-                    str(args.public_root),
+                    str(args.public_root.resolve()),
                     "--agent",
                     args.agent,
                     *(["--title", args.title] if args.title else []),
