@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -493,9 +494,9 @@ def test_commit_rechecks_final_index_after_runner(
 def test_push_prose_range_allowed_and_downstream_guard_runs(
     install: Path, tmp_path: Path
 ) -> None:
-    marker = tmp_path / "tracking-ran"
+    marker = tmp_path / "tracking ran's marker"
     stub = _hook(install, "validate-worktree-tracking.sh")
-    stub.write_text(f"#!/bin/bash\ncat >/dev/null\ntouch {marker}\n")
+    stub.write_text(f"#!/bin/bash\ncat >/dev/null\ntouch {shlex.quote(str(marker))}\n")
     stub.chmod(0o755)
     repo = _repo(tmp_path)
     base = _commit(repo, {"README.md": "seed\n"})
