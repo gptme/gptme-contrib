@@ -157,7 +157,7 @@ def attach_commits(nodes: list[dict], commits: Iterable[dict]) -> Counter:
         if i is None:
             st["unresolved"] += 1
             continue
-        shas = nodes[i].setdefault("delivered_shas", [])
+        shas = nodes[i]["delivered_shas"] = nodes[i].get("delivered_shas") or []
         if c["sha"] not in shas:
             shas.append(c["sha"])
             st["attached"] += 1

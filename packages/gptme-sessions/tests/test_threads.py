@@ -46,6 +46,16 @@ def test_trailer_commit_then_citation_links_sessions():
     assert "commit" in kinds(edges, 0, 1)
 
 
+def test_attach_commits_accepts_null_optional_deliverables():
+    nodes = [S(0, delivered_shas=None), S(1, shas_mentioned=["abcdef1234"])]
+    commit = {"agent": "bob", "sha": "abcdef1234", "ts": nodes[0]["end"], "sids": ["bob-0"]}
+    assert L.attach_commits(nodes, [commit])["attached"] == 1
+    assert L.attach_commits(nodes, [commit])["attached"] == 0
+    assert nodes[0]["delivered_shas"] == ["abcdef1234"]
+    edges, _ = L.mine_edges(nodes)
+    assert kinds(edges, 0, 1) == {"commit"}
+
+
 def test_plural_trailer_is_not_attributed():
     nodes = [S(0), S(1)]
     st = L.attach_commits(
