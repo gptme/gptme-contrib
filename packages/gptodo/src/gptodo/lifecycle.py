@@ -11,6 +11,7 @@ import copy
 import fcntl
 import hashlib
 import os
+import re
 import tempfile
 import warnings
 from contextlib import contextmanager
@@ -473,7 +474,39 @@ def transform_post(
             post.metadata.pop("probe", None)
             if not _completed_explicitly_set:
                 post.metadata.pop("completed", None)
+            # A new cycle starts with an open checklist. Leaving last cycle's
+            # `- [x]` ticked makes the revived task show N/N done, so it can be
+            # closed again without doing the work.
+            post.content = untick_checklist(post.content)
     return post
+
+
+_TICKED_RE = re.compile(r"^(\s*(?:>\s*)?[-*+] )\[[xX]\]")
+_FENCE_RE = re.compile(r"^\s*(?:>\s*)?(`{3,}|~{3,})")
+
+
+def untick_checklist(content: str) -> str:
+    """Reset `- [x]` checklist items to `- [ ]` for a new recurrence cycle.
+
+    Fenced code blocks are left alone (they hold examples, not the task's
+    checklist). `- [-]` skipped items keep their marker and reason: a skip is a
+    deliberate, documented decision, not a completed action to reopen.
+    """
+    out = []
+    fence = ""
+    for line in content.split("\n"):
+        if fence:
+            # Only a matching delimiter of at least the opening length closes
+            # a fence; inner examples and info strings are not closing fences.
+            candidate = re.sub(r"^\s*(?:>\s*)?", "", line)
+            if re.fullmatch(rf"{re.escape(fence[0])}{{{len(fence)},}}\s*", candidate):
+                fence = ""
+        elif opening := _FENCE_RE.match(line):
+            fence = opening.group(1)
+        else:
+            line = _TICKED_RE.sub(r"\1[ ]", line, count=1)
+        out.append(line)
+    return "\n".join(out)
 
 
 @contextmanager

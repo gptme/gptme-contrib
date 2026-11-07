@@ -154,3 +154,61 @@ class TestRecurCliReset:
 
         post = frontmatter.load(workspace / "tasks" / "mystery-task.md")
         assert post.metadata["state"] == "done"
+
+
+class TestRecurResetUnticksChecklist:
+    """A recurrence reset must reopen last cycle's checklist (gordon 2026-11-07:
+    a revived biweekly task showed N/N done and could be closed without the work)."""
+
+    def test_reset_unticks_done_items(self, workspace: Path):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(
+            path.read_text()
+            + "\n\n- [x] step one\n  - [X] nested step\n> - [x] quoted\n* [x] star bullet\n"
+            "- [-] skipped (not needed this cycle)\n\n"
+            "```\n- [x] example in code fence\n```\n\nprose with - [x] inline\n"
+        )
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        body = post.content
+        assert "- [ ] step one" in body
+        assert "  - [ ] nested step" in body
+        assert "> - [ ] quoted" in body
+        assert "* [ ] star bullet" in body
+        assert "- [-] skipped (not needed this cycle)" in body
+        assert "- [x] example in code fence" in body
+        assert "prose with - [x] inline" in body
+
+    @pytest.mark.parametrize(
+        "example",
+        [
+            "````markdown\n```python\n- [x] example\n```\n````",
+            "~~~markdown\n```\n- [x] example\n~~~",
+            "> ```markdown\n> - [x] example\n> ```",
+            "```markdown\n```not-a-closer\n- [x] example\n```",
+        ],
+    )
+    def test_reset_preserves_fenced_examples(self, workspace: Path, example: str):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{example}\n\n- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        body = frontmatter.load(path).content
+        assert example in body
+        assert "- [ ] real step" in body
+
+    def test_non_recurring_done_keeps_ticks(self, workspace: Path):
+        path = write_task(workspace, "one-off", state="active")
+        path.write_text(path.read_text() + "\n\n- [x] did it\n")
+        result = CliRunner().invoke(cli, ["edit", "one-off", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        assert "- [x] did it" in frontmatter.load(path).content
+
+    def test_cron_recur_keeps_ticks(self, workspace: Path):
+        path = write_task(workspace, "cron-task", state="active", recur='"0 9 * * 1"')
+        path.write_text(path.read_text() + "\n\n- [x] did it\n")
+        CliRunner().invoke(cli, ["edit", "cron-task", "--set", "state", "done"])
+        assert "- [x] did it" in frontmatter.load(path).content
