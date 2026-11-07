@@ -133,7 +133,28 @@ if [ -x "$saved_precommit" ] && \
         exit 1
     fi
     if [ ! -f "$repo_root/.pre-commit-config.yaml" ] || \
-       ! grep -qE -- "--config=(\\\"\\.pre-commit-config\\.yaml\\\"|'\\.pre-commit-config\\.yaml'|\\.pre-commit-config\\.yaml)([[:space:]]|$)" "$saved_precommit"; then
+       ! python3 - "$saved_precommit" <<'PY'
+import shlex
+import sys
+
+# Read shell words without executing the runner. Comments are not arguments,
+# and a standard option must not hide a second, conflicting configuration.
+try:
+    with open(sys.argv[1]) as runner:
+        lexer = shlex.shlex(runner.read(), posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        words = list(lexer)
+    configs = []
+    for index, word in enumerate(words):
+        if word.startswith("--config="):
+            configs.append(word.split("=", 1)[1])
+        elif word in ("--config", "-c"):
+            configs.append(words[index + 1])
+    sys.exit(0 if configs == [".pre-commit-config.yaml"] else 1)
+except (OSError, ValueError, IndexError):
+    sys.exit(1)
+PY
+    then
         echo "cannot safely replace generated pre-commit runner: requires an existing .pre-commit-config.yaml and explicit standard --config; hooks unchanged" >&2
         exit 1
     fi

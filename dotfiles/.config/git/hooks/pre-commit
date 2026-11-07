@@ -259,6 +259,14 @@ fi
 # The chaining wrapper skips generated local runners only with this capability
 # marker: this hook owns the single --files run, avoiding hook-impl stash/restore.
 
+# The runner also reads its policy from the worktree. Check this even when the
+# config is not in the staged diff (or has been deleted only in the worktree).
+if ! git diff --quiet -- .pre-commit-config.yaml; then
+    echo -e "${RED}Cannot run checks with unstaged pre-commit configuration${NC}" >&2
+    echo "Stage the intended configuration or use an isolated worktree; index and worktree left unchanged." >&2
+    exit 1
+fi
+
 # Only run if repo has pre-commit config
 if [ ! -f ".pre-commit-config.yaml" ]; then
     # No pre-commit config, skip this part
