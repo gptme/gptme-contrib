@@ -315,7 +315,7 @@ fi
 # that can overwrite concurrent work. Unstaged changes in other files are fine.
 for staged_file in "${HOOK_FILES[@]}"; do
     # Child file edits cannot enter a parent commit; a different child HEAD can.
-    if ! git diff --quiet --ignore-submodules=dirty -- "$staged_file"; then
+    if ! git --literal-pathspecs diff --quiet --ignore-submodules=dirty -- "$staged_file"; then
         echo -e "${RED}Cannot run checks on partially staged files: $staged_file${NC}" >&2
         echo "Stage the intended complete file or commit from an isolated worktree; index and worktree left unchanged." >&2
         exit 1
@@ -354,7 +354,7 @@ else
     while IFS= read -r -d '' f; do
         for staged_file in "${ORIGINALLY_STAGED_FILES[@]}"; do
             if [ "$f" = "$staged_file" ]; then
-                git add -- "$f"
+                git --literal-pathspecs add -- "$f"
                 break
             fi
         done

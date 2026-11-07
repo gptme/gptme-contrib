@@ -116,6 +116,37 @@ if [ "$HOOKS_DIR" = "$(cd "$GLOBAL_DIR" && pwd -P)" ] && \
     exit 0
 fi
 
+# Serialize the entire inspect/backup/publish transaction, including preflight.
+# mkdir is atomic and portable (including macOS); physical paths make aliases
+# share a lock. Acquire both contexts before changing hooks, failing rather than
+# waiting so overlapping directory pairs cannot deadlock. Never steal stale locks.
+install_locks=()
+release_install_locks() {
+    # Called indirectly by the EXIT trap below.
+    # shellcheck disable=SC2317
+    if [ ${#install_locks[@]} -gt 0 ]; then
+        for lock in "${install_locks[@]}"; do
+            rmdir "$lock" || true
+        done
+    fi
+}
+trap release_install_locks EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+for directory in "$HOOKS_DIR" "$RECEIVE_HOOKS_DIR"; do
+    if [ ${#install_locks[@]} -gt 0 ] && \
+       [ "$directory/.chain-global-hooks.lock" = "${install_locks[0]}" ]; then
+        continue
+    fi
+    lock="$directory/.chain-global-hooks.lock"
+    if ! mkdir "$lock"; then
+        echo "hook installation already in progress or lock requires manual recovery: $lock; hooks unchanged" >&2
+        exit 1
+    fi
+    install_locks+=("$lock")
+done
+
 # Refuse ambiguous saved-hook collisions before rewriting any hook. Once a hook
 # manager overwrites our wrapper we cannot prove ownership of its old .local;
 # the operator must preserve/move that backup explicitly before reinstalling.

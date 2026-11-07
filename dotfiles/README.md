@@ -86,6 +86,13 @@ The same single-handler restriction applies to `fsmonitor-watchman`: its opaque
 update token and NUL-delimited response cannot be combined with another handler.
 Aliased directories count as one handler and are left untouched. Wrapper refreshes
 publish a complete executable by atomic rename, never by truncating a live wrapper.
+Installation holds atomic directory locks across inspection, backup and publication
+in both commit-side and receive-side hook directories. A concurrent install (including
+one through a symlink alias) fails before rewriting any hook; retry after the first
+installer exits. Normal exit and handled signals release owned locks. After an
+uncatchable termination, verify no installer is running before manually removing
+the empty `.chain-global-hooks.lock` directory named in the error; locks are never
+stolen automatically.
 When the saved local
 `pre-commit` is a generated prek/pre-commit runner, the contrib global hook runs
 its guards and the check suite once using explicit `run --files`, retaining

@@ -582,7 +582,15 @@ def test_generated_runner_in_git_hooks_requires_explicit_repo(
 
 
 @pytest.mark.parametrize(
-    "filename", ["partial file.txt", "café.py", "line\nbreak.py", 'quote"file.py']
+    "filename",
+    [
+        "partial file.txt",
+        "café.py",
+        "line\nbreak.py",
+        'quote"file.py',
+        ":(literal)example.py",
+        "wild[ab].py",
+    ],
 )
 @pytest.mark.parametrize("formatter", [False, True])
 def test_chained_precommit_refuses_partially_staged_file(
@@ -1422,7 +1430,16 @@ def test_unrelated_saved_hook_collision_refused_before_any_rewrite(
         assert message.read_text() == "subject\nvalidation\n"
 
 
-@pytest.mark.parametrize("filename", ["café.py", "line\nbreak.py", 'quote"file.py'])
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "café.py",
+        "line\nbreak.py",
+        'quote"file.py',
+        ":(literal)example.py",
+        "wild[ab].py",
+    ],
+)
 def test_quoted_filename_reaches_runner_and_formatter_fix_is_staged(
     tmp_path: Path, filename: str
 ) -> None:
@@ -1470,3 +1487,100 @@ def test_quoted_filename_reaches_runner_and_formatter_fix_is_staged(
         )
         == b"formatted\n"
     )
+
+
+@pytest.mark.parametrize("alias", [False, True])
+def test_concurrent_install_refuses_before_copying_original(
+    tmp_path: Path, alias: bool
+) -> None:
+    import time
+
+    global_dir = tmp_path / "global"
+    local_dir = tmp_path / "local"
+    global_dir.mkdir()
+    local_dir.mkdir()
+    name = "prepare-commit-msg"
+    original = '#!/bin/bash\necho local >>"$1"\n'
+    _write_exec(local_dir / name, original)
+    _write_exec(global_dir / name, '#!/bin/bash\necho global >>"$1"\n')
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    ready = tmp_path / "copy-ready"
+    release = tmp_path / "copy-release"
+    _write_exec(
+        tools / "cp",
+        '#!/bin/bash\ntouch "$COPY_READY"\n'
+        'while [ ! -e "$COPY_RELEASE" ]; do sleep 0.01; done\n'
+        'exec /bin/cp "$@"\n',
+    )
+    args = ["--hooks-dir", str(local_dir), "--global-dir", str(global_dir)]
+    env = dict(
+        os.environ,
+        PATH=f"{tools}:{os.environ['PATH']}",
+        COPY_READY=str(ready),
+        COPY_RELEASE=str(release),
+    )
+    first = subprocess.Popen(
+        ["bash", str(CHAIN), *args],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while (
+            not ready.exists() and first.poll() is None and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        assert ready.exists(), "first installer did not reach original-hook backup"
+        if alias:
+            link = tmp_path / "local-alias"
+            link.symlink_to(local_dir, target_is_directory=True)
+            args[1] = str(link)
+        second = _run(args)
+    finally:
+        release.touch()
+        stdout, stderr = first.communicate(timeout=10)
+    assert first.returncode == 0, stdout + stderr
+    assert second.returncode != 0, second.stdout + second.stderr
+    assert "installation already in progress" in second.stderr
+    assert (local_dir / f"{name}.local").read_text() == original
+    message = tmp_path / "message"
+    message.write_text("subject\n")
+    _run_wrapper(local_dir / name, str(message))
+    assert message.read_text().splitlines() == ["subject", "global", "local"]
+    # Successful exit releases the lock, so an ordinary refresh still works.
+    assert _run(args).returncode == 0
+
+
+def test_receive_install_lock_refuses_before_commit_side_changes(
+    tmp_path: Path,
+) -> None:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_CONFIG_GLOBAL"] = str(tmp_path / "gitconfig")
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], env=env, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "core.hooksPath", ".hooks"],
+        env=env,
+        check=True,
+    )
+    ordinary = repo / ".hooks"
+    receive = repo / ".git/.hooks"
+    ordinary.mkdir()
+    receive.mkdir()
+    lock = receive / ".chain-global-hooks.lock"
+    lock.mkdir()
+    global_dir = tmp_path / "global"
+    global_dir.mkdir()
+    _write_exec(global_dir / "prepare-commit-msg", "#!/bin/sh\nexit 0\n")
+    args = [str(repo), "--global-dir", str(global_dir)]
+    result = _run(args, env=env)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "installation already in progress" in result.stderr
+    assert not (ordinary / "prepare-commit-msg").exists()
+    assert not (ordinary / ".chain-global-hooks.lock").exists()
+    assert lock.is_dir(), "must not release another installer's lock"
+    lock.rmdir()
+    assert _run(args, env=env).returncode == 0
