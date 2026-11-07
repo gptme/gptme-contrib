@@ -530,6 +530,46 @@ def test_sample_error_uses_newest_nonempty_error(tmp_path: Path) -> None:
         "failure_reason": "auth",
         # no error field — newest record, but empty
     }
-    write_records(tmp_path, [rec(40, "productive"), r_older, r_newer])
+    r_whitespace = {
+        "timestamp": (NOW - timedelta(minutes=30)).isoformat(),
+        "outcome": "failed",
+        "failure_reason": "auth",
+        "error": "   \n\t",  # newest of all, but whitespace-only
+    }
+    write_records(tmp_path, [rec(40, "productive"), r_older, r_newer, r_whitespace])
     status = assess(tmp_path)
     assert status["sample_error"] == "invalid API key"
+
+
+def test_billing_sample_is_newest_billing_error(tmp_path: Path) -> None:
+    # With several distinct billing-bearing errors, the sample must be the
+    # newest by parsed timestamp — not the first in JSONL file order. The
+    # file below is written out of order and with mixed UTC offsets.
+    r_old = {
+        "timestamp": (NOW - timedelta(hours=4)).isoformat(),
+        "outcome": "failed",
+        "failure_reason": "auth",
+        "error": "api_error_status:403; Forbidden",
+    }
+    r_new = {
+        # NOW-1h expressed at +02:00: lexically "13:00", actually 11:00 UTC
+        "timestamp": (NOW - timedelta(hours=1))
+        .astimezone(timezone(timedelta(hours=2)))
+        .isoformat(),
+        "outcome": "failed",
+        "failure_reason": "auth",
+        "error": "api_error_status:403; oauth_not_allowed_for_organization",
+    }
+    r_mid = {
+        "timestamp": (NOW - timedelta(hours=2)).isoformat(),
+        "outcome": "failed",
+        "failure_reason": "auth",
+        "error": "api_error_status:403; payment past due",
+    }
+    write_records(tmp_path, [rec(40, "productive"), r_old, r_new, r_mid])
+    status = assess(tmp_path)
+    assert status["billing_outage"] is True
+    assert (
+        status["sample_error"]
+        == "api_error_status:403; oauth_not_allowed_for_organization"
+    )

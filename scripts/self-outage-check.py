@@ -200,12 +200,22 @@ def assess(
         # or mixed-case error must not be able to hide the 403/billing signal,
         # and the display sample (below) is capped at 400 chars. The resulting
         # flag is authoritative; _is_billing_outage() reads it directly.
+        # Errors are ordered newest-first by parsed timestamp (JSONL file order
+        # is not guaranteed chronological) and whitespace-only errors dropped,
+        # so neither an older record nor an empty one can win the sample.
+        newest_first = sorted(
+            auth_failure_records,
+            key=lambda r: _parse_ts(r.get("timestamp", ""))
+            or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        errors_newest_first = [
+            e for e in ((r.get("error") or "").strip() for r in newest_first) if e
+        ]
         billing_errors = [
-            (r.get("error") or "").strip()
-            for r in auth_failure_records
-            if any(
-                kw in (r.get("error") or "").lower() for kw in BILLING_ERROR_SUBSTRINGS
-            )
+            e
+            for e in errors_newest_first
+            if any(kw in e.lower() for kw in BILLING_ERROR_SUBSTRINGS)
         ]
         billing_outage = (
             bool(billing_errors)
@@ -220,23 +230,7 @@ def assess(
         # outage (the recorder only populates it intermittently). Fall back to
         # the newest record that carries any error, so we always surface
         # *something* useful even when the most-recent record has an empty field.
-        err = (
-            billing_errors[0]
-            if billing_errors
-            else next(
-                (
-                    (r.get("error") or "").strip()
-                    for r in sorted(
-                        auth_failure_records,
-                        key=lambda r: _parse_ts(r.get("timestamp", ""))
-                        or datetime.min.replace(tzinfo=timezone.utc),
-                        reverse=True,
-                    )
-                    if r.get("error")
-                ),
-                "",
-            )
-        )
+        err = next(iter(billing_errors or errors_newest_first), "")
         sample_error = err[:400] or None
 
     last_prod = last_productive_ts(records_file, now)
