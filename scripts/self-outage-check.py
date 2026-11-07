@@ -104,11 +104,16 @@ _SECRET_PATTERNS = (
     # branches handle JSON-*escaped* quotes (``password=\\"a b\\"``), which is
     # what ``_error_text()`` produces when a structured payload's message
     # carries a quoted secret; they must precede the unquoted branch, which
-    # would otherwise consume only the backslash.
+    # would otherwise consume only the backslash. Inside an escaped string the
+    # body is tokenized, not scanned for the first ``\\"``: an inner escaped
+    # quote serializes as ``\\\\\\"`` (encoded backslash + encoded quote) and
+    # must be consumed as content, or ``password="a \\"b\\" c"`` would leak
+    # ``b`` and ``c``.
     re.compile(
         r"(?i)\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|"
         r"password|passwd|authorization|x-api-key)(?:\\?[\"'])?\s*[:=]\s*)"
-        r"(?:\\\"(?:(?!\\\").)*(?:\\\"|$)|\\'(?:(?!\\').)*(?:\\'|$)"
+        r"(?:\\\"(?:\\\\\\.|\\\\[^\\]|\\[^\"\\]|[^\\])*(?:\\\"|$)"
+        r"|\\'(?:\\\\\\.|\\\\[^\\]|\\[^'\\]|[^\\])*(?:\\'|$)"
         r"|\"(?:[^\"\\]|\\.)*(?:\"|$)|'(?:[^'\\]|\\.)*(?:'|$)|[^\s\"',;}]+)"
     ),
     # Bare JWTs: the header is always base64url of ``{"`` → ``eyJ``. Segments
@@ -307,15 +312,22 @@ def assess(
             or datetime.min.replace(tzinfo=timezone.utc),
             reverse=True,
         )
-        errors_newest_first = [e for e in (_error_text(r) for r in newest_first) if e]
+        texts_newest_first = [(r, _error_text(r)) for r in newest_first]
+        errors_newest_first = [e for _, e in texts_newest_first if e]
+        # A record is billing-bearing if its text carries a billing substring OR
+        # its structured payload carries HTTP 403 — the same two signals the
+        # classification uses, so the display sample never disagrees with it.
         billing_errors = [
             e
-            for e in errors_newest_first
-            if any(kw in e.lower() for kw in BILLING_ERROR_SUBSTRINGS)
+            for r, e in texts_newest_first
+            if e
+            and (
+                any(kw in e.lower() for kw in BILLING_ERROR_SUBSTRINGS)
+                or _is_structured_403(r.get("error"))
+            )
         ]
         billing_outage = (
             bool(billing_errors)
-            or any(_is_structured_403(r.get("error")) for r in auth_failure_records)
             or (dominant_reason in BILLING_OUTAGE_REASONS)
             or any(
                 r.get("failure_reason") in BILLING_OUTAGE_REASONS

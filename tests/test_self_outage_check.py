@@ -744,3 +744,43 @@ def test_structured_403_with_reason_phrase_classified_as_billing(
     assert status["billing_outage"] is True
     # ...but a 4030-ish code must not match.
     assert soc._is_structured_403({"code": "4031"}) is False
+
+
+def test_inner_escaped_quote_in_escaped_passphrase_redacted(tmp_path: Path) -> None:
+    # Regression (contrib#2038 review, fp 3b8ad6890ae2): a password whose value
+    # itself contains escaped quotes serializes as ``\"alpha \\\"beta\\\" omega\"``;
+    # the escaped-quote branch must not stop at the first inner ``\"``.
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "auth")
+        r["error"] = {
+            "message": 'login failed: password="alpha \\"beta\\" omega" tail',
+            "code": 401,
+        }
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    body = soc._issue_body(cfg_for(tmp_path), status)
+    for leaked in ("alpha", "beta", "omega"):
+        assert leaked not in status["sample_error"]
+        assert leaked not in body
+    assert "login failed" in status["sample_error"]
+    assert "tail" in status["sample_error"]
+
+
+def test_structured_403_record_preferred_for_sample(tmp_path: Path) -> None:
+    # Regression (contrib#2038 review, fp 2ac5455908f3): when billing is
+    # classified from a structured 403, the sample must surface that record,
+    # not a newer token error.
+    records = [rec(40, "productive")]
+    old = rec(4, "failed", "auth")
+    old["error"] = {"code": 403, "message": "subscription expired"}
+    records.append(old)
+    for h in (1, 2, 3):
+        r = rec(h, "failed", "auth")
+        r["error"] = "invalid token"
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    assert status["billing_outage"] is True
+    assert "subscription expired" in status["sample_error"]
