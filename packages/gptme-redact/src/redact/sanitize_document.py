@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from html.parser import HTMLParser
 
 from . import Finding, Severity
 
@@ -66,11 +67,11 @@ _HTML_SCRIPT_REGEX = re.compile(
     # dominance.
     r"<\s*(?:script|iframe|object|embed|form|svg|math)\b"
     r"|"
-    # javascript: / vbscript: / data: URI schemes. Two surfaces:
-    #   1. In an HTML attribute:  href="javascript:..." / src='vbscript:...'
-    #   2. In a Markdown link:    [text](javascript:...) -- the most
-    #      common firecrawl output form, no ``href=`` prefix.
-    r"(?:(?:href|src|action|formaction|xlink:href)\s*=\s*[\"']?\s*|\(\s*)"
+    # javascript: / vbscript: / data: URI schemes in Markdown links:
+    # [text](javascript:...) -- the common firecrawl output form.
+    # HTML attributes are parsed separately to decode character references
+    # without turning escaped prose into executable-looking HTML.
+    r"\(\s*"
     r"(?:javascript|vbscript|data)\s*:"
     r"|"
     # Inline event handlers -- every browser still honors these.
@@ -83,6 +84,39 @@ _HTML_SCRIPT_REGEX = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+
+_URI_ATTRIBUTES = frozenset({"href", "src", "action", "formaction", "xlink:href"})
+_DANGEROUS_SCHEME_REGEX = re.compile(
+    r"^(?:javascript|vbscript|data)\s*:", re.IGNORECASE
+)
+_URL_EDGE_CONTROLS = "".join(chr(c) for c in range(33))
+_URL_IGNORED_WHITESPACE = str.maketrans("", "", "\t\n\r")
+
+
+class _HtmlUriScanner(HTMLParser):
+    """Check actual HTML URI attributes, not entity-escaped prose.
+
+    HTMLParser decodes character references in attribute values exactly once.
+    Never unescape the document: escaped tags and payload examples are text,
+    and decoding them globally would create spurious findings.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.matches: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for name, value in attrs:
+            if name not in _URI_ATTRIBUTES or value is None:
+                continue
+            # URL parsing removes tabs/newlines anywhere and leading C0
+            # controls/spaces before interpreting the scheme.
+            normalized = value.translate(_URL_IGNORED_WHITESPACE).lstrip(
+                _URL_EDGE_CONTROLS
+            )
+            if _DANGEROUS_SCHEME_REGEX.match(normalized):
+                self.matches.append(self.get_starttag_text() or tag)
 
 
 # --- Suspicious metadata ------------------------------------------------------
@@ -198,13 +232,17 @@ def scan_document(
 
     # 2. HTML / script injection -- HIGH because browser-rendered
     # Markdown (GitHub, GitLab, VS Code, MkDocs) honors raw HTML.
-    html_matches = list(_HTML_SCRIPT_REGEX.finditer(text))
+    uri_scanner = _HtmlUriScanner()
+    uri_scanner.feed(text)
+    uri_scanner.close()
+    html_matches = [m.group(0) for m in _HTML_SCRIPT_REGEX.finditer(text)]
+    html_matches.extend(uri_scanner.matches)
     if html_matches:
         findings["html_script"] = Finding(
             category="html_script",
             severity=Severity.HIGH,
             count=len(html_matches),
-            preview=_preview("html_script", html_matches[0].group(0)),
+            preview=_preview("html_script", html_matches[0]),
         )
 
     # 3. Suspicious metadata -- MEDIUM. Information leak rather than

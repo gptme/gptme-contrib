@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from redact import Severity
 from redact.sanitize_document import (
     DocumentScanResult,
@@ -120,6 +121,74 @@ class TestHtmlScriptInjection:
         text = '<a href="javascript:alert(1)">click</a>\n'
         r = scan_document(text)
         assert any(f.category == "html_script" for f in r.findings), r.findings
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "java&#x73;cript:alert(1)",
+            "jav&#97;script:alert(1)",
+            "javascript&#58;alert(1)",
+            "javascript&colon;alert(1)",
+            "&#32;&#9;JaVaScRiPt&#x3a;alert(1)",
+            "java&#x09;script:alert(1)",
+            "java&NewLine;script:alert(1)",
+            "&#x01; javascript&colon;alert(1)",
+            "vb&#115;cript&#58;msgbox(1)",
+            "d&#97;ta&colon;text/html,payload",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "attribute", ["href", "src", "action", "formaction", "xlink:href"]
+    )
+    @pytest.mark.parametrize("quote", ['"', "'", ""])
+    def test_detects_encoded_html_attribute_scheme(self, value, attribute, quote):
+        # Encode literal spaces for the unquoted form; HTML decodes them
+        # only after tokenizing the attribute value.
+        if not quote:
+            value = value.replace(" ", "&#32;")
+        text = f"<a {attribute}={quote}{value}{quote}>click</a>"
+        snapshot = text
+        result = scan_document(text)
+        finding = next(f for f in result.findings if f.category == "html_script")
+        assert finding.severity == Severity.HIGH
+        assert finding.count == 1
+        assert result.blocked
+        assert result.input_chars == len(text)
+        assert text == snapshot
+
+    @pytest.mark.parametrize("quote", ['"', "'"])
+    def test_detects_literal_whitespace_in_quoted_scheme(self, quote):
+        text = f"<a href={quote} \tjava\t\r\nscript:alert(1){quote}>click</a>"
+        result = scan_document(text)
+        assert result.blocked
+        assert result.findings[0].category == "html_script"
+        assert result.findings[0].count == 1
+
+    def test_counts_encoded_and_plain_attributes_once_each(self):
+        text = (
+            '<a href="java&#x73;cript&colon;alert(1)">encoded</a>'
+            '<a href="javascript:alert(2)">plain</a>'
+        )
+        result = scan_document(text)
+        assert result.findings[0].category == "html_script"
+        assert result.findings[0].count == 2
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "&lt;script&gt;alert(1)&lt;/script&gt;",
+            '&lt;a href="javascript:alert(1)"&gt;example&lt;/a&gt;',
+            '&lt;a href="java&#x73;cript&colon;alert(1)"&gt;example&lt;/a&gt;',
+            '<p title="&lt;script&gt;alert(1)&lt;/script&gt;">Example</p>',
+            '<a href="https://example.com/?x=1&amp;y=2">safe</a>',
+            '<a href="java&amp;#x73;cript:alert(1)">not recursively decoded</a>',
+        ],
+    )
+    def test_escaped_html_prose_stays_clean(self, text):
+        result = scan_document(text)
+        assert result.findings == []
+        assert not result.blocked
+        assert result.input_chars == len(text)
 
     def test_detects_vbscript_scheme(self):
         text = "<a href='vbscript:msgbox(1)'>x</a>\n"

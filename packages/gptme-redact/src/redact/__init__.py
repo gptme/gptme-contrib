@@ -475,10 +475,10 @@ _PATTERNS: list[Pattern] = [
             # Quoted values include punctuation/spaces and escaped delimiters;
             # unquoted values stop at ordinary config/JSON separators.
             r"(?P<quote>['\"])?"
-            r"(?!\[REDACTED:)"
             r"(?P<value>(?(quote)"
             r"(?:\\[^\r\n]|(?!(?P=quote))[^\\\r\n]){11,}"
-            r"|[^\s'\",;}\]]{11,}))"
+            r"|(?:\[REDACTED:[A-Za-z0-9_:.-]+\][^\s'\",;}\]]*"
+            r"|[^\s'\",;}\]]{11,})))"
             r"(?(quote)(?P=quote))",
             re.IGNORECASE,
         ),
@@ -672,7 +672,7 @@ def redact(
     work = text
 
     # Layer 1: deterministic literal redaction (exact env/user secrets).
-    for literal in literals or []:
+    for literal in sorted(literals or [], key=len, reverse=True):
         if literal and literal in work:
             n = work.count(literal)
             work = work.replace(literal, "[REDACTED:literal]")
@@ -688,6 +688,9 @@ def redact(
         def _sub(m: re.Match[str], _p: Pattern = pat) -> str:
             if _p.value_only:
                 value = m.group("value")
+                # Exempt only a whole marker, never a marker-prefixed value.
+                if re.fullmatch(r"\[REDACTED:[A-Za-z0-9_:.-]+\]", value):
+                    return m.group(0)
                 # Allowlist exemption never applies to CRITICAL (fail-closed).
                 if value in allow and _p.severity < Severity.CRITICAL:
                     return m.group(0)

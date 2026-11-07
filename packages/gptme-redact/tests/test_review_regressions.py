@@ -127,3 +127,42 @@ def test_escaped_quote_in_password_is_consumed(value):
         result.redacted
         == f"SERVICE_PASSWORD={quote}[REDACTED:secret_assignment]{quote}"
     )
+
+
+@pytest.mark.parametrize("quote", ['"', "'", ""])
+def test_marker_prefix_does_not_hide_password_suffix(quote):
+    value = "[REDACTED:literal]actual-password-123"
+    result = redact(f"SERVICE_PASSWORD={quote}{value}{quote}", literals=[])
+    assert result.blocked
+    assert "actual-password-123" not in result.redacted
+
+
+def test_explicit_overlapping_literals_mask_longest_first():
+    result = redact("abcdefghijklmno", literals=["abcdefgh", "abcdefghijklmno"])
+    assert result.redacted == "[REDACTED:literal]"
+    assert result.blocked
+
+
+@pytest.mark.parametrize("quote", ['"', "'", ""])
+def test_complete_marker_is_not_replaced_again(quote):
+    text = f"SERVICE_PASSWORD={quote}[REDACTED:literal]{quote}"
+    assert redact(text, literals=[]).redacted == text
+
+
+def test_no_env_cli_overlapping_literals_do_not_expose_suffix(tmp_path, capsys):
+    source = tmp_path / "input.txt"
+    source.write_text("abcdefghijklmno")
+    assert (
+        main(
+            [
+                str(source),
+                "--no-env-secrets",
+                "--literal",
+                "abcdefgh",
+                "--literal",
+                "abcdefghijklmno",
+            ]
+        )
+        != 0
+    )
+    assert "ijklmno" not in capsys.readouterr().out
