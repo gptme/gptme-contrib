@@ -319,3 +319,23 @@ def test_sibling_journal_trees_have_independent_default_reservations(tmp_path: P
     assert first != second
     assert first.name == second.name == "autonomous-session-abcd.md"
     assert first.exists() and second.exists()
+
+
+def test_default_date_retry_across_midnight_reuses_original(tmp_path: Path, monkeypatch):
+    import gptme_sessions.journal_path as allocator
+
+    class Clock:
+        day = "2026-11-07"
+
+        @classmethod
+        def now(cls, tz):
+            return datetime.datetime.fromisoformat(cls.day).replace(tzinfo=tz)
+
+    monkeypatch.setattr(allocator, "datetime", Clock)
+    first = allocator.allocate_journal_path(tmp_path / "journal", "autonomous", "abcd", "11111111")
+    first.write_text("session started yesterday")
+    Clock.day = "2026-11-08"
+    retry = allocator.allocate_journal_path(tmp_path / "journal", "autonomous", "abcd", "11111111")
+    assert retry == first
+    assert retry.read_text() == "session started yesterday"
+    assert not (tmp_path / "journal" / Clock.day / first.name).exists()

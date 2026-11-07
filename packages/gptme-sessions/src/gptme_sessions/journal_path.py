@@ -151,13 +151,41 @@ def allocate_journal_path(
     default_reservation = (
         journal_dir.parent / "state" / "session-journal-reservations" / journal_dir.name
     )
-    owner_dir = Path(reservation_dir or default_reservation).resolve() / date_str
-    day_dir.mkdir(parents=True, exist_ok=True)
-
-    candidates = candidates_for(day_dir, run_type, label, run_id)
-    for path in candidates:
-        if reserve_candidate(path, owner_dir / f"{path.name}.json", run_id):
-            return path
+    owner_root = Path(reservation_dir or default_reservation).resolve()
+    owner_root.mkdir(parents=True, exist_ok=True)
+    # Serialize the cross-date lookup and allocation, including calls on opposite
+    # sides of UTC midnight. An explicit date deliberately scopes the reservation.
+    with (owner_root / ".allocation.lock").open("a") as allocation_lock:
+        fcntl.flock(allocation_lock.fileno(), fcntl.LOCK_EX)
+        if date is None:
+            for previous in sorted(owner_root.glob("????-??-??")):
+                if not previous.is_dir():
+                    continue
+                for candidate in candidates_for(
+                    journal_dir / previous.name, run_type, label, run_id
+                ):
+                    owner_path = previous / f"{candidate.name}.json"
+                    if not owner_path.exists():
+                        continue
+                    try:
+                        owner = json.loads(owner_path.read_text(encoding="utf-8"))
+                    except (OSError, ValueError) as exc:
+                        raise JournalReservationError(
+                            f"invalid owner record {owner_path}: {exc}"
+                        ) from exc
+                    if not isinstance(owner, dict):
+                        raise JournalReservationError(
+                            f"invalid owner record {owner_path}: expected object"
+                        )
+                    if owner.get("run_id") == run_id:
+                        if reserve_candidate(candidate, owner_path, run_id):
+                            return candidate
+        owner_dir = owner_root / date_str
+        day_dir.mkdir(parents=True, exist_ok=True)
+        candidates = candidates_for(day_dir, run_type, label, run_id)
+        for path in candidates:
+            if reserve_candidate(path, owner_dir / f"{path.name}.json", run_id):
+                return path
     raise JournalReservationError(
         f"all collision-avoidance candidates taken for label={label} run={run_id}: "
         f"{[str(candidate) for candidate in candidates]}"

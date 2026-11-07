@@ -224,7 +224,10 @@ python -m gptme_sessions.journal_path --journal-dir journal --run-type autonomou
 
 - A colliding label moves to a UUID-suffixed candidate instead of opening another
   run's journal.
-- A re-dispatched run (same `--uuid`) reuses the exact path it already owns.
+- A re-dispatched run (same `--uuid`, run type and label) reuses the exact path
+  it already owns, including after UTC midnight when `--date` is omitted. An
+  explicit `--date` scopes lookup to that date. Lookup and allocation share a
+  persistent namespace lock so midnight-straddling callers cannot split a run.
 - An existing journal with no reservation record is treated as historical and never
   adopted, so a new session cannot overwrite it.
 - The file is created empty; the session writes it.
