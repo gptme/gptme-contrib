@@ -127,17 +127,21 @@ def run_build(
             continue
         emitted.append(envelope)
 
-    with build_lock(private_root):
-        return _publish_and_derive(
-            registry,
-            emitted,
-            failed=failed,
-            private_root=private_root,
-            public_root=public_root,
-            agent=agent,
-            title=title,
-            out=out,
-        )
+    try:
+        with build_lock(private_root):
+            return _publish_and_derive(
+                registry,
+                emitted,
+                failed=failed,
+                private_root=private_root,
+                public_root=public_root,
+                agent=agent,
+                title=title,
+                out=out,
+            )
+    except OSError as exc:  # unwritable private root: no lock, so nothing is written
+        out(f"FAIL lock: {type(exc).__name__}: {exc}")
+        return 1
 
 
 def _publish_and_derive(

@@ -554,3 +554,11 @@ def test_a_second_build_waits_for_the_first_to_release_the_lock(
     worker.join(timeout=10)
     assert result == [0]
     assert (tmp_path / "public/core.json").exists()
+
+
+def test_unwritable_private_root_is_reported_not_raised(tmp_path: Path) -> None:
+    (tmp_path / "private").write_text("a file where the directory should be")
+    code, lines = _run(tmp_path, _all())
+    assert code == 1
+    assert any(line.startswith("FAIL lock:") for line in lines)
+    assert not (tmp_path / "public").exists()
