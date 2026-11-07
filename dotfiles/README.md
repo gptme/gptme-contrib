@@ -90,6 +90,9 @@ before any hook is rewritten: this slice supports an existing standard
 `.pre-commit-config.yaml` and one explicit standard `--config` in the runner.
 Shell comments do not count as configuration arguments; conflicting or repeated
 configuration options are refused without executing the runner.
+Wrappers also record the validated runner's content hash and refuse to skip a
+saved generated runner whose contents later change. Rerun the helper to validate
+the replacement; unsupported configuration changes remain refused.
 It does not silently discard custom validation. When using `--hooks-dir` inside
 `.git` (including linked-worktree metadata), also pass the repository argument;
 the helper refuses ambiguous repository discovery before rewriting any hook.
