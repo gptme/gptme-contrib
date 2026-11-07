@@ -230,6 +230,15 @@ partial build never leaves the fleet view describing only what was just touched.
 Reading from the private root (not the served one) means a private page feeding a
 dimension counts the same whether or not it was rebuilt this run.
 
+Builds are serialised: publishing, deriving and the shared writes
+(`core.json`, `headline.json`, portal) run under an exclusive `flock` on
+`<private-root>/.gptme-vitals.lock` (Unix only), because per-page timers share the
+top of the hour and an older build finishing second would otherwise replace a newer
+view. Emitters run *before* the lock is taken, so a slow collector does not block
+the others. `build` also refuses to start when two outputs would write one file
+(shared `summary_source`, `core.json`/`headline.json`, the portal page) or when no
+route sets `is_headline`.
+
 A failing emitter is reported, the other pages still publish, and the failed
 page keeps its previous file. Exit status is 1 if any page or the derived files
 failed, 2 for a usage error (unknown page, bad `module:ATTR`, overlapping roots).
