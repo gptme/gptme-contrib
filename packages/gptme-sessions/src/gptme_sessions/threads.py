@@ -117,7 +117,9 @@ class _Index:
             if own:
                 return nearest(self.nodes, own, t) if t is not None else own[-1]
             # A unique exact id can name a cross-agent parent. A collision cannot.
-            return exact[0] if allow_cross_agent and len(exact) == 1 else None
+            if allow_cross_agent:
+                return exact[0] if len(exact) == 1 else None
+            # A foreign exact id must not shadow the owner's short label.
         # Only an actual short label may fall back to the label index. Never
         # discard characters from an absent full ID or an unmatched longer label.
         if not re.fullmatch(r"[0-9a-f]{4,8}", sid):

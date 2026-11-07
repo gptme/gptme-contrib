@@ -187,6 +187,16 @@ def test_exact_session_id_collision_prefers_own_agent(sid):
     assert not nodes[1].get("delivered_shas")
 
 
+def test_foreign_exact_id_does_not_shadow_own_short_commit_label():
+    nodes = [S(0, "alice", id="abcd"), S(1, "bob", id="abcd1234-rest")]
+    st = L.attach_commits(
+        nodes, [{"agent": "bob", "sha": "abcdef1000", "ts": nodes[1]["end"], "sids": ["abcd"]}]
+    )
+    assert st["attached"] == 1
+    assert nodes[1]["delivered_shas"] == ["abcdef1000"]
+    assert not nodes[0].get("delivered_shas")
+
+
 def test_repeated_exact_id_within_agent_uses_reference_time():
     nodes = [S(0, id="abcd"), S(1, id="abcd")]
     L.attach_commits(
