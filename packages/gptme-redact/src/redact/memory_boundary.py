@@ -399,6 +399,26 @@ def classify_file(
     except ValueError:
         rel = Path(file_path.name)
 
+    if file_path.is_symlink():
+        # Never silently omit linked directories or follow links outside the
+        # audit boundary. The operator must choose how to handle their targets.
+        return Verdict(
+            path=_safe_metadata(str(rel)),
+            classification="ambiguous_leakage",
+            confidence=0.0,
+            rationale="symbolic link target was not inspected; requires operator review",
+            provenance={
+                "layer": "unknown",
+                "name": _safe_metadata(rel.stem),
+                "supersedes": None,
+            },
+            migration_preview={
+                "action": "refuse",
+                "target_layer": None,
+                "warnings": ["symbolic link was not followed"],
+            },
+        )
+
     text = file_path.read_text(encoding="utf-8", errors="replace")
     frontmatter = _frontmatter_scalars(text)
     classification, confidence, rationale = _classify(text, rel, frontmatter)
@@ -457,10 +477,13 @@ def audit_workspace(root: str | Path) -> AuditResult:
     resolved by nearest root and reported as durable information.
     """
     base = _validate_root(root)
-    scan_root = base / "workspace" if (base / "workspace").is_dir() else base
+    workspace = base / "workspace"
+    scan_root = workspace if workspace.is_dir() and not workspace.is_symlink() else base
 
     result = AuditResult()
-    for file_path in sorted(p for p in scan_root.rglob("*") if p.is_file()):
+    for file_path in sorted(
+        p for p in scan_root.rglob("*") if p.is_symlink() or p.is_file()
+    ):
         result.verdicts.append(classify_file(file_path, root=base))
 
     _mark_conflicts(result)

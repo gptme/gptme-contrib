@@ -69,3 +69,37 @@ def test_event_attribute_prose_stays_clean(text):
     from redact.sanitize_document import scan_document
 
     assert not scan_document(text).blocked
+
+
+@pytest.mark.parametrize("separator", ["=", ":", "= \t", ": \t"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_empty_assignment_does_not_capture_next_setting(separator, newline):
+    text = f"API_KEY{separator}{newline}PUBLIC=ok"
+    result = redact(text, literals=[])
+    assert result.redacted == text
+    assert not result.blocked
+    assert result.findings == []
+
+
+@pytest.mark.parametrize("target_kind", ["directory", "file", "missing", "cycle"])
+def test_audit_refuses_symlinks_without_following_them(target_kind, tmp_path):
+    from redact.memory_boundary import audit_workspace, preview_migration
+
+    root = tmp_path / "audit"
+    root.mkdir()
+    target = tmp_path / "target"
+    if target_kind == "directory":
+        target.mkdir()
+        (target / "note.md").write_text("token=x")
+    elif target_kind == "file":
+        target.write_text("token=x")
+    elif target_kind == "cycle":
+        target = root
+    link = root / "project-memory"
+    link.symlink_to(target, target_is_directory=target_kind in {"directory", "cycle"})
+    result = audit_workspace(root)
+    assert len(result.verdicts) == 1
+    assert result.verdicts[0].classification == "ambiguous_leakage"
+    assert result.verdicts[0].migration_preview["action"] == "refuse"
+    assert not preview_migration(root).safe_to_proceed
+    assert link.is_symlink()

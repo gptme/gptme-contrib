@@ -63,8 +63,8 @@ class Pattern:
 
 # --- Layer 2 deny-list -------------------------------------------------------
 # Ordering matters: specific high-severity patterns run before generic
-# ones so a token is categorized by its strongest match. Patterns are applied
-# in declared order and matched text is replaced before later patterns run.
+# ones so a token is categorized by its strongest match. All patterns discover
+# original-input spans; declared order breaks category ties in overlapping spans.
 _PATTERNS: list[Pattern] = [
     # CRITICAL — live API tokens with well-known key formats.
     # Anthropic API keys are "sk-ant-api03-" + ~95 base64url chars (incl "_" and
@@ -479,7 +479,7 @@ _PATTERNS: list[Pattern] = [
         re.compile(
             r"\b(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*_)?"
             r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)\b"
-            r"['\"]?\s*[:=]\s*"
+            r"['\"]?[ \t]*[:=][ \t]*"
             # Quoted values include punctuation/spaces and escaped delimiters.
             # Prefer a complete quoted value, including embedded newlines.
             # Truncated snippets end at a line boundary or EOF instead of a
