@@ -255,5 +255,34 @@ def test_recency_scan_is_order_independent() -> None:
     assert not fv.heartbeat_up(rev[0], rev[2])
 
 
+def test_equal_timestamp_tie_fails_closed_in_any_order() -> None:
+    # Regression (contrib#2058 review): a success and a failure sharing a
+    # timestamp must give the same answer for either input order, and the
+    # unordered tie must not let the success hide the failure.
+    noop = _r(1, "noop", output_tokens=4000)
+    fail = _r(1, "failed", failure_reason="timeout")
+    results = []
+    for recs in ([fail, noop], [noop, fail]):
+        pairs = [(datetime.fromisoformat(r["timestamp"]), r) for r in recs]
+        results.append(fv.inference_status_from_records(pairs, now=NOW, window_hours=7))
+    assert results[0][2] == results[1][2]
+    assert results[0][2]["failures_since_last_model_call"] == 1
+    assert not fv.heartbeat_up(results[0][0], results[0][2])
+
+
+def test_unhashable_outcome_does_not_abort_report() -> None:
+    # Regression (contrib#2058 review): parse_jsonl_lines() accepts any
+    # timestamped object, so a malformed outcome must be skipped, not raise.
+    bad = _r(2, "noop", output_tokens=4000)
+    bad["outcome"] = []
+    assert not fv.model_call_succeeded(bad)
+    good = _r(1, "noop", output_tokens=4000)
+    pairs = [(datetime.fromisoformat(r["timestamp"]), r) for r in (bad, good)]
+    status, _, metrics = fv.inference_status_from_records(
+        pairs, now=NOW, window_hours=7
+    )
+    assert metrics["model_call_records_in_window"] == 1
+
+
 def test_healthy_without_recency_field_fails_closed() -> None:
     assert not fv.heartbeat_up("healthy", {"productive_in_window": 1})

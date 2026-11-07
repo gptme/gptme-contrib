@@ -264,7 +264,10 @@ def model_call_succeeded(rec: dict) -> bool:
     hold (thin fallback records omit tokens), so this only *adds* evidence —
     its absence never implies an outage.
     """
-    if rec.get("outcome") not in MODEL_CALL_OUTCOMES:
+    outcome = rec.get("outcome")
+    # isinstance first: a malformed record (e.g. ``"outcome": []``) is
+    # unhashable and must not abort the whole report.
+    if not isinstance(outcome, str) or outcome not in MODEL_CALL_OUTCOMES:
         return False
     if is_launch_artifact(rec) or authbilling_reason(rec):
         return False
@@ -350,10 +353,20 @@ def inference_status_from_records(
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     cutoff = now - timedelta(hours=window_hours)
+
+    def _ends_failure_scan(r: dict) -> bool:
+        return model_call_succeeded(r) or (
+            r.get("outcome") == "productive" and not is_launch_artifact(r)
+        )
+
     # Sort: the recency scan below walks newest-first, and direct callers may
-    # pass records in any order (only the JSONL loader pre-sorts).
+    # pass records in any order (only the JSONL loader pre-sorts). Tie-break:
+    # at equal timestamps, success evidence sorts *before* other records, so
+    # the newest-first scan counts a same-instant failure before it stops —
+    # an unordered tie fails closed instead of depending on input order.
     in_window = sorted(
-        ((t, r) for (t, r) in records if cutoff <= t <= now), key=lambda x: x[0]
+        ((t, r) for (t, r) in records if cutoff <= t <= now),
+        key=lambda x: (x[0], not _ends_failure_scan(x[1])),
     )
 
     productive = sum(
@@ -369,9 +382,7 @@ def inference_status_from_records(
     # (thin fallback records), so it also ends the scan.
     failures_since = 0
     for _, r in reversed(in_window):
-        if model_call_succeeded(r) or (
-            r.get("outcome") == "productive" and not is_launch_artifact(r)
-        ):
+        if _ends_failure_scan(r):
             break
         if r.get("outcome") == "failed" and not is_launch_artifact(r):
             failures_since += 1
