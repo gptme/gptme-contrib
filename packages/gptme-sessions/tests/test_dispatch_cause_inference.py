@@ -289,6 +289,36 @@ def test_cascade_task_with_pr_coordination_key_uses_task_id():
     assert cause["id"] == "t1"
 
 
+@pytest.mark.parametrize(
+    ("claimed", "key"),
+    [
+        ("0", "cascade:task:old-task"),
+        ("0", "cascade:task:new-task"),
+        ("1", "cascade:task:old-task"),
+    ],
+    ids=["inactive-other-task", "inactive-same-task", "active-other-task"],
+)
+def test_cli_refresh_does_not_credit_stale_task_claim(
+    tmp_path: Path, capsys, monkeypatch, claimed, key
+):
+    for name in _PRODUCER_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CASCADE_INTENT", '{"task_id": "new-task"}')
+    monkeypatch.setenv("CASCADE_COORDINATION_CLAIMED", claimed)
+    monkeypatch.setenv("CASCADE_COORDINATION_SOURCE", "task")
+    monkeypatch.setenv("CASCADE_COORDINATION_KEY", key)
+    monkeypatch.setenv("CASCADE_SELECTED_ID", "new-task")
+    monkeypatch.setenv("AGENT_DISPATCH_CAUSE", '{"kind": "stale-parent"}')
+
+    assert main(["--workspace", str(tmp_path), "--refresh", "--record-start"]) == 0
+    cause = json.loads(capsys.readouterr().out)
+    assert cause["kind"] == "cascade-task"
+    assert cause["task"] == "new-task"
+    assert cause["id"] == "new-task"
+    row = json.loads((tmp_path / "state/sessions/dispatch-starts.jsonl").read_text())
+    assert row["dispatch_cause"] == cause
+
+
 def test_pm_ci_failure_slot_is_credited_to_pr(tmp_path: Path):
     """PM CI failure items use type=ci_failure (not ci_failure_pr); the PR must be credited."""
     work_file = tmp_path / "work.jsonl"

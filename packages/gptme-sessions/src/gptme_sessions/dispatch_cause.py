@@ -177,9 +177,12 @@ def infer_cause(env: Mapping[str, str]) -> dict[str, Any]:
         )
     elif task:
         coord_key = env.get("CASCADE_COORDINATION_KEY") or ""
-        cause.update(
-            kind="cascade-task", id=coord_key if coord_key.startswith("cascade:task:") else task
+        # Only an active claim for this task identifies the launch. Inherited
+        # inactive or mismatched task keys must not survive fresh inference.
+        claimed_task = (
+            env.get("CASCADE_COORDINATION_CLAIMED") == "1" and coord_key == f"cascade:task:{task}"
         )
+        cause.update(kind="cascade-task", id=coord_key if claimed_task else task)
     elif env.get("INVOCATION_ID"):
         # systemd also starts manually requested services; its invocation ID
         # establishes a service run, not proof that a timer fired.
