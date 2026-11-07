@@ -192,6 +192,7 @@ class TestRecurResetUnticksChecklist:
             "- ```markdown\n  - [x] example\n  ```",
             "1. ~~~markdown\n   - [x] example\n   ~~~",
             "> - ```markdown\n>   - [x] example\n>   ```",
+            "> > ```markdown\n> > - [x] example\n> > ```",
         ],
     )
     def test_reset_preserves_fenced_examples(self, workspace: Path, example: str):
@@ -234,6 +235,36 @@ class TestRecurResetUnticksChecklist:
         assert "prose with - ✅ inline" in post.content
         assert count_subtasks(post.content, checklist_only=True).completed == 0
 
+    @pytest.mark.parametrize(
+        "example",
+        [
+            "- ```markdown\n  - [x] example",
+            "1. ~~~markdown\n   - [x] example",
+            "> ```markdown\n> - [x] example",
+            "> - ```markdown\n>   - [x] example",
+            "> > ```markdown\n> > - [x] example",
+            "- ```markdown\n\n  - [x] example",
+            "1. ~~~markdown\n\n   - [x] example",
+        ],
+    )
+    def test_reset_ends_fence_at_container_boundary(self, workspace: Path, example: str):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{example}\n\n- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert example in post.content
+        assert "- [ ] real step" in post.content
+
+    @pytest.mark.parametrize("marker", ["1.", "2)", "-", "*", "+"])
+    def test_reset_reopens_list_markers(self, workspace: Path, marker: str):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{marker}  [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        assert f"{marker}  [ ] real step" in frontmatter.load(path).content
+
     def test_non_recurring_done_keeps_ticks(self, workspace: Path):
         path = write_task(workspace, "one-off", state="active")
         path.write_text(path.read_text() + "\n\n- [x] did it\n")
@@ -244,5 +275,8 @@ class TestRecurResetUnticksChecklist:
     def test_cron_recur_keeps_ticks(self, workspace: Path):
         path = write_task(workspace, "cron-task", state="active", recur='"0 9 * * 1"')
         path.write_text(path.read_text() + "\n\n- [x] did it\n")
-        CliRunner().invoke(cli, ["edit", "cron-task", "--set", "state", "done"])
-        assert "- [x] did it" in frontmatter.load(path).content
+        result = CliRunner().invoke(cli, ["edit", "cron-task", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "done"
+        assert "- [x] did it" in post.content

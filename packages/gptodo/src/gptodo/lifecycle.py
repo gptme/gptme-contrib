@@ -481,8 +481,9 @@ def transform_post(
     return post
 
 
-_TICKED_RE = re.compile(r"^(\s*(?:>\s*)?[-*+] )(?:\[[xX]\]|✅)")
-_FENCE_RE = re.compile(r"^\s*(?:>\s*)?(?:(?:[-*+]|[0-9]+[.)])\s+)?(`{3,}|~{3,})")
+_TICKED_RE = re.compile(r"^([ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+)(?:\[[xX]\]|✅)")
+_QUOTE_RE = re.compile(r"^([ \t]*>[ \t]?)+")
+_FENCE_RE = re.compile(r"^([ \t]*)(?:((?:[-*+]|[0-9]+[.)])[ \t]+))?(`{3,}|~{3,})")
 
 
 def untick_checklist(content: str) -> str:
@@ -494,21 +495,34 @@ def untick_checklist(content: str) -> str:
     """
     out = []
     fence = ""
+    fence_quotes = 0
+    list_indent = 0
     for line in content.split("\n"):
+        # Remove quote containers for parsing only; retain their exact bytes.
+        quote = _QUOTE_RE.match(line)
+        prefix = quote.group() if quote else ""
+        candidate = line[len(prefix) :]
+        quote_depth = prefix.count(">")
+        indent = len(candidate) - len(candidate.lstrip(" \t"))
+        if fence and (quote_depth < fence_quotes or (candidate.strip() and indent < list_indent)):
+            # A container can end a fence without an explicit delimiter. Parse
+            # this same line again outside the fence so later work reopens.
+            fence = ""
         if fence:
             # Only a matching delimiter of at least the opening length closes
             # a fence; inner examples and info strings are not closing fences.
-            candidate = re.sub(r"^\s*(?:>\s*)?", "", line)
-            if re.fullmatch(rf"{re.escape(fence[0])}{{{len(fence)},}}\s*", candidate):
+            if re.fullmatch(rf"[ \t]*{re.escape(fence[0])}{{{len(fence)},}}\s*", candidate):
                 fence = ""
-        elif (opening := _FENCE_RE.match(line)) and not (
-            opening.group(1).startswith("`") and "`" in line[opening.end() :]
+        elif (opening := _FENCE_RE.match(candidate)) and not (
+            opening.group(3).startswith("`") and "`" in candidate[opening.end() :]
         ):
             # Backtick fence info strings cannot contain backticks: a line
             # like ```example``` is an inline code span, not a fence opener.
-            fence = opening.group(1)
+            fence = opening.group(3)
+            fence_quotes = quote_depth
+            list_indent = len(opening.group(1) + opening.group(2)) if opening.group(2) else 0
         else:
-            line = _TICKED_RE.sub(r"\1[ ]", line, count=1)
+            line = prefix + _TICKED_RE.sub(r"\1[ ]", candidate, count=1)
         out.append(line)
     return "\n".join(out)
 
