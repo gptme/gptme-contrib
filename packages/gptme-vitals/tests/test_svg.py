@@ -30,6 +30,20 @@ def test_single_category_donut_draws_a_complete_ring(zeros):
     assert radius - half_width == 27.5
 
 
+@pytest.mark.parametrize("count,size", [(1, 120), (6, 120), (10, 120), (6, 200)])
+def test_donut_viewport_contains_every_legend_row(count, size):
+    segments = [(f"category {i}", i, "#123456") for i in range(1, count + 1)]
+    root = ET.fromstring(svg_module.donut_svg(segments, size=size))
+    height = float(root.attrib["height"])
+    assert height >= size
+    labels = root.findall("{http://www.w3.org/2000/svg}text")[1:]
+    assert len(labels) == count
+    for label in labels:
+        assert float(label.attrib["y"]) + 4 <= height
+    for swatch in root.findall("{http://www.w3.org/2000/svg}rect"):
+        assert float(swatch.attrib["y"]) + float(swatch.attrib["height"]) <= height
+
+
 def test_svg_module_imports_only_stdlib():
     tree = ast.parse(SVG_PATH.read_text())
     roots: set[str] = set()

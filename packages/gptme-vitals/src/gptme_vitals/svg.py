@@ -79,8 +79,9 @@ def donut_svg(segments: list[tuple[str, int, str]], size: int = 120) -> str:
     cx = cy = size // 2
     r = size // 2 - 10
     inner_r = r * 0.55
+    height = max(size, len(segments) * 22 + 4)
     svg = [
-        f'<svg width="{size + 140}" height="{size}" xmlns="http://www.w3.org/2000/svg">',
+        f'<svg width="{size + 140}" height="{height}" xmlns="http://www.w3.org/2000/svg">',
     ]
 
     start_angle: float = -90  # Start from top
