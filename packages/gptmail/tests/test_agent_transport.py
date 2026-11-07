@@ -14,7 +14,12 @@ from pathlib import Path
 import pytest
 
 from gptmail.transport import Transport
-from gptmail.transport.agent import AgentTransport, meta_of, split_frontmatter
+from gptmail.transport.agent import (
+    SESSION_ID_ENV_VARS,
+    AgentTransport,
+    meta_of,
+    split_frontmatter,
+)
 
 pytestmark = pytest.mark.usefixtures("clean_agent_scanner")
 
@@ -54,6 +59,27 @@ def test_send_records_reply_to(tmp_path: Path) -> None:
     t = _transport(tmp_path)
     mid = t.send("bob", "Re: x", "reply body", reply_to="parent.md")
     assert _frontmatter(t.outbox / mid)["in_reply_to"] == "parent.md"
+
+
+def test_send_stamps_sender_session_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in SESSION_ID_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("CC_SESSION_ID", "cc-fallback")
+    monkeypatch.setenv("AGENT_SESSION_ID", "agent-sess-1234")
+    t = _transport(tmp_path)
+    mid = t.send("bob", "Hi", "body")
+    # Earlier vars in the chain win, matching the Git-Session-Id commit hook.
+    assert _frontmatter(t.outbox / mid)["session_id"] == "agent-sess-1234"
+
+
+def test_send_omits_session_id_when_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for var in SESSION_ID_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    t = _transport(tmp_path)
+    mid = t.send("bob", "Hi", "body")
+    assert "session_id" not in _frontmatter(t.outbox / mid)
 
 
 def test_send_named_mailbox_writes_under_mailbox_root(tmp_path: Path) -> None:
