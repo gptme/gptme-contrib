@@ -90,6 +90,15 @@ def donut_svg(segments: list[tuple[str, int, str]], size: int = 120) -> str:
         angle = val / total * 360
         end_angle = start_angle + angle
 
+        # A full-turn SVG arc has coincident endpoints and draws nothing.
+        if val == total:
+            svg.append(
+                f'  <circle cx="{cx}" cy="{cy}" r="{(r + inner_r) / 2}" '
+                f'fill="none" stroke="{color}" stroke-width="{r - inner_r}" opacity="0.85"/>'
+            )
+            start_angle = end_angle
+            continue
+
         # Convert to radians
         s_rad = math.radians(start_angle)
         e_rad = math.radians(end_angle)

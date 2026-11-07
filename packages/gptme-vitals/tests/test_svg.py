@@ -3,11 +3,31 @@
 from __future__ import annotations
 
 import ast
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import gptme_vitals.svg as svg_module
+import pytest
 
 SVG_PATH = Path(svg_module.__file__)
+
+
+@pytest.mark.parametrize("zeros", [False, True])
+def test_single_category_donut_draws_a_complete_ring(zeros):
+    segments = [("only", 4, "#123456")]
+    if zeros:
+        segments = [("before", 0, "#111111"), *segments, ("after", 0, "#222222")]
+    root = ET.fromstring(svg_module.donut_svg(segments))
+    rings = root.findall("{http://www.w3.org/2000/svg}circle")
+    assert len(rings) == 1
+    ring = rings[0]
+    assert ring.attrib["fill"] == "none"
+    assert ring.attrib["stroke"] == "#123456"
+    assert float(ring.attrib["cx"]) == float(ring.attrib["cy"]) == 60
+    radius = float(ring.attrib["r"])
+    half_width = float(ring.attrib["stroke-width"]) / 2
+    assert radius + half_width == 50
+    assert radius - half_width == 27.5
 
 
 def test_svg_module_imports_only_stdlib():
