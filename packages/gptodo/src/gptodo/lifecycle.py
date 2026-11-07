@@ -505,6 +505,12 @@ def untick_checklist(content: str) -> str:
         prefix = quote.group() if quote else ""
         candidate = line[len(prefix) :]
         quote_depth = prefix.count(">")
+        if fence and quote_depth >= fence_quotes:
+            # Inside code, additional '>' characters are literal content, not
+            # new quote containers (and must not turn into closing fences).
+            container = re.match(rf"^(?:[ \t]*>[ \t]?){{{fence_quotes}}}", line)
+            assert container is not None
+            candidate = line[container.end() :]
         indent = len(candidate) - len(candidate.lstrip(" \t"))
         if fence and (quote_depth < fence_quotes or (candidate.strip() and indent < list_indent)):
             # A container can end a fence without an explicit delimiter. Parse
