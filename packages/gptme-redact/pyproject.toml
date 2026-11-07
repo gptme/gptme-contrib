@@ -1,0 +1,27 @@
+[project]
+name = "gptme-redact"
+version = "0.1.0"
+description = "Secret-safe export redactor — layered fail-closed redaction for derived agent content"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+redact = "redact.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/gptme/gptme-contrib"
+Repository = "https://github.com/gptme/gptme-contrib"
+Issues = "https://github.com/gptme/gptme-contrib/issues"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/redact"]
