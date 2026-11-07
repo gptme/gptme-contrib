@@ -488,3 +488,29 @@ def test_long_valid_journal_name_can_publish_ownership(tmp_path: Path):
     path = _alloc(tmp_path, label, "11111111")
     assert path.exists()
     assert _alloc(tmp_path, label, "11111111") == path
+
+
+@pytest.mark.parametrize("label", ["a" * 200, "é" * 100])
+@pytest.mark.parametrize("explicit_date", [False, True])
+def test_long_label_skips_oversized_full_uuid_candidate(tmp_path: Path, label, explicit_date):
+    journal_dir = tmp_path / "journal"
+    date = _TODAY if explicit_date else None
+    run_ids = [f"{n:08d}-0000-0000-0000-000000000000" for n in range(2)]
+    first, second = [
+        allocate_journal_path(journal_dir, "autonomous", label, run_id, date=date)
+        for run_id in run_ids
+    ]
+    assert first != second
+    assert second.name == f"autonomous-session-{label}-0000.md"
+    for run_id, path in zip(run_ids, (first, second)):
+        assert allocate_journal_path(journal_dir, "autonomous", label, run_id, date=date) == path
+
+
+def test_owner_name_limit_exhaustion_is_reservation_error(tmp_path: Path):
+    label = "a" * 225
+    first = _alloc(tmp_path, label, "11111111")
+    assert _alloc(tmp_path, label, "11111111") == first
+    # The four-character suffix journal fits, but its owner filename does not.
+    with pytest.raises(JournalReservationError, match="all collision-avoidance candidates"):
+        _alloc(tmp_path, label, "22222222")
+    assert list((tmp_path / _TODAY).iterdir()) == [first]

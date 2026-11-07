@@ -17,6 +17,7 @@ placeholder body would have to be replaced anyway.
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import json
 import os
@@ -185,8 +186,13 @@ def allocate_journal_path(
                 continue
             for candidate in candidates_for(journal_dir / previous.name, run_type, label, run_id):
                 owner_path = previous / f"{candidate.name}.json"
-                if not owner_path.exists():
-                    continue
+                try:
+                    if not owner_path.exists():
+                        continue
+                except OSError as exc:
+                    if exc.errno == errno.ENAMETOOLONG:
+                        continue
+                    raise
                 if read_owner_run_id(owner_path, candidate) == run_id:
                     if reserve_candidate(candidate, owner_path, run_id):
                         return candidate
@@ -194,8 +200,15 @@ def allocate_journal_path(
         day_dir.mkdir(parents=True, exist_ok=True)
         candidates = candidates_for(day_dir, run_type, label, run_id)
         for path in candidates:
-            if reserve_candidate(path, owner_dir / f"{path.name}.json", run_id):
-                return path
+            try:
+                if reserve_candidate(path, owner_dir / f"{path.name}.json", run_id):
+                    return path
+            except OSError as exc:
+                # The owner lock has the same byte length as the owner record,
+                # so oversized metadata names fail before journal creation.
+                # Let each filesystem enforce its own encoded component limit.
+                if exc.errno != errno.ENAMETOOLONG:
+                    raise
     raise JournalReservationError(
         f"all collision-avoidance candidates taken for label={label} run={run_id}: "
         f"{[str(candidate) for candidate in candidates]}"
