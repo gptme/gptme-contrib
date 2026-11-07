@@ -26,6 +26,7 @@ Python packages for gptme agents.
 | **gptme-lessons-extras** | Lesson format validation and analysis | `uv pip install -e packages/gptme-lessons-extras` |
 | **gptme-lessons-mcp** | MCP server that exposes gptme | `uv pip install -e packages/gptme-lessons-mcp` |
 | **gptme-rag** | ChromaDB-based RAG (Retrieval-Augmented Generation) for gptme agents | `uv pip install -e packages/gptme-rag` |
+| **gptme-redact** | Fail-closed secret scanner/redactor for derived agent content (import module `redact`) | `uv pip install -e packages/gptme-redact` |
 | **gptme-runloops** | Python-based run loop framework for autonomous AI agent operation | `uv pip install -e packages/gptme-runloops` |
 | **gptme-sessions** | Session tracking and analytics for gptme agents | `uv pip install -e packages/gptme-sessions` |
 | **gptme-subscription** | Generic subscription observation, pressure scoring, and capacity-aware routing for agent credential slots | `uv pip install -e packages/gptme-subscription` |

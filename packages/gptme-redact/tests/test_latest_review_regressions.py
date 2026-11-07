@@ -1,0 +1,144 @@
+"""Regressions for the packaged scanner's latest outage review."""
+
+import base64
+import json
+
+import pytest
+from redact import redact
+from redact.cli import main
+from redact.sanitize_document import scan_document
+
+
+@pytest.mark.parametrize("value", ["x", "hunter2", "abcdefghij"])
+@pytest.mark.parametrize("quote", ["", "'", '"'])
+def test_short_named_password_is_fully_masked(value, quote):
+    text = f"DATABASE_PASSWORD={quote}{value}{quote}"
+    result = redact(text, literals=[])
+    assert result.blocked
+    assert (
+        result.redacted
+        == f"DATABASE_PASSWORD={quote}[REDACTED:secret_assignment]{quote}"
+    )
+
+
+def _segment(text):
+    return base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
+
+
+@pytest.mark.parametrize("whitespace", [" ", "\n", "\t", "  "])
+@pytest.mark.parametrize("leading", ["", " \n"])
+def test_bare_jwt_with_json_whitespace_is_blocked(whitespace, leading):
+    header = _segment(leading + "{" + whitespace + '"alg": "HS256" }')
+    payload = _segment(leading + "{" + whitespace + '"sub": "example" }')
+    token = f"{header}.{payload}.{'c3ludGhldGlj' * 3}"
+    result = redact(f"token: {token}", literals=[])
+    assert result.blocked
+    assert result.redacted == "token: [REDACTED:jwt]"
+    assert any(f.category == "jwt" for f in result.findings)
+
+
+@pytest.mark.parametrize("prefix", ["session.", "session.version.", "x.", "e30."])
+def test_dotted_prefix_does_not_hide_jwt(prefix):
+    header = _segment('{"alg":"HS256"}')
+    payload = _segment('{"sub":"example"}')
+    token = f'{header}.{payload}.{"x" * 43}'
+    result = redact(prefix + token, literals=[])
+    assert result.blocked
+    assert result.redacted == prefix + "[REDACTED:jwt]"
+    assert [(f.category, f.count) for f in result.findings] == [("jwt", 1)]
+
+
+def test_multiple_prefixed_jwts_are_masked_once_each():
+    header = _segment('{"alg":"HS256"}')
+    payload = _segment('{"sub":"example"}')
+    token = f'{header}.{payload}.{"x" * 43}'
+    result = redact(f"session.{token} and version.{token}", literals=[])
+    assert result.blocked
+    assert result.redacted == "session.[REDACTED:jwt] and version.[REDACTED:jwt]"
+    assert [(f.category, f.count) for f in result.findings] == [("jwt", 2)]
+
+
+def test_cli_prefixed_jwt_refuses_output(tmp_path):
+    header = _segment('{"alg":"HS256"}')
+    payload = _segment('{"sub":"example"}')
+    source = tmp_path / "input.md"
+    source.write_text(f'session.{header}.{payload}.{"x" * 43}')
+    output = tmp_path / "output.md"
+    assert main([str(source), "--out", str(output), "--no-env-secrets"]) != 0
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "text", ["release.version.number", "abc.def.ghi", "e30.e30.signature"]
+)
+def test_non_jwt_dotted_text_is_not_a_jwt(text):
+    assert not any(f.category == "jwt" for f in redact(text, literals=[]).findings)
+
+
+@pytest.mark.parametrize(
+    "destination",
+    ["javascript:alert%281%29", "vbscript:msgbox(1)", "data:text/html,payload"],
+)
+@pytest.mark.parametrize(
+    "template", ["[target]: {uri}", "  [target]: <{uri}>", "[target]:\n  {uri}"]
+)
+def test_reference_link_dangerous_scheme_is_blocked(destination, template):
+    result = scan_document("[click][target]\n\n" + template.format(uri=destination))
+    assert result.blocked
+    assert any(f.category == "html_script" and f.count == 1 for f in result.findings)
+
+
+@pytest.mark.parametrize(
+    "destination",
+    ["https://example.com/javascript:guide", "mailto:someone@example.com"],
+)
+def test_reference_link_safe_scheme_is_not_blocked(destination):
+    assert not scan_document(f"[click][target]\n\n[target]: {destination}").blocked
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "DATABASE_PASSWORD=abcdefghij",
+        "[click][target]\n\n[target]: javascript:alert%281%29",
+    ],
+)
+def test_cli_latest_bypasses_refuse_output(text, tmp_path, capsys):
+    source = tmp_path / "input.md"
+    source.write_text(text)
+    output = tmp_path / "output.md"
+    if text.startswith("DATABASE"):
+        code = main([str(source), "--out", str(output), "--no-env-secrets"])
+        assert code != 0
+        assert not output.exists()
+    else:
+        code = main(["sanitize-doc", str(source), "--json"])
+        assert code != 0
+        assert json.loads(capsys.readouterr().out)["blocked"]
+
+
+@pytest.mark.parametrize(
+    "text", ["PASSWORD=hunter2", '{"password":"hunter2"}', "TOKEN=x", "monkey=ordinary"]
+)
+def test_standalone_secret_keyword(text):
+    result = redact(text, literals=[])
+    assert result.blocked == (not text.startswith("monkey"))
+    if result.blocked:
+        assert "hunter2" not in result.redacted
+
+
+@pytest.mark.parametrize("scheme", ["javascript", "vbscript", "data"])
+def test_inline_angle_destination_is_blocked(scheme):
+    assert scan_document(f"[click](<{scheme}:payload>)").blocked
+
+
+def test_deeply_nested_jwt_candidate_does_not_crash(monkeypatch):
+    def reject_nested_json(_):
+        raise RecursionError("nested JSON")
+
+    monkeypatch.setattr("redact.json.loads", reject_nested_json)
+    header = _segment('{"alg":"HS256","x":' + "[" * 2000 + "0" + "]" * 2000 + "}")
+    payload = _segment('{"sub":"example"}')
+    token = f'{header}.{payload}.{"x" * 43}'
+    result = redact(token, literals=[])
+    assert result.input_chars == len(token)
