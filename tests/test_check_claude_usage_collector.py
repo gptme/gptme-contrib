@@ -247,9 +247,10 @@ def test_weekly_only_captures_sonnet_on_next_render(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("stale_locked", [False, True], ids=["fresh", "stale-locked"])
 def test_cached_human_render_shows_fable_window(
-    tmp_path: Path, stale_locked: bool
+    tmp_path: Path, stale_locked: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Both cached renders must list Fable without starting another scrape."""
+    monkeypatch.setenv("CLAUDE_USAGE_CACHE_TTL", "600")
     if stale_locked and shutil.which("flock") is None:
         pytest.skip("stale-cache fallback requires flock")
     payload = (
