@@ -53,6 +53,37 @@ def test_worker_kind_wins_over_inherited_cascade_state():
     assert cause["task"] is None
 
 
+@pytest.mark.parametrize("prefix", ["AGENT", "BOB"])
+@pytest.mark.parametrize("kind", ["worker", "fanout", "fanout-btb"])
+@pytest.mark.parametrize(
+    "inherited",
+    [
+        {"EVENT_ID": "parent-event", "EVENT_URL": "https://github.com/gptme/gptme/pull/42"},
+        {"PM_DISPATCH_ID": "parent-slot"},
+        {"CASCADE_INTENT": '{"task_id": "selected-task"}'},
+    ],
+    ids=["event", "pm-slot", "task"],
+)
+def test_explicit_spawn_wins_over_parent_dispatch(prefix, kind, inherited):
+    cause = infer_cause(
+        {
+            **inherited,
+            f"{prefix}_DISPATCH_KIND": kind,
+            f"{prefix}_DISPATCH_ID": "child-1",
+            f"{prefix}_PARENT_SESSION_ID": "parent-1",
+        }
+    )
+    assert cause["kind"] == kind
+    assert cause["id"] == "child-1"
+    assert cause["parent_session_id"] == "parent-1"
+    assert cause["pr"] is None
+    assert "event_type" not in cause
+    assert session_trigger(cause) == "spawn"
+    # Fanout deliberately carries its selected task; workers must not borrow it.
+    expected_task = "selected-task" if kind != "worker" and "CASCADE_INTENT" in inherited else None
+    assert cause["task"] == expected_task
+
+
 def test_legacy_bob_names_still_infer():
     cause = infer_cause({"BOB_DISPATCH_KIND": "fanout", "BOB_DISPATCH_ID": "fanout-3"})
     assert cause["kind"] == "fanout"
@@ -217,6 +248,9 @@ def test_cli_refreshes_inherited_cause(tmp_path: Path, capsys):
         "AGENT_DISPATCH_CAUSE": '{"kind": "stale-parent"}',
         "AGENT_DISPATCH_KIND": "fanout",
         "AGENT_DISPATCH_ID": "fresh",
+        "EVENT_ID": "parent-event",
+        "PM_DISPATCH_ID": "parent-slot",
+        "CASCADE_INTENT": '{"task_id": "selected-task"}',
     }
     with pytest.MonkeyPatch.context() as mp:
         # Inference reads the whole environment, so the runner's own dispatcher
@@ -233,6 +267,9 @@ def test_cli_refreshes_inherited_cause(tmp_path: Path, capsys):
         refreshed = json.loads(capsys.readouterr().out)
         assert refreshed["kind"] == "fanout"
         assert refreshed["id"] == "fresh"
+        assert refreshed["task"] == "selected-task"
+        assert main(["--workspace", str(tmp_path), "--refresh", "--trigger"]) == 0
+        assert capsys.readouterr().out.strip() == "spawn"
 
 
 def test_cli_trigger_prints_classification(tmp_path: Path, capsys):

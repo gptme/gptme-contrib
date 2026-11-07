@@ -153,10 +153,10 @@ def infer_cause(env: Mapping[str, str]) -> dict[str, Any]:
         "task": task,
         "pr": None,
     }
-    if kind == "worker":
-        # A worker is a new launch, even when its spawner inherited CASCADE
-        # or event variables from an agent session.
-        cause.update(kind="worker", id=_env(env, "id"), task=None)
+    if kind in SPAWN_KINDS:
+        # Explicit child launches outrank inherited event/PM/selection state.
+        # Fanout carries its selected task; workers must not borrow that task.
+        cause.update(kind=kind, id=_env(env, "id"), task=None if kind == "worker" else task)
     elif env.get("EVENT_ID"):
         cause.update(
             kind="event",
@@ -177,8 +177,6 @@ def infer_cause(env: Mapping[str, str]) -> dict[str, Any]:
         )
     elif task:
         cause.update(kind="cascade-task", id=env.get("CASCADE_COORDINATION_KEY") or task)
-    elif kind in SPAWN_KINDS:
-        cause.update(kind=kind, id=_env(env, "id"))
     elif env.get("INVOCATION_ID"):
         # systemd also starts manually requested services; its invocation ID
         # establishes a service run, not proof that a timer fired.

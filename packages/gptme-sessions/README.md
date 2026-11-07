@@ -278,6 +278,11 @@ dispatcher prompt text stay in the stores that already own them.
 | `AGENT_PARENT_SESSION_ID` | Recorded as `parent_session_id`; never inferred |
 | `AGENT_SESSION_ID`, `AGENT_RECEIPT_SESSION_ID` | Session id for the start ledger |
 
+Explicit spawn kinds take precedence over event, PM and task-selection variables
+that a child may inherit. Fanout retains its selected `task` as context while its
+cause kind/id identify the spawn; workers clear inherited task context. Without an
+explicit spawn kind, event, PM, task and systemd inference keep that order.
+
 Legacy `BOB_*` spellings remain read as aliases (gptme/gptme-contrib#1724). Inference
 also recognises dispatcher-owned protocols that are not agent-branded: `CASCADE_*`
 selection state, `EVENT_ID`/`EVENT_URL`/`EVENT_TRIGGER_TYPE`, `PM_DISPATCH_ID` with
