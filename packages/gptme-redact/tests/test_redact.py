@@ -16,7 +16,6 @@ import re
 
 import pytest
 from redact import (
-    DEFAULT_ALLOWLIST,
     Finding,
     Result,
     Severity,
@@ -631,9 +630,9 @@ def test_lowering_block_severity_makes_email_block():
 
 
 def test_allowlisted_email_is_left_untouched_and_unrecorded():
-    text = "reach me at bob@superuserlabs.org thanks"
-    result = redact(text, allowlist=list(DEFAULT_ALLOWLIST))
-    assert "bob@superuserlabs.org" in result.redacted
+    text = "reach me at someone@example.com thanks"
+    result = redact(text, allowlist=["someone@example.com"])
+    assert "someone@example.com" in result.redacted
     assert not any(f.category == "email" for f in result.findings)
     assert result.blocked is False
 

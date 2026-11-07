@@ -472,14 +472,16 @@ _PATTERNS: list[Pattern] = [
             r"\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*"
             r"_(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)\b"
             r"['\"]?\s*[:=]\s*"
-            # Quoted values include punctuation/spaces and escaped delimiters;
-            # unquoted values stop at ordinary config/JSON separators.
+            # Quoted values include punctuation/spaces and escaped delimiters.
+            # Truncated snippets end at a line boundary or EOF instead of a
+            # closing quote; a final backslash is still part of the secret.
+            # Unquoted values stop at ordinary config/JSON separators.
             r"(?P<quote>['\"])?"
             r"(?P<value>(?(quote)"
-            r"(?:\\[^\r\n]|(?!(?P=quote))[^\\\r\n]){11,}"
+            r"(?:\\[^\r\n]|\\(?=[\r\n]|\Z)|(?!(?P=quote))[^\\\r\n]){11,}"
             r"|(?:\[REDACTED:[A-Za-z0-9_:.-]+\][^\s'\",;}\]]*"
             r"|[^\s'\",;}\]]{11,})))"
-            r"(?(quote)(?P=quote))",
+            r"(?(quote)(?:(?P=quote)|(?=[\r\n]|\Z)))",
             re.IGNORECASE,
         ),
         Severity.CRITICAL,

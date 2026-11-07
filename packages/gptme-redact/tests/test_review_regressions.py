@@ -166,3 +166,30 @@ def test_no_env_cli_overlapping_literals_do_not_expose_suffix(tmp_path, capsys):
         != 0
     )
     assert "ijklmno" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+@pytest.mark.parametrize(
+    "ending", ["", "\nNEXT_SETTING=public", "\r\nNEXT_SETTING=public"]
+)
+@pytest.mark.parametrize("tail", ["", "\\"])
+def test_incomplete_quoted_assignment_blocks_and_masks_whole_value(quote, ending, tail):
+    value = "synthetic-password-12345" + tail
+    text = f"SERVICE_PASSWORD={quote}{value}{ending}"
+    result = redact(text, literals=[])
+    assert result.blocked
+    assert (
+        result.redacted
+        == f"SERVICE_PASSWORD={quote}[REDACTED:secret_assignment]{ending}"
+    )
+    assert all(f.preview == "****" for f in result.findings)
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_cli_incomplete_quoted_assignment_refuses_artifact(quote, tmp_path, capsys):
+    source = tmp_path / "input.txt"
+    source.write_text(f"SERVICE_PASSWORD={quote}synthetic-password-12345")
+    output = tmp_path / "output.txt"
+    assert main([str(source), "--out", str(output), "--no-env-secrets"]) != 0
+    assert not output.exists()
+    assert "synthetic-password-12345" not in capsys.readouterr().out
