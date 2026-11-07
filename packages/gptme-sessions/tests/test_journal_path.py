@@ -492,7 +492,17 @@ def test_long_valid_journal_name_can_publish_ownership(tmp_path: Path):
 
 @pytest.mark.parametrize("label", ["a" * 200, "é" * 100])
 @pytest.mark.parametrize("explicit_date", [False, True])
-def test_long_label_skips_oversized_full_uuid_candidate(tmp_path: Path, label, explicit_date):
+def test_long_label_skips_oversized_full_uuid_candidate(
+    tmp_path: Path, monkeypatch, label, explicit_date
+):
+    import gptme_sessions.journal_path as allocator
+
+    class Clock:
+        @classmethod
+        def now(cls, tz):
+            return datetime.datetime.fromisoformat(_TODAY).replace(tzinfo=tz)
+
+    monkeypatch.setattr(allocator, "datetime", Clock)
     journal_dir = tmp_path / "journal"
     date = _TODAY if explicit_date else None
     run_ids = [f"{n:08d}-0000-0000-0000-000000000000" for n in range(2)]
