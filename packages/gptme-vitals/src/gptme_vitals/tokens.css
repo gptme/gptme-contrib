@@ -1,0 +1,33 @@
+/* gptme-vitals design tokens. One file, three states:
+ *   - default (dark)
+ *   - light, when the OS prefers it and the page has not pinned a theme
+ *   - light/dark pinned by <html data-theme="..."> (the manual toggle)
+ * The two light blocks must stay identical; tests enforce it. Pages read these
+ * variables and never declare their own :root palette.
+ */
+:root {
+  color-scheme: dark;
+  --bg: #11151f; --card-bg: #181e2b; --tile-bg: #1d2433; --text: #e6e9ef;
+  --accent: #f2a65a; --green: #5fcf8f; --yellow: #f4c95e; --red: #ff7b72;
+  --dim: #8b93a7; --border: #283147; --sep: #202839; --chart-blue: #8aa9d6;
+  --badge-ok-bg: #232b3b; --badge-green-bg: #173a2a;
+  --badge-yellow-bg: #4a3d16; --badge-red-bg: #4a1f1f;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f6f7fa; --card-bg: #ffffff; --tile-bg: #eef0f5; --text: #1b2130;
+  --accent: #9c5204; --green: #14753f; --yellow: #7a5600; --red: #b52e26;
+  --dim: #566074; --border: #d5d9e3; --sep: #e6e9f0; --chart-blue: #3b66a3;
+  --badge-ok-bg: #e3e7ef; --badge-green-bg: #d4efe0;
+  --badge-yellow-bg: #f6e8bd; --badge-red-bg: #f9d9d6;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --bg: #f6f7fa; --card-bg: #ffffff; --tile-bg: #eef0f5; --text: #1b2130;
+    --accent: #9c5204; --green: #14753f; --yellow: #7a5600; --red: #b52e26;
+    --dim: #566074; --border: #d5d9e3; --sep: #e6e9f0; --chart-blue: #3b66a3;
+    --badge-ok-bg: #e3e7ef; --badge-green-bg: #d4efe0;
+    --badge-yellow-bg: #f6e8bd; --badge-red-bg: #f9d9d6;
+  }
+}

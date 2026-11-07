@@ -126,7 +126,28 @@ Not moved from Bob's `dashboard_routes.py`: his route table and the
 Decisions/Review-queue ownership predicates (they encode his page split).
 Nav classes are `vitals-nav` (was `bob-nav`).
 
+## Theme
+
+`tokens.css` is the one palette, shipped as a file: dark by default, light when
+the OS prefers it, and either one pinned with `<html data-theme="light|dark">`.
+A pinned dark theme beats the OS preference; a pinned light one needs no media
+query. Pages read the variables (`--bg`, `--card-bg`, `--text`, `--accent`,
+`--green`/`--yellow`/`--red`, `--badge-*-bg`, ...) and never declare their own
+`:root`; Bob's workspace carried 13 independent palettes before this.
+
+```python
+from gptme_vitals import render_head_assets, render_theme_toggle
+
+head = render_head_assets()   # <style> tokens + base page CSS, pre-paint theme script
+toggle = render_theme_toggle()  # button cycling auto -> light -> dark, persisted
+```
+
+Tests enforce that every dark token has a light value, that the two light
+blocks (manual and media-query) are identical, and that text, status colours
+and badges meet WCAG AA (4.5:1) on every surface in both schemes. The light
+accent is `#9c5204`, darker than a straight inversion would give, because the
+first draft measured 4.46:1 on the tile surface.
+
 ## Next in slice 1
 
-The CSS token set with light/dark, the portal, and `build` emitting the derived
-`core.json`/`headline.json` pair.
+The portal and `build` emitting the derived `core.json`/`headline.json` pair.
