@@ -87,7 +87,9 @@ The wrapper skips that generated runner only when the global hook declares
 ownership of these checks. Arbitrary local hooks still run after the global
 check suite. Generated runners with a custom or missing config are refused
 before any hook is rewritten: this slice supports an existing standard
-`.pre-commit-config.yaml` and an explicit standard `--config` in the runner.
+`.pre-commit-config.yaml` and one explicit standard `--config` in the runner.
+Shell comments do not count as configuration arguments; conflicting or repeated
+configuration options are refused without executing the runner.
 It does not silently discard custom validation. When using `--hooks-dir` inside
 `.git` (including linked-worktree metadata), also pass the repository argument;
 the helper refuses ambiguous repository discovery before rewriting any hook.
@@ -96,7 +98,10 @@ staged files before running checks, leaving both index and worktree unchanged.
 Stage only the intended complete file, or use an isolated worktree for a partial
 commit. Submodule file edits are ignored here because they cannot enter the
 parent commit; a checked-out submodule commit differing from its staged pointer
-still blocks checks. Unstaged changes in other files do not block checks. No stash/restore is
+still blocks checks. Unstaged edits or deletion of `.pre-commit-config.yaml`
+also block checks, even when the configuration is absent from the staged diff:
+the runner must not validate against a different policy than the index holds.
+Unstaged changes in other files do not block checks. No stash/restore is
 introduced, so concurrent work is not hidden or restored over other sessions.
 Git-configured `~/` hook paths
 are expanded before installation; relative global paths use the repository's
