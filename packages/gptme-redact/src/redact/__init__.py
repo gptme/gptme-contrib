@@ -499,7 +499,10 @@ _PATTERNS: list[Pattern] = [
         re.compile(
             r"\b(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*_)?"
             r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)\b"
-            r"['\"]?[ \t]*[:=][ \t]*"
+            # A closing mapping-key quote followed by ':' permits JSON's
+            # multiline whitespace. Line-based assignments keep horizontal
+            # padding so an empty value cannot consume the next setting.
+            r"(?:['\"][ \t\r\n]*:[ \t\r\n]*|['\"]?[ \t]*[:=][ \t]*)"
             # Quoted values include punctuation/spaces and escaped delimiters.
             # Prefer a complete quoted value, including embedded newlines.
             # Truncated snippets end at a line boundary or EOF instead of a
