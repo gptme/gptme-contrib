@@ -481,3 +481,10 @@ def test_shared_uuid_prefix_falls_back_to_full_identity(tmp_path: Path):
     assert paths[-1].name == f"autonomous-session-abcd-{run_ids[-1]}.md"
     for run_id, path in zip(run_ids, paths):
         assert _alloc(tmp_path, "abcd", run_id) == path
+
+
+def test_long_valid_journal_name_can_publish_ownership(tmp_path: Path):
+    label = "a" * 220
+    path = _alloc(tmp_path, label, "11111111")
+    assert path.exists()
+    assert _alloc(tmp_path, label, "11111111") == path

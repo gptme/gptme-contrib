@@ -105,7 +105,7 @@ def reserve_candidate(path: Path, owner_path: Path, run_id: str) -> bool:
             mode="w",
             encoding="utf-8",
             dir=owner_path.parent,
-            prefix=f".{owner_path.name}.",
+            prefix=".journal-owner.",
             delete=False,
         ) as owner_file:
             owner_tmp = Path(owner_file.name)
