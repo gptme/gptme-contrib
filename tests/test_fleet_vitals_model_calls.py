@@ -109,6 +109,24 @@ def test_down_never_pushes_even_with_earlier_model_output() -> None:
     assert not fv.heartbeat_up(status, m)
 
 
+def test_non_auth_failures_after_success_do_not_push() -> None:
+    # A noop at -6h, then rate-limit/5xx failures: no 403 streak, so status is
+    # degraded and the field is True, but the newest evidence is failure.
+    recs = [_r(6, "noop", output_tokens=4000)] + [
+        _r(h, "failed", failure_reason=fr)
+        for h, fr in ((4, "rate_limit"), (3, "api_error_529"), (2, "timeout"))
+    ]
+    status, _, m = _status(recs)
+    assert status == "degraded"
+    assert m["model_calls_succeeded_in_window"] is True
+    assert m["failures_since_last_model_call"] == 3
+    assert not fv.heartbeat_up(status, m)
+    # Recovery: a fresh model-call success clears it.
+    status, _, m = _status(recs + [_r(1, "noop", output_tokens=10)])
+    assert m["failures_since_last_model_call"] == 0
+    assert fv.heartbeat_up(status, m)
+
+
 def test_healthy_pushes_and_stale_does_not() -> None:
     status, _, m = _status([_r(2, "productive")])
     assert status == "healthy" and fv.heartbeat_up(status, m)
@@ -121,7 +139,14 @@ def test_field_flows_through_cli_json(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     p = tmp_path / "session-records.jsonl"
-    p.write_text(json.dumps(_r(0.5, "noop", output_tokens=12)) + "\n")
+    # The CLI uses the real clock (no injectable now), so the record must be
+    # relative to it, not to the fixed NOW, or the test expires within hours.
+    rec = {
+        "timestamp": (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(),
+        "outcome": "noop",
+        "output_tokens": 12,
+    }
+    p.write_text(json.dumps(rec) + "\n")
     fv._inference_cli(["--records", str(p), "--window-hours", "7", "--json"])
     out = json.loads(capsys.readouterr().out)
     assert out["model_calls_succeeded_in_window"] is True

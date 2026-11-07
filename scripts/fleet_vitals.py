@@ -278,14 +278,21 @@ def heartbeat_up(status: str, metrics: dict) -> bool:
     """Push decision for a dead-man inference heartbeat (e.g. Uptime Kuma).
 
     Up when ``healthy``, or ``degraded`` with in-window proof a model call
-    returned. Never on ``down``: the field can still be True there (a noop
-    hours before the 403 streak began), and pushing would hide the outage.
-    Never on ``stale``. Consumers should call this rather than re-deriving the
-    policy from ``model_calls_succeeded_in_window`` alone.
+    returned *and no failed session since that proof*. Never on ``down``: the
+    field can still be True there (a noop hours before the 403 streak began),
+    and pushing would hide the outage. The same logic applies to non-403
+    failure runs (rate limit, 5xx, timeouts) after the last success: those
+    leave status ``degraded``, so the recency check is what keeps them from
+    pushing. Never on ``stale``. Consumers should call this rather than
+    re-deriving the policy from ``model_calls_succeeded_in_window`` alone.
     """
     if status == "healthy":
         return True
-    return status == "degraded" and bool(metrics.get("model_calls_succeeded_in_window"))
+    return (
+        status == "degraded"
+        and bool(metrics.get("model_calls_succeeded_in_window"))
+        and not metrics.get("failures_since_last_model_call", 0)
+    )
 
 
 def parse_jsonl_lines(lines: object) -> list[tuple[datetime, dict]]:
@@ -347,12 +354,22 @@ def inference_status_from_records(
         if r.get("outcome") == "productive" and not is_launch_artifact(r)
     )
     model_calls = sum(1 for _, r in in_window if model_call_succeeded(r))
+    # Failures *after* the newest model-call success. Old success evidence must
+    # not vouch for a run of later failures (rate limit, 5xx, timeouts), so
+    # heartbeat_up() requires this to be 0. Window-wide when no success exists.
+    failures_since = 0
+    for _, r in reversed(in_window):
+        if model_call_succeeded(r):
+            break
+        if r.get("outcome") == "failed" and not is_launch_artifact(r):
+            failures_since += 1
     metrics: dict[str, object] = {
         "window_hours": window_hours,
         "records_in_window": len(in_window),
         "productive_in_window": productive,
         "model_call_records_in_window": model_calls,
         "model_calls_succeeded_in_window": model_calls > 0,
+        "failures_since_last_model_call": failures_since,
     }
 
     if not in_window:
