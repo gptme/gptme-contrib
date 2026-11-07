@@ -20,10 +20,13 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import stat
 import subprocess
 import textwrap
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "check-claude-usage.sh"
@@ -242,8 +245,13 @@ def test_weekly_only_captures_sonnet_on_next_render(tmp_path: Path) -> None:
     assert _right_count(tmp_path) == 2
 
 
-def test_cached_human_render_shows_fable_window(tmp_path: Path) -> None:
-    """The cached human render must list the Fable window, not drop it."""
+@pytest.mark.parametrize("stale_locked", [False, True], ids=["fresh", "stale-locked"])
+def test_cached_human_render_shows_fable_window(
+    tmp_path: Path, stale_locked: bool
+) -> None:
+    """Both cached renders must list Fable without starting another scrape."""
+    if stale_locked and shutil.which("flock") is None:
+        pytest.skip("stale-cache fallback requires flock")
     payload = (
         "shortcuts\nCurrent week (all models)\n33% used\n"
         "Current week (Fable)\n12% used\n"
@@ -251,6 +259,15 @@ def test_cached_human_render_shows_fable_window(tmp_path: Path) -> None:
     first = _run_collector(tmp_path, payload, "--json")
     assert first.returncode == 0, first.stderr
     assert "seven_day_fable" in first.stdout, first.stdout
-    cached = _run_collector(tmp_path, payload)
+    with (tmp_path / "scrape.lock").open("w") as lock:
+        if stale_locked:
+            fcntl = pytest.importorskip("fcntl")
+            os.utime(tmp_path / "usage-cache.json", (0, 0))
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        cached = _run_collector(tmp_path, payload)
     assert cached.returncode == 0, cached.stderr
     assert "Weekly (Fable)" in cached.stdout, cached.stdout
+    assert "12% used" in cached.stdout, cached.stdout
+    # _fake_home resets this counter before each invocation. A fresh scrape
+    # prints Fable too, so the label alone cannot prove either cache path ran.
+    assert (tmp_path / "capture-count.txt").read_text() == "0"
