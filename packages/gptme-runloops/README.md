@@ -171,9 +171,49 @@ and other execution settings; `ambient_env` cannot add them back in this mode.
 No environment values are logged by this API.
 
 This is an opt-in Python API boundary for the runner only, not a sandbox or a
-fleet rollout. `run_work_file` and the CLI retain legacy behavior; lifecycle,
-GitHub observation, system-prompt, and post-run hooks are not isolated by this
-argument. Adopting callers must assemble and pass their intended environment.
+fleet rollout. Lifecycle, GitHub observation, system-prompt, and post-run hooks
+are not isolated by this argument.
+
+### Runner environment contract (`config.runner_env`)
+
+`run_work_file` adopts the boundary from a declarative TOML table
+(`gptme_runloops.runner_env` builds it; the module has no I/O):
+
+```toml
+[config.runner_env]
+mode = "explicit"            # or "legacy" (inherit os.environ unchanged)
+passthrough = ["PATH", "HOME"]
+prefixes = ["LC_"]
+credentials = ["OPENROUTER_API_KEY"]  # omit for the backend default
+set = { BOB_BACKEND = "gptme" }
+require = ["PATH", "HOME"]
+disable_dotenv = true
+```
+
+Semantics:
+
+- Empty table: legacy inheritance, unchanged.
+- `mode` is mandatory and strict. Anything other than `legacy`/`explicit` is a
+  configuration error (exit 78 before lock or claim), never a silent fallback.
+- `passthrough`/`prefixes`/`credentials` default to the module lists; an
+  explicit list (including `[]`) replaces the default. A missing optional
+  credential is simply absent, so the backend fails closed on its own.
+- `require` defaults to `PATH` and `HOME`; a missing name aborts the launch and
+  the error lists names only, never values.
+- With an explicit runner `HOME`, backend transcript/state and Claude credential
+  paths default beneath that home rather than the parent's. Configured path
+  overrides still win; the caller's config and parent environment are unchanged.
+  Run-item execution and planning require a non-empty absolute `HOME`, even
+  with `require = []` (exit 78 before lock/claim otherwise), so child launch and
+  parent discovery cannot disagree on home or cwd. The generic builder alone
+  still permits omitted settings when `require` is relaxed.
+- `disable_dotenv` sets `PYTHON_DOTENV_DISABLED=1` so a Python backend cannot
+  rehydrate a workspace `.env` behind this boundary.
+- The per-item `ambient_env` tag is merged explicitly when the contract is
+  active (`runner_base_env` replaces the ambient environment wholesale).
+
+Credentials stored in files under `HOME` remain readable to the same UID: this
+boundary removes unrelated *environment* authority, not filesystem authority.
 
 ## Contributor initial reviews (PM)
 

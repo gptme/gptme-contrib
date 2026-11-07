@@ -80,7 +80,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -113,6 +113,11 @@ from gptme_runloops.prompt_templates import (
     render_main_prompt,
     render_mention_constraint,
     render_preheld_claim_block,
+)
+from gptme_runloops.runner_env import (
+    DOTENV_DISABLE_VAR,
+    MissingRunnerEnv,
+    runner_env_from_spec,
 )
 from gptme_runloops.utils.state import atomic_write_text, locked_state_file
 from gptme_runloops.worker_records import (
@@ -443,6 +448,13 @@ class RunItemConfig:
     # Ambient-harness env tagging (project-monitoring.sh:417-422). Empty =
     # set nothing; the brain config sets "BOB_AMBIENT_HARNESS".
     ambient_harness_env: str = ""
+
+    # Explicit runner-environment contract (:mod:`gptme_runloops.runner_env`).
+    # Empty = legacy inheritance of ``os.environ`` (default). A table must
+    # declare ``mode``: ``legacy`` (explicit opt-out) or ``explicit`` (replace
+    # the runner environment with the named contract). An unknown mode is a
+    # configuration error, never a silent fallback.
+    runner_env: dict[str, Any] = field(default_factory=dict)
 
     poll_budget_sec: int = 1800
     claim_ttl_minutes: int = 60
@@ -1186,14 +1198,18 @@ def promote_notification_states(config: RunItemConfig) -> None:
 
 
 def snapshot_copilot_dirs(state_dir: Path) -> set[str] | None:
-    """Pre-dispatch snapshot of copilot session-state dir names (worker.sh:52-59)."""
+    """Snapshot session dirs; a missing root is an empty first-run baseline."""
+    if not state_dir.exists():
+        return set()
     if not state_dir.is_dir():
         return None
     return {p.name for p in state_dir.iterdir()}
 
 
 def snapshot_codex_rollouts(sessions_dir: Path) -> set[str] | None:
-    """Pre-dispatch snapshot of codex rollout file paths (worker.sh:63-70)."""
+    """Snapshot rollouts; a missing root is an empty first-run baseline."""
+    if not sessions_dir.exists():
+        return set()
     if not sessions_dir.is_dir():
         return None
     return {str(p) for p in sessions_dir.rglob("rollout-*.jsonl")}
@@ -3174,6 +3190,8 @@ def build_execution_plan(
     (read-only gate/status calls still run; merge/trigger become recorded
     intents, with self-merge assumed to succeed).
     """
+    runner_base_env = _resolve_runner_base_env(config, backend)
+    config = _config_for_runner_home(config, runner_base_env)
     items = read_work_items(work_file)
     lock_file, lock_scope = derive_lock_paths(config, slot_key or None)
     monitoring_rules = _read_monitoring_rules(config)
@@ -3360,6 +3378,51 @@ def _ambient_env(config: RunItemConfig, backend: str, model: str) -> dict[str, s
     return env
 
 
+def _resolve_runner_base_env(
+    config: RunItemConfig, backend: str
+) -> dict[str, str] | None:
+    """Resolve ``config.runner_env`` once per work file (before lock/claim).
+
+    Returns ``None`` for legacy inheritance, the explicit mapping otherwise.
+    Raises :class:`MissingRunnerEnv` or ``ValueError`` on a misdeclared
+    contract; the caller turns that into a fail-closed exit code 78.
+    """
+    spec = config.runner_env
+    if not isinstance(spec, Mapping):
+        raise ValueError("runner_env must be a table")
+    if not spec:
+        return None
+    env = runner_env_from_spec(spec, backend=backend)
+    if env is not None:
+        # Run-item trajectory discovery needs a stable child home even when the
+        # generic environment builder's required-setting check is relaxed.
+        if not env.get("HOME") or not Path(env["HOME"]).is_absolute():
+            raise ValueError("runner environment HOME must be an absolute path")
+        _log(
+            "Runner environment: explicit contract "
+            f"({len(env)} variables; dotenv disabled={env.get(DOTENV_DISABLE_VAR) == '1'})"
+        )
+    return env
+
+
+def _config_for_runner_home(
+    config: RunItemConfig, runner_base_env: Mapping[str, str] | None
+) -> RunItemConfig:
+    """Use the child HOME for default backend paths, without mutating inputs."""
+    if runner_base_env is None or not runner_base_env.get("HOME"):
+        return config
+    home = Path(runner_base_env["HOME"])
+    return replace(
+        config,
+        cc_projects_dir=config.cc_projects_dir or home / ".claude/projects",
+        cc_credentials_path=config.cc_credentials_path
+        or home / ".claude/.credentials.json",
+        copilot_state_dir=config.copilot_state_dir or home / ".copilot/session-state",
+        codex_sessions_dir=config.codex_sessions_dir or home / ".codex/sessions",
+        gptme_log_root=config.gptme_log_root or home / "data/trajectories/gptme-runs",
+    )
+
+
 def run_work_file(
     work_file: Path,
     config: RunItemConfig,
@@ -3388,6 +3451,16 @@ def run_work_file(
     if not items:
         _log(f"ERROR: work file ('{work_file}') is empty")
         return 1
+
+    try:
+        runner_base_env = _resolve_runner_base_env(config, backend)
+    except (MissingRunnerEnv, ValueError) as exc:
+        # Fail closed before claiming or locking: a misdeclared contract must
+        # never silently degrade to ambient inheritance.
+        _log(f"ERROR: {exc}")
+        return 78
+
+    config = _config_for_runner_home(config, runner_base_env)
 
     _log(
         f"--- Detached dispatch (slot={slot_key or 'none'} lane={lane}): "
@@ -3452,6 +3525,12 @@ def run_work_file(
             pass
 
         ambient = _ambient_env(config, backend, model)
+        # ``runner_base_env`` replaces the ambient environment wholesale, so the
+        # per-item ambient-harness tag (consumed by the memory pipeline) must be
+        # added explicitly instead of being inherited.
+        item_runner_env = (
+            None if runner_base_env is None else {**runner_base_env, **ambient}
+        )
         # Stage 1 (shadow mode): load the bandit but do not use it for routing.
         # Gated by AGENT_PM_BANDIT_SHADOW; live only when the slot launcher
         # forwards that env into the transient unit.
@@ -3576,6 +3655,7 @@ def run_work_file(
                     config,
                     hooks,
                     ambient_env=ambient,
+                    runner_base_env=item_runner_env,
                     latency_context_json=latency_context_json,
                     ack_result_json=ack_result_json,
                 )
