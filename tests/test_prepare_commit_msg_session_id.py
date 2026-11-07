@@ -85,3 +85,42 @@ def test_no_session_env_leaves_message_unchanged(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert msg.read_text() == original
+
+
+def _parsed_trailers(msg_file: Path) -> str:
+    return subprocess.run(
+        ["git", "interpret-trailers", "--parse", str(msg_file)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=_clean_env(),
+        check=True,
+    ).stdout
+
+
+def test_merge_message_without_trailing_newline_gets_parseable_trailer(
+    tmp_path: Path,
+) -> None:
+    """`git merge --no-edit` writes the message with no trailing newline.
+
+    Without the fix the trailer lands on the subject's paragraph and git does
+    not parse it, so session-lineage joins silently miss merge commits.
+    """
+    msg = tmp_path / "MERGE_MSG"
+    msg.write_text("Merge commit 'd7426755' into alice/branch")
+
+    result = _run_hook(msg, _clean_env(GIT_COMMITTER_SESSION_ID="f05eabcd"))
+
+    assert result.returncode == 0, result.stderr
+    assert msg.read_text().startswith("Merge commit 'd7426755' into alice/branch\n\n")
+    assert _parsed_trailers(msg).strip() == "Git-Session-Id: f05eabcd"
+
+
+def test_trailer_is_parseable_for_normal_commit(tmp_path: Path) -> None:
+    msg = tmp_path / "COMMIT_EDITMSG"
+    msg.write_text("feat: add widget\n")
+
+    result = _run_hook(msg, _clean_env(GIT_COMMITTER_SESSION_ID="f05eabcd"))
+
+    assert result.returncode == 0, result.stderr
+    assert _parsed_trailers(msg).strip() == "Git-Session-Id: f05eabcd"
