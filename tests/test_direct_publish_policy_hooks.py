@@ -445,6 +445,42 @@ def test_push_code_commit_in_range_denied(install: Path, tmp_path: Path) -> None
     assert _blocked(_run_push_hook(install, repo, [_tuple(new, base)]))
 
 
+def test_push_cannot_hide_committed_submodule_update(
+    install: Path, tmp_path: Path
+) -> None:
+    repo = _repo(tmp_path)
+    first = _commit(repo, {"README.md": "seed\n"})
+    second = _commit(repo, {"README.md": "next\n"})
+    _git(repo, "update-index", "--add", "--cacheinfo", f"160000,{first},vendor")
+    _git(repo, "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "gitlink")
+    base = _git(repo, "rev-parse", "HEAD")
+    _write(repo, "_posts/a.md", "prose\n")
+    _git(repo, "add", "_posts/a.md")
+    _git(repo, "update-index", "--cacheinfo", f"160000,{second},vendor")
+    _git(repo, "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "update")
+    new = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "config", "diff.ignoreSubmodules", "all")
+    assert _git(repo, "diff", "--name-only", base, new) == "_posts/a.md"
+    proc = _run_push_hook(install, repo, [_tuple(new, base)])
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "symlink/submodule/executable" in proc.stderr
+
+
+def test_push_graft_cannot_hide_code_add_and_revert(
+    install: Path, tmp_path: Path
+) -> None:
+    repo = _repo(tmp_path)
+    base = _commit(repo, {"README.md": "seed\n"})
+    _commit(repo, {"scripts/run.py": "print(1)\n"})
+    _commit(repo, {"scripts/run.py": None})
+    new = _commit(repo, {"_posts/a.md": "prose\n"})
+    (repo / ".git/info/grafts").write_text(f"{new} {base}\n")
+    assert _git(repo, "rev-list", f"{base}..{new}") == new
+    proc = _run_push_hook(install, repo, [_tuple(new, base)])
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "outside the direct-publish scope" in proc.stderr
+
+
 def test_push_replacement_cannot_disguise_code_commit(
     install: Path, tmp_path: Path
 ) -> None:

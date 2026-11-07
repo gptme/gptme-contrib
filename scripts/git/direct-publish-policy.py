@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -161,6 +162,8 @@ def git(*args: str, check: bool = True) -> bytes:
         ],
         capture_output=True,
         check=False,
+        # Legacy grafts alter parent traversal even with replacements disabled.
+        env=dict(os.environ, GIT_GRAFT_FILE=os.devnull),
     )
     if check and proc.returncode != 0:
         raise Denied(
@@ -254,7 +257,7 @@ def run_push(entry: dict, stdin: str) -> None:
                 raise Denied(f"commit {commit[:12]} is a merge or root commit")
             raw = git(
                 "diff-tree", "-r", "--raw", "-z", "--no-renames", "--no-commit-id",
-                "--no-ext-diff", commit,
+                "--no-ext-diff", "--ignore-submodules=none", commit,
             )  # fmt: skip
             if check_raw_diff(raw, patterns, f"commit {commit[:12]}") == 0:
                 raise Denied(f"commit {commit[:12]} changes nothing classifiable")
