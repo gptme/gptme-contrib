@@ -232,3 +232,24 @@ def test_attach_commits_preserves_full_hash_and_is_idempotent():
     assert L.attach_commits(nodes, [commit])["attached"] == 1
     assert L.attach_commits(nodes, [commit])["attached"] == 0
     assert nodes[0]["delivered_shas"] == [sha]
+
+
+@pytest.mark.parametrize("label", ["abcd", "abcdef12"])
+def test_uuid_journal_mention_without_optional_short(label):
+    nodes = [
+        S(0, id="abcdef12-0000-0000-0000-000000000001"),
+        S(1, sessions_mentioned=[label]),
+    ]
+    edges, _ = L.mine_edges(nodes)
+    assert "mention" in kinds(edges, 0, 1)
+
+
+def test_uuid_four_character_mention_stays_with_own_agent():
+    nodes = [
+        S(0, "alice", id="abcdef12-0000-0000-0000-000000000001"),
+        S(1, "bob", id="abcdef34-0000-0000-0000-000000000002"),
+        S(2, "bob", sessions_mentioned=["abcd"]),
+    ]
+    edges, _ = L.mine_edges(nodes)
+    assert "mention" in kinds(edges, 1, 2)
+    assert "mention" not in kinds(edges, 0, 2)

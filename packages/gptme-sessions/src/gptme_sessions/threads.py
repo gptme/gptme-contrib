@@ -88,7 +88,7 @@ class _Index:
             labels: set[str] = {str(n["id"])[:8]}
             if n.get("short"):
                 labels.add(str(n["short"]))
-            if re.fullmatch(r"[0-9a-f]{4,8}", str(n["id"])):
+            if re.fullmatch(r"[0-9a-f]{4}", str(n["id"])[:4]):
                 labels.add(str(n["id"])[:4])
             for lb in labels - {""}:
                 self.short[(n["agent"], lb)].append(i)
