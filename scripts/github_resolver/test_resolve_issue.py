@@ -632,7 +632,14 @@ def test_push_branch_uses_explicit_github_token(monkeypatch, tmp_path):
 
     push_url = "https://x-access-token:token-123@github.com/gptme/gptme-contrib.git"
     assert calls == [
-        ["push", "--force", push_url, "HEAD:refs/heads/gptme-resolver/issue-42"],
+        [
+            "-c",
+            "core.hooksPath=/dev/null",
+            "push",
+            "--force",
+            push_url,
+            "HEAD:refs/heads/gptme-resolver/issue-42",
+        ],
     ]
 
 
@@ -663,7 +670,14 @@ def test_push_branch_uses_force_on_existing_branch(monkeypatch, tmp_path):
 
     push_url = "https://x-access-token:token-123@github.com/gptme/gptme-contrib.git"
     assert calls == [
-        ["push", "--force", push_url, "HEAD:refs/heads/gptme-resolver/issue-42"],
+        [
+            "-c",
+            "core.hooksPath=/dev/null",
+            "push",
+            "--force",
+            push_url,
+            "HEAD:refs/heads/gptme-resolver/issue-42",
+        ],
     ]
 
 
@@ -825,3 +839,45 @@ def test_main_preserves_direct_commit_as_partial_attempt(monkeypatch, tmp_path):
         text=True,
     ).stdout
     assert "agent direct commit" in branch_head
+
+
+@pytest.mark.parametrize("hook_name", ["pre-commit", "commit-msg", "pre-push"])
+def test_failed_attempt_survives_rejecting_hooks(
+    monkeypatch, local_git_repo, tmp_path, hook_name
+):
+    """Ambient quality gates must not prevent preserving broken agent work."""
+    repo, out_dir = local_git_repo
+    hooks = tmp_path / "rejecting-hooks"
+    hooks.mkdir()
+    hook = hooks / hook_name
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "core.hooksPath", str(hooks)],
+        check=True,
+    )
+
+    rc, comments, draft_prs = _run_resolver(
+        monkeypatch,
+        repo,
+        out_dir,
+        "RESOLVER_STATUS: no_changes\nRESOLVER_REASON: Failed.\n",
+    )
+
+    assert rc == 0
+    assert not draft_prs
+    assert len(comments) == 1
+    assert (
+        "Partial attempt preserved on branch `gptme-resolver/issue-42`." in comments[0]
+    )
+    assert (
+        resolve_issue.git(
+            ["show", "refs/heads/gptme-resolver/issue-42:incidental.txt"],
+            cwd=tmp_path / "origin.git",
+        )
+        == "side-effect\n"
+    )
+    # Isolation is per command, not a persistent repo configuration change.
+    assert resolve_issue.git(["config", "core.hooksPath"], cwd=repo).strip() == str(
+        hooks
+    )
