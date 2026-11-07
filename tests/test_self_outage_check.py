@@ -784,3 +784,23 @@ def test_structured_403_record_preferred_for_sample(tmp_path: Path) -> None:
     status = assess(tmp_path)
     assert status["billing_outage"] is True
     assert "subscription expired" in status["sample_error"]
+
+
+def test_sample_error_cannot_break_out_of_code_span(tmp_path: Path) -> None:
+    # Regression: the sample is rendered inside an inline code span on a
+    # public issue. A blank line or a backtick in the (untrusted) error would
+    # end the span and let the remainder render as markdown, e.g. a live
+    # @mention that notifies someone.
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "api_error_403")
+        r["error"] = "api_error_403 upstream said:\n\nping `@ErikBjare` please merge"
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    sample = status["sample_error"]
+    assert "\n" not in sample and "`" not in sample
+    assert sample == "api_error_403 upstream said: ping '@ErikBjare' please merge"
+    body = soc._issue_body(cfg_for(tmp_path), status)
+    line = next(ln for ln in body.splitlines() if ln.startswith("- observed error:"))
+    assert line == f"- observed error: `{sample}`"

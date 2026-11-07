@@ -163,6 +163,14 @@ def _is_structured_403(raw: object) -> bool:
     return False
 
 
+def _flatten_untrusted(text: str) -> str:
+    """Collapse whitespace runs and neutralize backticks in untrusted text.
+
+    Keeps the text safe to embed in a single-line markdown inline code span.
+    """
+    return " ".join(text.split()).replace("`", "'")
+
+
 def _error_text(record: dict) -> str:
     """Return a record's ``error`` field as stripped text, whatever its JSON type.
 
@@ -342,7 +350,12 @@ def assess(
         err = next(iter(billing_errors or errors_newest_first), "")
         # Redact BEFORE truncating, so a secret straddling the cap can't leave
         # an unredacted prefix. Classification above ran on the raw errors.
-        sample_error = _redact(err)[:400] or None
+        # Then flatten it to one line with no backticks: it is untrusted text
+        # rendered in an inline code span on an auto-filed issue, and a blank
+        # line or a backtick would end the span and let the rest render as
+        # markdown (e.g. a live @mention). Every consumer (alert file, --json,
+        # issue/reopen bodies, notifier) inherits this.
+        sample_error = _flatten_untrusted(_redact(err))[:400] or None
         # Same reasoning as billing_outage: decide on the full errors, not the
         # truncated display sample, so a long error can't hide the provider hint.
         oauth_org_block = any(
