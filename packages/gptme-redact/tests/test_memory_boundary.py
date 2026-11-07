@@ -298,3 +298,125 @@ def test_safe_preview_on_clean_workspace(tmp_path: Path):
     assert preview.safe_to_proceed is True
     assert preview.requires_operator == []
     assert len(preview.actions["migrate_verbatim"]) == 1
+
+
+@pytest.mark.parametrize("field", ["name", "supersedes", "type"])
+@pytest.mark.parametrize(
+    "secret", ["sk-proj-" + "Ab3_-" * 20, "sk-" + "Z" * 16, "token=x"]
+)
+def test_credential_metadata_never_enters_reports(
+    tmp_path: Path, field: str, secret: str
+):
+    for layer in ("project", "user"):
+        path = tmp_path / layer / "goal.md"
+        path.parent.mkdir()
+        path.write_text(f"---\nname: goal\nstatus: living\n{field}: {secret}\n---\n")
+        verdict = classify_file(path, root=tmp_path)
+        assert secret not in json.dumps(verdict.to_dict())
+    audit = audit_workspace(tmp_path)
+    assert secret not in json.dumps(audit.to_dict())
+    assert secret not in json.dumps(preview_migration(tmp_path).to_dict())
+
+
+def test_redacted_names_do_not_create_false_collisions(tmp_path: Path):
+    for layer, key in (
+        ("project", "sk-proj-" + "A" * 50),
+        ("user", "sk-proj-" + "B" * 50),
+    ):
+        path = tmp_path / layer / "goal.md"
+        path.parent.mkdir()
+        path.write_text(f"---\nname: {key}\nstatus: living\n---\n")
+    assert audit_workspace(tmp_path).conflicts == []
+
+
+def test_credential_paths_are_sanitized_and_refused(tmp_path: Path):
+    secret = "sk-proj-" + "Ab3_-" * 20
+    root = tmp_path / secret
+    root.mkdir()
+    path = root / (secret + ".md")
+    path.write_text("---\nname: safe-name\nstatus: living\n---\n")
+    verdict = classify_file(path, root=root)
+    assert secret not in json.dumps(verdict.to_dict())
+    assert verdict.migration_preview["action"] == "refuse"
+    preview = preview_migration(root)
+    assert secret not in json.dumps(preview.to_dict())
+    assert preview.safe_to_proceed is False
+
+
+def test_safe_metadata_identity_is_preserved_without_env_dependence(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("TEST_API_KEY", "safe-policy-name")
+    for layer in ("project", "user"):
+        path = tmp_path / layer / "goal.md"
+        path.parent.mkdir()
+        path.write_text(
+            "---\nname: safe-policy-name\nsupersedes: old-policy\nstatus: living\n---\n"
+        )
+    audit = audit_workspace(tmp_path)
+    assert audit.conflicts[0]["name"] == "safe-policy-name"
+    assert audit.conflicts[0]["resolved_layer"] == "project"
+    assert all(v.provenance["supersedes"] == "old-policy" for v in audit.verdicts)
+
+
+@pytest.mark.parametrize("kind", ["missing", "file"])
+@pytest.mark.parametrize("operation", [audit_workspace, preview_migration])
+def test_invalid_audit_root_is_rejected(tmp_path: Path, kind: str, operation):
+    root = tmp_path / kind
+    if kind == "file":
+        root.write_text("not a directory")
+    with pytest.raises(ValueError, match="directory"):
+        operation(root)
+
+
+@pytest.mark.parametrize("kind", ["missing", "file"])
+@pytest.mark.parametrize(
+    "flags", [[], ["--json"], ["--dry-run"], ["--dry-run", "--json"]]
+)
+def test_cli_invalid_root_fails_gracefully(
+    tmp_path: Path, kind: str, flags: list[str], capsys
+):
+    from redact.memory_boundary import main
+
+    root = tmp_path / kind
+    if kind == "file":
+        root.write_text("not a directory")
+    with pytest.raises(SystemExit) as exc:
+        main([str(root), *flags])
+    assert exc.value.code != 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "directory" in captured.err
+    assert "Traceback" not in captured.err
+
+
+@pytest.mark.parametrize(
+    "flags", [[], ["--json"], ["--dry-run"], ["--dry-run", "--json"]]
+)
+def test_secret_collision_metadata_is_safe_in_cli_and_json(
+    tmp_path: Path, flags: list[str], capsys
+):
+    from redact.memory_boundary import main
+
+    key = "sk-proj-" + "Ab3_-" * 20
+    for layer in ("project", "user"):
+        path = tmp_path / layer / "goal.md"
+        path.parent.mkdir()
+        path.write_text(f"---\nname: {key}\nsupersedes: {key}\nstatus: living\n---\n")
+    audit = audit_workspace(tmp_path)
+    assert len(audit.conflicts) == 1
+    assert audit.conflicts[0]["resolved_layer"] == "project"
+    assert audit.conflicts[0]["name"] != key
+    assert all(
+        "name collision" in v.migration_preview["warnings"][-1] for v in audit.verdicts
+    )
+    assert key not in json.dumps(audit.to_dict())
+    assert key not in json.dumps(preview_migration(tmp_path).to_dict())
+    assert main([str(tmp_path), *flags]) == 0
+    captured = capsys.readouterr()
+    assert key not in captured.out + captured.err
+
+
+def test_empty_existing_directory_is_a_valid_root(tmp_path: Path):
+    assert audit_workspace(tmp_path).verdicts == []
+    assert preview_migration(tmp_path).safe_to_proceed is True

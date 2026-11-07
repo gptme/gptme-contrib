@@ -29,6 +29,7 @@ CLI::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -85,6 +86,30 @@ _CREDENTIAL_SHAPE = re.compile(
     r"|xox[baprs]-[A-Za-z0-9-]{10,}"
     r")"
 )
+# Report fields may embed assignments in prose or paths rather than at a line
+# start. Reuse the auditor's strict vocabulary without another vendor deny-list.
+_METADATA_ASSIGNMENT = re.compile(
+    _CREDENTIAL_ASSIGNMENT.pattern.replace(r"^\s*", r"\b")
+)
+
+
+def _safe_metadata(value: str) -> str:
+    """Opaque, deterministic identity for credential-bearing report fields.
+
+    Hash the entire field, not just the matched substring: no secret tail can
+    escape, distinct unsafe names do not collapse into a false collision, and
+    equal names still participate in nearest-root resolution. No env reads.
+    """
+    if (
+        _METADATA_ASSIGNMENT.search(value)
+        or _CREDENTIAL_SHAPE.search(value)
+        or redact(value, block_severity=Severity.HIGH).blocked
+    ):
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+        return f"[REDACTED:sha256:{digest}]"
+    return value
+
+
 _CREDENTIAL_FILENAME = re.compile(
     r"(?:secret|credential|password|passwd|token|api[_-]?key|\.env)", re.I
 )
@@ -216,7 +241,7 @@ def preview_migration(root: str | Path) -> MigrationPreview:
         actions[action].sort(key=lambda e: e["path"])
 
     return MigrationPreview(
-        root=str(root),
+        root=_safe_metadata(str(root)),
         actions=actions,
         conflicts=audit.conflicts,
         requires_operator=requires_operator,
@@ -340,7 +365,7 @@ def _classify(
             "lives in a project-memory directory (durable, cold or living)",
         )
     if frontmatter.get("name") and status in _DURABLE_STATUS:
-        kind = f" (type={ftype})" if ftype else ""
+        kind = f" (type={_safe_metadata(ftype)})" if ftype else ""
         return (
             "durable_project_memory",
             0.9,
@@ -377,10 +402,21 @@ def classify_file(
     text = file_path.read_text(encoding="utf-8", errors="replace")
     frontmatter = _frontmatter_scalars(text)
     classification, confidence, rationale = _classify(text, rel, frontmatter)
+    safe_path = _safe_metadata(str(rel))
+    if safe_path != str(rel):
+        classification, confidence, rationale = (
+            "ambiguous_leakage",
+            0.99,
+            "path contains credential-like material",
+        )
 
     layer = _infer_layer(rel, frontmatter)
-    name = frontmatter.get("name") or rel.stem
-    supersedes = frontmatter.get("supersedes") or None
+    name = _safe_metadata(frontmatter.get("name") or rel.stem)
+    supersedes = (
+        _safe_metadata(frontmatter["supersedes"])
+        if frontmatter.get("supersedes")
+        else None
+    )
 
     action, migrates = _MIGRATION[classification]
     warnings: list[str] = []
@@ -393,10 +429,10 @@ def classify_file(
         )
 
     return Verdict(
-        path=str(rel),
+        path=safe_path,
         classification=classification,
         confidence=confidence,
-        rationale=rationale,
+        rationale=_safe_metadata(rationale),
         provenance={"layer": layer, "name": name, "supersedes": supersedes},
         migration_preview={
             "action": action,
@@ -406,13 +442,21 @@ def classify_file(
     )
 
 
+def _validate_root(root: str | Path) -> Path:
+    base = Path(root)
+    if not base.is_dir():
+        # Do not echo the supplied path: even error metadata can hold secrets.
+        raise ValueError("audit root must be an existing directory")
+    return base
+
+
 def audit_workspace(root: str | Path) -> AuditResult:
     """Walk ``root`` (or ``root/workspace`` when present) and classify every file.
 
     Read-only: no file is modified. Cross-file layered-root collisions are
     resolved by nearest root and reported as durable information.
     """
-    base = Path(root)
+    base = _validate_root(root)
     scan_root = base / "workspace" if (base / "workspace").is_dir() else base
 
     result = AuditResult()
@@ -465,6 +509,10 @@ def main(argv: list[str] | None = None) -> int:
         help="emit the migration preview (what would move) instead of the per-file audit",
     )
     args = parser.parse_args(argv)
+    try:
+        _validate_root(args.root)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if args.dry_run:
         migration = preview_migration(args.root)

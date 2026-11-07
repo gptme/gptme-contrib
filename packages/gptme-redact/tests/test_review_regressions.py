@@ -90,3 +90,40 @@ def test_assignment_is_not_hidden_by_high_severity_token():
     result = redact("SERVICE_PASSWORD=" + "ghs_" + "A" * 36)
     assert result.blocked
     assert result.redacted == "SERVICE_PASSWORD=[REDACTED:secret_assignment]"
+
+
+@pytest.mark.parametrize("quote", ['"', "'", ""])
+@pytest.mark.parametrize(
+    "value", ["!longpassword123", "abc!def$ghi%jkl", "(synthetic-password)"]
+)
+def test_assignment_password_punctuation_is_fully_masked(quote, value):
+    text = f"SERVICE_PASSWORD={quote}{value}{quote}"
+    result = redact(text, literals=[])
+    assert result.blocked
+    assert (
+        result.redacted
+        == f"SERVICE_PASSWORD={quote}[REDACTED:secret_assignment]{quote}"
+    )
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_quoted_password_spaces_are_not_partial_redacted(quote):
+    value = "a long synthetic password!"
+    text = f"SERVICE_PASSWORD={quote}{value}{quote}, other=value"
+    result = redact(text, literals=[])
+    assert result.blocked
+    assert result.redacted == text.replace(value, "[REDACTED:secret_assignment]")
+
+
+@pytest.mark.parametrize(
+    "value", [r"long\"synthetic password!", r"long\'synthetic password!"]
+)
+def test_escaped_quote_in_password_is_consumed(value):
+    quote = '"' if '\\"' in value else "'"
+    text = f"SERVICE_PASSWORD={quote}{value}{quote}"
+    result = redact(text, literals=[])
+    assert result.blocked
+    assert (
+        result.redacted
+        == f"SERVICE_PASSWORD={quote}[REDACTED:secret_assignment]{quote}"
+    )
