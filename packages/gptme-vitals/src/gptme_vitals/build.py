@@ -15,6 +15,8 @@ and the only shared surface is the two schema strings and the status vocabulary
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -32,6 +34,10 @@ HEADLINE_SCHEMA = "fleet-vitals/headline@1"
 #: Keys the rollup computes. A page's ``core`` projection may not set them, or a
 #: page could overwrite the derived status the whole design exists to compute.
 RESERVED_DIMENSION_KEYS = frozenset({"status", "pages_total", "pages_unknown"})
+
+#: Root fields of ``core@1``. A dimension named after one would overwrite it
+#: when the dimensions are merged in, leaving a file that breaks the format.
+RESERVED_ROOT_KEYS = frozenset({"schema", "agent", "generated_at", "status"})
 
 
 class BuildError(ValueError):
@@ -62,6 +68,12 @@ def derive_core(
         if registry.get_by_slug(env.slug) is None:
             raise BuildError(f"envelope for unregistered slug {env.slug!r}")
         by_slug[env.slug] = env
+
+    for name in registry.core_dimensions():
+        if name in RESERVED_ROOT_KEYS:
+            raise BuildError(
+                f"core_dimension {name!r} collides with a core@1 root field"
+            )
 
     dimensions: dict[str, dict[str, object]] = {}
     statuses: list[PageEnvelope] = []
@@ -120,6 +132,10 @@ def derive_core(
     }
 
     route = registry.headline_route()
+    if not route.is_public:
+        # headline.json copies the page's headline text, label and link into a
+        # file other agents pull; a private page promised to stay out of that.
+        raise BuildError(f"headline route {route.slug!r} is private")
     headline_page = by_slug.get(route.slug)
     if headline_page is None:
         raise BuildError(
@@ -139,9 +155,21 @@ def derive_core(
 
 
 def _atomic_write(path: Path, content: str) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(content)
-    tmp.replace(path)
+    """Write via a unique temp file in the same directory, then rename over ``path``.
+
+    A fixed temp name would let two builds into one directory rename each
+    other's half-written file.
+    """
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=path.name + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(content)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
 
 def write_core_files(

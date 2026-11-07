@@ -173,9 +173,13 @@ write_core_files("state/vitals", core, headline)
   page**: it raises `pages_total` and `pages_unknown`, and a dimension whose
   pages are all blind is `unknown`, never `healthy`. The overall status is the
   worst rankable dimension, `unknown` if none is rankable.
-- `headline.json` comes from the one `is_headline` route. Zero or multiple
-  headline routes, or a headline page that emitted nothing, raises `BuildError`
-  rather than producing an undefined file.
+- `headline.json` comes from the one `is_headline` route, which must be public
+  (it copies the page's headline text, label and link into a file other agents
+  pull). Zero headline routes raise `RouteRegistryError` during derivation and
+  multiple raise it when the registry is constructed. A private headline route,
+  a headline page that emitted nothing, or a dimension named after a `core@1`
+  root field (`schema`, `agent`, `generated_at`, `status`) raises `BuildError`
+  rather than producing an undefined or corrupt file.
 - An envelope for a slug no route owns, or two for one slug, raises.
 
 It does not import `fleet_vitals`; the two share only the schema strings and the

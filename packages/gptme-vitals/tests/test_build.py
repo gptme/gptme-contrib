@@ -19,6 +19,7 @@ from gptme_vitals.routes import (
     RefreshCadence,
     RouteKind,
     RouteRegistry,
+    Visibility,
 )
 
 NOW = "2026-11-07T20:00:00Z"
@@ -210,3 +211,54 @@ def test_write_core_files_round_trips_and_leaves_no_temp_files(tmp_path: Path) -
     assert json.loads((out / "core.json").read_text()) == core
     assert json.loads((out / "headline.json").read_text()) == headline
     assert sorted(p.name for p in out.iterdir()) == ["core.json", "headline.json"]
+
+
+def test_private_headline_route_is_refused() -> None:
+    reg = RouteRegistry(
+        (
+            _route(
+                "audit",
+                core_dimension="attention",
+                is_headline=True,
+                visibility=Visibility.PRIVATE,
+            ),
+        )
+    )
+    with pytest.raises(BuildError, match="is private"):
+        derive_core(reg, [_env("audit", Status.HEALTHY)], agent="bob")
+
+
+@pytest.mark.parametrize("name", ["status", "schema", "agent", "generated_at"])
+def test_dimension_named_after_a_root_field_is_refused(name: str) -> None:
+    reg = RouteRegistry(
+        (_route("a", core_dimension=name, is_headline=True),),
+    )
+    with pytest.raises(BuildError, match="collides with a core@1 root field"):
+        derive_core(reg, [_env("a", Status.HEALTHY)], agent="bob")
+
+
+def test_write_uses_unique_temp_files_and_cleans_up_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gptme_vitals.build as build
+
+    core, headline = _derive([_env("services", Status.HEALTHY)])
+    seen: list[str] = []
+    real_replace = build.os.replace
+
+    def spy(src: str, dst: object) -> None:
+        seen.append(Path(src).name)
+        real_replace(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(build.os, "replace", spy)
+    write_core_files(tmp_path, core, headline)
+    write_core_files(tmp_path, core, headline)
+    assert len(seen) == len(set(seen)) == 4, "temp names must never repeat"
+
+    def boom(src: str, dst: object) -> None:
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(build.os, "replace", boom)
+    with pytest.raises(OSError, match="rename failed"):
+        write_core_files(tmp_path, core, headline)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["core.json", "headline.json"]
