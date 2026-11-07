@@ -152,8 +152,11 @@ def allocate_journal_path(
     ``reservation_dir`` defaults to
     ``<journal_dir>/../state/session-journal-reservations/<journal-dir-name>``.
     """
-    if not isinstance(run_id, str) or not run_id:
-        raise JournalReservationError("run id must be a non-empty string")
+    for name, value in (("run type", run_type), ("label", label), ("run id", run_id)):
+        if not isinstance(value, str) or not value or any(c in value for c in "/\\\0"):
+            raise JournalReservationError(
+                f"{name} must be a non-empty filename component without separators or NUL"
+            )
     date_str = date if date is not None else datetime.now(timezone.utc).strftime("%Y-%m-%d")
     try:
         parsed_date = calendar_date.fromisoformat(date_str)

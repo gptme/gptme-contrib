@@ -462,3 +462,13 @@ def test_empty_run_id_is_rejected_before_any_writes(tmp_path: Path, capsys):
     assert not captured.out
     assert "integrity failure" in captured.err
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("field", ["run_type", "label", "run_id"])
+@pytest.mark.parametrize("value", ["", "/tmp/escaped", "../escaped", "a/b", "a\\b", "a\x00b"])
+def test_filename_components_rejected_before_writes(tmp_path: Path, field, value):
+    kwargs = {"run_type": "autonomous", "label": "abcd", "run_id": "11111111"}
+    kwargs[field] = value
+    with pytest.raises(JournalReservationError):
+        allocate_journal_path(tmp_path / "journal", **kwargs)
+    assert not list(tmp_path.iterdir())
