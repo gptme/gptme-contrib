@@ -55,7 +55,9 @@ def test_send_reports_missing_scanner_instead_of_a_secret_policy_block(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A missing ``redact`` dependency must not be reported as a blocked secret."""
-    monkeypatch.delitem(sys.modules, "redact", raising=False)
+    # A sentinel, not a deletion: deleting would let a real installed `redact`
+    # be imported, so the test could pass or fail depending on the host env.
+    monkeypatch.setitem(sys.modules, "redact", None)
     t = _transport(tmp_path)
 
     with pytest.raises(ValueError) as excinfo:
