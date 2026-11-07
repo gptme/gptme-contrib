@@ -9,6 +9,7 @@ delivery-failure stamping).
 See task: fold-agent-msg-into-gptmail-single-comms-tool.
 """
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,23 @@ def test_send_writes_outbox_returns_filename_id(tmp_path: Path) -> None:
     assert fm["to"] == "bob"
     assert fm["subject"] == "Hello"
     assert fm["read"] is False
+
+
+def test_send_reports_missing_scanner_instead_of_a_secret_policy_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing ``redact`` dependency must not be reported as a blocked secret."""
+    monkeypatch.delitem(sys.modules, "redact", raising=False)
+    t = _transport(tmp_path)
+
+    with pytest.raises(ValueError) as excinfo:
+        t.send("bob", "Hello", "body text")
+
+    message = str(excinfo.value)
+    assert "redact" in message
+    assert "not installed" in message
+    assert "secret policy" not in message
+    assert not list(t.outbox.glob("*.md"))
 
 
 def test_send_records_reply_to(tmp_path: Path) -> None:

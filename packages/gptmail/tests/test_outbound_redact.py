@@ -9,7 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from gptmail.communication_utils.outbound_redact import guard_outbound
+from gptmail.communication_utils.outbound_redact import (
+    SecretScannerUnavailable,
+    guard_outbound,
+)
 
 
 def test_guard_outbound_allows_when_optional_redact_package_is_missing(
@@ -26,6 +29,28 @@ def test_guard_outbound_allows_when_optional_redact_package_is_missing(
 
     assert guard_outbound("ordinary text", "email", tmp_path) is True
     assert "redact package not available" in caplog.text
+    assert not (tmp_path / "state" / "outbound-redact-blocks.jsonl").exists()
+
+
+def test_guard_outbound_require_scanner_raises_scanner_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing scanner must not look like a secret finding."""
+    real_import = builtins.__import__
+
+    def import_without_redact(name: str, *args: object, **kwargs: object) -> object:
+        if name == "redact":
+            raise ModuleNotFoundError("No module named 'redact'", name="redact")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_redact)
+
+    with pytest.raises(SecretScannerUnavailable) as excinfo:
+        guard_outbound("ordinary text", "agent", tmp_path, require_scanner=True)
+
+    message = str(excinfo.value)
+    assert "redact" in message
+    assert "not installed" in message
     assert not (tmp_path / "state" / "outbound-redact-blocks.jsonl").exists()
 
 
@@ -100,10 +125,11 @@ def test_guard_outbound_allows_clean_content(
     assert not (tmp_path / "state" / "outbound-redact-blocks.jsonl").exists()
 
 
-def test_required_scanner_blocks_when_optional_package_missing(
+def test_required_scanner_raises_when_optional_package_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setitem(sys.modules, "redact", None)
-    assert guard_outbound("ordinary text", "twitter", tmp_path, require_scanner=True) is False
-    assert "required secret scanner unavailable" in caplog.text
+    with pytest.raises(SecretScannerUnavailable):
+        guard_outbound("ordinary text", "twitter", tmp_path, require_scanner=True)
+    assert "secret scanner unavailable" in caplog.text.lower()
     assert "ordinary text" not in caplog.text

@@ -94,7 +94,13 @@ def test_scanner_failure_is_private_and_never_publishes(
     transport = AgentTransport(
         tmp_path / "messages", "alice", deliver=None if local_only else deliver
     )
-    with pytest.raises(ValueError, match="Outbound agent message blocked") as exc:
+    # A missing scanner is a dependency error, not a policy block: it says so.
+    expected = (
+        "Outbound agent message not sent"
+        if failure == "missing"
+        else "Outbound agent message blocked"
+    )
+    with pytest.raises(ValueError, match=expected) as exc:
         transport.send("bob", "Hello", "ordinary text")
     assert SECRET not in str(exc.value)
     assert SECRET not in caplog.text

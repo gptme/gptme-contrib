@@ -16,15 +16,25 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+class SecretScannerUnavailable(RuntimeError):
+    """The caller requires scanning, but the ``redact`` package is not importable.
+
+    Distinct from a policy block: nothing was scanned and no secret was found. A
+    caller that receives this must report a missing dependency, not a secret.
+    """
+
+
 def guard_outbound(
     text: str, channel: str, workspace: Path, *, require_scanner: bool = False
 ) -> bool:
     """Return whether ``text`` may be sent through ``channel``.
 
-    Missing redaction support refuses delivery when ``require_scanner`` is set;
-    otherwise it warns and allows delivery for standalone compatibility. A detected
-    critical secret blocks delivery and writes only finding metadata, never the
-    outbound text, to ``state/outbound-redact-blocks.jsonl``.
+    Missing redaction support raises :class:`SecretScannerUnavailable` when
+    ``require_scanner`` is set, so callers report a missing dependency rather
+    than a secret; otherwise it warns and allows delivery for standalone
+    compatibility. A detected critical secret blocks delivery and writes only
+    finding metadata, never the outbound text, to
+    ``state/outbound-redact-blocks.jsonl``.
     """
     try:
         from redact import collect_secret_literals
@@ -33,8 +43,10 @@ def guard_outbound(
         if exc.name != "redact":
             raise
         if require_scanner:
-            logger.error("Outbound content blocked: required secret scanner unavailable")
-            return False
+            logger.error("Required secret scanner unavailable: redact is not installed")
+            raise SecretScannerUnavailable(
+                "required secret scanner unavailable: the 'redact' package is not installed"
+            ) from None
         logger.warning("redact package not available — skipping outbound secret scan")
         return True
 

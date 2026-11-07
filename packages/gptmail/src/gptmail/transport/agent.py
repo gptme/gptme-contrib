@@ -31,7 +31,10 @@ from pathlib import Path
 
 import yaml
 
-from gptmail.communication_utils.outbound_redact import guard_outbound
+from gptmail.communication_utils.outbound_redact import (
+    SecretScannerUnavailable,
+    guard_outbound,
+)
 
 # A delivery hook: given the local outbox path and the recipient name, place the
 # message in the recipient's inbox (SSH/SCP, shared repo, …) and return whether
@@ -240,6 +243,13 @@ class AgentTransport:
         # Check the exact rendered bytes before either publication boundary.
         try:
             allowed = guard_outbound(message, self.channel, self._root.parent, require_scanner=True)
+        except SecretScannerUnavailable:
+            # No scan ran, so this is a missing dependency, not a secret finding.
+            raise ValueError(
+                "Outbound agent message not sent: the required secret scanner is "
+                "unavailable because the 'redact' package is not installed in this "
+                "environment"
+            ) from None
         except Exception:
             # Scanner/collector exceptions may embed the outbound secret.
             raise ValueError("Outbound agent message blocked: secret scan failed") from None
