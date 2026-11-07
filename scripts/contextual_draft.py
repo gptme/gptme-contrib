@@ -173,6 +173,8 @@ def private_write(path: Path, text: str) -> None:
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
+            # Write text exactly as given: no platform newline translation.
+            newline="",
             dir=path.parent,
             prefix=".contextual-draft-",
             delete=False,
@@ -309,11 +311,11 @@ def generate(args: argparse.Namespace) -> None:
     started = time.monotonic()
     log_event(args.output.parent, "generation_started", model=args.model)
     try:
+        # Bytes, not text mode: universal-newline decoding would rewrite \r\n and
+        # \r in the generated body before the framing newline could be removed.
         proc = subprocess.run(
             command,
-            input=prompt,
-            text=True,
-            encoding="utf-8",
+            input=prompt.encode("utf-8"),
             capture_output=True,
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             timeout=GENERATION_TIMEOUT,
@@ -332,25 +334,34 @@ def generate(args: argparse.Namespace) -> None:
         args.output.parent,
         "generation_completed",
         returncode=proc.returncode,
-        stdout_bytes=len(proc.stdout.encode("utf-8")),
-        stderr_bytes=len(proc.stderr.encode("utf-8")),
+        stdout_bytes=len(proc.stdout),
+        stderr_bytes=len(proc.stderr),
         elapsed_s=time.monotonic() - started,
     )
     if proc.stderr:
+        # One diagnostics file per attempt: a retry after a failed attempt must
+        # never lose a successful response to an earlier attempt's stderr file.
+        # private_write still refuses to overwrite anything.
+        diagnostics = f"{args.output.name}.provider-stderr-{time.time_ns()}.txt"
         private_write(
-            args.output.parent / (args.output.name + ".provider-stderr.txt"),
-            proc.stderr,
+            args.output.parent / diagnostics,
+            proc.stderr.decode("utf-8", errors="replace"),
         )
+        log_event(args.output.parent, "provider_stderr_saved", file=diagnostics)
     if proc.returncode:
         # Provider errors can include request data; do not echo stderr.
         raise DraftError("Model process failed; no field changed")
-    if not proc.stdout.strip():
+    try:
+        stdout = proc.stdout.decode("utf-8")
+    except UnicodeError as exc:
+        raise DraftError("Model returned invalid UTF-8; no field changed") from exc
+    if not stdout.strip():
         raise DraftError(
             "Model returned no draft (possibly insufficient context); no field changed"
         )
     # gptme's plain-text CLI uses print(response): remove only its framing newline,
     # never meaningful whitespace in the response itself.
-    draft = proc.stdout.removesuffix("\n")
+    draft = stdout.removesuffix("\n")
     if len(draft.encode("utf-8")) > MAX_DRAFT:
         log_event(args.output.parent, "draft_rejected", reason="size_limit")
         raise DraftError(

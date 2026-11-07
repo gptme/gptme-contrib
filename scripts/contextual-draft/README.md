@@ -227,8 +227,10 @@ The launcher prints the exact private session path before capture. Each director
 is mode 0700 and files are mode 0600. `events.jsonl` records stage timestamps,
 model/exit status, source IDs, request/output byte counts and elapsed generation
 time, without message bodies. `native-stderr.txt` preserves capture/insertion
-errors. Provider stderr, when present, is saved privately beside the draft; it may
-contain sensitive request data and must not be copied into issues or notifications.
+errors. Provider stderr, when present, is saved privately beside the draft as one
+`draft.txt.provider-stderr-<ns>.txt` file per attempt, so a retry never collides
+with earlier diagnostics; it may contain sensitive request data and must not be
+copied into issues or notifications.
 `request.json` and `draft.txt` permit inspection/recovery without another model call.
 No automatic retry or retention deletion occurs. These files are private evidence,
 not a safe-to-publish log bundle. Do not recursively dump sessions into transcripts.

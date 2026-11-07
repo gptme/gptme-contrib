@@ -530,4 +530,49 @@ def test_generation_preserves_whitespace_and_bounds_size(
     ]
     assert events[0]["stage"] == "generation_started"
     assert events[1]["returncode"] == 0
-    assert all(body not in json.dumps(e) for e in events)
+    # Compare decoded string values: json.dumps() escapes newlines, so a logged
+    # multi-line body would never match its encoded form.
+    values = [v for e in events for v in e.values() if isinstance(v, str)]
+    assert all(body not in v for v in values)
+
+
+def test_generation_preserves_raw_carriage_returns(generation, tmp_path, monkeypatch):
+    exe = tmp_path / "gptme"
+    exe.write_text(
+        "#!/usr/bin/env python3\nimport sys\nsys.stdin.read()\n"
+        "sys.stdout.buffer.write(b'first\\r\\nsecond\\rthird\\n')\n",
+        encoding="utf-8",
+    )
+    exe.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    module.generate(generation)
+    # Only the single CLI framing newline is removed; no newline translation.
+    assert generation.output.read_bytes() == b"first\r\nsecond\rthird"
+
+
+def test_retry_after_failed_attempt_keeps_successful_draft(
+    generation, tmp_path, monkeypatch
+):
+    exe = tmp_path / "gptme"
+    attempt = tmp_path / "attempt"
+    # First call fails with stderr; the retry succeeds and also emits stderr.
+    exe.write_text(
+        "#!/usr/bin/env python3\nimport sys,pathlib\nsys.stdin.read()\n"
+        f"marker = pathlib.Path({str(attempt)!r})\n"
+        "print('provider warning', file=sys.stderr)\n"
+        "if not marker.exists():\n    marker.touch()\n    sys.exit(1)\n"
+        "print('Retry draft')\n",
+        encoding="utf-8",
+    )
+    exe.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    with pytest.raises(module.DraftError, match="Model process failed"):
+        module.generate(generation)
+    assert not generation.output.exists()
+    module.generate(generation)
+    assert generation.output.read_text() == "Retry draft"
+    diagnostics = sorted(tmp_path.glob("draft.txt.provider-stderr-*.txt"))
+    assert len(diagnostics) == 2
+    for path in diagnostics:
+        assert path.read_text() == "provider warning\n"
+        assert path.stat().st_mode & 0o777 == 0o600
