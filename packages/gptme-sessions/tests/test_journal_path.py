@@ -413,3 +413,52 @@ def test_default_date_lookup_skips_valid_historical_other_run(tmp_path: Path):
     assert first.parent != second.parent
     assert first.name == second.name == "autonomous-session-abcd.md"
     assert allocate_journal_path(tmp_path / "journal", "autonomous", "abcd", "22222222") == second
+
+
+@pytest.mark.parametrize("explicit_date", [False, True])
+def test_retry_keeps_suffix_after_historical_canonical_is_removed(tmp_path: Path, explicit_date):
+    journal_dir = tmp_path / "journal"
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    historical = journal_dir / today / "autonomous-session-abcd.md"
+    historical.parent.mkdir(parents=True)
+    historical.write_text("historical journal")
+    date = today if explicit_date else None
+    first = allocate_journal_path(journal_dir, "autonomous", "abcd", "22222222", date=date)
+    first.write_text("ongoing session")
+    historical.unlink()
+
+    retry = allocate_journal_path(journal_dir, "autonomous", "abcd", "22222222", date=date)
+    assert retry == first
+    assert retry.read_text() == "ongoing session"
+    assert not historical.exists()
+
+
+@pytest.mark.parametrize("date", ["", "/tmp/outside", "../outside", "2026-02-30", "20261107"])
+def test_invalid_date_is_rejected_before_any_writes(tmp_path: Path, date):
+    with pytest.raises(JournalReservationError, match="date"):
+        allocate_journal_path(tmp_path / "journal", "autonomous", "abcd", "11111111", date=date)
+    assert not list(tmp_path.iterdir())
+
+
+def test_empty_run_id_is_rejected_before_any_writes(tmp_path: Path, capsys):
+    with pytest.raises(JournalReservationError, match="run id"):
+        allocate_journal_path(tmp_path / "journal", "autonomous", "abcd", "")
+    assert (
+        main(
+            [
+                "--journal-dir",
+                str(tmp_path / "journal"),
+                "--run-type",
+                "autonomous",
+                "--label",
+                "abcd",
+                "--uuid",
+                "",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert "integrity failure" in captured.err
+    assert not list(tmp_path.iterdir())

@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import tempfile
+from datetime import date as calendar_date
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -151,7 +152,15 @@ def allocate_journal_path(
     ``reservation_dir`` defaults to
     ``<journal_dir>/../state/session-journal-reservations/<journal-dir-name>``.
     """
-    date_str = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if not isinstance(run_id, str) or not run_id:
+        raise JournalReservationError("run id must be a non-empty string")
+    date_str = date if date is not None else datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        parsed_date = calendar_date.fromisoformat(date_str)
+    except ValueError as exc:
+        raise JournalReservationError("date must be a valid YYYY-MM-DD date") from exc
+    if parsed_date.isoformat() != date_str:
+        raise JournalReservationError("date must be a valid YYYY-MM-DD date")
     journal_dir = Path(journal_dir).resolve()
     day_dir = journal_dir / date_str
     default_reservation = (
@@ -163,19 +172,20 @@ def allocate_journal_path(
     # sides of UTC midnight. An explicit date deliberately scopes the reservation.
     with (owner_root / ".allocation.lock").open("a") as allocation_lock:
         fcntl.flock(allocation_lock.fileno(), fcntl.LOCK_EX)
-        if date is None:
-            for previous in sorted(owner_root.glob("????-??-??")):
-                if not previous.is_dir():
+        previous_dirs = (
+            sorted(owner_root.glob("????-??-??")) if date is None else [owner_root / date_str]
+        )
+        # Find an owned suffix before creating any newly available candidate.
+        for previous in previous_dirs:
+            if not previous.is_dir():
+                continue
+            for candidate in candidates_for(journal_dir / previous.name, run_type, label, run_id):
+                owner_path = previous / f"{candidate.name}.json"
+                if not owner_path.exists():
                     continue
-                for candidate in candidates_for(
-                    journal_dir / previous.name, run_type, label, run_id
-                ):
-                    owner_path = previous / f"{candidate.name}.json"
-                    if not owner_path.exists():
-                        continue
-                    if read_owner_run_id(owner_path, candidate) == run_id:
-                        if reserve_candidate(candidate, owner_path, run_id):
-                            return candidate
+                if read_owner_run_id(owner_path, candidate) == run_id:
+                    if reserve_candidate(candidate, owner_path, run_id):
+                        return candidate
         owner_dir = owner_root / date_str
         day_dir.mkdir(parents=True, exist_ok=True)
         candidates = candidates_for(day_dir, run_type, label, run_id)
