@@ -104,6 +104,7 @@ from gptme_runloops.pm_dispatch import (
     classify_item_work_type,
     derive_slot_key,
     is_direct_mention,
+    valid_session_label,
 )
 from gptme_runloops.prompt_templates import (
     ItemPromptParams,
@@ -1582,8 +1583,10 @@ def plan_item(
     # on contention instead of blocking forever on "unknown" liveness.
     # Falls back to the per-worker project-monitoring id when no outer session
     # label is available (interactive PM runs, CI, non-autonomous contexts).
-    _outer_label = os.environ.get("BOB_SESSION_LABEL", "")
-    if _outer_label and re.fullmatch(r"[a-z0-9]{4,}", _outer_label) and backend:
+    # Shared validator: the dispatcher forwards the same value across the
+    # systemd-run boundary, so both ends must agree on what is acceptable.
+    _outer_label = valid_session_label(os.environ.get("BOB_SESSION_LABEL"))
+    if _outer_label and backend:
         claim_agent = f"bob-autonomous-{backend}-{_outer_label}"
     else:
         claim_agent = f"project-monitoring-{backend or 'unknown'}-{session_id}"

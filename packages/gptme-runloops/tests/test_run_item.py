@@ -36,7 +36,12 @@ from gptme_runloops.merge_lifecycle import (
     run_merge_lifecycle,
 )
 from gptme_runloops.pm_bandit import PmModelBandit
-from gptme_runloops.pm_dispatch import EFFECT_NONE, EFFECT_OBSERVED, EFFECT_UNKNOWN
+from gptme_runloops.pm_dispatch import (
+    EFFECT_NONE,
+    EFFECT_OBSERVED,
+    EFFECT_UNKNOWN,
+    valid_session_label,
+)
 from gptme_runloops.run_item import (
     PR_OBSERVE_TYPES,
     PR_STATE_TYPES,
@@ -473,6 +478,34 @@ def test_plan_claim_agent_ignores_invalid_outer_label(tmp_path, monkeypatch) -> 
         assert (
             plan.claim_agent == f"project-monitoring-claude-code-{plan.session_id}"
         ), f"bad label {bad_label!r} should fall back to project-monitoring id"
+
+
+@pytest.mark.parametrize(
+    "label", ["bc64", "0081", "", "ab", "has-hyphen", "HAS_UPPER", "a b"]
+)
+def test_dispatcher_label_validation_matches_claim_shaping(
+    tmp_path, monkeypatch, label
+) -> None:
+    """The forwarded label and the claim-shaping label must agree exactly.
+
+    Boundary regression for gptme-contrib#2071: ``LaneDispatcher._launch_unit``
+    forwards ``BOB_SESSION_LABEL`` across the ``systemd-run`` boundary and
+    run-item shapes the claim from it. If the two ends disagreed on what counts
+    as valid, detached workers would silently fall back to the unprobeable
+    ``project-monitoring-*`` identity whenever the values diverged.
+    """
+    monkeypatch.setenv("BOB_SESSION_LABEL", label)
+    item = make_item(
+        types=["assigned_issue"], detail="assigned; updated: 2026-07-11T00:00:00Z"
+    )
+    plan, _, _ = _plan_for(tmp_path, item, FakeLifecycleIO())
+    forwarded = valid_session_label(label)
+    if forwarded is None:
+        assert plan.claim_agent.startswith(
+            "project-monitoring-"
+        ), f"label {label!r} is not forwarded, so the claim must fall back"
+    else:
+        assert plan.claim_agent == f"bob-autonomous-claude-code-{forwarded}"
 
 
 def test_plan_pending_reply_followup_skips_ack(tmp_path) -> None:
