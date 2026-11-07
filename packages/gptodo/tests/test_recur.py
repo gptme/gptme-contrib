@@ -245,6 +245,9 @@ class TestRecurResetUnticksChecklist:
             "> > ```markdown\n> > - [x] example",
             "- ```markdown\n\n  - [x] example",
             "1. ~~~markdown\n\n   - [x] example",
+            "- notes\n\n  ```markdown\n  - [x] example",
+            "1. notes\n\n   ~~~markdown\n   - [x] example",
+            "> - notes\n>\n>   ```markdown\n>   - [x] example",
         ],
     )
     def test_reset_ends_fence_at_container_boundary(self, workspace: Path, example: str):

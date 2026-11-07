@@ -484,6 +484,7 @@ def transform_post(
 _TICKED_RE = re.compile(r"^([ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+)(?:\[[xX]\]|✅)")
 _QUOTE_RE = re.compile(r"^([ \t]*>[ \t]?)+")
 _FENCE_RE = re.compile(r"^([ \t]*)(?:((?:[-*+]|[0-9]+[.)])[ \t]+))?(`{3,}|~{3,})")
+_LIST_RE = re.compile(r"^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+")
 
 
 def untick_checklist(content: str) -> str:
@@ -497,6 +498,7 @@ def untick_checklist(content: str) -> str:
     fence = ""
     fence_quotes = 0
     list_indent = 0
+    list_containers: list[tuple[int, int]] = []
     for line in content.split("\n"):
         # Remove quote containers for parsing only; retain their exact bytes.
         quote = _QUOTE_RE.match(line)
@@ -508,6 +510,16 @@ def untick_checklist(content: str) -> str:
             # A container can end a fence without an explicit delimiter. Parse
             # this same line again outside the fence so later work reopens.
             fence = ""
+        if not fence:
+            # List context survives blank lines and also owns fences opened on
+            # continuation lines, rather than directly after a list marker.
+            while list_containers and (
+                quote_depth != list_containers[-1][0]
+                or (candidate.strip() and indent < list_containers[-1][1])
+            ):
+                list_containers.pop()
+            if item := _LIST_RE.match(candidate):
+                list_containers.append((quote_depth, item.end()))
         if fence:
             # Only a matching delimiter of at least the opening length closes
             # a fence; inner examples and info strings are not closing fences.
@@ -520,7 +532,7 @@ def untick_checklist(content: str) -> str:
             # like ```example``` is an inline code span, not a fence opener.
             fence = opening.group(3)
             fence_quotes = quote_depth
-            list_indent = len(opening.group(1) + opening.group(2)) if opening.group(2) else 0
+            list_indent = list_containers[-1][1] if list_containers else 0
         else:
             line = prefix + _TICKED_RE.sub(r"\1[ ]", candidate, count=1)
         out.append(line)
