@@ -27,7 +27,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -462,9 +461,9 @@ _PATTERNS: list[Pattern] = [
     # in full. Matching the SECRET-NAMED key as required context is what makes
     # this safe where a bare-token regex could not be: a 40-hex value alone is
     # indistinguishable from a commit hash, but `*_KEY=<40hex>` is unambiguous.
-    # Declared LAST of all patterns so every specific pattern (sk-…, ghs_…, …)
-    # wins first and keeps its own category/severity — by the time this runs those
-    # values are already masked and no longer match. Only the value group is
+    # Applied after specific CRITICAL patterns but BEFORE lower-severity
+    # patterns: token/PII substitution must not hide a CRITICAL assignment.
+    # Specific CRITICAL patterns keep their own category. Only the value group is
     # redacted (value_only), preserving the key name for debuggability. The name
     # must be SNAKE_CASE with the secret keyword as a `_`-delimited segment (so
     # "monkey", "MONKEY_BUSINESS", and prose like "the api key" never match).
@@ -472,8 +471,8 @@ _PATTERNS: list[Pattern] = [
         re.compile(
             r"\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*"
             r"_(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)\b"
-            r"\s*[:=]\s*"
-            r"['\"]?(?P<value>[A-Za-z0-9][A-Za-z0-9_./+=-]{10,})['\"]?",
+            r"['\"]?\s*[:=]\s*"
+            r"['\"]?(?P<value>[A-Za-z0-9][A-Za-z0-9_@./+=-]{10,})['\"]?",
             re.IGNORECASE,
         ),
         Severity.CRITICAL,
@@ -673,8 +672,11 @@ def redact(
             for _ in range(n):
                 record("literal", Severity.CRITICAL, literal)
 
-    # Layer 2: pattern deny-list.
-    for pat in _PATTERNS:
+    # Layer 2: credential-specific patterns, assignment fallback, then PII.
+    # The assignment fallback is declared last for readability, not priority.
+    patterns = [p for p in _PATTERNS if p.severity >= Severity.CRITICAL]
+    patterns.extend(p for p in _PATTERNS if p.severity < Severity.CRITICAL)
+    for pat in patterns:
 
         def _sub(m: re.Match[str], _p: Pattern = pat) -> str:
             if _p.value_only:
@@ -719,6 +721,7 @@ def trufflehog_scan(text: str) -> list[Finding]:
     TruffleHog only fires on confirmed secrets.
 
     Returns empty list when the binary is absent (graceful degradation).
+    Raises RuntimeError on execution/protocol failure; a failed scan is not clean.
     """
     binary = shutil.which("trufflehog")
     if binary is None:
@@ -736,12 +739,13 @@ def trufflehog_scan(text: str) -> list[Finding]:
                 text=True,
                 timeout=60,
             )
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            print(
-                f"warning: trufflehog scan failed ({exc}); skipping layer 3",
-                file=sys.stderr,
-            )
-            return []
+        except (subprocess.TimeoutExpired, OSError):
+            # Do not echo exceptions/stdout/stderr: scanner diagnostics may
+            # contain the input secrets we are trying to protect.
+            raise RuntimeError("TruffleHog scan could not complete") from None
+
+    if result.returncode != 0:
+        raise RuntimeError(f"TruffleHog scan failed (exit {result.returncode})")
 
     for line in result.stdout.splitlines():
         line = line.strip()
@@ -750,9 +754,13 @@ def trufflehog_scan(text: str) -> list[Finding]:
         try:
             record = json.loads(line)
         except json.JSONDecodeError:
-            continue
+            raise RuntimeError("TruffleHog returned invalid JSON") from None
+        if not isinstance(record, dict):
+            raise RuntimeError("TruffleHog returned an invalid finding")
         detector = record.get("DetectorName", "") or record.get("detector_name", "")
         raw = record.get("Raw", "") or record.get("raw", "")
+        if not isinstance(detector, str) or not detector or not isinstance(raw, str):
+            raise RuntimeError("TruffleHog returned an invalid finding")
         preview = (
             _mask_preview(
                 "trufflehog:" + detector.replace(" ", "_"), raw, Severity.CRITICAL
@@ -909,23 +917,23 @@ def scan_prompt_injection(text: str, *, canonicalize: bool = False) -> list[Find
     if canonicalize:
         # Lazy import avoids a circular dependency: canonicalize.py imports
         # scan_prompt_injection from this module at function-call time.
-        from redact.canonicalize import canonicalize_for_injection_scan
+        from redact.canonicalize import canonicalize_for_injection_scan_variants
 
-        _, canonical_text = canonicalize_for_injection_scan(text)
-        for pat in _INJECTION_PATTERNS:
-            matches = list(pat.regex.finditer(canonical_text))
-            if not matches:
-                continue
-            if pat.category in findings:
-                continue  # already detected in raw text; no escalation needed
-            sample = matches[0].group(0)
-            # Upgrade severity by one level — canonical-only = evasion attempt
-            upgraded = Severity(min(int(pat.severity) + 1, int(Severity.CRITICAL)))
-            findings[pat.category] = Finding(
-                category=pat.category,
-                severity=upgraded,
-                count=len(matches),
-                preview=_mask_preview(pat.category, sample, pat.severity),
-            )
+        for canonical_text in canonicalize_for_injection_scan_variants(text):
+            for pat in _INJECTION_PATTERNS:
+                matches = list(pat.regex.finditer(canonical_text))
+                if not matches:
+                    continue
+                if pat.category in findings:
+                    continue  # raw or earlier variant already detected it
+                sample = matches[0].group(0)
+                # Upgrade severity by one level — canonical-only = evasion attempt
+                upgraded = Severity(min(int(pat.severity) + 1, int(Severity.CRITICAL)))
+                findings[pat.category] = Finding(
+                    category=pat.category,
+                    severity=upgraded,
+                    count=len(matches),
+                    preview=_mask_preview(pat.category, sample, pat.severity),
+                )
 
     return sorted(findings.values(), key=lambda f: (-int(f.severity), f.category))

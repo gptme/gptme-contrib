@@ -108,7 +108,11 @@ def _main_redact(argv: list[str] | None = None) -> int:
 
     # Layer 3: optional TruffleHog scan.
     if args.trufflehog:
-        th_findings = trufflehog_scan(text)
+        try:
+            th_findings = trufflehog_scan(text)
+        except RuntimeError as exc:
+            print(f"error: {exc}; refusing artifact", file=sys.stderr)
+            return 2
         existing_cats = {f.category for f in result.findings}
         for f in th_findings:
             if f.category in existing_cats:

@@ -10,6 +10,7 @@ content delivered to callers. This is advisory scanning only.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from typing import NamedTuple
 
@@ -259,8 +260,9 @@ def canonicalize_for_injection_scan(text: str) -> tuple[str, str]:
 
     Returns:
         (original_text, canonical_text) where canonical_text has:
-        - Default-ignorable characters removed
+        - Default-ignorable characters removed or replaced with separators
         - Unicode confusables mapped to ASCII equivalents
+        - Horizontal whitespace runs collapsed to a single ASCII space
 
     The original payload is preserved and unchanged.
     This is detection-only; callers receive the original text unchanged.
@@ -269,15 +271,33 @@ def canonicalize_for_injection_scan(text: str) -> tuple[str, str]:
     canonical = map_confusables(canonical)
     # Normalize combining marks to NFC form to handle nested diacritics
     canonical = unicodedata.normalize("NFC", canonical)
+    # Patterns contain literal spaces. Collapse horizontal whitespace while
+    # retaining line boundaries used by anchored system-role patterns.
+    canonical = re.sub(r"[^\S\n]+", " ", canonical)
     return text, canonical
+
+
+def canonicalize_for_injection_scan_variants(text: str) -> tuple[str, ...]:
+    """Return bounded scan views for both meanings of invisible characters.
+
+    A zero width may separate words ("Ignore\\u200bprevious") or interrupt a
+    word ("Ig\\u200bnore"). No single replacement handles both, so scan a
+    separator view and a deletion view. Deduplicate identical views and never
+    rewrite the original payload. This is a heuristic, not exhaustive Unicode
+    normalization or a guarantee of detecting all obfuscations.
+    """
+    _, separated = canonicalize_for_injection_scan(text)
+    stripped = "".join(c for c in text if c not in _DEFAULT_IGNORABLE_CHARS)
+    _, joined = canonicalize_for_injection_scan(stripped)
+    return tuple(dict.fromkeys((separated, joined)))
 
 
 def scan_with_canonicalization(text: str) -> CanonicalResult:
     """Scan text for injection patterns using both raw and canonical forms.
 
-    Compares findings between the raw text and a canonicalized version
-    (zero-width chars removed, confusables mapped). This detects evasion
-    attempts that would bypass simple regex matching.
+    Compares findings between raw text and bounded canonical scan views
+    (zero-width chars removed or treated as separators, confusables mapped).
+    This detects evasion attempts that would bypass simple regex matching.
 
     Args:
         text: Input text to scan (preserved unchanged)
@@ -285,16 +305,25 @@ def scan_with_canonicalization(text: str) -> CanonicalResult:
     Returns:
         CanonicalResult with:
         - original_text: Unchanged input
-        - canonical_text: Canonicalized version
+        - canonical_text: Primary canonical view (separator interpretation)
         - original_findings: Patterns found in raw text
-        - canonical_findings: Patterns found in canonical text
+        - canonical_findings: Union of patterns found in canonical scan views
         - new_detections: Findings in canonical but not in raw (likely evasion)
         - evaded_patterns: Category names of evaded patterns
     """
     original_text, canonical_text = canonicalize_for_injection_scan(text)
 
     original_findings = scan_prompt_injection(original_text)
-    canonical_findings = scan_prompt_injection(canonical_text)
+    # Union categories across the bounded views, without counting the same
+    # detection twice when both interpretations match.
+    canonical_by_category: dict[str, Finding] = {}
+    for variant in canonicalize_for_injection_scan_variants(text):
+        for finding in scan_prompt_injection(variant):
+            canonical_by_category.setdefault(finding.category, finding)
+    canonical_findings = sorted(
+        canonical_by_category.values(),
+        key=lambda f: (-int(f.severity), f.category),
+    )
 
     # Identify patterns that were evaded in the original but detected in canonical
     original_cats = {f.category for f in original_findings}

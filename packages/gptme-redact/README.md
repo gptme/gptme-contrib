@@ -71,7 +71,7 @@ options:
 ## Python API
 
 ```python
-from redact import redact, collect_secret_literals, Result
+from redact import redact, collect_secret_literals, Result, Severity
 
 result = redact(
     text="my API key is sk-ant-api...",

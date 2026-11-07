@@ -461,7 +461,7 @@ def test_pypi_token_redacted_and_blocked():
 def test_github_app_token_found_but_not_blocked_by_default():
     # HIGH severity — below the CRITICAL default block threshold.
     ghs = "ghs_" + "a" * 36
-    result = redact(f"app_token={ghs}")
+    result = redact(f"observed {ghs}")
     assert ghs not in result.redacted
     assert any(f.category == "github_app_token" for f in result.findings)
     assert result.blocked is False
@@ -597,8 +597,8 @@ def test_email_found_but_not_blocked_by_default():
 
 
 def test_phone_number_found_but_not_blocked_by_default():
-    result = redact("call me at +46765784797")
-    assert "+46765784797" not in result.redacted
+    result = redact("call me at +46700000001")
+    assert "+46700000001" not in result.redacted
     assert any(f.category == "phone_number" for f in result.findings)
     assert result.blocked is False
 

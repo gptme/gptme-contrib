@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from redact import Severity, redact
+
 CLASSIFICATIONS = (
     "durable_project_memory",
     "resumable_session_state",
@@ -71,7 +73,9 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
     r"private[_-]?key|client[_-]?secret|bearer"
     r")\s*[=:]\s*\S+"
 )
-# High-signal secret shapes that appear even without an assignment context.
+# Conservative legacy/placeholder shapes, including short tokens and incomplete
+# private-key blocks. Keep these stricter auditor checks alongside the shared
+# scanner rather than duplicating its evolving vendor-specific credential list.
 _CREDENTIAL_SHAPE = re.compile(
     r"(?:"
     r"sk-[A-Za-z0-9]{16,}"
@@ -277,7 +281,14 @@ def _classify(
     parent_parts = {p.lower() for p in rel_path.parts[:-1]}
 
     # 1. Leakage — always wins.
-    if _CREDENTIAL_ASSIGNMENT.search(text) or _CREDENTIAL_SHAPE.search(text):
+    if (
+        _CREDENTIAL_ASSIGNMENT.search(text)
+        or _CREDENTIAL_SHAPE.search(text)
+        # Reuse credential coverage without collecting process-env literals or
+        # treating MEDIUM-severity contextual PII as a credential. The redacted
+        # copy is discarded: this auditor never rewrites source content.
+        or redact(text, block_severity=Severity.HIGH).blocked
+    ):
         return (
             "ambiguous_leakage",
             0.99,
@@ -406,8 +417,6 @@ def audit_workspace(root: str | Path) -> AuditResult:
 
     result = AuditResult()
     for file_path in sorted(p for p in scan_root.rglob("*") if p.is_file()):
-        if file_path.name in {"README.md", "verdict-spec.md", "verdict-spec.json"}:
-            continue
         result.verdicts.append(classify_file(file_path, root=base))
 
     _mark_conflicts(result)

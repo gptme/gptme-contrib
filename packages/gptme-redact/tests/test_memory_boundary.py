@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from redact.memory_boundary import (
     CLASSIFICATIONS,
     CONFIDENCE_FLOOR,
@@ -177,6 +178,114 @@ def test_migration_preview_is_read_only():
     preview_migration(FIXTURE)
     after = {p: p.read_bytes() for p in FIXTURE.rglob("*") if p.is_file()}
     assert before == after
+
+
+@pytest.mark.parametrize(
+    "filename", ["README.md", "verdict-spec.md", "verdict-spec.json"]
+)
+@pytest.mark.parametrize("workspace_dir", ["", "workspace"])
+@pytest.mark.parametrize("content", ["Durable goal.", "token=placeholder"])
+def test_audit_does_not_exempt_documentation_filenames(
+    tmp_path: Path, filename: str, workspace_dir: str, content: str
+):
+    project = tmp_path / workspace_dir / "project-memory"
+    project.mkdir(parents=True)
+    path = project / filename
+    path.write_text(content)
+
+    verdict = _verdict_by_suffix(audit_workspace(tmp_path), filename)
+    assert verdict.path == str(path.relative_to(tmp_path))
+    preview = preview_migration(tmp_path)
+    if content == "token=placeholder":
+        assert verdict.classification == "ambiguous_leakage"
+        assert verdict.migration_preview["action"] == "refuse"
+        assert preview.safe_to_proceed is False
+        assert [item["path"] for item in preview.requires_operator] == [verdict.path]
+    else:
+        assert verdict.classification == "durable_project_memory"
+        assert verdict.migration_preview["action"] == "migrate_verbatim"
+        assert preview.safe_to_proceed is True
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "sk-proj-" + "Ab3_-" * 20,
+        "sk-svcacct-" + "Ab3_-" * 20,
+        "sk-ant-api03-" + "Ab3_-" * 20,
+        "sk-ant-oat01-" + "Ab3_-" * 20,
+        "sk-ant-ort01-" + "Ab3_-" * 20,
+        "sk-ant-admin01-" + "Ab3_-" * 20,
+        "github_pat_" + "A" * 22 + "_" + "b" * 59,
+    ],
+    ids=[
+        "openai-project",
+        "openai-service",
+        "anthropic-api",
+        "anthropic-access",
+        "anthropic-refresh",
+        "anthropic-admin",
+        "github-finegrained",
+    ],
+)
+def test_modern_keys_in_project_memory_are_refused(tmp_path: Path, key: str):
+    project = tmp_path / "project-memory"
+    project.mkdir()
+    path = project / "goal.md"
+    # Prose (not an assignment), with every durable signal present.
+    path.write_text("---\nname: goal\nstatus: living\n---\n\nDurable goal. " + key)
+
+    verdict = classify_file(path, root=tmp_path)
+    assert verdict.classification == "ambiguous_leakage"
+    assert verdict.confidence >= 0.9
+    assert verdict.migration_preview["action"] == "refuse"
+    assert verdict.migration_preview["target_layer"] is None
+    preview = preview_migration(tmp_path)
+    assert preview.safe_to_proceed is False
+    assert preview.actions["migrate_verbatim"] == []
+    assert [item["path"] for item in preview.requires_operator] == [
+        "project-memory/goal.md"
+    ]
+    assert key not in json.dumps(verdict.to_dict())
+    assert key not in json.dumps(preview.to_dict())
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["token=x", "sk-" + "Z" * 16, "-----BEGIN PRIVATE KEY-----"],
+)
+def test_stricter_auditor_placeholder_checks_are_preserved(
+    tmp_path: Path, content: str
+):
+    path = tmp_path / "goal.md"
+    path.write_text("---\nname: goal\nstatus: living\n---\n\n" + content)
+    verdict = classify_file(path, root=tmp_path)
+    assert verdict.classification == "ambiguous_leakage"
+    assert verdict.migration_preview["action"] == "refuse"
+    assert verdict.confidence >= 0.9
+
+
+def test_shared_scanner_high_severity_credentials_are_refused(tmp_path: Path):
+    path = tmp_path / "goal.md"
+    path.write_text(
+        "---\nname: goal\nstatus: living\n---\n\n"
+        "Integration endpoint: https://discord.com/api/webhooks/"
+        + "1" * 18
+        + "/"
+        + "A" * 60
+    )
+    assert classify_file(path).migration_preview["action"] == "refuse"
+    assert preview_migration(tmp_path).safe_to_proceed is False
+
+
+def test_contextual_pii_is_not_a_credential_signal(tmp_path: Path):
+    path = tmp_path / "goal.md"
+    path.write_text(
+        "---\nname: goal\nstatus: living\n---\n\n"
+        "Contact maintainer@example.com; workspace /home/alice/project."
+    )
+    assert classify_file(path).classification == "durable_project_memory"
+    assert preview_migration(tmp_path).safe_to_proceed is True
 
 
 def test_safe_preview_on_clean_workspace(tmp_path: Path):
