@@ -2776,6 +2776,66 @@ class TestLaneDispatcherSlotLogDir:
         assert not any("StandardError" in arg for arg in cmd)
 
 
+# Env vars the worker (``run_item``) reads but which deliberately do not cross the
+# ``systemd-run`` boundary. Every entry needs a reason — see the guard test below.
+_AMBIENT_WORKER_ENV_READS: dict[str, str] = {
+    "BOB_PM_FAST_LANE_MODEL": (
+        "read only to compose the bandit shadow candidate list (observation-only); "
+        "the resolved model crosses the boundary as AGENT_SELECTED_MODEL/BOB_SELECTED_MODEL"
+    ),
+    "PM_MAX_REDELIVERY_ATTEMPTS": (
+        "operator tuning knob with no production caller; the worker default (2) "
+        "matches the bash twin in project-monitoring-lib.sh"
+    ),
+    "GPTME_MODEL": (
+        "fallback for the ambient-memory harness tag only when the slot resolved "
+        "no model; the resolved model crosses as AGENT_SELECTED_MODEL/BOB_SELECTED_MODEL"
+    ),
+    "GROK_BUILD_MODEL": (
+        "same ambient-tag fallback for the grok-build backend; the resolved model "
+        "crosses the boundary explicitly"
+    ),
+}
+
+
+def _env_names_read_by_worker() -> set[str]:
+    """Env vars ``run_item`` reads through a literal ``os.environ.get``/``os.getenv``.
+
+    Scope note: only single-argument literal reads are discovered, which is the
+    pattern both known regressions used. Reads routed through helpers or built
+    from intermediate strings are out of scope for this guard.
+    """
+    import ast
+
+    import gptme_runloops
+
+    source = Path(gptme_runloops.__file__).parent / "run_item.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        first = node.args[0]
+        if not isinstance(first, ast.Constant) or not isinstance(first.value, str):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute):
+            continue
+        is_environ_get = (
+            func.attr == "get"
+            and isinstance(func.value, ast.Attribute)
+            and func.value.attr == "environ"
+        )
+        is_getenv = (
+            func.attr == "getenv"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "os"
+        )
+        if is_environ_get or is_getenv:
+            names.add(first.value)
+    return names
+
+
 class TestLaneDispatcherEnvAliases:
     """Slot launch dual-writes neutral AGENT_* alongside legacy BOB_*.
 
@@ -2885,6 +2945,38 @@ class TestLaneDispatcherEnvAliases:
         assert not any(
             arg.startswith("--setenv=BOB_SESSION_LABEL=") for arg in cmd
         ), f"invalid label {bad_label!r} must not be forwarded"
+
+    def test_worker_env_reads_cross_the_boundary_or_are_justified(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every worker-side env read must be forwarded or explicitly justified.
+
+        Transient units inherit nothing, so an env-derived behaviour the
+        dispatcher does not forward is inert in production while its own tests
+        keep passing — they set the variable in-process. That shape has now hit
+        this seam twice: the unset shadow flag behind gptme-contrib#1506 and the
+        unforwarded session label behind #2071. Prose comments did not stop the
+        second one, so the check is mechanical.
+        """
+        monkeypatch.setenv("BOB_SESSION_LABEL", "bc64")
+        cmd = self._captured_cmd(
+            tmp_path, monkeypatch, backend="claude-code", model="sonnet"
+        )
+        forwarded = {
+            arg.split("=", 1)[1].split("=", 1)[0]
+            for arg in cmd
+            if arg.startswith("--setenv=")
+        }
+        unforwarded = _env_names_read_by_worker() - forwarded
+        assert unforwarded == set(_AMBIENT_WORKER_ENV_READS), (
+            "the set of worker env reads that do not cross the systemd-run "
+            f"boundary changed: {sorted(unforwarded ^ set(_AMBIENT_WORKER_ENV_READS))}. "
+            "Forward the variable from _launch_unit, or extend "
+            "_AMBIENT_WORKER_ENV_READS with a reason."
+        )
+        assert all(
+            reason.strip() for reason in _AMBIENT_WORKER_ENV_READS.values()
+        ), "every ambient worker env read needs a stated reason"
 
     @pytest.mark.parametrize("types", [["notification"], ["contributor_unreviewed"]])
     def test_default_launcher_preserves_notification_states(
