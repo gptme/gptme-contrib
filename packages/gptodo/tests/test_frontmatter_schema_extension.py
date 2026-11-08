@@ -23,6 +23,7 @@ from click.testing import CliRunner
 
 from gptodo import cli as cli_mod
 from gptodo.cli import cli
+from gptodo.utils import load_tasks
 from gptodo.utils import (
     EXTRA_FRONTMATTER_FIELDS_ENV,
     HAVE_TOML_PARSER,
@@ -188,3 +189,74 @@ def test_lint_resolves_schema_once_regardless_of_task_count(
 
     assert result.exit_code == 0, result.output
     assert calls == 1, f"schema resolved {calls}x for 5 tasks — hoist regressed"
+
+
+# -- Extension field JSON parsing --------------------------------------------
+
+_TODO_TASK = """\
+---
+state: todo
+created: 2026-11-01T00:00:00+00:00
+---
+# Test task
+"""
+
+
+@needs_toml
+def test_extension_field_json_object_stored_as_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--set premise_check '{…}'` must write a mapping, not a quoted string."""
+    monkeypatch.delenv(EXTRA_FRONTMATTER_FIELDS_ENV, raising=False)
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.gptodo]\nextra_frontmatter_fields = ["premise_check"]\n'
+    )
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(_TODO_TASK)
+
+    monkeypatch.chdir(tmp_path)
+    payload = '{"checked_at": "2026-11-01T00:00:00+00:00", "verdict": "verified"}'
+    result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "premise_check", payload])
+    assert result.exit_code == 0, f"edit failed: {result.output}"
+
+    tasks = load_tasks(tasks_dir)
+    assert len(tasks) == 1
+    pc = tasks[0].metadata.get("premise_check")
+    assert isinstance(pc, dict), f"expected dict, got {type(pc).__name__}: {pc!r}"
+    assert pc.get("verdict") == "verified"
+
+
+@needs_toml
+def test_extension_field_malformed_json_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A value that starts with `{` but is not valid JSON must exit non-zero."""
+    monkeypatch.delenv(EXTRA_FRONTMATTER_FIELDS_ENV, raising=False)
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.gptodo]\nextra_frontmatter_fields = ["premise_check"]\n'
+    )
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(_TODO_TASK)
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "premise_check", "{bad json]"])
+    assert result.exit_code != 0, "malformed JSON should have exited non-zero"
+    assert "premise_check" in result.output
+
+
+def test_core_scalar_field_not_json_parsed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Core scalar fields must never gain JSON parsing; `--set priority 5` → '5'."""
+    monkeypatch.delenv(EXTRA_FRONTMATTER_FIELDS_ENV, raising=False)
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(_TODO_TASK)
+
+    monkeypatch.chdir(tmp_path)
+    # priority is an enum field — an invalid numeric value must still be refused,
+    # not silently parsed as an integer.
+    result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "priority", "5"])
+    assert (
+        result.exit_code != 0 or "Invalid" in result.output
+    ), "numeric priority should be rejected, not silently coerced"
