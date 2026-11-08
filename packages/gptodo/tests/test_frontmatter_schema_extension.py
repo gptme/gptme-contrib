@@ -246,17 +246,22 @@ def test_extension_field_malformed_json_exits_nonzero(
     assert "premise_check" in result.output
 
 
-def test_core_scalar_field_not_json_parsed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Core scalar fields must never gain JSON parsing; `--set priority 5` → '5'."""
+@pytest.mark.parametrize("payload", [' {"step": "verify"} ', '["verify", "ship"]', "{bad json]"])
+def test_core_scalar_field_not_json_parsed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: str
+) -> None:
+    """Core string fields preserve JSON-looking input verbatim, without parsing."""
     monkeypatch.delenv(EXTRA_FRONTMATTER_FIELDS_ENV, raising=False)
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
     (tasks_dir / "my-task.md").write_text(_TODO_TASK)
 
     monkeypatch.chdir(tmp_path)
-    # priority is an enum field — an invalid numeric value must still be refused,
-    # not silently parsed as an integer.
-    result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "priority", "5"])
-    assert (
-        result.exit_code != 0 or "Invalid" in result.output
-    ), "numeric priority should be rejected, not silently coerced"
+    result = CliRunner().invoke(cli, ["edit", "my-task", "--set", "next_action", payload])
+    assert result.exit_code == 0, result.output
+
+    tasks = load_tasks(tasks_dir)
+    assert len(tasks) == 1
+    actual = tasks[0].metadata["next_action"]
+    assert isinstance(actual, str)
+    assert actual == payload
