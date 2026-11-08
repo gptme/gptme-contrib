@@ -122,11 +122,24 @@ def test_read_only_audit_does_not_modify_files():
     assert before == after
 
 
-def test_low_confidence_is_surfaced():
+def test_low_confidence_is_surfaced(tmp_path: Path):
     # A file with no boundary signal is refused, not silently classified.
-    path = FIXTURE / "workspace" / "cache" / "rag-results.md"
-    verdict = classify_file(path, root=FIXTURE)
-    assert verdict.classification in CLASSIFICATIONS
+    path = tmp_path / "notes.md"
+    path.write_text("just a plain note with nothing distinctive\n")
+    audit = audit_workspace(tmp_path)
+    verdict = _verdict_by_suffix(audit, "notes.md")
+    assert verdict.classification == "ambiguous_leakage"
+    assert verdict.confidence < CONFIDENCE_FLOOR
+    assert verdict.migration_preview["action"] == "refuse"
+    assert verdict.migration_preview["target_layer"] is None
+    assert audit.to_dict()["summary"]["below_confidence_floor"] == ["notes.md"]
+
+    preview = preview_migration(tmp_path)
+    assert preview.safe_to_proceed is False
+    assert [entry["path"] for entry in preview.actions["refuse"]] == ["notes.md"]
+    assert preview.requires_operator == [
+        {"path": "notes.md", "reason": "refused by classification"}
+    ]
 
 
 def test_unclassifiable_file_falls_back_to_refusal(tmp_path: Path):
