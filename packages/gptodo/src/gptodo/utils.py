@@ -1560,14 +1560,18 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
         },
         "has_issues": task.has_issues,
         # Task classification
-        "task_type": md.get("task_type"),
+        "task_type": _meta_str(md.get("task_type")),
         "next_action": _meta_str(md.get("next_action")),
         # YAML can auto-parse dates in free-text fields as well as timestamp fields.
         "waiting_for": _meta_str(md.get("waiting_for")),
         "waiting_since": _meta_str(md.get("waiting_since")),
         "first_waiting_since": _meta_str(md.get("first_waiting_since")),
-        "waiting_spell_count": md.get("waiting_spell_count"),
-        "wait_kind": md.get("wait_kind"),
+        "waiting_spell_count": (
+            _meta_str(md.get("waiting_spell_count"))
+            if isinstance(md.get("waiting_spell_count"), date)
+            else md.get("waiting_spell_count")
+        ),
+        "wait_kind": _meta_str(md.get("wait_kind")),
         "probe": _meta_str(md.get("probe")),
         "symptom_probe": _meta_str(md.get("symptom_probe")),
         "proceed_after": _meta_str(md.get("proceed_after")),
@@ -1575,7 +1579,7 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
         "recheck_after": _meta_str(md.get("recheck_after")),
         "tracking_issue": _meta_str(md.get("tracking_issue")),
         "upstream_coordination_id": _meta_str(md.get("upstream_coordination_id")),
-        "erik_gate_class": md.get("erik_gate_class"),
+        "erik_gate_class": _meta_str(md.get("erik_gate_class")),
         "workaround_surface": _meta_str(md.get("workaround_surface")),
         # Scheduling fields
         "wait": task.wait.isoformat() if task.wait else None,

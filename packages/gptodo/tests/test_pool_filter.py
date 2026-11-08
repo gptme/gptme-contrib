@@ -560,6 +560,10 @@ class TestTaskToDictBlockerFields:
             "tracking_issue",
             "upstream_coordination_id",
             "workaround_surface",
+            "task_type",
+            "wait_kind",
+            "erik_gate_class",
+            "waiting_spell_count",
         ],
     )
     def test_yaml_date_in_text_field_is_json_safe(
@@ -592,6 +596,7 @@ class TestTaskToDictBlockerFields:
             created="2026-01-01T00:00:00+00:00",
             waiting_for="external review",
             waiting_since="2026-01-02T00:00:00+00:00",
+            waiting_spell_count=2,
             wait_kind="external",
             probe="gh pr view 123 --json state | jq -e '.state == \"MERGED\"'",
             tracking_issue="https://github.com/org/repo/issues/123",
@@ -607,6 +612,7 @@ class TestTaskToDictBlockerFields:
         data = json.loads(result.output)
         tasks_by_id = {t["id"]: t for t in data["tasks"]}
         t = tasks_by_id["waiting-task"]
+        assert t["waiting_spell_count"] == 2
         assert t["waiting_for"] == "external review"
         assert t["wait_kind"] == "external"
         assert t["probe"] == "gh pr view 123 --json state | jq -e '.state == \"MERGED\"'"
