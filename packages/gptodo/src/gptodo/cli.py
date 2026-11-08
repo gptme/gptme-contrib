@@ -2655,7 +2655,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
     # right before `gptodo lint` rejects it, recreating the two-schema split.
     _excluded = KNOWN_FRONTMATTER_FIELDS | set(DEPRECATED_FRONTMATTER_FIELDS)
     for _extra in resolve_known_frontmatter_fields(repo_root) - _excluded:
-        VALID_FIELDS.setdefault(_extra, {"type": "string"})
+        VALID_FIELDS.setdefault(_extra, {"type": "extension"})
 
     # Validate set operations
     for field, value in set_fields:
@@ -2827,6 +2827,23 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
                     )
                     raise SystemExit(1)
             # Arbitrary string value - no validation needed
+        elif field_spec["type"] == "extension":
+            # Workspace-registered extension fields (e.g. premise_check) may hold
+            # structured values. Auto-detect JSON objects/arrays so the caller can
+            # write `--set premise_check '{"checked_at": "…", "verdict": "verified"}'`
+            # and get a mapping, not a quoted string.
+            stripped = value.strip()
+            if stripped.startswith(("{", "[")):
+                import json
+
+                try:
+                    value = json.loads(stripped)
+                except json.JSONDecodeError as e:
+                    console.print(
+                        f"[red]Field '{field}': value looks like JSON but could not be parsed: {e}[/]"
+                    )
+                    raise SystemExit(1)
+            # Plain scalar extension values pass through unchanged.
 
         changes.append(("set", field, value))
 
