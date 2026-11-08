@@ -350,3 +350,13 @@ def test_write_uses_unique_temp_files_and_cleans_up_on_failure(
     with pytest.raises(OSError, match="rename failed"):
         write_core_files(tmp_path, core, headline)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["core.json", "headline.json"]
+
+
+def test_shared_core_files_are_readable_by_a_separate_server_user(
+    tmp_path: Path,
+) -> None:
+    core, headline = _derive([_env("services", Status.HEALTHY)])
+    for _ in range(2):  # both initial publication and replacement keep public modes
+        write_core_files(tmp_path, core, headline)
+        for name in ("core.json", "headline.json"):
+            assert (tmp_path / name).stat().st_mode & 0o777 == 0o644

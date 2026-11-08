@@ -155,8 +155,11 @@ The portal and `build` emitting the derived `core.json`/`headline.json` pair.
 ## Derived `core.json` / `headline.json`
 
 `derive_core(registry, envelopes, agent=..., base_url=...)` returns the `fleet-vitals/core@1`
-and `headline@1` pair; `write_core_files()` writes them atomically. Nothing is
-hand-built: each dimension is the rollup of the pages that declared it.
+and `headline@1` pair; `write_core_files()` replaces each file atomically with
+mode 0644. This is not a two-file transaction: concurrent builders must serialize
+the read/derive/write cycle, and readers can see different generations between
+replacements. Nothing is hand-built: each dimension is the rollup of the pages
+that declared it.
 
 ```python
 from gptme_vitals import derive_core, write_core_files

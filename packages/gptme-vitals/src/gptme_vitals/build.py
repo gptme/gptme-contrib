@@ -188,6 +188,9 @@ def _atomic_write(path: Path, content: str) -> None:
     try:
         with os.fdopen(fd, "w") as handle:
             handle.write(content)
+        # mkstemp is 0600; core.json and headline.json are meant to be pulled
+        # by other agents and read by the web server, which may be another user.
+        os.chmod(tmp_name, 0o644)
         os.replace(tmp_name, path)
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
@@ -197,7 +200,12 @@ def _atomic_write(path: Path, content: str) -> None:
 def write_core_files(
     vitals_dir: str | Path, core: dict[str, object], headline: dict[str, object]
 ) -> None:
-    """Write ``core.json`` then ``headline.json`` atomically into ``vitals_dir``."""
+    """Replace each JSON file atomically, not the pair as one transaction.
+
+    Concurrent builders must serialize their read/derive/write cycle (the build
+    CLI holds a lock). Readers can see different generations between the two
+    replacements; neither individual file is ever partially written.
+    """
     out = Path(vitals_dir)
     out.mkdir(parents=True, exist_ok=True)
     _atomic_write(out / "core.json", json.dumps(core, indent=2) + "\n")
