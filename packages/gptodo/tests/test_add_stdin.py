@@ -44,8 +44,9 @@ def test_open_empty_pipe_returns_promptly(workspace: Path) -> None:
     created = workspace / "tasks" / "task-filed-from-a-harness-pipe.md"
     assert created.exists()
     assert "## " not in created.read_text()
-    # Rich may wrap long paths, but there must be no extra task-id line.
-    assert "".join(out.split()) == f"✓Createdtask:{created}"
+    # Rich may wrap long paths; the bare task id must appear on its own line.
+    assert created.stem in out.splitlines()
+    assert "✓ Created task:" in out
 
 
 def _wait(proc: subprocess.Popen[str]) -> tuple[str, str]:
@@ -67,6 +68,25 @@ def test_piped_body_is_still_read(workspace: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "- [ ] one" in (workspace / "tasks" / "task-with-body.md").read_text()
+
+
+def test_add_prints_task_id_on_its_own_line(workspace: Path) -> None:
+    """gptodo add must print the bare task id on its own stdout line."""
+    result = CliRunner().invoke(
+        cli,
+        ["add", "verify-the-task-authoring-interface-handles-a-deliberately-long-title"],
+        input=None,
+    )
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    # The stem is 50-char max; the id line must appear as a plain bare string.
+    stem = "verify-the-task-authoring-interface-handles-a-deli"
+    assert stem in lines, f"id line not found in output:\n{result.output}"
+    # The human-readable line is also present.
+    assert any("✓ Created task:" in ln for ln in lines)
+    # Verify the id is usable: gptodo edit must accept it.
+    edit_result = CliRunner().invoke(cli, ["edit", stem, "--set", "priority", "high"])
+    assert edit_result.exit_code == 0, edit_result.output
 
 
 def test_read_piped_body_without_fileno_falls_back_to_read() -> None:

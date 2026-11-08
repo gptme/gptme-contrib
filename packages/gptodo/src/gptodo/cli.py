@@ -5746,6 +5746,7 @@ def add(
     filepath.write_text(content)
 
     console.print(f"[green]✓ Created task:[/] {filepath}")
+    print(filepath.stem)
 
 
 def _body_looks_like_frontmatter(body: str) -> bool:
