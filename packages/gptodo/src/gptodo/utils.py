@@ -1497,6 +1497,15 @@ def load_tasks(
 # =============================================================================
 
 
+def _meta_str(val: Any) -> Optional[str]:
+    """Serialize a metadata field to a JSON-safe string (None pass-through)."""
+    if val is None:
+        return None
+    if hasattr(val, "isoformat"):
+        return str(val.isoformat())
+    return val if isinstance(val, str) else str(val)
+
+
 def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
     """Serialize TaskInfo to a JSON-compatible dictionary.
 
@@ -1513,7 +1522,24 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
     - discovered_from: list of tasks this was discovered from
     - depends: list of dependencies (deprecated, same as requires)
     - subtasks: {completed: int, total: int, skipped: int}
+    - task_type: project | action
+    - next_action: immediate concrete next step
+    - waiting_for: blocker description (set when state=waiting)
+    - waiting_since: ISO timestamp when waiting started
+    - first_waiting_since: ISO timestamp of first waiting entry (never reset)
+    - waiting_spell_count: number of distinct waiting spells
+    - wait_kind: machine | human | external | hypothesis
+    - probe: machine-checkable shell command for blocker resolution
+    - symptom_probe: replay gate (exits non-zero before fix, zero after)
+    - proceed_after: proceed-unless-objection gate ISO timestamp
+    - review_by: review gate ISO timestamp
+    - recheck_after: skip sweep until this ISO timestamp
+    - tracking_issue: active issue/PR URL
+    - upstream_coordination_id: machine claim key for upstream coordination
+    - erik_gate_class: credential | spend | access | public | physical | irreversible
+    - workaround_surface: what to do while waiting
     """
+    md = task.metadata
     return {
         "id": task.id,
         "name": task.name,
@@ -1533,6 +1559,24 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
             "skipped": task.subtasks.skipped,
         },
         "has_issues": task.has_issues,
+        # Task classification
+        "task_type": md.get("task_type"),
+        "next_action": md.get("next_action"),
+        # Blocker / waiting fields — datetime values from YAML are serialized via _meta_str
+        "waiting_for": md.get("waiting_for"),
+        "waiting_since": _meta_str(md.get("waiting_since")),
+        "first_waiting_since": _meta_str(md.get("first_waiting_since")),
+        "waiting_spell_count": md.get("waiting_spell_count"),
+        "wait_kind": md.get("wait_kind"),
+        "probe": md.get("probe"),
+        "symptom_probe": md.get("symptom_probe"),
+        "proceed_after": _meta_str(md.get("proceed_after")),
+        "review_by": _meta_str(md.get("review_by")),
+        "recheck_after": _meta_str(md.get("recheck_after")),
+        "tracking_issue": md.get("tracking_issue"),
+        "upstream_coordination_id": md.get("upstream_coordination_id"),
+        "erik_gate_class": md.get("erik_gate_class"),
+        "workaround_surface": md.get("workaround_surface"),
         # Scheduling fields
         "wait": task.wait.isoformat() if task.wait else None,
         "recur": task.recur,

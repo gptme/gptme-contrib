@@ -541,3 +541,47 @@ def test_frontier_routing_tag_is_general_pool(tmp_path: Path, monkeypatch) -> No
     data = json.loads(result.output)
     ids = [t["id"] for t in data["ready_tasks"]]
     assert "gptodo-next-pool-filter" in ids
+
+
+# ---------------------------------------------------------------------------
+# task_to_dict blocker/coordination fields — verify they appear in JSON output
+# ---------------------------------------------------------------------------
+
+
+class TestTaskToDictBlockerFields:
+    def test_blocker_fields_in_list_json(self, tmp_path: Path, monkeypatch) -> None:
+        """task_to_dict exports waiting_for, probe, tracking_issue, and similar blocker fields."""
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        write_task(
+            tasks_dir,
+            "waiting-task",
+            state="waiting",
+            created="2026-01-01T00:00:00+00:00",
+            waiting_for="external review",
+            waiting_since="2026-01-02T00:00:00+00:00",
+            wait_kind="external",
+            probe="gh pr view 123 --json state | jq -e '.state == \"MERGED\"'",
+            tracking_issue="https://github.com/org/repo/issues/123",
+            erik_gate_class="credential",
+            recheck_after="2026-02-01T00:00:00+00:00",
+            task_type="action",
+            next_action="Wait for reviewer",
+        )
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["list", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        tasks_by_id = {t["id"]: t for t in data["tasks"]}
+        t = tasks_by_id["waiting-task"]
+        assert t["waiting_for"] == "external review"
+        assert t["wait_kind"] == "external"
+        assert t["probe"] == "gh pr view 123 --json state | jq -e '.state == \"MERGED\"'"
+        assert t["tracking_issue"] == "https://github.com/org/repo/issues/123"
+        assert t["erik_gate_class"] == "credential"
+        assert t["task_type"] == "action"
+        assert t["next_action"] == "Wait for reviewer"
+        # datetime fields serialized to strings
+        assert t["waiting_since"] == "2026-01-02T00:00:00+00:00"
+        assert t["recheck_after"] == "2026-02-01T00:00:00+00:00"
