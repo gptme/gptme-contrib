@@ -40,7 +40,6 @@ from gptme_runloops.pm_dispatch import (
     EFFECT_NONE,
     EFFECT_OBSERVED,
     EFFECT_UNKNOWN,
-    valid_session_label,
 )
 from gptme_runloops.run_item import (
     PR_OBSERVE_TYPES,
@@ -444,68 +443,47 @@ def test_plan_assigned_issue_tier_claim_and_ack(tmp_path, monkeypatch) -> None:
     plan, _, _ = _plan_for(tmp_path, item, FakeLifecycleIO())
     assert plan.timeout == 1500 and plan.time_desc == "~20 minutes"
     assert plan.claim_key == "github:gptme/gptme-contrib#1234"
-    assert plan.claim_agent == f"project-monitoring-claude-code-{plan.session_id}"
+    assert plan.claim_agent == f"bob-autonomous-claude-code-{plan.session_id[:4]}"
     assert plan.ack_intent is True
 
 
-def test_plan_claim_agent_uses_outer_session_label(tmp_path, monkeypatch) -> None:
-    """Worker claims inherit the outer autonomous session label for liveness checking.
+def test_plan_claim_agent_uses_worker_session_label(tmp_path, monkeypatch) -> None:
+    """Worker claim_agent uses a per-worker label derived from session_id, not the outer session.
 
-    When BOB_SESSION_LABEL is set (we're inside an autonomous session), the
-    claim_agent uses bob-autonomous-{backend}-{label} so reap_dead_holders can
-    determine liveness via the session_label sentinel in the process table.
-    When the outer session dies its sentinel disappears and stale worker claims
-    can be reaped automatically on the next contention.
+    Workers are detached systemd-run --scope subprocesses — the outer session exits
+    while workers keep running. Using the outer label caused reap_dead_holders() to
+    free live worker claims when the outer sentinel disappeared. The fix derives the
+    label from session_id[:4] (always a valid 4-hex string) so each worker owns its
+    own coordination sentinel.
     """
+    # Outer session label must NOT be used — the fix ignores it entirely.
     monkeypatch.setenv("BOB_SESSION_LABEL", "0081")
     item = make_item(
         types=["assigned_issue"], detail="assigned; updated: 2026-07-11T00:00:00Z"
     )
     plan, _, _ = _plan_for(tmp_path, item, FakeLifecycleIO())
-    assert plan.claim_agent == "bob-autonomous-claude-code-0081"
+    # claim_agent uses the worker's own session_id[:4], not the outer "0081"
+    assert plan.claim_agent == f"bob-autonomous-claude-code-{plan.session_id[:4]}"
+    assert plan.claim_agent != "bob-autonomous-claude-code-0081"
+    # BOB_SESSION_LABEL in runner_env is overridden with the worker label
+    assert plan.runner_env.get("BOB_SESSION_LABEL") == plan.session_id[:4]
     # session_id is still derived (used for subagent env vars and trajectory path)
     assert plan.session_id is not None
 
 
-def test_plan_claim_agent_ignores_invalid_outer_label(tmp_path, monkeypatch) -> None:
-    """Invalid/non-alphanumeric labels fall back to per-worker project-monitoring ID."""
-    for bad_label in ("", "ab", "has-hyphen", "HAS_UPPER"):
-        monkeypatch.setenv("BOB_SESSION_LABEL", bad_label)
+def test_plan_claim_agent_worker_label_is_always_autonomous(
+    tmp_path, monkeypatch
+) -> None:
+    """With a backend, claim_agent is always bob-autonomous-*, regardless of outer label."""
+    for label in ("", "ab", "has-hyphen", "HAS_UPPER", "bc64", "0081"):
+        monkeypatch.setenv("BOB_SESSION_LABEL", label)
         item = make_item(
             types=["assigned_issue"], detail="assigned; updated: 2026-07-11T00:00:00Z"
         )
         plan, _, _ = _plan_for(tmp_path, item, FakeLifecycleIO())
-        assert (
-            plan.claim_agent == f"project-monitoring-claude-code-{plan.session_id}"
-        ), f"bad label {bad_label!r} should fall back to project-monitoring id"
-
-
-@pytest.mark.parametrize(
-    "label", ["bc64", "0081", "", "ab", "has-hyphen", "HAS_UPPER", "a b"]
-)
-def test_dispatcher_label_validation_matches_claim_shaping(
-    tmp_path, monkeypatch, label
-) -> None:
-    """The forwarded label and the claim-shaping label must agree exactly.
-
-    Boundary regression for gptme-contrib#2071: ``LaneDispatcher._launch_unit``
-    forwards ``BOB_SESSION_LABEL`` across the ``systemd-run`` boundary and
-    run-item shapes the claim from it. If the two ends disagreed on what counts
-    as valid, detached workers would silently fall back to the unprobeable
-    ``project-monitoring-*`` identity whenever the values diverged.
-    """
-    monkeypatch.setenv("BOB_SESSION_LABEL", label)
-    item = make_item(
-        types=["assigned_issue"], detail="assigned; updated: 2026-07-11T00:00:00Z"
-    )
-    plan, _, _ = _plan_for(tmp_path, item, FakeLifecycleIO())
-    forwarded = valid_session_label(label)
-    if forwarded is None:
-        assert plan.claim_agent.startswith(
-            "project-monitoring-"
-        ), f"label {label!r} is not forwarded, so the claim must fall back"
-    else:
-        assert plan.claim_agent == f"bob-autonomous-claude-code-{forwarded}"
+        # Always uses worker-local session_id[:4], never the outer label
+        assert plan.claim_agent == f"bob-autonomous-claude-code-{plan.session_id[:4]}"
+        assert plan.runner_env.get("BOB_SESSION_LABEL") == plan.session_id[:4]
 
 
 def test_plan_pending_reply_followup_skips_ack(tmp_path) -> None:
@@ -564,6 +542,7 @@ def test_plan_runner_argv_and_env(tmp_path) -> None:
     assert plan.runner_env == {
         "AGENT_SESSION_ID": plan.session_id,
         "BOB_SESSION_ID": plan.session_id,
+        "BOB_SESSION_LABEL": plan.session_id[:4],
         "CC_SESSION_ID": plan.session_id,
     }
     assert plan.trajectory_path.endswith(f"/{plan.session_id}.jsonl")
@@ -574,6 +553,7 @@ def test_plan_gptme_env(tmp_path) -> None:
     assert plan.runner_env == {
         "AGENT_SESSION_ID": plan.session_id,
         "BOB_SESSION_ID": plan.session_id,
+        "BOB_SESSION_LABEL": plan.session_id[:4],
     }
     assert plan.trajectory_path == ""
 
@@ -585,6 +565,7 @@ def test_plan_grok_build_env(tmp_path) -> None:
     assert plan.runner_env == {
         "AGENT_SESSION_ID": plan.session_id,
         "BOB_SESSION_ID": plan.session_id,
+        "BOB_SESSION_LABEL": plan.session_id[:4],
         "GROK_BUILD_SESSION_ID": plan.session_id,
     }
     assert plan.trajectory_path == ""  # CC prediction only

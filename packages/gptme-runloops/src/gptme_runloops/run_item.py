@@ -104,7 +104,6 @@ from gptme_runloops.pm_dispatch import (
     classify_item_work_type,
     derive_slot_key,
     is_direct_mention,
-    valid_session_label,
 )
 from gptme_runloops.prompt_templates import (
     ItemPromptParams,
@@ -1577,17 +1576,19 @@ def plan_item(
     claim_key = issue_coordination_key(item.types, item.repo, item.number)
     slug = item_slug(item.repo, item.number_str, index)
     session_id = derive_session_id(slug, run_salt)
-    # Tie liveness to the outer autonomous session when one is present. With a
-    # shaped id the coordination reaper can determine whether the holder is dead
-    # (session_label sentinel gone from the process table) and free stale claims
-    # on contention instead of blocking forever on "unknown" liveness.
-    # Falls back to the per-worker project-monitoring id when no outer session
-    # label is available (interactive PM runs, CI, non-autonomous contexts).
-    # Shared validator: the dispatcher forwards the same value across the
-    # systemd-run boundary, so both ends must agree on what is acceptable.
-    _outer_label = valid_session_label(os.environ.get("BOB_SESSION_LABEL"))
-    if _outer_label and backend:
-        claim_agent = f"bob-autonomous-{backend}-{_outer_label}"
+    # Tie liveness to the WORKER's own session, not the outer autonomous session.
+    # Workers run as detached systemd-run --scope subprocesses — the outer session
+    # exits normally while workers keep running. Using the outer session's label
+    # causes reap_dead_holders() to incorrectly free live worker claims when the
+    # outer sentinel disappears, triggering repeated re-dispatch of the same PR.
+    #
+    # Fix: derive a per-worker label from the unique session_id (uuid5 of slug +
+    # run_salt) and set it as BOB_SESSION_LABEL in runner_env so the worker owns
+    # its own sentinel. Falls back to project-monitoring id without a backend.
+    if backend:
+        # First 4 hex chars of the UUID are always lowercase hex — valid label.
+        _worker_label = session_id[:4]
+        claim_agent = f"bob-autonomous-{backend}-{_worker_label}"
     else:
         claim_agent = f"project-monitoring-{backend or 'unknown'}-{session_id}"
 
@@ -1642,6 +1643,10 @@ def plan_item(
         "AGENT_SESSION_ID": session_id,
         "BOB_SESSION_ID": session_id,
     }
+    # Override the inherited outer-session label with the worker's own label so
+    # the worker's autonomous-run.sh sentinel matches claim_agent above.
+    if backend:
+        runner_env["BOB_SESSION_LABEL"] = session_id[:4]
     if backend == "claude-code":
         runner_env["CC_SESSION_ID"] = session_id
     elif backend == "grok-build":
