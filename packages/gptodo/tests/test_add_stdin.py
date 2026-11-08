@@ -44,9 +44,8 @@ def test_open_empty_pipe_returns_promptly(workspace: Path) -> None:
     created = workspace / "tasks" / "task-filed-from-a-harness-pipe.md"
     assert created.exists()
     assert "## " not in created.read_text()
-    # Rich may wrap long paths; the bare task id must appear on its own line.
-    assert created.stem in out.splitlines()
-    assert "✓ Created task:" in out
+    assert out == f"{created.stem}\n"
+    assert "✓ Created task:" in err
 
 
 def _wait(proc: subprocess.Popen[str]) -> tuple[str, str]:
@@ -70,23 +69,36 @@ def test_piped_body_is_still_read(workspace: Path) -> None:
     assert "- [ ] one" in (workspace / "tasks" / "task-with-body.md").read_text()
 
 
-def test_add_prints_task_id_on_its_own_line(workspace: Path) -> None:
-    """gptodo add must print the bare task id on its own stdout line."""
-    result = CliRunner().invoke(
-        cli,
-        ["add", "verify-the-task-authoring-interface-handles-a-deliberately-long-title"],
-        input=None,
+@pytest.mark.parametrize(
+    "title",
+    ["Short task", "verify-the-task-authoring-interface-handles-a-deliberately-long-title"],
+)
+def test_add_stdout_can_be_chained_into_edit(workspace: Path, title: str) -> None:
+    """Capture stdout exactly as TASK_ID=$(gptodo add ... </dev/null) does."""
+    result = subprocess.run(
+        [sys.executable, "-m", "gptodo", "add", title],
+        cwd=workspace,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=20,
     )
-    assert result.exit_code == 0, result.output
-    lines = result.output.splitlines()
-    # The stem is 50-char max; the id line must appear as a plain bare string.
-    stem = "verify-the-task-authoring-interface-handles-a-deli"
-    assert stem in lines, f"id line not found in output:\n{result.output}"
-    # The human-readable line is also present.
-    assert any("✓ Created task:" in ln for ln in lines)
-    # Verify the id is usable: gptodo edit must accept it.
-    edit_result = CliRunner().invoke(cli, ["edit", stem, "--set", "priority", "high"])
-    assert edit_result.exit_code == 0, edit_result.output
+    assert result.returncode == 0, result.stderr
+    # Shell command substitution strips trailing newlines, not other output.
+    task_id = result.stdout.rstrip("\n")
+    edit_result = subprocess.run(
+        [sys.executable, "-m", "gptodo", "edit", task_id, "--set", "priority", "high"],
+        cwd=workspace,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert edit_result.returncode == 0, edit_result.stdout + edit_result.stderr
+    created = next((workspace / "tasks").glob("*.md"))
+    assert result.stdout == f"{created.stem}\n"
+    assert "✓ Created task:" in result.stderr
+    assert "priority: high" in created.read_text()
 
 
 def test_read_piped_body_without_fileno_falls_back_to_read() -> None:
