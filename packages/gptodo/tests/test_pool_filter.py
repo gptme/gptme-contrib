@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from gptodo.cli import cli
@@ -549,6 +550,37 @@ def test_frontier_routing_tag_is_general_pool(tmp_path: Path, monkeypatch) -> No
 
 
 class TestTaskToDictBlockerFields:
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "waiting_for",
+            "next_action",
+            "probe",
+            "symptom_probe",
+            "tracking_issue",
+            "upstream_coordination_id",
+            "workaround_surface",
+        ],
+    )
+    def test_yaml_date_in_text_field_is_json_safe(
+        self, tmp_path: Path, monkeypatch, field: str
+    ) -> None:
+        """YAML implicitly parses unquoted dates even in free-text metadata."""
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        write_task(
+            tasks_dir,
+            "waiting-task",
+            state="waiting",
+            created="2026-01-01T00:00:00+00:00",
+            **{field: "2026-12-01"},
+        )
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(cli, ["list", "--json"])
+        assert result.exit_code == 0, result.output
+        task = next(t for t in json.loads(result.output)["tasks"] if t["id"] == "waiting-task")
+        assert task[field] == "2026-12-01"
+
     def test_blocker_fields_in_list_json(self, tmp_path: Path, monkeypatch) -> None:
         """task_to_dict exports waiting_for, probe, tracking_issue, and similar blocker fields."""
         tasks_dir = tmp_path / "tasks"
