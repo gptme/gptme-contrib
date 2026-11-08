@@ -2664,7 +2664,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
             console.print(
                 f"[red]Unknown field: {field}. Valid fields: {', '.join(sorted(VALID_FIELDS.keys()))}[/]"
             )
-            return
+            raise SystemExit(1)
 
         field_spec = VALID_FIELDS[field]
 
@@ -2678,7 +2678,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
             console.print(
                 f"[red]Field '{field}' is a list field. Use --add or --remove instead of --set.[/]"
             )
-            return
+            raise SystemExit(1)
 
         # Validate based on field type
         if field_spec["type"] == "enum":
@@ -2693,7 +2693,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
             if value not in field_spec["values"]:  # type: ignore[operator]
                 valid = ", ".join(field_spec["values"])  # type: ignore[arg-type]
                 console.print(f"[red]Invalid {field}: {value}. Valid values: {valid}[/]")
-                return
+                raise SystemExit(1)
 
             # State-transition legality check (Gordon 2026-07-01).
             #
@@ -2793,7 +2793,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
                     console.print(
                         f"[red]Invalid {field} format. Use YYYY-MM-DD or YYYY-MM-DDTHH:MM[/]"
                     )
-                    return
+                    raise SystemExit(1)
                 if isinstance(parsed, datetime):
                     value = parsed.isoformat()
                 else:
@@ -2807,7 +2807,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
                         f"[red]Invalid {field} format. Use YYYY-MM-DD or ISO datetime, "
                         "or 'none' to clear the field[/]"
                     )
-                    return
+                    raise SystemExit(1)
             else:
                 try:
                     created_dt = datetime.fromisoformat(value)
@@ -2817,7 +2817,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
                         f"[red]Invalid {field} date format. Use ISO format "
                         "(YYYY-MM-DD[THH:MM:SS+HH:MM]), or 'none' to clear the field[/]"
                     )
-                    return
+                    raise SystemExit(1)
         elif field_spec["type"] == "string":
             if field == "recur":
                 if not is_valid_recur_value(value):
@@ -2825,7 +2825,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
                         "[red]Invalid recur format. Use 7d, 24h, weekly, monthly, "
                         "or a cron expression like '0 9 * * 1'[/]"
                     )
-                    return
+                    raise SystemExit(1)
             # Arbitrary string value - no validation needed
 
         changes.append(("set", field, value))
@@ -2874,7 +2874,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
                 console.print(
                     f"[red]Cannot {op} to field: {field}. Use --{op} with deps/tags/requires/related/discovered-from.[/]"
                 )
-                return
+                raise SystemExit(1)
 
             # Warn about blocks → requires semantic change
             if field in ("block", "blocks"):
