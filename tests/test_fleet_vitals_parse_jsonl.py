@@ -29,6 +29,15 @@ GOOD = json.dumps({"timestamp": "2026-11-07T12:00:00Z", "outcome": "noop"})
     ids=["malformed", "int-too-many-digits", "deep-nesting"],
 )
 def test_bad_line_is_skipped_and_good_line_kept(bad: str) -> None:
-    out = fv.parse_jsonl_lines([bad, GOOD])
+    # Pin the int digit limit so the oversized-int case doesn't depend on
+    # PYTHONINTMAXSTRDIGITS / interpreter defaults.
+    if not hasattr(sys, "set_int_max_str_digits"):
+        pytest.skip("interpreter lacks int max-str-digits limit")
+    old = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        out = fv.parse_jsonl_lines([bad, GOOD])
+    finally:
+        sys.set_int_max_str_digits(old)
     assert len(out) == 1
     assert out[0][1]["outcome"] == "noop"
