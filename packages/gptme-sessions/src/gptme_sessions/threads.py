@@ -329,7 +329,7 @@ def mine_edges(
             continue
         pstarts = [nodes[p]["start"] for p in prim]
         for i in ix:
-            pos = bisect.bisect_right(pstarts, nodes[i]["end"]) - 1
+            pos = bisect.bisect_right(pstarts, nodes[i]["start"]) - 1
             sp = spec(len(nodes[i]["_mk"]), 4)
             if pos >= 0:
                 add(prim[pos], i, "ref", k, sp)

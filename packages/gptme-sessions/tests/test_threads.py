@@ -85,6 +85,22 @@ def test_consecutive_sessions_on_same_task_chain():
     assert "task" in kinds(edges, 0, 2) and not kinds(edges, 0, 1)
 
 
+@pytest.mark.parametrize("key", ["task", "pr"])
+def test_reference_prefers_worker_before_mentioning_session_started(key):
+    value = "t-x" if key == "task" else "owner/project#12"
+    mention = "tasks_mentioned" if key == "task" else "prs_mentioned"
+    nodes = [
+        S(0, start=0, dur=10, **{key: value}),
+        S(1, start=20, dur=80, **{mention: [value]}),
+        S(2, start=50, dur=10, **{key: value}),
+    ]
+    edges, _ = L.mine_edges(nodes)
+    assert kinds(edges, 0, 1) == {"ref"}
+    assert "ref" not in kinds(edges, 1, 2)
+    assert L.best_predecessors(nodes, edges) == [-1, 0, 0]
+    assert L.threads(L.best_predecessors(nodes, edges)) == [0, 0, 0]
+
+
 def test_message_reply_links_sender_and_replier_sessions():
     nodes = [S(0, "erbot"), S(1, "bob")]
     msgs = [
