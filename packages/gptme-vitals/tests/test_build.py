@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from runpy import run_path
 
 import pytest
 from gptme_vitals.build import (
@@ -72,7 +73,13 @@ def _env(
 
 
 def _derive(envs: list[PageEnvelope], reg: RouteRegistry | None = None):
-    return derive_core(reg or _registry(), envs, agent="bob", generated_at=NOW)
+    return derive_core(
+        reg or _registry(),
+        envs,
+        agent="bob",
+        generated_at=NOW,
+        base_url="https://bob.example/",
+    )
 
 
 def test_rolls_up_per_dimension_with_blind_page_counts() -> None:
@@ -189,8 +196,89 @@ def test_headline_comes_from_the_headline_route() -> None:
         "value": "services headline",
         "status": "degraded",
         "generated_at": NOW,
-        "link": "/services/",
+        "link": "https://bob.example/services/",
+        "trend": "flat",
     }
+
+
+def test_headline_matches_fleet_contract_without_copying_private_detail() -> None:
+    make_headline = run_path(
+        str(Path(__file__).resolve().parents[3] / "scripts" / "fleet_vitals.py")
+    )["make_headline"]
+    env = PageEnvelope(
+        slug="services",
+        status=Status.DEGRADED,
+        headline="service health",
+        generated_at=NOW,
+        lines=("27 services running", "not part of the fleet subtitle"),
+        detail={"private": "must not reach the fleet"},
+    )
+    _, headline = derive_core(
+        _registry(),
+        [env],
+        agent="bob",
+        generated_at=NOW,
+        base_url="https://bob.example/vitals/",
+    )
+    expected = make_headline(
+        "bob",
+        "Services",
+        "service health",
+        status="degraded",
+        detail="27 services running",
+        link="https://bob.example/services/",
+        generated_at=NOW,
+    )
+    assert headline == expected
+
+
+@pytest.mark.parametrize("base_url", [None, "", "/vitals/", "https://", "file:///tmp/"])
+def test_relative_headline_link_needs_an_absolute_http_base(
+    base_url: str | None,
+) -> None:
+    with pytest.raises(BuildError, match="absolute HTTP"):
+        derive_core(
+            _registry(),
+            [_env("services", Status.HEALTHY)],
+            agent="bob",
+            base_url=base_url,
+        )
+
+
+@pytest.mark.parametrize(
+    ("href", "base_url", "expected"),
+    [
+        ("/services/", "https://bob.example/vitals/", "https://bob.example/services/"),
+        (
+            "services/",
+            "https://bob.example/vitals/",
+            "https://bob.example/vitals/services/",
+        ),
+        ("https://bob.example/services/", None, "https://bob.example/services/"),
+    ],
+)
+def test_headline_links_resolve_on_the_producing_agent(
+    href: str, base_url: str | None, expected: str
+) -> None:
+    reg = RouteRegistry((_route("services", href=href, is_headline=True),))
+    _, headline = derive_core(
+        reg, [_env("services", Status.HEALTHY)], agent="bob", base_url=base_url
+    )
+    assert headline["link"] == expected
+    assert headline["trend"] == "flat"
+    assert "detail" not in headline
+
+
+@pytest.mark.parametrize("href", ["javascript:alert(1)", "file:///tmp/services"])
+def test_non_http_headline_link_is_refused(href: str) -> None:
+    reg = RouteRegistry((_route("services", href=href, is_headline=True),))
+    with pytest.raises(BuildError, match="absolute HTTP"):
+        derive_core(
+            reg,
+            [_env("services", Status.HEALTHY)],
+            agent="bob",
+            base_url="https://bob.example/",
+        )
 
 
 def test_headline_page_that_emitted_nothing_raises() -> None:

@@ -154,14 +154,16 @@ The portal and `build` emitting the derived `core.json`/`headline.json` pair.
 
 ## Derived `core.json` / `headline.json`
 
-`derive_core(registry, envelopes, agent=...)` returns the `fleet-vitals/core@1`
+`derive_core(registry, envelopes, agent=..., base_url=...)` returns the `fleet-vitals/core@1`
 and `headline@1` pair; `write_core_files()` writes them atomically. Nothing is
 hand-built: each dimension is the rollup of the pages that declared it.
 
 ```python
 from gptme_vitals import derive_core, write_core_files
 
-core, headline = derive_core(REGISTRY, envelopes, agent="bob")
+core, headline = derive_core(
+    REGISTRY, envelopes, agent="bob", base_url="https://bob.example/"
+)
 write_core_files("state/vitals", core, headline)
 ```
 
@@ -180,6 +182,13 @@ write_core_files("state/vitals", core, headline)
   a headline page that emitted nothing, or a dimension named after a `core@1`
   root field (`schema`, `agent`, `generated_at`, `status`) raises `BuildError`
   rather than producing an undefined or corrupt file.
+- The shared headline link must be absolute HTTP(S): a relative route requires
+  the producing agent's `base_url`, resolved with standard URL-join semantics
+  (a leading `/` starts at the host root). Otherwise derivation raises
+  `BuildError`, rather than making the fleet card link to the aggregator's host.
+  `headline.detail` comes only from the public first `lines` entry when non-empty,
+  never from private `PageEnvelope.detail`. `trend` is explicitly `"flat"`, the
+  existing fleet-contract default; no trend is inferred from a single envelope.
 - An envelope for a slug no route owns, or two for one slug, raises.
 
 It does not import `fleet_vitals`; the two share only the schema strings and the

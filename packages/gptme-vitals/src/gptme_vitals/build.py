@@ -19,6 +19,7 @@ import os
 import tempfile
 from collections.abc import Iterable
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 
 from gptme_vitals.envelope import (
     PageEnvelope,
@@ -50,6 +51,7 @@ def derive_core(
     *,
     agent: str,
     generated_at: str | None = None,
+    base_url: str | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Return ``(core, headline)`` derived from ``envelopes``.
 
@@ -59,6 +61,9 @@ def derive_core(
     Raises :class:`BuildError` for an envelope no route owns, two envelopes for
     one slug, a ``core`` projection that sets a reserved key or collides with a
     sibling page's key, or a headline route whose page emitted nothing.
+    Relative headline links require an absolute HTTP(S) ``base_url`` for the
+    producing agent: the fleet view may be served on a different host. Public
+    ``lines[0]`` supplies the optional subtitle; private ``detail`` never does.
     """
     generated_at = generated_at or utcnow_rfc3339()
     by_slug: dict[str, PageEnvelope] = {}
@@ -142,6 +147,20 @@ def derive_core(
             f"headline route {route.slug!r} emitted no envelope; "
             "headline.json would be undefined"
         )
+    try:
+        if base_url is not None:
+            base = urlsplit(base_url)
+            if base.scheme not in {"http", "https"} or not base.hostname:
+                raise BuildError("base_url must be an absolute HTTP(S) URL")
+        link = urljoin(base_url or "", route.href)
+        parsed = urlsplit(link)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise BuildError(
+                f"headline route {route.slug!r} needs an absolute HTTP(S) link; "
+                "supply base_url for relative routes"
+            )
+    except ValueError as exc:
+        raise BuildError(f"headline requires an absolute HTTP(S) URL: {exc}") from exc
     headline: dict[str, object] = {
         "schema": HEADLINE_SCHEMA,
         "agent": agent,
@@ -149,8 +168,11 @@ def derive_core(
         "value": headline_page.headline,
         "status": str(headline_page.status),
         "generated_at": generated_at,
-        "link": route.href,
+        "link": link,
+        "trend": "flat",
     }
+    if headline_page.lines and headline_page.lines[0]:
+        headline["detail"] = headline_page.lines[0]
     return core, headline
 
 
