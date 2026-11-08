@@ -470,7 +470,10 @@ def test_edit_set_recur_rejects_invalid_value(
     runner = CliRunner()
     result = runner.invoke(cli, ["edit", "bad-task", "--set", "recur", "weakly"])
 
-    assert result.exit_code == 0
+    # A refusal must be distinguishable from success by exit code alone: callers
+    # chain `gptodo edit … && <next step>` and would otherwise continue against
+    # an unmodified task.
+    assert result.exit_code == 1, result.output
     assert "Invalid recur format" in result.output
 
     import frontmatter as fm
