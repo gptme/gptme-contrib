@@ -73,8 +73,13 @@ def test_piped_body_is_still_read(workspace: Path) -> None:
     "title",
     ["Short task", "verify-the-task-authoring-interface-handles-a-deliberately-long-title"],
 )
-def test_add_stdout_can_be_chained_into_edit(workspace: Path, title: str) -> None:
+@pytest.mark.parametrize("malformed_config", [False, True])
+def test_add_stdout_can_be_chained_into_edit(
+    workspace: Path, title: str, malformed_config: bool
+) -> None:
     """Capture stdout exactly as TASK_ID=$(gptodo add ... </dev/null) does."""
+    if malformed_config:
+        (workspace / "gptme.toml").write_text("[agent\n")
     result = subprocess.run(
         [sys.executable, "-m", "gptodo", "add", title],
         cwd=workspace,
@@ -98,6 +103,9 @@ def test_add_stdout_can_be_chained_into_edit(workspace: Path, title: str) -> Non
     created = next((workspace / "tasks").glob("*.md"))
     assert result.stdout == f"{created.stem}\n"
     assert "✓ Created task:" in result.stderr
+    if malformed_config:
+        assert "Warning: Failed to load" in result.stderr
+        assert "assigned_to: agent" in created.read_text()
     assert "priority: high" in created.read_text()
 
 

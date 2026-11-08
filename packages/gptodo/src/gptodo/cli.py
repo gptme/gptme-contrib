@@ -3023,7 +3023,7 @@ def _resolve_agent_name(repo_root: Path, override: str | None) -> str:
                 try:
                     import tomli as tomllib  # type: ignore[import-not-found,no-redef]
                 except ModuleNotFoundError:
-                    console.print(
+                    Console(stderr=True).print(
                         "[yellow]Warning: tomli is required on Python <3.11 to read "
                         "gptme.toml; falling back to 'agent'[/]"
                     )
@@ -3031,7 +3031,7 @@ def _resolve_agent_name(repo_root: Path, override: str | None) -> str:
 
             data = tomllib.loads(gptme_toml.read_text())
         except (OSError, tomllib.TOMLDecodeError) as exc:
-            console.print(
+            Console(stderr=True).print(
                 f"[yellow]Warning: Failed to load {gptme_toml}: {exc}. Falling back to 'agent'.[/]"
             )
             return "agent"
