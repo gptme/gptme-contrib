@@ -142,11 +142,9 @@ class _Index:
 
 
 def nearest(nodes: list[dict], cands: list[int], t: float) -> int | None:
-    """Prefer the closest candidate that started before t (a reference points backwards)."""
-    if not cands:
-        return None
+    """Return the closest candidate starting at or before t, or leave it unresolved."""
     before = [c for c in cands if nodes[c]["start"] <= t]
-    return min(before or cands, key=lambda c: abs(nodes[c]["start"] - t))
+    return min(before, key=lambda c: t - nodes[c]["start"]) if before else None
 
 
 def attach_commits(nodes: list[dict], commits: Iterable[dict]) -> Counter:

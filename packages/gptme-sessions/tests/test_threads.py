@@ -416,6 +416,31 @@ def test_parent_label_excludes_child_before_choosing_nearest(label):
     assert L.best_predecessors(nodes, edges) == [-1, 0]
 
 
+@pytest.mark.parametrize(
+    "reference", ["abcd", "abcde", "abcdef", "abcdef1", "abcdef12", "abcdef12-rest"]
+)
+def test_future_parent_candidate_does_not_create_reversed_ancestry(reference):
+    nodes = [
+        S(0, start=100, dur=10, parent=reference),
+        S(1, start=200, dur=10, id="abcdef12-rest"),
+    ]
+    edges, st = L.mine_edges(nodes)
+    assert not edges
+    assert st["parent_unresolved"] == 1
+    assert L.best_predecessors(nodes, edges) == [-1, -1]
+    assert L.threads(L.best_predecessors(nodes, edges)) == [0, 1]
+
+
+def test_nearest_candidate_requires_start_at_or_before_reference_time():
+    nodes = [S(0, start=100), S(1, start=200), S(2, start=300)]
+    assert L.nearest(nodes, [0, 1, 2], 99) is None
+    assert L.nearest(nodes, [0, 1, 2], 100) == 0
+    assert L.nearest(nodes, [0, 1, 2], 199) == 0
+    assert L.nearest(nodes, [0, 1, 2], 200) == 1
+    assert L.nearest(nodes, [0, 1, 2], 400) == 2
+    assert L.nearest(nodes, [], 400) is None
+
+
 def test_self_parent_is_unresolved_without_another_candidate():
     nodes = [S(0, id="abcdef12-0000-0000-0000-000000000001", parent="abcd")]
     edges, st = L.mine_edges(nodes)
