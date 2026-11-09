@@ -12,6 +12,9 @@ Matrix (see knowledge/research/2026-11-08-task-authoring-interface-review-round3
     invalid value for a known field         1       no
     unknown field                           1       no
     terminal-state reopen                   1       no
+    missing task id                         1       no
+    valid task id, no mutation args         1       no
+    `show` with missing task id             1       n/a
 """
 
 from __future__ import annotations
@@ -116,3 +119,44 @@ def test_terminal_reopen_exits_one_without_mutation(tmp_path: Path, monkeypatch)
 
     assert result.exit_code == 1, result.output
     assert _state(tasks_dir) == "done"
+
+
+def test_edit_missing_task_exits_nonzero_without_mutation(tasks_dir: Path) -> None:
+    before = (tasks_dir / "t.md").read_text()
+
+    result = CliRunner().invoke(cli, ["edit", "no-such-task-xyz", "--set", "priority", "high"])
+
+    assert result.exit_code == 1, result.output
+    assert (tasks_dir / "t.md").read_text() == before
+
+
+def test_edit_no_tasks_at_all_exits_nonzero(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "tasks").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(cli, ["edit", "t", "--set", "priority", "high"])
+
+    assert result.exit_code == 1, result.output
+
+
+def test_edit_without_mutation_args_exits_nonzero_without_mutation(tasks_dir: Path) -> None:
+    before = (tasks_dir / "t.md").read_text()
+
+    result = CliRunner().invoke(cli, ["edit", "t"])
+
+    assert result.exit_code == 1, result.output
+    assert "No changes specified" in result.output
+    assert (tasks_dir / "t.md").read_text() == before
+
+
+def test_show_missing_task_exits_nonzero(tasks_dir: Path) -> None:
+    result = CliRunner().invoke(cli, ["show", "no-such-task-xyz"])
+
+    assert result.exit_code == 1, result.output
+    assert "not found" in result.output
+
+
+def test_show_existing_task_still_exits_zero(tasks_dir: Path) -> None:
+    result = CliRunner().invoke(cli, ["show", "t"])
+
+    assert result.exit_code == 0, result.output
