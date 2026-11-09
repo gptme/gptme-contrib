@@ -1666,6 +1666,7 @@ def watch(
     """
     timeout_seconds = _parse_duration(timeout)
     deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+    wall_deadline = None if timeout_seconds is None else time.time() + timeout_seconds
     agents = _load_agents()
     recipient = (to_recipient or _self_name()).lower()
 
@@ -1731,18 +1732,24 @@ def watch(
         err=True,
     )
 
-    def _budget(limit: float) -> float:
+    def _budget(limit: float, *, check_local: bool = False) -> float:
         """Check the shared deadline, and cap the next blocking operation."""
         if deadline is None:
             return limit
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            # A push may arrive while SSH or sleep consumes the remaining budget.
+            # Only local files delivered before expiry can satisfy this final scan;
+            # late remote rows and pulls must still fail the monotonic deadline.
+            if check_local and thread_target is not None:
+                if _check_thread({}, delivered_before=wall_deadline):
+                    sys.exit(0)
             click.echo(f"Timed out after {timeout} waiting for {target_desc}.", err=True)
             sys.exit(WATCH_TIMEOUT_EXIT)
         return min(limit, remaining)
 
     def _poll(agent_name: str, agent_cfg: dict[str, str]) -> list[dict] | None:
-        budget = _budget(20)
+        budget = _budget(20, check_local=True)
         rows = _remote_pending_rows(
             agent_name,
             agent_cfg,
@@ -1751,13 +1758,15 @@ def watch(
             all_mailboxes=all_mailboxes,
             **({"timeout": budget} if deadline is not None else {}),
         )
-        _budget(20)  # A probe can finish at/after expiry; never accept late rows.
+        _budget(20, check_local=True)  # Reject late rows, but retain timely pushes.
         return rows
 
     reported: set[str] = set()
     local_inboxes = {_mailbox_root(name) / "inbox" for name in mailboxes}
 
-    def _check_thread(remote: dict[str, list[dict]]) -> bool:
+    def _check_thread(
+        remote: dict[str, list[dict]], *, delivered_before: float | None = None
+    ) -> bool:
         """Report new thread replies; returns True when --once should exit."""
         assert thread_target is not None
         parents, inbox_messages = (
@@ -1765,6 +1774,13 @@ def watch(
         )
         candidates: list[tuple[str, dict, str, bool]] = []
         for key, meta, path in inbox_messages:
+            if delivered_before is not None:
+                try:
+                    # ctime records local delivery even when copy preserves mtime.
+                    if path.stat().st_ctime > delivered_before:
+                        continue
+                except FileNotFoundError:
+                    continue  # A concurrent consumer moved the inbox file.
             sender = str(meta.get("from", "")).lower()
             if (
                 path.parent in local_inboxes
@@ -1781,7 +1797,8 @@ def watch(
                 parents.setdefault(key, _parent_keys(row))
                 candidates.append((key, row, agent_name, False))
         for key, meta, sender, is_local in candidates:
-            _budget(60)
+            if delivered_before is None:
+                _budget(60)
             if key in reported or key == thread_target:
                 continue
             if not _reaches_thread(key, thread_target, parents):
@@ -1808,7 +1825,8 @@ def watch(
                 if not destination.is_file():
                     click.echo(f"Warning: reply not fetched yet: {destination.name}", err=True)
                     continue
-            _budget(60)  # Delivery/local scanning must not turn expiry into success.
+            if delivered_before is None:
+                _budget(60)  # Delivery/local scanning must not turn expiry into success.
             reported.add(key)
             now_str = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
             filename = f"{key}.md"
@@ -1840,8 +1858,8 @@ def watch(
 
     try:
         while True:
-            time.sleep(_budget(interval))
-            _budget(interval)
+            time.sleep(_budget(interval, check_local=True))
+            _budget(interval, check_local=True)
             if thread_target is not None:
                 if _check_thread({}):
                     return

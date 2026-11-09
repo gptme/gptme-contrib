@@ -2092,6 +2092,48 @@ def test_watch_checks_local_reply_before_blocking_probe(
     assert probes == ([] if already_local else ["bob"])
 
 
+@pytest.mark.parametrize("phase", ["baseline", "poll", "sleep"])
+@pytest.mark.parametrize("late", [False, True])
+def test_watch_checks_push_delivery_at_deadline(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, phase: str, late: bool
+) -> None:
+    root = _send_root(workspace)
+    reply = _thread_row("reply.md", root)
+    clock = [1000.0]
+    # The file is written at real wall time below. Place that timestamp inside
+    # or outside the watch window independently of the simulated blocking wait.
+    wall_start = agent_cli.time.time() - (3 if late else 0)
+    monkeypatch.setattr(agent_cli.time, "time", lambda: wall_start)
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+    probes: list[str] = []
+
+    def _deliver() -> None:
+        path = workspace / "messages" / "inbox" / "reply.md"
+        _write_local(path.parent, path.name, reply)
+        # Old source mtimes must not make a late atomic delivery look timely.
+        os.utime(path, (wall_start - 100, wall_start - 100))
+        clock[0] += 3
+
+    def _poll(name: str, _cfg: dict, **_kw: object) -> None:
+        probes.append(name)
+        if phase == "baseline" or (phase == "poll" and len(probes) == 2):
+            _deliver()
+        return None
+
+    def _sleep(_seconds: float) -> None:
+        if phase == "sleep":
+            _deliver()
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _poll)
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    result = CliRunner().invoke(
+        agent, ["watch", "--thread", root, "--once", "--pull", "--timeout", "2s"]
+    )
+    assert result.exit_code == (agent_cli.WATCH_TIMEOUT_EXIT if late else 0), result.output
+    assert result.stdout == ("" if late else "reply.md\n")
+    assert len(probes) == (2 if phase == "poll" else 1)
+
+
 @pytest.mark.parametrize("phase", ["baseline", "poll"])
 def test_watch_matches_remote_reply_before_probing_next_peer(
     workspace: Path, monkeypatch: pytest.MonkeyPatch, phase: str
