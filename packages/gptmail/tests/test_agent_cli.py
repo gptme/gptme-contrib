@@ -1695,3 +1695,27 @@ def test_send_watch_rejects_no_reply(workspace: Path) -> None:
     assert result.exit_code != 0
     assert "cannot be combined with --no-reply" in result.output
     assert not list((workspace / "messages" / "outbox").glob("*.md"))
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_send_watch_releases_send_lock_before_waiting(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, duplicate: bool
+) -> None:
+    """Another sender can acquire the same subject lock while a reply is awaited."""
+    if duplicate:
+        first = CliRunner().invoke(agent, ["send", "bob", "Status", "one"])
+        assert first.exit_code == 0, first.output
+    watched: list[str] = []
+
+    def _wait(ctx, message_id, recipient, mailbox, timeout, interval):
+        lock = agent_cli._send_lock(agent_cli._transport(mailbox=mailbox), "send:bob|Status")
+        lock.timeout = 0
+        with lock:
+            watched.append(message_id)
+
+    monkeypatch.setattr(agent_cli, "_watch_sent_reply", _wait)
+    result = CliRunner().invoke(agent, ["send", "bob", "Status", "two", "--watch"])
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert watched == [_only_outbox_msg(workspace).name]
+    assert _peer_inbox_count(workspace) == 1
+    assert ("Skipping" in result.output) == duplicate

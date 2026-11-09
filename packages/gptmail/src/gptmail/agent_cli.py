@@ -941,16 +941,17 @@ def send(
     recipient = to.lower()
     with _send_lock(transport, f"send:{recipient}|{subject}"):
         duplicate = None if force else _recent_outbox_duplicate(transport, recipient, subject)
-        if duplicate:
-            click.echo(
-                f"Skipping: '{subject}' was already sent to {recipient} within the last "
-                f"{OUTBOX_DEDUP_TTL // 60} min ({duplicate}). Use --force to send anyway.",
-                err=True,
-            )
-            if watch_reply:
-                _watch_sent_reply(ctx, duplicate, recipient, mailbox, watch_timeout, watch_interval)
-            return
-        message_id = transport.send(to, subject, body, reply_expected=not no_reply)
+        if not duplicate:
+            message_id = transport.send(to, subject, body, reply_expected=not no_reply)
+    if duplicate:
+        click.echo(
+            f"Skipping: '{subject}' was already sent to {recipient} within the last "
+            f"{OUTBOX_DEDUP_TTL // 60} min ({duplicate}). Use --force to send anyway.",
+            err=True,
+        )
+        if watch_reply:
+            _watch_sent_reply(ctx, duplicate, recipient, mailbox, watch_timeout, watch_interval)
+        return
     _track_sent(transport, message_id, reply_to=None)
     if _delivery_failed(message_id, mailbox=mailbox):
         click.echo(
