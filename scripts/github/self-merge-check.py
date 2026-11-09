@@ -2573,6 +2573,40 @@ def _fetch_pr_file_shapes(repo: str, number: int) -> list[dict[str, Any]]:
     return [doc for doc in _iter_json_documents(result.stdout) if isinstance(doc, dict)]
 
 
+def _pr_diff_proves_no_gitlinks(repo: str, number: int, file_count: int) -> bool:
+    """Use Git mode headers, not quoted pointer text, to exclude gitlinks.
+
+    Only needed for ambiguous patches containing full pointer lines. The files
+    API omits modes; the raw diff supplies them. Unknown or incomplete mode
+    evidence must not open the substitution path.
+    """
+    diff = run_gh_checked(
+        [
+            "api",
+            f"repos/{repo}/pulls/{number}",
+            "-H",
+            "Accept: application/vnd.github.diff",
+        ]
+    )
+    if not diff:
+        return False
+    sections = re.split(r"(?m)^diff --git ", diff)[1:]
+    if len(sections) != file_count:
+        return False
+    for section in sections:
+        headers = section.split("\n@@", 1)[0]
+        modes = re.findall(
+            r"(?m)^(?:index [0-9a-f]+\.\.[0-9a-f]+ |"
+            r"(?:old|new|deleted file|new file) mode )([0-7]{6})$",
+            headers,
+        )
+        if not modes or any(
+            mode not in {"100644", "100755", "120000"} for mode in modes
+        ):
+            return False
+    return True
+
+
 def _gptme_core_added_lines(patch: str | None) -> list[str]:
     """Added (`+`-prefixed, non-hunk-header) lines of a unified diff patch."""
     if not patch:
@@ -3859,15 +3893,14 @@ def evaluate_pr(
                 if (
                     len(shapes) != len(files)
                     or {shape.get("path") for shape in shapes} != set(files)
-                    or any(
-                        not isinstance(shape.get("patch"), str)
-                        or any(
-                            re.fullmatch(r"[+-]Subproject commit [0-9a-f]{40}", line)
-                            for line in shape["patch"].splitlines()
-                        )
-                        for shape in shapes
-                    )
+                    or any(not isinstance(shape.get("patch"), str) for shape in shapes)
                 ):
+                    substituted = None
+                elif any(
+                    re.fullmatch(r"[+-]Subproject commit [0-9a-f]{40}", line)
+                    for shape in shapes
+                    for line in shape["patch"].splitlines()
+                ) and not _pr_diff_proves_no_gitlinks(repo, number, len(files)):
                     substituted = None
             if substituted:
                 result.warnings.append(substituted)

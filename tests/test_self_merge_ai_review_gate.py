@@ -455,6 +455,7 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
         file_shapes: list[dict[str, Any]] | None = None,
         publish_on_summary: bool = False,
         late_comments: list[str] | None = None,
+        raw_diff: str | None = None,
         review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = (
             [],
             [],
@@ -462,8 +463,10 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
     ) -> tuple[Any, list[list[str]]]:
         calls: list[list[str]] = []
 
-        def fake_run_gh(args: list[str], timeout: int = 30) -> str:
+        def fake_run_gh(args: list[str], timeout: int = 30) -> str | None:
             calls.append(args)
+            if "Accept: application/vnd.github.diff" in args:
+                return raw_diff
             return "\n".join(
                 late_comments
                 if summary_published and late_comments is not None
@@ -782,7 +785,22 @@ def test_greptile_substitution_refreshes_summary_only_negative_verdict(
     assert not any("AI review substituted" in warning for warning in result.warnings)
 
 
-def test_greptile_substitution_allows_documented_pointer_text(evaluate: Any) -> None:
+@pytest.mark.parametrize(
+    "mode_headers,allowed",
+    [
+        ("index aaaaaaa..bbbbbbb 100644", True),
+        ("new file mode 100644\nindex 0000000..bbbbbbb", True),
+        ("index aaaaaaa..bbbbbbb 160000", False),
+        ("new file mode 160000\nindex 0000000..bbbbbbb", False),
+        ("deleted file mode 160000\nindex aaaaaaa..0000000", False),
+        ("old mode 160000\nnew mode 100644\nindex aaaaaaa..bbbbbbb", False),
+        ("index aaaaaaa..bbbbbbb", False),
+        ("", False),
+    ],
+)
+def test_greptile_substitution_allows_documented_pointer_text(
+    evaluate: Any, mode_headers: str, allowed: bool
+) -> None:
     result, _ = evaluate(
         greptile=GREPTILE_CLEAN,
         comments=[_comment(None)],
@@ -790,11 +808,17 @@ def test_greptile_substitution_allows_documented_pointer_text(evaluate: Any) -> 
         file_shapes=[
             {
                 "path": "docs/review-tools.md",
-                "patch": "+Subproject commit abcdef123456\n",
+                "patch": "+Subproject commit " + "b" * 40 + "\n",
             }
         ],
+        raw_diff=(
+            "diff --git a/docs/review-tools.md b/docs/review-tools.md\n"
+            f"{mode_headers}\n"
+            "--- a/docs/review-tools.md\n+++ b/docs/review-tools.md\n"
+            "@@ -0,0 +1 @@\n+Subproject commit " + "b" * 40 + "\n"
+        ),
     )
-    assert result.eligible, result.reasons
+    assert result.eligible is allowed, (result.reasons, result.warnings)
 
 
 def test_greptile_substitution_counts_threads_before_review_submission(

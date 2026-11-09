@@ -144,10 +144,23 @@ def _evaluate(
         for path in file_paths
     ]
     greptile_sha = HEAD_SHA if greptile_fresh else "deadbeef"
+
+    def checked_gh(args: list[str], timeout: int = 30) -> str:
+        if args == [
+            "api",
+            "repos/gptme/gptme-cloud/pulls/901",
+            "-H",
+            "Accept: application/vnd.github.diff",
+        ]:
+            return "".join(
+                f"diff --git a/{path} b/{path}\n"
+                f"index {OLD_SHA}..{BRANCH_ONLY_SHA} 160000\n{gitlink_patch}"
+                for path in file_paths
+            )
+        raise AssertionError(f"unexpected GitHub call: {args}")
+
     with (
-        patch.object(
-            smc, "run_gh_checked", side_effect=AssertionError("unexpected GitHub call")
-        ),
+        patch.object(smc, "run_gh_checked", side_effect=checked_gh),
         patch.dict("os.environ", {"SELF_MERGE_ALLOWED_PATHS": allowed_paths}),
         patch.object(smc, "fetch_pr", return_value=pr_data),
         patch.object(smc, "get_gh_user", return_value="TimeToBuildBob"),
