@@ -1762,15 +1762,19 @@ def watch(
         return rows
 
     reported: set[str] = set()
-    local_inboxes = {_mailbox_root(name) / "inbox" for name in mailboxes}
 
     def _check_thread(
         remote: dict[str, list[dict]], *, delivered_before: float | None = None
     ) -> bool:
         """Report new thread replies; returns True when --once should exit."""
         assert thread_target is not None
+        known_mailboxes = _known_mailboxes()
+        local_inboxes = {
+            _mailbox_root(name) / "inbox"
+            for name in (known_mailboxes if all_mailboxes else mailboxes)
+        }
         parents, inbox_messages = (
-            _local_thread_messages(_known_mailboxes()) if watch_local_inbox else ({}, [])
+            _local_thread_messages(known_mailboxes) if watch_local_inbox else ({}, [])
         )
         candidates: list[tuple[str, dict, str, bool]] = []
         for key, meta, path in inbox_messages:
@@ -1798,7 +1802,7 @@ def watch(
                 candidates.append((key, row, agent_name, False))
         for key, meta, sender, is_local in candidates:
             if delivered_before is None:
-                _budget(60)
+                _budget(60, check_local=True)
             if key in reported or key == thread_target:
                 continue
             if not _reaches_thread(key, thread_target, parents):
@@ -1826,7 +1830,7 @@ def watch(
                     click.echo(f"Warning: reply not fetched yet: {destination.name}", err=True)
                     continue
             if delivered_before is None:
-                _budget(60)  # Delivery/local scanning must not turn expiry into success.
+                _budget(60, check_local=True)  # Only timely local delivery survives expiry.
             reported.add(key)
             now_str = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
             filename = f"{key}.md"

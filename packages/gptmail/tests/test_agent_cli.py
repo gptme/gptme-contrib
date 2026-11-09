@@ -2038,6 +2038,9 @@ def test_watch_caps_pull_and_rejects_late_reply(
     root = _send_root(workspace)
     clock = [1000.0]
     reply = _thread_row("reply.md", root)
+    # Keep the filesystem timestamp consistent with the simulated late pull.
+    wall_start = agent_cli.time.time() - (3 if late else 0)
+    monkeypatch.setattr(agent_cli.time, "time", lambda: wall_start)
     monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
 
     def _poll(*_args: object, **_kw: object) -> list[dict]:
@@ -2132,6 +2135,67 @@ def test_watch_checks_push_delivery_at_deadline(
     assert result.exit_code == (agent_cli.WATCH_TIMEOUT_EXIT if late else 0), result.output
     assert result.stdout == ("" if late else "reply.md\n")
     assert len(probes) == (2 if phase == "poll" else 1)
+
+
+@pytest.mark.parametrize("same_reply", [True, False])
+@pytest.mark.parametrize("late", [False, True])
+def test_watch_checks_push_delivery_during_pull(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, same_reply: bool, late: bool
+) -> None:
+    root = _send_root(workspace)
+    remote = _thread_row("remote.md", root)
+    pushed = remote if same_reply else _thread_row("pushed.md", root)
+    clock = [1000.0]
+    wall_start = agent_cli.time.time() - (3 if late else 0)
+    monkeypatch.setattr(agent_cli.time, "time", lambda: wall_start)
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+    _scripted_rows(monkeypatch, [[remote]])
+
+    def _pull(cmd: list[str], **_kw: object) -> None:
+        _write_local(workspace / "messages" / "inbox", pushed["file"], pushed)
+        clock[0] += 3
+        raise agent_cli.subprocess.TimeoutExpired(cmd, 2)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _pull)
+    result = CliRunner().invoke(
+        agent, ["watch", "--thread", root, "--once", "--pull", "--timeout", "2s"]
+    )
+    assert result.exit_code == (agent_cli.WATCH_TIMEOUT_EXIT if late else 0), result.output
+    assert result.stdout == ("" if late else f"{pushed['file']}\n")
+
+
+def test_watch_all_mailboxes_includes_newly_created_inbox(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _send_root(workspace)
+    reply = _thread_row("reply.md", root)
+    clock = [1000.0]
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+    (workspace / "messages" / "agents.yaml").write_text(
+        yaml.dump({"bob": {"delivery": "pull-only"}})
+    )
+
+    def _sleep(seconds: float) -> None:
+        _write_local(workspace / "messages" / "mailboxes" / "ops" / "inbox", "reply.md", reply)
+        clock[0] += seconds
+
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    result = CliRunner().invoke(
+        agent,
+        [
+            "watch",
+            "--thread",
+            root,
+            "--all-mailboxes",
+            "--once",
+            "--interval",
+            "1",
+            "--timeout",
+            "2s",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "reply.md\n"
 
 
 @pytest.mark.parametrize("phase", ["baseline", "poll"])
