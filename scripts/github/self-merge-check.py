@@ -1664,18 +1664,35 @@ def fetch_ai_review_status(
             "refusal": "lookup_failed",
         }
     marker = raw
+    # These early refusals can be replaced by Greptile. Check disposition
+    # first: a stale/absent/abstained summary does not retire finding threads,
+    # and even an off-diff negative summary still needs a proved disposition.
+    # Reuse the existing predicate, including its fail-closed API handling.
+    if (
+        marker is None
+        or not _sha_matches_head(str(marker.get("sha") or ""), head_sha)
+        or marker.get("score") is None
+    ):
+        if review_data is _UNSET:
+            review_data = _fetch_greptile_review_data(repo, pr_number)
+        raw_score = (marker or {}).get("score")
+        disposition = _ai_review_disposition_shortfall(
+            cast(
+                "tuple[list[dict[str, Any]], list[dict[str, Any]]] | None",
+                review_data,
+            ),
+            marker=marker,
+            score=raw_score if type(raw_score) is int else None,
+            expected_author=expected_author,
+        )
+        if disposition:
+            return {
+                "accepted": False,
+                "detail": f"AI review {disposition}",
+                "refusal": "disposition_shortfall",
+            }
     if marker is None:
         return {"accepted": False, "detail": None, "refusal": "absent"}
-
-    if not _sha_matches_head(str(marker.get("sha") or ""), head_sha):
-        return {
-            "accepted": False,
-            "detail": (
-                f"AI review is stale (reviewed {marker.get('sha') or 'unknown'}, "
-                f"head is {head_sha[:12]})"
-            ),
-            "refusal": "stale",
-        }
 
     score = marker.get("score")
     if score is None:
@@ -1716,6 +1733,16 @@ def fetch_ai_review_status(
                 f"({AI_REVIEW_MIN_SCORE}-{AI_REVIEW_CLEAN_SCORE})"
             ),
             "refusal": "invalid_score",
+        }
+
+    if not _sha_matches_head(str(marker.get("sha") or ""), head_sha):
+        return {
+            "accepted": False,
+            "detail": (
+                f"AI review is stale (reviewed {marker.get('sha') or 'unknown'}, "
+                f"head is {head_sha[:12]})"
+            ),
+            "refusal": "stale",
         }
 
     # Disposition, not score. A score of 4 (surviving P2s) or even 3 (a P1 that

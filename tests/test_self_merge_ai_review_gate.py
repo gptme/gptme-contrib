@@ -451,6 +451,10 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
         comments: list[str],
         reviewed_sha: str | None = None,
         greptile_score: int = 5,
+        review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = (
+            [],
+            [],
+        ),
     ) -> tuple[Any, list[list[str]]]:
         calls: list[list[str]] = []
 
@@ -474,7 +478,9 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
         )
         monkeypatch.setattr(smc, "get_gh_user", lambda: AUTHOR)
         monkeypatch.setattr(smc, "merge_permission", lambda repo: True)
-        monkeypatch.setattr(smc, "_fetch_greptile_review_data", lambda r, n: ([], []))
+        monkeypatch.setattr(
+            smc, "_fetch_greptile_review_data", lambda r, n: review_data
+        )
         monkeypatch.setattr(
             smc, "fetch_greptile_status", lambda r, n, review_data=None: greptile
         )
@@ -734,6 +740,68 @@ def test_greptile_substitution_never_erases_an_open_p0(evaluate: Any) -> None:
     assert result.eligible is False
     assert any("AI review" in r for r in result.reasons)
     assert not any("AI review substituted" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        _marker(sha="deadbeefcafe", score=3),
+        _marker(sha="deadbeefcafe"),
+        _marker(score=None),
+        None,
+    ],
+    ids=["stale-negative", "stale-clean", "abstained", "absent"],
+)
+@pytest.mark.parametrize("severity", ["P0", "P1"])
+def test_greptile_substitution_checks_threads_before_early_refusals(
+    evaluate: Any, marker: dict[str, Any] | None, severity: str
+) -> None:
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(marker)],
+        reviewed_sha=HEAD_SHA,
+        review_data=([], [_finding_thread(severity, resolved=False, total=1)]),
+    )
+    assert result.eligible is False
+    assert any("not resolved" in r for r in result.reasons)
+    assert not any("AI review substituted" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize(
+    "marker", [_marker(sha="deadbeefcafe"), _marker(score=None), None]
+)
+def test_greptile_substitution_requires_readable_threads_for_early_refusals(
+    evaluate: Any, marker: dict[str, Any] | None
+) -> None:
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(marker)],
+        reviewed_sha=HEAD_SHA,
+        review_data=None,
+    )
+    assert result.eligible is False
+    assert any("could not read review thread state" in r for r in result.reasons)
+
+
+def test_greptile_substitution_refuses_stale_off_diff_p1(evaluate: Any) -> None:
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(_marker(sha="deadbeefcafe", score=3))],
+        reviewed_sha=HEAD_SHA,
+    )
+    assert result.eligible is False
+    assert any("disposed P1" in r for r in result.reasons)
+
+
+def test_greptile_substitution_accepts_disposed_stale_p1(evaluate: Any) -> None:
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(_marker(sha="deadbeefcafe", score=3))],
+        reviewed_sha=HEAD_SHA,
+        review_data=([], [_finding_thread("P1", resolved=True, total=2)]),
+    )
+    assert result.eligible is True
+    assert any("AI review substituted" in w for w in result.warnings)
 
 
 def test_greptile_substitution_is_a_noop_when_ai_review_is_accepted(
