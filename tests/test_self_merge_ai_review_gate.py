@@ -534,12 +534,7 @@ def test_evaluate_pr_accepts_our_clean_review_without_greptile(evaluate: Any) ->
 def test_evaluate_pr_blocks_fallback_when_greptile_state_fetch_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Greptile API failure is advisory; a clean AI review can still accept the PR.
-
-    Previously a failed Greptile fetch blocked the AI fallback (fail-closed).
-    After the 2026-09-07 change Greptile is advisory, so its API failure produces
-    a warning and the AI reviewer's clean verdict makes the PR eligible.
-    """
+    """A positive AI verdict cannot establish that unread human threads are safe."""
     monkeypatch.setattr(smc, "fetch_pr", lambda repo, number: _pr_payload())
     monkeypatch.setattr(
         smc,
@@ -572,11 +567,8 @@ def test_evaluate_pr_blocks_fallback_when_greptile_state_fetch_failed(
     result = smc.evaluate_pr(
         "gptme/gptme-contrib", 1382, workspace_repos=["gptme/gptme-contrib"]
     )
-    assert result.eligible is True
-    assert any("Greptile review not found" in w for w in result.warnings)
-    assert not any(
-        "Could not verify Greptile review state" in r for r in result.reasons
-    )
+    assert result.eligible is False
+    assert any("Could not verify review thread state" in r for r in result.reasons)
 
 
 def test_evaluate_pr_blocks_on_degraded_review(evaluate: Any) -> None:
@@ -652,7 +644,15 @@ def test_greptile_clean_at_head_substitutes_for_missing_ai_review(
         [],
         [{"path": "docs/review-tools.md", "patch": None}],
         [{"path": "wrong-path.md", "patch": "+ordinary text"}],
-        [{"path": "docs/review-tools.md", "patch": "+Subproject commit " + "a" * 40}],
+        [
+            {
+                "path": "docs/review-tools.md",
+                "patch": "-Subproject commit "
+                + "a" * 40
+                + "\n+Subproject commit "
+                + "b" * 40,
+            }
+        ],
     ],
 )
 def test_greptile_substitution_requires_proven_non_pointer_diff(
@@ -667,6 +667,64 @@ def test_greptile_substitution_requires_proven_non_pointer_diff(
     assert not result.eligible
     assert any("AI review required" in r for r in result.reasons)
     assert not any("AI review substituted" in w for w in result.warnings)
+
+
+def test_greptile_substitution_allows_documented_pointer_text(evaluate: Any) -> None:
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(None)],
+        reviewed_sha=HEAD_SHA,
+        file_shapes=[
+            {
+                "path": "docs/review-tools.md",
+                "patch": "+Subproject commit abcdef123456\n",
+            }
+        ],
+    )
+    assert result.eligible, result.reasons
+
+
+def test_greptile_substitution_counts_threads_before_review_submission(
+    evaluate: Any,
+) -> None:
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(None)],
+        reviewed_sha=HEAD_SHA,
+        review_data=(
+            [],
+            [
+                {
+                    "isResolved": False,
+                    "comments": {
+                        "nodes": [
+                            {
+                                "author": {"login": "greptile-apps[bot]"},
+                                "createdAt": "2026-11-09T12:04:00Z",
+                                "body": "Fix this before merge",
+                            }
+                        ]
+                    },
+                }
+            ],
+        ),
+    )
+    assert not result.eligible
+    assert not any("AI review substituted" in w for w in result.warnings)
+
+
+def test_unreadable_threads_block_even_with_ai_disabled(
+    evaluate: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(smc.SELF_MERGE_ACCEPT_AI_REVIEW_ENV, "0")
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(None)],
+        reviewed_sha=HEAD_SHA,
+        review_data=None,
+    )
+    assert not result.eligible
+    assert any("review thread state" in r for r in result.reasons)
 
 
 def test_greptile_substitution_accepts_a_one_pass_marker(evaluate: Any) -> None:

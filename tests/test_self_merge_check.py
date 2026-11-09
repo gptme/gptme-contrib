@@ -183,7 +183,7 @@ def test_evaluate_pr_blocks_changes_requested() -> None:
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
-            self_merge_check, "_fetch_greptile_review_data", return_value=None
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
         ),
         patch.object(
             self_merge_check,
@@ -241,7 +241,7 @@ def test_evaluate_pr_blocks_merge_conflicts(merge_state: str) -> None:
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
-            self_merge_check, "_fetch_greptile_review_data", return_value=None
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
         ),
         patch.object(
             self_merge_check,
@@ -273,7 +273,7 @@ def test_evaluate_pr_clean_merge_state_passes_gate() -> None:
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
-            self_merge_check, "_fetch_greptile_review_data", return_value=None
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
         ),
         patch.object(
             self_merge_check,
@@ -308,7 +308,7 @@ def _evaluate_with_hold_labels(labels: list[object]) -> Any:
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
-            self_merge_check, "_fetch_greptile_review_data", return_value=None
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
         ),
         patch.object(
             self_merge_check,
@@ -403,7 +403,7 @@ def test_evaluate_pr_null_labels_fails_closed() -> None:
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
-            self_merge_check, "_fetch_greptile_review_data", return_value=None
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
         ),
         patch.object(
             self_merge_check,
@@ -434,7 +434,7 @@ def test_evaluate_pr_missing_labels_key_blocks_merge() -> None:
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
-            self_merge_check, "_fetch_greptile_review_data", return_value=None
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
         ),
         patch.object(
             self_merge_check,
@@ -1012,7 +1012,7 @@ def test_evaluate_pr_warns_when_workspace_repos_empty() -> None:
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
-            self_merge_check, "_fetch_greptile_review_data", return_value=None
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
         ),
         patch.object(
             self_merge_check,
@@ -1064,7 +1064,7 @@ def _evaluate_otherwise_eligible(merge_perm):
         patch.object(self_merge_check, "fetch_pr", return_value=_eligible_pr_data()),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
-            self_merge_check, "_fetch_greptile_review_data", return_value=None
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
         ),
         patch.object(
             self_merge_check,
@@ -1953,7 +1953,7 @@ def test_evaluate_pr_captures_head_sha() -> None:
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
-            self_merge_check, "_fetch_greptile_review_data", return_value=None
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
         ),
         patch.object(
             self_merge_check,
@@ -1998,7 +1998,7 @@ def _evaluate_with_score_provenance(reviewed_commit, head_sha="abc123def456789a"
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
-            self_merge_check, "_fetch_greptile_review_data", return_value=None
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
         ),
         patch.object(
             self_merge_check,
@@ -2071,7 +2071,7 @@ def test_evaluate_pr_head_sha_empty_when_missing() -> None:
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
-            self_merge_check, "_fetch_greptile_review_data", return_value=None
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
         ),
         patch.object(
             self_merge_check,
@@ -2790,7 +2790,7 @@ def _evaluate_gptme_core(
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
-            self_merge_check, "_fetch_greptile_review_data", return_value=None
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
         ),
         patch.object(
             self_merge_check,
@@ -2996,7 +2996,7 @@ def test_evaluate_pr_other_repo_category_allowlist_unchanged() -> None:
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
-            self_merge_check, "_fetch_greptile_review_data", return_value=None
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
         ),
         patch.object(
             self_merge_check,
@@ -3356,7 +3356,7 @@ def _evaluate_contrib(
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
-            self_merge_check, "_fetch_greptile_review_data", return_value=None
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
         ),
         patch.object(
             self_merge_check,
@@ -3457,7 +3457,7 @@ def test_evaluate_pr_other_repo_contrib_placement_rule_not_applied() -> None:
         patch.object(self_merge_check, "fetch_pr", return_value=pr_data),
         patch.object(self_merge_check, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(
-            self_merge_check, "_fetch_greptile_review_data", return_value=None
+            self_merge_check, "_fetch_greptile_review_data", return_value=([], [])
         ),
         patch.object(
             self_merge_check,

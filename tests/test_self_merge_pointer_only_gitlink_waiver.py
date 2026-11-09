@@ -149,7 +149,7 @@ def _evaluate(
         patch.object(smc, "fetch_pr", return_value=pr_data),
         patch.object(smc, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(smc, "merge_permission", return_value=True),
-        patch.object(smc, "_fetch_greptile_review_data", return_value=None),
+        patch.object(smc, "_fetch_greptile_review_data", return_value=([], [])),
         patch.object(
             smc,
             "fetch_greptile_status",

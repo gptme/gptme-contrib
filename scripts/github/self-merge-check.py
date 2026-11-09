@@ -3649,6 +3649,9 @@ def evaluate_pr(
 
     # Fetch once; pass to both helpers to avoid duplicate GraphQL round-trips.
     shared_review_data = _fetch_greptile_review_data(repo, number)
+    if shared_review_data is None:
+        # Thread safety is independent of the machine-review kill switch.
+        result.reasons.append("Could not verify review thread state (API failure)")
 
     # One fetch, shared by both readers of the review marker: the Greptile-
     # substitute path below and the abstention blocker after it. They ask
@@ -3749,7 +3752,26 @@ def evaluate_pr(
                 ai_review=ai_review,
                 greptile_is_fresh=greptile_is_fresh,
                 greptile_unknown=bool(greptile.get("unknown")),
-                greptile_unresolved=greptile_unresolved,
+                # The legacy Greptile gate filters by review submission time;
+                # comments can precede submission, so substitution must inspect
+                # all unresolved Greptile roots in the complete thread set.
+                greptile_unresolved=max(
+                    greptile_unresolved,
+                    sum(
+                        1
+                        for thread in (shared_review_data or ([], []))[1]
+                        if not thread.get("isResolved", False)
+                        and any(
+                            "greptile"
+                            in (
+                                (comment.get("author") or {}).get("login") or ""
+                            ).lower()
+                            for comment in (thread.get("comments") or {}).get(
+                                "nodes", []
+                            )[:1]
+                        )
+                    ),
+                ),
                 greptile_score=greptile_score,
             )
             if substituted:
@@ -3763,12 +3785,7 @@ def evaluate_pr(
                     or {shape.get("path") for shape in shapes} != set(files)
                     or any(
                         not isinstance(shape.get("patch"), str)
-                        or any(
-                            line.startswith(
-                                ("+Subproject commit ", "-Subproject commit ")
-                            )
-                            for line in shape["patch"].splitlines()
-                        )
+                        or parse_pointer_only_gitlink([shape]) is not None
                         for shape in shapes
                     )
                 ):
