@@ -2917,34 +2917,18 @@ class TestLaneDispatcherEnvAliases:
         assert "--setenv=AGENT_PM_BANDIT_SHADOW=1" in cmd
         assert "--setenv=BOB_PM_BANDIT_SHADOW=1" in cmd
 
-    def test_forwards_outer_session_label(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("label", ["bc64", "", "ab", "has-hyphen", "HAS_UPPER"])
+    def test_does_not_forward_outer_session_label(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, label: str
     ) -> None:
-        """The outer session label must cross the systemd-run boundary.
-
-        Transient units inherit nothing, and run-item shapes its coordination
-        claim identity from this label. Without it, detached workers — the only
-        production dispatch path — keep the unprobeable
-        ``project-monitoring-*`` id and stale claims are never reaped
-        (gptme-contrib#2071).
-        """
-        monkeypatch.setenv("BOB_SESSION_LABEL", "bc64")
-        cmd = self._captured_cmd(
-            tmp_path, monkeypatch, backend="claude-code", model=None
-        )
-        assert "--setenv=BOB_SESSION_LABEL=bc64" in cmd
-
-    @pytest.mark.parametrize("bad_label", ["", "ab", "has-hyphen", "HAS_UPPER"])
-    def test_does_not_forward_invalid_outer_session_label(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_label: str
-    ) -> None:
-        monkeypatch.setenv("BOB_SESSION_LABEL", bad_label)
+        """Detached workers must not advertise their dispatcher's liveness."""
+        monkeypatch.setenv("BOB_SESSION_LABEL", label)
         cmd = self._captured_cmd(
             tmp_path, monkeypatch, backend="claude-code", model=None
         )
         assert not any(
             arg.startswith("--setenv=BOB_SESSION_LABEL=") for arg in cmd
-        ), f"invalid label {bad_label!r} must not be forwarded"
+        ), f"outer label {label!r} must not be forwarded"
 
     def test_worker_env_reads_cross_the_boundary_or_are_justified(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -55,26 +55,6 @@ DEFAULT_FAST_BURST_ALLOWANCE = 1
 # Minimum bandit observations before preferring bandit routing over static fallback
 MIN_BANDIT_OBSERVATIONS = 5
 
-# Outer autonomous session label. Read by run-item to shape its coordination
-# claim identity, so it must survive the systemd-run boundary (transient units
-# inherit nothing). See ``valid_session_label``.
-SESSION_LABEL_ENV = "BOB_SESSION_LABEL"
-_SESSION_LABEL_RE = re.compile(r"[a-z0-9]{4,}")
-
-
-def valid_session_label(raw: str | None) -> str | None:
-    """Return the outer autonomous session label when it is safe to propagate.
-
-    The label is embedded in a coordination claim identity
-    (``bob-autonomous-<backend>-<label>``) that the reaper later resolves
-    against the process table. A value that could not have come from a real
-    session label is therefore dropped rather than forwarded, so a malformed
-    environment cannot mint an unprobeable claim identity.
-    """
-    if raw and _SESSION_LABEL_RE.fullmatch(raw):
-        return raw
-    return None
-
 
 # Repositories excluded from PM dispatch entirely.
 # No repos are excluded by default; sessions should act (fix conflicts, escalate)
@@ -1038,15 +1018,7 @@ class LaneDispatcher:
         )
         cmd.append(f"--setenv=AGENT_PM_BANDIT_SHADOW={shadow}")
         cmd.append(f"--setenv=BOB_PM_BANDIT_SHADOW={shadow}")
-        # Forward the outer autonomous session label too: run-item shapes its
-        # coordination claim identity from it so the reaper can decide whether
-        # the holder is dead. Without this the liveness fix never reaches
-        # detached runs — the only production dispatch path — and every worker
-        # keeps the unprobeable project-monitoring-* identity
-        # (gptme-contrib#2071).
-        outer_label = valid_session_label(os.environ.get(SESSION_LABEL_ENV))
-        if outer_label:
-            cmd.append(f"--setenv={SESSION_LABEL_ENV}={outer_label}")
+
         # Route stdout+stderr to per-slot log files when slot_log_dir is set.
         # Sequential file appends are much cheaper than journald's mmap
         # random-write pattern on DRAM-less SSDs (~18 GB/day → target <3 GB).

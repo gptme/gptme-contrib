@@ -443,47 +443,35 @@ def test_plan_assigned_issue_tier_claim_and_ack(tmp_path, monkeypatch) -> None:
     plan, _, _ = _plan_for(tmp_path, item, FakeLifecycleIO())
     assert plan.timeout == 1500 and plan.time_desc == "~20 minutes"
     assert plan.claim_key == "github:gptme/gptme-contrib#1234"
-    assert plan.claim_agent == f"bob-autonomous-claude-code-{plan.session_id[:4]}"
+    assert plan.claim_agent == f"project-monitoring-claude-code-preselect-{os.getpid()}"
     assert plan.ack_intent is True
 
 
-def test_plan_claim_agent_uses_worker_session_label(tmp_path, monkeypatch) -> None:
-    """Worker claim_agent uses a per-worker label derived from session_id, not the outer session.
+@pytest.mark.parametrize("backend", ["claude-code", "gptme", "codex", "grok-build", ""])
+def test_plan_claim_agent_uses_supervisor_pid(tmp_path, monkeypatch, backend) -> None:
+    """The run-item supervisor owns the claim, not its parent or runner child.
 
-    Workers are detached systemd-run --scope subprocesses — the outer session exits
-    while workers keep running. Using the outer label caused reap_dead_holders() to
-    free live worker claims when the outer sentinel disappeared. The fix derives the
-    label from session_id[:4] (always a valid 4-hex string) so each worker owns its
-    own coordination sentinel.
+    The existing coordination ``*-preselect-PID`` contract probes /proc for a
+    process that already exists at acquisition and outlives claim release.
+    run_work_file satisfies that contract even while no runner is present.
     """
-    # Outer session label must NOT be used — the fix ignores it entirely.
     monkeypatch.setenv("BOB_SESSION_LABEL", "0081")
-    item = make_item(
-        types=["assigned_issue"], detail="assigned; updated: 2026-07-11T00:00:00Z"
+    plan, _, _ = _plan_for(tmp_path, make_item(), FakeLifecycleIO(), backend=backend)
+    assert (
+        plan.claim_agent
+        == f"project-monitoring-{backend or 'unknown'}-preselect-{os.getpid()}"
     )
-    plan, _, _ = _plan_for(tmp_path, item, FakeLifecycleIO())
-    # claim_agent uses the worker's own session_id[:4], not the outer "0081"
-    assert plan.claim_agent == f"bob-autonomous-claude-code-{plan.session_id[:4]}"
-    assert plan.claim_agent != "bob-autonomous-claude-code-0081"
-    # BOB_SESSION_LABEL in runner_env is overridden with the worker label
-    assert plan.runner_env.get("BOB_SESSION_LABEL") == plan.session_id[:4]
-    # session_id is still derived (used for subagent env vars and trajectory path)
-    assert plan.session_id is not None
+    assert "BOB_SESSION_LABEL" not in plan.runner_env
 
 
-def test_plan_claim_agent_worker_label_is_always_autonomous(
-    tmp_path, monkeypatch
-) -> None:
-    """With a backend, claim_agent is always bob-autonomous-*, regardless of outer label."""
-    for label in ("", "ab", "has-hyphen", "HAS_UPPER", "bc64", "0081"):
-        monkeypatch.setenv("BOB_SESSION_LABEL", label)
-        item = make_item(
-            types=["assigned_issue"], detail="assigned; updated: 2026-07-11T00:00:00Z"
-        )
-        plan, _, _ = _plan_for(tmp_path, item, FakeLifecycleIO())
-        # Always uses worker-local session_id[:4], never the outer label
-        assert plan.claim_agent == f"bob-autonomous-claude-code-{plan.session_id[:4]}"
-        assert plan.runner_env.get("BOB_SESSION_LABEL") == plan.session_id[:4]
+def test_plan_claim_agent_distinguishes_supervisors(tmp_path, monkeypatch) -> None:
+    """A repeated item/session UUID must not alias different worker processes."""
+    monkeypatch.setattr("gptme_runloops.run_item.os.getpid", lambda: 12345)
+    first, _, _ = _plan_for(tmp_path, make_item(), FakeLifecycleIO())
+    monkeypatch.setattr("gptme_runloops.run_item.os.getpid", lambda: 67890)
+    second, _, _ = _plan_for(tmp_path, make_item(), FakeLifecycleIO())
+    assert first.session_id == second.session_id
+    assert first.claim_agent != second.claim_agent
 
 
 def test_plan_pending_reply_followup_skips_ack(tmp_path) -> None:
@@ -542,7 +530,6 @@ def test_plan_runner_argv_and_env(tmp_path) -> None:
     assert plan.runner_env == {
         "AGENT_SESSION_ID": plan.session_id,
         "BOB_SESSION_ID": plan.session_id,
-        "BOB_SESSION_LABEL": plan.session_id[:4],
         "CC_SESSION_ID": plan.session_id,
     }
     assert plan.trajectory_path.endswith(f"/{plan.session_id}.jsonl")
@@ -553,7 +540,6 @@ def test_plan_gptme_env(tmp_path) -> None:
     assert plan.runner_env == {
         "AGENT_SESSION_ID": plan.session_id,
         "BOB_SESSION_ID": plan.session_id,
-        "BOB_SESSION_LABEL": plan.session_id[:4],
     }
     assert plan.trajectory_path == ""
 
@@ -565,7 +551,6 @@ def test_plan_grok_build_env(tmp_path) -> None:
     assert plan.runner_env == {
         "AGENT_SESSION_ID": plan.session_id,
         "BOB_SESSION_ID": plan.session_id,
-        "BOB_SESSION_LABEL": plan.session_id[:4],
         "GROK_BUILD_SESSION_ID": plan.session_id,
     }
     assert plan.trajectory_path == ""  # CC prediction only
@@ -723,6 +708,57 @@ def test_run_work_file_happy_path(tmp_path) -> None:
     assert lock_file.read_text() == ""
     history = config.lock_history.read_text()
     assert "ACQUIRED" in history and "RELEASED" in history
+
+
+def test_run_work_file_claim_owner_spans_entire_lifecycle(
+    tmp_path, monkeypatch
+) -> None:
+    """PID identity remains live before runner launch and after runner return."""
+    item = make_item()
+    work_file = _write_work_file(tmp_path, item)
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    phases = []
+    owner = None
+
+    def assert_owner_alive(phase):
+        assert owner == f"project-monitoring-claude-code-preselect-{os.getpid()}"
+        # No sentinel or runner child is needed to prove this owner's liveness.
+        os.kill(int(owner.rsplit("-", 1)[1]), 0)
+        phases.append(phase)
+
+    def observe_cmd(argv, **kwargs):
+        nonlocal owner
+        if "work-claim" in argv:
+            owner = argv[2]
+            assert_owner_alive("acquire")
+        elif "work-abandon" in argv:
+            assert argv[2] == owner
+            assert_owner_alive("abandon")
+        elif argv[0] == "/fake/run.sh":
+            assert_owner_alive("runner")
+        return run_cmd(argv, **kwargs)
+
+    def capture_snapshot(*args, **kwargs):
+        assert_owner_alive("snapshot")
+        return ""
+
+    def post_session(plan, *args, **kwargs):
+        assert plan.claim_agent == owner
+        assert_owner_alive("post-session")
+        return EFFECT_NONE
+
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.capture_pr_snapshot_json", capture_snapshot
+    )
+    monkeypatch.setattr("gptme_runloops.run_item.run_post_session", post_session)
+    hooks = make_hooks(
+        run_cmd=observe_cmd,
+        merge_lifecycle_io=FakeLifecycleIO(status="in-progress"),
+        claim_tool=["fake-coordination"],
+    )
+    assert run_work_file(work_file, config, hooks, backend="claude-code") == 0
+    assert phases == ["acquire", "snapshot", "runner", "post-session", "abandon"]
 
 
 def test_shadow_bandit_enabled_reads_env() -> None:

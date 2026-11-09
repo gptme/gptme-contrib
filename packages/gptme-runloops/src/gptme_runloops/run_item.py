@@ -1576,21 +1576,12 @@ def plan_item(
     claim_key = issue_coordination_key(item.types, item.repo, item.number)
     slug = item_slug(item.repo, item.number_str, index)
     session_id = derive_session_id(slug, run_salt)
-    # Tie liveness to the WORKER's own session, not the outer autonomous session.
-    # Workers run as detached systemd-run --scope subprocesses — the outer session
-    # exits normally while workers keep running. Using the outer session's label
-    # causes reap_dead_holders() to incorrectly free live worker claims when the
-    # outer sentinel disappears, triggering repeated re-dispatch of the same PR.
-    #
-    # Fix: derive a per-worker label from the unique session_id (uuid5 of slug +
-    # run_salt) and set it as BOB_SESSION_LABEL in runner_env so the worker owns
-    # its own sentinel. Falls back to project-monitoring id without a backend.
-    if backend:
-        # First 4 hex chars of the UUID are always lowercase hex — valid label.
-        _worker_label = session_id[:4]
-        claim_agent = f"bob-autonomous-{backend}-{_worker_label}"
-    else:
-        claim_agent = f"project-monitoring-{backend or 'unknown'}-{session_id}"
+    # The supervisor acquires the claim before launching the runner and retains
+    # it through post-session processing. Neither the outer session nor the
+    # runner child spans that lifetime. Use coordination's existing
+    # *-preselect-PID contract: this process already exists at acquisition and
+    # stays alive until _abandon_claim(), including when the runner has exited.
+    claim_agent = f"project-monitoring-{backend or 'unknown'}-preselect-{os.getpid()}"
 
     preheld_block = ""
     if claim_mode == "preheld" and claim_key:
@@ -1643,10 +1634,7 @@ def plan_item(
         "AGENT_SESSION_ID": session_id,
         "BOB_SESSION_ID": session_id,
     }
-    # Override the inherited outer-session label with the worker's own label so
-    # the worker's autonomous-run.sh sentinel matches claim_agent above.
-    if backend:
-        runner_env["BOB_SESSION_LABEL"] = session_id[:4]
+
     if backend == "claude-code":
         runner_env["CC_SESSION_ID"] = session_id
     elif backend == "grok-build":
