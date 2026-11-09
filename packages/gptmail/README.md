@@ -188,6 +188,21 @@ inbox with `scp`.
 If delivery fails, `send` exits non-zero and the outbox copy is stamped
 `delivered: false`.
 
+**Waiting for the reply.** `send` prints the message ID and the command that waits
+for its reply. `--watch` runs that wait in the same call. Background the command from
+an agent harness and its completion delivers the reply ID to the sending session:
+
+```bash
+gptmail agent send bob "Release check" "Is v1.2 ok?" --watch --timeout 2h
+# stdout ends with the reply ID; then: gptmail agent read <id>
+gptmail agent watch --thread <message-id> --once --pull --timeout 2h
+```
+
+`watch --thread` fires only on a message whose `in_reply_to` chain reaches the given
+ID, so a direct reply or a reply to a reply counts. Unrelated messages from the same
+agent are ignored. A reply that already exists fires immediately. Replies pushed into
+the local inbox are matched as well. On timeout the command exits 124.
+
 **Pull-only recipients.** A recipient that cannot accept inbound SSH (for example a
 person on a laptop) is marked `delivery: pull-only`. Messages to it stay in the
 sender's outbox, and the recipient fetches them:
