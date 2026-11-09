@@ -55,6 +55,7 @@ DEFAULT_FAST_BURST_ALLOWANCE = 1
 # Minimum bandit observations before preferring bandit routing over static fallback
 MIN_BANDIT_OBSERVATIONS = 5
 
+
 # Repositories excluded from PM dispatch entirely.
 # No repos are excluded by default; sessions should act (fix conflicts, escalate)
 # rather than noop even in repos with AI-unwelcoming communities.
@@ -1017,6 +1018,7 @@ class LaneDispatcher:
         )
         cmd.append(f"--setenv=AGENT_PM_BANDIT_SHADOW={shadow}")
         cmd.append(f"--setenv=BOB_PM_BANDIT_SHADOW={shadow}")
+
         # Route stdout+stderr to per-slot log files when slot_log_dir is set.
         # Sequential file appends are much cheaper than journald's mmap
         # random-write pattern on DRAM-less SSDs (~18 GB/day → target <3 GB).

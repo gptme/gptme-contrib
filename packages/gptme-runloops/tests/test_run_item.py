@@ -36,7 +36,11 @@ from gptme_runloops.merge_lifecycle import (
     run_merge_lifecycle,
 )
 from gptme_runloops.pm_bandit import PmModelBandit
-from gptme_runloops.pm_dispatch import EFFECT_NONE, EFFECT_OBSERVED, EFFECT_UNKNOWN
+from gptme_runloops.pm_dispatch import (
+    EFFECT_NONE,
+    EFFECT_OBSERVED,
+    EFFECT_UNKNOWN,
+)
 from gptme_runloops.run_item import (
     PR_OBSERVE_TYPES,
     PR_STATE_TYPES,
@@ -430,15 +434,44 @@ def test_plan_cross_repo_needs_re_review_injects_refresh(tmp_path) -> None:
     assert "Address Greptile Review Findings (cross-repo)" in plan.prompt
 
 
-def test_plan_assigned_issue_tier_claim_and_ack(tmp_path) -> None:
+def test_plan_assigned_issue_tier_claim_and_ack(tmp_path, monkeypatch) -> None:
+    # Isolate from any outer autonomous session in the test runner environment.
+    monkeypatch.delenv("BOB_SESSION_LABEL", raising=False)
     item = make_item(
         types=["assigned_issue"], detail="assigned; updated: 2026-07-11T00:00:00Z"
     )
     plan, _, _ = _plan_for(tmp_path, item, FakeLifecycleIO())
     assert plan.timeout == 1500 and plan.time_desc == "~20 minutes"
     assert plan.claim_key == "github:gptme/gptme-contrib#1234"
-    assert plan.claim_agent == f"project-monitoring-claude-code-{plan.session_id}"
+    assert plan.claim_agent == f"project-monitoring-claude-code-preselect-{os.getpid()}"
     assert plan.ack_intent is True
+
+
+@pytest.mark.parametrize("backend", ["claude-code", "gptme", "codex", "grok-build", ""])
+def test_plan_claim_agent_uses_supervisor_pid(tmp_path, monkeypatch, backend) -> None:
+    """The run-item supervisor owns the claim, not its parent or runner child.
+
+    The existing coordination ``*-preselect-PID`` contract probes /proc for a
+    process that already exists at acquisition and outlives claim release.
+    run_work_file satisfies that contract even while no runner is present.
+    """
+    monkeypatch.setenv("BOB_SESSION_LABEL", "0081")
+    plan, _, _ = _plan_for(tmp_path, make_item(), FakeLifecycleIO(), backend=backend)
+    assert (
+        plan.claim_agent
+        == f"project-monitoring-{backend or 'unknown'}-preselect-{os.getpid()}"
+    )
+    assert "BOB_SESSION_LABEL" not in plan.runner_env
+
+
+def test_plan_claim_agent_distinguishes_supervisors(tmp_path, monkeypatch) -> None:
+    """A repeated item/session UUID must not alias different worker processes."""
+    monkeypatch.setattr("gptme_runloops.run_item.os.getpid", lambda: 12345)
+    first, _, _ = _plan_for(tmp_path, make_item(), FakeLifecycleIO())
+    monkeypatch.setattr("gptme_runloops.run_item.os.getpid", lambda: 67890)
+    second, _, _ = _plan_for(tmp_path, make_item(), FakeLifecycleIO())
+    assert first.session_id == second.session_id
+    assert first.claim_agent != second.claim_agent
 
 
 def test_plan_pending_reply_followup_skips_ack(tmp_path) -> None:
@@ -675,6 +708,57 @@ def test_run_work_file_happy_path(tmp_path) -> None:
     assert lock_file.read_text() == ""
     history = config.lock_history.read_text()
     assert "ACQUIRED" in history and "RELEASED" in history
+
+
+def test_run_work_file_claim_owner_spans_entire_lifecycle(
+    tmp_path, monkeypatch
+) -> None:
+    """PID identity remains live before runner launch and after runner return."""
+    item = make_item()
+    work_file = _write_work_file(tmp_path, item)
+    config = make_config(tmp_path)
+    run_cmd = FakeRunCmd()
+    phases = []
+    owner = None
+
+    def assert_owner_alive(phase):
+        assert owner == f"project-monitoring-claude-code-preselect-{os.getpid()}"
+        # No sentinel or runner child is needed to prove this owner's liveness.
+        os.kill(int(owner.rsplit("-", 1)[1]), 0)
+        phases.append(phase)
+
+    def observe_cmd(argv, **kwargs):
+        nonlocal owner
+        if "work-claim" in argv:
+            owner = argv[2]
+            assert_owner_alive("acquire")
+        elif "work-abandon" in argv:
+            assert argv[2] == owner
+            assert_owner_alive("abandon")
+        elif argv[0] == "/fake/run.sh":
+            assert_owner_alive("runner")
+        return run_cmd(argv, **kwargs)
+
+    def capture_snapshot(*args, **kwargs):
+        assert_owner_alive("snapshot")
+        return ""
+
+    def post_session(plan, *args, **kwargs):
+        assert plan.claim_agent == owner
+        assert_owner_alive("post-session")
+        return EFFECT_NONE
+
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.capture_pr_snapshot_json", capture_snapshot
+    )
+    monkeypatch.setattr("gptme_runloops.run_item.run_post_session", post_session)
+    hooks = make_hooks(
+        run_cmd=observe_cmd,
+        merge_lifecycle_io=FakeLifecycleIO(status="in-progress"),
+        claim_tool=["fake-coordination"],
+    )
+    assert run_work_file(work_file, config, hooks, backend="claude-code") == 0
+    assert phases == ["acquire", "snapshot", "runner", "post-session", "abandon"]
 
 
 def test_shadow_bandit_enabled_reads_env() -> None:

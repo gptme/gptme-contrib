@@ -1576,7 +1576,12 @@ def plan_item(
     claim_key = issue_coordination_key(item.types, item.repo, item.number)
     slug = item_slug(item.repo, item.number_str, index)
     session_id = derive_session_id(slug, run_salt)
-    claim_agent = f"project-monitoring-{backend or 'unknown'}-{session_id}"
+    # The supervisor acquires the claim before launching the runner and retains
+    # it through post-session processing. Neither the outer session nor the
+    # runner child spans that lifetime. Use coordination's existing
+    # *-preselect-PID contract: this process already exists at acquisition and
+    # stays alive until _abandon_claim(), including when the runner has exited.
+    claim_agent = f"project-monitoring-{backend or 'unknown'}-preselect-{os.getpid()}"
 
     preheld_block = ""
     if claim_mode == "preheld" and claim_key:
@@ -1629,6 +1634,7 @@ def plan_item(
         "AGENT_SESSION_ID": session_id,
         "BOB_SESSION_ID": session_id,
     }
+
     if backend == "claude-code":
         runner_env["CC_SESSION_ID"] = session_id
     elif backend == "grok-build":
