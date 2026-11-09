@@ -54,6 +54,9 @@ READS = [
     "gh api --method=GET repos/o/r/issues/5/comments -F since=2026-01-01",
     # a write elsewhere in the pipeline doesn't make the read a write
     "gh api repos/o/r/issues/5/comments > /tmp/c.json; curl -X POST http://localhost/x",
+    # a backgrounded read is its own command; curl's -X POST is not its method
+    "gh api repos/o/r/issues/5/comments & curl -X POST http://localhost/x",
+    "gh api repos/o/r/issues/5/comments 2>&1 | head",
     # flag-like text inside a quoted value is not a flag
     "gh api repos/o/r/issues/5/comments --jq '.[] | select(.body | contains(\" -f \"))'",
 ]
@@ -96,6 +99,13 @@ def test_non_api_gh_writes_unchanged() -> None:
     assert sigs["comments_posted"] == 1
 
 
+def test_gh_api_text_in_comment_body_still_counts() -> None:
+    # "gh api" mentioned inside a gh pr comment body is not a gh api invocation
+    sigs = extract_signals_cc(_bash_msgs("gh pr comment 12 --body 'Use gh api to inspect this PR'"))
+    assert sigs["gh_interactions"] == 1
+    assert sigs["comments_posted"] == 1
+
+
 def test_split_shell_segments_respects_quotes() -> None:
     from gptme_sessions.signals import _split_shell_segments
 
@@ -107,4 +117,6 @@ def test_split_shell_segments_respects_quotes() -> None:
         "e",
     ]
     assert _split_shell_segments(r"a \| b | c") == [r"a \| b ", " c"]
-    assert _split_shell_segments("sleep 1 & echo x") == ["sleep 1 & echo x"]
+    # lone & backgrounds and terminates a command; redirects keep their &
+    assert _split_shell_segments("sleep 1 & echo x") == ["sleep 1 ", " echo x"]
+    assert _split_shell_segments("a 2>&1 b &> f >&2") == ["a 2>&1 b &> f >&2"]

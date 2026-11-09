@@ -318,7 +318,6 @@ _GH_INTERACTION_RE = re.compile(
 # *same* invocation writes. Without this, a read-only triage session that
 # lists a PR's comments via `gh api repos/o/r/issues/N/comments` was graded
 # productive (gh_interactions >= 1) despite posting nothing.
-_GH_API_CMD_RE = re.compile(r"\bgh\s+api\s")
 
 
 def _split_shell_segments(cmd: str) -> list[str]:
@@ -347,8 +346,8 @@ def _split_shell_segments(cmd: str) -> list[str]:
             quote = c
             buf.append(c)
         elif c in "|&;\n":
-            if c == "&" and cmd[i + 1 : i + 2] != "&":
-                buf.append(c)  # lone & (background / redirect), not a separator
+            if c == "&" and (cmd[i + 1 : i + 2] == ">" or (buf and buf[-1] in "<>")):
+                buf.append(c)  # redirect (2>&1, &>, >&), not a separator
             else:
                 segments.append("".join(buf))
                 buf = []
@@ -399,6 +398,21 @@ def _gh_api_writes(segment: str) -> bool:
     return has_field
 
 
+def _is_gh_api_invocation(segment: str) -> bool:
+    """True if the segment's command itself is ``gh api`` (not just text in it).
+
+    Leading ``VAR=value`` env assignments are skipped. A ``gh api`` mentioned
+    inside a quoted argument (e.g. a ``gh pr comment --body``) does not count.
+    """
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        tokens = segment.split()
+    while tokens and "=" in tokens[0] and not tokens[0].startswith("-"):
+        tokens = tokens[1:]
+    return tokens[:2] == ["gh", "api"]
+
+
 def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
     """Match a gh write-command pattern, ignoring read-only ``gh api`` calls.
 
@@ -408,7 +422,7 @@ def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
     for segment in _split_shell_segments(cmd):
         if not pattern.search(segment):
             continue
-        if not _GH_API_CMD_RE.search(segment) or _gh_api_writes(segment):
+        if not _is_gh_api_invocation(segment) or _gh_api_writes(segment):
             return True
     return False
 
