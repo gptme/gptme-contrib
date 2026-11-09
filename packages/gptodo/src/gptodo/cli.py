@@ -304,7 +304,7 @@ def show(task_id, render=False):
 
     if not task_id:
         console.print("[red]Error: Task ID or filename required[/]")
-        return
+        sys.exit(1)
 
     task = None
     if not task_id.isdigit():
@@ -321,7 +321,7 @@ def show(task_id, render=False):
         tasks = load_tasks(tasks_dir)
         if not tasks:
             console.print("[red]No tasks found[/]")
-            return
+            sys.exit(1)
 
         # Sort tasks by creation date for consistent ID mapping
         tasks.sort(key=lambda t: t.created)
@@ -338,7 +338,7 @@ def show(task_id, render=False):
 
     if not task:
         console.print(f"[red]Error: Task {task_id} not found[/]")
-        return
+        sys.exit(1)
 
     # Create rich table for metadata
     table = Table(show_header=False, box=None)
@@ -2577,7 +2577,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
         if set_subtask:
             raise click.ClickException("No tasks found")
         console.print("[red]No tasks found[/]")
-        return
+        sys.exit(1)
 
     # Find tasks to edit
     try:
@@ -2586,7 +2586,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
         if set_subtask:
             raise click.ClickException(str(e)) from e
         console.print(f"[red]{e}[/]")
-        return
+        sys.exit(1)
 
     # Validate all field operations before applying any changes
     changes: list[tuple[str, str, str | None]] = []
@@ -2906,7 +2906,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
 
     if not changes:
         console.print("[red]No changes specified. Use --set, --add, or --remove.[/]")
-        return
+        sys.exit(1)
 
     from gptodo.lifecycle import mutate_task, resolve_subtask_lines, TransitionError
 
