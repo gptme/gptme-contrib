@@ -360,24 +360,55 @@ def _split_shell_segments(cmd: str) -> list[str]:
     return segments
 
 
-def _gh_api_writes(segment: str) -> bool:
-    """True if a single ``gh api`` invocation is a write (non-GET) request.
+def _shell_tokens(segment: str) -> list[str]:
+    try:
+        return shlex.split(segment)
+    except ValueError:
+        return segment.split()
+
+
+def _gh_api_args(segment: str) -> list[str] | None:
+    """Arguments after an unquoted ``gh api`` in the segment, or None if absent.
+
+    The ``gh api`` pair is located anywhere among the shell tokens, so any
+    leading syntax resolves without enumerating it: ``VAR=x``, wrappers
+    (``env``, ``command``, ``timeout 5``, ``xargs``), shell keywords (``if``,
+    ``then``, ``while``, ``!``), and grouping (``(gh``, ``{``). Command names
+    compare by basename (``/usr/bin/gh``). A ``gh api`` mentioned inside a
+    quoted argument stays part of one token and does not count.
+    """
+    tokens = _shell_tokens(segment)
+    for i in range(len(tokens) - 1):
+        name = tokens[i].lstrip("({!").rsplit("/", 1)[-1]
+        if name == "gh" and tokens[i + 1] == "api":
+            return tokens[i + 2 :]
+    return None
+
+
+# gh api options whose next token is a value, never a flag (``--template '-f'``).
+_GH_API_VALUE_OPTS = frozenset(
+    {"-H", "--header", "-q", "--jq", "-t", "--template", "-p", "--preview", "--hostname", "--cache"}
+)
+
+
+def _gh_api_writes(args: list[str]) -> bool:
+    """True if ``gh api`` arguments describe a write (non-GET) request.
 
     Flags are read from shell tokens, not raw text, so a quoted argument value
-    such as ``-f body='Use -X GET'`` is not mistaken for a method flag.
+    such as ``-f body='Use -X GET'`` is not mistaken for a method flag, and the
+    value of an option like ``--jq``/``--template`` is never read as a flag.
     """
-    try:
-        tokens = shlex.split(segment)
-    except ValueError:
-        tokens = segment.split()
     method: str | None = None
     has_field = False
     i = 0
-    while i < len(tokens):
-        tok = tokens[i]
+    while i < len(args):
+        tok = args[i]
+        if tok in _GH_API_VALUE_OPTS:
+            i += 2
+            continue
         if tok in ("-X", "--method"):
-            if i + 1 < len(tokens):
-                method = tokens[i + 1]
+            if i + 1 < len(args):
+                method = args[i + 1]
             i += 2
             continue
         if tok.startswith("--method="):
@@ -398,55 +429,17 @@ def _gh_api_writes(segment: str) -> bool:
     return has_field
 
 
-def _is_gh_api_invocation(segment: str) -> bool:
-    """True if the segment's command itself is ``gh api`` (not just text in it).
-
-    Leading ``VAR=value`` env assignments are skipped. A ``gh api`` mentioned
-    inside a quoted argument (e.g. a ``gh pr comment --body``) does not count.
-    """
-    try:
-        tokens = shlex.split(segment)
-    except ValueError:
-        tokens = segment.split()
-    return _strip_command_prefixes(tokens)[:2] == ["gh", "api"]
-
-
-# Wrappers that run their argument as a command (``env gh api ...``).
-_COMMAND_WRAPPERS = frozenset({"env", "command", "exec", "nohup", "time", "sudo", "builtin"})
-
-
-def _strip_command_prefixes(tokens: list[str]) -> list[str]:
-    """Drop leading ``VAR=value`` assignments and wrapper commands with their flags.
-
-    Command names are compared by basename, so ``/usr/bin/env`` and
-    ``/usr/bin/gh`` resolve like ``env`` and ``gh``.
-    """
-    tokens = list(tokens)
-    while tokens:
-        head = tokens[0]
-        if "=" in head and not head.startswith("-"):
-            tokens.pop(0)
-        elif head.rsplit("/", 1)[-1] in _COMMAND_WRAPPERS:
-            tokens.pop(0)
-            while tokens and tokens[0].startswith("-"):
-                tokens.pop(0)
-        else:
-            break
-    if tokens:
-        tokens[0] = tokens[0].rsplit("/", 1)[-1]
-    return tokens
-
-
 def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
     """Match a gh write-command pattern, ignoring read-only ``gh api`` calls.
 
-    Non-api matches (``gh pr comment`` etc.) count as before. A ``gh api``
-    match counts only if its own shell segment is a write request.
+    Non-api matches (``gh pr comment`` etc.) count as before. A segment that
+    invokes ``gh api`` counts only if that invocation is a write request.
     """
     for segment in _split_shell_segments(cmd):
         if not pattern.search(segment):
             continue
-        if not _is_gh_api_invocation(segment) or _gh_api_writes(segment):
+        args = _gh_api_args(segment)
+        if args is None or _gh_api_writes(args):
             return True
     return False
 

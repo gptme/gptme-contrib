@@ -63,6 +63,14 @@ READS = [
     "env gh api --paginate repos/o/r/issues/5/comments",
     "env -i GH_TOKEN=x /usr/bin/gh api repos/o/r/issues/5/comments",
     "command gh api repos/o/r/pulls/12/reviews",
+    # shell keywords, grouping and arg-taking wrappers before gh api
+    "if gh api repos/o/r/issues/5/comments; then echo found; fi",
+    "! gh api repos/o/r/issues/5/comments >/dev/null",
+    "(gh api repos/o/r/issues/5/comments)",
+    "timeout 30 gh api repos/o/r/pulls/12/reviews",
+    # option values that look like write flags are values, not flags
+    "gh api repos/o/r/issues/5/comments --template '-f'",
+    "gh api repos/o/r/issues/5/comments -q '-F' -H 'Accept: -f'",
 ]
 
 WRITES = [
@@ -80,6 +88,8 @@ WRITES = [
     'gh api repos/o/r/issues/5/comments --jq ".a; .b" -f body=x',
     "gh api repos/o/r/issues/5/comments --jq '.x && .y' --method POST",
     "env gh api repos/o/r/issues/5/comments -f body=LGTM",
+    "if gh api repos/o/r/issues/5/comments -f body=x; then echo ok; fi",
+    "timeout 30 gh api repos/o/r/issues/5/comments --jq .id -f body=x",
 ]
 
 
