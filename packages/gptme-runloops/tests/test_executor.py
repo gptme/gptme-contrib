@@ -249,6 +249,45 @@ def test_execute_gptme_logs_duplicate_conversation_files(tmp_path, monkeypatch):
     assert "b-session/conversation.jsonl" in log_text
 
 
+@pytest.mark.parametrize("child_exit", [0, 1, 75, 3])
+def test_execute_gptme_preserves_child_exit_status_through_tee(
+    tmp_path, monkeypatch, child_exit
+):
+    """A child exit status must survive the `... | tee` pipeline.
+
+    The wrapper streams output through `tee`, and without `pipefail` the
+    pipeline reports tee's status (0), so a failed or rate-limited gptme run
+    was recorded as a success. Exit 75 is core's rate-limit class, which the
+    retry/rearm logic keys on.
+    """
+    global_log_dir = tmp_path / "global-logs"
+    global_log_dir.mkdir()
+    monkeypatch.setattr(execution_mod, "GLOBAL_LOG_DIR", global_log_dir)
+
+    binary_dir = tmp_path / "bin"
+    binary_dir.mkdir()
+    binary = binary_dir / "gptme"
+    binary.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "print('child ran', flush=True)\n"
+        f"sys.exit({child_exit})\n"
+    )
+    binary.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{binary_dir}{os.pathsep}{os.environ['PATH']}")
+
+    result = execution_mod.execute_gptme(
+        "Test prompt", workspace=tmp_path, timeout=60, run_type="exit-status"
+    )
+
+    assert result.exit_code == child_exit
+    assert result.success is (child_exit == 0)
+    log_text = "\n".join(path.read_text() for path in global_log_dir.glob("*.log"))
+    assert f"Exit code: {child_exit}" in log_text
+    # Streaming is preserved: tee still writes the child's stdout to the log.
+    assert "child ran" in log_text
+
+
 def test_gptme_executor_is_available():
     """Test is_available checks for gptme binary."""
     executor = GptmeExecutor()

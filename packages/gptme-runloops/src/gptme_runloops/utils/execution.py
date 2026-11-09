@@ -154,11 +154,15 @@ def execute_gptme(
         trajectory_path: Path | None = None
         timed_out = False
 
-        # Execute with tee - streams to both stdout and log file
+        # Execute with tee - streams to both stdout and log file.
+        # `bash -o pipefail` is load-bearing: without it the pipeline status is
+        # tee's status (always 0), so a failed or rate-limited gptme run
+        # (exit 75) would be recorded as success. The whole pipeline must run
+        # inside the pipefail shell — `bash -o pipefail -c '<child>' | tee`
+        # would still leave the outer shell owning the pipeline.
         try:
             result = subprocess.run(
-                cmd_with_tee,
-                shell=True,  # Required for pipe
+                ["bash", "-o", "pipefail", "-c", cmd_with_tee],
                 cwd=workspace,
                 env=run_env,
                 timeout=timeout,
