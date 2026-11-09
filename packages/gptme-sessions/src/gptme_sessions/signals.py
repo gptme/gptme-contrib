@@ -308,9 +308,43 @@ _GH_INTERACTION_RE = re.compile(
     r"gh\s+(?:"
     r"pr\s+(?:review|comment|close|reopen|merge|edit)"
     r"|issue\s+(?:comment|close|reopen|edit|create)"
-    r"|api\s+repos/[^\s]+/(?:pulls|issues)/\d+/(?:comments|reviews)"
+    r"|api\s+(?:\S+\s+)*?repos/[^\s]+/(?:pulls|issues)/\d+/(?:comments|reviews)"
     r")"
 )
+
+# `gh api` is a GET unless it carries a method override or body fields (gh
+# switches to POST when -f/-F/--field/--raw-field/--input is given), so the
+# api branches of _GH_INTERACTION_RE / _GH_COMMENT_CMD_RE only count when the
+# *same* invocation writes. Without this, a read-only triage session that
+# lists a PR's comments via `gh api repos/o/r/issues/N/comments` was graded
+# productive (gh_interactions >= 1) despite posting nothing.
+_GH_API_CMD_RE = re.compile(r"\bgh\s+api\s")
+_GH_API_METHOD_RE = re.compile(r"(?:^|\s)(?:-X|--method)(?:\s+|=)?['\"]?([A-Za-z]+)")
+_GH_API_FIELD_RE = re.compile(r"(?:^|\s)(?:-f|-F|--field|--raw-field|--input)(?:\s|=|$)")
+_SHELL_SEGMENT_SPLIT_RE = re.compile(r"\|\||&&|[|;\n]")
+
+
+def _gh_api_writes(segment: str) -> bool:
+    """True if a single ``gh api`` invocation is a write (non-GET) request."""
+    method = _GH_API_METHOD_RE.search(segment)
+    if method:
+        return method.group(1).upper() != "GET"
+    return bool(_GH_API_FIELD_RE.search(segment))
+
+
+def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
+    """Match a gh write-command pattern, ignoring read-only ``gh api`` calls.
+
+    Non-api matches (``gh pr comment`` etc.) count as before. A ``gh api``
+    match counts only if its own shell segment is a write request.
+    """
+    for segment in _SHELL_SEGMENT_SPLIT_RE.split(cmd):
+        if not pattern.search(segment):
+            continue
+        if not _GH_API_CMD_RE.search(segment) or _gh_api_writes(segment):
+            return True
+    return False
+
 
 # Regex for gh pr create command detection (from Bash input).
 # Tracked separately from gh_interactions because PR submission is higher-value
@@ -441,7 +475,8 @@ _GH_PR_REVIEW_CMD_RE = re.compile(r"gh\s+pr\s+review\b")
 
 # Comments posted: PR comments, issue comments, and direct API comment endpoints
 _GH_COMMENT_CMD_RE = re.compile(
-    r"gh\s+(?:pr|issue)\s+comment\b" r"|gh\s+api\s+repos/[^\s]+/(?:pulls|issues)/\d+/comments\b"
+    r"gh\s+(?:pr|issue)\s+comment\b"
+    r"|gh\s+api\s+(?:\S+\s+)*?repos/[^\s]+/(?:pulls|issues)/\d+/comments\b"
 )
 
 # Issues created (gh issue create — creation event, analogous to prs_submitted)
@@ -1391,7 +1426,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     bash_input = item.get("input", {})
                     cmd = bash_input.get("command", "")
                     command_cwd = bash_input.get("cwd") or bash_input.get("workdir") or session_cwd
-                    if _GH_INTERACTION_RE.search(cmd):
+                    if _gh_cmd_matches(_GH_INTERACTION_RE, cmd):
                         gh_interactions += 1
 
                     # Commit commands: remember them so a truncated result (output
@@ -1433,7 +1468,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     # Populated alongside the aggregate gh_interactions count.
                     if _GH_PR_REVIEW_CMD_RE.search(cmd):
                         reviews_submitted += 1
-                    if _GH_COMMENT_CMD_RE.search(cmd):
+                    if _gh_cmd_matches(_GH_COMMENT_CMD_RE, cmd):
                         comments_posted += 1
                     if _GH_ISSUE_CREATE_CMD_RE.search(cmd):
                         issues_created += 1
