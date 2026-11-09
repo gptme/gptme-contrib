@@ -1669,9 +1669,15 @@ def test_send_watch_returns_reply_id_after_pull(
         rows.append(_thread_row("20990101-000009-bob-Re.md", root_path.name))
 
     pulls: list[list[str]] = []
+
+    def _pull(cmd: list[str], **_kw: object) -> None:
+        pulls.append(list(cmd))
+        for row in rows:
+            _write_local(workspace / "messages" / "inbox", row["file"], row)
+
     monkeypatch.setattr(agent_cli, "_remote_pending_rows", _fake)
     monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
-    monkeypatch.setattr(agent_cli.subprocess, "run", lambda cmd, **_kw: pulls.append(list(cmd)))
+    monkeypatch.setattr(agent_cli.subprocess, "run", _pull)
 
     result = CliRunner().invoke(agent, ["send", "bob", "Cross-check", "ok?", "--watch"])
     assert result.exit_code == 0, result.output
@@ -1815,3 +1821,55 @@ def test_watch_thread_infers_mailbox_only_when_omitted(
     assert result.exit_code == 0, result.output
     assert result.stdout.strip() == f"reply-{expected}.md"
     assert scopes == [[expected]]
+
+
+@pytest.mark.parametrize("failure", ["missing", "timeout", "oserror"])
+@pytest.mark.parametrize("mailbox", ["default", "ops"])
+def test_watch_thread_retries_until_matching_reply_is_pulled(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, failure: str, mailbox: str
+) -> None:
+    root = _send_root(workspace)
+    reply = _thread_row("reply.md", root)
+    reply["mailbox"] = mailbox
+    _scripted_rows(monkeypatch, [[reply]])
+    pulls: list[list[str]] = []
+
+    def _pull(cmd: list[str], **_kw: object) -> None:
+        pulls.append(cmd)
+        if len(pulls) == 1:
+            if failure == "timeout":
+                raise agent_cli.subprocess.TimeoutExpired(cmd, 60)
+            if failure == "oserror":
+                raise OSError("pull could not start")
+            # Even a successful process may fetch an unrelated row, not this reply.
+            _write_local(agent_cli._mailbox_root(mailbox) / "inbox", "other.md", {})
+            return
+        assert len(pulls) == 2
+        _write_local(agent_cli._mailbox_root(mailbox) / "inbox", "reply.md", reply)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _pull)
+    result = CliRunner().invoke(
+        agent, ["watch", "--thread", root, "--once", "--pull", "--mailbox", mailbox]
+    )
+    assert result.exit_code == 0, result.output
+    assert len(pulls) == 2
+    assert result.stdout.strip().splitlines() == ["reply.md"]
+    assert pulls[-1][-2:] == ["--mailbox", mailbox]
+
+
+def test_watch_thread_failed_pull_times_out_without_reporting_reply(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _send_root(workspace)
+    _scripted_rows(monkeypatch, [[_thread_row("reply.md", root)]])
+    clock = [1000.0]
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        agent_cli.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+    monkeypatch.setattr(agent_cli.subprocess, "run", lambda *_args, **_kw: None)
+    result = CliRunner().invoke(
+        agent, ["watch", "--thread", root, "--once", "--pull", "--timeout", "2s"]
+    )
+    assert result.exit_code == agent_cli.WATCH_TIMEOUT_EXIT, result.output
+    assert result.stdout == ""

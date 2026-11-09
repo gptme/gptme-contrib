@@ -1763,17 +1763,30 @@ def watch(
                 continue
             if not _reaches_thread(key, thread_target, parents):
                 continue
+            if do_pull and not is_local:
+                try:
+                    destination = _pull_destination(meta, fallback_mailbox=mailboxes[0])
+                except click.BadParameter as e:
+                    click.echo(f"Warning: refusing invalid reply destination: {e}", err=True)
+                    continue
+                if destination is None:
+                    click.echo("Warning: refusing unsafe reply filename.", err=True)
+                    continue
+                try:
+                    subprocess.run(pull_cmd, check=False, timeout=60)
+                except (OSError, subprocess.TimeoutExpired) as e:
+                    click.echo(f"Warning: --pull failed: {e}", err=True)
+                # pull tolerates partial failures; its exit status does not prove
+                # this reply arrived. Leave it unreported so the next poll retries.
+                if not destination.is_file():
+                    click.echo(f"Warning: reply not fetched yet: {destination.name}", err=True)
+                    continue
             reported.add(key)
             hit = True
             now_str = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
             filename = f"{key}.md"
             subject = str(meta.get("subject", "(no subject)"))
             click.echo(f"{now_str} reply from {sender}: {subject} ({filename})", err=True)
-            if do_pull and not is_local:
-                try:
-                    subprocess.run(pull_cmd, check=False, timeout=60)
-                except (OSError, subprocess.TimeoutExpired) as e:
-                    click.echo(f"Warning: --pull failed: {e}", err=True)
             click.echo(filename)
         return hit and once
 
