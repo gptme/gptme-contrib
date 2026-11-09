@@ -1779,7 +1779,6 @@ def watch(
                 key = _thread_key(row["file"])
                 parents.setdefault(key, _parent_keys(row))
                 candidates.append((key, row, agent_name, False))
-        hit = False
         for key, meta, sender, is_local in candidates:
             _budget(60)
             if key in reported or key == thread_target:
@@ -1810,13 +1809,14 @@ def watch(
                     continue
             _budget(60)  # Delivery/local scanning must not turn expiry into success.
             reported.add(key)
-            hit = True
             now_str = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
             filename = f"{key}.md"
             subject = str(meta.get("subject", "(no subject)"))
             click.echo(f"{now_str} reply from {sender}: {subject} ({filename})", err=True)
             click.echo(filename)
-        return hit and once
+            if once:
+                return True
+        return False
 
     # Push delivery is authoritative already; don't let an offline peer hide it.
     if thread_target is not None and _check_thread({}):

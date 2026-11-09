@@ -2089,3 +2089,56 @@ def test_watch_pull_only_contacts_the_matching_sender(
     assert result.stdout == "reply.md\n"
     assert probes == ["bob", "bob"]
     assert (agent_cli._mailbox_root(reply["mailbox"]) / "inbox" / "reply.md").is_file()
+
+
+@pytest.mark.parametrize("delivery", ["local", "remote", "pull", "slow-second-pull"])
+def test_watch_thread_once_stops_after_first_matching_reply(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, delivery: str
+) -> None:
+    root = _send_root(workspace)
+    replies = [_thread_row(f"reply-{number}.md", root) for number in (1, 2)]
+    clock = [1000.0]
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+    _scripted_rows(monkeypatch, [replies])
+    if delivery == "local":
+        for reply in replies:
+            _write_local(workspace / "messages" / "inbox", reply["file"], reply)
+    pulls: list[list[str]] = []
+
+    def _pull(cmd: list[str], **_kw: object) -> None:
+        pulls.append(cmd)
+        if delivery == "slow-second-pull" and len(pulls) == 2:
+            clock[0] += 3
+            raise agent_cli.subprocess.TimeoutExpired(cmd, 2)
+        # A sender-scoped pull may deliver the entire batch, not just one reply.
+        for reply in replies:
+            _write_local(workspace / "messages" / "inbox", reply["file"], reply)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _pull)
+    args = ["watch", "--thread", root, "--once", "--timeout", "2s"]
+    if delivery in ("pull", "slow-second-pull"):
+        args.append("--pull")
+    result = CliRunner().invoke(agent, args)
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines() == ["reply-1.md"]
+    assert len(pulls) == (1 if "pull" in delivery else 0)
+
+
+def test_watch_thread_continuous_reports_every_match_once(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _send_root(workspace)
+    replies = [_thread_row(f"reply-{number}.md", root) for number in (1, 2)]
+    _scripted_rows(monkeypatch, [replies])
+    sleeps = [0]
+
+    def _sleep(_seconds: float) -> None:
+        sleeps[0] += 1
+        if sleeps[0] == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    result = CliRunner().invoke(agent, ["watch", "--thread", root])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines() == ["reply-1.md", "reply-2.md"]
+    assert sleeps[0] == 2  # The repeated batch is polled without duplicate output.
