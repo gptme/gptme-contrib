@@ -1782,3 +1782,36 @@ def test_watch_thread_respects_local_mailbox_scope(
     assert result.exit_code == 0, result.output
     expected = "20990101-000001-bob-Ops.md" if all_mailboxes else "20990101-000002-bob-Default.md"
     assert result.stdout.strip().splitlines() == [expected]
+
+
+@pytest.mark.parametrize("selected", [None, "default", "ops"])
+def test_watch_thread_infers_mailbox_only_when_omitted(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, selected: str | None
+) -> None:
+    root = "20990101-000000-alice-Ask.md"
+    _write_local(
+        workspace / "messages" / "mailboxes" / "ops" / "outbox",
+        root,
+        {"from": "alice", "to": "bob", "subject": "Ask"},
+    )
+    for mailbox in ("default", "ops"):
+        _write_local(
+            agent_cli._mailbox_root(mailbox) / "inbox",
+            f"reply-{mailbox}.md",
+            {"from": "bob", "to": "alice", "in_reply_to": root},
+        )
+    scopes: list[list[str]] = []
+
+    def _poll(_name: str, _cfg: dict, **kwargs: object) -> list[dict]:
+        scopes.append(kwargs["mailboxes"])
+        return []
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _poll)
+    args = ["watch", "--thread", root, "--once"]
+    if selected is not None:
+        args += ["--mailbox", selected]
+    result = CliRunner().invoke(agent, args)
+    expected = selected or "ops"
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == f"reply-{expected}.md"
+    assert scopes == [[expected]]

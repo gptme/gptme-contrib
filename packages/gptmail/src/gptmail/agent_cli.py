@@ -1602,7 +1602,11 @@ def status(mailbox: str, all_mailboxes: bool) -> None:
     is_flag=True,
     help="Invoke 'gptmail agent pull' after each hit to fetch the message locally.",
 )
-@click.option("--mailbox", default="default", show_default=True, help="Mailbox to watch.")
+@click.option(
+    "--mailbox",
+    default=None,
+    help="Mailbox to watch (default: watched message's mailbox, otherwise default).",
+)
 @click.option("--all-mailboxes", is_flag=True, help="Watch across all mailboxes.")
 @click.option(
     "--thread",
@@ -1628,7 +1632,7 @@ def watch(
     interval: int,
     once: bool,
     do_pull: bool,
-    mailbox: str,
+    mailbox: str | None,
     all_mailboxes: bool,
     thread: str | None,
     timeout: str | None,
@@ -1668,7 +1672,7 @@ def watch(
             )
         else:
             root_mailbox, root_meta = root
-            if mailbox == "default" and not all_mailboxes:
+            if mailbox is None and not all_mailboxes:
                 mailbox = root_mailbox
             root_to = root_meta.get("to")
             if (
@@ -1677,6 +1681,9 @@ def watch(
                 and str(root_meta.get("from", "")).lower() == recipient
             ):
                 from_agents = root_to.lower()
+
+    if mailbox is None:
+        mailbox = "default"
 
     # Build the set of agents to watch.
     if from_agents:
