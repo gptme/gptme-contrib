@@ -3173,6 +3173,27 @@ def _check_workspace_repo(
     return [], []
 
 
+def _fetch_greptile_summary_signal(repo: str, pr_number: int) -> dict[str, Any]:
+    """Read score and reviewed commit from one summary-evaluator response."""
+    signal = Path(__file__).with_name("greptile-merge-signal.py")
+    if not signal.exists():
+        return {}
+    try:
+        env = os.environ.copy()
+        env.pop("GREPTILE_MERGE_SIGNAL_DISABLED", None)
+        proc = subprocess.run(
+            [sys.executable, str(signal), "--repo", repo, str(pr_number)],
+            capture_output=True,
+            env=env,
+            text=True,
+            timeout=30,
+        )
+        data = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def greptile_summary_score(repo: str, pr_number: int) -> int | None:
     """Latest Greptile summary score via the shared greptile-merge-signal evaluator.
 
@@ -3775,6 +3796,19 @@ def evaluate_pr(
                 greptile_score=greptile_score,
             )
             if substituted:
+                # Legacy readers above execute independently. They cannot
+                # establish that a score and its provenance belong together.
+                signal = _fetch_greptile_summary_signal(repo, number)
+                signal_sha = signal.get("reviewed_commit")
+                signal_score = signal.get("score")
+                if (
+                    not isinstance(signal_sha, str)
+                    or not _sha_matches_head(signal_sha, result.head_sha or "")
+                    or type(signal_score) is not int
+                    or signal_score < _parse_self_merge_min_greptile_score()
+                ):
+                    substituted = None
+            if substituted:
                 # Pointer bumps have their own merged-upstream provenance
                 # requirement above. Never route around a refused waiver, even
                 # when the marker is absent/stale instead of abstained. Unknown
@@ -3785,7 +3819,10 @@ def evaluate_pr(
                     or {shape.get("path") for shape in shapes} != set(files)
                     or any(
                         not isinstance(shape.get("patch"), str)
-                        or parse_pointer_only_gitlink([shape]) is not None
+                        or any(
+                            re.fullmatch(r"[+-]Subproject commit [0-9a-f]{40}", line)
+                            for line in shape["patch"].splitlines()
+                        )
                         for shape in shapes
                     )
                 ):

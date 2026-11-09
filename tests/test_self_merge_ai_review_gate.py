@@ -451,6 +451,7 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
         comments: list[str],
         reviewed_sha: str | None = None,
         greptile_score: int = 5,
+        summary_signal: dict[str, Any] | None = None,
         file_shapes: list[dict[str, Any]] | None = None,
         review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = (
             [],
@@ -508,6 +509,17 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
             },
         )
         monkeypatch.setattr(smc, "greptile_summary_score", lambda r, n: greptile_score)
+        monkeypatch.setattr(
+            smc,
+            "_fetch_greptile_summary_signal",
+            lambda r, n: summary_signal
+            if summary_signal is not None
+            else {
+                "score": greptile_score,
+                "reviewed_commit": reviewed_sha,
+            },
+            raising=False,
+        )
         monkeypatch.setattr(
             smc, "greptile_summary_reviewed_commit", lambda r, n: reviewed_sha
         )
@@ -643,6 +655,12 @@ def test_greptile_clean_at_head_substitutes_for_missing_ai_review(
     [
         [],
         [{"path": "docs/review-tools.md", "patch": None}],
+        [
+            {
+                "path": "docs/review-tools.md",
+                "patch": "@@ -0,0 +1 @@\n+Subproject commit " + "b" * 40 + "\n",
+            }
+        ],
         [{"path": "wrong-path.md", "patch": "+ordinary text"}],
         [
             {
@@ -666,6 +684,29 @@ def test_greptile_substitution_requires_proven_non_pointer_diff(
     )
     assert not result.eligible
     assert any("AI review required" in r for r in result.reasons)
+    assert not any("AI review substituted" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize(
+    "signal",
+    [
+        {"reviewed_commit": "a" * 40, "score": 5},
+        {"reviewed_commit": HEAD_SHA, "score": 2},
+        {},
+    ],
+)
+def test_greptile_substitution_requires_score_and_head_from_same_snapshot(
+    evaluate: Any,
+    signal: dict[str, Any],
+) -> None:
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(None)],
+        reviewed_sha=HEAD_SHA,
+        greptile_score=5,
+        summary_signal=signal,
+    )
+    assert not result.eligible
     assert not any("AI review substituted" in w for w in result.warnings)
 
 
