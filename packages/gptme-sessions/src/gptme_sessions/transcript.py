@@ -83,6 +83,37 @@ class NormalizedMessage:
         return {k: v for k, v in d.items() if v is not None and v is not False}
 
 
+# Structured session-end block emitted by gptme's SESSION_END hook (see
+# gptme/tools/complete.py). It is an HTML comment inside a ``ui_only`` system
+# message, so it lives in the transcript but never reaches a provider request.
+SESSION_END_BLOCK_OPEN = "<!-- gptme:session-end "
+SESSION_END_BLOCK_CLOSE = " -->"
+
+
+def parse_session_end_block(messages: list[NormalizedMessage]) -> dict[str, Any] | None:
+    """Return the parsed session-end payload, or ``None`` when it is absent.
+
+    The newest block wins: a resumed log can carry the block from an earlier
+    run, and only the last one describes the session that just finished.
+    Malformed payloads are ignored rather than raised — a transcript reader
+    must never fail because a diagnostic tail block was truncated.
+    """
+    for message in reversed(messages):
+        content = message.content or ""
+        if not (
+            content.startswith(SESSION_END_BLOCK_OPEN) and content.endswith(SESSION_END_BLOCK_CLOSE)
+        ):
+            continue
+        raw = content[len(SESSION_END_BLOCK_OPEN) : -len(SESSION_END_BLOCK_CLOSE)]
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
 @dataclass
 class SessionTranscript:
     """Normalized, harness-agnostic session detail and transcript.
@@ -141,6 +172,7 @@ class SessionTranscript:
     stop_reason: str | None = None
     usage: dict[str, object] | None = None
     cost: float | None = None
+    session_end: dict[str, Any] | None = None
 
     def to_dict(self) -> dict:
         """Serialize to JSON-compatible dict."""
@@ -1452,6 +1484,7 @@ def read_transcript(path: Path) -> SessionTranscript:
         trajectory_path=str(path.resolve()),
         capabilities=capabilities,
         messages=norm_msgs,
+        session_end=parse_session_end_block(norm_msgs),
     )
 
 
