@@ -769,6 +769,26 @@ def test_greptile_substitution_checks_threads_published_with_summary(
 
 
 @pytest.mark.parametrize("initial", [None, _marker(score=None)])
+@pytest.mark.parametrize("file_shapes", [None, []])
+def test_greptile_substitution_accepts_newly_qualifying_ai_review(
+    evaluate: Any,
+    initial: dict[str, Any] | None,
+    file_shapes: list[dict[str, Any]] | None,
+) -> None:
+    """A qualifying refreshed AI review needs no Greptile substitution waiver."""
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(initial)],
+        reviewed_sha=HEAD_SHA,
+        late_comments=[_comment(_marker())],
+        file_shapes=file_shapes,
+    )
+    assert result.eligible, result.reasons
+    assert any("AI review accepted" in warning for warning in result.warnings)
+    assert not any("AI review substituted" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize("initial", [None, _marker(score=None)])
 def test_greptile_substitution_refreshes_summary_only_negative_verdict(
     evaluate: Any, initial: dict[str, Any] | None
 ) -> None:

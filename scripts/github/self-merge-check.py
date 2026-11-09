@@ -3902,7 +3902,11 @@ def evaluate_pr(
                     for line in shape["patch"].splitlines()
                 ) and not _pr_diff_proves_no_gitlinks(repo, number, len(files)):
                     substituted = None
-            if substituted:
+            if ai_review["accepted"]:
+                # The refresh may have found a newly qualifying AI review.
+                # It satisfies the requirement directly, without substitution.
+                result.warnings.append(f"AI review accepted ({ai_review['detail']})")
+            elif substituted:
                 result.warnings.append(substituted)
             else:
                 reason = "AI review required"
