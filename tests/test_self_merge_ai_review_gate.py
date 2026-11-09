@@ -454,6 +454,7 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
         summary_signal: dict[str, Any] | None = None,
         file_shapes: list[dict[str, Any]] | None = None,
         publish_on_summary: bool = False,
+        late_comments: list[str] | None = None,
         review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = (
             [],
             [],
@@ -463,7 +464,11 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
 
         def fake_run_gh(args: list[str], timeout: int = 30) -> str:
             calls.append(args)
-            return "\n".join(comments)
+            return "\n".join(
+                late_comments
+                if summary_published and late_comments is not None
+                else comments
+            )
 
         monkeypatch.setattr(smc, "run_gh", fake_run_gh)
         monkeypatch.setattr(smc, "run_gh_checked", fake_run_gh)
@@ -758,6 +763,23 @@ def test_greptile_substitution_checks_threads_published_with_summary(
     )
     assert not result.eligible, result.warnings
     assert not any("AI review substituted" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize("initial", [None, _marker(score=None)])
+def test_greptile_substitution_refreshes_summary_only_negative_verdict(
+    evaluate: Any, initial: dict[str, Any] | None
+) -> None:
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(initial)],
+        reviewed_sha=HEAD_SHA,
+        late_comments=[
+            _comment(_marker(score=1, findings=[{"fp": "late-p0", "severity": "P0"}]))
+        ],
+    )
+    assert not result.eligible, result.warnings
+    assert any("P0" in reason for reason in result.reasons)
+    assert not any("AI review substituted" in warning for warning in result.warnings)
 
 
 def test_greptile_substitution_allows_documented_pointer_text(evaluate: Any) -> None:

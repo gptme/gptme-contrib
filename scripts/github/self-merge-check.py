@@ -3810,8 +3810,11 @@ def evaluate_pr(
                     substituted = None
             if substituted:
                 # The accepted summary can postdate the original thread read.
-                # Read threads AFTER that summary and recheck both reviewers'
-                # findings, rather than treating the old empty set as evidence.
+                # Refresh the AI summary before threads: unanchored findings
+                # exist only in that marker, not in the thread snapshot.
+                shared_marker = _fetch_ai_review_marker_checked(
+                    repo, number, expected_author=current_user
+                )
                 shared_review_data = _fetch_greptile_review_data(repo, number)
                 if shared_review_data is None:
                     result.reasons.append(
