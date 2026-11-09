@@ -361,8 +361,9 @@ def _split_shell_segments(cmd: str) -> list[str]:
 
 
 def _shell_tokens(segment: str) -> list[str]:
+    # comments=True: bash never executes a trailing ``# -f body=x``.
     try:
-        return shlex.split(segment)
+        return shlex.split(segment, comments=True)
     except ValueError:
         return segment.split()
 
@@ -432,16 +433,23 @@ def _gh_api_writes(args: list[str]) -> bool:
 def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
     """Match a gh write-command pattern, ignoring read-only ``gh api`` calls.
 
-    Non-api matches (``gh pr comment`` etc.) count as before. A segment that
-    invokes ``gh api`` counts only if that invocation is a write request.
+    Non-api matches (``gh pr comment`` etc.) count as before, even when the
+    same segment also runs a ``gh api`` read (e.g. ``--body-file <(gh api
+    ...)``). An api match counts only if the ``gh api`` invocation writes.
     """
     for segment in _split_shell_segments(cmd):
-        if not pattern.search(segment):
+        matches = list(pattern.finditer(segment))
+        if not matches:
             continue
+        if any(not _GH_API_MATCH_RE.match(m.group(0)) for m in matches):
+            return True
         args = _gh_api_args(segment)
         if args is None or _gh_api_writes(args):
             return True
     return False
+
+
+_GH_API_MATCH_RE = re.compile(r"gh\s+api\b")
 
 
 # Regex for gh pr create command detection (from Bash input).

@@ -71,6 +71,8 @@ READS = [
     # option values that look like write flags are values, not flags
     "gh api repos/o/r/issues/5/comments --template '-f'",
     "gh api repos/o/r/issues/5/comments -q '-F' -H 'Accept: -f'",
+    # a write flag in a trailing shell comment is never executed
+    "gh api --paginate repos/o/r/issues/5/comments # -f body=example",
 ]
 
 WRITES = [
@@ -111,6 +113,14 @@ def test_gh_api_write_is_interaction(cmd: str) -> None:
 def test_non_api_gh_writes_unchanged() -> None:
     sigs = extract_signals_cc(_bash_msgs("gh pr comment 12 --body 'a; b | c'", "gh issue close 7"))
     assert sigs["gh_interactions"] == 2
+    assert sigs["comments_posted"] == 1
+
+
+def test_non_api_write_fed_by_gh_api_read_counts() -> None:
+    # the comment is a write even though its body comes from a gh api read
+    cmd = "gh pr comment 12 --body-file <( gh api repos/o/r/issues/5/comments --jq '.[0].body' )"
+    sigs = extract_signals_cc(_bash_msgs(cmd))
+    assert sigs["gh_interactions"] == 1
     assert sigs["comments_posted"] == 1
 
 
