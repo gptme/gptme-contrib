@@ -789,6 +789,40 @@ def test_greptile_substitution_accepts_newly_qualifying_ai_review(
 
 
 @pytest.mark.parametrize("initial", [None, _marker(score=None)])
+@pytest.mark.parametrize("resolved", [False, True])
+def test_newly_qualifying_ai_review_preserves_refreshed_greptile_threads(
+    evaluate: Any, initial: dict[str, Any] | None, resolved: bool
+) -> None:
+    """Accepting a late AI verdict must not discard another reviewer's finding."""
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(initial)],
+        reviewed_sha=HEAD_SHA,
+        late_comments=[_comment(_marker())],
+        publish_on_summary=True,
+        review_data=(
+            [],
+            [
+                {
+                    "isResolved": resolved,
+                    "comments": {
+                        "nodes": [
+                            {
+                                "author": {"login": "greptile-apps[bot]"},
+                                "body": "P2 published after review submission",
+                            }
+                        ]
+                    },
+                }
+            ],
+        ),
+    )
+    assert result.eligible is resolved, (result.reasons, result.warnings)
+    if not resolved:
+        assert any("1 unresolved thread(s)" in reason for reason in result.reasons)
+
+
+@pytest.mark.parametrize("initial", [None, _marker(score=None)])
 def test_greptile_substitution_refreshes_summary_only_negative_verdict(
     evaluate: Any, initial: dict[str, Any] | None
 ) -> None:

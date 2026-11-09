@@ -3864,24 +3864,32 @@ def evaluate_pr(
                         marker_result=shared_marker,
                         review_data=shared_review_data,
                     )
+                    refreshed_greptile_unresolved = sum(
+                        1
+                        for thread in shared_review_data[1]
+                        if not thread.get("isResolved", False)
+                        and any(
+                            "greptile"
+                            in (
+                                (comment.get("author") or {}).get("login") or ""
+                            ).lower()
+                            for comment in (thread.get("comments") or {}).get(
+                                "nodes", []
+                            )[:1]
+                        )
+                    )
+                    # Greptile threads remain an independent blocker even if
+                    # the refreshed AI verdict now satisfies its own gate.
+                    if refreshed_greptile_unresolved:
+                        result.reasons.append(
+                            f"Greptile reviewed (score {signal_score}/5); "
+                            f"{refreshed_greptile_unresolved} unresolved thread(s)"
+                        )
                     substituted = greptile_satisfies_ai_review(
                         ai_review=ai_review,
                         greptile_is_fresh=True,
                         greptile_unknown=False,
-                        greptile_unresolved=sum(
-                            1
-                            for thread in shared_review_data[1]
-                            if not thread.get("isResolved", False)
-                            and any(
-                                "greptile"
-                                in (
-                                    (comment.get("author") or {}).get("login") or ""
-                                ).lower()
-                                for comment in (thread.get("comments") or {}).get(
-                                    "nodes", []
-                                )[:1]
-                            )
-                        ),
+                        greptile_unresolved=refreshed_greptile_unresolved,
                         greptile_score=signal_score,
                     )
             if substituted:
