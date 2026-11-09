@@ -1571,6 +1571,38 @@ def test_watch_thread_existing_reply_fires_immediately(
     assert len(probed) == 1
 
 
+def test_watch_thread_fires_on_reply_already_pulled_locally(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Late start: the periodic pull job already took the reply out of the outbox.
+
+    This is the race from gptme/gptme-contrib#2082: a count-baselining watch that
+    starts after the reply landed never fires, because the reply is both absent
+    from the remote outbox and part of the baseline. Thread mode must check the
+    local inbox before it begins polling.
+    """
+    root = _send_root(workspace)
+    _write_local(
+        workspace / "messages" / "inbox",
+        "20990101-000001-bob-Re.md",
+        {
+            "from": "bob",
+            "to": "alice",
+            "subject": "Re: Release cross-check",
+            "in_reply_to": root,
+            "read": True,
+        },
+    )
+    # Remote outbox is empty -- pull already moved the reply to our inbox.
+    probed = _scripted_rows(monkeypatch, [[]])
+
+    result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once", "--pull"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == "20990101-000001-bob-Re.md"
+    # Fired from the pre-poll check: exactly one baseline probe, no polling loop.
+    assert len(probed) == 1
+
+
 def test_watch_thread_sees_push_delivered_reply_without_ssh(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
