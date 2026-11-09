@@ -1713,9 +1713,10 @@ def watch(
     if skipped:
         click.echo(f"Note: skipping non-SSH agents: {', '.join(skipped)}", err=True)
 
-    # Thread mode also scans the local inbox (push delivery), so it can run with
-    # no SSH-reachable peer at all — e.g. waiting on a pull-only human's reply.
-    watch_local_inbox = thread_target is not None and recipient == _self_name()
+    # Thread mode also scans the workspace inbox, including pull --as deliveries
+    # for a --to override. Candidate metadata still filters by recipient below.
+    # No SSH-reachable peer is needed for an already-local or pushed reply.
+    watch_local_inbox = thread_target is not None
     if not ssh_agents and not watch_local_inbox:
         click.echo("No SSH-reachable agents to watch.", err=True)
         sys.exit(1)

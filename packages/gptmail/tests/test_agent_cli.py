@@ -1603,6 +1603,74 @@ def test_watch_thread_fires_on_reply_already_pulled_locally(
     assert probed == []
 
 
+@pytest.mark.parametrize("ssh_peer", [False, True])
+@pytest.mark.parametrize("already_delivered", [False, True])
+@pytest.mark.parametrize("mailbox", ["default", "ops"])
+def test_watch_thread_to_override_checks_local_inbox(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ssh_peer: bool,
+    already_delivered: bool,
+    mailbox: str,
+) -> None:
+    """pull --as and watch --to share the workspace inbox, not its env identity."""
+    monkeypatch.setenv("AGENT_NAME", "laptop")
+    if not ssh_peer:
+        (workspace / "messages" / "agents.yaml").write_text(
+            yaml.dump({"bob": {"delivery": "pull-only"}})
+        )
+    root = "ask.md"
+    _write_local(
+        agent_cli._mailbox_root(mailbox) / "outbox",
+        root,
+        {"from": "dana", "to": "bob", "subject": "Ask"},
+    )
+    inbox = agent_cli._mailbox_root(mailbox) / "inbox"
+    # Same thread, wrong recipient: broadening local scanning must not accept it.
+    _write_local(
+        inbox,
+        "wrong-recipient.md",
+        {"from": "bob", "to": "laptop", "in_reply_to": root},
+    )
+    probed = _scripted_rows(monkeypatch, [[]])
+    clock = [1000.0]
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+
+    def _deliver() -> None:
+        _write_local(
+            inbox,
+            "reply.md",
+            {"from": "bob", "to": "dana", "in_reply_to": root, "read": True},
+        )
+
+    def _sleep(seconds: float) -> None:
+        clock[0] += seconds
+        _deliver()
+
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    if already_delivered:
+        _deliver()
+    result = CliRunner().invoke(
+        agent,
+        [
+            "watch",
+            "--to",
+            "DANA",
+            "--thread",
+            root,
+            "--once",
+            "--pull",
+            "--interval",
+            "1",
+            "--timeout",
+            "2s",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip().splitlines() == ["reply.md"]
+    assert probed == ([] if already_delivered or not ssh_peer else ["bob"])
+
+
 def test_watch_thread_sees_push_delivered_reply_without_ssh(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
