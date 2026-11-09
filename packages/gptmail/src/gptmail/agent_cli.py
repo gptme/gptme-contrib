@@ -306,7 +306,11 @@ def _ssh_deliver(agents: dict[str, dict[str, str]], *, mailbox: str = "default")
                     "ssh",
                     *ssh_opts,
                     ssh_target,
-                    f"ln -- {shlex.quote(remote_temp)} {shlex.quote(remote_final)}",
+                    # A periodic pull may publish first. Preserve that copy and
+                    # its read/reply metadata, but do not mask other link errors.
+                    # -T prevents a directory collision from receiving the link.
+                    f"ln -T -- {shlex.quote(remote_temp)} {shlex.quote(remote_final)}"
+                    f" || test -f {shlex.quote(remote_final)}",
                 ],
                 check=True,
                 capture_output=True,

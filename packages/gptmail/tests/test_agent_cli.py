@@ -2368,6 +2368,93 @@ def test_ssh_push_publishes_only_complete_messages(
     assert not list(inbox.glob(".*")), "staging files must be cleaned after success or failure"
 
 
+@pytest.mark.parametrize("mailbox", ["default", "ops"])
+def test_ssh_push_racing_pull_preserves_delivery_and_send_dedup(tmp_path, monkeypatch, mailbox):
+    """Run the remote publication shell locally after pull wins the delivery race."""
+    import shlex
+
+    from gptmail.transport.agent import AgentTransport
+
+    messages = tmp_path / "messages"
+    messages.mkdir()
+    peer = tmp_path / "peer with spaces"
+    (messages / "agents.yaml").write_text(
+        yaml.safe_dump({"bob": {"ssh": "bob@peer", "workspace": str(peer)}})
+    )
+    inbox = peer / "messages"
+    if mailbox != "default":
+        inbox = inbox / "mailboxes" / mailbox
+    inbox = inbox / "inbox"
+    monkeypatch.setenv("AGENT_NAME", "alice")
+    monkeypatch.setattr(agent_cli, "_repo_root", lambda: tmp_path)
+    run = agent_cli.subprocess.run
+    received = []
+
+    def _run(cmd, **kwargs):
+        if cmd[0] == "ssh":
+            return run(["sh", "-c", cmd[-1]], **kwargs)
+        assert cmd[0] == "scp"
+        source = Path(cmd[-2])
+        staged = Path(shlex.split(cmd[-1].split(":", 1)[1])[0])
+        shutil.copyfile(source, staged)
+        # Periodic pull publishes the complete message before push's ln runs.
+        assert AgentTransport.local_deliver(inbox)(source, "bob")
+        destination = inbox / source.name
+        agent_cli._mark_read(destination)
+        received.append((destination, destination.read_bytes(), destination.stat().st_ino))
+        return agent_cli.subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _run)
+    args = ["send", "bob", "Race", "complete body", "--mailbox", mailbox]
+    first = CliRunner().invoke(agent, args)
+    assert first.exit_code == 0, first.output
+    outbox = agent_cli._mailbox_root(mailbox) / "outbox"
+    (sent,) = outbox.glob("*.md")
+    assert (meta_of(sent) or {}).get("delivered") is not False
+    second = CliRunner().invoke(agent, args)
+    assert second.exit_code == 0, second.output
+    assert "Skipping" in second.output
+    assert len(received) == 1
+    destination, contents, inode = received[0]
+    assert destination.read_bytes() == contents
+    assert destination.stat().st_ino == inode
+    assert (meta_of(destination) or {}).get("read") is True
+    assert list(outbox.glob("*.md")) == [sent]
+    assert not list(inbox.glob(".*"))
+
+
+@pytest.mark.parametrize("failure", ["directory", "link"])
+def test_ssh_push_publication_failure_is_not_success(tmp_path, monkeypatch, failure):
+    """Only an existing message file settles a failed link; other failures stay failures."""
+    import shlex
+
+    inbox = tmp_path / "peer" / "messages" / "inbox"
+    source = tmp_path / "reply.md"
+    source.write_text("complete body")
+    run = agent_cli.subprocess.run
+
+    def _run(cmd, **kwargs):
+        if cmd[0] == "ssh":
+            if cmd[-1].startswith("ln ") and failure == "link":
+                raise agent_cli.subprocess.CalledProcessError(1, cmd)
+            return run(["sh", "-c", cmd[-1]], **kwargs)
+        assert cmd[0] == "scp"
+        staged = Path(shlex.split(cmd[-1].split(":", 1)[1])[0])
+        shutil.copyfile(source, staged)
+        if failure == "directory":
+            (inbox / source.name).mkdir()
+        return agent_cli.subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _run)
+    deliver = agent_cli._ssh_deliver(
+        {"alice": {"ssh": "alice@peer", "workspace": str(tmp_path / "peer")}}
+    )
+    assert deliver(source, "alice") is False
+    assert not list(inbox.glob(".*"))
+    if failure == "directory":
+        assert list((inbox / source.name).iterdir()) == []
+
+
 @pytest.mark.parametrize("update", ["read", "mark_read", "mark_replied"])
 def test_watch_retains_delivery_time_after_metadata_update(workspace, monkeypatch, update):
     root = _send_root(workspace)
