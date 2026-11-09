@@ -2022,3 +2022,33 @@ def test_watch_checks_local_reply_before_blocking_probe(
     assert result.exit_code == 0, result.output
     assert result.stdout == "reply.md\n"
     assert probes == ([] if already_local else ["bob"])
+
+
+@pytest.mark.parametrize("phase", ["baseline", "poll"])
+def test_watch_matches_remote_reply_before_probing_next_peer(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    root = _send_root(workspace)
+    config = workspace / "messages" / "agents.yaml"
+    registry = yaml.safe_load(config.read_text())
+    registry["charlie"] = {"ssh": "charlie@charlie", "workspace": "/charlie"}
+    config.write_text(yaml.dump(registry))
+    clock = [1000.0]
+    probes: list[str] = []
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(agent_cli.time, "sleep", lambda _: None)
+
+    def _poll(name: str, _cfg: dict, **_kw: object) -> list[dict]:
+        probes.append(name)
+        if phase == "poll" and len(probes) <= 2:
+            return []
+        clock[0] += 0.5 if name == "bob" else 3
+        return [_thread_row("reply.md", root)] if name == "bob" else []
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _poll)
+    result = CliRunner().invoke(
+        agent, ["watch", "--from", "bob,charlie", "--thread", root, "--once", "--timeout", "2s"]
+    )
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "reply.md\n"
+    assert probes == (["bob"] if phase == "baseline" else ["bob", "charlie", "bob"])

@@ -1822,9 +1822,9 @@ def watch(
         else:
             first_rows[agent_name] = rows
             baselines[agent_name] = {str(row.get("file", "")) for row in rows if row.get("file")}
-    # A thread reply that already exists is the answer, not history to skip.
-    if thread_target is not None and _check_thread(first_rows):
-        return
+        # Match accumulated rows before another peer can consume the deadline.
+        if thread_target is not None and _check_thread(first_rows):
+            return
 
     try:
         while True:
@@ -1838,8 +1838,8 @@ def watch(
                     rows = _poll(agent_name, agent_cfg)
                     if rows is not None:
                         polled[agent_name] = rows
-                if _check_thread(polled):
-                    return
+                    if _check_thread(polled):
+                        return
                 continue
             for agent_name, agent_cfg in ssh_agents.items():
                 rows = _poll(agent_name, agent_cfg)
