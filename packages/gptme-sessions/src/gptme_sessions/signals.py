@@ -408,9 +408,33 @@ def _is_gh_api_invocation(segment: str) -> bool:
         tokens = shlex.split(segment)
     except ValueError:
         tokens = segment.split()
-    while tokens and "=" in tokens[0] and not tokens[0].startswith("-"):
-        tokens = tokens[1:]
-    return tokens[:2] == ["gh", "api"]
+    return _strip_command_prefixes(tokens)[:2] == ["gh", "api"]
+
+
+# Wrappers that run their argument as a command (``env gh api ...``).
+_COMMAND_WRAPPERS = frozenset({"env", "command", "exec", "nohup", "time", "sudo", "builtin"})
+
+
+def _strip_command_prefixes(tokens: list[str]) -> list[str]:
+    """Drop leading ``VAR=value`` assignments and wrapper commands with their flags.
+
+    Command names are compared by basename, so ``/usr/bin/env`` and
+    ``/usr/bin/gh`` resolve like ``env`` and ``gh``.
+    """
+    tokens = list(tokens)
+    while tokens:
+        head = tokens[0]
+        if "=" in head and not head.startswith("-"):
+            tokens.pop(0)
+        elif head.rsplit("/", 1)[-1] in _COMMAND_WRAPPERS:
+            tokens.pop(0)
+            while tokens and tokens[0].startswith("-"):
+                tokens.pop(0)
+        else:
+            break
+    if tokens:
+        tokens[0] = tokens[0].rsplit("/", 1)[-1]
+    return tokens
 
 
 def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:

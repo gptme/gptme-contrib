@@ -59,6 +59,10 @@ READS = [
     "gh api repos/o/r/issues/5/comments 2>&1 | head",
     # flag-like text inside a quoted value is not a flag
     "gh api repos/o/r/issues/5/comments --jq '.[] | select(.body | contains(\" -f \"))'",
+    # wrapper commands and absolute paths still resolve to gh api
+    "env gh api --paginate repos/o/r/issues/5/comments",
+    "env -i GH_TOKEN=x /usr/bin/gh api repos/o/r/issues/5/comments",
+    "command gh api repos/o/r/pulls/12/reviews",
 ]
 
 WRITES = [
@@ -75,6 +79,7 @@ WRITES = [
     "gh api repos/o/r/issues/5/comments --jq '.html_url | .' -f body=LGTM",
     'gh api repos/o/r/issues/5/comments --jq ".a; .b" -f body=x',
     "gh api repos/o/r/issues/5/comments --jq '.x && .y' --method POST",
+    "env gh api repos/o/r/issues/5/comments -f body=LGTM",
 ]
 
 
