@@ -63,6 +63,10 @@ WRITES = [
     "gh api repos/o/r/pulls/12/reviews --method POST -f event=APPROVE",
     'gh api repos/o/r/pulls/12/comments --input - <<\'EOF\'\n{"body": "x"}\nEOF',
     "cd /tmp && gh api repos/o/r/issues/5/comments -F body=@c.md | jq .html_url",
+    # shell operators inside quotes must not split the endpoint from its write flag
+    "gh api repos/o/r/issues/5/comments --jq '.html_url | .' -f body=LGTM",
+    'gh api repos/o/r/issues/5/comments --jq ".a; .b" -f body=x',
+    "gh api repos/o/r/issues/5/comments --jq '.x && .y' --method POST",
 ]
 
 
@@ -85,3 +89,17 @@ def test_non_api_gh_writes_unchanged() -> None:
     sigs = extract_signals_cc(_bash_msgs("gh pr comment 12 --body 'a; b | c'", "gh issue close 7"))
     assert sigs["gh_interactions"] == 2
     assert sigs["comments_posted"] == 1
+
+
+def test_split_shell_segments_respects_quotes() -> None:
+    from gptme_sessions.signals import _split_shell_segments
+
+    assert _split_shell_segments("a 'x | y' && b \"p; q\" || c; d\ne") == [
+        "a 'x | y' ",
+        ' b "p; q" ',
+        " c",
+        " d",
+        "e",
+    ]
+    assert _split_shell_segments(r"a \| b | c") == [r"a \| b ", " c"]
+    assert _split_shell_segments("sleep 1 & echo x") == ["sleep 1 & echo x"]

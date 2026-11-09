@@ -321,7 +321,46 @@ _GH_INTERACTION_RE = re.compile(
 _GH_API_CMD_RE = re.compile(r"\bgh\s+api\s")
 _GH_API_METHOD_RE = re.compile(r"(?:^|\s)(?:-X|--method)(?:\s+|=)?['\"]?([A-Za-z]+)")
 _GH_API_FIELD_RE = re.compile(r"(?:^|\s)(?:-f|-F|--field|--raw-field|--input)(?:\s|=|$)")
-_SHELL_SEGMENT_SPLIT_RE = re.compile(r"\|\||&&|[|;\n]")
+
+
+def _split_shell_segments(cmd: str) -> list[str]:
+    """Split a shell command on ``|``, ``||``, ``&&``, ``;`` and newlines.
+
+    Operators inside single or double quotes are literal text, not separators,
+    so ``--jq '.a | .b' -f body=x`` stays one segment. Backslash escapes are
+    honoured outside single quotes. Not a full shell parser: an unterminated
+    quote just runs to the end of the command.
+    """
+    segments: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    i, n = 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if c == "\\" and quote != "'" and i + 1 < n:
+            buf.append(cmd[i : i + 2])
+            i += 2
+            continue
+        if quote:
+            if c == quote:
+                quote = None
+            buf.append(c)
+        elif c in "'\"":
+            quote = c
+            buf.append(c)
+        elif c in "|&;\n":
+            if c == "&" and cmd[i + 1 : i + 2] != "&":
+                buf.append(c)  # lone & (background / redirect), not a separator
+            else:
+                segments.append("".join(buf))
+                buf = []
+                if c in "|&" and cmd[i + 1 : i + 2] == c:
+                    i += 1
+        else:
+            buf.append(c)
+        i += 1
+    segments.append("".join(buf))
+    return segments
 
 
 def _gh_api_writes(segment: str) -> bool:
@@ -338,7 +377,7 @@ def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
     Non-api matches (``gh pr comment`` etc.) count as before. A ``gh api``
     match counts only if its own shell segment is a write request.
     """
-    for segment in _SHELL_SEGMENT_SPLIT_RE.split(cmd):
+    for segment in _split_shell_segments(cmd):
         if not pattern.search(segment):
             continue
         if not _GH_API_CMD_RE.search(segment) or _gh_api_writes(segment):
