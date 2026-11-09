@@ -1599,8 +1599,8 @@ def test_watch_thread_fires_on_reply_already_pulled_locally(
     result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once", "--pull"])
     assert result.exit_code == 0, result.output
     assert result.stdout.strip() == "20990101-000001-bob-Re.md"
-    # Fired from the pre-poll check: exactly one baseline probe, no polling loop.
-    assert len(probed) == 1
+    # Fired before any blocking SSH probe, even if the sender is offline.
+    assert probed == []
 
 
 def test_watch_thread_sees_push_delivered_reply_without_ssh(
@@ -1820,7 +1820,7 @@ def test_watch_thread_infers_mailbox_only_when_omitted(
     expected = selected or "ops"
     assert result.exit_code == 0, result.output
     assert result.stdout.strip() == f"reply-{expected}.md"
-    assert scopes == [[expected]]
+    assert scopes == []  # A local reply completes without an unnecessary SSH probe.
 
 
 @pytest.mark.parametrize("failure", ["missing", "timeout", "oserror"])
@@ -1991,3 +1991,34 @@ def test_watch_caps_pull_and_rejects_late_reply(
     assert result.exit_code == (agent_cli.WATCH_TIMEOUT_EXIT if late else 0), result.output
     assert result.stdout == ("" if late else "reply.md\n")
     assert budgets == [1.5]
+
+
+@pytest.mark.parametrize("already_local", [True, False])
+def test_watch_checks_local_reply_before_blocking_probe(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, already_local: bool
+) -> None:
+    root = _send_root(workspace)
+    reply = _thread_row("reply.md", root)
+    clock = [1000.0]
+    probes: list[str] = []
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+
+    def _deliver() -> None:
+        _write_local(workspace / "messages" / "inbox", "reply.md", reply)
+
+    def _poll(name: str, _cfg: dict, **_kw: object) -> list[dict]:
+        probes.append(name)
+        if already_local or len(probes) > 1:
+            clock[0] += 3  # An offline peer must not hide a locally delivered reply.
+        return []
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _poll)
+    monkeypatch.setattr(agent_cli.time, "sleep", lambda _: _deliver())
+    if already_local:
+        _deliver()
+    result = CliRunner().invoke(
+        agent, ["watch", "--thread", root, "--once", "--pull", "--timeout", "2s"]
+    )
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "reply.md\n"
+    assert probes == ([] if already_local else ["bob"])

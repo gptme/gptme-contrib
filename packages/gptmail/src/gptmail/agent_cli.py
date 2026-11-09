@@ -1807,6 +1807,10 @@ def watch(
             click.echo(filename)
         return hit and once
 
+    # Push delivery is authoritative already; don't let an offline peer hide it.
+    if thread_target is not None and _check_thread({}):
+        return
+
     # Baseline: None = not yet successfully probed; set[str] = known filenames.
     baselines: dict[str, set[str] | None] = {}
     first_rows: dict[str, list[dict]] = {}
@@ -1827,6 +1831,8 @@ def watch(
             time.sleep(_budget(interval))
             _budget(interval)
             if thread_target is not None:
+                if _check_thread({}):
+                    return
                 polled: dict[str, list[dict]] = {}
                 for agent_name, agent_cfg in ssh_agents.items():
                     rows = _poll(agent_name, agent_cfg)
