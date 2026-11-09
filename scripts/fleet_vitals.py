@@ -254,7 +254,11 @@ def parse_jsonl_lines(lines: object) -> list[tuple[datetime, dict]]:
             continue
         try:
             rec = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
+            # ValueError covers JSONDecodeError plus inputs json accepts
+            # syntactically but can't build (int literals past
+            # sys.get_int_max_str_digits()); RecursionError is deep nesting.
+            # Either way one bad line must not abort the whole report.
             continue
         if not isinstance(rec, dict):
             continue
