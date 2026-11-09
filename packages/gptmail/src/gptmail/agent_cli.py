@@ -1393,6 +1393,7 @@ def _fetch_from_agent(
         "Useful for pull-only recipients (e.g. humans) checking from a different host."
     ),
 )
+@click.option("--from", "from_agent", default=None, help="Fetch only from this registered agent.")
 @click.option("--mailbox", default="default", show_default=True, help="Mailbox to fetch into.")
 @click.option("--all-mailboxes", is_flag=True, help="Pull across default plus every named mailbox.")
 @click.option(
@@ -1408,6 +1409,7 @@ def _fetch_from_agent(
 @click.option("--dry-run", is_flag=True, help="Show what would be fetched without writing files.")
 def pull(
     as_recipient: str | None,
+    from_agent: str | None,
     mailbox: str,
     all_mailboxes: bool,
     notify_cmd: str | None,
@@ -1417,8 +1419,8 @@ def pull(
     """Pull messages from all SSH-reachable agents' outboxes (pull-only recipients).
 
     Iterates the agents.yaml registry, fetches outbox messages addressed to
-    this identity from every agent with an SSH target, and deduplicates them
-    into the local inbox by filename.  Intended for human recipients who cannot
+    this identity from every agent with an SSH target (or only --from), and
+    deduplicates them into the local inbox by filename. Intended for human recipients who cannot
     receive inbound SSH push delivery — run on a cron/launchd schedule (e.g.
     every 30 minutes) to surface messages without manual polling.
 
@@ -1435,6 +1437,11 @@ def pull(
         gptmail agent pull --notify-cmd "sh -c 'notify-send gptmail \"$SUMMARY\"'"
     """
     agents = _load_agents()
+    if from_agent is not None:
+        from_agent = from_agent.strip().lower()
+        if from_agent not in agents:
+            raise click.BadParameter(f"unknown agent '{from_agent}'", param_hint="--from")
+        agents = {from_agent: agents[from_agent]}
     self_name = (as_recipient or _self_name()).lower()
     mailboxes = _selected_mailboxes(mailbox, all_mailboxes)
     remote_mailboxes = [] if all_mailboxes else mailboxes
@@ -1789,7 +1796,11 @@ def watch(
                     click.echo("Warning: refusing unsafe reply filename.", err=True)
                     continue
                 try:
-                    subprocess.run(pull_cmd, check=False, timeout=_budget(60), stdout=sys.stderr)
+                    # Reuse pull's safe atomic delivery, but never scan unrelated peers.
+                    sender_pull_cmd = pull_cmd + ["--from", sender]
+                    subprocess.run(
+                        sender_pull_cmd, check=False, timeout=_budget(60), stdout=sys.stderr
+                    )
                 except (OSError, subprocess.TimeoutExpired) as e:
                     click.echo(f"Warning: --pull failed: {e}", err=True)
                 # pull tolerates partial failures; its exit status does not prove

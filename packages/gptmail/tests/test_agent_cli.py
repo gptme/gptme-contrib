@@ -1684,7 +1684,7 @@ def test_send_watch_returns_reply_id_after_pull(
     stdout = result.stdout.strip().splitlines()
     assert stdout[0] == "Sent to bob: Cross-check"
     assert stdout[-1] == "20990101-000009-bob-Re.md"
-    assert pulls and pulls[0][-4:] == ["--as", "alice", "--mailbox", "default"]
+    assert pulls and pulls[0][-6:] == ["--as", "alice", "--mailbox", "default", "--from", "bob"]
 
 
 def test_send_prints_watch_hint(workspace: Path) -> None:
@@ -1854,7 +1854,7 @@ def test_watch_thread_retries_until_matching_reply_is_pulled(
     assert result.exit_code == 0, result.output
     assert len(pulls) == 2
     assert result.stdout.strip().splitlines() == ["reply.md"]
-    assert pulls[-1][-2:] == ["--mailbox", mailbox]
+    assert pulls[-1][-4:] == ["--mailbox", mailbox, "--from", "bob"]
 
 
 def test_watch_thread_failed_pull_times_out_without_reporting_reply(
@@ -2052,3 +2052,40 @@ def test_watch_matches_remote_reply_before_probing_next_peer(
     assert result.exit_code == 0, result.output
     assert result.stdout == "reply.md\n"
     assert probes == (["bob"] if phase == "baseline" else ["bob", "charlie", "bob"])
+
+
+@pytest.mark.parametrize("all_mailboxes", [False, True])
+def test_watch_pull_only_contacts_the_matching_sender(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, all_mailboxes: bool
+) -> None:
+    root = _send_root(workspace)
+    registry = {"offline": {"ssh": "offline@offline", "workspace": "/offline"}}
+    registry.update(yaml.safe_load((workspace / "messages" / "agents.yaml").read_text()))
+    (workspace / "messages" / "agents.yaml").write_text(yaml.dump(registry, sort_keys=False))
+    reply = _thread_row("reply.md", root)
+    reply["mailbox"] = "ops" if all_mailboxes else "default"
+    probes: list[str] = []
+
+    def _poll(name: str, _cfg: dict, **_kw: object) -> list[dict]:
+        probes.append(name)
+        assert name == "bob", "An unrelated offline agent must not delay reply delivery"
+        return [reply]
+
+    def _run(cmd: list[str], **kwargs: object) -> None:
+        if cmd[0] == "scp":
+            Path(cmd[-1]).write_text(f"---\n{yaml.dump(reply)}---\nbody\n")
+        else:
+            # Exercise the real pull CLI, including its registry iteration.
+            result = CliRunner().invoke(agent, cmd[cmd.index("pull") :])
+            assert result.exit_code == 0, result.output
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _poll)
+    monkeypatch.setattr(agent_cli.subprocess, "run", _run)
+    args = ["watch", "--thread", root, "--once", "--pull", "--timeout", "2s"]
+    if all_mailboxes:
+        args.append("--all-mailboxes")
+    result = CliRunner().invoke(agent, args)
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "reply.md\n"
+    assert probes == ["bob", "bob"]
+    assert (agent_cli._mailbox_root(reply["mailbox"]) / "inbox" / "reply.md").is_file()

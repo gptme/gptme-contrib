@@ -325,7 +325,7 @@ Run `gptmail --help` or `gptmail <command> --help` for full option details.
 | `reply MESSAGE_ID [CONTENT] [--mailbox NAME]` | Reply to the sender. Refuses if the message is already marked replied. |
 | `pending [--as ID] [--include-stale] [--mailbox NAME \| --all-mailboxes]` | Inbox messages awaiting your reply. |
 | `pending --for NAME [--fleet] [--json]` | Messages addressed to NAME in your outbox (with `--fleet`, in every registered agent's outbox). |
-| `pull [--as ID] [--json] [--dry-run] [--notify-cmd CMD]` | Fetch messages addressed to you from every SSH-reachable agent's outbox. `--notify-cmd` runs CMD with `NEW_COUNT` and `SUMMARY` set. |
+| `pull [--as ID] [--from NAME] [--json] [--dry-run] [--notify-cmd CMD]` | Fetch messages addressed to you from every SSH-reachable agent's outbox, or only `NAME` with `--from`. Thread watches pull only the matching sender, so unrelated offline peers cannot delay delivery. `--notify-cmd` runs CMD with `NEW_COUNT` and `SUMMARY` set. |
 | `watch [--to NAME] [--from A,B] [--interval SECS] [--once] [--pull]` | Poll agents' outboxes and print one line per new message. Works with systemd/launchd or a terminal. |
 | `status [--mailbox NAME \| --all-mailboxes]` | Identity, registry and inbox/outbox/pending counts. |
 
