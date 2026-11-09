@@ -446,7 +446,11 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Drive evaluate_pr with everything but the review signal stubbed out."""
 
     def _run(
-        *, greptile: dict[str, Any], comments: list[str]
+        *,
+        greptile: dict[str, Any],
+        comments: list[str],
+        reviewed_sha: str | None = None,
+        greptile_score: int = 5,
     ) -> tuple[Any, list[list[str]]]:
         calls: list[list[str]] = []
 
@@ -483,8 +487,10 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
                 "authors": [],
             },
         )
-        monkeypatch.setattr(smc, "greptile_summary_score", lambda r, n: 5)
-        monkeypatch.setattr(smc, "greptile_summary_reviewed_commit", lambda r, n: None)
+        monkeypatch.setattr(smc, "greptile_summary_score", lambda r, n: greptile_score)
+        monkeypatch.setattr(
+            smc, "greptile_summary_reviewed_commit", lambda r, n: reviewed_sha
+        )
         result = smc.evaluate_pr(
             "gptme/gptme-contrib", 1382, workspace_repos=["gptme/gptme-contrib"]
         )
@@ -597,6 +603,149 @@ def test_greptile_path_is_untouched_and_pays_one_marker_fetch(evaluate: Any) -> 
     assert result.eligible is True
     marker_fetches = [c for c in calls if "issues/1382/comments" in " ".join(c)]
     assert len(marker_fetches) == 1
+
+
+# --- A current-head Greptile review as the machine-review alternative ---------
+# Erik's 2026-10-23 standup: routine PRs "just need the Greptile or the AI
+# reviewer". Before this, a fresh Greptile was still paired with a mandatory
+# own-AI-review marker, so a capacity-limited reviewer (no marker / one pass)
+# blocked PRs Greptile had already covered at the exact head.
+
+
+def test_greptile_clean_at_head_substitutes_for_missing_ai_review(
+    evaluate: Any,
+) -> None:
+    """No own-review marker, but Greptile 5/5 at the current head: eligible."""
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(None)],
+        reviewed_sha=HEAD_SHA,
+    )
+    assert result.eligible is True
+    assert result.reasons == []
+    assert any("AI review substituted" in w for w in result.warnings)
+
+
+def test_greptile_substitution_accepts_a_one_pass_marker(evaluate: Any) -> None:
+    """A single-pass AI marker is a capacity failure, not a negative verdict."""
+    consensus = dict(
+        FULL_CONSENSUS,
+        requested=1,
+        answered=1,
+        jobs_requested=1,
+        jobs_answered=1,
+        min_agreement=1,
+        min_agreement_requested=1,
+    )
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(_marker(consensus=consensus))],
+        reviewed_sha=HEAD_SHA,
+    )
+    assert result.eligible is True
+    assert any("AI review substituted" in w for w in result.warnings)
+
+
+def test_greptile_substitution_accepts_a_stale_ai_marker(evaluate: Any) -> None:
+    """Greptile covers the current head; an older AI marker names a dead head."""
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(_marker(sha="deadbeefcafe"))],
+        reviewed_sha=HEAD_SHA,
+    )
+    assert result.eligible is True
+    assert any("AI review substituted" in w for w in result.warnings)
+
+
+def test_greptile_substitution_refuses_a_stale_greptile(evaluate: Any) -> None:
+    """Changed head voided the Greptile review: no substitute, still blocked.
+
+    This is the gptme/gptme#4547 shape — a positive score left over from an
+    older commit cannot stand in for a review of the current head.
+    """
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(None)],
+        reviewed_sha="1111111111",
+    )
+    assert result.eligible is False
+    assert "AI review required" in result.reasons
+    assert not any("AI review substituted" in w for w in result.warnings)
+
+
+def test_greptile_substitution_refuses_missing_greptile_provenance(
+    evaluate: Any,
+) -> None:
+    """Fresh-looking status with no reviewed commit is unknown, not clean."""
+    result, _ = evaluate(
+        greptile={"has_review": True, "unresolved": 0, "total": 0},
+        comments=[_comment(None)],
+        reviewed_sha=None,
+    )
+    assert result.eligible is False
+    assert "AI review required" in result.reasons
+
+
+def test_greptile_substitution_refuses_below_the_score_floor(evaluate: Any) -> None:
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(None)],
+        reviewed_sha=HEAD_SHA,
+        greptile_score=4,
+    )
+    assert result.eligible is False
+    assert not any("AI review substituted" in w for w in result.warnings)
+
+
+def test_greptile_substitution_refuses_unresolved_threads(evaluate: Any) -> None:
+    result, _ = evaluate(
+        greptile={"has_review": True, "unresolved": 1, "total": 1},
+        comments=[_comment(None)],
+        reviewed_sha=HEAD_SHA,
+    )
+    assert result.eligible is False
+    assert not any("AI review substituted" in w for w in result.warnings)
+
+
+def test_greptile_substitution_refuses_an_unknown_greptile_state() -> None:
+    """An API failure is unknown, and unknown is never a clean substitute."""
+    substitute = smc.greptile_satisfies_ai_review(
+        ai_review={"accepted": False, "refusal": "absent", "detail": None},
+        greptile_is_fresh=True,
+        greptile_unknown=True,
+        greptile_unresolved=0,
+        greptile_score=5,
+    )
+    assert substitute is None
+
+
+def test_greptile_substitution_never_erases_an_open_p0(evaluate: Any) -> None:
+    """A negative own-review verdict is not "no verdict" and stays blocking.
+
+    The marker is current-head with a raw P0/P1 score but no thread proves the
+    finding was disposed, so the own reviewer's verdict stands: a Greptile 5/5
+    must not launder it (the gptme/gptme#4622 constant-provenance class).
+    """
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(_marker(score=2))],
+        reviewed_sha=HEAD_SHA,
+    )
+    assert result.eligible is False
+    assert any("AI review" in r for r in result.reasons)
+    assert not any("AI review substituted" in w for w in result.warnings)
+
+
+def test_greptile_substitution_is_a_noop_when_ai_review_is_accepted(
+    evaluate: Any,
+) -> None:
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(_marker())],
+        reviewed_sha=HEAD_SHA,
+    )
+    assert result.eligible is True
+    assert not any("AI review substituted" in w for w in result.warnings)
 
 
 def test_greptile_stale_with_unresolved_is_advisory_with_clean_ai_review(

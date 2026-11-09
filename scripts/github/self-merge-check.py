@@ -8,6 +8,10 @@ Policy summary:
 - CI must be green (or skipped)
 - A machine review must be present and clean: own self-hosted AI reviewer with
   consensus pass and zero open P1 findings (see "Accepting our own review" below).
+  A current-head Greptile review with no unresolved threads at the configured
+  score floor is accepted as an *alternative* input when the own reviewer has no
+  usable verdict (absent, stale, abstained, or one-pass/degraded consensus). An
+  open P0/P1 from our reviewer is never erased by a positive Greptile score.
   Greptile review uses a 3-branch staleness policy (Erik decision 2026-09-07):
     1. Fresh Greptile on current head → 5/5 floor applies (original gate).
     2. Stale or dark Greptile AND fresh own-AI-review → AI reviewer verdict is the gate.
@@ -1642,7 +1646,7 @@ def fetch_ai_review_status(
     round-trip, matching the other review-data helpers.
     """
     if not _ai_review_enabled():
-        return {"accepted": False, "detail": None}
+        return {"accepted": False, "detail": None, "refusal": "disabled"}
 
     if isinstance(marker_result, _MarkerUnset):
         # Use the checked variant so a failed API call (timeout, rate limit,
@@ -1657,10 +1661,11 @@ def fetch_ai_review_status(
         return {
             "accepted": False,
             "detail": "AI review marker lookup failed (API error, timeout, or identity resolution failure)",
+            "refusal": "lookup_failed",
         }
     marker = raw
     if marker is None:
-        return {"accepted": False, "detail": None}
+        return {"accepted": False, "detail": None, "refusal": "absent"}
 
     if not _sha_matches_head(str(marker.get("sha") or ""), head_sha):
         return {
@@ -1669,11 +1674,16 @@ def fetch_ai_review_status(
                 f"AI review is stale (reviewed {marker.get('sha') or 'unknown'}, "
                 f"head is {head_sha[:12]})"
             ),
+            "refusal": "stale",
         }
 
     score = marker.get("score")
     if score is None:
-        return {"accepted": False, "detail": "AI reviewer abstained (no score)"}
+        return {
+            "accepted": False,
+            "detail": "AI reviewer abstained (no score)",
+            "refusal": "abstained",
+        }
     # Type and threshold are separate refusals so the detail names the actual
     # defect. Folding them together reported a malformed marker (score "5" as a
     # string, or 5.0) as `AI review score 5/5 below 5/5` — a sentence that is
@@ -1687,6 +1697,7 @@ def fetch_ai_review_status(
             "detail": (
                 f"AI review score is not an integer ({type(score).__name__}: {score!r})"
             ),
+            "refusal": "invalid_score",
         }
     # A score outside the rubric is corruption, not a review — `confidence_score`
     # emits 1-5 and nothing else, and a bare `<` would wave it through while
@@ -1704,6 +1715,7 @@ def fetch_ai_review_status(
                 f"AI review score {score}/5 outside the rubric "
                 f"({AI_REVIEW_MIN_SCORE}-{AI_REVIEW_CLEAN_SCORE})"
             ),
+            "refusal": "invalid_score",
         }
 
     # Disposition, not score. A score of 4 (surviving P2s) or even 3 (a P1 that
@@ -1724,11 +1736,19 @@ def fetch_ai_review_status(
         expected_author=expected_author,
     )
     if disposition:
-        return {"accepted": False, "detail": f"AI review {disposition}"}
+        return {
+            "accepted": False,
+            "detail": f"AI review {disposition}",
+            "refusal": "disposition_shortfall",
+        }
 
     shortfall = _consensus_shortfall(marker.get("consensus"))
     if shortfall:
-        return {"accepted": False, "detail": f"AI review {shortfall}"}
+        return {
+            "accepted": False,
+            "detail": f"AI review {shortfall}",
+            "refusal": "consensus_shortfall",
+        }
 
     return {
         "accepted": True,
@@ -1736,6 +1756,7 @@ def fetch_ai_review_status(
             f"AI review {score}/5 at current head {str(marker.get('sha'))[:12]}, "
             "findings disposed"
         ),
+        "refusal": None,
     }
 
 
@@ -3385,6 +3406,67 @@ def pointer_only_gitlink_ai_review_waiver(
     )
 
 
+# AI-review refusals that mean "no usable verdict at the current head" rather
+# than "the reviewer produced a negative verdict". Only these may be replaced
+# by an independent, current-head Greptile review (see
+# ``greptile_satisfies_ai_review``). ``disposition_shortfall`` (an open P0/P1)
+# and both ``invalid_score`` cases are deliberately absent: a positive Greptile
+# score must never erase a negative review, and a marker we cannot parse may be
+# hiding one. ``lookup_failed`` is absent because "we could not ask" is not
+# "the reviewer did not run".
+_AI_REVIEW_SUBSTITUTABLE_REFUSALS = frozenset(
+    {"absent", "stale", "abstained", "consensus_shortfall"}
+)
+
+
+def greptile_satisfies_ai_review(
+    *,
+    ai_review: dict[str, Any],
+    greptile_is_fresh: bool,
+    greptile_unknown: bool,
+    greptile_unresolved: int,
+    greptile_score: int | None,
+) -> str | None:
+    """Whether a current-head, clean Greptile review is the machine-review signal.
+
+    Erik's 2026-10-23 standup said routine PRs "just need the Greptile or the AI
+    reviewer". The gate only ever implemented the second half as the fallback
+    for a *missing* Greptile; a fresh Greptile still had to be accompanied by an
+    own-AI-review marker. With the marker absent or one-pass (the reviewer is
+    capacity-limited on OpenRouter/subscription), a PR that Greptile had already
+    reviewed at the exact head stayed blocked for lack of a second reviewer.
+    In the 2026-10-15->23 ledger window 23 Erik-merged PRs were blocked only by
+    the missing machine review and 12 of them carried a fresh Greptile 5/5.
+
+    This is an *alternative input*, not a relaxation of any other control:
+    CI, author, base/head, category/placement, sensitive paths, human review
+    threads, the Greptile floor and the unresolved-thread count are unchanged.
+    It cannot fire on a negative own-review verdict (see
+    ``_AI_REVIEW_SUBSTITUTABLE_REFUSALS``) and it refuses anything less than a
+    current-head review at the configured score floor: stale head, unknown
+    provenance, below-floor score or any unresolved thread all keep the PR
+    blocked exactly as before.
+
+    Returns a warning string when the substitution applies, else None.
+    """
+    if ai_review.get("accepted"):
+        return None
+    refusal = ai_review.get("refusal")
+    if refusal not in _AI_REVIEW_SUBSTITUTABLE_REFUSALS:
+        return None
+    if greptile_unknown or not greptile_is_fresh:
+        return None
+    if greptile_unresolved > 0:
+        return None
+    min_score = _parse_self_merge_min_greptile_score()
+    if type(greptile_score) is not int or greptile_score < min_score:
+        return None
+    return (
+        f"AI review substituted: Greptile {greptile_score}/5 with no unresolved "
+        f"threads at the current head (AI review refusal: {refusal})"
+    )
+
+
 def evaluate_pr(
     repo: str, number: int, *, workspace_repos: list[str] | None
 ) -> CheckResult:
@@ -3631,10 +3713,20 @@ def evaluate_pr(
         if waiver:
             result.warnings.append(waiver)
         else:
-            reason = "AI review required"
-            if ai_review["detail"]:
-                reason += f": {ai_review['detail']}"
-            result.reasons.append(reason)
+            substituted = greptile_satisfies_ai_review(
+                ai_review=ai_review,
+                greptile_is_fresh=greptile_is_fresh,
+                greptile_unknown=bool(greptile.get("unknown")),
+                greptile_unresolved=greptile_unresolved,
+                greptile_score=greptile_score,
+            )
+            if substituted:
+                result.warnings.append(substituted)
+            else:
+                reason = "AI review required"
+                if ai_review["detail"]:
+                    reason += f": {ai_review['detail']}"
+                result.reasons.append(reason)
 
     human_threads = fetch_unresolved_human_threads(
         repo, number, review_data=shared_review_data
