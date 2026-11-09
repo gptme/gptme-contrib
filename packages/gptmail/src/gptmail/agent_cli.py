@@ -42,6 +42,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -53,7 +54,14 @@ from gptmail.communication_utils.state.tracking import (
     MessageState,
 )
 from gptmail.communication_utils.state.locks import FileLock
-from gptmail.transport.agent import _FM_DELIM, AgentTransport, Deliver, meta_of
+from gptmail.transport.agent import (
+    _FM_DELIM,
+    AgentTransport,
+    Deliver,
+    local_delivery_time,
+    meta_of,
+    write_inbox_metadata,
+)
 
 
 # Inbox messages older than this (days) are assumed handled and no longer
@@ -271,6 +279,10 @@ def _ssh_deliver(agents: dict[str, dict[str, str]], *, mailbox: str = "default")
             "-o",
             "ControlPersist=60",
         ]
+        # Stage under a non-message suffix in the same directory. Readers must
+        # never see parseable frontmatter before SCP has finished the body.
+        remote_temp = f"{remote_inbox}.{local_path.name}.{uuid.uuid4().hex}.part"
+        remote_final = f"{remote_inbox}{local_path.name}"
         try:
             subprocess.run(
                 ["ssh", *ssh_opts, ssh_target, f"mkdir -p {shlex.quote(remote_inbox)}"],
@@ -283,15 +295,36 @@ def _ssh_deliver(agents: dict[str, dict[str, str]], *, mailbox: str = "default")
                     "scp",
                     *ssh_opts,
                     str(local_path),
-                    f"{ssh_target}:{remote_inbox}{local_path.name}",
+                    f"{ssh_target}:{shlex.quote(remote_temp)}",
                 ],
                 check=True,
                 capture_output=True,
                 timeout=15,
             )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            subprocess.run(
+                [
+                    "ssh",
+                    *ssh_opts,
+                    ssh_target,
+                    f"ln -- {shlex.quote(remote_temp)} {shlex.quote(remote_final)}",
+                ],
+                check=True,
+                capture_output=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             click.echo(f"Error delivering to {recipient}: {e}", err=True)
             return False
+        finally:
+            try:
+                subprocess.run(
+                    ["ssh", *ssh_opts, ssh_target, f"rm -f -- {shlex.quote(remote_temp)}"],
+                    check=True,
+                    capture_output=True,
+                    timeout=10,
+                )
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                pass  # A disconnected peer may retain a harmless non-message staging file.
         return True
 
     return _deliver
@@ -516,7 +549,7 @@ def _mark_read(path: Path) -> None:
         fm = re.sub(r"^read: false$", "read: true", fm, flags=re.MULTILINE)
     else:
         fm = fm.rstrip("\n") + "\nread: true\n"
-    path.write_text("---".join([parts[0], fm, parts[2]]))
+    write_inbox_metadata(path, "---".join([parts[0], fm, parts[2]]))
 
 
 def _mark_replied(path: Path) -> None:
@@ -540,7 +573,7 @@ def _mark_replied(path: Path) -> None:
         fm = fm.rstrip("\n") + "\nreplied: true\n"
     else:
         fm = re.sub(r"^replied: false$", "replied: true", fm, flags=re.MULTILINE)
-    path.write_text("---".join([parts[0], fm, parts[2]]))
+    write_inbox_metadata(path, "---".join([parts[0], fm, parts[2]]))
 
 
 def _resolve_message(
@@ -1780,8 +1813,8 @@ def watch(
         for key, meta, path in inbox_messages:
             if delivered_before is not None:
                 try:
-                    # ctime records local delivery even when copy preserves mtime.
-                    if path.stat().st_ctime > delivered_before:
+                    # Metadata rewrites retain the receiver's original ctime.
+                    if local_delivery_time(path) > delivered_before:
                         continue
                 except FileNotFoundError:
                     continue  # A concurrent consumer moved the inbox file.

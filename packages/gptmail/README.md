@@ -201,7 +201,9 @@ gptmail agent watch --thread <message-id> --once --pull --timeout 2h
 `watch --thread` fires only on a message whose `in_reply_to` chain reaches the given
 ID, so a direct reply or a reply to a reply counts. Unrelated messages from the same
 agent are ignored. A reply that already exists fires immediately. Replies pushed into
-the local inbox are matched as well. On timeout the command exits 124.
+the local inbox are matched as well. Push and pull publish complete files atomically;
+read/reply metadata updates retain the receiver-local arrival time used for the final
+deadline scan. On timeout the command exits 124.
 
 **Pull-only recipients.** A recipient that cannot accept inbound SSH (for example a
 person on a laptop) is marked `delivery: pull-only`. Messages to it stay in the

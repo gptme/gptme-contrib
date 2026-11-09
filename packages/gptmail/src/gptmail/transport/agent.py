@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import tempfile
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -109,6 +110,31 @@ def meta_of(path: Path) -> dict | None:
     except OSError:
         return None
     return split_frontmatter(content)[0]
+
+
+def local_delivery_time(path: Path) -> float:
+    """Receiver-local arrival time, retained across our atomic metadata updates."""
+    with path.open() as source:
+        arrival = os.fstat(source.fileno()).st_ctime
+        meta, _ = split_frontmatter(source.read())
+    value = (meta or {}).get("_local_received_at")
+    return float(value) if isinstance(value, (int, float)) else arrival
+
+
+def write_inbox_metadata(path: Path, content: str) -> None:
+    """Publish read/replied stamps without losing the original arrival time."""
+    arrival = local_delivery_time(path)
+    parts = _FM_DELIM.split(content, maxsplit=2)
+    if len(parts) >= 3 and not re.search(r"^_local_received_at:", parts[1], re.MULTILINE):
+        parts[1] = parts[1].rstrip("\n") + f"\n_local_received_at: {arrival}\n"
+        content = "---".join(parts)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as output:
+            output.write(content)
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
 
 
 class AgentTransport:
@@ -359,7 +385,7 @@ class AgentTransport:
                         fm = fm.rstrip("\n") + "\nread: true\n"
                     parts[1] = fm
                     content = "---".join(parts)
-                    path.write_text(content)
+                    write_inbox_metadata(path, content)
         return content
 
     def _lookup_meta(self, message_id: str) -> dict | None:
@@ -433,7 +459,15 @@ class AgentTransport:
 
         def _deliver(local_path: Path, _recipient: str) -> bool:
             dest.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(local_path, dest / local_path.name)
+            fd, name = tempfile.mkstemp(prefix=f".{local_path.name}.", dir=dest)
+            os.close(fd)
+            try:
+                shutil.copy2(local_path, name)
+                os.link(name, dest / local_path.name)
+            except FileExistsError:
+                pass  # Preserve the first delivery and any receiver-side tracking.
+            finally:
+                Path(name).unlink(missing_ok=True)
             return True
 
         return _deliver

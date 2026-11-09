@@ -326,3 +326,22 @@ def test_mark_read_survives_dashes_in_in_reply_to(tmp_path: Path) -> None:
     assert (
         meta["in_reply_to"] == tricky_id
     ), f"in_reply_to was corrupted: {meta.get('in_reply_to')!r}"
+
+
+def test_local_delivery_does_not_publish_partial_message(tmp_path: Path, monkeypatch) -> None:
+    from gptmail.transport import agent as transport_module
+
+    source = tmp_path / "reply.md"
+    source.write_text("---\nfrom: bob\n---\ncomplete body\n")
+    inbox = tmp_path / "inbox"
+    copy = transport_module.shutil.copy2
+
+    def _copy(src, dest):
+        Path(dest).write_text("---\nfrom: bob\n---\n")
+        assert not list(inbox.glob("*.md"))
+        return copy(src, dest)
+
+    monkeypatch.setattr(transport_module.shutil, "copy2", _copy)
+    assert AgentTransport.local_deliver(inbox)(source, "alice") is True
+    assert (inbox / source.name).read_text() == source.read_text()
+    assert not list(inbox.glob(".*"))

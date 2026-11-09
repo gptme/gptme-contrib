@@ -1474,6 +1474,19 @@ def _write_local(folder: Path, filename: str, meta: dict) -> None:
     (folder / filename).write_text(f"---\n{yaml.dump(meta)}---\n\nbody\n")
 
 
+def _mock_delivery_ctime(monkeypatch, timestamp):
+    """Control filesystem ctime too, not just Python's wall/monotonic clocks."""
+    stat, fstat = Path.stat, os.fstat
+
+    def _with_ctime(result):
+        fields = list(result)
+        fields[9] = timestamp()
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(Path, "stat", lambda self, *a, **kw: _with_ctime(stat(self, *a, **kw)))
+    monkeypatch.setattr(os, "fstat", lambda fd: _with_ctime(fstat(fd)))
+
+
 def _scripted_rows(monkeypatch: pytest.MonkeyPatch, polls: list[list[dict] | None]) -> list[str]:
     """Return successive row lists per probe (last one repeats); records probed agents."""
     probed: list[str] = []
@@ -2038,8 +2051,8 @@ def test_watch_caps_pull_and_rejects_late_reply(
     root = _send_root(workspace)
     clock = [1000.0]
     reply = _thread_row("reply.md", root)
-    # Keep the filesystem timestamp consistent with the simulated late pull.
-    wall_start = agent_cli.time.time() - (3 if late else 0)
+    wall_start = 1000.0
+    _mock_delivery_ctime(monkeypatch, lambda: wall_start + (3 if late else 1))
     monkeypatch.setattr(agent_cli.time, "time", lambda: wall_start)
     monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
 
@@ -2103,9 +2116,8 @@ def test_watch_checks_push_delivery_at_deadline(
     root = _send_root(workspace)
     reply = _thread_row("reply.md", root)
     clock = [1000.0]
-    # The file is written at real wall time below. Place that timestamp inside
-    # or outside the watch window independently of the simulated blocking wait.
-    wall_start = agent_cli.time.time() - (3 if late else 0)
+    wall_start = 1000.0
+    _mock_delivery_ctime(monkeypatch, lambda: wall_start + (3 if late else 1))
     monkeypatch.setattr(agent_cli.time, "time", lambda: wall_start)
     monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
     probes: list[str] = []
@@ -2146,7 +2158,8 @@ def test_watch_checks_push_delivery_during_pull(
     remote = _thread_row("remote.md", root)
     pushed = remote if same_reply else _thread_row("pushed.md", root)
     clock = [1000.0]
-    wall_start = agent_cli.time.time() - (3 if late else 0)
+    wall_start = 1000.0
+    _mock_delivery_ctime(monkeypatch, lambda: wall_start + (3 if late else 1))
     monkeypatch.setattr(agent_cli.time, "time", lambda: wall_start)
     monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
     _scripted_rows(monkeypatch, [[remote]])
@@ -2316,3 +2329,69 @@ def test_watch_thread_continuous_reports_every_match_once(
     assert result.exit_code == 0, result.output
     assert result.stdout.splitlines() == ["reply-1.md", "reply-2.md"]
     assert sleeps[0] == 2  # The repeated batch is polled without duplicate output.
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_ssh_push_publishes_only_complete_messages(
+    tmp_path: Path, monkeypatch, failure: bool
+) -> None:
+    """Exercise the actual remote shell commands locally, inspecting mid-SCP visibility."""
+    import shlex
+
+    inbox = tmp_path / "peer" / "messages" / "inbox"
+    source = tmp_path / "reply.md"
+    source.write_text("---\nfrom: bob\nto: alice\nin_reply_to: ask.md\n---\n\ncomplete body\n")
+    run = agent_cli.subprocess.run
+
+    def _run(cmd, **kwargs):
+        if cmd[0] == "ssh":
+            return run(["sh", "-c", cmd[-1]], **kwargs)
+        assert cmd[0] == "scp"
+        remote = cmd[-1].split(":", 1)[1]
+        destination = Path(shlex.split(remote)[0])
+        destination.write_text("---\nfrom: bob\nto: alice\nin_reply_to: ask.md\n---\n")
+        assert not list(inbox.glob("*.md")), "partial SCP must not be an inbox message"
+        if failure:
+            raise agent_cli.subprocess.CalledProcessError(1, cmd)
+        destination.write_text(source.read_text())
+        return agent_cli.subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _run)
+    deliver = agent_cli._ssh_deliver(
+        {"alice": {"ssh": "alice@peer", "workspace": str(tmp_path / "peer")}}
+    )
+    assert deliver(source, "alice") is (not failure)
+    if failure:
+        assert not list(inbox.glob("*.md"))
+    else:
+        assert (inbox / source.name).read_text() == source.read_text()
+    assert not list(inbox.glob(".*")), "staging files must be cleaned after success or failure"
+
+
+@pytest.mark.parametrize("update", ["read", "mark_read", "mark_replied"])
+def test_watch_retains_delivery_time_after_metadata_update(workspace, monkeypatch, update):
+    root = _send_root(workspace)
+    reply = _thread_row("reply.md", root)
+    path = workspace / "messages" / "inbox" / "reply.md"
+    clock = [1000.0]
+    ctime = [1001.0]
+    _mock_delivery_ctime(monkeypatch, lambda: ctime[0])
+    monkeypatch.setattr(agent_cli.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+
+    def _poll(*args, **kwargs):
+        _write_local(path.parent, path.name, reply)
+        clock[0] = 1003.0
+        if update == "read":
+            assert CliRunner().invoke(agent, ["read", path.name]).exit_code == 0
+        elif update == "mark_read":
+            agent_cli._mark_read(path)
+        else:
+            agent_cli._mark_replied(path)
+        ctime[0] = 1003.0  # Rewriting metadata changes inode ctime after expiry.
+        return None
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _poll)
+    result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once", "--timeout", "2s"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "reply.md\n"
