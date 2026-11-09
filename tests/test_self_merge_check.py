@@ -826,8 +826,20 @@ def test_fetch_pr_files_returns_empty_list_for_pr_with_no_changed_files() -> Non
     assert files == []
 
 
-def test_fetch_greptile_review_data_returns_partial_on_mid_pagination_failure() -> None:
-    """Mid-pagination failure should return already-collected data, not None."""
+@pytest.mark.parametrize(
+    "second_page",
+    [
+        "",
+        "not json",
+        '{"errors": [{"message": "timeout"}]}',
+        '{"data": {"repository": {"pullRequest": {"reviewThreads": null}}}}',
+        '{"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [], "pageInfo": {"hasNextPage": true, "endCursor": null}}}}}}',
+    ],
+)
+def test_fetch_greptile_review_data_refuses_partial_on_mid_pagination_failure(
+    second_page: str,
+) -> None:
+    """An unread second page may hide an unresolved human or own-review P1."""
     first_page = {
         "data": {
             "repository": {
@@ -870,19 +882,14 @@ def test_fetch_greptile_review_data_returns_partial_on_mid_pagination_failure() 
         "run_gh",
         side_effect=[
             self_merge_check.json.dumps(first_page),
-            "",  # second page fails (network error / timeout)
+            second_page,
         ],
     ):
         result = self_merge_check._fetch_greptile_review_data(
             "gptme/gptme-contrib", 504
         )
 
-    # Should return partial data from page 1, not None
-    assert result is not None
-    reviews, threads = result
-    assert len(reviews) == 1
-    assert reviews[0]["author"]["login"] == "greptile-apps"
-    assert len(threads) == 1
+    assert result is None
 
 
 @pytest.mark.parametrize(

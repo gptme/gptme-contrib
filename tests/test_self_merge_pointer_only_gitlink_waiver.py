@@ -125,6 +125,7 @@ def _evaluate(
     greptile_fresh: bool = True,
     greptile_unresolved: int = 0,
     merged_upstream: bool | None = True,
+    refusal: str = "abstained",
     gitmodules: str | None = GITMODULES,
     gitlink_patch: str = GITLINK_PATCH,
     allowed_paths: str = "gptme/gptme-cloud:gptme",
@@ -173,6 +174,7 @@ def _evaluate(
             return_value={
                 "accepted": False,
                 "detail": "AI reviewer abstained (no score)",
+                "refusal": refusal,
             },
         ),
         patch.object(smc, "_fetch_pr_file_shapes", return_value=shapes),
@@ -195,13 +197,18 @@ def test_evaluate_pr_waives_ai_review_for_901_shape() -> None:
     assert result.category == "repo-allowlisted(gptme/gptme-cloud)"
 
 
-def test_evaluate_pr_blocks_branch_only_pin() -> None:
+@pytest.mark.parametrize(
+    "refusal", ["abstained", "absent", "stale", "consensus_shortfall"]
+)
+def test_evaluate_pr_blocks_branch_only_pin(refusal: str) -> None:
     """Replay gptme-cloud#898's 9da4505: no merged upstream PR → still ineligible."""
     branch_patch = (
         f"@@ -1 +1 @@\n-Subproject commit {OLD_SHA}\n"
         f"+Subproject commit {BRANCH_ONLY_SHA}\n"
     )
-    result = _evaluate(merged_upstream=False, gitlink_patch=branch_patch)
+    result = _evaluate(
+        merged_upstream=False, gitlink_patch=branch_patch, refusal=refusal
+    )
     assert not result.eligible
     assert any("AI review required" in r for r in result.reasons)
     assert not any("AI review waived" in w for w in result.warnings)

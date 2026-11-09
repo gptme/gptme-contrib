@@ -807,12 +807,8 @@ def _fetch_greptile_review_data(
             gh_args += ["-f", f"after={cursor}"]
         raw = run_gh(gh_args, timeout=15)
         if not raw:
-            # If we already have review data from page 1, degrade gracefully by
-            # returning what was collected so far rather than discarding it.  A
-            # mid-pagination transient error should not produce a false "Greptile
-            # review not found" result.
-            if reviews is not None:
-                break
+            # Partial threads cannot prove the absence of unresolved findings.
+            # A later page can contain a human thread or an own-review P0/P1.
             return None
 
         try:
@@ -827,14 +823,23 @@ def _fetch_greptile_review_data(
         if reviews is None:
             reviews = (pr_data.get("reviews") or {}).get("nodes", [])
 
-        threads_data = pr_data.get("reviewThreads", {})
-        all_threads.extend(threads_data.get("nodes", []))
-        page_info = threads_data.get("pageInfo", {})
-        if not page_info.get("hasNextPage"):
+        threads_data = pr_data.get("reviewThreads")
+        if not isinstance(threads_data, dict):
+            return None
+        nodes = threads_data.get("nodes")
+        page_info = threads_data.get("pageInfo")
+        if (
+            not isinstance(nodes, list)
+            or not isinstance(page_info, dict)
+            or type(page_info.get("hasNextPage")) is not bool
+        ):
+            return None
+        all_threads.extend(nodes)
+        if not page_info["hasNextPage"]:
             break
         cursor = page_info.get("endCursor")
         if not cursor:
-            break
+            return None
 
     # reviews is always a list here: all break paths require at least one successful
     # page, and reviews is set from the first page's response (line 385).  The
@@ -3747,6 +3752,27 @@ def evaluate_pr(
                 greptile_unresolved=greptile_unresolved,
                 greptile_score=greptile_score,
             )
+            if substituted:
+                # Pointer bumps have their own merged-upstream provenance
+                # requirement above. Never route around a refused waiver, even
+                # when the marker is absent/stale instead of abstained. Unknown
+                # file shapes cannot establish that this is a non-pointer PR.
+                shapes = _fetch_pr_file_shapes(repo, number)
+                if (
+                    len(shapes) != len(files)
+                    or {shape.get("path") for shape in shapes} != set(files)
+                    or any(
+                        not isinstance(shape.get("patch"), str)
+                        or any(
+                            line.startswith(
+                                ("+Subproject commit ", "-Subproject commit ")
+                            )
+                            for line in shape["patch"].splitlines()
+                        )
+                        for shape in shapes
+                    )
+                ):
+                    substituted = None
             if substituted:
                 result.warnings.append(substituted)
             else:

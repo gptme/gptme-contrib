@@ -451,6 +451,7 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
         comments: list[str],
         reviewed_sha: str | None = None,
         greptile_score: int = 5,
+        file_shapes: list[dict[str, Any]] | None = None,
         review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = (
             [],
             [],
@@ -469,6 +470,19 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
             smc,
             "_fetch_contrib_pr_file_shapes",
             lambda repo, number: [
+                {
+                    "path": "docs/review-tools.md",
+                    "status": "modified",
+                    "patch": "+Document the review tools.\n",
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            smc,
+            "_fetch_pr_file_shapes",
+            lambda repo, number: file_shapes
+            if file_shapes is not None
+            else [
                 {
                     "path": "docs/review-tools.md",
                     "status": "modified",
@@ -630,6 +644,29 @@ def test_greptile_clean_at_head_substitutes_for_missing_ai_review(
     assert result.eligible is True
     assert result.reasons == []
     assert any("AI review substituted" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize(
+    "shapes",
+    [
+        [],
+        [{"path": "docs/review-tools.md", "patch": None}],
+        [{"path": "wrong-path.md", "patch": "+ordinary text"}],
+        [{"path": "docs/review-tools.md", "patch": "+Subproject commit " + "a" * 40}],
+    ],
+)
+def test_greptile_substitution_requires_proven_non_pointer_diff(
+    evaluate: Any, shapes: list[dict[str, Any]]
+) -> None:
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(None)],
+        reviewed_sha=HEAD_SHA,
+        file_shapes=shapes,
+    )
+    assert not result.eligible
+    assert any("AI review required" in r for r in result.reasons)
+    assert not any("AI review substituted" in w for w in result.warnings)
 
 
 def test_greptile_substitution_accepts_a_one_pass_marker(evaluate: Any) -> None:
