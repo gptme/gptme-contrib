@@ -319,8 +319,6 @@ _GH_INTERACTION_RE = re.compile(
 # lists a PR's comments via `gh api repos/o/r/issues/N/comments` was graded
 # productive (gh_interactions >= 1) despite posting nothing.
 _GH_API_CMD_RE = re.compile(r"\bgh\s+api\s")
-_GH_API_METHOD_RE = re.compile(r"(?:^|\s)(?:-X|--method)(?:\s+|=)?['\"]?([A-Za-z]+)")
-_GH_API_FIELD_RE = re.compile(r"(?:^|\s)(?:-f|-F|--field|--raw-field|--input)(?:\s|=|$)")
 
 
 def _split_shell_segments(cmd: str) -> list[str]:
@@ -364,11 +362,41 @@ def _split_shell_segments(cmd: str) -> list[str]:
 
 
 def _gh_api_writes(segment: str) -> bool:
-    """True if a single ``gh api`` invocation is a write (non-GET) request."""
-    method = _GH_API_METHOD_RE.search(segment)
-    if method:
-        return method.group(1).upper() != "GET"
-    return bool(_GH_API_FIELD_RE.search(segment))
+    """True if a single ``gh api`` invocation is a write (non-GET) request.
+
+    Flags are read from shell tokens, not raw text, so a quoted argument value
+    such as ``-f body='Use -X GET'`` is not mistaken for a method flag.
+    """
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        tokens = segment.split()
+    method: str | None = None
+    has_field = False
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in ("-X", "--method"):
+            if i + 1 < len(tokens):
+                method = tokens[i + 1]
+            i += 2
+            continue
+        if tok.startswith("--method="):
+            method = tok.split("=", 1)[1]
+        elif tok.startswith("-X") and len(tok) > 2:
+            method = tok[2:].lstrip("=")
+        elif tok in ("-f", "-F", "--field", "--raw-field", "--input"):
+            has_field = True
+            i += 2
+            continue
+        elif tok.startswith(("--field=", "--raw-field=", "--input=")) or (
+            tok[:2] in ("-f", "-F") and len(tok) > 2
+        ):
+            has_field = True
+        i += 1
+    if method is not None:
+        return method.upper() != "GET"
+    return has_field
 
 
 def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:

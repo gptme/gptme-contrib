@@ -54,9 +54,14 @@ READS = [
     "gh api --method=GET repos/o/r/issues/5/comments -F since=2026-01-01",
     # a write elsewhere in the pipeline doesn't make the read a write
     "gh api repos/o/r/issues/5/comments > /tmp/c.json; curl -X POST http://localhost/x",
+    # flag-like text inside a quoted value is not a flag
+    "gh api repos/o/r/issues/5/comments --jq '.[] | select(.body | contains(\" -f \"))'",
 ]
 
 WRITES = [
+    # quoted "-X GET" inside the body must not mask the real -f write
+    "gh api repos/o/r/issues/5/comments -f body='Use -X GET for reads'",
+    "gh api -XPOST repos/o/r/issues/5/comments --input r.json",
     "gh api repos/o/r/issues/5/comments -f body='LGTM'",
     "gh api repos/o/r/issues/5/comments --raw-field body=@reply.md",
     "gh api -X POST repos/o/r/pulls/12/reviews --input review.json",
