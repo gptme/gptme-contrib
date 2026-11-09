@@ -1754,3 +1754,31 @@ def test_watch_thread_filters_local_reply_senders(
     assert result.exit_code == 0, result.output
     assert result.stdout.strip().splitlines() == ["20990101-000002-bob-Re.md"]
     assert "Wrong sender" not in result.output
+
+
+@pytest.mark.parametrize("all_mailboxes", [False, True])
+def test_watch_thread_respects_local_mailbox_scope(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, all_mailboxes: bool
+) -> None:
+    root = _send_root(workspace)
+    ops_inbox = workspace / "messages" / "mailboxes" / "ops" / "inbox"
+    _write_local(
+        ops_inbox,
+        "20990101-000001-bob-Ops.md",
+        {"from": "bob", "to": "alice", "subject": "Ops reply", "in_reply_to": root},
+    )
+    _scripted_rows(monkeypatch, [[]])
+
+    def _sleep(_: float) -> None:
+        _write_local(
+            workspace / "messages" / "inbox",
+            "20990101-000002-bob-Default.md",
+            {"from": "bob", "to": "alice", "subject": "Default reply", "in_reply_to": root},
+        )
+
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    scope = ["--all-mailboxes"] if all_mailboxes else ["--mailbox", "default"]
+    result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once", *scope])
+    assert result.exit_code == 0, result.output
+    expected = "20990101-000001-bob-Ops.md" if all_mailboxes else "20990101-000002-bob-Default.md"
+    assert result.stdout.strip().splitlines() == [expected]

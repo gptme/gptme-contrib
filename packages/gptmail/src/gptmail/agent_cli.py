@@ -1725,6 +1725,7 @@ def watch(
         )
 
     reported: set[str] = set()
+    local_inboxes = {_mailbox_root(name) / "inbox" for name in mailboxes}
 
     def _check_thread(remote: dict[str, list[dict]]) -> bool:
         """Report new thread replies; returns True when --once should exit."""
@@ -1733,10 +1734,11 @@ def watch(
             _local_thread_messages(_known_mailboxes()) if watch_local_inbox else ({}, [])
         )
         candidates: list[tuple[str, dict, str, bool]] = []
-        for key, meta, _path in inbox_messages:
+        for key, meta, path in inbox_messages:
             sender = str(meta.get("from", "")).lower()
             if (
-                sender != recipient
+                path.parent in local_inboxes
+                and sender != recipient
                 and (from_agents is None or sender in watch_agents)
                 and _addressed_to(meta, recipient)
             ):
