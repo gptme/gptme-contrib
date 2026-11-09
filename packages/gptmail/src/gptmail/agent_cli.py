@@ -1734,8 +1734,13 @@ def watch(
         )
         candidates: list[tuple[str, dict, str, bool]] = []
         for key, meta, _path in inbox_messages:
-            if str(meta.get("from", "")).lower() != recipient and _addressed_to(meta, recipient):
-                candidates.append((key, meta, str(meta.get("from", "unknown")), True))
+            sender = str(meta.get("from", "")).lower()
+            if (
+                sender != recipient
+                and (from_agents is None or sender in watch_agents)
+                and _addressed_to(meta, recipient)
+            ):
+                candidates.append((key, meta, sender, True))
         for agent_name, rows in remote.items():
             for row in rows:
                 if not row.get("file"):

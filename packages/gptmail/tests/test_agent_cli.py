@@ -1719,3 +1719,38 @@ def test_send_watch_releases_send_lock_before_waiting(
     assert watched == [_only_outbox_msg(workspace).name]
     assert _peer_inbox_count(workspace) == 1
     assert ("Skipping" in result.output) == duplicate
+
+
+@pytest.mark.parametrize("from_filter", [None, "bob", "bob,erik"])
+def test_watch_thread_filters_local_reply_senders(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, from_filter: str | None
+) -> None:
+    """Explicit and inferred sender filters also govern push-delivered replies."""
+    root = _send_root(workspace)
+    config_path = workspace / "messages" / "agents.yaml"
+    registry = yaml.safe_load(config_path.read_text())
+    registry.update({"charlie": {"delivery": "pull-only"}, "erik": {"delivery": "pull-only"}})
+    config_path.write_text(yaml.dump(registry))
+    inbox = workspace / "messages" / "inbox"
+    _write_local(
+        inbox,
+        "20990101-000001-charlie-Re.md",
+        {"from": "charlie", "to": "alice", "subject": "Wrong sender", "in_reply_to": root},
+    )
+    _scripted_rows(monkeypatch, [[]])
+
+    def _sleep(_: float) -> None:
+        _write_local(
+            inbox,
+            "20990101-000002-bob-Re.md",
+            {"from": "BOB", "to": "alice", "subject": "Expected reply", "in_reply_to": root},
+        )
+
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    args = ["watch", "--thread", root, "--once"]
+    if from_filter is not None:
+        args += ["--from", from_filter]
+    result = CliRunner().invoke(agent, args)
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip().splitlines() == ["20990101-000002-bob-Re.md"]
+    assert "Wrong sender" not in result.output
