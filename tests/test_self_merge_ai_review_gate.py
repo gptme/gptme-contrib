@@ -453,6 +453,7 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
         greptile_score: int = 5,
         summary_signal: dict[str, Any] | None = None,
         file_shapes: list[dict[str, Any]] | None = None,
+        publish_on_summary: bool = False,
         review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = (
             [],
             [],
@@ -493,9 +494,23 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
         )
         monkeypatch.setattr(smc, "get_gh_user", lambda: AUTHOR)
         monkeypatch.setattr(smc, "merge_permission", lambda repo: True)
-        monkeypatch.setattr(
-            smc, "_fetch_greptile_review_data", lambda r, n: review_data
-        )
+        summary_published = False
+
+        def fetch_threads(r: str, n: int) -> Any:
+            if publish_on_summary and not summary_published:
+                return ([], [])
+            return review_data
+
+        def fetch_summary(r: str, n: int) -> dict[str, Any]:
+            nonlocal summary_published
+            summary_published = True
+            return (
+                summary_signal
+                if summary_signal is not None
+                else {"score": greptile_score, "reviewed_commit": reviewed_sha}
+            )
+
+        monkeypatch.setattr(smc, "_fetch_greptile_review_data", fetch_threads)
         monkeypatch.setattr(
             smc, "fetch_greptile_status", lambda r, n, review_data=None: greptile
         )
@@ -512,12 +527,7 @@ def evaluate(monkeypatch: pytest.MonkeyPatch) -> Any:
         monkeypatch.setattr(
             smc,
             "_fetch_greptile_summary_signal",
-            lambda r, n: summary_signal
-            if summary_signal is not None
-            else {
-                "score": greptile_score,
-                "reviewed_commit": reviewed_sha,
-            },
+            fetch_summary,
             raising=False,
         )
         monkeypatch.setattr(
@@ -707,6 +717,46 @@ def test_greptile_substitution_requires_score_and_head_from_same_snapshot(
         summary_signal=signal,
     )
     assert not result.eligible
+    assert not any("AI review substituted" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize("late_state", ["greptile", "own-p1", "unreadable"])
+def test_greptile_substitution_checks_threads_published_with_summary(
+    evaluate: Any, monkeypatch: pytest.MonkeyPatch, late_state: str
+) -> None:
+    """A summary published after the first thread read must not launder findings."""
+    monkeypatch.setenv("SELF_MERGE_MIN_GREPTILE_SCORE", "4")
+    threads: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None
+    if late_state == "greptile":
+        threads = (
+            [],
+            [
+                {
+                    "isResolved": False,
+                    "comments": {
+                        "nodes": [
+                            {
+                                "author": {"login": "greptile-apps[bot]"},
+                                "body": "P2 published just before the summary",
+                            }
+                        ]
+                    },
+                }
+            ],
+        )
+    elif late_state == "own-p1":
+        threads = ([], [_finding_thread("P1", resolved=False, total=1)])
+    else:
+        threads = None
+    result, _ = evaluate(
+        greptile=GREPTILE_CLEAN,
+        comments=[_comment(None)],
+        reviewed_sha=HEAD_SHA,
+        greptile_score=4,
+        publish_on_summary=True,
+        review_data=threads,
+    )
+    assert not result.eligible, result.warnings
     assert not any("AI review substituted" in w for w in result.warnings)
 
 

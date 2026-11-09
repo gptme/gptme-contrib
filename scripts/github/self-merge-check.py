@@ -3809,6 +3809,45 @@ def evaluate_pr(
                 ):
                     substituted = None
             if substituted:
+                # The accepted summary can postdate the original thread read.
+                # Read threads AFTER that summary and recheck both reviewers'
+                # findings, rather than treating the old empty set as evidence.
+                shared_review_data = _fetch_greptile_review_data(repo, number)
+                if shared_review_data is None:
+                    result.reasons.append(
+                        "Could not verify review thread state (API failure)"
+                    )
+                    substituted = None
+                else:
+                    ai_review = fetch_ai_review_status(
+                        repo,
+                        number,
+                        head_sha=result.head_sha,
+                        expected_author=current_user,
+                        marker_result=shared_marker,
+                        review_data=shared_review_data,
+                    )
+                    substituted = greptile_satisfies_ai_review(
+                        ai_review=ai_review,
+                        greptile_is_fresh=True,
+                        greptile_unknown=False,
+                        greptile_unresolved=sum(
+                            1
+                            for thread in shared_review_data[1]
+                            if not thread.get("isResolved", False)
+                            and any(
+                                "greptile"
+                                in (
+                                    (comment.get("author") or {}).get("login") or ""
+                                ).lower()
+                                for comment in (thread.get("comments") or {}).get(
+                                    "nodes", []
+                                )[:1]
+                            )
+                        ),
+                        greptile_score=signal_score,
+                    )
+            if substituted:
                 # Pointer bumps have their own merged-upstream provenance
                 # requirement above. Never route around a refused waiver, even
                 # when the marker is absent/stale instead of abstained. Unknown

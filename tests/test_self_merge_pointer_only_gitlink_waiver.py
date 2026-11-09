@@ -145,11 +145,20 @@ def _evaluate(
     ]
     greptile_sha = HEAD_SHA if greptile_fresh else "deadbeef"
     with (
+        patch.object(
+            smc, "run_gh_checked", side_effect=AssertionError("unexpected GitHub call")
+        ),
         patch.dict("os.environ", {"SELF_MERGE_ALLOWED_PATHS": allowed_paths}),
         patch.object(smc, "fetch_pr", return_value=pr_data),
         patch.object(smc, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(smc, "merge_permission", return_value=True),
         patch.object(smc, "_fetch_greptile_review_data", return_value=([], [])),
+        patch.object(smc, "_fetch_ai_review_marker_checked", return_value=None),
+        patch.object(
+            smc,
+            "_fetch_greptile_summary_signal",
+            return_value={"score": greptile_score, "reviewed_commit": greptile_sha},
+        ),
         patch.object(
             smc,
             "fetch_greptile_status",
@@ -212,6 +221,18 @@ def test_evaluate_pr_blocks_branch_only_pin(refusal: str) -> None:
     assert not result.eligible
     assert any("AI review required" in r for r in result.reasons)
     assert not any("AI review waived" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize(
+    "refusal", ["abstained", "absent", "stale", "consensus_shortfall"]
+)
+def test_non_pointer_control_reaches_substitution(refusal: str) -> None:
+    """The branch-pin fixture rejects on patch shape, not missing API stubs."""
+    result = _evaluate(
+        merged_upstream=False, gitlink_patch="+ordinary text", refusal=refusal
+    )
+    assert result.eligible, result.reasons
+    assert any("AI review substituted" in w for w in result.warnings)
 
 
 def test_evaluate_pr_does_not_waive_when_greptile_is_dark() -> None:
