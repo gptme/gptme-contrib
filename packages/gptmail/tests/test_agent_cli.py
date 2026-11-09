@@ -1909,3 +1909,85 @@ def test_watch_does_not_poll_after_sleep_reaches_deadline(
     assert result.exit_code == agent_cli.WATCH_TIMEOUT_EXIT, result.output
     assert result.stdout == ""
     assert len(probed) == 1
+
+
+@pytest.mark.parametrize("phase", ["baseline", "poll"])
+@pytest.mark.parametrize("thread_mode", [True, False])
+def test_watch_rejects_probe_results_after_deadline(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, phase: str, thread_mode: bool
+) -> None:
+    root = _send_root(workspace)
+    clock = [1000.0]
+    probes: list[str] = []
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(agent_cli.time, "sleep", lambda _: None)
+    config = workspace / "messages" / "agents.yaml"
+    registry = yaml.safe_load(config.read_text())
+    registry["charlie"] = {"ssh": "charlie@charlie", "workspace": "/charlie"}
+    config.write_text(yaml.dump(registry))
+
+    def _poll(name: str, _cfg: dict, **_kw: object) -> list[dict]:
+        probes.append(name)
+        if phase == "baseline" or len(probes) == 3:
+            clock[0] += 3
+            return [_thread_row("late.md", root)]
+        return []
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _poll)
+    args = ["watch", "--from", "bob,charlie", "--once", "--timeout", "2s"]
+    if thread_mode:
+        args += ["--thread", root]
+    result = CliRunner().invoke(agent, args)
+    assert result.exit_code == agent_cli.WATCH_TIMEOUT_EXIT, result.output
+    assert result.stdout == ""
+    assert probes == (["bob"] if phase == "baseline" else ["bob", "charlie", "bob"])
+
+
+def test_watch_caps_real_probe_to_remaining_budget(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _send_root(workspace)
+    clock = [1000.0]
+    budgets: list[float] = []
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+
+    def _run(cmd: list[str], **kw: object) -> None:
+        budgets.append(float(kw["timeout"]))
+        clock[0] += budgets[-1]
+        raise agent_cli.subprocess.TimeoutExpired(cmd, budgets[-1])
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _run)
+    result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once", "--timeout", "2s"])
+    assert result.exit_code == agent_cli.WATCH_TIMEOUT_EXIT, result.output
+    assert budgets == [2.0]
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize("late", [False, True])
+def test_watch_caps_pull_and_rejects_late_reply(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, late: bool
+) -> None:
+    root = _send_root(workspace)
+    clock = [1000.0]
+    reply = _thread_row("reply.md", root)
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+
+    def _poll(*_args: object, **_kw: object) -> list[dict]:
+        clock[0] += 0.5
+        return [reply]
+
+    budgets: list[float] = []
+
+    def _pull(_cmd: list[str], **kw: object) -> None:
+        budgets.append(float(kw["timeout"]))
+        clock[0] += 2 if late else 0.25
+        _write_local(workspace / "messages" / "inbox", "reply.md", reply)
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _poll)
+    monkeypatch.setattr(agent_cli.subprocess, "run", _pull)
+    result = CliRunner().invoke(
+        agent, ["watch", "--thread", root, "--once", "--pull", "--timeout", "2s"]
+    )
+    assert result.exit_code == (agent_cli.WATCH_TIMEOUT_EXIT if late else 0), result.output
+    assert result.stdout == ("" if late else "reply.md\n")
+    assert budgets == [1.5]

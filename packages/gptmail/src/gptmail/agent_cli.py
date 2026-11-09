@@ -665,6 +665,7 @@ def _remote_pending_rows(
     recipient: str,
     mailboxes: list[str],
     all_mailboxes: bool,
+    timeout: float = 20,
 ) -> list[dict] | None:
     """Return pending message rows from a remote agent, or None if unreachable.
 
@@ -700,7 +701,7 @@ def _remote_pending_rows(
             capture_output=True,
             text=True,
             check=True,
-            timeout=20,
+            timeout=timeout,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         click.echo(f"Warning: failed to collect pending rows from {agent_name}: {e}", err=True)
@@ -1722,14 +1723,28 @@ def watch(
         err=True,
     )
 
+    def _budget(limit: float) -> float:
+        """Check the shared deadline, and cap the next blocking operation."""
+        if deadline is None:
+            return limit
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            click.echo(f"Timed out after {timeout} waiting for {target_desc}.", err=True)
+            sys.exit(WATCH_TIMEOUT_EXIT)
+        return min(limit, remaining)
+
     def _poll(agent_name: str, agent_cfg: dict[str, str]) -> list[dict] | None:
-        return _remote_pending_rows(
+        budget = _budget(20)
+        rows = _remote_pending_rows(
             agent_name,
             agent_cfg,
             recipient=recipient,
             mailboxes=mailboxes,
             all_mailboxes=all_mailboxes,
+            **({"timeout": budget} if deadline is not None else {}),
         )
+        _budget(20)  # A probe can finish at/after expiry; never accept late rows.
+        return rows
 
     reported: set[str] = set()
     local_inboxes = {_mailbox_root(name) / "inbox" for name in mailboxes}
@@ -1759,6 +1774,7 @@ def watch(
                 candidates.append((key, row, agent_name, False))
         hit = False
         for key, meta, sender, is_local in candidates:
+            _budget(60)
             if key in reported or key == thread_target:
                 continue
             if not _reaches_thread(key, thread_target, parents):
@@ -1773,7 +1789,7 @@ def watch(
                     click.echo("Warning: refusing unsafe reply filename.", err=True)
                     continue
                 try:
-                    subprocess.run(pull_cmd, check=False, timeout=60, stdout=sys.stderr)
+                    subprocess.run(pull_cmd, check=False, timeout=_budget(60), stdout=sys.stderr)
                 except (OSError, subprocess.TimeoutExpired) as e:
                     click.echo(f"Warning: --pull failed: {e}", err=True)
                 # pull tolerates partial failures; its exit status does not prove
@@ -1781,6 +1797,7 @@ def watch(
                 if not destination.is_file():
                     click.echo(f"Warning: reply not fetched yet: {destination.name}", err=True)
                     continue
+            _budget(60)  # Delivery/local scanning must not turn expiry into success.
             reported.add(key)
             hit = True
             now_str = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
@@ -1807,19 +1824,8 @@ def watch(
 
     try:
         while True:
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    click.echo(
-                        f"Timed out after {timeout} waiting for {target_desc}.",
-                        err=True,
-                    )
-                    sys.exit(WATCH_TIMEOUT_EXIT)
-                time.sleep(min(interval, remaining))
-            else:
-                time.sleep(interval)
-            if deadline is not None and time.monotonic() >= deadline:
-                continue  # Exit through the timeout check before another remote probe.
+            time.sleep(_budget(interval))
+            _budget(interval)
             if thread_target is not None:
                 polled: dict[str, list[dict]] = {}
                 for agent_name, agent_cfg in ssh_agents.items():
@@ -1846,6 +1852,7 @@ def watch(
                 old_count = len(known)
                 new_count = len(current)
                 for row in new_rows:
+                    _budget(60)
                     subject = str(row.get("subject", "(no subject)"))
                     filename = str(row.get("file", ""))
                     click.echo(
@@ -1855,9 +1862,10 @@ def watch(
                 baselines[agent_name] = current
                 if do_pull:
                     try:
-                        subprocess.run(pull_cmd, check=False, timeout=60)
+                        subprocess.run(pull_cmd, check=False, timeout=_budget(60))
                     except (OSError, subprocess.TimeoutExpired) as e:
                         click.echo(f"Warning: --pull failed: {e}", err=True)
+                _budget(60)
                 if once:
                     return
     except KeyboardInterrupt:
