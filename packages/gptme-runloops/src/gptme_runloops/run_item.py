@@ -1582,6 +1582,10 @@ def plan_item(
     # *-preselect-PID contract: this process already exists at acquisition and
     # stays alive until _abandon_claim(), including when the runner has exited.
     claim_agent = f"project-monitoring-{backend or 'unknown'}-preselect-{os.getpid()}"
+    # agent_msg has no github: claim_key, so plan.claim_agent stays None; the
+    # in-prompt claim still needs this supervisor id interpolated now. Leaving
+    # ``pm-agent-msg-$$`` for the LLM to expand uses a PID that dies immediately.
+    params = replace(params, claim_agent=claim_agent)
 
     preheld_block = ""
     if claim_mode == "preheld" and claim_key:

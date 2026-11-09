@@ -56,6 +56,7 @@ Behavior changes come later, with the brain-side switchover.
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -723,6 +724,10 @@ class ItemPromptParams:
     - ``peer_agents`` ← the literal "Gordon / Alice / Sven" domain roster.
     - ``agent_msg_policy_note`` ← the trailing Gordon/IBKR policy paragraph
       of the agent-msg arm (Bob passes it; empty renders no paragraph).
+    - ``claim_agent`` ← the in-prompt agent_msg claimer. Must be a
+      live-shaped supervisor id
+      (``project-monitoring-<backend>-preselect-<pid>``).
+      ``pm-agent-msg-$$`` is unprovable: the claim command's PID dies immediately.
     - ``workspace`` ← both ``$WORKSPACE`` *and* the hardcoded
       ``/home/bob/bob`` in the twitter/forum/agent-msg arms (identical for
       Bob, parameterized for everyone else).
@@ -743,6 +748,7 @@ class ItemPromptParams:
     forum_handle: str = ""
     peer_agents: str = "other agents"
     agent_msg_policy_note: str = ""
+    claim_agent: str = ""
     source: str = ""
     greptile_helper: str | None = None
     pr_address_script: str | None = None
@@ -820,6 +826,8 @@ class ItemPromptParams:
             "twitter_handle": self.twitter_handle or self.author,
             "forum_handle": self.forum_handle or self.agent_name.lower(),
             "peer_agents": self.peer_agents,
+            "claim_agent": self.claim_agent
+            or f"project-monitoring-unknown-preselect-{os.getpid()}",
             "greptile_helper": ctx.resolved_greptile_helper,
             "pr_address_script": ctx.resolved_pr_address_script,
             "stem": self.stem,
@@ -1089,7 +1097,7 @@ An inter-agent message is read but unreplied. Message details: {detail}
 ```bash
 cd {workspace}
 # Extract message filename from detail above
-uv run coordination work-claim "pm-agent-msg-$$" "agent-msg:reply:MSG_FILE" --ttl 30
+uv run coordination work-claim "{claim_agent}" "agent-msg:reply:MSG_FILE" --ttl 30
 # If denied: skip (another session is handling it)
 ```
 
@@ -1098,7 +1106,7 @@ uv run coordination work-claim "pm-agent-msg-$$" "agent-msg:reply:MSG_FILE" --tt
 cd {workspace}
 python3 scripts/agent-msg.py read MSG_FILE
 python3 scripts/agent-msg.py reply MSG_FILE "Your reply text"
-uv run coordination work-complete "pm-agent-msg-$$" "agent-msg:reply:MSG_FILE"
+uv run coordination work-complete "{claim_agent}" "agent-msg:reply:MSG_FILE"
 ```
 {policy_block}"""
 

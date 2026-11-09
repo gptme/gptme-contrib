@@ -76,6 +76,8 @@ BOB_IDENTITY = dict(
         'No autonomous action taken."\n'
         "(memory: gordon-equity-messages-are-erik-gated-not-bob-action)"
     ),
+    # Stable fixture matching PM_AGENT_MSG_CLAIMER in the bash golden capture.
+    claim_agent="project-monitoring-unknown-preselect-1",
 )
 
 ALICE_IDENTITY = dict(
@@ -264,6 +266,26 @@ def test_agent_msg_policy_note_absent_when_empty() -> None:
     assert "Erik-gated" not in rendered
     # Empty note leaves the arm's trailing newline structure, no paragraph.
     assert rendered.endswith("```\n\n")
+
+
+def test_agent_msg_claimer_is_supervisor_shaped() -> None:
+    params = ItemPromptParams(
+        repo="o/r",
+        number=0,
+        detail="file=x.md",
+        **ALICE_IDENTITY,
+        claim_agent="project-monitoring-gptme-preselect-4242",
+    )
+    rendered = render_item_investigate(ItemPromptKind.AGENT_MSG_REPLY, params)
+    assert "pm-agent-msg-$$" not in rendered
+    assert (
+        'work-claim "project-monitoring-gptme-preselect-4242" "agent-msg:reply:MSG_FILE"'
+        in rendered
+    )
+    assert (
+        'work-complete "project-monitoring-gptme-preselect-4242" "agent-msg:reply:MSG_FILE"'
+        in rendered
+    )
 
 
 def test_twitter_forum_handles_fall_back() -> None:

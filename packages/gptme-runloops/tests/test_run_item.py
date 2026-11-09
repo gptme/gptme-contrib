@@ -474,6 +474,23 @@ def test_plan_claim_agent_distinguishes_supervisors(tmp_path, monkeypatch) -> No
     assert first.claim_agent != second.claim_agent
 
 
+def test_plan_agent_msg_prompt_uses_supervisor_claimer(tmp_path, monkeypatch) -> None:
+    """agent_msg has no github: key; the prompt claimer still carries supervisor liveness."""
+    monkeypatch.delenv("BOB_SESSION_LABEL", raising=False)
+    item = make_item(
+        types=["agent_msg_reply"],
+        number="msg:erik-x",
+        all_numbers=["msg:erik-x"],
+        detail="file=20261109-x.md sender=erik",
+        title="[agent-msg] from erik: x",
+    )
+    plan, _, _ = _plan_for(tmp_path, item, FakeLifecycleIO())
+    assert plan.claim_agent is None
+    claimer = f"project-monitoring-claude-code-preselect-{os.getpid()}"
+    assert claimer in plan.prompt
+    assert "pm-agent-msg-$$" not in plan.prompt
+
+
 def test_plan_pending_reply_followup_skips_ack(tmp_path) -> None:
     item = make_item(
         types=["assigned_issue"], detail="pending_reply_followup; updated: x"
