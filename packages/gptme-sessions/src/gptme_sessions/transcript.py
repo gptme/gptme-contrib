@@ -90,8 +90,12 @@ SESSION_END_BLOCK_OPEN = "<!-- gptme:session-end "
 SESSION_END_BLOCK_CLOSE = " -->"
 
 
-def parse_session_end_block(messages: list[NormalizedMessage]) -> dict[str, Any] | None:
-    """Return the parsed session-end payload, or ``None`` when it is absent.
+def parse_session_end_block(messages: list[dict]) -> dict[str, Any] | None:
+    """Read hook metadata from raw gptme records, before normalization.
+
+    Only ``ui_only`` system records can carry hook metadata; matching user,
+    assistant or tool-result text is ordinary content, not a session outcome.
+    Callers must restrict extraction to gptme trajectories.
 
     The newest block wins: a resumed log can carry the block from an earlier
     run, and only the last one describes the session that just finished.
@@ -99,7 +103,11 @@ def parse_session_end_block(messages: list[NormalizedMessage]) -> dict[str, Any]
     must never fail because a diagnostic tail block was truncated.
     """
     for message in reversed(messages):
-        content = message.content or ""
+        if message.get("role") != "system" or message.get("ui_only") is not True:
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
         if not (
             content.startswith(SESSION_END_BLOCK_OPEN) and content.endswith(SESSION_END_BLOCK_CLOSE)
         ):
@@ -1484,7 +1492,7 @@ def read_transcript(path: Path) -> SessionTranscript:
         trajectory_path=str(path.resolve()),
         capabilities=capabilities,
         messages=norm_msgs,
-        session_end=parse_session_end_block(norm_msgs),
+        session_end=parse_session_end_block(msgs) if fmt == "gptme" else None,
     )
 
 
