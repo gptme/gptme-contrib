@@ -1873,3 +1873,39 @@ def test_watch_thread_failed_pull_times_out_without_reporting_reply(
     )
     assert result.exit_code == agent_cli.WATCH_TIMEOUT_EXIT, result.output
     assert result.stdout == ""
+
+
+def test_watch_thread_pull_summary_stays_off_stdout(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _send_root(workspace)
+    reply = _thread_row("reply.md", root)
+    _scripted_rows(monkeypatch, [[reply]])
+
+    def _pull(_cmd: list[str], **kwargs: object) -> None:
+        print("1 new message(s) fetched into inbox:", file=kwargs.get("stdout", sys.stdout))
+        _write_local(workspace / "messages" / "inbox", "reply.md", reply)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _pull)
+    result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once", "--pull"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "reply.md\n"
+    assert "1 new message(s)" in result.stderr
+
+
+def test_watch_does_not_poll_after_sleep_reaches_deadline(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _send_root(workspace)
+    probed = _scripted_rows(monkeypatch, [[], [_thread_row("late.md", root)]])
+    clock = [1000.0]
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+
+    def _sleep(seconds: float) -> None:
+        clock[0] += seconds
+
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once", "--timeout", "2s"])
+    assert result.exit_code == agent_cli.WATCH_TIMEOUT_EXIT, result.output
+    assert result.stdout == ""
+    assert len(probed) == 1

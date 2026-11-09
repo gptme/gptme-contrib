@@ -1773,7 +1773,7 @@ def watch(
                     click.echo("Warning: refusing unsafe reply filename.", err=True)
                     continue
                 try:
-                    subprocess.run(pull_cmd, check=False, timeout=60)
+                    subprocess.run(pull_cmd, check=False, timeout=60, stdout=sys.stderr)
                 except (OSError, subprocess.TimeoutExpired) as e:
                     click.echo(f"Warning: --pull failed: {e}", err=True)
                 # pull tolerates partial failures; its exit status does not prove
@@ -1818,6 +1818,8 @@ def watch(
                 time.sleep(min(interval, remaining))
             else:
                 time.sleep(interval)
+            if deadline is not None and time.monotonic() >= deadline:
+                continue  # Exit through the timeout check before another remote probe.
             if thread_target is not None:
                 polled: dict[str, list[dict]] = {}
                 for agent_name, agent_cfg in ssh_agents.items():
