@@ -875,3 +875,45 @@ def test_partial_build_revokes_private_html_even_without_an_envelope(
     )
     assert code == 0
     assert not html.exists()
+
+
+def test_private_route_losing_envelope_still_revokes_shared_text(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    registry = _portal_registry()
+    assert (
+        _run_with_emitters(
+            tmp_path,
+            registry,
+            {
+                "services": _emitter(
+                    "services", Status.HEALTHY, lines=("old public text",)
+                )
+            },
+        )[0]
+        == 0
+    )
+    changed = RouteRegistry(
+        tuple(
+            replace(
+                route,
+                visibility=Visibility.PRIVATE,
+                summary_source=None,
+                core_dimension=None,
+                is_headline=False,
+            )
+            if route.slug in ("services", "cost")
+            else replace(route, is_headline=True)
+            for route in registry.routes
+        ),
+        portal=registry.portal,
+    )
+
+    def boom() -> PageEnvelope:
+        raise RuntimeError("new headline unavailable")
+
+    assert _run_with_emitters(tmp_path, changed, {"sessions": boom})[0] == 1
+    assert not (tmp_path / "public/headline.json").exists()
+    assert not (tmp_path / "public/index.html").exists()

@@ -125,7 +125,7 @@ def run_build(
             # Shared outputs can retain text from a former public route even
             # after headline ownership changes. Revoke before collection rather
             # than infer the old owner from the current registry.
-            if any(not route.is_public for route in registry.envelope_routes()):
+            if any(not route.is_public for route in registry.routes):
                 try:
                     (public_root / "headline.json").unlink(missing_ok=True)
                     target = portal_path(registry, public_root)
