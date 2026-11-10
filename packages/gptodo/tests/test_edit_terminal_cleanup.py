@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from gptodo.cli import cli
@@ -238,6 +239,47 @@ def test_closing_edit_with_explicit_next_action_is_refused(tmp_path: Path, monke
     )
     assert result.exit_code == 1, result.output
     assert _meta(tasks_dir, "my-task")["state"] == "active"
+
+
+@pytest.mark.parametrize("state", ["done", "cancelled"])
+@pytest.mark.parametrize("clear_last", [True, False])
+def test_terminal_field_repeated_sets_use_last_assignment(
+    tmp_path: Path, monkeypatch, state: str, clear_last: bool
+) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    path = tasks_dir / "my-task.md"
+    path.write_text(DONE_TASK.replace("state: done", f"state: {state}"))
+    monkeypatch.chdir(tmp_path)
+    before = path.read_bytes()
+    values = ["Later", "none"] if clear_last else ["none", "Later"]
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "edit",
+            "my-task",
+            "--set",
+            "next_action",
+            values[0],
+            "--set",
+            "next_action",
+            values[1],
+            "--set",
+            "priority",
+            "high",
+        ],
+    )
+
+    if clear_last:
+        assert result.exit_code == 0, result.output
+        meta = _meta(tasks_dir, "my-task")
+        assert meta["priority"] == "high"
+        assert "next_action" not in meta
+    else:
+        assert result.exit_code == 1, result.output
+        assert "Refusing to set" in result.output
+        assert path.read_bytes() == before
 
 
 def test_clearing_stale_field_on_terminal_task_still_allowed(tmp_path: Path, monkeypatch) -> None:

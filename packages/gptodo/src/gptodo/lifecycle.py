@@ -402,13 +402,13 @@ def transform_post(
         )
         # An explicit value for a field the strip is about to drop would be
         # reported as a successful edit while writing nothing. Refuse instead;
-        # clearing (value None) stays allowed.
+        # clearing (value None) stays allowed. Match the apply loop's
+        # last-assignment-wins semantics when a field is set more than once.
+        _final_stale_sets = {
+            field: value for op, field, value in changes if op == "set" and field in _stale_fields
+        }
         _explicit_stale = sorted(
-            {
-                field
-                for op, field, value in changes
-                if op == "set" and field in _stale_fields and value is not None
-            }
+            field for field, value in _final_stale_sets.items() if value is not None
         )
         if _explicit_stale:
             raise TransitionError(
