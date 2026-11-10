@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -152,8 +153,34 @@ def emit_file(
     """Emit the finished, not-yet-emitted blocks of one transcript.
 
     Returns the number of events posted. A block is finished once its last row
-    is more than ``gap_s`` old; the in-progress trailing block waits.
+    is more than ``gap_s`` old; the in-progress trailing block waits. If another
+    invocation owns this transcript, skip it until the next run.
     """
+    lock_path = _cursor_path(path).with_suffix(".lock.sqlite3")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # SQLite provides a cross-platform process lock, released even on a crash.
+    # Keep this separate from the JSON cursor and never unlink the lock file.
+    lock = sqlite3.connect(lock_path, timeout=0)
+    try:
+        try:
+            lock.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            if str(exc) == "database is locked":
+                return 0
+            raise
+        return _emit_file_locked(client, hostname, path, gap_s=gap_s, now=now)
+    finally:
+        lock.close()
+
+
+def _emit_file_locked(
+    client: AWClient,
+    hostname: str,
+    path: Path,
+    *,
+    gap_s: float,
+    now: datetime | None,
+) -> int:
     now = now or datetime.now(timezone.utc)
     text = path.read_text(encoding="utf-8", errors="replace")
     blocks = parse_session(text.splitlines(), gap_s=gap_s)

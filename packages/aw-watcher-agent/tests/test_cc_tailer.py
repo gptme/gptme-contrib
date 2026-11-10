@@ -141,6 +141,28 @@ def test_emit_resumes_after_last_successful_post(tmp_path, monkeypatch, fail_at)
     assert cc_tailer.emit_file(retry_client, "host", transcript, now=now) == 0
 
 
+def test_overlapping_emit_does_not_replay_inflight_block(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    transcript = tmp_path / "s1.jsonl"
+    transcript.write_text(_row("2026-11-10T09:00:00Z"), encoding="utf-8")
+    now = _dt("2026-11-10T10:00:00Z")
+    first = _Client()
+    overlapping = _Client()
+    post_event = first.post_event
+
+    def post_with_overlap(bucket_id, event):
+        # Another invocation arrives after the cursor read, before checkpointing.
+        assert cc_tailer.emit_file(overlapping, "host", transcript, now=now) == 0
+        return post_event(bucket_id, event)
+
+    monkeypatch.setattr(first, "post_event", post_with_overlap)
+    assert cc_tailer.emit_file(first, "host", transcript, now=now) == 1
+    assert len(first.posted) == 1
+    assert overlapping.posted == []
+    # The lock must be released after finishing, including on exception paths.
+    assert cc_tailer.emit_file(overlapping, "host", transcript, now=now) == 0
+
+
 def test_transcripts_excludes_nested_subagent_logs(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     proj = tmp_path / "projects" / "-work-proj"
