@@ -105,6 +105,12 @@ READS = [
     "(gh api repos/o/r/issues/5/comments --template ')' -X GET)",
     # ``--`` ends options: a later -f is the endpoint's positional, not a field
     "gh api -- repos/o/r/issues/5/comments",
+    # heredoc bodies are data: a documented gh api write is not a write
+    "cat > doc.md <<'EOF'\ngh api repos/o/r/issues/5/comments -f body=x\nEOF",
+    "cat <<'EOF'\n$(gh api -X POST repos/o/r/issues/5/comments -f body=x)\nEOF",
+    'cat <<"EOF"\n`gh api repos/o/r/issues/5/comments -f body=x`\nEOF',
+    "cat <<EOF\ngh api repos/o/r/issues/5/comments -f body=x\nEOF",
+    "cat <<-'EOF'\n\tgh api repos/o/r/issues/5/comments -f body=x\n\tEOF",
 ]
 
 WRITES = [
@@ -160,6 +166,13 @@ WRITES = [
     "gh api repos/o/r/issues/5/comments -ifbody=LGTM",
     "gh api -iX POST repos/o/r/pulls/12/reviews",
     "gh api -X=POST repos/o/r/pulls/12/reviews",
+    # the command after a heredoc terminator still runs, apostrophes in the body
+    # notwithstanding
+    "cat <<'EOF'\nDon't post yet\nEOF\ngh api repos/o/r/issues/5/comments -f body=x",
+    # an unquoted delimiter still expands substitutions in the body
+    "cat <<EOF\nid: $(gh api repos/o/r/issues/5/comments -f body=x --jq .id)\nEOF",
+    # a here-string is not a heredoc
+    'gh api repos/o/r/issues/5/comments --input - <<< \'{"body": "x"}\'',
 ]
 
 

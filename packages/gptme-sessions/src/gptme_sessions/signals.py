@@ -652,6 +652,72 @@ def _gh_api_writes(args: list[str]) -> bool:
     return has_field
 
 
+_HEREDOC_OP_RE = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|(\\?)([A-Za-z0-9_.@%+-]+))")
+
+
+def _strip_heredoc_bodies(cmd: str) -> str:
+    """Drop here-document bodies, which bash feeds as data, not commands.
+
+    A body line such as ``gh api ... -f body=x`` inside ``cat > doc.md <<'EOF'``
+    is text, not a command. With a quoted delimiter (``<<'EOF'``, ``<<"EOF"``,
+    ``<<\\EOF``) the body is fully literal and is removed. With an unquoted
+    delimiter bash still expands ``$(...)``/backticks in it, so only those
+    substitutions are kept, one per line. ``<<-`` strips leading tabs before
+    matching the terminator; ``<<<`` (here-string) is not a heredoc.
+    """
+    out: list[str] = []
+    pending: list[tuple[str, bool, bool]] = []  # (delimiter, quoted, strip_tabs)
+    quote: str | None = None
+    i, n = 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if c == "\\" and quote != "'" and i + 1 < n:
+            out.append(cmd[i : i + 2])
+            i += 2
+            continue
+        if quote:
+            if c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+        elif c == "#" and (i == 0 or cmd[i - 1] in " \t\n;|&("):
+            end = cmd.find("\n", i)
+            end = n if end < 0 else end
+            out.append(cmd[i:end])
+            i = end
+            continue
+        elif c == "<" and cmd.startswith("<<", i) and not cmd.startswith("<<<", i):
+            m = _HEREDOC_OP_RE.match(cmd, i)
+            if m:
+                bare = m.group(5)
+                word = m.group(2) if m.group(2) is not None else m.group(3)
+                quoted = bare is None or bool(m.group(4))
+                pending.append((bare if word is None else word, quoted, bool(m.group(1))))
+                out.append(m.group(0))
+                i = m.end()
+                continue
+        elif c == "\n" and pending:
+            out.append(c)
+            i += 1
+            for word, quoted, strip_tabs in pending:
+                body: list[str] = []
+                while i < n:
+                    end = cmd.find("\n", i)
+                    end = n if end < 0 else end
+                    line = cmd[i:end]
+                    i = end + 1
+                    if (line.lstrip("\t") if strip_tabs else line) == word:
+                        break
+                    body.append(line)
+                if not quoted:
+                    out.extend(f"$({sub})\n" for sub in _command_substitutions("\n".join(body)))
+            pending = []
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
     """Match a gh write-command pattern, ignoring read-only ``gh api`` calls.
 
@@ -662,6 +728,7 @@ def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
     so a write inside ``x="$(gh api ...)"`` counts even though shell
     tokenization keeps the quoted substitution in one token.
     """
+    cmd = _strip_heredoc_bodies(cmd)
     for sub in _command_substitutions(cmd):
         if _gh_cmd_matches(pattern, sub):
             return True
