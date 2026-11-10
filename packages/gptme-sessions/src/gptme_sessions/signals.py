@@ -588,6 +588,9 @@ def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
         if _gh_cmd_matches(pattern, sub):
             return True
     for segment in _split_shell_segments(cmd):
+        script = _shell_c_script(segment)
+        if script is not None and _gh_cmd_matches(pattern, script):
+            return True
         matches = list(pattern.finditer(segment))
         if not matches:
             continue
@@ -607,6 +610,42 @@ def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
 
 
 _GH_API_MATCH_RE = re.compile(r"gh\s+api\b")
+
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+
+
+def _shell_c_script(segment: str) -> str | None:
+    """The inline script of a ``bash -c '<script>'`` invocation in the segment.
+
+    Shell tokenization keeps the quoted script in one token, so its ``gh api``
+    is invisible to ``_gh_api_args``; bash still runs it, so the caller checks
+    it as a command of its own. The shell is located among the tokens like
+    ``gh api`` is (``timeout 5 bash -c``, ``env X=1 sh -c``) and ``-c`` may be
+    clustered (``-lc``, ``-ec``). Without ``-c`` the first operand is a script
+    file, which we cannot see, so None.
+    """
+    tokens = _shell_tokens(segment)
+    for i, tok in enumerate(tokens):
+        if tok.rsplit("/", 1)[-1] not in _SHELLS:
+            continue
+        has_c = False
+        j = i + 1
+        while j < len(tokens):
+            opt = tokens[j]
+            if opt in ("-o", "+o", "-O", "+O"):
+                j += 2
+                continue
+            if opt.startswith("--"):
+                j += 1
+                continue
+            if opt[:1] in "-+" and len(opt) > 1:
+                has_c = has_c or (opt[0] == "-" and "c" in opt[1:])
+                j += 1
+                continue
+            break
+        if has_c and j < len(tokens):
+            return tokens[j]
+    return None
 
 
 # Regex for gh pr create command detection (from Bash input).

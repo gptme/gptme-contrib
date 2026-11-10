@@ -95,6 +95,10 @@ READS = [
     # HEAD fetches headers only and posts nothing
     "gh api -X HEAD repos/o/r/issues/5/comments",
     "gh api --method=head repos/o/r/issues/5/comments -f per_page=1",
+    # an inline -c script that only reads is still a read
+    "bash -c 'gh api repos/o/r/issues/5/comments --jq length'",
+    # without -c the operand is a script file, and quoted text after it is data
+    "bash run.sh 'gh api repos/o/r/issues/5/comments -f body=x'",
 ]
 
 WRITES = [
@@ -137,6 +141,11 @@ WRITES = [
     "gh api repos/o/r/issues/5/comments --input reply.json",
     # a write inside a process substitution counts as its own command
     "cat <(gh api repos/o/r/issues/5/comments -f body=x)",
+    # bash runs an inline -c script; the quoted script is still a command
+    "bash -c 'gh api repos/o/r/issues/5/comments -f body=LGTM'",
+    "timeout 30 bash -lc 'cd /tmp && gh api repos/o/r/issues/5/comments -f body=x'",
+    'sh -o errexit -c "gh api repos/o/r/issues/5/comments -f body=x"',
+    "/bin/bash -e -c 'x=$(gh api repos/o/r/issues/5/comments -f body=x)'",
 ]
 
 
@@ -215,3 +224,14 @@ def test_endpoint_in_field_value_is_not_comment() -> None:
         sigs = extract_signals_cc(_bash_msgs(cmd))
         assert sigs.get("comments_posted", 0) == 0, cmd
         assert sigs["gh_interactions"] == 0, cmd
+
+
+def test_bash_c_write_counts_comment() -> None:
+    # The same write graded directly and through an inline -c script.
+    for cmd in (
+        "gh api repos/o/r/issues/5/comments -f body=LGTM",
+        "bash -c 'gh api repos/o/r/issues/5/comments -f body=LGTM'",
+    ):
+        sigs = extract_signals_cc(_bash_msgs(cmd))
+        assert sigs["gh_interactions"] == 1, cmd
+        assert sigs["comments_posted"] == 1, cmd
