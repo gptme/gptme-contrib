@@ -2755,7 +2755,10 @@ def edit(
                             f"  {tname}: {cur} → {target}. Terminal states are sticky "
                             "by design; use --force if you really mean it."
                         )
-                    refuse("terminal state reopen requires --force")
+                    refuse(
+                        "terminal state reopen requires --force",
+                        task_id=terminal_reopens[0][0] if len(terminal_reopens) == 1 else None,
+                    )
 
                 if other_illegal and strict and not force:
                     console.print(
@@ -2774,7 +2777,10 @@ def edit(
                         "belong in 'waiting' (with `wait:` / `waiting_for:`), "
                         "not 'active'.[/]"
                     )
-                    refuse("illegal transition requires --force when GPTODO_STRICT_TRANSITIONS=1")
+                    refuse(
+                        "illegal transition requires --force when GPTODO_STRICT_TRANSITIONS=1",
+                        task_id=other_illegal[0][0] if len(other_illegal) == 1 else None,
+                    )
 
                 if other_illegal and not force:
                     # Non-strict: warn, don't block.
@@ -2941,6 +2947,7 @@ def edit(
         return "\n".join(lines)
 
     pending_done = []
+    pending_ids = []
     for task in target_tasks:
         post = frontmatter.load(task.path)
         prior = normalize_state(str(post.metadata.get("state", "backlog") or "backlog"), warn=False)
@@ -2953,6 +2960,7 @@ def edit(
         pending = count_subtasks(_projected_content(post), checklist_only=True).pending
         if pending:
             pending_done.append(f"{task.name}: {pending} unresolved checkbox(es)")
+            pending_ids.append(task.name)
 
     if pending_done:
         details = "; ".join(pending_done)
@@ -2961,6 +2969,7 @@ def edit(
                 f"Cannot mark done: {details}. Tick completed items, skip dropped items "
                 "with a reason, or file a follow-up task and skip with a pointer. "
                 "Use --allow-pending only for an intentional override.",
+                task_id=pending_ids[0] if len(pending_ids) == 1 else None,
                 click_error=True,
             )
         console.print(f"[yellow]--allow-pending: {details}[/]")

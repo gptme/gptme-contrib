@@ -28,6 +28,8 @@ def tasks_dir(tmp_path: Path, monkeypatch) -> Path:
     d.mkdir()
     _write(d)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GPTODO_TASKS_DIR", str(d))
+    monkeypatch.setenv("TASKS_REPO_ROOT", str(tmp_path))
     return d
 
 
@@ -159,3 +161,24 @@ def test_click_usage_errors_are_not_json(tasks_dir: Path) -> None:
     assert result.exit_code == 2
     assert result.stdout == ""
     assert "No such option" in result.stderr
+
+
+@pytest.mark.parametrize("state,strict", [("done", False), ("active", True)])
+def test_json_batch_identifies_transition_refusal(
+    tasks_dir: Path, monkeypatch, state, strict
+) -> None:
+    _write(tasks_dir, "blocked", state=state)
+    if strict:
+        monkeypatch.setenv("GPTODO_STRICT_TRANSITIONS", "1")
+    payload, code = _edit_json(tasks_dir, "t", "blocked", "--set", "state", "todo")
+    assert code == payload["exit"] == 1
+    assert payload["id"] == "blocked"
+
+
+def test_json_batch_identifies_pending_task(tasks_dir: Path) -> None:
+    _write(tasks_dir, "blocked")
+    with (tasks_dir / "blocked.md").open("a") as f:
+        f.write("\n- [ ] unfinished step\n")
+    payload, code = _edit_json(tasks_dir, "t", "blocked", "--set", "state", "done")
+    assert code == payload["exit"] == 1
+    assert payload["id"] == "blocked"
