@@ -102,7 +102,10 @@ _HEREDOC_RE = re.compile(r"(?<!<)<<(-?)\s*([\"']?)([A-Za-z_]\w*)\2(?=\s|[;&|<>()
 # A heredoc body fed to a shell is still shell; any other body is stdin data.
 _SHELL_CONSUMER_RE = re.compile(r"\b(?:ba|z|da|k)?sh\b|\bssh\b|\beval\b|\bsource\b")
 # Even backslash pairs leave the expansion active; an odd backslash escapes it.
-_HEREDOC_SUBSTITUTION_RE = re.compile(r"(?<!\\)(?:\\\\)*(?:\$\((.*?)\)|`(.*?)`)", re.S)
+# Greedy captures deliberately retain nested substitutions rather than silently
+# discarding shell after the first inner closing parenthesis. Multiple expansions
+# may retain intervening data: conservative over-counting beats hiding a write.
+_HEREDOC_SUBSTITUTION_RE = re.compile(r"(?<!\\)(?:\\\\)*(?:\$\((.*)\)|`(.*)`)", re.S)
 
 
 def _strip_heredoc_bodies(cmd: str) -> str:
@@ -257,7 +260,8 @@ def cmd_mutation(cmd: str, cwd_scratch: bool = False) -> tuple[str | None, str |
         # Same bias as the redirect path below: outside known scratch space a
         # relative-path fileop (rm foo, mv a b) is counted as acting rather
         # than scratch — a repo-root cwd is the common case.
-        return "acting", cmd[max(0, fm.start() - 20) : fm.end() + 60]
+        evidence_source = unq if sh else cmd
+        return "acting", evidence_source[max(0, fm.start() - 20) : fm.end() + 60]
     for t in targets:
         if _SCRATCH_PATH_RE.match(t):
             continue
@@ -265,7 +269,12 @@ def cmd_mutation(cmd: str, cwd_scratch: bool = False) -> tuple[str | None, str |
             return "acting", f"redirect > {t}"
         if not t.startswith("$") and not in_scratch:
             return "acting", f"redirect > {t}"
-    ev = ("fileop " + cmd[max(0, fm.start()) : fm.end() + 50]) if fm else f"redirect > {targets[0]}"
+    evidence_source = unq if sh else cmd
+    ev = (
+        "fileop " + evidence_source[max(0, fm.start()) : fm.end() + 50]
+        if fm
+        else f"redirect > {targets[0]}"
+    )
     return "scratch", ev
 
 

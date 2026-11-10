@@ -155,6 +155,13 @@ def test_cmd_mutation_heredoc_keeps_real_shell_mutations() -> None:
     assert cmd_mutation(write)[0] == "acting"
 
 
+def test_cmd_mutation_heredoc_evidence_names_actual_fileop() -> None:
+    command = "cat <<'EOF'\n" + "a" * 100 + "\nEOF\ntouch out.txt"
+    label, evidence = cmd_mutation(command)
+    assert label == "acting"
+    assert evidence is not None and "touch out.txt" in evidence
+
+
 @pytest.mark.parametrize("header", ["# example <<EOF", "echo hi # example <<EOF", "cat <<EOF"])
 def test_cmd_mutation_unterminated_or_commented_heredoc_keeps_evidence(header: str) -> None:
     assert cmd_mutation(f"{header}\ntouch out.txt")[0] == "acting"
@@ -182,6 +189,7 @@ def test_cmd_mutation_quoted_shell_heredoc_executes_body(shell: str) -> None:
         "'$(git commit -am update)'",
         '"$(git commit -am update)"',
         "$(\ngit commit -am update\n)",
+        "$(printf '%s' \"$(date)\"; touch out.txt)",
     ],
 )
 def test_cmd_mutation_unquoted_heredoc_expansions_are_shell(body: str) -> None:
