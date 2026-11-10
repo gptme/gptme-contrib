@@ -71,8 +71,34 @@ def write_state(workspace: Path, **values: object) -> None:
 
 @pytest.fixture(autouse=True)
 def fixed_clock(monkeypatch: pytest.MonkeyPatch) -> None:
-    now = datetime.now(UTC)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
     monkeypatch.setattr(state_delta_gate_cli, "_now", lambda: now)
+
+
+@pytest.mark.parametrize("raw", ['{"noop_only_streak":7', "[]"])
+@pytest.mark.parametrize("command", ["record-noop", "record-productive"])
+def test_invalid_json_state_is_not_overwritten(
+    tmp_path: Path, raw: str, command: str
+) -> None:
+    state_file = tmp_path / "state" / "state-delta-gate.json"
+    state_file.parent.mkdir()
+    state_file.write_text(raw)
+    assert run(tmp_path, command) == 1
+    assert state_file.read_text() == raw
+    assert run(tmp_path, "check", "--explore-rate", "0") == PROCEED
+    assert run(tmp_path, "status") == 1
+
+
+@pytest.mark.parametrize("value", ["invalid", "inf", None, [], float("inf")])
+def test_invalid_streak_does_not_crash(tmp_path: Path, value: object) -> None:
+    write_state(tmp_path, noop_only_streak=value)
+    assert run(tmp_path, "check", "--explore-rate", "0") == PROCEED
+    assert run(tmp_path, "status") == 0
+    assert run(tmp_path, "record-noop") == 0
+    assert read_state(tmp_path)["noop_only_streak"] == 1
+    write_state(tmp_path, noop_only_streak=value)
+    assert run(tmp_path, "record-productive") == 0
+    assert read_state(tmp_path)["noop_only_streak"] == 0
 
 
 @pytest.mark.parametrize("command", ["record-noop", "record-productive"])
@@ -194,7 +220,9 @@ def test_force_bypasses_even_on_long_streak(tmp_path: Path) -> None:
     write_state(
         tmp_path,
         noop_only_streak=10,
-        last_executed_ts=(datetime.now(UTC) - timedelta(seconds=10)).isoformat(),
+        last_executed_ts=(
+            state_delta_gate_cli._now() - timedelta(seconds=10)
+        ).isoformat(),
     )
     assert run(tmp_path, "check", "--force", "--explore-rate", "0") == PROCEED
 
@@ -206,7 +234,7 @@ def test_armed_streak_skips_before_backoff(tmp_path: Path) -> None:
     write_state(
         tmp_path,
         noop_only_streak=1,
-        last_executed_ts=datetime.now(UTC).isoformat(),
+        last_executed_ts=state_delta_gate_cli._now().isoformat(),
     )
     assert run(tmp_path, "check", "--explore-rate", "0") == SKIP
 
@@ -216,7 +244,9 @@ def test_armed_streak_proceeds_after_backoff(tmp_path: Path) -> None:
     write_state(
         tmp_path,
         noop_only_streak=1,
-        last_executed_ts=(datetime.now(UTC) - timedelta(seconds=1801)).isoformat(),
+        last_executed_ts=(
+            state_delta_gate_cli._now() - timedelta(seconds=1801)
+        ).isoformat(),
     )
     assert run(tmp_path, "check", "--explore-rate", "0") == PROCEED
 
@@ -226,7 +256,9 @@ def test_backoff_doubles_per_streak(tmp_path: Path) -> None:
     write_state(
         tmp_path,
         noop_only_streak=2,
-        last_executed_ts=(datetime.now(UTC) - timedelta(seconds=3599)).isoformat(),
+        last_executed_ts=(
+            state_delta_gate_cli._now() - timedelta(seconds=3599)
+        ).isoformat(),
     )
     assert run(tmp_path, "check", "--explore-rate", "0") == SKIP
 
@@ -234,7 +266,9 @@ def test_backoff_doubles_per_streak(tmp_path: Path) -> None:
     write_state(
         tmp_path,
         noop_only_streak=2,
-        last_executed_ts=(datetime.now(UTC) - timedelta(seconds=3601)).isoformat(),
+        last_executed_ts=(
+            state_delta_gate_cli._now() - timedelta(seconds=3601)
+        ).isoformat(),
     )
     assert run(tmp_path, "check", "--explore-rate", "0") == PROCEED
 
@@ -244,7 +278,9 @@ def test_backoff_caps_at_4h(tmp_path: Path) -> None:
     write_state(
         tmp_path,
         noop_only_streak=4,
-        last_executed_ts=(datetime.now(UTC) - timedelta(seconds=14399)).isoformat(),
+        last_executed_ts=(
+            state_delta_gate_cli._now() - timedelta(seconds=14399)
+        ).isoformat(),
     )
     assert run(tmp_path, "check", "--explore-rate", "0") == SKIP
 
@@ -252,7 +288,9 @@ def test_backoff_caps_at_4h(tmp_path: Path) -> None:
     write_state(
         tmp_path,
         noop_only_streak=9,
-        last_executed_ts=(datetime.now(UTC) - timedelta(seconds=14401)).isoformat(),
+        last_executed_ts=(
+            state_delta_gate_cli._now() - timedelta(seconds=14401)
+        ).isoformat(),
     )
     assert run(tmp_path, "check", "--explore-rate", "0") == PROCEED
 
@@ -264,7 +302,7 @@ def test_addressed_signal_proceeds_before_backoff(tmp_path: Path) -> None:
     write_state(
         tmp_path,
         noop_only_streak=5,
-        last_executed_ts=datetime.now(UTC).isoformat(),
+        last_executed_ts=state_delta_gate_cli._now().isoformat(),
     )
     assert run(tmp_path, "check", "--addressed", "1", "--explore-rate", "0") == PROCEED
 
@@ -273,7 +311,7 @@ def test_addressed_signal_true_values(tmp_path: Path) -> None:
     write_state(
         tmp_path,
         noop_only_streak=3,
-        last_executed_ts=datetime.now(UTC).isoformat(),
+        last_executed_ts=state_delta_gate_cli._now().isoformat(),
     )
     for val in ("1", "true", "yes"):
         assert (
@@ -285,7 +323,7 @@ def test_addressed_false_falls_through(tmp_path: Path) -> None:
     write_state(
         tmp_path,
         noop_only_streak=1,
-        last_executed_ts=datetime.now(UTC).isoformat(),
+        last_executed_ts=state_delta_gate_cli._now().isoformat(),
     )
     assert run(tmp_path, "check", "--addressed", "0", "--explore-rate", "0") == SKIP
 
@@ -329,7 +367,7 @@ def test_explore_rate_1_always_proceeds(tmp_path: Path) -> None:
     write_state(
         tmp_path,
         noop_only_streak=1,
-        last_executed_ts=datetime.now(UTC).isoformat(),
+        last_executed_ts=state_delta_gate_cli._now().isoformat(),
     )
     assert run(tmp_path, "check", "--explore-rate", "1") == PROCEED
 
@@ -338,7 +376,7 @@ def test_explore_rate_0_never_promotes_skip(tmp_path: Path) -> None:
     write_state(
         tmp_path,
         noop_only_streak=1,
-        last_executed_ts=datetime.now(UTC).isoformat(),
+        last_executed_ts=state_delta_gate_cli._now().isoformat(),
     )
     assert run(tmp_path, "check", "--explore-rate", "0") == SKIP
 
@@ -350,7 +388,7 @@ def test_quota_behind_pace_bypasses(tmp_path: Path) -> None:
     write_state(
         tmp_path,
         noop_only_streak=3,
-        last_executed_ts=datetime.now(UTC).isoformat(),
+        last_executed_ts=state_delta_gate_cli._now().isoformat(),
     )
     assert (
         run(tmp_path, "check", "--quota-behind-pace", "1", "--explore-rate", "0")

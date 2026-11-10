@@ -68,9 +68,18 @@ def _parse_dt(value: str | None) -> datetime | None:
 def _read_state(state_file: Path) -> dict:
     try:
         raw = json.loads(state_file.read_text())
-        return raw if isinstance(raw, dict) else {}
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError:
         return {}
+    if not isinstance(raw, dict):
+        raise ValueError("state must be a JSON object")
+    return raw
+
+
+def _streak(value: object) -> int:
+    try:
+        return max(0, int(value)) if isinstance(value, int | float | str) else 0
+    except (ValueError, OverflowError):
+        return 0
 
 
 def _write_state(state_file: Path, state: dict) -> None:
@@ -114,15 +123,12 @@ def _check(args: argparse.Namespace) -> int:
 
     try:
         state = _read_state(state_file)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         print(f"state-delta-gate: could not read state: {exc}", file=sys.stderr)
         return PROCEED  # Admission fails open; recording must report failures.
     now = _now()
 
-    streak_raw = state.get("noop_only_streak", 0)
-    noop_only_streak = (
-        int(streak_raw) if isinstance(streak_raw, int | float | str) else 0
-    )
+    noop_only_streak = _streak(state.get("noop_only_streak", 0))
     last_executed_ts = _parse_dt(state.get("last_executed_ts"))
 
     backoff_seconds = state_delta_backoff_seconds(noop_only_streak)
@@ -186,13 +192,12 @@ def _record(args: argparse.Namespace, *, productive: bool) -> int:
             fcntl.flock(lock, fcntl.LOCK_EX)
             state = _read_state(state_file)
             old_streak = state.get("noop_only_streak", 0)
-            streak = int(old_streak) if isinstance(old_streak, int | float | str) else 0
-            streak = 0 if productive else streak + 1
+            streak = 0 if productive else _streak(old_streak) + 1
             now = _now()
             state["noop_only_streak"] = streak
             state["last_executed_ts"] = now.isoformat()
             _write_state(state_file, state)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         print(f"state-delta-gate: could not record state: {exc}", file=sys.stderr)
         return 1
 
@@ -215,7 +220,7 @@ def _status(args: argparse.Namespace) -> int:
 
     try:
         state = _read_state(state_file)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         print(f"state-delta-gate: could not read state: {exc}", file=sys.stderr)
         return 1
 
@@ -224,8 +229,7 @@ def _status(args: argparse.Namespace) -> int:
     except ImportError:
         state_delta_backoff_seconds = None
 
-    streak_raw = state.get("noop_only_streak", 0)
-    streak = int(streak_raw) if isinstance(streak_raw, int | float | str) else 0
+    streak = _streak(state.get("noop_only_streak", 0))
     backoff = (
         state_delta_backoff_seconds(streak)
         if state_delta_backoff_seconds
