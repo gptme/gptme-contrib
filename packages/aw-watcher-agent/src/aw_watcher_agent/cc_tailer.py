@@ -203,8 +203,18 @@ def _emit_file_locked(
 ) -> int:
     now = now or datetime.now(timezone.utc)
     text = path.read_text(encoding="utf-8", errors="replace")
-    blocks = parse_session(text.splitlines(), gap_s=gap_s)
-    finished = [b for b in blocks if (now - b.end).total_seconds() > gap_s]
+    lines = text.splitlines()
+    incomplete = False
+    if lines and not text.endswith("\n"):
+        try:
+            json.loads(lines[-1])
+        except json.JSONDecodeError:
+            incomplete = True
+    blocks = parse_session(lines, gap_s=gap_s)
+    # A partially written row may extend the last parsed block. Earlier blocks
+    # already have a complete successor establishing their idle boundary.
+    candidates = blocks[:-1] if incomplete else blocks
+    finished = [b for b in candidates if (now - b.end).total_seconds() > gap_s]
     emitted = _read_emitted(path, gap_s, server=client.server, hostname=hostname)
     new = finished[emitted:]
     if not new:

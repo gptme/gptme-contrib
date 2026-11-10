@@ -241,3 +241,19 @@ def test_checkpoint_is_scoped_to_destination(tmp_path, monkeypatch, change):
     assert cc_tailer.emit_file(first, "host", transcript, now=now) == 0
     assert cc_tailer.emit_file(second, host, transcript, now=now) == 0
     assert len(first.posted) == len(second.posted) == 1
+
+
+def test_incomplete_final_row_holds_trailing_block_until_completed(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    transcript = tmp_path / "s1.jsonl"
+    prefix = _row("2026-11-10T08:00:00Z") + "\n" + _row("2026-11-10T09:00:00Z") + "\n"
+    last = _row("2026-11-10T09:10:00Z")
+    transcript.write_text(prefix + last[:20], encoding="utf-8")
+    client = _Client()
+    now = _dt("2026-11-10T10:00:00Z")
+    assert cc_tailer.emit_file(client, "host", transcript, now=now) == 1
+    assert client.posted[0][1].timestamp == _dt("2026-11-10T08:00:00Z").isoformat()
+    transcript.write_text(prefix + last + "\n", encoding="utf-8")
+    assert cc_tailer.emit_file(client, "host", transcript, now=now) == 1
+    assert client.posted[-1][1].duration == 600
+    assert cc_tailer.emit_file(client, "host", transcript, now=now) == 0
