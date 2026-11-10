@@ -110,25 +110,24 @@ def run_build(
         if slug not in emitters:
             raise UsageError(f"no emitter registered for page {slug!r}")
 
-    failed = 0
-    # Emitters run outside the lock: a slow collector must not hold up the
-    # others. Only the publish -> derive -> shared-write section is serialised.
-    emitted: list[PageEnvelope] = []
-    for slug in wanted:
-        try:
-            envelope = emitters[slug]()
-            if envelope.slug != slug:
-                raise PublishError(
-                    f"emitter {slug!r} returned envelope for {envelope.slug!r}"
-                )
-        except Exception as exc:  # one broken page must not stop the others
-            failed += 1
-            out(f"FAIL {slug}: {type(exc).__name__}: {exc}")
-            continue
-        emitted.append(envelope)
-
     try:
         with build_lock(private_root):
+            # Collection belongs inside the lock too: otherwise a slow build
+            # can publish an older observation after a newer build completes.
+            failed = 0
+            emitted: list[PageEnvelope] = []
+            for slug in wanted:
+                try:
+                    envelope = emitters[slug]()
+                    if envelope.slug != slug:
+                        raise PublishError(
+                            f"emitter {slug!r} returned envelope for {envelope.slug!r}"
+                        )
+                except Exception as exc:  # one broken page must not stop the others
+                    failed += 1
+                    out(f"FAIL {slug}: {type(exc).__name__}: {exc}")
+                    continue
+                emitted.append(envelope)
             return _publish_and_derive(
                 registry,
                 emitted,

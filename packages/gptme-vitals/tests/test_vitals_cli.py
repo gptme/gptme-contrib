@@ -529,7 +529,7 @@ def test_timers_resolve_relative_roots_to_absolute_paths(
     assert f'"--public-root" "{app / "rel-public"}"' in service
 
 
-def test_shared_writes_happen_under_the_build_lock_and_emitters_do_not(
+def test_collection_and_shared_writes_happen_under_the_build_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import contextlib
@@ -576,7 +576,7 @@ def test_shared_writes_happen_under_the_build_lock_and_emitters_do_not(
 
     code, _ = _run_with_emitters(tmp_path, _portal_registry(), _all(services=emitting))
     assert code == 0
-    assert seen == {"emitter": False, "publish": True, "core": True, "portal": True}
+    assert seen == {"emitter": True, "publish": True, "core": True, "portal": True}
 
 
 def _run_with_emitters(
