@@ -148,7 +148,14 @@ def _strip_heredoc_bodies(cmd: str) -> str:
         ]
         # Quoting the executable does not stop it consuming shell input.
         header = _QUOTED_RE.sub(lambda q: q.group()[1:-1], line)
-        if not heredocs or _SHELL_CONSUMER_RE.search(header):
+        # With a trailing pipe the heredoc precedes the rest of the pipeline;
+        # its consumer can be after the delimiter. Keep this unsupported shape
+        # conservatively rather than hiding an executed body.
+        if (
+            not heredocs
+            or _SHELL_CONSUMER_RE.search(header)
+            or header[:comment].rstrip().endswith("|")
+        ):
             continue
         for m in heredocs:
             strip_tabs, delim = m.group(1) == "-", m.group(3)

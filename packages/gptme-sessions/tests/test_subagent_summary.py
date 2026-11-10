@@ -183,7 +183,13 @@ def test_cmd_mutation_heredoc_line_continuation_respects_escaping(backslashes: i
 
 
 @pytest.mark.parametrize(
-    "header", ["bash \\\n<<'EOF'", "ba\\\nsh <<'EOF'", "bash \\\n  -s \\\n  <<'EOF'"]
+    "header",
+    [
+        "bash \\\n<<'EOF'",
+        "ba\\\nsh <<'EOF'",
+        "bash \\\n  -s \\\n  <<'EOF'",
+        "cat <<'EOF' | bash",
+    ],
 )
 def test_cmd_mutation_continued_shell_heredoc_keeps_body(header: str, tmp_path: Path) -> None:
     import subprocess
@@ -200,6 +206,23 @@ def test_cmd_mutation_continued_shell_heredoc_keeps_body(header: str, tmp_path: 
 def test_cmd_mutation_continued_data_heredoc_remains_literal() -> None:
     command = "cat \\\n<<'EOF'\ntouch out.txt\nEOF"
     assert cmd_mutation(command) == (None, None)
+    pipeline = "cat <<'EOF' | cat\ntouch out.txt\nEOF"
+    assert cmd_mutation(pipeline) == (None, None)
+
+
+def test_heredoc_body_precedes_pipeline_continuation(tmp_path: Path) -> None:
+    import subprocess
+
+    # A newline after | starts the pending heredoc, not the next executable.
+    # Putting bash before the body (as one review proposed) is invalid syntax.
+    invalid = "cat <<'EOF' |\nbash\ntouch out.txt\nEOF"
+    result = subprocess.run(["bash", "-c", invalid], cwd=tmp_path, capture_output=True)
+    assert result.returncode == 2
+    assert not (tmp_path / "out.txt").exists()
+    valid = "cat <<'EOF' |\ntouch out.txt\nEOF\nbash"
+    subprocess.run(["bash", "-c", valid], cwd=tmp_path, check=True)
+    assert (tmp_path / "out.txt").exists()
+    assert cmd_mutation(valid)[0] == "acting"
 
 
 @pytest.mark.parametrize(
