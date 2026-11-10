@@ -235,3 +235,28 @@ def test_bash_c_write_counts_comment() -> None:
         sigs = extract_signals_cc(_bash_msgs(cmd))
         assert sigs["gh_interactions"] == 1, cmd
         assert sigs["comments_posted"] == 1, cmd
+
+
+def test_unquoted_substitution_arg_does_not_lend_method() -> None:
+    # An inner GET in an unquoted $(...) or backtick argument is its own
+    # command; the outer POST still writes (same as the quoted/literal forms).
+    for cmd in (
+        "gh api repos/o/r/issues/5/comments -f body=$(gh api -X GET user --jq .login)",
+        "gh api repos/o/r/issues/5/comments -f body=`gh api -X GET user --jq .login`",
+        'gh api repos/o/r/issues/5/comments -f body="$(gh api -X GET user --jq .login)"',
+        "gh api repos/o/r/issues/5/comments -f body=alice",
+    ):
+        sigs = extract_signals_cc(_bash_msgs(cmd))
+        assert sigs["gh_interactions"] == 1, cmd
+        assert sigs["comments_posted"] == 1, cmd
+
+
+def test_unquoted_substitution_read_only_stays_zero() -> None:
+    # Read control: a GET whose argument comes from another GET posts nothing.
+    for cmd in (
+        "gh api -X GET repos/o/r/issues/$(gh api -X GET user --jq .id)/comments",
+        "gh api repos/o/r/issues/5/comments --jq $(echo .)",
+    ):
+        sigs = extract_signals_cc(_bash_msgs(cmd))
+        assert sigs.get("comments_posted", 0) == 0, cmd
+        assert sigs["gh_interactions"] == 0, cmd

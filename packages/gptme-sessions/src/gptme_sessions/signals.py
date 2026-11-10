@@ -475,11 +475,13 @@ def _gh_api_args(segment: str) -> list[str] | None:
 
 
 def _collapse_process_substitutions(tokens: list[str]) -> list[str]:
-    """Replace each ``<(...)``/``>(...)`` token run with one opaque word.
+    """Replace each substitution's token run with one opaque word.
 
-    A process substitution is a separate command whose path becomes a single
-    argument, so ``--input <(gh api -X GET ...)`` must not lend the inner
-    ``-X GET`` to the outer invocation. ``_command_substitutions`` checks the
+    Process substitution (``<(...)``/``>(...)``), unquoted command
+    substitution (``body=$(...)``) and backticks are separate commands whose
+    output or path becomes part of a single argument, so ``--input <(gh api
+    -X GET ...)`` or ``-f body=$(gh api -X GET ...)`` must not lend the inner
+    ``-X GET`` to the outer invocation. ``_command_substitutions`` checks each
     body as a command of its own.
     """
     out: list[str] = []
@@ -488,16 +490,34 @@ def _collapse_process_substitutions(tokens: list[str]) -> list[str]:
         tok = tokens[i]
         if _paren_delta(tok) > 0 and tok.startswith(("<(", ">(")):
             # shlex groups punctuation runs, so ``<(`` arrives as one token.
-            j, depth = i + 1, _paren_delta(tok)
-            while j < len(tokens) and depth > 0:
-                depth += _paren_delta(tokens[j])
-                j += 1
             out.append("/dev/fd/63")
-            i = j
+            i = _skip_paren_run(tokens, i)
+            continue
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if tok.endswith("$") and _paren_delta(nxt) > 0 and nxt.startswith("("):
+            # shlex splits ``body=$(`` into ``body=$`` and ``(``.
+            out.append(tok[:-1] + "SUBST")
+            i = _skip_paren_run(tokens, i + 1)
+            continue
+        if tok.count("`") % 2 == 1:
+            j = i + 1
+            while j < len(tokens) and tokens[j].count("`") % 2 == 0:
+                j += 1
+            out.append(tok.split("`", 1)[0] + "SUBST")
+            i = j + 1
             continue
         out.append(tok)
         i += 1
     return out
+
+
+def _skip_paren_run(tokens: list[str], i: int) -> int:
+    """Index just past the group opened by ``tokens[i]``."""
+    j, depth = i + 1, _paren_delta(tokens[i])
+    while j < len(tokens) and depth > 0:
+        depth += _paren_delta(tokens[j])
+        j += 1
+    return j
 
 
 def _paren_delta(tok: str) -> int:
