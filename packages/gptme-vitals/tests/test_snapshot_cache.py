@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 from gptme_vitals import snapshot_cache as sc
+
+
+@pytest.fixture(autouse=True)
+def clean_cache_environment(monkeypatch):
+    for name in (sc.TTL_ENV, sc.DIR_ENV, sc.REFRESH_ENV):
+        monkeypatch.delenv(name, raising=False)
 
 
 def test_miss_then_hit_within_ttl(tmp_path):
@@ -108,6 +115,17 @@ def test_non_roundtrippable_values_are_never_cached(tmp_path):
     assert len(calls) == 2
     assert not (tmp_path / "odd.json").exists()
     assert sc.write_snapshot(tmp_path, "s", {"a": {1, 2}}) is False
+
+
+def test_deeply_nested_value_is_returned_without_caching(tmp_path):
+    value: list[object] = []
+    for _ in range(sys.getrecursionlimit() + 100):
+        value = [value]
+    assert (
+        sc.cached_signal("deep", lambda: value, cache_dir=tmp_path, ttl_seconds=60)
+        is value
+    )
+    assert not list(tmp_path.iterdir())
 
 
 def test_served_value_is_identical_to_computed_value(tmp_path):

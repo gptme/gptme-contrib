@@ -112,9 +112,9 @@ def write_snapshot(
     """
     try:
         encoded = json.dumps(value)
-    except (TypeError, ValueError):
-        return False
-    if json.loads(encoded) != value:
+        if json.loads(encoded) != value:
+            return False
+    except (TypeError, ValueError, RecursionError):
         return False
     current = time.time() if now is None else now
     payload = {
@@ -136,7 +136,7 @@ def write_snapshot(
             with contextlib.suppress(OSError):
                 os.unlink(tmp_name)
             raise
-    except OSError:
+    except (OSError, RecursionError):
         return False
     return True
 

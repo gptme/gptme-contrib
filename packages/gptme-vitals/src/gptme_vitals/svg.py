@@ -60,7 +60,7 @@ def bar_svg(values: list[tuple[str, int, str]], max_val: int | None = None) -> s
         )
         lines.append(
             f'  <rect x="{label_w}" y="{y}" width="{w}" height="{bar_h}" '
-            f'rx="3" fill="{color}" opacity="0.85"/>',
+            f'rx="3" fill="{html_escape(color)}" opacity="0.85"/>',
         )
         lines.append(
             f'  <text x="{label_w + w + 6}" y="{y + bar_h - 6}" '
@@ -95,7 +95,7 @@ def donut_svg(segments: list[tuple[str, int, str]], size: int = 120) -> str:
         if val == total:
             svg.append(
                 f'  <circle cx="{cx}" cy="{cy}" r="{(r + inner_r) / 2}" '
-                f'fill="none" stroke="{color}" stroke-width="{r - inner_r}" opacity="0.85"/>'
+                f'fill="none" stroke="{html_escape(color)}" stroke-width="{r - inner_r}" opacity="0.85"/>'
             )
             start_angle = end_angle
             continue
@@ -122,7 +122,7 @@ def donut_svg(segments: list[tuple[str, int, str]], size: int = 120) -> str:
             f"L {ix1:.1f} {iy1:.1f} "
             f"A {inner_r} {inner_r} 0 {large_arc} 0 {ix2:.1f} {iy2:.1f} Z"
         )
-        svg.append(f'  <path d="{d}" fill="{color}" opacity="0.85"/>')
+        svg.append(f'  <path d="{d}" fill="{html_escape(color)}" opacity="0.85"/>')
         start_angle = end_angle
 
     # Center label
@@ -136,7 +136,7 @@ def donut_svg(segments: list[tuple[str, int, str]], size: int = 120) -> str:
     for i, (label, val, color) in enumerate(segments):
         ly = 20 + i * 22
         svg.append(
-            f'  <rect x="{legend_x}" y="{ly - 10}" width="12" height="12" rx="2" fill="{color}"/>',
+            f'  <rect x="{legend_x}" y="{ly - 10}" width="12" height="12" rx="2" fill="{html_escape(color)}"/>',
         )
         pct = val / total * 100
         svg.append(

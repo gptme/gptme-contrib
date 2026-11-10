@@ -44,6 +44,27 @@ def test_donut_viewport_contains_every_legend_row(count, size):
         assert float(swatch.attrib["y"]) + float(swatch.attrib["height"]) <= height
 
 
+@pytest.mark.parametrize("renderer", ["bar", "donut_wedges", "donut_ring"])
+def test_palette_values_cannot_inject_svg_attributes(renderer):
+    color = 'red" onmouseover="alert(1)&<>'
+    segments = [("a", 1, color)]
+    if renderer == "donut_wedges":
+        segments.append(("b", 2, color))
+    output = (
+        svg_module.bar_svg(segments)
+        if renderer == "bar"
+        else svg_module.donut_svg(segments)
+    )
+    root = ET.fromstring(output)
+    palette_values = []
+    for element in root.iter():
+        assert "onmouseover" not in element.attrib
+        for attr in ("fill", "stroke"):
+            if element.attrib.get(attr) == color:
+                palette_values.append(element.attrib[attr])
+    assert len(palette_values) == (1 if renderer == "bar" else len(segments) * 2)
+
+
 def test_svg_module_imports_only_stdlib():
     tree = ast.parse(SVG_PATH.read_text())
     roots: set[str] = set()
