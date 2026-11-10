@@ -47,6 +47,8 @@ def _bash_msgs(*commands: str) -> list[dict]:
 
 
 READS = [
+    # reads inside process substitutions stay reads
+    "diff <(gh api repos/o/r/issues/5/comments) <(gh api repos/o/r/issues/6/comments)",
     "gh api repos/gptme/gptme-contrib/issues/2067/comments --jq '.[-4:][] | {u:.user.login}'",
     "gh api repos/o/r/pulls/12/reviews",
     "gh api repos/o/r/pulls/12/comments --paginate | jq length",
@@ -129,6 +131,12 @@ WRITES = [
     # a mid-word # is literal in bash, not a comment that hides -f
     "gh api repos/o/r/issues/5/comments -H X-Issue:#5 -f body=x",
     "gh api repos/o/r/issues/5/comments -H 'X-Issue:#5' -f body=x",
+    # the inner GET of a process substitution is a separate command; the outer
+    # invocation still POSTs its --input
+    "gh api repos/o/r/issues/5/comments --input <(gh api -X GET repos/o/r/issues/comments/123)",
+    "gh api repos/o/r/issues/5/comments --input reply.json",
+    # a write inside a process substitution counts as its own command
+    "cat <(gh api repos/o/r/issues/5/comments -f body=x)",
 ]
 
 
@@ -197,3 +205,13 @@ def test_quoted_substitution_write_counts_comment() -> None:
         sigs = extract_signals_cc(_bash_msgs(cmd))
         assert sigs["gh_interactions"] == 1, cmd
         assert sigs["comments_posted"] == 1, cmd
+
+
+def test_endpoint_in_field_value_is_not_comment() -> None:
+    # PATCHing an issue whose body mentions a comments path posts no comment;
+    # the endpoint argument decides, not text inside a field value.
+    for body in ("see repos/o/r/issues/6/comments", "plain text"):
+        cmd = f"gh api -X PATCH repos/o/r/issues/5 -f body='{body}'"
+        sigs = extract_signals_cc(_bash_msgs(cmd))
+        assert sigs.get("comments_posted", 0) == 0, cmd
+        assert sigs["gh_interactions"] == 0, cmd

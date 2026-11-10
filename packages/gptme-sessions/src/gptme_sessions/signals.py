@@ -367,11 +367,13 @@ def _split_shell_segments(cmd: str) -> list[str]:
 
 
 def _command_substitutions(cmd: str) -> list[str]:
-    """Bodies of ``$(...)`` and backtick substitutions that bash would execute.
+    """Bodies of ``$(...)``, backtick and ``<(...)``/``>(...)`` substitutions
+    that bash would execute.
 
     Substitutions run unquoted and inside double quotes
     (``x="$(gh api ... -f body=x)"``) but not inside single quotes or shell
-    comments, so ``printf '$(gh api ... -f x)'`` yields nothing. Only
+    comments, so ``printf '$(gh api ... -f x)'`` yields nothing. Process
+    substitution only happens unquoted. Only
     outermost bodies are returned; callers recurse for nested ones.
     """
     bodies: list[str] = []
@@ -385,7 +387,7 @@ def _command_substitutions(cmd: str) -> list[str]:
         if quote == "'":
             if c == "'":
                 quote = None
-        elif c == "$" and cmd[i + 1 : i + 2] == "(":
+        elif (c == "$" or (c in "<>" and quote is None)) and cmd[i + 1 : i + 2] == "(":
             start = j = i + 2
             depth, inner = 1, None
             while j < n:
@@ -456,11 +458,74 @@ def _gh_api_args(segment: str) -> list[str] | None:
     compare by basename (``/usr/bin/gh``). A ``gh api`` mentioned inside a
     quoted argument stays part of one token and does not count.
     """
-    tokens = _shell_tokens(segment)
+    tokens = _collapse_process_substitutions(_shell_tokens(segment))
     for i in range(len(tokens) - 1):
         name = re.split(r"[=({!$`]", tokens[i])[-1].rsplit("/", 1)[-1]
         if name == "gh" and tokens[i + 1] == "api":
-            return tokens[i + 2 :]
+            args = tokens[i + 2 :]
+            # An unmatched ``)`` closes the group or substitution this
+            # invocation sits in; what follows is not its arguments.
+            depth = 0
+            for j, tok in enumerate(args):
+                depth += _paren_delta(tok)
+                if depth < 0:
+                    return args[:j]
+            return args
+    return None
+
+
+def _collapse_process_substitutions(tokens: list[str]) -> list[str]:
+    """Replace each ``<(...)``/``>(...)`` token run with one opaque word.
+
+    A process substitution is a separate command whose path becomes a single
+    argument, so ``--input <(gh api -X GET ...)`` must not lend the inner
+    ``-X GET`` to the outer invocation. ``_command_substitutions`` checks the
+    body as a command of its own.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if _paren_delta(tok) > 0 and tok.startswith(("<(", ">(")):
+            # shlex groups punctuation runs, so ``<(`` arrives as one token.
+            j, depth = i + 1, _paren_delta(tok)
+            while j < len(tokens) and depth > 0:
+                depth += _paren_delta(tokens[j])
+                j += 1
+            out.append("/dev/fd/63")
+            i = j
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
+
+def _paren_delta(tok: str) -> int:
+    """Net ``(`` minus ``)`` of an unquoted punctuation token, else 0."""
+    if tok and not tok.strip("();<>|&"):
+        return tok.count("(") - tok.count(")")
+    return 0
+
+
+def _gh_api_endpoint(args: list[str]) -> str | None:
+    """The endpoint (first positional argument) of a ``gh api`` invocation."""
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok in _GH_API_VALUE_OPTS or tok in (
+            "-X",
+            "--method",
+            "-f",
+            "-F",
+            "--field",
+            "--raw-field",
+            "--input",
+        ):
+            i += 2
+            continue
+        if not tok.startswith("-"):
+            return tok
+        i += 1
     return None
 
 
@@ -531,7 +596,12 @@ def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
         # No tokenized ``gh api`` invocation means the match was quoted text
         # (``printf 'gh api ...'``), not a command, so it never counts.
         args = _gh_api_args(segment)
-        if args is not None and _gh_api_writes(args):
+        if args is None or not _gh_api_writes(args):
+            continue
+        # Match the endpoint argument itself, not a path quoted in a field
+        # value (``-f body='see repos/o/r/issues/6/comments'``).
+        endpoint = _gh_api_endpoint(args)
+        if endpoint is not None and pattern.search(f"gh api {endpoint}"):
             return True
     return False
 
