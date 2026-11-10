@@ -481,6 +481,42 @@ if [ "$is_allowed" = false ] && [[ "$REMOTE_URL" == *"gptme-agent-template"* ]];
     is_allowed=true
 fi
 
+# Path-scoped direct publication: an exact repository listed in
+# direct-publish.json may push prose-only history to its default branch. The
+# checker judges each tuple's own remote_old..local_new range, against the push
+# destination URL git supplied ($2). It and its config come from this hook's own
+# install root, never from the pushed repository; anything missing, malformed or
+# not approved (exit != 0) leaves the push blocked below.
+_dp_protected_tuple=false
+for _dp_line in "${STDIN_LINES[@]}"; do
+    read -r _dp_lref _dp_lsha _dp_rref _dp_rsha <<< "$_dp_line"
+    if [[ "$_dp_rref" == "refs/heads/master" || "$_dp_rref" == "refs/heads/main" ]]; then
+        _dp_protected_tuple=true
+    fi
+done
+if [ "$is_allowed" = false ] && [ "$_dp_protected_tuple" = true ] &&
+    [ -f "$HOOK_CONF_DIR/direct-publish.json" ]; then
+    # Resolve symlinks first and require the installation layout; a blind
+    # walk from .git/modules/sub/hooks lands in an untrusted superproject.
+    # Config still comes from the installed HOOK_CONF_DIR above.
+    _DP_HOOKS_REAL="$(cd "$SCRIPT_DIR" && pwd -P)" || _DP_HOOKS_REAL=""
+    _DP_ROOT=""
+    case "$_DP_HOOKS_REAL" in
+        */dotfiles/.config/git/hooks)
+            _DP_CANDIDATE="${_DP_HOOKS_REAL%/dotfiles/.config/git/hooks}"
+            case "$_DP_CANDIDATE" in
+                */.git|*/.git/*) ;;
+                *) _DP_ROOT="$_DP_CANDIDATE" ;;
+            esac
+            ;;
+    esac
+    if [ -n "$_DP_ROOT" ] && [ -f "$_DP_ROOT/scripts/git/direct-publish-policy.py" ] &&
+        printf '%s\n' "${STDIN_LINES[@]}" | python3 "$_DP_ROOT/scripts/git/direct-publish-policy.py" push \
+            --config "$HOOK_CONF_DIR/direct-publish.json" --remote-url "${2:-}" >&2; then
+        is_allowed=true
+    fi
+fi
+
 # If not allowed, check for master/main pushes
 if [ "$is_allowed" = false ]; then
     for line in "${STDIN_LINES[@]}"; do
