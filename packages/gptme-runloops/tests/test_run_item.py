@@ -3956,6 +3956,57 @@ class TestGrokBuildInfraFailureRecordedInLedger:
         completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
         assert completed["infra_failure"] == "gptme_auth"
 
+    @pytest.mark.parametrize(
+        ("with_trajectory", "expect_deferred"), [(True, False), (False, True)]
+    )
+    def test_gptme_exit_75_rate_limit_vs_lock_busy(
+        self, tmp_path, with_trajectory: bool, expect_deferred: bool
+    ) -> None:
+        """Exit 75 is a rate limit when gptme left a 429 trajectory, a defer otherwise.
+
+        The code alone is ambiguous (gptme/gptme-contrib#2084 made gptme's
+        real 75 visible); the trajectory is the cause signal.
+        """
+        item = make_item(types=["notification"], number=0)
+        work_file = _write_work_file(tmp_path, item)
+        config = make_config(tmp_path)
+        session_ref: Path | None = None
+
+        def run_cmd(argv, **kwargs):
+            nonlocal session_ref
+            argv = [str(arg) for arg in argv]
+            if "/fake/run.sh" in argv:
+                env = kwargs.get("env", {})
+                session_id = env.get("BOB_SESSION_ID", "test-gptme-session")
+                if with_trajectory:
+                    traj = tmp_path / "gptme-traj.jsonl"
+                    traj.write_text(
+                        '{"role": "error", "content": "API error (status 429): rate limit"}\n'
+                    )
+                    ref = Path("/tmp") / f"gptme-traj-{session_id}.path"
+                    ref.write_text(str(traj))
+                    session_ref = ref
+                return subprocess.CompletedProcess(argv, 75, "", "")
+            stdout = "abc123\n" if "rev-parse" in argv else ""
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+        try:
+            run_work_file(
+                work_file, config, make_hooks(run_cmd=run_cmd), backend="gptme"
+            )
+        finally:
+            if session_ref is not None:
+                session_ref.unlink(missing_ok=True)
+
+        completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
+        assert completed["exit_code"] == 75
+        if expect_deferred:
+            assert completed.get("infra_failure") is None
+            assert completed["outcome"] != "failed"
+        else:
+            assert completed["infra_failure"] == "gptme_rate_limit"
+            assert completed["outcome"] == "failed"
+
 
 # --- Effect=observed suppression for failed sessions (gptme/gptme-contrib#1601) ---
 

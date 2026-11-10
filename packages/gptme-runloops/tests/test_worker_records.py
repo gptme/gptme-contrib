@@ -324,6 +324,62 @@ def test_post_session_record_normalizes_lock_busy_for_primary_writer(
     assert "error" not in record
 
 
+@pytest.mark.parametrize("exit_code", [75, 76])
+def test_post_session_record_uses_canonical_writer_when_session_ran(
+    tmp_path: Path, exit_code: int
+) -> None:
+    """75/76 after a session actually ran (gptme rate limit / auth) is a failure.
+
+    Same exit code as lock-busy, opposite meaning: the cause signal
+    (``session_ran``) routes it to the canonical writer so the trajectory is
+    ingested and the run is graded, instead of an "unknown" local record.
+    """
+    seen: list[int] = []
+
+    def post_session(**kwargs: Any) -> _StubResult:
+        seen.append(kwargs["exit_code"])
+        return _StubResult(
+            _StubRecord({"exit_code": kwargs["exit_code"], "outcome": "failed"}),
+            "stub-grade",
+        )
+
+    record_file = tmp_path / "record.json"
+    write_post_session_record(
+        record_file,
+        harness="gptme",
+        model="m",
+        session_id="session",
+        exit_code=exit_code,
+        duration_seconds=1,
+        item_timeout=900,
+        trajectory_path=None,
+        post_session=post_session,
+        make_store=StubStore,
+        session_ran=True,
+    )
+
+    assert seen == [exit_code]
+    record = json.loads(record_file.read_text())
+    assert record["outcome"] == "failed"
+    assert record["grade"] == "stub-grade"
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "session_ran", "expected"),
+    [
+        (75, True, "failed"),
+        (76, True, "failed"),
+        (75, False, "unknown"),
+        (124, True, "unknown"),
+        (0, True, "unknown"),
+    ],
+)
+def test_fallback_outcome_session_ran(
+    exit_code: int, session_ran: bool, expected: str
+) -> None:
+    assert fallback_outcome(exit_code, session_ran=session_ran) == expected
+
+
 # --- Golden: legacy fallback record write (worker.sh:325-373) ---
 
 
