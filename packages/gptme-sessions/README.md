@@ -254,6 +254,42 @@ existing owned suffixes before attempting newly available canonical paths.
 be non-empty filename components without path separators or NUL. Invalid inputs
 fail before any directories or journal files are created.
 
+### Dispatch provenance (`dispatch_cause`)
+
+`dispatch_cause` answers *"what launched this session?"* — a worker spawn, an event, a
+scheduled slot, a task claim, or systemd — and records it before the agent runs, so a
+runner that dies before `post_session` still leaves provenance.
+
+```bash
+python -m gptme_sessions.dispatch_cause --workspace .                    # print the cause
+python -m gptme_sessions.dispatch_cause --workspace . --refresh          # re-infer from this env
+python -m gptme_sessions.dispatch_cause --workspace . --record-start     # also append the start ledger
+python -m gptme_sessions.dispatch_cause --workspace . --trigger          # spawn|dispatch|timer|unknown
+```
+
+A dispatcher exports the printed JSON as `AGENT_DISPATCH_CAUSE`, and `post_session`
+records it with no further wiring. Inference is identifier-only — event payloads and
+dispatcher prompt text stay in the stores that already own them.
+
+| Variable | Meaning |
+|---|---|
+| `AGENT_DISPATCH_CAUSE` | Explicit JSON cause; wins unless `--refresh` is passed |
+| `AGENT_DISPATCH_KIND` / `AGENT_DISPATCH_ID` | Spawn kind (`worker`, `fanout`, `fanout-btb`) and its id |
+| `AGENT_PARENT_SESSION_ID` | Recorded as `parent_session_id`; never inferred |
+| `AGENT_SESSION_ID`, `AGENT_RECEIPT_SESSION_ID` | Session id for the start ledger |
+
+Explicit spawn kinds take precedence over event, PM and task-selection variables
+that a child may inherit. Fanout retains its selected `task` as context while its
+cause kind/id identify the spawn; workers clear inherited task context. Without an
+explicit spawn kind, event, PM, task and systemd inference keep that order.
+
+Legacy `BOB_*` spellings remain read as aliases (gptme/gptme-contrib#1724). Inference
+also recognises dispatcher-owned protocols that are not agent-branded: `CASCADE_*`
+selection state, `EVENT_ID`/`EVENT_URL`/`EVENT_TRIGGER_TYPE`, `PM_DISPATCH_ID` with
+`PM_WORK_FILE`, and systemd's `INVOCATION_ID`. A `systemd` cause classifies as
+`unknown` rather than `timer`: an invocation id proves a service ran, not that a
+timer fired it.
+
 ## Where trajectories are discovered
 
 | Harness | Default location | Override |
