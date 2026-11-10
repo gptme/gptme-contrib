@@ -174,10 +174,15 @@ def from_records(
 
     nodes: list[dict[str, Any]] = []
     for r in records:
-        end = _epoch(r.end_time) or _epoch(r.timestamp)
         start = _epoch(r.start_time)
-        if start is None and end is not None:
-            start = end - (r.duration_seconds or 0)
+        end = _epoch(r.end_time)
+        duration = r.duration_seconds or 0
+        if start is None:
+            # Explicit end times anchor backwards; sync's timestamp is the
+            # trajectory's first event, so timestamp-only records anchor forwards.
+            start = end - duration if end is not None else _epoch(r.timestamp)
+        if end is None and start is not None:
+            end = start + duration
         if start is None or end is None:
             continue
         cause = r.dispatch_cause if isinstance(r.dispatch_cause, Mapping) else {}

@@ -174,3 +174,16 @@ def test_thread_cli_shows_ancestry_and_descendants(tmp_path: Path) -> None:
 
     text = CliRunner().invoke(cli, ["--sessions-dir", d, "thread", "a00000", "--since", "all"])
     assert text.exit_code != 0 and "ambiguous" in text.output
+
+
+def test_timestamp_only_synced_record_starts_at_first_event() -> None:
+    record = SessionRecord(
+        session_id="synced",
+        timestamp="2026-11-10T10:00:00+00:00",
+        duration_seconds=3600,
+    )
+    (node,) = from_records([record], agent="bob", read_journal=None)
+    from datetime import datetime
+
+    assert node["start"] == datetime.fromisoformat(record.timestamp).timestamp()
+    assert node["end"] == node["start"] + 3600
