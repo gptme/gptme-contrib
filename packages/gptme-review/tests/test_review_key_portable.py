@@ -50,6 +50,26 @@ def test_missing_or_broken_config_resolves_none(tmp_path: Path) -> None:
     assert got is None
 
 
+@pytest.mark.parametrize("invalid_env", ['"invalid"', "42", '["invalid"]'])
+def test_non_table_config_env_is_skipped(tmp_path: Path, invalid_env: str) -> None:
+    broken = tmp_path / "broken.toml"
+    broken.write_text(f"env = {invalid_env}\n")
+    valid = _write_config(
+        tmp_path / "valid.toml", {"OPENROUTER_API_KEY_REVIEW": "cfg-review"}
+    )
+    assert (
+        core._resolve_review_key_portable(
+            environ={"OPENROUTER_API_KEY_REVIEW": "env-review"},
+            config_paths=(broken,),
+        )
+        == "env-review"
+    )
+    assert (
+        core._resolve_review_key_portable(environ={}, config_paths=(broken, valid))
+        == "cfg-review"
+    )
+
+
 def test_review_api_key_falls_back_without_workspace_resolver(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

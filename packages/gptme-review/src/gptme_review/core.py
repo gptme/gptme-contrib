@@ -3202,7 +3202,10 @@ def _resolve_review_key_portable(
                 data = tomllib.load(fh)
         except (OSError, tomllib.TOMLDecodeError):
             continue
-        for name, value in (data.get("env") or {}).items():
+        env_table = data.get("env")
+        if not isinstance(env_table, dict):
+            continue
+        for name, value in env_table.items():
             if isinstance(value, str):
                 config_env[name] = value
     for name in REVIEW_KEY_NAMES:
