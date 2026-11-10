@@ -1264,7 +1264,7 @@ def snapshot_gptme_trajectories(
         if target:
             paths.add(Path(target))
     return {
-        str(path): (st.st_mtime_ns, st.st_size)
+        str(path.resolve()): (st.st_mtime_ns, st.st_size)
         for path in paths
         if path.is_file()
         for st in [path.stat()]
@@ -1338,7 +1338,7 @@ def resolve_backend_trajectory(
     def gptme_written_this_run(path: Path) -> bool:
         st = path.stat()
         if gptme_pre is not None:
-            previous = gptme_pre.get(str(path))
+            previous = gptme_pre.get(str(path.resolve()))
             if previous is None:
                 return st.st_mtime >= started_epoch
             return previous != (st.st_mtime_ns, st.st_size)

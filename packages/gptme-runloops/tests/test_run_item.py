@@ -1825,15 +1825,17 @@ def test_trajectory_gptme_uses_run_sh_sentinel(tmp_path) -> None:
     assert got == str(trajectory)
 
 
-@pytest.mark.parametrize("source", ["ref", "durable"])
+@pytest.mark.parametrize("source", ["ref", "durable", "published_ref"])
 @pytest.mark.parametrize("change", ["unchanged", "modified", "created"])
+@pytest.mark.parametrize("relative_root", [False, True])
 def test_gptme_same_second_trajectory_requires_current_write(
-    tmp_path, source: str, change: str
+    tmp_path, monkeypatch, source: str, change: str, relative_root: bool
 ) -> None:
-    log_root = tmp_path / "logs"
+    monkeypatch.chdir(tmp_path)
+    log_root = Path("logs") if relative_root else tmp_path / "logs"
     trajectory = (
         log_root / "gptme-logs-sid" / "session" / "conversation.jsonl"
-        if source == "durable"
+        if source in ("durable", "published_ref")
         else tmp_path / "conversation.jsonl"
     )
     trajectory.parent.mkdir(parents=True, exist_ok=True)
@@ -1848,9 +1850,9 @@ def test_gptme_same_second_trajectory_requires_current_write(
         trajectory.write_text('{"role": "error", "content": "status 429"}\n')
         # Same second AND identical timestamp: size change still proves a write.
         os.utime(trajectory, (1000, 1000))
-    if source == "ref":
+    if source in ("ref", "published_ref"):
         # Republishing a pointer alone does not make its target current.
-        ref.write_text(str(trajectory))
+        ref.write_text(str(trajectory.resolve()))
 
     got = resolve_backend_trajectory(
         "gptme",
@@ -1866,7 +1868,10 @@ def test_gptme_same_second_trajectory_requires_current_write(
         gptme_pre=pre,
     )
 
-    assert got == ("" if change == "unchanged" else str(trajectory))
+    expected_path = (
+        trajectory.resolve() if source in ("ref", "published_ref") else trajectory
+    )
+    assert got == ("" if change == "unchanged" else str(expected_path))
 
 
 def test_trajectory_gptme_ignores_missing_sentinel_target(tmp_path) -> None:
@@ -3434,6 +3439,12 @@ def test_execute_plan_gptme_same_second_retry_ignores_previous_error(
     tmp_path, monkeypatch, exit_code: int
 ) -> None:
     monkeypatch.setattr("gptme_runloops.run_item.time.time", lambda: 1000)
+    # Keep repeated invocations identical within the test, but isolate its
+    # real /tmp reference from other parametrizations and parallel workers.
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.derive_session_id",
+        lambda slug, salt: derive_session_id(slug, str(tmp_path)),
+    )
     config = make_config(tmp_path, gptme_log_root=tmp_path / "logs")
     item = make_item(types=["notification"], number=0)
     plan = plan_item(
