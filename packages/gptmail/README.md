@@ -188,6 +188,30 @@ inbox with `scp`.
 If delivery fails, `send` exits non-zero and the outbox copy is stamped
 `delivered: false`.
 
+**Waiting for the reply.** `send` prints the message ID and the command that waits
+for its reply. `--watch` runs that wait in the same call. Background the command from
+an agent harness and its completion delivers the reply ID to the sending session:
+
+```bash
+gptmail agent send bob "Release check" "Is v1.2 ok?" --watch --timeout 2h
+# stdout ends with the reply ID; then: gptmail agent read <id>
+gptmail agent watch --thread <message-id> --once --pull --timeout 2h
+```
+
+`watch --thread` fires only on a message whose `in_reply_to` chain reaches the given
+ID, so a direct reply or a reply to a reply counts. Unrelated messages from the same
+agent are ignored. A reply that already exists fires immediately. Replies pushed into
+the local inbox are matched as well. Push and pull publish complete files atomically;
+read/reply metadata updates retain the receiver-local arrival time used for the final
+deadline scan. Delivery resets filesystem mtime on the receiving host; incoming YAML
+arrival fields are not trusted. The timestamp is sampled immediately before atomic
+publication, not atomically with it: suspension between stamping and linking can make
+a post-deadline publication count as timely. The timeout bounds waiting and network
+operations; it is not a strict publication-order guarantee across paused processes.
+SSH push publication requires `python3` on the peer
+(no remote gptmail installation or GNU coreutils is required). On timeout the command
+exits 124.
+
 **Pull-only recipients.** A recipient that cannot accept inbound SSH (for example a
 person on a laptop) is marked `delivery: pull-only`. Messages to it stay in the
 sender's outbox, and the recipient fetches them:
@@ -310,7 +334,7 @@ Run `gptmail --help` or `gptmail <command> --help` for full option details.
 | `reply MESSAGE_ID [CONTENT] [--mailbox NAME]` | Reply to the sender. Refuses if the message is already marked replied. |
 | `pending [--as ID] [--include-stale] [--mailbox NAME \| --all-mailboxes]` | Inbox messages awaiting your reply. |
 | `pending --for NAME [--fleet] [--json]` | Messages addressed to NAME in your outbox (with `--fleet`, in every registered agent's outbox). |
-| `pull [--as ID] [--json] [--dry-run] [--notify-cmd CMD]` | Fetch messages addressed to you from every SSH-reachable agent's outbox. `--notify-cmd` runs CMD with `NEW_COUNT` and `SUMMARY` set. |
+| `pull [--as ID] [--from NAME] [--json] [--dry-run] [--notify-cmd CMD]` | Fetch messages addressed to you from every SSH-reachable agent's outbox, or only `NAME` with `--from`. Thread watches pull only the matching sender, so unrelated offline peers cannot delay delivery. `--notify-cmd` runs CMD with `NEW_COUNT` and `SUMMARY` set. |
 | `watch [--to NAME] [--from A,B] [--interval SECS] [--once] [--pull]` | Poll agents' outboxes and print one line per new message. Works with systemd/launchd or a terminal. |
 | `status [--mailbox NAME \| --all-mailboxes]` | Identity, registry and inbox/outbox/pending counts. |
 

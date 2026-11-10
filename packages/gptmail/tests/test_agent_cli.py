@@ -430,7 +430,9 @@ def test_reply_marks_read_no_existing_key(workspace: Path) -> None:
     assert fm["replied"] is True
 
 
-def test_pending_excludes_sender_declared_no_reply_but_list_keeps_it(workspace: Path) -> None:
+def test_pending_excludes_sender_declared_no_reply_but_list_keeps_it(
+    workspace: Path,
+) -> None:
     name = _seed_inbox(workspace, reply_expected=False)
 
     pending = CliRunner().invoke(agent, ["pending"])
@@ -709,7 +711,9 @@ def test_status_reports_counts(workspace: Path) -> None:
     assert "Pending:  1" in result.output
 
 
-def test_send_named_mailbox_writes_mailbox_outbox_and_list_shows_it(workspace: Path) -> None:
+def test_send_named_mailbox_writes_mailbox_outbox_and_list_shows_it(
+    workspace: Path,
+) -> None:
     result = CliRunner().invoke(agent, ["send", "--mailbox", "ops", "bob", "Hello", "body text"])
     assert result.exit_code == 0, result.output
 
@@ -767,7 +771,9 @@ def test_pending_all_mailboxes_combines_default_and_named(workspace: Path) -> No
     assert "[ops]" in result.output
 
 
-def test_pending_for_recipient_scans_local_outbox_across_mailboxes(workspace: Path) -> None:
+def test_pending_for_recipient_scans_local_outbox_across_mailboxes(
+    workspace: Path,
+) -> None:
     default_msg = _seed_outbox(workspace, "erik", "Default")
     ops_msg = _seed_outbox(workspace, "erik", "Ops", mailbox="ops")
 
@@ -781,7 +787,9 @@ def test_pending_for_recipient_scans_local_outbox_across_mailboxes(workspace: Pa
     assert "alice " in result.output
 
 
-def test_pending_for_recipient_json_emits_machine_readable_rows(workspace: Path) -> None:
+def test_pending_for_recipient_json_emits_machine_readable_rows(
+    workspace: Path,
+) -> None:
     default_msg = _seed_outbox(workspace, "erik", "Default")
     ops_msg = _seed_outbox(workspace, "erik", "Ops", mailbox="ops")
 
@@ -798,7 +806,9 @@ def test_pending_for_recipient_json_emits_machine_readable_rows(workspace: Path)
     assert rows[1]["mailbox"] == "ops"
 
 
-def test_pending_for_recipient_ignores_outbox_rows_without_to_field(workspace: Path) -> None:
+def test_pending_for_recipient_ignores_outbox_rows_without_to_field(
+    workspace: Path,
+) -> None:
     outbox = workspace / "messages" / "outbox"
     malformed = outbox / "20260616-120000-000000-alice-missing-to.md"
     malformed.write_text(
@@ -861,7 +871,9 @@ def test_pending_for_recipient_fleet_propagates_all_mailboxes(
     assert {row["file"] for row in rows} == expected_files
 
 
-def test_remote_pending_rows_warns_on_missing_transport(capsys: pytest.CaptureFixture[str]) -> None:
+def test_remote_pending_rows_warns_on_missing_transport(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     rows = agent_cli._remote_pending_rows(
         "bob",
         {"workspace": "/tmp/bob"},
@@ -1026,7 +1038,9 @@ def multi_peer_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
     return tmp_path
 
 
-def test_broadcast_delivers_to_all_peers_except_self(multi_peer_workspace: Path) -> None:
+def test_broadcast_delivers_to_all_peers_except_self(
+    multi_peer_workspace: Path,
+) -> None:
     """Broadcast reaches every registry peer but not self; outbox has one per peer."""
     result = CliRunner().invoke(agent, ["broadcast", "Standup", "all hands"])
     assert result.exit_code == 0, result.output
@@ -1447,3 +1461,1139 @@ def test_forbidden_cli_output_never_delivered_or_marked_replied(
     assert not list((workspace / "messages" / "outbox").glob("*.md"))
     assert not list((workspace / "bob" / "messages" / "inbox").glob("*.md"))
     assert not _frontmatter(workspace / "messages" / "inbox" / name).get("replied")
+
+
+# ---------------------------------------------------------------------------
+# thread-scoped watch / send --watch tests (gptme/gptme-contrib#2082)
+# ---------------------------------------------------------------------------
+
+
+def _send_root(workspace: Path) -> str:
+    """Send alice -> bob and return the outbox message ID."""
+    result = CliRunner().invoke(agent, ["send", "bob", "Release cross-check", "Is v1 ok?"])
+    assert result.exit_code == 0, result.output
+    (path,) = (workspace / "messages" / "outbox").glob("*.md")
+    return path.name
+
+
+def _thread_row(filename: str, in_reply_to: object, subject: str = "Re: x") -> dict:
+    row = _make_row(filename, subject, sender="bob", recipient="alice")
+    if in_reply_to is not None:
+        row["in_reply_to"] = in_reply_to
+    return row
+
+
+def _write_local(folder: Path, filename: str, meta: dict) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / filename).write_text(f"---\n{yaml.dump(meta)}---\n\nbody\n")
+
+
+def _mock_delivery_ctime(monkeypatch, timestamp):
+    """Stamp simulated deliveries; metadata rewrites exercise real mtime retention."""
+    write_text = Path.write_text
+
+    def _write(path, *args, **kwargs):
+        result = write_text(path, *args, **kwargs)
+        os.utime(path, (timestamp(), timestamp()))
+        return result
+
+    monkeypatch.setattr(Path, "write_text", _write)
+
+
+def _scripted_rows(monkeypatch: pytest.MonkeyPatch, polls: list[list[dict] | None]) -> list[str]:
+    """Return successive row lists per probe (last one repeats); records probed agents."""
+    probed: list[str] = []
+
+    def _fake(agent_name: str, agent_cfg: dict, **_kw: object) -> list[dict] | None:
+        probed.append(agent_name)
+        return polls[min(len(probed) - 1, len(polls) - 1)]
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _fake)
+    monkeypatch.setattr(agent_cli.time, "sleep", lambda _: None)
+    return probed
+
+
+def test_watch_thread_ignores_unrelated_and_fires_on_direct_reply(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _send_root(workspace)
+    unrelated = _thread_row("20990101-000001-bob-Other.md", None, "Unrelated news")
+    reply = _thread_row("20990101-000002-bob-Re.md", root, "Re: Release cross-check")
+    probed = _scripted_rows(monkeypatch, [[unrelated], [unrelated], [unrelated, reply]])
+
+    result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip().splitlines() == ["20990101-000002-bob-Re.md"]
+    assert "Unrelated news" not in result.output
+    # --from defaults to the root message's recipient.
+    assert set(probed) == {"bob"}
+
+
+def test_watch_thread_fires_on_reply_to_a_reply_via_local_chain(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """root -> bob's reply (inbox) -> alice follow-up (outbox) -> bob's 2nd reply."""
+    root = _send_root(workspace)
+    messages = workspace / "messages"
+    _write_local(
+        messages / "inbox",
+        "20990101-000001-bob-Re1.md",
+        {
+            "from": "bob",
+            "to": "alice",
+            "subject": "Re: 1",
+            "in_reply_to": root,
+            "read": True,
+        },
+    )
+    _write_local(
+        messages / "outbox",
+        "20990101-000002-alice-Followup.md",
+        {
+            "from": "alice",
+            "to": "bob",
+            "subject": "Re: 2",
+            "in_reply_to": "20990101-000001-bob-Re1.md",
+        },
+    )
+    second = _thread_row("20990101-000003-bob-Re3.md", "20990101-000002-alice-Followup.md")
+    _scripted_rows(monkeypatch, [[], [second]])
+    sleeps = [0]
+
+    def _sleep(_: float) -> None:
+        sleeps[0] += 1
+        if sleeps[0] > 1:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    result = CliRunner().invoke(agent, ["watch", "--thread", root])
+    assert result.exit_code == 0, result.output
+    # The first reply already exists (reported at start); the reply-to-a-reply
+    # arrives on the next poll and is reported once.
+    assert result.stdout.strip().splitlines() == [
+        "20990101-000001-bob-Re1.md",
+        "20990101-000003-bob-Re3.md",
+    ]
+
+
+def test_watch_thread_accepts_list_in_reply_to_and_bare_ids(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _send_root(workspace)
+    bare_root = root.removesuffix(".md")
+    reply = _thread_row("20990101-000002-bob-Re.md", ["unrelated.md", bare_root])
+    _scripted_rows(monkeypatch, [[reply]])
+
+    result = CliRunner().invoke(agent, ["watch", "--thread", bare_root, "--once"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == "20990101-000002-bob-Re.md"
+
+
+def test_watch_thread_existing_reply_fires_immediately(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reply present at baseline is the answer, not history to skip."""
+    root = _send_root(workspace)
+    reply = _thread_row("20990101-000002-bob-Re.md", root)
+    probed = _scripted_rows(monkeypatch, [[reply]])
+
+    result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == "20990101-000002-bob-Re.md"
+    assert len(probed) == 1
+
+
+def test_watch_thread_fires_on_reply_already_pulled_locally(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Late start: the periodic pull job already took the reply out of the outbox.
+
+    This is the race from gptme/gptme-contrib#2082: a count-baselining watch that
+    starts after the reply landed never fires, because the reply is both absent
+    from the remote outbox and part of the baseline. Thread mode must check the
+    local inbox before it begins polling.
+    """
+    root = _send_root(workspace)
+    _write_local(
+        workspace / "messages" / "inbox",
+        "20990101-000001-bob-Re.md",
+        {
+            "from": "bob",
+            "to": "alice",
+            "subject": "Re: Release cross-check",
+            "in_reply_to": root,
+            "read": True,
+        },
+    )
+    # Remote outbox is empty -- pull already moved the reply to our inbox.
+    probed = _scripted_rows(monkeypatch, [[]])
+
+    result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once", "--pull"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == "20990101-000001-bob-Re.md"
+    # Fired before any blocking SSH probe, even if the sender is offline.
+    assert probed == []
+
+
+@pytest.mark.parametrize("ssh_peer", [False, True])
+@pytest.mark.parametrize("already_delivered", [False, True])
+@pytest.mark.parametrize("mailbox", ["default", "ops"])
+def test_watch_thread_to_override_checks_local_inbox(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ssh_peer: bool,
+    already_delivered: bool,
+    mailbox: str,
+) -> None:
+    """pull --as and watch --to share the workspace inbox, not its env identity."""
+    monkeypatch.setenv("AGENT_NAME", "laptop")
+    if not ssh_peer:
+        (workspace / "messages" / "agents.yaml").write_text(
+            yaml.dump({"bob": {"delivery": "pull-only"}})
+        )
+    root = "ask.md"
+    _write_local(
+        agent_cli._mailbox_root(mailbox) / "outbox",
+        root,
+        {"from": "dana", "to": "bob", "subject": "Ask"},
+    )
+    inbox = agent_cli._mailbox_root(mailbox) / "inbox"
+    # Same thread, wrong recipient: broadening local scanning must not accept it.
+    _write_local(
+        inbox,
+        "wrong-recipient.md",
+        {"from": "bob", "to": "laptop", "in_reply_to": root},
+    )
+    probed = _scripted_rows(monkeypatch, [[]])
+    clock = [1000.0]
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+
+    def _deliver() -> None:
+        _write_local(
+            inbox,
+            "reply.md",
+            {"from": "bob", "to": "dana", "in_reply_to": root, "read": True},
+        )
+
+    def _sleep(seconds: float) -> None:
+        clock[0] += seconds
+        _deliver()
+
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    if already_delivered:
+        _deliver()
+    result = CliRunner().invoke(
+        agent,
+        [
+            "watch",
+            "--to",
+            "DANA",
+            "--thread",
+            root,
+            "--once",
+            "--pull",
+            "--interval",
+            "1",
+            "--timeout",
+            "2s",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip().splitlines() == ["reply.md"]
+    assert probed == ([] if already_delivered or not ssh_peer else ["bob"])
+
+
+def test_watch_thread_sees_push_delivered_reply_without_ssh(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pull-only peer pushes into our inbox; thread mode needs no SSH target."""
+    config_path = workspace / "messages" / "agents.yaml"
+    registry = yaml.safe_load(config_path.read_text())
+    registry["erik"] = {"delivery": "pull-only"}
+    config_path.write_text(yaml.dump(registry))
+    root = "20990101-000000-alice-Ask.md"
+    _write_local(
+        workspace / "messages" / "outbox",
+        root,
+        {"from": "alice", "to": "erik", "subject": "Ask"},
+    )
+    probed = _scripted_rows(monkeypatch, [[]])
+    inbox = workspace / "messages" / "inbox"
+
+    def _sleep(_: float) -> None:
+        _write_local(
+            inbox,
+            "20990101-000001-erik-Re.md",
+            {"from": "erik", "to": "alice", "subject": "Re: Ask", "in_reply_to": root},
+        )
+
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once", "--pull"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == "20990101-000001-erik-Re.md"
+    assert probed == []
+
+
+def test_watch_timeout_exits_nonzero(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _send_root(workspace)
+    _scripted_rows(monkeypatch, [[]])
+    clock = [1000.0]
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+
+    def _sleep(seconds: float) -> None:
+        clock[0] += seconds
+
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    result = CliRunner().invoke(agent, ["watch", "--thread", root, "--timeout", "2m"])
+    assert result.exit_code == agent_cli.WATCH_TIMEOUT_EXIT
+    assert "Timed out after 2m" in result.output
+    assert result.stdout == ""
+
+
+def test_watch_rejects_invalid_timeout(workspace: Path) -> None:
+    result = CliRunner().invoke(agent, ["watch", "--timeout", "soon"])
+    assert result.exit_code != 0
+    assert "invalid duration" in result.output
+
+
+def test_send_watch_returns_reply_id_after_pull(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows: list[dict] = []
+
+    def _fake(agent_name: str, agent_cfg: dict, **_kw: object) -> list[dict]:
+        return list(rows)
+
+    def _sleep(_: float) -> None:
+        (root_path,) = (workspace / "messages" / "outbox").glob("*.md")
+        rows.append(_thread_row("20990101-000009-bob-Re.md", root_path.name))
+
+    pulls: list[list[str]] = []
+
+    def _pull(cmd: list[str], **_kw: object) -> None:
+        pulls.append(list(cmd))
+        for row in rows:
+            _write_local(workspace / "messages" / "inbox", row["file"], row)
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _fake)
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    monkeypatch.setattr(agent_cli.subprocess, "run", _pull)
+
+    result = CliRunner().invoke(agent, ["send", "bob", "Cross-check", "ok?", "--watch"])
+    assert result.exit_code == 0, result.output
+    stdout = result.stdout.strip().splitlines()
+    assert stdout[0] == "Sent to bob: Cross-check"
+    assert stdout[-1] == "20990101-000009-bob-Re.md"
+    assert pulls and pulls[0][-6:] == [
+        "--as",
+        "alice",
+        "--mailbox",
+        "default",
+        "--from",
+        "bob",
+    ]
+
+
+def test_send_prints_watch_hint(workspace: Path) -> None:
+    result = CliRunner().invoke(agent, ["send", "bob", "Ask", "body"])
+    assert result.exit_code == 0, result.output
+    assert "gptmail agent watch --thread " in result.stderr
+    assert "--once --pull --timeout 2h" in result.stderr
+    no_reply = CliRunner().invoke(agent, ["send", "bob", "FYI", "body", "--no-reply"])
+    assert "watch --thread" not in no_reply.output
+
+
+def test_send_watch_rejects_no_reply(workspace: Path) -> None:
+    result = CliRunner().invoke(agent, ["send", "bob", "FYI", "body", "--watch", "--no-reply"])
+    assert result.exit_code != 0
+    assert "cannot be combined with --no-reply" in result.output
+    assert not list((workspace / "messages" / "outbox").glob("*.md"))
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_send_watch_releases_send_lock_before_waiting(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, duplicate: bool
+) -> None:
+    """Another sender can acquire the same subject lock while a reply is awaited."""
+    if duplicate:
+        first = CliRunner().invoke(agent, ["send", "bob", "Status", "one"])
+        assert first.exit_code == 0, first.output
+    watched: list[str] = []
+
+    def _wait(ctx, message_id, recipient, mailbox, timeout, interval):
+        lock = agent_cli._send_lock(agent_cli._transport(mailbox=mailbox), "send:bob|Status")
+        lock.timeout = 0
+        with lock:
+            watched.append(message_id)
+
+    monkeypatch.setattr(agent_cli, "_watch_sent_reply", _wait)
+    result = CliRunner().invoke(agent, ["send", "bob", "Status", "two", "--watch"])
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert watched == [_only_outbox_msg(workspace).name]
+    assert _peer_inbox_count(workspace) == 1
+    assert ("Skipping" in result.output) == duplicate
+
+
+@pytest.mark.parametrize("from_filter", [None, "bob", "bob,erik"])
+def test_watch_thread_filters_local_reply_senders(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, from_filter: str | None
+) -> None:
+    """Explicit and inferred sender filters also govern push-delivered replies."""
+    root = _send_root(workspace)
+    config_path = workspace / "messages" / "agents.yaml"
+    registry = yaml.safe_load(config_path.read_text())
+    registry.update({"charlie": {"delivery": "pull-only"}, "erik": {"delivery": "pull-only"}})
+    config_path.write_text(yaml.dump(registry))
+    inbox = workspace / "messages" / "inbox"
+    _write_local(
+        inbox,
+        "20990101-000001-charlie-Re.md",
+        {
+            "from": "charlie",
+            "to": "alice",
+            "subject": "Wrong sender",
+            "in_reply_to": root,
+        },
+    )
+    _scripted_rows(monkeypatch, [[]])
+
+    def _sleep(_: float) -> None:
+        _write_local(
+            inbox,
+            "20990101-000002-bob-Re.md",
+            {
+                "from": "BOB",
+                "to": "alice",
+                "subject": "Expected reply",
+                "in_reply_to": root,
+            },
+        )
+
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    args = ["watch", "--thread", root, "--once"]
+    if from_filter is not None:
+        args += ["--from", from_filter]
+    result = CliRunner().invoke(agent, args)
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip().splitlines() == ["20990101-000002-bob-Re.md"]
+    assert "Wrong sender" not in result.output
+
+
+@pytest.mark.parametrize("all_mailboxes", [False, True])
+def test_watch_thread_respects_local_mailbox_scope(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, all_mailboxes: bool
+) -> None:
+    root = _send_root(workspace)
+    ops_inbox = workspace / "messages" / "mailboxes" / "ops" / "inbox"
+    _write_local(
+        ops_inbox,
+        "20990101-000001-bob-Ops.md",
+        {"from": "bob", "to": "alice", "subject": "Ops reply", "in_reply_to": root},
+    )
+    _scripted_rows(monkeypatch, [[]])
+
+    def _sleep(_: float) -> None:
+        _write_local(
+            workspace / "messages" / "inbox",
+            "20990101-000002-bob-Default.md",
+            {
+                "from": "bob",
+                "to": "alice",
+                "subject": "Default reply",
+                "in_reply_to": root,
+            },
+        )
+
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    scope = ["--all-mailboxes"] if all_mailboxes else ["--mailbox", "default"]
+    result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once", *scope])
+    assert result.exit_code == 0, result.output
+    expected = "20990101-000001-bob-Ops.md" if all_mailboxes else "20990101-000002-bob-Default.md"
+    assert result.stdout.strip().splitlines() == [expected]
+
+
+@pytest.mark.parametrize("selected", [None, "default", "ops"])
+def test_watch_thread_infers_mailbox_only_when_omitted(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, selected: str | None
+) -> None:
+    root = "20990101-000000-alice-Ask.md"
+    _write_local(
+        workspace / "messages" / "mailboxes" / "ops" / "outbox",
+        root,
+        {"from": "alice", "to": "bob", "subject": "Ask"},
+    )
+    for mailbox in ("default", "ops"):
+        _write_local(
+            agent_cli._mailbox_root(mailbox) / "inbox",
+            f"reply-{mailbox}.md",
+            {"from": "bob", "to": "alice", "in_reply_to": root},
+        )
+    scopes: list[list[str]] = []
+
+    def _poll(_name: str, _cfg: dict, **kwargs: object) -> list[dict]:
+        scopes.append(kwargs["mailboxes"])
+        return []
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _poll)
+    args = ["watch", "--thread", root, "--once"]
+    if selected is not None:
+        args += ["--mailbox", selected]
+    result = CliRunner().invoke(agent, args)
+    expected = selected or "ops"
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == f"reply-{expected}.md"
+    assert scopes == []  # A local reply completes without an unnecessary SSH probe.
+
+
+@pytest.mark.parametrize("failure", ["missing", "timeout", "oserror"])
+@pytest.mark.parametrize("mailbox", ["default", "ops"])
+def test_watch_thread_retries_until_matching_reply_is_pulled(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, failure: str, mailbox: str
+) -> None:
+    root = _send_root(workspace)
+    reply = _thread_row("reply.md", root)
+    reply["mailbox"] = mailbox
+    _scripted_rows(monkeypatch, [[reply]])
+    pulls: list[list[str]] = []
+
+    def _pull(cmd: list[str], **_kw: object) -> None:
+        pulls.append(cmd)
+        if len(pulls) == 1:
+            if failure == "timeout":
+                raise agent_cli.subprocess.TimeoutExpired(cmd, 60)
+            if failure == "oserror":
+                raise OSError("pull could not start")
+            # Even a successful process may fetch an unrelated row, not this reply.
+            _write_local(agent_cli._mailbox_root(mailbox) / "inbox", "other.md", {})
+            return
+        assert len(pulls) == 2
+        _write_local(agent_cli._mailbox_root(mailbox) / "inbox", "reply.md", reply)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _pull)
+    result = CliRunner().invoke(
+        agent, ["watch", "--thread", root, "--once", "--pull", "--mailbox", mailbox]
+    )
+    assert result.exit_code == 0, result.output
+    assert len(pulls) == 2
+    assert result.stdout.strip().splitlines() == ["reply.md"]
+    assert pulls[-1][-4:] == ["--mailbox", mailbox, "--from", "bob"]
+
+
+def test_watch_thread_failed_pull_times_out_without_reporting_reply(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _send_root(workspace)
+    _scripted_rows(monkeypatch, [[_thread_row("reply.md", root)]])
+    clock = [1000.0]
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        agent_cli.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+    monkeypatch.setattr(agent_cli.subprocess, "run", lambda *_args, **_kw: None)
+    result = CliRunner().invoke(
+        agent, ["watch", "--thread", root, "--once", "--pull", "--timeout", "2s"]
+    )
+    assert result.exit_code == agent_cli.WATCH_TIMEOUT_EXIT, result.output
+    assert result.stdout == ""
+
+
+def test_watch_thread_pull_summary_stays_off_stdout(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _send_root(workspace)
+    reply = _thread_row("reply.md", root)
+    _scripted_rows(monkeypatch, [[reply]])
+
+    def _pull(_cmd: list[str], **kwargs: object) -> None:
+        print(
+            "1 new message(s) fetched into inbox:",
+            file=kwargs.get("stdout", sys.stdout),
+        )
+        _write_local(workspace / "messages" / "inbox", "reply.md", reply)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _pull)
+    result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once", "--pull"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "reply.md\n"
+    assert "1 new message(s)" in result.stderr
+
+
+def test_watch_does_not_poll_after_sleep_reaches_deadline(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _send_root(workspace)
+    probed = _scripted_rows(monkeypatch, [[], [_thread_row("late.md", root)]])
+    clock = [1000.0]
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+
+    def _sleep(seconds: float) -> None:
+        clock[0] += seconds
+
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once", "--timeout", "2s"])
+    assert result.exit_code == agent_cli.WATCH_TIMEOUT_EXIT, result.output
+    assert result.stdout == ""
+    assert len(probed) == 1
+
+
+@pytest.mark.parametrize("phase", ["baseline", "poll"])
+@pytest.mark.parametrize("thread_mode", [True, False])
+def test_watch_rejects_probe_results_after_deadline(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, phase: str, thread_mode: bool
+) -> None:
+    root = _send_root(workspace)
+    clock = [1000.0]
+    probes: list[str] = []
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(agent_cli.time, "sleep", lambda _: None)
+    config = workspace / "messages" / "agents.yaml"
+    registry = yaml.safe_load(config.read_text())
+    registry["charlie"] = {"ssh": "charlie@charlie", "workspace": "/charlie"}
+    config.write_text(yaml.dump(registry))
+
+    def _poll(name: str, _cfg: dict, **_kw: object) -> list[dict]:
+        probes.append(name)
+        if phase == "baseline" or len(probes) == 3:
+            clock[0] += 3
+            return [_thread_row("late.md", root)]
+        return []
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _poll)
+    args = ["watch", "--from", "bob,charlie", "--once", "--timeout", "2s"]
+    if thread_mode:
+        args += ["--thread", root]
+    result = CliRunner().invoke(agent, args)
+    assert result.exit_code == agent_cli.WATCH_TIMEOUT_EXIT, result.output
+    assert result.stdout == ""
+    assert probes == (["bob"] if phase == "baseline" else ["bob", "charlie", "bob"])
+
+
+def test_watch_caps_real_probe_to_remaining_budget(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _send_root(workspace)
+    clock = [1000.0]
+    budgets: list[float] = []
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+
+    def _run(cmd: list[str], **kw: object) -> None:
+        budgets.append(float(kw["timeout"]))
+        clock[0] += budgets[-1]
+        raise agent_cli.subprocess.TimeoutExpired(cmd, budgets[-1])
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _run)
+    result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once", "--timeout", "2s"])
+    assert result.exit_code == agent_cli.WATCH_TIMEOUT_EXIT, result.output
+    assert budgets == [2.0]
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize("late", [False, True])
+def test_watch_caps_pull_and_rejects_late_reply(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, late: bool
+) -> None:
+    root = _send_root(workspace)
+    clock = [1000.0]
+    reply = _thread_row("reply.md", root)
+    wall_start = 1000.0
+    _mock_delivery_ctime(monkeypatch, lambda: wall_start + (3 if late else 1))
+    monkeypatch.setattr(agent_cli.time, "time", lambda: wall_start)
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+
+    def _poll(*_args: object, **_kw: object) -> list[dict]:
+        clock[0] += 0.5
+        return [reply]
+
+    budgets: list[float] = []
+
+    def _pull(_cmd: list[str], **kw: object) -> None:
+        budgets.append(float(kw["timeout"]))
+        clock[0] += 2 if late else 0.25
+        _write_local(workspace / "messages" / "inbox", "reply.md", reply)
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _poll)
+    monkeypatch.setattr(agent_cli.subprocess, "run", _pull)
+    result = CliRunner().invoke(
+        agent, ["watch", "--thread", root, "--once", "--pull", "--timeout", "2s"]
+    )
+    assert result.exit_code == (agent_cli.WATCH_TIMEOUT_EXIT if late else 0), result.output
+    assert result.stdout == ("" if late else "reply.md\n")
+    assert budgets == [1.5]
+
+
+@pytest.mark.parametrize("already_local", [True, False])
+def test_watch_checks_local_reply_before_blocking_probe(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, already_local: bool
+) -> None:
+    root = _send_root(workspace)
+    reply = _thread_row("reply.md", root)
+    clock = [1000.0]
+    probes: list[str] = []
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+
+    def _deliver() -> None:
+        _write_local(workspace / "messages" / "inbox", "reply.md", reply)
+
+    def _poll(name: str, _cfg: dict, **_kw: object) -> list[dict]:
+        probes.append(name)
+        if already_local or len(probes) > 1:
+            clock[0] += 3  # An offline peer must not hide a locally delivered reply.
+        return []
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _poll)
+    monkeypatch.setattr(agent_cli.time, "sleep", lambda _: _deliver())
+    if already_local:
+        _deliver()
+    result = CliRunner().invoke(
+        agent, ["watch", "--thread", root, "--once", "--pull", "--timeout", "2s"]
+    )
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "reply.md\n"
+    assert probes == ([] if already_local else ["bob"])
+
+
+@pytest.mark.parametrize("phase", ["baseline", "poll", "sleep"])
+@pytest.mark.parametrize("late", [False, True])
+def test_watch_checks_push_delivery_at_deadline(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, phase: str, late: bool
+) -> None:
+    root = _send_root(workspace)
+    reply = _thread_row("reply.md", root)
+    clock = [1000.0]
+    wall_start = 1000.0
+    _mock_delivery_ctime(monkeypatch, lambda: wall_start + (3 if late else 1))
+    monkeypatch.setattr(agent_cli.time, "time", lambda: wall_start)
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+    probes: list[str] = []
+
+    def _deliver() -> None:
+        path = workspace / "messages" / "inbox" / "reply.md"
+        _write_local(path.parent, path.name, reply)
+        # The delivery boundary has already stamped receiver-local mtime.
+        clock[0] += 3
+
+    def _poll(name: str, _cfg: dict, **_kw: object) -> None:
+        probes.append(name)
+        if phase == "baseline" or (phase == "poll" and len(probes) == 2):
+            _deliver()
+        return None
+
+    def _sleep(_seconds: float) -> None:
+        if phase == "sleep":
+            _deliver()
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _poll)
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    result = CliRunner().invoke(
+        agent, ["watch", "--thread", root, "--once", "--pull", "--timeout", "2s"]
+    )
+    assert result.exit_code == (agent_cli.WATCH_TIMEOUT_EXIT if late else 0), result.output
+    assert result.stdout == ("" if late else "reply.md\n")
+    assert len(probes) == (2 if phase == "poll" else 1)
+
+
+@pytest.mark.parametrize("same_reply", [True, False])
+@pytest.mark.parametrize("late", [False, True])
+def test_watch_checks_push_delivery_during_pull(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, same_reply: bool, late: bool
+) -> None:
+    root = _send_root(workspace)
+    remote = _thread_row("remote.md", root)
+    pushed = remote if same_reply else _thread_row("pushed.md", root)
+    clock = [1000.0]
+    wall_start = 1000.0
+    _mock_delivery_ctime(monkeypatch, lambda: wall_start + (3 if late else 1))
+    monkeypatch.setattr(agent_cli.time, "time", lambda: wall_start)
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+    _scripted_rows(monkeypatch, [[remote]])
+
+    def _pull(cmd: list[str], **_kw: object) -> None:
+        _write_local(workspace / "messages" / "inbox", pushed["file"], pushed)
+        clock[0] += 3
+        raise agent_cli.subprocess.TimeoutExpired(cmd, 2)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _pull)
+    result = CliRunner().invoke(
+        agent, ["watch", "--thread", root, "--once", "--pull", "--timeout", "2s"]
+    )
+    assert result.exit_code == (agent_cli.WATCH_TIMEOUT_EXIT if late else 0), result.output
+    assert result.stdout == ("" if late else f"{pushed['file']}\n")
+
+
+def test_watch_all_mailboxes_includes_newly_created_inbox(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _send_root(workspace)
+    reply = _thread_row("reply.md", root)
+    clock = [1000.0]
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+    (workspace / "messages" / "agents.yaml").write_text(
+        yaml.dump({"bob": {"delivery": "pull-only"}})
+    )
+
+    def _sleep(seconds: float) -> None:
+        _write_local(workspace / "messages" / "mailboxes" / "ops" / "inbox", "reply.md", reply)
+        clock[0] += seconds
+
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    result = CliRunner().invoke(
+        agent,
+        [
+            "watch",
+            "--thread",
+            root,
+            "--all-mailboxes",
+            "--once",
+            "--interval",
+            "1",
+            "--timeout",
+            "2s",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "reply.md\n"
+
+
+@pytest.mark.parametrize("phase", ["baseline", "poll"])
+def test_watch_matches_remote_reply_before_probing_next_peer(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    root = _send_root(workspace)
+    config = workspace / "messages" / "agents.yaml"
+    registry = yaml.safe_load(config.read_text())
+    registry["charlie"] = {"ssh": "charlie@charlie", "workspace": "/charlie"}
+    config.write_text(yaml.dump(registry))
+    clock = [1000.0]
+    probes: list[str] = []
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(agent_cli.time, "sleep", lambda _: None)
+
+    def _poll(name: str, _cfg: dict, **_kw: object) -> list[dict]:
+        probes.append(name)
+        if phase == "poll" and len(probes) <= 2:
+            return []
+        clock[0] += 0.5 if name == "bob" else 3
+        return [_thread_row("reply.md", root)] if name == "bob" else []
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _poll)
+    result = CliRunner().invoke(
+        agent,
+        [
+            "watch",
+            "--from",
+            "bob,charlie",
+            "--thread",
+            root,
+            "--once",
+            "--timeout",
+            "2s",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "reply.md\n"
+    assert probes == (["bob"] if phase == "baseline" else ["bob", "charlie", "bob"])
+
+
+@pytest.mark.parametrize("all_mailboxes", [False, True])
+def test_watch_pull_only_contacts_the_matching_sender(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, all_mailboxes: bool
+) -> None:
+    root = _send_root(workspace)
+    registry = {"offline": {"ssh": "offline@offline", "workspace": "/offline"}}
+    registry.update(yaml.safe_load((workspace / "messages" / "agents.yaml").read_text()))
+    (workspace / "messages" / "agents.yaml").write_text(yaml.dump(registry, sort_keys=False))
+    reply = _thread_row("reply.md", root)
+    reply["mailbox"] = "ops" if all_mailboxes else "default"
+    probes: list[str] = []
+
+    def _poll(name: str, _cfg: dict, **_kw: object) -> list[dict]:
+        probes.append(name)
+        assert name == "bob", "An unrelated offline agent must not delay reply delivery"
+        return [reply]
+
+    def _run(cmd: list[str], **kwargs: object) -> None:
+        if cmd[0] == "scp":
+            Path(cmd[-1]).write_text(f"---\n{yaml.dump(reply)}---\nbody\n")
+        else:
+            # Exercise the real pull CLI, including its registry iteration.
+            result = CliRunner().invoke(agent, cmd[cmd.index("pull") :])
+            assert result.exit_code == 0, result.output
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _poll)
+    monkeypatch.setattr(agent_cli.subprocess, "run", _run)
+    args = ["watch", "--thread", root, "--once", "--pull", "--timeout", "2s"]
+    if all_mailboxes:
+        args.append("--all-mailboxes")
+    result = CliRunner().invoke(agent, args)
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "reply.md\n"
+    assert probes == ["bob", "bob"]
+    assert (agent_cli._mailbox_root(reply["mailbox"]) / "inbox" / "reply.md").is_file()
+
+
+@pytest.mark.parametrize("delivery", ["local", "remote", "pull", "slow-second-pull"])
+def test_watch_thread_once_stops_after_first_matching_reply(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, delivery: str
+) -> None:
+    root = _send_root(workspace)
+    replies = [_thread_row(f"reply-{number}.md", root) for number in (1, 2)]
+    clock = [1000.0]
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+    _scripted_rows(monkeypatch, [replies])
+    if delivery == "local":
+        for reply in replies:
+            _write_local(workspace / "messages" / "inbox", reply["file"], reply)
+    pulls: list[list[str]] = []
+
+    def _pull(cmd: list[str], **_kw: object) -> None:
+        pulls.append(cmd)
+        if delivery == "slow-second-pull" and len(pulls) == 2:
+            clock[0] += 3
+            raise agent_cli.subprocess.TimeoutExpired(cmd, 2)
+        # A sender-scoped pull may deliver the entire batch, not just one reply.
+        for reply in replies:
+            _write_local(workspace / "messages" / "inbox", reply["file"], reply)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _pull)
+    args = ["watch", "--thread", root, "--once", "--timeout", "2s"]
+    if delivery in ("pull", "slow-second-pull"):
+        args.append("--pull")
+    result = CliRunner().invoke(agent, args)
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines() == ["reply-1.md"]
+    assert len(pulls) == (1 if "pull" in delivery else 0)
+
+
+def test_watch_thread_continuous_reports_every_match_once(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _send_root(workspace)
+    replies = [_thread_row(f"reply-{number}.md", root) for number in (1, 2)]
+    _scripted_rows(monkeypatch, [replies])
+    sleeps = [0]
+
+    def _sleep(_seconds: float) -> None:
+        sleeps[0] += 1
+        if sleeps[0] == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(agent_cli.time, "sleep", _sleep)
+    result = CliRunner().invoke(agent, ["watch", "--thread", root])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines() == ["reply-1.md", "reply-2.md"]
+    assert sleeps[0] == 2  # The repeated batch is polled without duplicate output.
+
+
+@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("long_name", [False, True])
+def test_ssh_push_publishes_only_complete_messages(
+    tmp_path: Path, monkeypatch, failure: bool, long_name: bool
+) -> None:
+    """Exercise the actual remote shell commands locally, inspecting mid-SCP visibility."""
+    import shlex
+
+    inbox = tmp_path / "peer" / "messages" / "inbox"
+    filename = (
+        agent_cli.AgentTransport._make_filename("𐐀" * 15, "𐐀" * 33) if long_name else "reply.md"
+    )
+    assert len(filename.encode()) <= 255
+    source = tmp_path / filename
+    source.write_text("---\nfrom: bob\nto: alice\nin_reply_to: ask.md\n---\n\ncomplete body\n")
+    run = agent_cli.subprocess.run
+
+    def _run(cmd, **kwargs):
+        if cmd[0] == "ssh":
+            return run(["sh", "-c", cmd[-1]], **kwargs)
+        assert cmd[0] == "scp"
+        remote = cmd[-1].split(":", 1)[1]
+        destination = Path(shlex.split(remote)[0])
+        destination.write_text("---\nfrom: bob\nto: alice\nin_reply_to: ask.md\n---\n")
+        assert not list(inbox.glob("*.md")), "partial SCP must not be an inbox message"
+        if failure:
+            raise agent_cli.subprocess.CalledProcessError(1, cmd)
+        destination.write_text(source.read_text())
+        return agent_cli.subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _run)
+    deliver = agent_cli._ssh_deliver(
+        {"alice": {"ssh": "alice@peer", "workspace": str(tmp_path / "peer")}}
+    )
+    assert deliver(source, "alice") is (not failure)
+    if failure:
+        assert not list(inbox.glob("*.md"))
+    else:
+        assert (inbox / source.name).read_text() == source.read_text()
+    assert not list(inbox.glob(".*")), "staging files must be cleaned after success or failure"
+
+
+@pytest.mark.parametrize("mailbox", ["default", "ops"])
+def test_ssh_push_racing_pull_preserves_delivery_and_send_dedup(tmp_path, monkeypatch, mailbox):
+    """Run the remote publication shell locally after pull wins the delivery race."""
+    import shlex
+
+    from gptmail.transport.agent import AgentTransport
+
+    messages = tmp_path / "messages"
+    messages.mkdir()
+    peer = tmp_path / "peer with spaces"
+    (messages / "agents.yaml").write_text(
+        yaml.safe_dump({"bob": {"ssh": "bob@peer", "workspace": str(peer)}})
+    )
+    inbox = peer / "messages"
+    if mailbox != "default":
+        inbox = inbox / "mailboxes" / mailbox
+    inbox = inbox / "inbox"
+    monkeypatch.setenv("AGENT_NAME", "alice")
+    monkeypatch.setattr(agent_cli, "_repo_root", lambda: tmp_path)
+    run = agent_cli.subprocess.run
+    received = []
+
+    def _run(cmd, **kwargs):
+        if cmd[0] == "ssh":
+            return run(["sh", "-c", cmd[-1]], **kwargs)
+        assert cmd[0] == "scp"
+        source = Path(cmd[-2])
+        staged = Path(shlex.split(cmd[-1].split(":", 1)[1])[0])
+        shutil.copyfile(source, staged)
+        # Periodic pull publishes the complete message before push's ln runs.
+        assert AgentTransport.local_deliver(inbox)(source, "bob")
+        destination = inbox / source.name
+        agent_cli._mark_read(destination)
+        received.append((destination, destination.read_bytes(), destination.stat().st_ino))
+        return agent_cli.subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _run)
+    args = ["send", "bob", "Race", "complete body", "--mailbox", mailbox]
+    first = CliRunner().invoke(agent, args)
+    assert first.exit_code == 0, first.output
+    outbox = agent_cli._mailbox_root(mailbox) / "outbox"
+    (sent,) = outbox.glob("*.md")
+    assert (meta_of(sent) or {}).get("delivered") is not False
+    second = CliRunner().invoke(agent, args)
+    assert second.exit_code == 0, second.output
+    assert "Skipping" in second.output
+    assert len(received) == 1
+    destination, contents, inode = received[0]
+    assert destination.read_bytes() == contents
+    assert destination.stat().st_ino == inode
+    assert (meta_of(destination) or {}).get("read") is True
+    assert list(outbox.glob("*.md")) == [sent]
+    assert not list(inbox.glob(".*"))
+
+
+@pytest.mark.parametrize("failure", ["directory", "link"])
+def test_ssh_push_publication_failure_is_not_success(tmp_path, monkeypatch, failure):
+    """Only an existing message file settles a failed link; other failures stay failures."""
+    import shlex
+
+    inbox = tmp_path / "peer" / "messages" / "inbox"
+    source = tmp_path / "reply.md"
+    source.write_text("complete body")
+    run = agent_cli.subprocess.run
+
+    def _run(cmd, **kwargs):
+        if cmd[0] == "ssh":
+            if cmd[-1].startswith("python3 ") and failure == "link":
+                raise agent_cli.subprocess.CalledProcessError(1, cmd)
+            return run(["sh", "-c", cmd[-1]], **kwargs)
+        assert cmd[0] == "scp"
+        staged = Path(shlex.split(cmd[-1].split(":", 1)[1])[0])
+        shutil.copyfile(source, staged)
+        if failure == "directory":
+            (inbox / source.name).mkdir()
+        return agent_cli.subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _run)
+    deliver = agent_cli._ssh_deliver(
+        {"alice": {"ssh": "alice@peer", "workspace": str(tmp_path / "peer")}}
+    )
+    assert deliver(source, "alice") is False
+    assert not list(inbox.glob(".*"))
+    if failure == "directory":
+        assert list((inbox / source.name).iterdir()) == []
+
+
+@pytest.mark.parametrize("update", ["read", "mark_read", "mark_replied"])
+def test_watch_retains_delivery_time_after_metadata_update(workspace, monkeypatch, update):
+    root = _send_root(workspace)
+    reply = _thread_row("reply.md", root)
+    path = workspace / "messages" / "inbox" / "reply.md"
+    clock = [1000.0]
+    arrival = [1001.0]
+    _mock_delivery_ctime(monkeypatch, lambda: arrival[0])
+    monkeypatch.setattr(agent_cli.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+
+    def _poll(*args, **kwargs):
+        _write_local(path.parent, path.name, reply)
+        clock[0] = 1003.0
+        if update == "read":
+            assert CliRunner().invoke(agent, ["read", path.name]).exit_code == 0
+        elif update == "mark_read":
+            agent_cli._mark_read(path)
+        else:
+            agent_cli._mark_replied(path)
+        arrival[0] = 1003.0  # Later writes must not change the retained arrival.
+        return None
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _poll)
+    result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once", "--timeout", "2s"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "reply.md\n"
+
+
+def test_ssh_publication_works_without_gnu_ln(tmp_path, monkeypatch):
+    """A BSD-like ln rejects GNU -T; publication must still work."""
+    import shlex
+
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    ln = tools / "ln"
+    ln.write_text(
+        '#!/bin/sh\nfor arg do\n case "$arg" in -T) exit 64;; esac\ndone\nexec /bin/ln "$@"\n'
+    )
+    ln.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+    source = tmp_path / "reply.md"
+    source.write_text("complete body")
+    os.utime(source, (1, 1))
+    run = agent_cli.subprocess.run
+
+    def _run(cmd, **kwargs):
+        if cmd[0] == "ssh":
+            return run(["sh", "-c", cmd[-1]], **kwargs)
+        staged = Path(shlex.split(cmd[-1].split(":", 1)[1])[0])
+        shutil.copy2(source, staged)
+        return agent_cli.subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", _run)
+    deliver = agent_cli._ssh_deliver(
+        {"alice": {"ssh": "alice@peer", "workspace": str(tmp_path / "peer")}}
+    )
+    assert deliver(source, "alice") is True
+    received = tmp_path / "peer/messages/inbox/reply.md"
+    assert received.read_text() == "complete body"
+    assert received.stat().st_mtime > 1
+
+
+def test_watch_rejects_sender_supplied_arrival_time(workspace, monkeypatch):
+    root = _send_root(workspace)
+    reply = _thread_row("reply.md", root)
+    reply["_local_received_at"] = 0
+    clock = [1000.0]
+    _mock_delivery_ctime(monkeypatch, lambda: 1003.0)
+    monkeypatch.setattr(agent_cli.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: clock[0])
+
+    def _poll(*args, **kwargs):
+        _write_local(workspace / "messages/inbox", "reply.md", reply)
+        agent_cli._mark_read(workspace / "messages/inbox/reply.md")
+        clock[0] = 1003.0
+        return []
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _poll)
+    result = CliRunner().invoke(agent, ["watch", "--thread", root, "--once", "--timeout", "2s"])
+    assert result.exit_code == agent_cli.WATCH_TIMEOUT_EXIT, result.output
+    assert result.stdout == ""

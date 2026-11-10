@@ -42,18 +42,26 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 import click
 import yaml
 
+from gptmail.communication_utils.state.locks import FileLock
 from gptmail.communication_utils.state.tracking import (
     ConversationTracker,
     MessageState,
 )
-from gptmail.communication_utils.state.locks import FileLock
-from gptmail.transport.agent import _FM_DELIM, AgentTransport, Deliver, meta_of
+from gptmail.transport.agent import (
+    _FM_DELIM,
+    AgentTransport,
+    Deliver,
+    local_delivery_time,
+    meta_of,
+    write_inbox_metadata,
+)
 
 
 # Inbox messages older than this (days) are assumed handled and no longer
@@ -271,6 +279,10 @@ def _ssh_deliver(agents: dict[str, dict[str, str]], *, mailbox: str = "default")
             "-o",
             "ControlPersist=60",
         ]
+        # Stage under a non-message suffix in the same directory. Readers must
+        # never see parseable frontmatter before SCP has finished the body.
+        remote_temp = f"{remote_inbox}.{uuid.uuid4().hex}.part"
+        remote_final = f"{remote_inbox}{local_path.name}"
         try:
             subprocess.run(
                 ["ssh", *ssh_opts, ssh_target, f"mkdir -p {shlex.quote(remote_inbox)}"],
@@ -283,15 +295,56 @@ def _ssh_deliver(agents: dict[str, dict[str, str]], *, mailbox: str = "default")
                     "scp",
                     *ssh_opts,
                     str(local_path),
-                    f"{ssh_target}:{remote_inbox}{local_path.name}",
+                    f"{ssh_target}:{shlex.quote(remote_temp)}",
                 ],
                 check=True,
                 capture_output=True,
                 timeout=15,
             )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            subprocess.run(
+                [
+                    "ssh",
+                    *ssh_opts,
+                    ssh_target,
+                    # Python's link never interprets a directory as a target
+                    # folder, and works on macOS as well as GNU/Linux. A pull
+                    # may win publication; retain its copy and tracking stamps.
+                    "python3 -c "
+                    + shlex.quote(
+                        "import os, sys, time\n"
+                        "source, dest = sys.argv[1:]\n"
+                        "arrival = time.time()\n"
+                        "os.utime(source, (arrival, arrival))\n"
+                        "try:\n"
+                        "    os.link(source, dest)\n"
+                        "except FileExistsError:\n"
+                        "    if not os.path.isfile(dest):\n"
+                        "        raise\n"
+                    )
+                    + f" {shlex.quote(remote_temp)} {shlex.quote(remote_final)}",
+                ],
+                check=True,
+                capture_output=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             click.echo(f"Error delivering to {recipient}: {e}", err=True)
             return False
+        finally:
+            try:
+                subprocess.run(
+                    [
+                        "ssh",
+                        *ssh_opts,
+                        ssh_target,
+                        f"rm -f -- {shlex.quote(remote_temp)}",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    timeout=10,
+                )
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                pass  # A disconnected peer may retain a harmless non-message staging file.
         return True
 
     return _deliver
@@ -516,7 +569,7 @@ def _mark_read(path: Path) -> None:
         fm = re.sub(r"^read: false$", "read: true", fm, flags=re.MULTILINE)
     else:
         fm = fm.rstrip("\n") + "\nread: true\n"
-    path.write_text("---".join([parts[0], fm, parts[2]]))
+    write_inbox_metadata(path, "---".join([parts[0], fm, parts[2]]))
 
 
 def _mark_replied(path: Path) -> None:
@@ -540,7 +593,7 @@ def _mark_replied(path: Path) -> None:
         fm = fm.rstrip("\n") + "\nreplied: true\n"
     else:
         fm = re.sub(r"^replied: false$", "replied: true", fm, flags=re.MULTILINE)
-    path.write_text("---".join([parts[0], fm, parts[2]]))
+    write_inbox_metadata(path, "---".join([parts[0], fm, parts[2]]))
 
 
 def _resolve_message(
@@ -665,6 +718,7 @@ def _remote_pending_rows(
     recipient: str,
     mailboxes: list[str],
     all_mailboxes: bool,
+    timeout: float = 20,
 ) -> list[dict] | None:
     """Return pending message rows from a remote agent, or None if unreachable.
 
@@ -679,7 +733,17 @@ def _remote_pending_rows(
             err=True,
         )
         return None
-    cmd = ["uv", "run", "gptmail", "agent", "pending", "--for", recipient, "--json", "--local-only"]
+    cmd = [
+        "uv",
+        "run",
+        "gptmail",
+        "agent",
+        "pending",
+        "--for",
+        recipient,
+        "--json",
+        "--local-only",
+    ]
     if all_mailboxes:
         cmd.append("--all-mailboxes")
     else:
@@ -696,11 +760,19 @@ def _remote_pending_rows(
     )
     try:
         result = subprocess.run(
-            ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", agent["ssh"], remote_cmd],
+            [
+                "ssh",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "BatchMode=yes",
+                agent["ssh"],
+                remote_cmd,
+            ],
             capture_output=True,
             text=True,
             check=True,
-            timeout=20,
+            timeout=timeout,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         click.echo(f"Warning: failed to collect pending rows from {agent_name}: {e}", err=True)
@@ -711,7 +783,10 @@ def _remote_pending_rows(
         click.echo(f"Warning: invalid pending JSON from {agent_name}: {e}", err=True)
         return None
     if not isinstance(payload, list):
-        click.echo(f"Warning: invalid pending payload from {agent_name}: expected a list", err=True)
+        click.echo(
+            f"Warning: invalid pending payload from {agent_name}: expected a list",
+            err=True,
+        )
         return None
     rows: list[dict] = []
     for item in payload:
@@ -759,13 +834,101 @@ def _fleet_pending_rows(
     return rows
 
 
+# -- thread-scoped watch -----------------------------------------------------
+
+# Exit status when ``watch``/``send --watch`` gives up waiting (as timeout(1)).
+WATCH_TIMEOUT_EXIT = 124
+_DURATION_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _parse_duration(value: str | None) -> float | None:
+    """Parse ``90``, ``90s``, ``30m``, ``2h`` or ``1d`` into seconds."""
+    if value is None:
+        return None
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*", value.lower())
+    if not match or float(match.group(1)) <= 0:
+        raise click.BadParameter(f"invalid duration {value!r} (examples: 90s, 30m, 2h)")
+    return float(match.group(1)) * _DURATION_UNITS[match.group(2)]
+
+
+def _thread_key(value: object) -> str:
+    """Normalize a message ID for thread matching.
+
+    Message IDs are outbox filenames, but callers and older senders may drop the
+    ``.md`` suffix or wrap the ID in ``<...>`` as email does.
+    """
+    key = str(value).strip().strip("<>")
+    return key[:-3] if key.endswith(".md") else key
+
+
+def _parent_keys(meta: dict) -> list[str]:
+    """``in_reply_to`` as normalized keys; it may be a scalar or a list."""
+    raw = meta.get("in_reply_to")
+    items = raw if isinstance(raw, list) else [raw]
+    return [_thread_key(item) for item in items if item]
+
+
+def _reaches_thread(key: str, target: str, parents: dict[str, list[str]]) -> bool:
+    """Whether ``key``'s ``in_reply_to`` ancestry includes ``target``."""
+    seen = {key}
+    frontier = list(parents.get(key, []))
+    while frontier:
+        current = frontier.pop()
+        if current == target:
+            return True
+        if current in seen:
+            continue
+        seen.add(current)
+        frontier.extend(parents.get(current, []))
+    return False
+
+
+def _local_thread_messages(
+    mailboxes: list[str],
+) -> tuple[dict[str, list[str]], list[tuple[str, dict, Path]]]:
+    """Parent links from local inbox+outbox, plus the local inbox messages.
+
+    Outbox messages matter for reply-to-a-reply: the peer's second reply points
+    at our follow-up, which only exists in our outbox.
+    """
+    parents: dict[str, list[str]] = {}
+    inbox_messages: list[tuple[str, dict, Path]] = []
+    for mailbox in mailboxes:
+        root = _mailbox_root(mailbox)
+        for folder in ("inbox", "outbox"):
+            directory = root / folder
+            if not directory.exists():
+                continue
+            for path in sorted(directory.glob("*.md")):
+                meta = meta_of(path)
+                if not meta:
+                    continue
+                key = _thread_key(path.name)
+                parents.setdefault(key, _parent_keys(meta))
+                if folder == "inbox":
+                    inbox_messages.append((key, meta, path))
+    return parents, inbox_messages
+
+
+def _find_thread_root(thread: str) -> tuple[str, dict] | None:
+    """Locate the watched message locally; returns ``(mailbox, meta)``."""
+    filename = thread.strip().strip("<>")
+    for candidate in dict.fromkeys([filename, f"{_thread_key(filename)}.md"]):
+        for folder in ("outbox", "inbox"):
+            resolved = _resolve_message(candidate, folder=folder)
+            if resolved is not None:
+                return resolved[0], meta_of(resolved[1]) or {}
+    return None
+
+
 # -- CLI ---------------------------------------------------------------------
 
 
 def _scanner_available() -> bool:
     """Whether the outbound secret scanner (``redact``) is importable."""
     try:
-        from redact import collect_secret_literals, redact as _scan  # noqa: F401
+        from redact import collect_secret_literals  # noqa: F401
+        from redact import redact as _scan  # noqa: F401
     except ImportError as exc:
         if exc.name != "redact":
             raise
@@ -793,14 +956,54 @@ def agent() -> None:
     is_flag=True,
     help="Send even if the same subject went to this agent within the last hour.",
 )
+@click.option(
+    "--watch",
+    "watch_reply",
+    is_flag=True,
+    help=(
+        "After sending, block until the threaded reply arrives (pulled locally) and "
+        "print its ID on stdout, like 'watch --thread ID --once --pull'."
+    ),
+)
+@click.option(
+    "--timeout",
+    "watch_timeout",
+    default="2h",
+    show_default=True,
+    metavar="DURATION",
+    help=f"With --watch: give up after DURATION and exit {WATCH_TIMEOUT_EXIT}.",
+)
+@click.option(
+    "--interval",
+    "watch_interval",
+    default=45,
+    show_default=True,
+    type=int,
+    help="With --watch: poll interval in seconds.",
+)
+@click.pass_context
 def send(
-    to: str, subject: str, content: str | None, mailbox: str, no_reply: bool, force: bool
+    ctx: click.Context,
+    to: str,
+    subject: str,
+    content: str | None,
+    mailbox: str,
+    no_reply: bool,
+    force: bool,
+    watch_reply: bool,
+    watch_timeout: str,
+    watch_interval: int,
 ) -> None:
     """Send a message to another agent.
 
     Skips (exit 0) when a message with the same subject was already delivered to
-    the same agent within the last hour, unless --force.
+    the same agent within the last hour, unless --force. With --watch, a skipped
+    send waits on the earlier message's thread instead.
     """
+    if watch_reply and no_reply:
+        raise click.UsageError("--watch waits for a reply; it cannot be combined with --no-reply.")
+    if watch_reply:
+        _parse_duration(watch_timeout)  # validate before sending anything
     body = content if content is not None else sys.stdin.read()
     agents = _load_agents()
     if to.lower() == _self_name():
@@ -814,14 +1017,17 @@ def send(
     recipient = to.lower()
     with _send_lock(transport, f"send:{recipient}|{subject}"):
         duplicate = None if force else _recent_outbox_duplicate(transport, recipient, subject)
-        if duplicate:
-            click.echo(
-                f"Skipping: '{subject}' was already sent to {recipient} within the last "
-                f"{OUTBOX_DEDUP_TTL // 60} min ({duplicate}). Use --force to send anyway.",
-                err=True,
-            )
-            return
-        message_id = transport.send(to, subject, body, reply_expected=not no_reply)
+        if not duplicate:
+            message_id = transport.send(to, subject, body, reply_expected=not no_reply)
+    if duplicate:
+        click.echo(
+            f"Skipping: '{subject}' was already sent to {recipient} within the last "
+            f"{OUTBOX_DEDUP_TTL // 60} min ({duplicate}). Use --force to send anyway.",
+            err=True,
+        )
+        if watch_reply:
+            _watch_sent_reply(ctx, duplicate, recipient, mailbox, watch_timeout, watch_interval)
+        return
     _track_sent(transport, message_id, reply_to=None)
     if _delivery_failed(message_id, mailbox=mailbox):
         click.echo(
@@ -831,6 +1037,40 @@ def send(
         )
         sys.exit(1)
     click.echo(f"Sent to {to.lower()}: {subject}")
+    if watch_reply:
+        _watch_sent_reply(ctx, message_id, recipient, mailbox, watch_timeout, watch_interval)
+    elif not no_reply:
+        mailbox_arg = "" if mailbox == "default" else f" --mailbox {shlex.quote(mailbox)}"
+        click.echo(
+            f"Message ID: {message_id}\n"
+            f"Wait for the reply: gptmail agent watch --thread {shlex.quote(message_id)}"
+            f"{mailbox_arg} --once --pull --timeout 2h",
+            err=True,
+        )
+
+
+def _watch_sent_reply(
+    ctx: click.Context,
+    message_id: str,
+    recipient: str,
+    mailbox: str,
+    timeout: str,
+    interval: int,
+) -> None:
+    """Block on the reply to a just-sent message (``send --watch``)."""
+    click.echo(f"Message ID: {message_id}", err=True)
+    ctx.invoke(
+        watch,
+        to_recipient=None,
+        from_agents=recipient,
+        interval=interval,
+        once=True,
+        do_pull=True,
+        mailbox=mailbox,
+        all_mailboxes=False,
+        thread=message_id,
+        timeout=timeout,
+    )
 
 
 @agent.command()
@@ -1004,7 +1244,12 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
 @agent.command()
 @click.option("--mailbox", default="default", show_default=True, help="Mailbox to inspect.")
 @click.option("--all-mailboxes", is_flag=True, help="Scan default plus every named mailbox.")
-@click.option("--for", "for_recipient", default=None, help="Show messages pending for a recipient.")
+@click.option(
+    "--for",
+    "for_recipient",
+    default=None,
+    help="Show messages pending for a recipient.",
+)
 @click.option(
     "--as",
     "as_identity",
@@ -1179,7 +1424,8 @@ def _fetch_from_agent(
         if dest is None:
             if filename:
                 click.echo(
-                    f"Warning: refusing unsafe filename from {agent_name}: {filename}", err=True
+                    f"Warning: refusing unsafe filename from {agent_name}: {filename}",
+                    err=True,
                 )
             continue
         if dest.exists():
@@ -1194,16 +1440,24 @@ def _fetch_from_agent(
             remote_path = f"{workspace}/messages/outbox/{filename}"
         else:
             remote_path = f"{workspace}/messages/mailboxes/{row_mailbox}/outbox/{filename}"
-        fd, temp_name = tempfile.mkstemp(prefix=f".{dest.name}.", dir=dest.parent)
+        fd, temp_name = tempfile.mkstemp(prefix=".delivery-", dir=dest.parent)
         os.close(fd)
         temp_dest = Path(temp_name)
         try:
             subprocess.run(
-                ["scp", *ssh_opts, f"{ssh_target}:{shlex.quote(remote_path)}", str(temp_dest)],
+                [
+                    "scp",
+                    *ssh_opts,
+                    f"{ssh_target}:{shlex.quote(remote_path)}",
+                    str(temp_dest),
+                ],
                 check=True,
                 capture_output=True,
                 timeout=15,
             )
+            # Receiver-local arrival, not a timestamp supplied by the sender.
+            arrival = time.time()
+            os.utime(temp_dest, (arrival, arrival))
             try:
                 os.link(temp_dest, dest)
             except FileExistsError:
@@ -1228,8 +1482,13 @@ def _fetch_from_agent(
         "Useful for pull-only recipients (e.g. humans) checking from a different host."
     ),
 )
+@click.option("--from", "from_agent", default=None, help="Fetch only from this registered agent.")
 @click.option("--mailbox", default="default", show_default=True, help="Mailbox to fetch into.")
-@click.option("--all-mailboxes", is_flag=True, help="Pull across default plus every named mailbox.")
+@click.option(
+    "--all-mailboxes",
+    is_flag=True,
+    help="Pull across default plus every named mailbox.",
+)
 @click.option(
     "--notify-cmd",
     default=None,
@@ -1243,6 +1502,7 @@ def _fetch_from_agent(
 @click.option("--dry-run", is_flag=True, help="Show what would be fetched without writing files.")
 def pull(
     as_recipient: str | None,
+    from_agent: str | None,
     mailbox: str,
     all_mailboxes: bool,
     notify_cmd: str | None,
@@ -1252,8 +1512,8 @@ def pull(
     """Pull messages from all SSH-reachable agents' outboxes (pull-only recipients).
 
     Iterates the agents.yaml registry, fetches outbox messages addressed to
-    this identity from every agent with an SSH target, and deduplicates them
-    into the local inbox by filename.  Intended for human recipients who cannot
+    this identity from every agent with an SSH target (or only --from), and
+    deduplicates them into the local inbox by filename. Intended for human recipients who cannot
     receive inbound SSH push delivery — run on a cron/launchd schedule (e.g.
     every 30 minutes) to surface messages without manual polling.
 
@@ -1270,6 +1530,11 @@ def pull(
         gptmail agent pull --notify-cmd "sh -c 'notify-send gptmail \"$SUMMARY\"'"
     """
     agents = _load_agents()
+    if from_agent is not None:
+        from_agent = from_agent.strip().lower()
+        if from_agent not in agents:
+            raise click.BadParameter(f"unknown agent '{from_agent}'", param_hint="--from")
+        agents = {from_agent: agents[from_agent]}
     self_name = (as_recipient or _self_name()).lower()
     mailboxes = _selected_mailboxes(mailbox, all_mailboxes)
     remote_mailboxes = [] if all_mailboxes else mailboxes
@@ -1305,7 +1570,8 @@ def pull(
                     dest = _pull_destination(row, fallback_mailbox=mailboxes[0])
                 except click.BadParameter as e:
                     click.echo(
-                        f"Warning: refusing invalid mailbox from {agent_name}: {e}", err=True
+                        f"Warning: refusing invalid mailbox from {agent_name}: {e}",
+                        err=True,
                     )
                     continue
                 if dest is None:
@@ -1363,7 +1629,12 @@ def pull(
         env["SUMMARY"] = f"{n} new message(s): {subjects}"
         try:
             subprocess.run(shlex.split(notify_cmd), env=env, timeout=10, check=True)
-        except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        except (
+            OSError,
+            ValueError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ) as e:
             click.echo(f"Warning: --notify-cmd failed: {e}", err=True)
 
     if json_output:
@@ -1419,7 +1690,10 @@ def status(mailbox: str, all_mailboxes: bool) -> None:
     "--from",
     "from_agents",
     default=None,
-    help="Comma-separated list of agents to watch (default: all SSH-reachable agents).",
+    help=(
+        "Comma-separated list of agents to watch (default: all SSH-reachable agents; "
+        "with --thread, the watched message's recipient when it is in the local outbox)."
+    ),
 )
 @click.option(
     "--interval",
@@ -1435,16 +1709,40 @@ def status(mailbox: str, all_mailboxes: bool) -> None:
     is_flag=True,
     help="Invoke 'gptmail agent pull' after each hit to fetch the message locally.",
 )
-@click.option("--mailbox", default="default", show_default=True, help="Mailbox to watch.")
+@click.option(
+    "--mailbox",
+    default=None,
+    help="Mailbox to watch (default: watched message's mailbox, otherwise default).",
+)
 @click.option("--all-mailboxes", is_flag=True, help="Watch across all mailboxes.")
+@click.option(
+    "--thread",
+    "--in-reply-to",
+    "thread",
+    default=None,
+    metavar="MESSAGE_ID",
+    help=(
+        "Only fire on replies whose in_reply_to chain reaches MESSAGE_ID (a direct "
+        "reply or a reply to a reply). Prints each matching reply's ID on stdout."
+    ),
+)
+@click.option(
+    "--timeout",
+    "timeout",
+    default=None,
+    metavar="DURATION",
+    help=f"Give up after DURATION (e.g. 90s, 30m, 2h) and exit {WATCH_TIMEOUT_EXIT}.",
+)
 def watch(
     to_recipient: str | None,
     from_agents: str | None,
     interval: int,
     once: bool,
     do_pull: bool,
-    mailbox: str,
+    mailbox: str | None,
     all_mailboxes: bool,
+    thread: str | None,
+    timeout: str | None,
 ) -> None:
     """Watch agents' outboxes for new messages (streaming reply monitor).
 
@@ -1453,14 +1751,47 @@ def watch(
     so it composes with Claude Code's Monitor tool, launchd/systemd units, or a
     plain terminal.
 
+    With --thread, only replies in that message's thread count, and a reply
+    that already exists fires immediately (no baseline). The local inbox is
+    checked too, so replies pushed straight to us are seen without SSH.
+
     \b
     Example — watch all agents for new messages to you (the default):
         gptmail agent watch
     Example — watch a subset of agents, exit on first reply:
         gptmail agent watch --from peer1,peer2 --once
+    Example — wait up to 2h for the reply to a message you sent:
+        gptmail agent watch --thread MESSAGE_ID --once --pull --timeout 2h
     """
+    timeout_seconds = _parse_duration(timeout)
+    deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+    wall_deadline = None if timeout_seconds is None else time.time() + timeout_seconds
     agents = _load_agents()
     recipient = (to_recipient or _self_name()).lower()
+
+    thread_target: str | None = None
+    if thread:
+        thread_target = _thread_key(thread)
+        root = _find_thread_root(thread)
+        if root is None:
+            click.echo(
+                f"Note: {thread} not found locally; matching against watched agents only.",
+                err=True,
+            )
+        else:
+            root_mailbox, root_meta = root
+            if mailbox is None and not all_mailboxes:
+                mailbox = root_mailbox
+            root_to = root_meta.get("to")
+            if (
+                from_agents is None
+                and isinstance(root_to, str)
+                and str(root_meta.get("from", "")).lower() == recipient
+            ):
+                from_agents = root_to.lower()
+
+    if mailbox is None:
+        mailbox = "default"
 
     # Build the set of agents to watch.
     if from_agents:
@@ -1482,45 +1813,172 @@ def watch(
     if skipped:
         click.echo(f"Note: skipping non-SSH agents: {', '.join(skipped)}", err=True)
 
-    if not ssh_agents:
+    # Thread mode also scans the workspace inbox, including pull --as deliveries
+    # for a --to override. Candidate metadata still filters by recipient below.
+    # No SSH-reachable peer is needed for an already-local or pushed reply.
+    watch_local_inbox = thread_target is not None
+    if not ssh_agents and not watch_local_inbox:
         click.echo("No SSH-reachable agents to watch.", err=True)
         sys.exit(1)
 
     mailboxes = _selected_mailboxes(mailbox, all_mailboxes)
+    pull_cmd = [sys.executable, "-m", "gptmail", "agent", "pull", "--as", recipient]
+    pull_cmd += ["--all-mailboxes"] if all_mailboxes else ["--mailbox", mailboxes[0]]
 
+    target_desc = f"replies to {thread} for {recipient}" if thread else f"messages to {recipient}"
     click.echo(
-        f"Watching {len(ssh_agents)} agent(s) for messages to {recipient} "
-        f"(interval: {interval}s)...",
+        f"Watching {len(ssh_agents)} agent(s) for {target_desc} (interval: {interval}s)...",
         err=True,
     )
 
-    # Baseline: None = not yet successfully probed; set[str] = known filenames.
-    baselines: dict[str, set[str] | None] = {}
-    for agent_name, agent_cfg in ssh_agents.items():
+    def _budget(limit: float, *, check_local: bool = False) -> float:
+        """Check the shared deadline, and cap the next blocking operation."""
+        if deadline is None:
+            return limit
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # A push may arrive while SSH or sleep consumes the remaining budget.
+            # Only local files delivered before expiry can satisfy this final scan;
+            # late remote rows and pulls must still fail the monotonic deadline.
+            if check_local and thread_target is not None:
+                if _check_thread({}, delivered_before=wall_deadline):
+                    sys.exit(0)
+            click.echo(f"Timed out after {timeout} waiting for {target_desc}.", err=True)
+            sys.exit(WATCH_TIMEOUT_EXIT)
+        return min(limit, remaining)
+
+    def _poll(agent_name: str, agent_cfg: dict[str, str]) -> list[dict] | None:
+        budget = _budget(20, check_local=True)
         rows = _remote_pending_rows(
             agent_name,
             agent_cfg,
             recipient=recipient,
             mailboxes=mailboxes,
             all_mailboxes=all_mailboxes,
+            **({"timeout": budget} if deadline is not None else {}),
         )
+        _budget(20, check_local=True)  # Reject late rows, but retain timely pushes.
+        return rows
+
+    reported: set[str] = set()
+
+    def _check_thread(
+        remote: dict[str, list[dict]], *, delivered_before: float | None = None
+    ) -> bool:
+        """Report new thread replies; returns True when --once should exit."""
+        assert thread_target is not None
+        known_mailboxes = _known_mailboxes()
+        local_inboxes = {
+            _mailbox_root(name) / "inbox"
+            for name in (known_mailboxes if all_mailboxes else mailboxes)
+        }
+        parents, inbox_messages = (
+            _local_thread_messages(known_mailboxes) if watch_local_inbox else ({}, [])
+        )
+        candidates: list[tuple[str, dict, str, bool]] = []
+        for key, meta, path in inbox_messages:
+            if delivered_before is not None:
+                try:
+                    # Metadata rewrites retain receiver-stamped delivery mtime.
+                    if local_delivery_time(path) > delivered_before:
+                        continue
+                except FileNotFoundError:
+                    continue  # A concurrent consumer moved the inbox file.
+            sender = str(meta.get("from", "")).lower()
+            if (
+                path.parent in local_inboxes
+                and sender != recipient
+                and (from_agents is None or sender in watch_agents)
+                and _addressed_to(meta, recipient)
+            ):
+                candidates.append((key, meta, sender, True))
+        for agent_name, rows in remote.items():
+            for row in rows:
+                if not row.get("file"):
+                    continue
+                key = _thread_key(row["file"])
+                parents.setdefault(key, _parent_keys(row))
+                candidates.append((key, row, agent_name, False))
+        for key, meta, sender, is_local in candidates:
+            if delivered_before is None:
+                _budget(60, check_local=True)
+            if key in reported or key == thread_target:
+                continue
+            if not _reaches_thread(key, thread_target, parents):
+                continue
+            if do_pull and not is_local:
+                try:
+                    destination = _pull_destination(meta, fallback_mailbox=mailboxes[0])
+                except click.BadParameter as e:
+                    click.echo(f"Warning: refusing invalid reply destination: {e}", err=True)
+                    continue
+                if destination is None:
+                    click.echo("Warning: refusing unsafe reply filename.", err=True)
+                    continue
+                try:
+                    # Reuse pull's safe atomic delivery, but never scan unrelated peers.
+                    sender_pull_cmd = pull_cmd + ["--from", sender]
+                    subprocess.run(
+                        sender_pull_cmd,
+                        check=False,
+                        timeout=_budget(60),
+                        stdout=sys.stderr,
+                    )
+                except (OSError, subprocess.TimeoutExpired) as e:
+                    click.echo(f"Warning: --pull failed: {e}", err=True)
+                # pull tolerates partial failures; its exit status does not prove
+                # this reply arrived. Leave it unreported so the next poll retries.
+                if not destination.is_file():
+                    click.echo(f"Warning: reply not fetched yet: {destination.name}", err=True)
+                    continue
+            if delivered_before is None:
+                _budget(60, check_local=True)  # Only timely local delivery survives expiry.
+            reported.add(key)
+            now_str = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
+            filename = f"{key}.md"
+            subject = str(meta.get("subject", "(no subject)"))
+            click.echo(f"{now_str} reply from {sender}: {subject} ({filename})", err=True)
+            click.echo(filename)
+            if once:
+                return True
+        return False
+
+    # Push delivery is authoritative already; don't let an offline peer hide it.
+    if thread_target is not None and _check_thread({}):
+        return
+
+    # Baseline: None = not yet successfully probed; set[str] = known filenames.
+    baselines: dict[str, set[str] | None] = {}
+    first_rows: dict[str, list[dict]] = {}
+    for agent_name, agent_cfg in ssh_agents.items():
+        rows = _poll(agent_name, agent_cfg)
         if rows is None:
             click.echo(f"Warning: {agent_name} unreachable at baseline; will retry.", err=True)
             baselines[agent_name] = None
         else:
+            first_rows[agent_name] = rows
             baselines[agent_name] = {str(row.get("file", "")) for row in rows if row.get("file")}
+        # Match accumulated rows before another peer can consume the deadline.
+        if thread_target is not None and _check_thread(first_rows):
+            return
 
     try:
         while True:
-            time.sleep(interval)
+            time.sleep(_budget(interval, check_local=True))
+            _budget(interval, check_local=True)
+            if thread_target is not None:
+                if _check_thread({}):
+                    return
+                polled: dict[str, list[dict]] = {}
+                for agent_name, agent_cfg in ssh_agents.items():
+                    rows = _poll(agent_name, agent_cfg)
+                    if rows is not None:
+                        polled[agent_name] = rows
+                    if _check_thread(polled):
+                        return
+                continue
             for agent_name, agent_cfg in ssh_agents.items():
-                rows = _remote_pending_rows(
-                    agent_name,
-                    agent_cfg,
-                    recipient=recipient,
-                    mailboxes=mailboxes,
-                    all_mailboxes=all_mailboxes,
-                )
+                rows = _poll(agent_name, agent_cfg)
                 if rows is None:
                     continue  # unreachable — skip and retry next poll
                 current = {str(row.get("file", "")) for row in rows if row.get("file")}
@@ -1536,6 +1994,7 @@ def watch(
                 old_count = len(known)
                 new_count = len(current)
                 for row in new_rows:
+                    _budget(60)
                     subject = str(row.get("subject", "(no subject)"))
                     filename = str(row.get("file", ""))
                     click.echo(
@@ -1545,13 +2004,10 @@ def watch(
                 baselines[agent_name] = current
                 if do_pull:
                     try:
-                        subprocess.run(
-                            [sys.executable, "-m", "gptmail", "agent", "pull", "--as", recipient],
-                            check=False,
-                            timeout=60,
-                        )
+                        subprocess.run(pull_cmd, check=False, timeout=_budget(60))
                     except (OSError, subprocess.TimeoutExpired) as e:
                         click.echo(f"Warning: --pull failed: {e}", err=True)
+                _budget(60)
                 if once:
                     return
     except KeyboardInterrupt:

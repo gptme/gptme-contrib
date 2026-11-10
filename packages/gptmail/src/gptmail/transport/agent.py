@@ -26,6 +26,9 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
+import tempfile
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -109,6 +112,33 @@ def meta_of(path: Path) -> dict | None:
     except OSError:
         return None
     return split_frontmatter(content)[0]
+
+
+def local_delivery_time(path: Path) -> float:
+    """Receiver-stamped mtime, retained across our atomic metadata updates.
+
+    Delivery resets mtime after copying, so incoming YAML and sender mtimes
+    cannot backdate arrival. Metadata-only updates preserve this filesystem
+    timestamp rather than trusting a field in the message itself.
+    """
+    with path.open() as source:
+        return os.fstat(source.fileno()).st_mtime
+
+
+def write_inbox_metadata(path: Path, content: str) -> None:
+    """Publish read/replied stamps without losing the original arrival time."""
+    with path.open() as source:
+        original = os.fstat(source.fileno())
+    arrival = original.st_mtime
+    fd, name = tempfile.mkstemp(prefix=".metadata-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as output:
+            output.write(content)
+            os.fchmod(output.fileno(), stat.S_IMODE(original.st_mode))
+        os.utime(name, (arrival, arrival))
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
 
 
 class AgentTransport:
@@ -359,7 +389,7 @@ class AgentTransport:
                         fm = fm.rstrip("\n") + "\nread: true\n"
                     parts[1] = fm
                     content = "---".join(parts)
-                    path.write_text(content)
+                    write_inbox_metadata(path, content)
         return content
 
     def _lookup_meta(self, message_id: str) -> dict | None:
@@ -433,7 +463,18 @@ class AgentTransport:
 
         def _deliver(local_path: Path, _recipient: str) -> bool:
             dest.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(local_path, dest / local_path.name)
+            fd, name = tempfile.mkstemp(prefix=".delivery-", dir=dest)
+            os.close(fd)
+            try:
+                shutil.copy2(local_path, name)
+                arrival = time.time()
+                os.utime(name, (arrival, arrival))  # Discard the sender's timestamp.
+                os.link(name, dest / local_path.name)
+            except FileExistsError:
+                # Preserve a previous delivery, but a directory is not a message.
+                return (dest / local_path.name).is_file()
+            finally:
+                Path(name).unlink(missing_ok=True)
             return True
 
         return _deliver

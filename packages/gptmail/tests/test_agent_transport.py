@@ -193,7 +193,9 @@ def test_read_include_thread_prepends_ancestor(tmp_path: Path) -> None:
     # (bob's outbox filename = parent id) resolves in alice's inbox.
     alice = _transport(tmp_path)
     bob = AgentTransport(
-        tmp_path / "bob-messages", "bob", deliver=AgentTransport.local_deliver(alice.inbox)
+        tmp_path / "bob-messages",
+        "bob",
+        deliver=AgentTransport.local_deliver(alice.inbox),
     )
     parent_id = bob.send("alice", "Original", "the original question")
     reply_id = bob.send("alice", "Re: Original", "the answer", reply_to=parent_id)
@@ -208,7 +210,9 @@ def test_read_include_thread_prepends_ancestor(tmp_path: Path) -> None:
 def test_read_include_thread_rejects_parent_path_traversal(tmp_path: Path) -> None:
     alice = _transport(tmp_path)
     bob = AgentTransport(
-        tmp_path / "bob-messages", "bob", deliver=AgentTransport.local_deliver(alice.inbox)
+        tmp_path / "bob-messages",
+        "bob",
+        deliver=AgentTransport.local_deliver(alice.inbox),
     )
     (tmp_path / "secret.md").write_text("TOP SECRET\n")
     reply_id = bob.send("alice", "Re: Original", "the answer", reply_to="../../secret.md")
@@ -326,3 +330,84 @@ def test_mark_read_survives_dashes_in_in_reply_to(tmp_path: Path) -> None:
     assert (
         meta["in_reply_to"] == tricky_id
     ), f"in_reply_to was corrupted: {meta.get('in_reply_to')!r}"
+
+
+def test_local_delivery_does_not_publish_partial_message(tmp_path: Path, monkeypatch) -> None:
+    from gptmail.transport import agent as transport_module
+
+    source = tmp_path / "reply.md"
+    source.write_text("---\nfrom: bob\n---\ncomplete body\n")
+    inbox = tmp_path / "inbox"
+    copy = transport_module.shutil.copy2
+
+    def _copy(src, dest):
+        Path(dest).write_text("---\nfrom: bob\n---\n")
+        assert not list(inbox.glob("*.md"))
+        return copy(src, dest)
+
+    monkeypatch.setattr(transport_module.shutil, "copy2", _copy)
+    assert AgentTransport.local_deliver(inbox)(source, "alice") is True
+    assert (inbox / source.name).read_text() == source.read_text()
+    assert not list(inbox.glob(".*"))
+
+
+def test_local_delivery_rejects_directory_collision(tmp_path: Path) -> None:
+    source = tmp_path / "reply.md"
+    source.write_text("complete body")
+    inbox = tmp_path / "inbox"
+    (inbox / source.name).mkdir(parents=True)
+    assert AgentTransport.local_deliver(inbox)(source, "alice") is False
+    assert list((inbox / source.name).iterdir()) == []
+    assert not list(inbox.glob(".*"))
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o640, 0o660])
+@pytest.mark.parametrize("filename", ["reply.md", "r" * 250 + ".md"])
+def test_metadata_update_preserves_permissions_and_long_filename(tmp_path, mode, filename):
+    import os
+    import stat
+
+    from gptmail.transport.agent import local_delivery_time, write_inbox_metadata
+
+    path = tmp_path / filename
+    path.write_text("original body")
+    path.chmod(mode)
+    os.utime(path, (1000, 1000))
+    write_inbox_metadata(path, "updated body")
+    assert path.read_text() == "updated body"
+    assert stat.S_IMODE(path.stat().st_mode) == mode
+    assert local_delivery_time(path) == 1000
+    assert not list(tmp_path.glob(".*"))
+
+
+def test_local_delivery_accepts_long_filename(tmp_path):
+    source = tmp_path / ("r" * 250 + ".md")
+    source.write_text("complete body")
+    inbox = tmp_path / "inbox"
+    assert AgentTransport.local_deliver(inbox)(source, "alice")
+    assert (inbox / source.name).read_text() == "complete body"
+    assert not list(inbox.glob(".*"))
+
+
+def test_local_delivery_resets_sender_mtime_and_ignores_yaml_arrival(
+    tmp_path: Path,
+) -> None:
+    import os
+    import time
+
+    from gptmail.transport.agent import local_delivery_time, write_inbox_metadata
+
+    source = tmp_path / "reply.md"
+    source.write_text("---\nfrom: bob\n_local_received_at: 0\n---\ncomplete body")
+    os.utime(source, (1, 1))
+    inbox = tmp_path / "inbox"
+    before = time.time()
+    assert AgentTransport.local_deliver(inbox)(source, "alice")
+    received = inbox / source.name
+    arrival = local_delivery_time(received)
+    assert before <= arrival <= time.time()
+    write_inbox_metadata(
+        received, received.read_text().replace("from: bob", "from: bob\nread: true")
+    )
+    assert local_delivery_time(received) == arrival
+    assert meta_of(received)["read"] is True

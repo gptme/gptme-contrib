@@ -904,3 +904,48 @@ def test_remote_command_resolves_uv_from_user_local_bin_in_noninteractive_shell(
         ["sh", "-c", without_prefix], env=env, capture_output=True, text=True, check=False
     )
     assert broken.returncode == 127
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_pull_from_limits_registry_before_any_probe(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool
+) -> None:
+    config = pull_workspace / "erik" / "messages" / "agents.yaml"
+    registry = yaml.safe_load(config.read_text())
+    registry["offline"] = {"ssh": "offline@offline", "workspace": "/offline"}
+    config.write_text(yaml.dump(registry))
+    name = _write_outbox_msg(
+        pull_workspace / "gordon" / "messages" / "outbox",
+        sender="gordon",
+        recipient="erik",
+        subject="Selected sender",
+    )
+    real_rows = agent_cli._remote_pending_rows
+    probes: list[str] = []
+
+    def _rows(agent_name: str, cfg: dict, **kw: object) -> list[dict] | None:
+        probes.append(agent_name)
+        assert agent_name == "gordon"
+        return real_rows(agent_name, cfg, **kw)
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _rows)
+    args = ["pull", "--from", "GORDON", "--json"]
+    if dry_run:
+        args.append("--dry-run")
+    result = CliRunner().invoke(agent, args)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["new_count"] == 1
+    assert probes == ["gordon"]
+    assert (pull_workspace / "erik" / "messages" / "inbox" / name).exists() is not dry_run
+
+
+def test_pull_unknown_from_fails_before_any_probe(
+    pull_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _unexpected(*_args: object, **_kw: object) -> None:
+        pytest.fail("Unknown sender must not fall back to a fleet pull")
+
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", _unexpected)
+    result = CliRunner().invoke(agent, ["pull", "--from", "unknown"])
+    assert result.exit_code == 2
+    assert "unknown agent 'unknown'" in result.output
