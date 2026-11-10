@@ -431,10 +431,14 @@ def _shell_tokens(segment: str) -> list[str]:
     """Shell words of a segment, with unquoted grouping/redirect punctuation
     split into tokens of its own (``(gh ... -X GET)`` -> ``GET``, ``)``).
 
-    Comments are honoured: bash never executes a trailing ``# -f body=x``.
+    shlex's own comment handling is disabled: it treats a mid-word ``#`` as a
+    comment (``-H X-Issue:#5 -f body=x`` would lose ``-f``), whereas bash
+    only starts a comment at a word boundary. Segments come from
+    ``_split_shell_segments``, which already drops real comments.
     """
     lexer = shlex.shlex(segment, posix=True, punctuation_chars="();<>|&")
     lexer.whitespace_split = True
+    lexer.commenters = ""
     try:
         return list(lexer)
     except ValueError:
@@ -500,7 +504,8 @@ def _gh_api_writes(args: list[str]) -> bool:
             has_field = True
         i += 1
     if method is not None:
-        return method.upper() != "GET"
+        # HEAD fetches headers only; like GET it posts nothing.
+        return method.upper() not in ("GET", "HEAD")
     return has_field
 
 

@@ -90,6 +90,9 @@ READS = [
     "printf '%s' '$(gh api repos/o/r/issues/5/comments -f body=x)'",
     'echo "\\$(gh api repos/o/r/issues/5/comments -f body=x)"',
     "true # $(gh api repos/o/r/issues/5/comments -f body=x)",
+    # HEAD fetches headers only and posts nothing
+    "gh api -X HEAD repos/o/r/issues/5/comments",
+    "gh api --method=head repos/o/r/issues/5/comments -f per_page=1",
 ]
 
 WRITES = [
@@ -123,6 +126,9 @@ WRITES = [
     'x="$(echo "$(gh api repos/o/r/issues/5/comments -f body=x)")"',
     "(gh api repos/o/r/issues/5/comments -f body=x -X POST)",
     "(gh api repos/o/r/issues/5/comments -f body=x)",
+    # a mid-word # is literal in bash, not a comment that hides -f
+    "gh api repos/o/r/issues/5/comments -H X-Issue:#5 -f body=x",
+    "gh api repos/o/r/issues/5/comments -H 'X-Issue:#5' -f body=x",
 ]
 
 
