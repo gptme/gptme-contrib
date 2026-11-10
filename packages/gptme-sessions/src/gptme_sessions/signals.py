@@ -366,6 +366,67 @@ def _split_shell_segments(cmd: str) -> list[str]:
     return segments
 
 
+def _command_substitutions(cmd: str) -> list[str]:
+    """Bodies of ``$(...)`` and backtick substitutions that bash would execute.
+
+    Substitutions run unquoted and inside double quotes
+    (``x="$(gh api ... -f body=x)"``) but not inside single quotes or shell
+    comments, so ``printf '$(gh api ... -f x)'`` yields nothing. Only
+    outermost bodies are returned; callers recurse for nested ones.
+    """
+    bodies: list[str] = []
+    quote: str | None = None
+    i, n = 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if c == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote == "'":
+            if c == "'":
+                quote = None
+        elif c == "$" and cmd[i + 1 : i + 2] == "(":
+            start = j = i + 2
+            depth, inner = 1, None
+            while j < n:
+                d = cmd[j]
+                if d == "\\" and inner != "'":
+                    j += 2
+                    continue
+                if inner:
+                    if d == inner:
+                        inner = None
+                elif d in "'\"":
+                    inner = d
+                elif d == "(":
+                    depth += 1
+                elif d == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            bodies.append(cmd[start:j])
+            i = j + 1
+            continue
+        elif c == "`":
+            end = cmd.find("`", i + 1)
+            end = n if end < 0 else end
+            bodies.append(cmd[i + 1 : end])
+            i = end + 1
+            continue
+        elif quote == '"':
+            if c == '"':
+                quote = None
+        elif c in "'\"":
+            quote = c
+        elif c == "#" and (i == 0 or cmd[i - 1] in " \t\n(;|&"):
+            while i < n and cmd[i] != "\n":
+                i += 1
+            continue
+        i += 1
+    return bodies
+
+
 def _shell_tokens(segment: str) -> list[str]:
     # comments=True: bash never executes a trailing ``# -f body=x``.
     try:
@@ -443,7 +504,13 @@ def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
     Non-api matches (``gh pr comment`` etc.) count as before, even when the
     same segment also runs a ``gh api`` read (e.g. ``--body-file <(gh api
     ...)``). An api match counts only if the ``gh api`` invocation writes.
+    Executable command substitutions are checked as commands of their own,
+    so a write inside ``x="$(gh api ...)"`` counts even though shell
+    tokenization keeps the quoted substitution in one token.
     """
+    for sub in _command_substitutions(cmd):
+        if _gh_cmd_matches(pattern, sub):
+            return True
     for segment in _split_shell_segments(cmd):
         matches = list(pattern.finditer(segment))
         if not matches:

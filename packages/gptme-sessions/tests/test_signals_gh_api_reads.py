@@ -80,6 +80,12 @@ READS = [
     "gh api repos/o/r/issues/5/comments # example only; gh api repos/o/r/issues/5/comments -f body=x",
     "gh api repos/o/r/issues/5/comments # a | gh api repos/o/r/issues/5/comments -f body=x",
     "x=$(gh api repos/o/r/issues/5/comments --jq length)",
+    # a quoted substitution executes, but this one is a GET
+    'result="$(gh api repos/o/r/issues/5/comments --jq length)"',
+    # single-quoted, escaped or commented substitutions never execute
+    "printf '%s' '$(gh api repos/o/r/issues/5/comments -f body=x)'",
+    'echo "\\$(gh api repos/o/r/issues/5/comments -f body=x)"',
+    "true # $(gh api repos/o/r/issues/5/comments -f body=x)",
 ]
 
 WRITES = [
@@ -106,6 +112,11 @@ WRITES = [
     "gh api repos/o/r/issues/5/comments -f body='see #5; ok'",
     "x=$(gh api repos/o/r/issues/5/comments -f body=x)",
     "y=`gh api repos/o/r/issues/5/comments -f body=x`",
+    # bash executes substitutions inside double quotes too
+    'result="$(gh api repos/o/r/issues/5/comments -f body=x)"',
+    'y="`gh api repos/o/r/issues/5/comments -f body=x`"',
+    "echo \"posted: $(gh api repos/o/r/issues/5/comments -f body='a) b' --jq .id)\"",
+    'x="$(echo "$(gh api repos/o/r/issues/5/comments -f body=x)")"',
 ]
 
 
@@ -162,3 +173,15 @@ def test_split_shell_segments_respects_quotes() -> None:
     # unquoted comments swallow operators up to the newline; a#b is a word
     assert _split_shell_segments("a # x; y | z\nb") == ["a ", "b"]
     assert _split_shell_segments("a#b; c '#d; e'") == ["a#b", " c '#d; e'"]
+
+
+def test_quoted_substitution_write_counts_comment() -> None:
+    # Bash runs "$(...)" inside double quotes; the quoted and unquoted forms
+    # must grade the same (1 interaction, 1 comment).
+    for cmd in (
+        'result="$(gh api repos/o/r/issues/5/comments -f body=x)"',
+        "result=$(gh api repos/o/r/issues/5/comments -f body=x)",
+    ):
+        sigs = extract_signals_cc(_bash_msgs(cmd))
+        assert sigs["gh_interactions"] == 1, cmd
+        assert sigs["comments_posted"] == 1, cmd
