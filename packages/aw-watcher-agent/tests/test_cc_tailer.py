@@ -223,3 +223,21 @@ def test_interrupted_checkpoint_preserves_previous_cursor(tmp_path, monkeypatch)
         cc_tailer._write_emitted(transcript, 2)
     assert cursor.read_bytes() == previous
     assert cc_tailer._read_emitted(transcript) == 1
+
+
+@pytest.mark.parametrize("change", ["server", "hostname"])
+def test_checkpoint_is_scoped_to_destination(tmp_path, monkeypatch, change):
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    transcript = tmp_path / "s1.jsonl"
+    transcript.write_text(_row("2026-11-10T09:00:00Z"), encoding="utf-8")
+    now = _dt("2026-11-10T10:00:00Z")
+    first = _Client()
+    second = _Client()
+    host = "other" if change == "hostname" else "host"
+    if change == "server":
+        second.server = "http://other"
+    assert cc_tailer.emit_file(first, "host", transcript, now=now) == 1
+    assert cc_tailer.emit_file(second, host, transcript, now=now) == 1
+    assert cc_tailer.emit_file(first, "host", transcript, now=now) == 0
+    assert cc_tailer.emit_file(second, host, transcript, now=now) == 0
+    assert len(first.posted) == len(second.posted) == 1

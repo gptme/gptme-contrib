@@ -122,14 +122,17 @@ def parse_session(lines: Iterable[str], *, gap_s: float = DEFAULT_GAP_S) -> list
     return blocks
 
 
-def _cursor_path(transcript: Path) -> Path:
-    digest = hashlib.sha256(os.fsencode(transcript.resolve())).hexdigest()
+def _cursor_path(transcript: Path, server: str = "", hostname: str = "") -> Path:
+    identity = json.dumps([str(transcript.resolve()), server.rstrip("/"), hostname])
+    digest = hashlib.sha256(identity.encode()).hexdigest()
     return core.state_dir() / f"cc-cursor-{digest}.json"
 
 
-def _read_emitted(transcript: Path, gap_s: float = DEFAULT_GAP_S) -> int:
+def _read_emitted(
+    transcript: Path, gap_s: float = DEFAULT_GAP_S, *, server: str = "", hostname: str = ""
+) -> int:
     try:
-        data = json.loads(_cursor_path(transcript).read_text(encoding="utf-8"))
+        data = json.loads(_cursor_path(transcript, server, hostname).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return 0
     count = data.get("emitted_blocks") if isinstance(data, dict) else None
@@ -138,8 +141,15 @@ def _read_emitted(transcript: Path, gap_s: float = DEFAULT_GAP_S) -> int:
     return count if isinstance(count, int) and count >= 0 else 0
 
 
-def _write_emitted(transcript: Path, count: int, gap_s: float = DEFAULT_GAP_S) -> None:
-    path = _cursor_path(transcript)
+def _write_emitted(
+    transcript: Path,
+    count: int,
+    gap_s: float = DEFAULT_GAP_S,
+    *,
+    server: str = "",
+    hostname: str = "",
+) -> None:
+    path = _cursor_path(transcript, server, hostname)
     path.parent.mkdir(parents=True, exist_ok=True)
     # The caller holds the transcript lock, so one fixed sibling temp is safe.
     temporary = path.with_suffix(".tmp")
@@ -166,7 +176,7 @@ def emit_file(
     is more than ``gap_s`` old; the in-progress trailing block waits. If another
     invocation owns this transcript, skip it until the next run.
     """
-    lock_path = _cursor_path(path).with_suffix(".lock.sqlite3")
+    lock_path = _cursor_path(path, client.server, hostname).with_suffix(".lock.sqlite3")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     # SQLite provides a cross-platform process lock, released even on a crash.
     # Keep this separate from the JSON cursor and never unlink the lock file.
@@ -195,7 +205,7 @@ def _emit_file_locked(
     text = path.read_text(encoding="utf-8", errors="replace")
     blocks = parse_session(text.splitlines(), gap_s=gap_s)
     finished = [b for b in blocks if (now - b.end).total_seconds() > gap_s]
-    emitted = _read_emitted(path, gap_s)
+    emitted = _read_emitted(path, gap_s, server=client.server, hostname=hostname)
     new = finished[emitted:]
     if not new:
         return 0
@@ -205,5 +215,5 @@ def _emit_file_locked(
     for block in new:
         client.post_event(bucket, block.to_event())
         emitted += 1
-        _write_emitted(path, emitted, gap_s)
+        _write_emitted(path, emitted, gap_s, server=client.server, hostname=hostname)
     return len(new)
