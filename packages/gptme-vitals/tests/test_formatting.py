@@ -19,6 +19,11 @@ def test_coercion(value, f, i):
     assert as_int(value) == i
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_as_int_non_finite_is_missing(value):
+    assert as_int(value) is None
+
+
 def test_format_pct():
     assert format_pct(0.256) == "26%"
     assert format_pct("x") == "?"

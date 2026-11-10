@@ -17,13 +17,16 @@ def as_float(value: object) -> float | None:
 
 
 def as_int(value: object) -> int | None:
-    """Return ``value`` as an int (floats truncate), or ``None`` otherwise."""
+    """Return an int (finite floats truncate), or ``None`` otherwise."""
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
         return value
     if isinstance(value, float):
-        return int(value)
+        try:
+            return int(value)
+        except (ValueError, OverflowError):
+            return None
     return None
 
 
