@@ -286,6 +286,48 @@ def test_fail_open_emits_machine_readable_decision(
     assert "state-delta-gate:" in captured.err
 
 
+@pytest.mark.parametrize("verbose", ["flag", "environment"])
+@pytest.mark.parametrize("streak", [0, 1])
+def test_verbose_preserves_machine_readable_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    verbose: str,
+    streak: int,
+) -> None:
+    write_state(
+        tmp_path,
+        noop_only_streak=streak,
+        last_executed_ts=state_delta_gate_cli._now().isoformat(),
+    )
+    args = ["check", "--explore-rate", "0"]
+    if verbose == "flag":
+        args.insert(0, "--verbose")
+    else:
+        monkeypatch.setenv("STATE_DELTA_GATE_VERBOSE", "1")
+    assert run(tmp_path, *args) == (SKIP if streak else PROCEED)
+    captured = capsys.readouterr()
+    assert captured.out.strip() == (
+        "GATE_CAUSE=skip GATE_PROCEED=0"
+        if streak
+        else "GATE_CAUSE=inactive GATE_PROCEED=1"
+    )
+    assert "state-delta-gate:" in captured.err
+
+
+@pytest.mark.parametrize("command", ["record-noop", "record-productive"])
+def test_record_round_trips_escaped_surrogate_metadata(
+    tmp_path: Path, command: str
+) -> None:
+    write_state(tmp_path, noop_only_streak=1, metadata="\ud800")
+    assert run(tmp_path, command) == 0
+    state = read_state(tmp_path)
+    assert state["metadata"] == "\ud800"
+    assert state["noop_only_streak"] == (2 if command == "record-noop" else 0)
+    assert state["last_executed_ts"] == state_delta_gate_cli._now().isoformat()
+    assert not list((tmp_path / "state").glob("*.tmp"))
+
+
 # --- First run / no-state ---
 
 

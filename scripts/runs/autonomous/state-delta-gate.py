@@ -84,7 +84,7 @@ def _streak(value: object) -> int:
 
 def _write_state(state_file: Path, state: dict) -> None:
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(state, indent=2, ensure_ascii=False) + "\n"
+    data = json.dumps(state, indent=2, ensure_ascii=True) + "\n"
     tmp: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -172,10 +172,9 @@ def _check(args: argparse.Namespace) -> int:
             f"reason={decision.reason!r})",
             file=sys.stderr,
         )
-    else:
-        print(
-            f"GATE_CAUSE={decision.cause} GATE_PROCEED={'1' if decision.proceed else '0'}",
-        )
+    print(
+        f"GATE_CAUSE={decision.cause} GATE_PROCEED={'1' if decision.proceed else '0'}",
+    )
 
     return PROCEED if decision.proceed else SKIP
 
