@@ -169,8 +169,13 @@ so it works as a throttle whose rate depends on how often unrelated lanes commit
 - `addressed_signals` — point-to-point work (agent-msg/inbox, @-mentions, review
   requests) proceeds first; it outranks every frequency-based probe.
 - `wall_clock_backoff_expired` — pair with
-  `state_delta_backoff_seconds(consecutive_skips)`: 30m → 1h → 2h, capped at 4h.
-  The clock, not commit frequency, controls throughput.
+  `state_delta_backoff_seconds(noop_only_streak)`: 30m → 1h → 2h, capped at 4h.
+  Feed the same consecutive executed clean-noop counter to the helper and gate,
+  and compare the returned duration with time since the last **executed** session.
+  Skipped timer ticks change neither the counter nor that timestamp. Increment
+  the counter after an executed clean noop; reset it after productive work.
+  Do **not** use a consecutive-skip counter: resetting it on each execution
+  collapses the ladder into a timer-dependent fixed period.
 - `explore` — resolve with `explore_roll()` (5% default). It is evaluated last, so
   the cohort holds only runs every other probe would have skipped; their
   productive rate is the measured cost of a skip. Tag `cause == "explore"` in

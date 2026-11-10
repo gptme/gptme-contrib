@@ -287,8 +287,47 @@ class TestStateDeltaGateExplore:
 
 
 class TestStateDeltaHelpers:
+    @pytest.mark.parametrize("timer_seconds", [600, 1800, 3600])
+    def test_backoff_grows_across_executed_noops_and_resets_on_work(
+        self, timer_seconds: int
+    ) -> None:
+        # Begin just after one executed noop. Skipped timer ticks must change
+        # neither the noop streak nor the last-executed timestamp.
+        noop_only_streak = 1
+        last_executed = 0
+        gaps = []
+        for now in range(timer_seconds, 24 * 3600 + 1, timer_seconds):
+            backoff = state_delta_backoff_seconds(noop_only_streak=noop_only_streak)
+            decision = state_delta_gate(
+                noop_only_streak=noop_only_streak,
+                quota_behind_pace=False,
+                wall_clock_backoff_expired=now - last_executed >= backoff,
+            )
+            if decision.proceed:
+                assert decision.cause == "backoff"
+                gaps.append(now - last_executed)
+                last_executed = now
+                noop_only_streak += 1
+            else:
+                assert decision.cause == "skip"
+
+        expected = [max(timer_seconds, gap) for gap in [1800, 3600, 7200, 14400]]
+        assert gaps[:4] == expected
+        assert all(gap == 14400 for gap in gaps[4:])
+
+        # A productive execution resets the same counter consumed by both APIs.
+        noop_only_streak = 0
+        assert state_delta_backoff_seconds(noop_only_streak=noop_only_streak) == 0
+        assert (
+            state_delta_gate(
+                noop_only_streak=noop_only_streak, quota_behind_pace=False
+            ).cause
+            == "inactive"
+        )
+        assert state_delta_backoff_seconds(noop_only_streak=1) == 1800
+
     def test_backoff_doubles_from_30m_and_caps_at_4h(self) -> None:
-        # 30m, 1h, 2h, then the 4h cap for every further consecutive skip.
+        # 30m, 1h, 2h, then the 4h cap for every further executed noop.
         assert state_delta_backoff_seconds(0) == 0
         assert state_delta_backoff_seconds(-3) == 0
         assert state_delta_backoff_seconds(1) == 1800

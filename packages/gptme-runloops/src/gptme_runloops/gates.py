@@ -40,8 +40,8 @@ class GateDecision:
     """Outcome of a runtime-admission gate.
 
     ``proceed`` is the admission decision; ``reason`` is a human-readable
-    explanation suitable for logging (it mirrors the bash gate's echo lines so
-    logs read identically before and after the cut-over). ``cause`` names the
+    explanation suitable for logging. Legacy decision outcomes are preserved,
+    but reason text can include the new probes. ``cause`` names the
     branch that decided it (``"inactive"``, ``"quota"``, ``"addressed"``,
     ``"backoff"``, ``"change"``, ``"explore"`` or ``"skip"``) so the caller can
     tag dispatch bookkeeping (e.g. ``{"kind": "timer", "gate": cause}``) without
@@ -54,26 +54,27 @@ class GateDecision:
 
 
 def state_delta_backoff_seconds(
-    consecutive_skips: int,
+    noop_only_streak: int,
     *,
     base_seconds: int = DEFAULT_BACKOFF_BASE_SECONDS,
     max_seconds: int = DEFAULT_BACKOFF_MAX_SECONDS,
 ) -> int:
     """Doubling wall-clock backoff for the state-delta probe.
 
-    The replacement for "any change opens the gate" is a deliberate clock: after
-    the gate has skipped ``consecutive_skips`` times in a row, the caller waits
-    ``base_seconds * 2 ** (consecutive_skips - 1)`` since the last executed session
-    before proceeding, capped at ``max_seconds``. Skips must not reset that clock.
-    With the reference defaults that is
-    30m, 1h, 2h, then 4h for every further skip.
+    Pass the same consecutive executed clean-noop counter as the gate's
+    ``noop_only_streak``. After each executed noop, the caller waits
+    ``base_seconds * 2 ** (noop_only_streak - 1)`` since the last executed session,
+    capped at ``max_seconds``. Skipped timer ticks change neither the streak nor
+    that timestamp. A productive execution resets the streak to zero.
+    With the reference defaults that is 30m, 1h, 2h, then 4h for every further
+    executed noop, rather than a period determined by timer frequency.
 
-    ``consecutive_skips <= 0`` returns ``0`` — no backoff configured, which the
-    caller renders as "not elapsed".
+    ``noop_only_streak <= 0`` returns ``0`` — no backoff configured; the gate is
+    inactive at streak zero regardless of the elapsed-clock input.
     """
-    if consecutive_skips <= 0:
+    if noop_only_streak <= 0:
         return 0
-    return min(base_seconds * 2 ** (consecutive_skips - 1), max_seconds)
+    return min(base_seconds * (1 << (noop_only_streak - 1)), max_seconds)
 
 
 def explore_roll(
@@ -110,8 +111,8 @@ def state_delta_gate(
     """Skip a session when the last one no-op'd and nothing addressed us since.
 
     Mechanism — branches are evaluated in this order, cheapest and
-    highest-precision first (steps 1-3 keep the reference ``autonomous-run-cc.sh``
-    decision table byte-for-byte when the new arguments are omitted):
+    highest-precision first (the reference ``autonomous-run-cc.sh`` admission
+    decisions are unchanged when the new arguments are omitted):
 
     1. **Gate inactive** when the session is forced or the noop-only streak is 0 —
        there is no reason to suppress a session that isn't part of a noop run.
@@ -140,7 +141,7 @@ def state_delta_gate(
     (the reference caller deliberately uses NOOP_ONLY_STREAK, not NOOP_STREAK, so
     runtime failures bypass the gate and reach the fail-guard), the pace-gap
     threshold behind ``quota_behind_pace``, what counts as addressed, the
-    consecutive-skip count and elapsed clock behind ``wall_clock_backoff_expired``,
+    executed-noop streak and elapsed clock behind ``wall_clock_backoff_expired``,
     the explore rate (``explore_roll(0.05)``), and what a legacy
     ``changes_detected`` probes.
 
