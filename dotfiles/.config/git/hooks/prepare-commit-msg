@@ -4,6 +4,10 @@
 Replaces the env-only bash hook. Subagents, worktrees, and systemd-run
 children often lose GIT_COMMITTER_SESSION_ID; walking same-cgroup ancestors
 recovers it. Agent-neutral: AGENT_* first, BOB_* kept as compatibility.
+
+Also drops standalone ``<think>``/``</think>`` lines: some reasoning-model
+streams leak the tag into model-authored commit messages (gptme/gptme#4803),
+and a lone tag line is never meaningful message content.
 """
 
 from __future__ import annotations
@@ -107,6 +111,16 @@ def resolve_session_id(
     return None
 
 
+STRAY_REASONING_TAGS = frozenset({b"<think>", b"</think>"})
+
+
+def strip_stray_reasoning_tags(content: bytes) -> tuple[bytes, int]:
+    """Remove lines that are exactly a reasoning tag; return (content, removed)."""
+    lines = content.splitlines(keepends=True)
+    kept = [line for line in lines if line.strip() not in STRAY_REASONING_TAGS]
+    return b"".join(kept), len(lines) - len(kept)
+
+
 def _opted_out(env: dict[str, str]) -> bool:
     return env.get("AGENT_SESSION_TRAILER", "1").strip().lower() in {
         "0",
@@ -147,6 +161,14 @@ def main() -> int:
     if len(sys.argv) < 2 or not Path(sys.argv[1]).is_file():
         return 0
     message = sys.argv[1]
+    cleaned, removed = strip_stray_reasoning_tags(Path(message).read_bytes())
+    if removed:
+        Path(message).write_bytes(cleaned)
+        print(
+            f"prepare-commit-msg: dropped {removed} stray <think>/</think> "
+            "line(s) from the commit message",
+            file=sys.stderr,
+        )
     source = sys.argv[2] if len(sys.argv) > 2 else ""
     git = ["git", *comment_char_override(Path(message).read_bytes(), source)]
     # Check under both comment chars: with -m ... -e an existing trailer sits

@@ -447,3 +447,32 @@ def test_scissors_keeps_trailer_above_diff(tmp_path: Path) -> None:
     body = msg.read_text()
     assert result.returncode == 0, result.stderr
     assert body.index("Git-Session-Id: s4") < body.index(">8")
+
+
+def test_stray_reasoning_tag_lines_are_dropped(tmp_path: Path) -> None:
+    # gptme/gptme#4803: reasoning-model streams can leak a lone tag line into
+    # a model-authored commit message. Ported from Bob's session-trailer overlay.
+    msg = tmp_path / "COMMIT_EDITMSG"
+    msg.write_bytes(b"fix: thing\n</think>\n\nbody keeps <think> inline\n  <think>  \n")
+
+    result = _run_hook(msg, _clean_env(GIT_COMMITTER_SESSION_ID="f05eabcd"))
+
+    assert result.returncode == 0, result.stderr
+    body = msg.read_bytes()
+    assert b"</think>\n" not in body
+    assert b"  <think>  " not in body
+    assert b"body keeps <think> inline" in body
+    assert "dropped 2 stray" in result.stderr
+    assert b"Git-Session-Id: f05eabcd" in body
+
+
+def test_non_utf8_message_survives_reasoning_tag_strip(tmp_path: Path) -> None:
+    msg = tmp_path / "COMMIT_EDITMSG"
+    msg.write_bytes(b"fix: caf\xe9\n</think>\n")
+
+    result = _run_hook(msg, _clean_env(GIT_COMMITTER_SESSION_ID="f05eabcd"))
+
+    assert result.returncode == 0, result.stderr
+    body = msg.read_bytes()
+    assert body.startswith(b"fix: caf\xe9\n")
+    assert b"</think>" not in body
