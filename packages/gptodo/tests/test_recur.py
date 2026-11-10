@@ -357,6 +357,34 @@ class TestRecurResetUnticksChecklist:
         assert result.exit_code == 0, result.output
         assert f"{marker}  [ ] real step" in frontmatter.load(path).content
 
+    @pytest.mark.parametrize("suffix", ["", " step", "\tstep"])
+    @pytest.mark.parametrize("marker", ["x", "X"])
+    def test_reset_reopens_checkbox_at_marker_boundary(
+        self, workspace: Path, suffix: str, marker: str
+    ):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n- [{marker}]{suffix}\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert post.content.endswith(f"- [ ]{suffix}")
+
+    def test_reset_preserves_links_labelled_x(self, workspace: Path):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        links = (
+            "- [x](https://example.com) reference\n"
+            "* [X][target]\n"
+            "> 1. [x]shortcut\n"
+            "\n[target]: https://example.com\n"
+        )
+        path.write_text(path.read_text() + f"\n\n{links}\n- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert post.content.endswith(f"{links}\n- [ ] real step")
+
     def test_non_recurring_done_keeps_ticks(self, workspace: Path):
         path = write_task(workspace, "one-off", state="active")
         path.write_text(path.read_text() + "\n\n- [x] did it\n")

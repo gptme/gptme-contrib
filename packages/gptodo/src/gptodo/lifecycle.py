@@ -481,7 +481,7 @@ def transform_post(
     return post
 
 
-_TICKED_RE = re.compile(r"^([ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+)(?:\[[xX]\]|✅)")
+_TICKED_RE = re.compile(r"^([ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+)(?:\[[xX]\](?=[ \t]|$)|✅)")
 _QUOTE_RE = re.compile(r"^([ \t]*>[ \t]?)+")
 _FENCE_RE = re.compile(r"^([ \t]*)(?:((?:[-*+]|[0-9]+[.)])[ \t]+))?(`{3,}|~{3,})")
 _LIST_RE = re.compile(r"^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+")
