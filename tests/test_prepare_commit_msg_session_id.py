@@ -473,6 +473,8 @@ def test_stray_reasoning_tag_lines_are_dropped(tmp_path: Path) -> None:
         (b"  ~~~xml", b"<think>\nexample\n</think>\n", b"  ~~~~"),
         (b"````xml", b"```\n<think>\n~~~\n</think>\n", b"````"),
         (b"```xml", b"```not-a-close\n<think>\n", b"```"),
+        (b"```xml", b"    ```\n<think>\n", b"```"),
+        (b"~~~xml", b"\t~~~\n<think>\n", b"~~~"),
     ],
 )
 def test_reasoning_tags_inside_fences_are_preserved(

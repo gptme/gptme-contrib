@@ -112,7 +112,7 @@ def resolve_session_id(
 
 
 STRAY_REASONING_TAGS = frozenset({b"<think>", b"</think>"})
-_CODE_FENCE = re.compile(rb"(`{3,}|~{3,})(.*)")
+_CODE_FENCE = re.compile(rb" {0,3}(`{3,}|~{3,})(.*)")
 
 
 def strip_stray_reasoning_tags(content: bytes) -> tuple[bytes, int]:
@@ -122,7 +122,7 @@ def strip_stray_reasoning_tags(content: bytes) -> tuple[bytes, int]:
     removed = 0
     for line in content.splitlines(keepends=True):
         stripped = line.strip()
-        marker = _CODE_FENCE.fullmatch(stripped)
+        marker = _CODE_FENCE.fullmatch(line.rstrip(b"\r\n"))
         if fence is not None:
             if (
                 marker
