@@ -100,7 +100,7 @@ _NONSCRATCH_PATH_RE = re.compile(
 _QUOTED_TARGET_RE = re.compile(r"(?<![0-9&<>=!])>{1,2}\s*[\"']([^\"'\n]+)[\"']")
 _HEREDOC_RE = re.compile(r"(?<!<)<<(-?)\s*([\"']?)([A-Za-z_]\w*)\2(?=\s|[;&|<>()]|$)")
 # A heredoc body fed to a shell is still shell; any other body is stdin data.
-_SHELL_CONSUMER_RE = re.compile(r"\b(?:ba|z|da|k)?sh\b|\bssh\b|\beval\b|\bsource\b")
+_SHELL_CONSUMER_RE = re.compile(r"\b(?:ba|z|da|k|a)?sh\b|\bssh\b|\beval\b|\bsource\b")
 # Even backslash pairs leave the expansion active; an odd backslash escapes it.
 # Greedy captures deliberately retain nested substitutions rather than silently
 # discarding shell after the first inner closing parenthesis. Multiple expansions
@@ -161,7 +161,7 @@ def _strip_heredoc_bodies(cmd: str) -> str:
                 return "\n".join(out)
             if not m.group(2):
                 # Backslash-newline is removed before unquoted heredoc expansion.
-                body_text = "\n".join(body_lines).replace("\\\n", "")
+                body_text = re.sub(r"(?<!\\)((?:\\\\)*)\\\n", r"\1", "\n".join(body_lines))
                 for substitution in _HEREDOC_SUBSTITUTION_RE.finditer(body_text):
                     out.append(substitution.group(1) or substitution.group(2) or "")
             out.append(delim)

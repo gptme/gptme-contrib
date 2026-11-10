@@ -176,7 +176,15 @@ def test_cmd_mutation_unsupported_heredoc_delimiter_keeps_following_commands(
     assert cmd_mutation(command)[0] == "acting"
 
 
-@pytest.mark.parametrize("shell", ['"/bin/bash"', "'/bin/sh'", '"bash"', "env '/bin/bash'"])
+@pytest.mark.parametrize("backslashes", [1, 2, 3, 4])
+def test_cmd_mutation_heredoc_line_continuation_respects_escaping(backslashes: int) -> None:
+    command = "cat <<EOF\n" + "\\" * backslashes + "\n$(touch out.txt)\nEOF"
+    assert cmd_mutation(command)[0] == "acting"
+
+
+@pytest.mark.parametrize(
+    "shell", ['"/bin/bash"', "'/bin/sh'", '"bash"', "env '/bin/bash'", "/bin/ash"]
+)
 def test_cmd_mutation_quoted_shell_heredoc_executes_body(shell: str) -> None:
     assert cmd_mutation(f"{shell} <<'EOF'\ntouch out.txt\nEOF")[0] == "acting"
 
