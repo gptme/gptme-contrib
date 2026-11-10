@@ -166,6 +166,8 @@ WRITES = [
     "gh api repos/o/r/issues/5/comments -ifbody=LGTM",
     "gh api -iX POST repos/o/r/pulls/12/reviews",
     "gh api -X=POST repos/o/r/pulls/12/reviews",
+    "gh api repos/o/r/issues/5/comments -i=false -f body=x",
+    "echo $((1 << 2))\ngh api repos/o/r/issues/5/comments -f body=x",
     # the command after a heredoc terminator still runs, apostrophes in the body
     # notwithstanding
     "cat <<'EOF'\nDon't post yet\nEOF\ngh api repos/o/r/issues/5/comments -f body=x",

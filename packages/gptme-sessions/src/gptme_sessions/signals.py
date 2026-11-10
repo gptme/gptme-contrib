@@ -624,6 +624,25 @@ def _gh_api_parse(args: list[str]) -> _GhApiArgs:
                         options.append((name, None))
                     break
                 if ch in _GH_API_SHORT_BOOL:
+                    rest = tok[j + 1 :]
+                    if rest.startswith("="):
+                        value = rest[1:]
+                        invalid |= value not in (
+                            "1",
+                            "t",
+                            "T",
+                            "TRUE",
+                            "true",
+                            "True",
+                            "0",
+                            "f",
+                            "F",
+                            "FALSE",
+                            "false",
+                            "False",
+                        )
+                        options.append((_GH_API_SHORT_BOOL[ch], value))
+                        break
                     options.append((_GH_API_SHORT_BOOL[ch], None))
                 else:
                     invalid = True
@@ -695,6 +714,13 @@ def _strip_heredoc_bodies(cmd: str) -> str:
         elif c == "#" and (i == 0 or cmd[i - 1] in " \t\n;|&("):
             end = cmd.find("\n", i)
             end = n if end < 0 else end
+            out.append(cmd[i:end])
+            i = end
+            continue
+        elif cmd.startswith("$((", i):
+            # Arithmetic left shifts are not heredoc redirections. Preserve
+            # the expression so later substitution extraction can inspect it.
+            end = _subst_end(cmd, i)
             out.append(cmd[i:end])
             i = end
             continue
