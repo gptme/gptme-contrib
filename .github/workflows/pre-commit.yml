@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main, master ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, 'feat/**' ]
 
 # Cancel a PR's older runs when it gets a new push (they're superseded).
 # Pushes to a branch share one group without cancel-in-progress: a running

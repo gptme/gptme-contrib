@@ -11,7 +11,7 @@ on:
       - 'uv.lock'
       - '.github/workflows/test-skills.yml'
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, 'feat/**' ]
     paths:
       - 'skills/**'
       - 'pyproject.toml'
