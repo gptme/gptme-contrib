@@ -131,6 +131,16 @@ def _heredoc_substitutions(body: str) -> Iterable[str]:
                 i += 2
                 continue
             elif not quote:
+                if char == "#" and (i == start or body[i - 1] in " \t\n;&|()<>"):
+                    # Comments cannot close a substitution or change its quote
+                    # context. Blank them without shifting nested offsets or
+                    # allowing their literal text to become mutation evidence.
+                    end = body.find("\n", i)
+                    if end < 0:
+                        end = len(body)
+                    body = body[:i] + " " * (end - i) + body[end:]
+                    i = end
+                    continue
                 # A case pattern's ')' is not a substitution terminator.
                 # Track case scopes at their parenthesis depth, not quoted
                 # occurrences of the words in printf/echo data.

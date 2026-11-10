@@ -303,6 +303,47 @@ def test_cmd_mutation_heredoc_case_substitution_keeps_write(body: str, tmp_path:
     assert cmd_mutation(literal) == (None, None)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "$(printf x # )\ntouch out.txt\n)",
+        "$(printf x # ') case\ntouch out.txt\n)",
+        '$(printf "%s" "$(printf x # )\ntouch out.txt\n)")',
+    ],
+)
+def test_cmd_mutation_heredoc_substitution_comments_keep_write(body: str, tmp_path: Path) -> None:
+    import subprocess
+
+    command = f"cat <<EOF\n{body}\nEOF"
+    subprocess.run(["bash", "-c", command], cwd=tmp_path, check=True, capture_output=True)
+    assert (tmp_path / "out.txt").exists()
+    label, evidence = cmd_mutation(command)
+    assert label == "acting"
+    assert evidence is not None and "touch out.txt" in evidence
+    assert classify_agent({"shell": 1}, [command], [])[0] == "acting"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "$(printf x # ignored\n# touch out.txt\n)",
+        "$(printf '%s' '# ) touch out.txt')",
+        "$(printf '%s' x#) 'touch out.txt'",
+        "$(printf '%s' \\#) 'touch out.txt'",
+    ],
+)
+def test_cmd_mutation_heredoc_comment_and_hash_data_remain_readonly(
+    body: str, tmp_path: Path
+) -> None:
+    import subprocess
+
+    command = f"cat <<EOF\n{body}\nEOF"
+    subprocess.run(["bash", "-c", command], cwd=tmp_path, check=True, capture_output=True)
+    assert not (tmp_path / "out.txt").exists()
+    assert cmd_mutation(command) == (None, None)
+    assert classify_agent({"shell": 1}, [command], [])[0] == "readonly"
+
+
 def test_cmd_mutation_escaped_heredoc_expansions_are_literal() -> None:
     assert cmd_mutation("cat <<EOF\n\\$(git commit -am update)\nEOF") == (None, None)
     assert cmd_mutation("cat <<EOF\n\\`git commit -am update\\`\nEOF") == (None, None)
