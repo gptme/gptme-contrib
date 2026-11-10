@@ -665,7 +665,7 @@ def test_failed_public_write_keeps_previous_private_and_derived_state(
     previous_public = public.read_text()
     real_write = publish._atomic_write
 
-    def fail_public(path: Path, content: str, *, mode: int) -> None:
+    def fail_public(path: Path, content: str | bytes, *, mode: int) -> None:
         if path == public:
             raise PermissionError("served directory unwritable")
         real_write(path, content, mode=mode)
@@ -679,3 +679,43 @@ def test_failed_public_write_keeps_previous_private_and_derived_state(
     assert private.read_text() == previous_private
     assert public.read_text() == previous_public
     assert _core(tmp_path)["activity"]["status"] == "healthy"
+
+
+@pytest.mark.parametrize("root_name", ["private", "public"])
+def test_aliased_output_is_refused_before_collection_or_writes(
+    tmp_path: Path,
+    root_name: str,
+) -> None:
+    root = tmp_path / root_name
+    root.mkdir()
+    (root / "alias").symlink_to(root, target_is_directory=True)
+    registry = RouteRegistry(
+        (
+            _route("services", is_headline=True),
+            _route("sessions", summary_source="alias/.gptme-vitals.lock"),
+        )
+    )
+    collected: list[bool] = []
+
+    def emit() -> PageEnvelope:
+        collected.append(True)
+        return PageEnvelope(
+            slug="services",
+            status=Status.HEALTHY,
+            headline="services",
+            generated_at=NOW,
+        )
+
+    with pytest.raises(ValueError, match="symlink"):
+        run_build(
+            registry,
+            {"services": emit},
+            pages=(),
+            private_root=tmp_path / "private",
+            public_root=tmp_path / "public",
+            agent="bob",
+            base_url=BASE_URL,
+        )
+    assert not collected
+    assert not (tmp_path / "private/.gptme-vitals.lock").exists()
+    assert not (tmp_path / "private/services").exists()

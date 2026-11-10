@@ -96,6 +96,12 @@ def run_build(
     """Rebuild ``pages`` (all emitters when empty); return the exit status."""
     check_roots(private_root, public_root)
     check_outputs(registry)
+    # Validate every path, including unselected pages, before creating the lock
+    # or invoking collectors. Directory aliases cannot bypass output claims.
+    for route in registry.envelope_routes():
+        summary_path(route, private_root)
+        summary_path(route, public_root)
+    portal_path(registry, public_root)
     try:
         # derive_core needs both; failing here means no page is built against a
         # registry that could never produce core.json/headline.json.

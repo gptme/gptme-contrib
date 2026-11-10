@@ -320,3 +320,74 @@ def test_distinct_outputs_pass(registry: RouteRegistry) -> None:
 def test_summary_source_cannot_replace_the_build_lock(name: str) -> None:
     with pytest.raises(PublishError, match="lock"):
         check_outputs(RouteRegistry((_route("a", summary_source=name),)))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "core.json",
+        "headline.json",
+        ".gptme-vitals.lock",
+        "pub/summary.json",
+        "index.html",
+    ],
+)
+def test_separate_portal_summary_cannot_collide(source: str) -> None:
+    portal = _route("portal", href="/", output_path="index.html", summary_source=source)
+    with pytest.raises(PublishError, match="more than one output"):
+        check_outputs(RouteRegistry((_route("pub"),), portal=portal))
+
+
+@pytest.mark.parametrize("root_name", ["private", "public"])
+def test_in_root_directory_alias_cannot_replace_lock_or_other_outputs(
+    tmp_path: Path, root_name: str
+) -> None:
+    private, public = tmp_path / "private", tmp_path / "public"
+    root = tmp_path / root_name
+    root.mkdir()
+    (root / "alias").symlink_to(root, target_is_directory=True)
+    sentinel = root / ".gptme-vitals.lock"
+    sentinel.write_bytes(b"lock sentinel")
+    inode = sentinel.stat().st_ino
+    reg = RouteRegistry((_route("pub", summary_source="alias/.gptme-vitals.lock"),))
+    with pytest.raises(PublishError, match="symlink"):
+        publish_page(reg, _env("pub"), private_root=private, public_root=public)
+    assert sentinel.read_bytes() == b"lock sentinel"
+    assert sentinel.stat().st_ino == inode
+
+
+@pytest.mark.parametrize("fail_public", [False, True])
+def test_corrupt_private_file_recovers_or_rolls_back_exact_bytes(
+    registry: RouteRegistry,
+    roots: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    fail_public: bool,
+) -> None:
+    import gptme_vitals.publish as publish
+
+    private, public = roots
+    target = private / "pub/summary.json"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"\xff\xfe corrupt\r\n")
+    previous = target.read_bytes()
+    real_write = publish._atomic_write
+
+    def write(path: Path, content: str | bytes, *, mode: int) -> None:
+        if path == public / "pub/summary.json" and fail_public:
+            raise PermissionError("served write failed")
+        real_write(path, content, mode=mode)
+
+    monkeypatch.setattr(publish, "_atomic_write", write)
+    if fail_public:
+        with pytest.raises(PermissionError, match="served write failed"):
+            publish_page(
+                registry, _env("pub"), private_root=private, public_root=public
+            )
+        assert target.read_bytes() == previous
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    else:
+        publish_page(registry, _env("pub"), private_root=private, public_root=public)
+        assert json.loads(target.read_text())["status"] == "healthy"
+        assert (
+            json.loads((public / "pub/summary.json").read_text())["status"] == "healthy"
+        )

@@ -53,9 +53,16 @@ def _relative_inside(slug: str, source: str, root: Path, what: str) -> Path:
             f"route {slug!r}: {what} {source!r} must be a relative path inside the root"
         )
     target = root.joinpath(*rel.parts)
-    # A symlinked directory inside the root would let a write land elsewhere (a
-    # private page inside the served tree, say). resolve() follows existing
-    # links and tolerates not-yet-created components.
+    # Even an in-root directory symlink can alias another output or the lock
+    # inode. Reject directory aliases instead of maintaining a second set of
+    # filesystem-dependent collision keys. A symlink used as the root is fine.
+    parent = root
+    for part in rel.parts[:-1]:
+        parent /= part
+        if parent.is_symlink():
+            raise PublishError(
+                f"route {slug!r}: {what} {source!r} passes through a symlink"
+            )
     if not target.parent.resolve().is_relative_to(root.resolve()):
         raise PublishError(
             f"route {slug!r}: {what} {source!r} resolves outside {root} "
@@ -111,6 +118,7 @@ def check_outputs(registry: RouteRegistry) -> None:
     portal = registry.portal
     if portal is not None:
         claim("portal output_path", portal.slug, portal.output_path)
+        claim("summary_source", portal.slug, portal.summary_source)
     for route in registry.routes:
         claim("summary_source", route.slug, route.summary_source)
         claim("output_path", route.slug, route.output_path)
@@ -123,14 +131,16 @@ def check_outputs(registry: RouteRegistry) -> None:
             )
 
 
-def _atomic_write(path: Path, content: str, *, mode: int) -> None:
+def _atomic_write(path: Path, content: str | bytes, *, mode: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
         dir=path.parent, prefix=path.name + ".", suffix=".tmp"
     )
     try:
-        with os.fdopen(fd, "w") as handle:
-            handle.write(content)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(
+                content.encode("utf-8") if isinstance(content, str) else content
+            )
         os.chmod(tmp_name, mode)
         os.replace(tmp_name, path)
     except BaseException:
@@ -170,7 +180,7 @@ def publish_page(
     public_target = summary_path(route, public) if route.is_public else None
     private_content = json.dumps(envelope.to_private(), indent=2) + "\n"
     public_content = json.dumps(envelope.to_public(), indent=2) + "\n"
-    previous = target.read_text() if target.exists() else None
+    previous = target.read_bytes() if target.exists() else None
     _atomic_write(target, private_content, mode=0o600)
     written.append(target)
     if public_target is not None:

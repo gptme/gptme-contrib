@@ -210,6 +210,11 @@ The location under either root is the route's `summary_source`, which must be a
 relative path with no `..`. The roots must not overlap (identical, nested either
 way, or reached through a symlink): that would make the private root reachable
 through the served tree, so it raises `PublishError` before anything is written.
+Directory symlinks below either root are refused even when their destination is
+inside that root: an alias could otherwise bypass collision checks and replace
+the lock inode or another page's output. A symlink naming the root itself is
+allowed when the resolved roots remain disjoint. The CLI validates all envelope
+paths, including unselected pages and the separate portal, before collection.
 
 `load_envelope` reads a stored envelope back and drops `detail`. A missing,
 unparsable, wrongly-shaped or unrecognised-status file is a *blind* page (`None`),
@@ -249,7 +254,8 @@ Every build removes old public summaries for currently private routes before
 collection, even when those pages were not selected or their emitters fail. A
 cleanup error stops the build with exit 1 rather than claiming successful privacy
 revocation. For public pages, a failed served-file write restores the previous
-private file (or removes a first-time private write), so derivation does not advance
+private file byte-for-byte (including invalid UTF-8), or removes a first-time
+private write, so derivation does not advance
 the failed page. This is error recovery, not a crash-atomic two-root transaction:
 readers can observe intermediate generations, and a process crash or a failed
 rollback can require operator recovery.

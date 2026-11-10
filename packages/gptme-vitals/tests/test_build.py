@@ -12,6 +12,7 @@ from gptme_vitals.build import (
     HEADLINE_SCHEMA,
     BuildError,
     derive_core,
+    headline_link,
     write_core_files,
 )
 from gptme_vitals.envelope import PageEnvelope, Status
