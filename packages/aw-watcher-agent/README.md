@@ -6,9 +6,9 @@ activity to your **local** aw-server, so AI work shows up in the aw-webui
 Timeline alongside window/AFK data instead of looking like idle time.
 
 **Status:** alpha (`0.2.0`). Session tracking and the Codex log-tailer work and
-are dogfooded against a local aw-server; the Claude Code log-tailer is tested on
-fixtures and real transcripts but not yet dogfooded. A native gptme plugin hook
-for per-tool events and an aw-webui "AI work" view are not built yet.
+are dogfooded against a local aw-server, as is the Claude Code log-tailer. A
+native gptme plugin hook for per-tool events and an aw-webui "AI work" view are
+not built yet.
 
 This is the controller use case behind
 [ActivityWatch/activitywatch#1215](https://github.com/ActivityWatch/activitywatch/issues/1215).
@@ -81,6 +81,10 @@ with no harness configuration:
 aw-watcher-agent tail-claude-code            # every transcript
 aw-watcher-agent tail-claude-code --gap 600  # split blocks on 10 min idle
 ```
+
+Use either this tailer or the `emit-start`/`emit-end` hooks for Claude Code on
+a given machine, not both. Both write to the same bucket, so a session tracked
+both ways appears twice on the Timeline and is counted twice in any duration sum.
 
 Only `timestamp`, `sessionId` and `cwd` are read; prompts, replies and tool
 payloads are never touched. A session is split into blocks on idle gaps
