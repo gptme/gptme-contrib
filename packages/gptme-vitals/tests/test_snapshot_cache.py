@@ -117,6 +117,24 @@ def test_non_roundtrippable_values_are_never_cached(tmp_path):
     assert sc.write_snapshot(tmp_path, "s", {"a": {1, 2}}) is False
 
 
+@pytest.mark.parametrize("value", [{"pair": (1, 2)}, {"set": {1, 2}}])
+def test_uncacheable_refresh_invalidates_previous_snapshot(tmp_path, value):
+    assert sc.write_snapshot(tmp_path, "sig", {"n": 1}, now=0.0)
+    for now, refresh in [(1.0, True), (2.0, False)]:
+        assert (
+            sc.cached_signal(
+                "sig",
+                lambda: value,
+                cache_dir=tmp_path,
+                ttl_seconds=60,
+                now=now,
+                refresh=refresh,
+            )
+            is value
+        )
+    assert not (tmp_path / "sig.json").exists()
+
+
 def test_deeply_nested_value_is_returned_without_caching(tmp_path):
     value: list[object] = []
     for _ in range(sys.getrecursionlimit() + 100):

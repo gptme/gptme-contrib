@@ -169,6 +169,9 @@ def cached_signal(
         if hit:
             return value
     value = compute()
-    if ttl > 0:
-        write_snapshot(cache_dir, name, value, key=key, now=now)
+    if ttl > 0 and not write_snapshot(cache_dir, name, value, key=key, now=now):
+        # A successful computation supersedes the previous snapshot even when
+        # its result cannot be cached. Never resurrect that older value.
+        with contextlib.suppress(OSError):
+            _snapshot_path(cache_dir, name).unlink()
     return value
