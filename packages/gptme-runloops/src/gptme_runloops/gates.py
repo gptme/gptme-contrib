@@ -63,8 +63,9 @@ def state_delta_backoff_seconds(
 
     The replacement for "any change opens the gate" is a deliberate clock: after
     the gate has skipped ``consecutive_skips`` times in a row, the caller waits
-    ``base_seconds * 2 ** (consecutive_skips - 1)`` since the last session before
-    proceeding, capped at ``max_seconds``. With the reference defaults that is
+    ``base_seconds * 2 ** (consecutive_skips - 1)`` since the last executed session
+    before proceeding, capped at ``max_seconds``. Skips must not reset that clock.
+    With the reference defaults that is
     30m, 1h, 2h, then 4h for every further skip.
 
     ``consecutive_skips <= 0`` returns ``0`` — no backoff configured, which the
@@ -157,7 +158,7 @@ def state_delta_gate(
             addressed to this agent since the last session. Called at most once, and
             only on the armed, non-bypassed path.
         wall_clock_backoff_expired: True when the caller's backoff window has
-            elapsed since the last skipped session (see
+            elapsed since the last executed session (see
             :func:`state_delta_backoff_seconds`). Defaults to False so callers that
             omit it keep the legacy decision table.
         explore: True when the caller's epsilon sample selected this would-be skip
@@ -184,7 +185,7 @@ def state_delta_gate(
     if wall_clock_backoff_expired:
         return GateDecision(
             True,
-            "wall-clock backoff elapsed since last skipped session — proceeding to re-measure",
+            "wall-clock backoff elapsed since last executed session — proceeding to re-measure",
             "backoff",
         )
     if changes_detected is not None and changes_detected():
