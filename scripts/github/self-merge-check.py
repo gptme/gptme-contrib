@@ -3893,17 +3893,28 @@ def evaluate_pr(
                             )[:1]
                         )
                     )
-                    if refreshed_greptile_unresolved and not greptile_unresolved:
-                        signal = _fetch_greptile_summary_signal(repo, number)
-                        signal_sha = signal.get("reviewed_commit")
-                        if greptile_is_fresh or (
-                            isinstance(signal_sha, str)
-                            and _sha_matches_head(signal_sha, result.head_sha or "")
-                        ):
+                    # A summary can arrive without inline threads. Always
+                    # refresh its score as well as the thread snapshot.
+                    signal = _fetch_greptile_summary_signal(repo, number)
+                    signal_sha = signal.get("reviewed_commit")
+                    if greptile_is_fresh or (
+                        isinstance(signal_sha, str)
+                        and _sha_matches_head(signal_sha, result.head_sha or "")
+                    ):
+                        if refreshed_greptile_unresolved and not greptile_unresolved:
                             result.reasons.append(
                                 f"Greptile reviewed (score {signal.get('score')}/5); "
                                 f"{refreshed_greptile_unresolved} unresolved thread(s)"
                             )
+                        refreshed_score = signal.get("score")
+                        min_score = _parse_self_merge_min_greptile_score()
+                        if type(refreshed_score) is int and refreshed_score < min_score:
+                            reason = (
+                                f"Greptile score {refreshed_score}/5 "
+                                f"below floor {min_score}/5"
+                            )
+                            if reason not in result.reasons:
+                                result.reasons.append(reason)
         if waiver:
             result.warnings.append(waiver)
         else:

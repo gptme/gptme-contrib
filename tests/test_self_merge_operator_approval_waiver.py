@@ -106,6 +106,7 @@ def test_malformed_output_fails_closed() -> None:
         "delayed_unresolved",
         "delayed_greptile_unresolved",
         "new_greptile_unresolved",
+        "new_greptile_low_score",
     ],
 )
 def test_operator_approval_preserves_human_thread_gate(
@@ -193,7 +194,10 @@ def test_operator_approval_preserves_human_thread_gate(
     monkeypatch.setattr(
         smc,
         "_fetch_greptile_summary_signal",
-        lambda *a: {"reviewed_commit": HEAD, "score": 5},
+        lambda *a: {
+            "reviewed_commit": HEAD,
+            "score": 3 if thread_state == "new_greptile_low_score" else 5,
+        },
     )
     monkeypatch.setattr(smc, "_fetch_greptile_review_data", review_data)
     monkeypatch.setattr(
@@ -216,6 +220,8 @@ def test_operator_approval_preserves_human_thread_gate(
     if thread_state.endswith("unreadable"):
         assert any("AI review required" in reason for reason in result.reasons)
         assert "Could not verify review thread state (API failure)" in result.reasons
+    elif thread_state == "new_greptile_low_score":
+        assert "Greptile score 3/5 below floor 5/5" in result.reasons
     elif "greptile" in thread_state:
         assert any("1 unresolved thread(s)" in reason for reason in result.reasons)
     elif thread_state.endswith("unresolved"):
