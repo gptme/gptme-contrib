@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main, master ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, 'feat/**' ]
   # master pushes test only what the push changed; the full matrix runs nightly
   schedule:
     - cron: '0 3 * * *'
