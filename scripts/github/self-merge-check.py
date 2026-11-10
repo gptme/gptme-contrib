@@ -3879,19 +3879,13 @@ def evaluate_pr(
                     # Approval does not waive the independent fresh-Greptile
                     # gate. Preserve findings that arrived with this refresh,
                     # including a review absent from the initial snapshot.
-                    refreshed_greptile_unresolved = sum(
-                        1
-                        for thread in shared_review_data[1]
-                        if not thread.get("isResolved", False)
-                        and any(
-                            "greptile"
-                            in (
-                                (comment.get("author") or {}).get("login") or ""
-                            ).lower()
-                            for comment in (thread.get("comments") or {}).get(
-                                "nodes", []
-                            )[:1]
-                        )
+                    # Use the initial gate's review-cycle filtering so approval
+                    # does not resurrect superseded Greptile threads.
+                    refreshed_greptile = fetch_greptile_status(
+                        repo, number, review_data=shared_review_data
+                    )
+                    refreshed_greptile_unresolved = int(
+                        refreshed_greptile.get("unresolved") or 0
                     )
                     # A summary can arrive without inline threads. Always
                     # refresh its score as well as the thread snapshot.

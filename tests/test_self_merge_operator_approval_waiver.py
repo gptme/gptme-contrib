@@ -107,6 +107,7 @@ def test_malformed_output_fails_closed() -> None:
         "delayed_greptile_unresolved",
         "new_greptile_unresolved",
         "stale_greptile_unresolved",
+        "superseded_greptile_unresolved",
         "new_greptile_low_score",
     ],
 )
@@ -143,7 +144,7 @@ def test_operator_approval_preserves_human_thread_gate(
             {"path": "docs/review-tools.md", "status": "modified", "patch": "+Policy"}
         ],
     )
-    threads = (
+    threads: list[dict[str, Any]] = (
         []
         if not thread_state.endswith("unresolved")
         else [
@@ -164,6 +165,15 @@ def test_operator_approval_preserves_human_thread_gate(
             }
         ]
     )
+    reviews: list[dict[str, Any]] = []
+    if thread_state == "superseded_greptile_unresolved":
+        threads[0]["comments"]["nodes"][0]["createdAt"] = "2026-11-09T12:00:00Z"
+        reviews = [
+            {
+                "author": {"login": "greptile-apps[bot]"},
+                "submittedAt": "2026-11-10T12:00:00Z",
+            }
+        ]
     approval_observed = False
     thread_reads_after_approval = 0
 
@@ -173,7 +183,7 @@ def test_operator_approval_preserves_human_thread_gate(
             thread_reads_after_approval += 1
         elif thread_state.startswith(("delayed_", "new_")):
             return ([], [])
-        return None if thread_state.endswith("unreadable") else ([], threads)
+        return None if thread_state.endswith("unreadable") else (reviews, threads)
 
     def approved_review(*a: Any, **k: Any) -> str:
         nonlocal approval_observed
@@ -183,15 +193,23 @@ def test_operator_approval_preserves_human_thread_gate(
 
     # Isolate the independent Greptile signal: its summary reader can spawn
     # a helper subprocess, which a run_gh stub alone does not intercept.
-    monkeypatch.setattr(
-        smc,
-        "fetch_greptile_status",
-        lambda *a, **k: {
+    real_fetch_greptile_status = smc.fetch_greptile_status
+
+    def greptile_status(*a: Any, **k: Any) -> dict[str, Any]:
+        if thread_state == "superseded_greptile_unresolved":
+            status: dict[str, Any] = real_fetch_greptile_status(*a, **k)
+            return status
+        return {
             "has_review": thread_state
             in {"delayed_greptile_unresolved", "stale_greptile_unresolved"},
-            "unresolved": 1 if thread_state == "stale_greptile_unresolved" else 0,
-        },
-    )
+            "unresolved": int(
+                "greptile" in thread_state
+                and thread_state.endswith("unresolved")
+                and (approval_observed or thread_state == "stale_greptile_unresolved")
+            ),
+        }
+
+    monkeypatch.setattr(smc, "fetch_greptile_status", greptile_status)
     monkeypatch.setattr(
         smc,
         "greptile_summary_reviewed_commit",
@@ -220,7 +238,9 @@ def test_operator_approval_preserves_human_thread_gate(
     result = smc.evaluate_pr(
         "gptme/gptme-contrib", 2098, workspace_repos=["gptme/gptme-contrib"]
     )
-    assert result.eligible is (thread_state == "clear"), result.reasons
+    assert result.eligible is (
+        thread_state in {"clear", "superseded_greptile_unresolved"}
+    ), result.reasons
     if thread_state != "unreadable":
         assert approval_observed
         assert thread_reads_after_approval == 1
@@ -229,6 +249,8 @@ def test_operator_approval_preserves_human_thread_gate(
         assert "Could not verify review thread state (API failure)" in result.reasons
     elif thread_state == "new_greptile_low_score":
         assert "Greptile score 3/5 below floor 5/5" in result.reasons
+    elif thread_state == "superseded_greptile_unresolved":
+        assert not result.reasons
     elif "greptile" in thread_state:
         assert any("1 unresolved thread(s)" in reason for reason in result.reasons)
     elif thread_state.endswith("unresolved"):
