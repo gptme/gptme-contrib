@@ -1,20 +1,13 @@
-"""Packaging metadata must not pretend to resolve the outbound secret scanner.
+"""Packaging metadata must name the outbound secret scanner correctly.
 
 ``transport/agent.py`` calls ``guard_outbound(..., require_scanner=True)``, which
-imports ``redact``. Without it every inter-agent send refuses to deliver, and the
-failure used to surface as a misleading "blocked by secret policy"
+imports ``redact``. Without it every inter-agent send refuses to deliver
 (gptme-contrib#2051).
-
-Declaring the dependency is not yet possible, and declaring it *wrongly* is worse
-than not declaring it:
 
 - PyPI ``redact`` 0.1.1 is an unrelated config-template renderer (Feng Zhou), so a
   bare ``redact`` requirement installs the wrong package and then fails the import.
-- An extra naming an unpublished package (e.g. ``gptme-redact``) makes
-  ``uv sync --all-extras`` unresolvable, which turns the whole workspace red.
-
-So the requirement stays a documented ``--with /path/to/redact`` install path,
-checked at runtime by ``gptmail agent doctor``.
+- The scanner's distribution is ``gptme-redact`` (gptme-contrib#2055), a workspace
+  member, so the ``secrets`` extra resolves under ``uv sync --all-extras``.
 """
 
 from __future__ import annotations
@@ -46,10 +39,26 @@ def _names(requirements: list[str]) -> set[str]:
     return {canonicalize_name(Requirement(req).name) for req in requirements}
 
 
-def test_no_dependency_names_the_scanner() -> None:
+WORKSPACE = PYPROJECT.parents[2] / "pyproject.toml"
+
+
+def test_no_dependency_names_bare_redact() -> None:
     names = _names(_requirements(tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))))
     assert "redact" not in names, "PyPI redact is an unrelated project"
-    assert "gptme-redact" not in names, "an unpublished extra breaks --all-extras"
+
+
+def test_secrets_extra_names_the_scanner_distribution() -> None:
+    extras = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"][
+        "optional-dependencies"
+    ]
+    assert _names(extras["secrets"]) == {"gptme-redact"}
+
+
+def test_scanner_distribution_is_a_workspace_member() -> None:
+    # An extra naming a package uv cannot resolve breaks `uv sync --all-extras`.
+    sources = tomllib.loads(WORKSPACE.read_text(encoding="utf-8"))["tool"]["uv"]["sources"]
+    assert sources["gptme-redact"] == {"workspace": True}
+    assert (WORKSPACE.parent / "packages" / "gptme-redact" / "pyproject.toml").is_file()
 
 
 @pytest.mark.parametrize(
