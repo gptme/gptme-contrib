@@ -69,7 +69,7 @@ def _read_state(state_file: Path) -> dict:
     try:
         raw = json.loads(state_file.read_text())
         return raw if isinstance(raw, dict) else {}
-    except (OSError, json.JSONDecodeError):
+    except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
 
@@ -112,7 +112,11 @@ def _check(args: argparse.Namespace) -> int:
     if not state_file.is_absolute():
         state_file = Path(args.workspace).resolve() / state_file
 
-    state = _read_state(state_file)
+    try:
+        state = _read_state(state_file)
+    except OSError as exc:
+        print(f"state-delta-gate: could not read state: {exc}", file=sys.stderr)
+        return PROCEED  # Admission fails open; recording must report failures.
     now = _now()
 
     streak_raw = state.get("noop_only_streak", 0)
@@ -209,7 +213,11 @@ def _status(args: argparse.Namespace) -> int:
     if not state_file.is_absolute():
         state_file = Path(args.workspace).resolve() / state_file
 
-    state = _read_state(state_file)
+    try:
+        state = _read_state(state_file)
+    except OSError as exc:
+        print(f"state-delta-gate: could not read state: {exc}", file=sys.stderr)
+        return 1
 
     try:
         from gptme_runloops.gates import state_delta_backoff_seconds

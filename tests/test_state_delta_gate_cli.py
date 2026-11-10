@@ -69,6 +69,38 @@ def write_state(workspace: Path, **values: object) -> None:
     p.write_text(json.dumps(values) + "\n")
 
 
+@pytest.fixture(autouse=True)
+def fixed_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+    monkeypatch.setattr(state_delta_gate_cli, "_now", lambda: now)
+
+
+@pytest.mark.parametrize("command", ["record-noop", "record-productive"])
+def test_record_read_failure_preserves_existing_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    command: str,
+) -> None:
+    write_state(tmp_path, noop_only_streak=7, preserved="metadata")
+    state_file = tmp_path / "state" / "state-delta-gate.json"
+    before = state_file.read_bytes()
+    original_read = Path.read_text
+
+    def fail(path: Path, *args, **kwargs):
+        if path == state_file:
+            raise PermissionError("injected read failure")
+        return original_read(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_text", fail)
+        assert run(tmp_path, command) != 0
+    assert state_file.read_bytes() == before
+    err = capsys.readouterr().err
+    assert "injected read failure" in err
+    assert "recorded" not in err
+
+
 @pytest.mark.parametrize("command", ["record-noop", "record-productive"])
 def test_record_holds_sidecar_lock_through_read_and_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
