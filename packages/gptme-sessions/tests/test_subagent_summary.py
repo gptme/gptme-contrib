@@ -203,6 +203,24 @@ def test_cmd_mutation_continued_shell_heredoc_keeps_body(header: str, tmp_path: 
     assert classify_agent({"shell": 1}, [command], [])[0] == "acting"
 
 
+@pytest.mark.parametrize("header", ["cat <<EOF", "cat <<-EOF"])
+def test_cmd_mutation_continued_heredoc_delimiter_keeps_following_write(
+    header: str, tmp_path: Path
+) -> None:
+    import subprocess
+
+    command = f"{header}\nEO\\\nF\ntouch out.txt\ncat <<EOF\nhello\nEOF"
+    subprocess.run(["bash", "-c", command], cwd=tmp_path, check=True, capture_output=True)
+    assert (tmp_path / "out.txt").exists()
+    label, evidence = cmd_mutation(command)
+    assert label == "acting"
+    assert evidence is not None and "touch out.txt" in evidence
+    assert classify_agent({"shell": 1}, [command], [])[0] == "acting"
+    # Quoted delimiters do not fold backslash-newline in their bodies.
+    quoted = "cat <<'EOF'\nEO\\\nF\ntouch out.txt\nEOF"
+    assert cmd_mutation(quoted) == (None, None)
+
+
 def test_cmd_mutation_continued_data_heredoc_remains_literal() -> None:
     command = "cat \\\n<<'EOF'\ntouch out.txt\nEOF"
     assert cmd_mutation(command) == (None, None)

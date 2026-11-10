@@ -197,8 +197,17 @@ def _strip_heredoc_bodies(cmd: str) -> str:
             body_lines: list[str] = []
             body_start = i
             while i < len(lines):
-                body = lines[i].lstrip("\t") if strip_tabs else lines[i]
+                body = lines[i]
                 i += 1
+                # Unquoted heredocs fold escaped newlines before testing the
+                # delimiter: EO\\\nF closes EOF, exposing following commands.
+                while (
+                    not m.group(2) and i < len(lines) and (len(body) - len(body.rstrip("\\"))) % 2
+                ):
+                    body = body[:-1] + lines[i]
+                    i += 1
+                if strip_tabs:
+                    body = body.lstrip("\t")
                 if body == delim:
                     break
                 body_lines.append(body)
@@ -207,9 +216,7 @@ def _strip_heredoc_bodies(cmd: str) -> str:
                 out.extend(lines[body_start:])
                 return "\n".join(out)
             if not m.group(2):
-                # Backslash-newline is removed before unquoted heredoc expansion.
-                body_text = re.sub(r"(?<!\\)((?:\\\\)*)\\\n", r"\1", "\n".join(body_lines))
-                out.extend(_heredoc_substitutions(body_text))
+                out.extend(_heredoc_substitutions("\n".join(body_lines)))
             out.append(delim)
     return "\n".join(out)
 
