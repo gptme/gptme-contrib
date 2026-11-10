@@ -52,6 +52,29 @@ def test_journal_key_normalizes_absolute_and_relative_paths() -> None:
     assert journal_key("/tmp/notes/a.md") == "a.md"
 
 
+def test_dot_components_in_journal_paths_preserve_link_evidence() -> None:
+    expected = "journal/2026-11-10/a.md"
+    for path in (
+        "/ws/journal/2026-11-09/../2026-11-10/./a.md",
+        "journal/2026-11-09/../2026-11-10/a.md",
+        r"C:\ws\journal\2026-11-09\..\2026-11-10\a.md",
+    ):
+        assert journal_key(path) == expected
+        first = _rec("producer", "2026-11-10T10:00:00Z", "2026-11-10T10:30:00Z", journal_path=path)
+        later = _rec(
+            "consumer",
+            "2026-11-10T11:00:00Z",
+            "2026-11-10T11:30:00Z",
+            journal_path="journal/2026-11-10/b.md",
+        )
+        nodes = from_records([first, later], agent="bob", read_journal=lambda _: expected)
+        assert nodes[0]["journal"] == expected
+        rows, _ = build_forest(nodes)
+        assert rows[1]["predecessor"] == "producer"
+        assert rows[1]["kind"] == "mention"
+        assert from_records([first], agent="bob", read_journal=None)[0]["journal"] == expected
+
+
 def test_from_records_coerces_real_record_shapes(tmp_path: Path) -> None:
     rec = _rec(
         "aaaa1111-0000-0000-0000-000000000000",

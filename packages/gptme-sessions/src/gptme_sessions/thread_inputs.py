@@ -15,6 +15,7 @@ entries they point at.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
@@ -52,7 +53,9 @@ def journal_key(path: str | Path) -> str:
     Records store absolute or workspace-relative paths, and journals link each
     other as ``journal/YYYY-MM-DD/x.md``; this makes all three compare equal.
     """
-    s = str(path).replace("\\", "/")
+    # Normalize lexically: identity keys must also work with --no-journals,
+    # without consulting the filesystem or resolving symlinks.
+    s = posixpath.normpath(str(path).replace("\\", "/"))
     pos = s.rfind("journal/")
     return s[pos:] if pos >= 0 else s.rsplit("/", 1)[-1]
 
