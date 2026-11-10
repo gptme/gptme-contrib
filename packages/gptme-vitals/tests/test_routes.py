@@ -458,3 +458,32 @@ def test_external_url_encoding_does_not_collapse_distinct_queries() -> None:
     reg = RouteRegistry((encoded, literal))
     assert reg.get_by_href(encoded.href) is encoded
     assert reg.get_by_href(literal.href) is literal
+
+
+@pytest.mark.parametrize("kind", [RouteKind.STATIC, RouteKind.DYNAMIC])
+@pytest.mark.parametrize(
+    "href", ["/decisions/?state=open", "../decisions/?state=open", "?state=open"]
+)
+def test_query_bearing_routes_resolve_before_path_only_fallback(
+    tmp_path: Path, kind: RouteKind, href: str
+) -> None:
+    route = _route(
+        "filtered",
+        href="/decisions/?state=open",
+        kind=kind,
+        output_path="filtered.html" if kind is RouteKind.STATIC else None,
+    )
+    fallback = _route("decisions", output_path="all.html")
+    reg = RouteRegistry((fallback, route))
+    current = "/decisions/?state=closed" if href.startswith("?") else "/tasks/"
+    expected = tmp_path / "filtered.html" if kind is RouteKind.STATIC else None
+    assert (
+        reg.resolve_internal_target(href, current_route=current, site_root=tmp_path)
+        == expected
+    )
+    assert (
+        reg.resolve_internal_target(
+            "/decisions/?state=other", current_route="/", site_root=tmp_path
+        )
+        == tmp_path / "all.html"
+    )

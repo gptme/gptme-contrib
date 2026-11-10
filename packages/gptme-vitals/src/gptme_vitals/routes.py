@@ -293,7 +293,9 @@ class RouteRegistry:
         # relative link to a dynamic or differently-pathed route gets the same
         # answer as the root-relative spelling of it.
         directory = raw_path.endswith("/") if raw_path else current_directory
-        route = self._route_for_path(normalized, directory=directory)
+        route = self._route_for_path(
+            normalized, directory=directory, query=parsed.query
+        )
         if route is not None:
             return route.static_target(site_root)
         if directory or not normalized.suffix:
@@ -301,14 +303,17 @@ class RouteRegistry:
         return site_root / normalized
 
     def _route_for_path(
-        self, path: PurePosixPath, *, directory: bool
+        self, path: PurePosixPath, *, directory: bool, query: str
     ) -> DashboardRoute | None:
         """The registered route a normalised site-relative path refers to."""
         text = "" if path == PurePosixPath(".") else path.as_posix()
-        for candidate in (f"/{text}", f"/{text}/" if text else "/"):
-            route = self._by_href.get(candidate)
-            if route is not None and (candidate.endswith("/") or not directory):
-                return route
+        # Prefer an exact query-bearing registration; ordinary static pages
+        # remain crawlable with arbitrary UI query parameters.
+        for suffix in (f"?{query}", "") if query else ("",):
+            for candidate in (f"/{text}", f"/{text}/" if text else "/"):
+                route = self._by_href.get(candidate + suffix)
+                if route is not None and (candidate.endswith("/") or not directory):
+                    return route
         return None if directory else self._by_output.get(text)
 
     # -- rendering --------------------------------------------------------
