@@ -1083,6 +1083,12 @@ def check_links(content: str, task_path: Path, repo_root: Path) -> List[str]:
     return broken
 
 
+# ``-`` stays unanchored (historical behaviour); an ordered marker (``3.``/``3)``)
+# must start its line, so prose such as "version 2. [x]" never counts.
+_BULLET_OR_NUMBER = r"(?:-|\d+[.)])"
+_ITEM_MARKER = r"(?:-|(?m:^)[ \t]*(?:>[ \t]*)?\d+[.)])"
+
+
 def count_subtasks(content: str, *, checklist_only: bool = False) -> SubtaskCount:
     """Count completed, total, and intentionally-skipped subtasks.
 
@@ -1091,6 +1097,7 @@ def count_subtasks(content: str, *, checklist_only: bool = False) -> SubtaskCoun
     - [x] Completed task
     - ✅ Completed task
     - 🏃 In-progress task
+    1. [ ] Ordered-list item (``3.`` or ``3)`` at line start)
 
     Three interchangeable forms mean "intentionally skipped, and here is why":
     - [-] Wire GitHub issue indexing (deferred: cache mutates under you)
@@ -1140,7 +1147,7 @@ def count_subtasks(content: str, *, checklist_only: bool = False) -> SubtaskCoun
             if opening:
                 fence = opening.group(1)
                 continue
-            item = re.match(r"- (\[[ x-]\]|\[SKIP\]|✅|🏃)\s*(.*)", line)
+            item = re.match(r"(?:-|\d+[.)]) (\[[ x-]\]|\[SKIP\]|✅|🏃)\s*(.*)", line)
             if item:
                 marker, title = item.groups()
                 title = "~~skipped~~" if re.match(r"~~.+?~~", title) else "item"
@@ -1151,19 +1158,22 @@ def count_subtasks(content: str, *, checklist_only: bool = False) -> SubtaskCoun
     # markers so a title like "- [-] Use - [ ] thing (deferred: X)" does not
     # produce a spurious pending count from the "- [ ]" inside the title.
     content_without_skips = re.sub(
-        r"^\s*(?:>\s*)?- \[(?:-|SKIP)\].*$", "", content, flags=re.MULTILINE
+        rf"^\s*(?:>\s*)?{_BULLET_OR_NUMBER} \[(?:-|SKIP)\].*$",
+        "",
+        content,
+        flags=re.MULTILINE,
     )
-    completed = len(re.findall(r"- (\[x\]|✅)", content_without_skips))
-    pending = len(re.findall(r"- (\[ \]|🏃)", content_without_skips))
+    completed = len(re.findall(rf"{_ITEM_MARKER} (\[x\]|✅)", content_without_skips))
+    pending = len(re.findall(rf"{_ITEM_MARKER} (\[ \]|🏃)", content_without_skips))
     # Strikethrough-form skips are already counted above (they use [x] / [ ]),
     # so move them out of completed/pending rather than double-counting.
-    struck_done = len(re.findall(r"- \[x\]\s*~~.+?~~", content_without_skips))
-    struck_pending = len(re.findall(r"- \[ \]\s*~~.+?~~", content_without_skips))
+    struck_done = len(re.findall(rf"{_ITEM_MARKER} \[x\]\s*~~.+?~~", content_without_skips))
+    struck_pending = len(re.findall(rf"{_ITEM_MARKER} \[ \]\s*~~.+?~~", content_without_skips))
     completed -= struck_done
     pending -= struck_pending
     skipped = (
-        len(re.findall(r"^\s*(?:>\s*)?- \[-\]", content, re.MULTILINE))
-        + len(re.findall(r"^\s*(?:>\s*)?- \[SKIP\]", content, re.MULTILINE))
+        len(re.findall(rf"^\s*(?:>\s*)?{_BULLET_OR_NUMBER} \[-\]", content, re.MULTILINE))
+        + len(re.findall(rf"^\s*(?:>\s*)?{_BULLET_OR_NUMBER} \[SKIP\]", content, re.MULTILINE))
         + struck_done
         + struck_pending
     )
