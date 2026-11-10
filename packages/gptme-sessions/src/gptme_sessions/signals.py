@@ -686,7 +686,11 @@ def _strip_heredoc_bodies(cmd: str) -> str:
             out.append(cmd[i:end])
             i = end
             continue
-        elif c == "<" and cmd.startswith("<<", i) and not cmd.startswith("<<<", i):
+        elif cmd.startswith("<<<", i):
+            out.append("<<<")
+            i += 3
+            continue
+        elif c == "<" and cmd.startswith("<<", i):
             m = _HEREDOC_OP_RE.match(cmd, i)
             if m:
                 bare = m.group(5)

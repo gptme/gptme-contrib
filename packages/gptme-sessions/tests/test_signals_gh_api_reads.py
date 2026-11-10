@@ -173,6 +173,7 @@ WRITES = [
     "cat <<EOF\nid: $(gh api repos/o/r/issues/5/comments -f body=x --jq .id)\nEOF",
     # a here-string is not a heredoc
     'gh api repos/o/r/issues/5/comments --input - <<< \'{"body": "x"}\'',
+    "cat <<< 'EOF'\ngh api repos/o/r/issues/5/comments -f body=x",
 ]
 
 
