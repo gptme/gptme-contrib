@@ -188,7 +188,7 @@ def test_ready_does_not_parse_whole_archive(tmp_path: Path, monkeypatch) -> None
     real_load_tasks = gptodo_utils.load_tasks
     calls: list[dict] = []
 
-    def spy(tasks_dir, recursive=False, single_file=None, errors_out=None):
+    def spy(tasks_dir, recursive=False, single_file=None, errors_out=None, **kwargs):
         calls.append(
             {
                 "tasks_dir": Path(tasks_dir),
@@ -197,7 +197,11 @@ def test_ready_does_not_parse_whole_archive(tmp_path: Path, monkeypatch) -> None
             }
         )
         return real_load_tasks(
-            tasks_dir, recursive=recursive, single_file=single_file, errors_out=errors_out
+            tasks_dir,
+            recursive=recursive,
+            single_file=single_file,
+            errors_out=errors_out,
+            **kwargs,
         )
 
     monkeypatch.setattr(gptodo_utils, "load_tasks", spy)

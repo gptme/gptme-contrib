@@ -8,6 +8,7 @@ tasks/gptodo-check-archived-dependency-false-positive.md for the incident.
 
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from gptodo.cli import cli
@@ -75,3 +76,52 @@ def test_check_full_run_does_not_validate_archived_tasks(tmp_path: Path, monkeyp
 
     assert result.exit_code == 0, result.output
     assert "All 1 tasks verified successfully" in result.output
+
+
+def test_check_unparseable_archived_dependency_still_exists(tmp_path: Path, monkeypatch) -> None:
+    """An archived file that fails to parse still exists on disk, so a live
+    task requiring it must not get a false "not found" dependency error."""
+    _write_fixtures(tmp_path)
+    (tmp_path / "tasks/archive/archived-dep.md").write_text("---\nstate: [unclosed\n---\n")
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["check", "tasks/foo.md"])
+
+    assert "not found" not in result.output, result.output
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+@pytest.mark.parametrize("first_malformed", [False, True])
+@pytest.mark.parametrize("nested_first", [False, True])
+def test_check_duplicate_archive_stem_uses_first_parseable(
+    tmp_path: Path, monkeypatch, scoped: bool, first_malformed: bool, nested_first: bool
+) -> None:
+    """Cycle checks retain the eager loader's first-successful-match order."""
+    _write_fixtures(tmp_path)
+    archive_dir = tmp_path / "tasks/archive"
+    nested = archive_dir / "subdir"
+    nested.mkdir()
+    cyclic = ARCHIVED_DEP_TASK.replace("state: done", "state: done\nrequires: [foo]")
+    first = archive_dir / "archived-dep.md"
+    second = nested / "archived-dep.md"
+    if nested_first:
+        first, second = second, first
+    first.write_text("---\nstate: [unclosed\n---\n" if first_malformed else cyclic)
+    second.write_text(cyclic if first_malformed else ARCHIVED_DEP_TASK)
+
+    # Pin the previous recursive traversal order, independent of filesystem order.
+    original_glob = Path.glob
+
+    def ordered_glob(path, pattern, **kwargs):
+        if path == archive_dir and pattern == "**/*.md":
+            return iter([first, second])
+        return original_glob(path, pattern, **kwargs)
+
+    monkeypatch.setattr(Path, "glob", ordered_glob)
+    monkeypatch.chdir(tmp_path)
+    args = ["check", "tasks/foo.md"] if scoped else ["check"]
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code != 0, result.output
+    assert "Circular dependency detected involving task foo" in result.output

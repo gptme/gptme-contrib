@@ -40,22 +40,30 @@ def test_check_archive_dependency_universe_does_not_scan_body(tmp_path: Path, mo
     (archive / "old.md").write_text(
         "---\nstate: done\ncreated: 2026-01-01\n---\nARCHIVE_BODY\n- [x] Done\n"
     )
-    from gptodo import cli as cli_module
+    from gptodo import utils as utils_module
 
-    original = cli_module.load_tasks
+    original = utils_module.load_tasks
     archive_calls = []
 
     def guarded_load(directory, *args, **kwargs):
         if directory == archive:
-            archive_calls.append(kwargs.get("include_subtasks", True))
+            archive_calls.append(
+                (
+                    kwargs.get("recursive", False),
+                    kwargs.get("single_file"),
+                    kwargs.get("include_subtasks", True),
+                )
+            )
         return original(directory, *args, **kwargs)
 
-    monkeypatch.setattr(cli_module, "load_tasks", guarded_load)
+    monkeypatch.setattr(utils_module, "load_tasks", guarded_load)
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(cli, ["check", "tasks/live.md"])
     assert result.exit_code == 0, result.output
     assert "All 1 tasks verified successfully" in result.output
-    assert archive_calls == [False]
+    # The archive is never enumerated: only the required file is parsed, and
+    # without the body subtask scan.
+    assert archive_calls == [(False, archive / "old.md", False)]
 
 
 def test_dependency_only_archive_still_rejects_cycle(tmp_path, monkeypatch):
