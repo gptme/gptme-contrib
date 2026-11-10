@@ -224,7 +224,14 @@ def test_duplicate_records_do_not_create_self_predecessors(tmp_path: Path) -> No
     ]
     nodes = from_records(records, agent="bob", read_journal=None)
     assert [n["id"] for n in nodes] == ["before", "repeated", "after"]
-    assert nodes[1]["name"] == "row-2"  # Last supplied record is authoritative.
+    assert nodes[1]["name"] == "row-2"  # Newest timestamp wins, regardless of input order.
+    reversed_nodes = from_records(reversed(records), agent="bob", read_journal=None)
+    assert [n["id"] for n in reversed_nodes] == ["before", "repeated", "after"]
+    assert reversed_nodes[1]["name"] == "row-2"
+    for record in records[1:3]:
+        record.journal_path = "journal/2026-11-10/repeated.md"
+    digest_nodes = from_records(records, agent="bob", read_journal=lambda _: "# Retained title")
+    assert digest_nodes[1]["title"] == "Retained title"  # Duplicate rows aren't shared journals.
     store = SessionStore(sessions_dir=tmp_path)
     for record in records:
         store.append(record)
