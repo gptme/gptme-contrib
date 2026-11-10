@@ -96,11 +96,15 @@ def test_malformed_output_fails_closed() -> None:
         )
 
 
-@pytest.mark.parametrize("thread_state", ["unreadable", "clear", "unresolved"])
+@pytest.mark.parametrize(
+    "thread_state",
+    ["unreadable", "clear", "unresolved", "delayed_unreadable", "delayed_unresolved"],
+)
 def test_operator_approval_preserves_human_thread_gate(
     monkeypatch: pytest.MonkeyPatch, thread_state: str
 ) -> None:
-    """REST approval cannot turn unknown GraphQL thread state into permission."""
+    """Approval must use readable human-thread state fetched after the verdict."""
+    monkeypatch.setenv("SELF_MERGE_ACCEPT_AI_REVIEW", "1")
     monkeypatch.setattr(smc, "get_gh_user", lambda: "TimeToBuildBob")
     monkeypatch.setattr(smc, "merge_permission", lambda repo: True)
     monkeypatch.setattr(
@@ -130,7 +134,7 @@ def test_operator_approval_preserves_human_thread_gate(
     )
     threads = (
         []
-        if thread_state != "unresolved"
+        if not thread_state.endswith("unresolved")
         else [
             {
                 "isResolved": False,
@@ -142,11 +146,23 @@ def test_operator_approval_preserves_human_thread_gate(
             }
         ]
     )
-    monkeypatch.setattr(
-        smc,
-        "_fetch_greptile_review_data",
-        lambda *a: None if thread_state == "unreadable" else ([], threads),
-    )
+    approval_observed = False
+    thread_reads_after_approval = 0
+
+    def review_data(*a: Any) -> Any:
+        nonlocal thread_reads_after_approval
+        if approval_observed:
+            thread_reads_after_approval += 1
+        elif thread_state.startswith("delayed_"):
+            return ([], [])
+        return None if thread_state.endswith("unreadable") else ([], threads)
+
+    def approved_review(*a: Any, **k: Any) -> str:
+        nonlocal approval_observed
+        approval_observed = True
+        return json.dumps(_review("APPROVED", HEAD))
+
+    monkeypatch.setattr(smc, "_fetch_greptile_review_data", review_data)
     monkeypatch.setattr(
         smc, "_fetch_ai_review_marker_checked", lambda *a, **k: (None, True)
     )
@@ -156,16 +172,18 @@ def test_operator_approval_preserves_human_thread_gate(
         lambda *a, **k: {"accepted": False, "detail": "no consensus review"},
     )
     monkeypatch.setattr(smc, "run_gh", lambda *a, **k: "")
-    monkeypatch.setattr(
-        smc, "run_gh_checked", lambda *a, **k: json.dumps(_review("APPROVED", HEAD))
-    )
+    monkeypatch.setattr(smc, "run_gh_checked", approved_review)
     result = smc.evaluate_pr(
         "gptme/gptme-contrib", 2098, workspace_repos=["gptme/gptme-contrib"]
     )
     assert result.eligible is (thread_state == "clear"), result.reasons
-    if thread_state == "unreadable":
+    if thread_state != "unreadable":
+        assert approval_observed
+        assert thread_reads_after_approval == 1
+    if thread_state.endswith("unreadable"):
         assert any("AI review required" in reason for reason in result.reasons)
-    elif thread_state == "unresolved":
+        assert "Could not verify review thread state (API failure)" in result.reasons
+    elif thread_state.endswith("unresolved"):
         assert any(
             "unresolved human review thread" in reason for reason in result.reasons
         )

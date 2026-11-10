@@ -3865,6 +3865,16 @@ def evaluate_pr(
             waiver = operator_approval_ai_review_waiver(
                 repo=repo, number=number, head_sha=result.head_sha or ""
             )
+            if waiver:
+                # The approval can postdate the initial thread snapshot and
+                # contain inline feedback of its own. The human gate below
+                # must consume thread state read after that approval.
+                shared_review_data = _fetch_greptile_review_data(repo, number)
+                if shared_review_data is None:
+                    result.reasons.append(
+                        "Could not verify review thread state (API failure)"
+                    )
+                    waiver = None
         if waiver:
             result.warnings.append(waiver)
         else:
