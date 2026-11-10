@@ -2048,21 +2048,14 @@ def check(fix: bool, task_files: list[str]):
     # Dependency resolution must also see archived tasks (tasks/archive/**),
     # which the non-recursive glob above skips — otherwise any live task that
     # depends on a completed, archived task fails with a false "not found".
-    # Scoped separately from `all_tasks` so archived tasks aren't pulled into
-    # full "check all" validation output (validation/link-check issues), only
-    # into dependency-existence and cycle resolution.
-    archive_load_errors: list[tuple[Path, str]] = []
-    # Load recursively from tasks/archive/ directly, so unrelated malformed
-    # files elsewhere in the task tree can't inject phantom dependency IDs.
-    archive_dir = tasks_dir / "archive"
-    dependency_universe = list(all_tasks)
-    if archive_dir.is_dir():
-        dependency_universe += load_tasks(
-            archive_dir,
-            recursive=True,
-            errors_out=archive_load_errors,
-            include_subtasks=False,
-        )
+    # Archived tasks are only consulted for dependency-existence and cycle
+    # resolution, never pulled into validation output, and are resolved on
+    # demand (see build_dependency_universe): eagerly parsing an ~8.6k-file
+    # archive cost ~1.6s on every single-file pre-commit check, while only the
+    # few names a validated task actually requires are ever looked up.
+    dependency_universe = build_dependency_universe(
+        {task.id: task for task in all_tasks}, tasks_dir
+    )
 
     # Determine which tasks to validate
     scoped_load_errors: list[tuple[Path, str]] = []
@@ -2109,10 +2102,13 @@ def check(fix: bool, task_files: list[str]):
     # A malformed task file still exists for relationship checks. Treating its
     # id as missing would turn a non-blocking out-of-scope parse warning into a
     # blocking dependency error on an otherwise valid scoped task.
-    task_ids = {task.id for task in dependency_universe}
+    # An archived file that fails to parse still exists, for the same reason.
+    task_ids = {task.id for task in all_tasks}
     task_ids.update(path.stem for path, _ in global_load_errors)
     task_ids.update(path.stem for path, _ in scoped_load_errors)
-    task_ids.update(path.stem for path, _ in archive_load_errors)
+
+    def dependency_exists(dep: str) -> bool:
+        return dep in task_ids or dependency_universe.has_archived(dep)
 
     # Track dependencies in tasks being validated
     tasks_with_deps = [task for task in tasks_to_validate if task.requires]
@@ -2127,7 +2123,7 @@ def check(fix: bool, task_files: list[str]):
         path.add(task_id)
         # Find task object to get its dependencies (search in the full
         # dependency universe, including archived tasks)
-        task = next((t for t in dependency_universe if t.id == task_id), None)
+        task = dependency_universe.get(task_id)
         if task:
             for dep in task.requires:
                 if has_cycle(dep, visited, path):
@@ -2148,7 +2144,7 @@ def check(fix: bool, task_files: list[str]):
     # Check for missing dependencies
     for task in tasks_with_deps:
         for dep in task.requires:
-            if dep not in task_ids:
+            if not dependency_exists(dep):
                 dependency_issues.append(f"{task.id}: Dependency '{dep}' not found")
 
     # Check for circular dependencies

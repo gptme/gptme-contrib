@@ -75,3 +75,16 @@ def test_check_full_run_does_not_validate_archived_tasks(tmp_path: Path, monkeyp
 
     assert result.exit_code == 0, result.output
     assert "All 1 tasks verified successfully" in result.output
+
+
+def test_check_unparseable_archived_dependency_still_exists(tmp_path: Path, monkeypatch) -> None:
+    """An archived file that fails to parse still exists on disk, so a live
+    task requiring it must not get a false "not found" dependency error."""
+    _write_fixtures(tmp_path)
+    (tmp_path / "tasks/archive/archived-dep.md").write_text("---\nstate: [unclosed\n---\n")
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["check", "tasks/foo.md"])
+
+    assert "not found" not in result.output, result.output
+    assert result.exit_code == 0, result.output

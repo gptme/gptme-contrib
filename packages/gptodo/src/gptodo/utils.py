@@ -1561,8 +1561,8 @@ class _LazyArchiveTasks(Dict[str, TaskInfo]):
     archived tasks on demand, but iteration, ``len()``, ``keys()`` and
     ``items()`` only report entries already resolved (the live tasks, plus any
     archived task fetched earlier). Consumers that need the full archived set
-    must use ``gptodo check``'s eager ``dependency_universe`` instead — the
-    whole point here is to avoid enumerating the archive.
+    must enumerate the archive themselves (``load_tasks(..., recursive=True)``)
+    — the whole point here is to avoid that.
     """
 
     def __init__(
@@ -1598,11 +1598,21 @@ class _LazyArchiveTasks(Dict[str, TaskInfo]):
             self._archive_index = index
         return self._archive_index.get(name)
 
+    def has_archived(self, name: str) -> bool:
+        """Whether an archived file exists for ``name``, even if it fails to parse."""
+        return self._archived_path(name) is not None
+
     def _load_archived(self, name: str) -> Optional[TaskInfo]:
         path = self._archived_path(name)
         if path is None:
             return None
-        for task in load_tasks(self._archive_dir, single_file=path, errors_out=self._errors_out):
+        # Only the top-level task is looked up, so skip the body subtask scan.
+        for task in load_tasks(
+            self._archive_dir,
+            single_file=path,
+            errors_out=self._errors_out,
+            include_subtasks=False,
+        ):
             if task.name == name:
                 self[name] = task
                 return task
@@ -1648,7 +1658,7 @@ def build_dependency_universe(
     live_tasks: Dict[str, TaskInfo],
     tasks_dir: Path,
     errors_out: List[Tuple[Path, str]] | None = None,
-) -> Dict[str, TaskInfo]:
+) -> _LazyArchiveTasks:
     """Build the dependency-lookup dict for a task tree, including archived tasks.
 
     ``load_tasks(tasks_dir)`` only globs the top level, so a task whose
