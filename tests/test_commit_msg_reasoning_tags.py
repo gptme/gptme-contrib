@@ -37,6 +37,8 @@ def _run(tmp_path: Path, body: bytes) -> tuple[subprocess.CompletedProcess[str],
         b"fix: thing\n\n```xml\n<think>\n```\n</think>\n",
         b"fix: thing\n\n```\nunclosed ``` x\n```\n</think>\n",
         b"fix: doc ------------------------ >8 ------------------------\n</think>\n",
+        b"fix: thing\n\n# ------------------------ >8 ------------------------\n"
+        b" </think>\n",
     ],
 )
 def test_bare_tag_line_rejects_and_leaves_message_untouched(
@@ -59,7 +61,8 @@ def test_bare_tag_line_rejects_and_leaves_message_untouched(
         b"fix: docs\n\n- Example:\n\n    ```xml\n    <think>\n    ```\n",
         b"fix: docs\n\n1. Step\n\t```\n\t</think>\n\t```\n",
         b"fix: thing\n\n# ------------------------ >8 ------------------------\n"
-        b" </think>\n",
+        b"diff --git a/example b/example\n--- a/example\n+++ b/example\n"
+        b"@@ -1 +1 @@\n-</think>\n+<think>\n",
         b"",
     ],
 )
@@ -104,6 +107,16 @@ def test_real_commit_is_blocked_then_allowed(tmp_path: Path) -> None:
     blocked = git("commit", "--allow-empty", "-m", "fix: x\n\n</think>")
     assert blocked.returncode != 0
     assert "rejected" in blocked.stderr
+    assert git("rev-parse", "--verify", "HEAD").returncode != 0
+
+    scissors = git(
+        "commit",
+        "--allow-empty",
+        "-m",
+        "fix: x\n\n# ------------------------ >8 ------------------------\n</think>",
+    )
+    assert scissors.returncode != 0
+    assert "rejected" in scissors.stderr
     assert git("rev-parse", "--verify", "HEAD").returncode != 0
 
     ok = git("commit", "--allow-empty", "-m", "fix: handle `</think>` leaks")

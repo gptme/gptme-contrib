@@ -19,17 +19,15 @@ REASONING_TAGS = frozenset({b"<think>", b"</think>"})
 # Any indentation: a fence nested in a list is still an example, and a
 # misread fence can only let a commit through, never reject one.
 _FENCE = re.compile(rb"[ \t]*(`{3,}|~{3,})(.*)")
-# `commit -v` cut line: comment char(s), then the marker, alone on the line.
-_SCISSORS = re.compile(rb"\S{1,8} -{24} >8 -{24}")
 
 
 def stray_tag_lines(content: bytes) -> list[int]:
     """1-based line numbers of bare reasoning tags outside fenced blocks."""
     found: list[int] = []
     fence: bytes | None = None
+    # Scan past scissors-shaped lines too: commit-msg is not told whether
+    # Git will discard that suffix. Real diff lines carry a diff prefix.
     for number, line in enumerate(content.splitlines(), start=1):
-        if _SCISSORS.fullmatch(line.rstrip()):
-            break  # `commit -v` diff below; git drops it
         marker = _FENCE.fullmatch(line)
         if fence is not None:
             if (
