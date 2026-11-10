@@ -1407,10 +1407,12 @@ def threads(
         return
     for row in rows:
         title = f"  {row['title']}" if row.get("title") else ""
-        click.echo(
+        text = (
             f"{_fmt_ts(row['start'])}  {str(row['id'])[:8]}  "
             f"thread={str(row['thread'])[:8]}  {_fmt_link(row)}{title}"
         )
+        # Record fields and journal titles are untrusted terminal content.
+        click.echo(re.sub(r"[\x00-\x1f\x7f-\x9f]", "", text))
     pct = 100 * summary["linked"] / summary["sessions"] if summary["sessions"] else 0.0
     click.echo(
         f"\n{summary['sessions']} sessions, {summary['linked']} linked ({pct:.0f}%), "
@@ -1485,9 +1487,9 @@ def thread(
         )
 
     for r in ancestry:
-        click.echo(line(r, 0))
+        click.echo(re.sub(r"[\x00-\x1f\x7f-\x9f]", "", line(r, 0)))
     for depth, r in descendants:
-        click.echo(line(r, depth))
+        click.echo(re.sub(r"[\x00-\x1f\x7f-\x9f]", "", line(r, depth)))
 
 
 # -- append ------------------------------------------------------------------

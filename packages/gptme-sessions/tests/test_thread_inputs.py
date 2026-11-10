@@ -270,3 +270,38 @@ def test_hardlinked_journals_are_shared(tmp_path: Path) -> None:
     nodes = from_records(records, agent="bob")
     assert len(nodes) == 2
     assert all("sessions_mentioned" not in n for n in nodes)
+
+
+def test_nul_journal_path_keeps_record_evidence() -> None:
+    record = _rec(
+        "nul",
+        "2026-11-10T10:00:00Z",
+        "2026-11-10T10:30:00Z",
+        journal_path="journal/bad\0.md",
+        dispatch_cause={"task": "keep-me"},
+    )
+    (node,) = from_records([record], agent="bob")
+    assert node["task"] == "keep-me"
+    assert "title" not in node
+
+
+def test_thread_text_output_strips_journal_terminal_controls(tmp_path: Path) -> None:
+    journal = tmp_path / "entry.md"
+    journal.write_text("# title \x1b]52;c;SGVsbG8=\x07 end\n")
+    store_path = tmp_path / "store"
+    SessionStore(sessions_dir=store_path).append(
+        _rec(
+            "session-one",
+            "2026-11-10T10:00:00Z",
+            "2026-11-10T10:30:00Z",
+            journal_path=str(journal),
+        )
+    )
+    for command in (["threads"], ["thread", "session-one"]):
+        result = CliRunner().invoke(
+            cli, ["--sessions-dir", str(store_path), *command, "--since", "all"], color=True
+        )
+        assert result.exit_code == 0, result.output
+        assert "title" in result.output
+        assert "\x1b" not in result.output
+        assert "\x07" not in result.output

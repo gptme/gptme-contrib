@@ -185,7 +185,7 @@ def from_records(
                     pass  # Custom readers can supply text for paths not on disk.
                 entry = (path, identity)
                 shared[identity] = shared.get(identity, 0) + 1
-            except (OSError, RuntimeError):
+            except (OSError, RuntimeError, ValueError):
                 pass  # Unusable journal evidence must not discard record fields.
         journal_paths.append(entry)
 
