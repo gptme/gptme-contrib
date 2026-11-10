@@ -134,6 +134,8 @@ def run_build(
             for route in registry.envelope_routes():
                 if not route.is_public:
                     try:
+                        if route.is_headline:
+                            (public_root / "headline.json").unlink(missing_ok=True)
                         summary_path(route, public_root).unlink(missing_ok=True)
                     except (OSError, PublishError) as exc:
                         out(f"FAIL visibility {route.slug}: {exc}")
@@ -287,10 +289,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             check_roots(args.private_root, args.public_root)
             check_outputs(registry)
             for route in registry.envelope_routes():
+                summary_path(route, args.private_root)
+                summary_path(route, args.public_root)
                 if route.cadence in CALENDAR and route.slug not in emitters:
                     raise UsageError(
                         f"no emitter registered for scheduled page {route.slug!r}"
                     )
+            portal_path(registry, args.public_root)
             try:
                 # A unit set whose every run would refuse to start is not worth writing.
                 headline_link(registry.headline_route(), args.base_url)

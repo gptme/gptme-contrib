@@ -75,9 +75,9 @@ def render_unit_pair(
     """Render the pair for ``route``; the command is ``executable build <slug> *build_args``."""
     if not PurePosixPath(executable).is_absolute():
         raise TimerError(f"executable must be an absolute path, got {executable!r}")
-    if not _PREFIX.match(unit_prefix):
+    if not _PREFIX.fullmatch(unit_prefix):
         raise TimerError(f"unit_prefix {unit_prefix!r} is not a safe unit-name prefix")
-    if not _SLUG.match(route.slug):
+    if not _SLUG.fullmatch(route.slug):
         raise TimerError(f"slug {route.slug!r} is not safe to use in a unit name")
     calendar = CALENDAR.get(route.cadence)
     if calendar is None:

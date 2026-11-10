@@ -130,3 +130,13 @@ def test_control_characters_cannot_inject_a_directive(arg: str) -> None:
         render_unit_pair(
             _route("a", RefreshCadence.HOURLY), executable=EXE, build_args=[arg]
         )
+
+
+def test_unit_prefix_cannot_end_in_newline() -> None:
+    with pytest.raises(TimerError, match="prefix"):
+        render_unit_pair(
+            _route("a", RefreshCadence.HOURLY),
+            executable=EXE,
+            build_args=[],
+            unit_prefix="vitals\n",
+        )

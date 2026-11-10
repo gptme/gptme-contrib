@@ -774,3 +774,34 @@ def test_timers_refuse_scheduled_routes_without_emitters_before_writing(
     assert main(_timers_argv(app)) == 2
     assert "no emitter registered for scheduled page 'b'" in capsys.readouterr().err
     assert not (app / "units").exists()
+
+
+def test_private_headline_revokes_previous_shared_headline(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    registry = _portal_registry()
+    assert _run_with_emitters(tmp_path, registry, _all())[0] == 0
+    headline = tmp_path / "public/headline.json"
+    assert headline.exists()
+    private = RouteRegistry(
+        tuple(
+            replace(route, visibility=Visibility.PRIVATE)
+            if route.is_headline
+            else route
+            for route in registry.routes
+        ),
+        portal=registry.portal,
+    )
+    assert _run_with_emitters(tmp_path, private, _all())[0] == 1
+    assert not headline.exists()
+
+
+@pytest.mark.parametrize("root_name", ["private", "public"])
+def test_timers_refuse_directory_alias_before_writing(
+    app: Path, root_name: str
+) -> None:
+    root = app / root_name
+    root.mkdir()
+    (root / "a").symlink_to(root, target_is_directory=True)
+    assert main(_timers_argv(app)) == 2
+    assert not (app / "units").exists()
