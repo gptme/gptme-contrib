@@ -78,7 +78,7 @@ def read_snapshot(
     path = _snapshot_path(cache_dir, name)
     try:
         payload = json.loads(path.read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return False, None
     if (
         not isinstance(payload, dict)

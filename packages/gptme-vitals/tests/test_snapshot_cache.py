@@ -164,6 +164,12 @@ def test_corrupt_snapshot_is_a_miss(tmp_path):
     assert payload["value"] == 42
 
 
+def test_deeply_nested_snapshot_is_a_miss(tmp_path):
+    (tmp_path / "sig.json").write_text("[" * 10000 + "0" + "]" * 10000)
+    assert sc.cached_signal("sig", lambda: 42, cache_dir=tmp_path, ttl_seconds=60) == 42
+    assert json.loads((tmp_path / "sig.json").read_text())["value"] == 42
+
+
 def test_unwritable_cache_dir_degrades_to_compute(tmp_path):
     blocker = tmp_path / "file-not-dir"
     blocker.write_text("x")
