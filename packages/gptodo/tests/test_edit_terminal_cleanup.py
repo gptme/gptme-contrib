@@ -195,3 +195,59 @@ def test_invalid_date_value_hints_none_clears_field(tmp_path: Path, monkeypatch)
     assert "Invalid waiting_since format" in flat
     assert "'none' to clear the field" in flat
     assert _meta(tasks_dir, "my-task") == before
+
+
+DONE_TASK = """\
+---
+state: done
+created: 2026-06-01T00:00:00+00:00
+completed: 2026-06-02T00:00:00+00:00
+priority: medium
+---
+# Done Task
+"""
+
+
+def test_explicit_stale_field_on_terminal_task_is_refused(tmp_path: Path, monkeypatch) -> None:
+    """Setting a field the terminal strip would drop must fail loudly, not report success."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(DONE_TASK)
+    monkeypatch.chdir(tmp_path)
+    before = (tasks_dir / "my-task.md").read_text()
+
+    for args in (
+        ["--set", "next_action", "Do more"],
+        ["--set", "waiting_for", "someone"],
+        ["--set", "priority", "high", "--set", "wait", "2026-12-01"],
+    ):
+        result = CliRunner().invoke(cli, ["edit", "my-task", *args])
+        assert result.exit_code == 1, (args, result.output)
+        assert "Refusing to set" in result.output
+        assert (tasks_dir / "my-task.md").read_text() == before
+
+
+def test_closing_edit_with_explicit_next_action_is_refused(tmp_path: Path, monkeypatch) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(ACTIVE_WITH_NEXT_ACTION)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(
+        cli, ["edit", "my-task", "--set", "state", "done", "--set", "next_action", "Later"]
+    )
+    assert result.exit_code == 1, result.output
+    assert _meta(tasks_dir, "my-task")["state"] == "active"
+
+
+def test_clearing_stale_field_on_terminal_task_still_allowed(tmp_path: Path, monkeypatch) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "my-task.md").write_text(DONE_TASK)
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(
+        cli, ["edit", "my-task", "--set", "next_action", "none", "--set", "priority", "high"]
+    )
+    assert result.exit_code == 0, result.output
+    assert _meta(tasks_dir, "my-task")["priority"] == "high"
