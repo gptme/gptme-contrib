@@ -80,8 +80,12 @@ def donut_svg(segments: list[tuple[str, int, str]], size: int = 120) -> str:
     r = size // 2 - 10
     inner_r = r * 0.55
     height = max(size, len(segments) * 22 + 4)
+    legend_text = [f"{label} ({val / total * 100:.0f}%)" for label, val, _ in segments]
+    # Match the bar chart's character-width budget, including the percentage
+    # and a right margin. Preserve the minimum width for short legends.
+    width = max(size + 140, size + 28 + max(map(len, legend_text)) * 7 + 10)
     svg = [
-        f'<svg width="{size + 140}" height="{height}" xmlns="http://www.w3.org/2000/svg">',
+        f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">',
     ]
 
     start_angle: float = -90  # Start from top
@@ -138,10 +142,9 @@ def donut_svg(segments: list[tuple[str, int, str]], size: int = 120) -> str:
         svg.append(
             f'  <rect x="{legend_x}" y="{ly - 10}" width="12" height="12" rx="2" fill="{html_escape(color)}"/>',
         )
-        pct = val / total * 100
         svg.append(
             f'  <text x="{legend_x + 18}" y="{ly}" fill="var(--dim)" font-size="11" '
-            f'font-family="inherit">{html_escape(label)} ({pct:.0f}%)</text>',
+            f'font-family="inherit">{html_escape(legend_text[i])}</text>',
         )
 
     svg.append("</svg>")

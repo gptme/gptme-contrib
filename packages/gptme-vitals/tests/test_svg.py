@@ -44,6 +44,19 @@ def test_donut_viewport_contains_every_legend_row(count, size):
         assert float(swatch.attrib["y"]) + float(swatch.attrib["height"]) <= height
 
 
+@pytest.mark.parametrize("size", [120, 200])
+@pytest.mark.parametrize(
+    "label", ["short", "claude-code:claude-sonnet-4-6", "<wide & long>" * 5]
+)
+def test_donut_viewport_grows_to_fit_legend_text(size, label):
+    root = ET.fromstring(svg_module.donut_svg([(label, 4, "#123456")], size=size))
+    text = root.findall("{http://www.w3.org/2000/svg}text")[1]
+    assert text.text == f"{label} (100%)"
+    assert (
+        float(root.attrib["width"]) >= float(text.attrib["x"]) + len(text.text) * 7 + 10
+    )
+
+
 @pytest.mark.parametrize("renderer", ["bar", "donut_wedges", "donut_ring"])
 def test_palette_values_cannot_inject_svg_attributes(renderer):
     color = 'red" onmouseover="alert(1)&<>'
