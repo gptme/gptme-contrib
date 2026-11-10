@@ -31,6 +31,7 @@ def tasks_dir(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setenv("GPTODO_TASKS_DIR", str(d))
     monkeypatch.setenv("TASKS_REPO_ROOT", str(tmp_path))
     monkeypatch.delenv("GPTODO_STRICT_TRANSITIONS", raising=False)
+    monkeypatch.delenv("GPTODO_EXTRA_FRONTMATTER_FIELDS", raising=False)
     return d
 
 
@@ -148,6 +149,27 @@ def test_json_replacing_yaml_date(tasks_dir: Path) -> None:
     payload, code = _edit_json(tasks_dir, "t", "--set", "wait", "2026-06-02")
     assert code == 0
     assert payload["tasks"][0]["changes"]["wait"] == {"from": "2026-06-01", "to": "2026-06-02"}
+
+
+def test_json_replacing_extension_with_yaml_date_keys(tasks_dir: Path, monkeypatch) -> None:
+    monkeypatch.setenv("GPTODO_EXTRA_FRONTMATTER_FIELDS", "custom_field")
+    (tasks_dir / "t.md").write_text(
+        "---\nstate: todo\ncustom_field:\n"
+        "  2026-06-01: old\n"
+        "  nested:\n    - 2026-06-02: 2026-06-03\n"
+        "---\n# t\n"
+    )
+    result = CliRunner().invoke(
+        cli, ["edit", "--json", "t", "--set", "custom_field", '{"value":"new"}']
+    )
+    assert result.exit_code == 0, result.exception
+    payload = json.loads(result.stdout)
+    assert payload["exit"] == 0
+    assert payload["tasks"][0]["changes"]["custom_field"] == {
+        "from": {"2026-06-01": "old", "nested": [{"2026-06-02": "2026-06-03"}]},
+        "to": {"value": "new"},
+    }
+    assert "value: new" in (tasks_dir / "t.md").read_text()
 
 
 def test_json_invalid_extension_refusal(tasks_dir: Path, monkeypatch) -> None:

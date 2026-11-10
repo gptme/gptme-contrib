@@ -3019,8 +3019,16 @@ def edit(
             run_completion_effects(path)
 
     if output_json:
-        # YAML may load existing date fields as date/datetime objects.
-        print(json.dumps({"tasks": task_results, "exit": 0}, default=str))
+
+        def json_safe(value: Any) -> Any:
+            # YAML mappings can have date keys, which default=str cannot handle.
+            if isinstance(value, dict):
+                return {str(key): json_safe(item) for key, item in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [json_safe(item) for item in value]
+            return value
+
+        print(json.dumps(json_safe({"tasks": task_results, "exit": 0}), default=str))
     else:
         # Show success message
         count = len(target_tasks)
