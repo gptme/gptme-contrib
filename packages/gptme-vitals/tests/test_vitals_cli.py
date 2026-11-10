@@ -624,3 +624,30 @@ def test_unwritable_private_root_is_reported_not_raised(tmp_path: Path) -> None:
     assert code == 1
     assert any(line.startswith("FAIL lock:") for line in lines)
     assert not (tmp_path / "public").exists()
+
+
+@pytest.mark.parametrize("failed_cost", [False, True])
+def test_visibility_cleanup_does_not_depend_on_emitter_success_or_selection(
+    tmp_path: Path, failed_cost: bool
+) -> None:
+    from gptme_vitals.publish import publish_page
+
+    public_registry = RouteRegistry((_route("cost"),))
+    publish_page(
+        public_registry,
+        _emitter("cost", Status.HEALTHY)(),
+        private_root=tmp_path / "private",
+        public_root=tmp_path / "public",
+    )
+
+    def boom() -> PageEnvelope:
+        raise RuntimeError("cost collector unavailable")
+
+    code, _ = _run(
+        tmp_path,
+        _all(cost=boom),
+        pages=() if failed_cost else ("services",),
+    )
+    assert code == (1 if failed_cost else 0)
+    assert not (tmp_path / "public/cost/summary.json").exists()
+    assert (tmp_path / "private/cost/summary.json").exists()

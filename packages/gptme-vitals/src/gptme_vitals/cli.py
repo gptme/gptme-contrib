@@ -35,6 +35,7 @@ from gptme_vitals.publish import (
     load_envelopes,
     portal_path,
     publish_page,
+    summary_path,
     write_text,
 )
 from gptme_vitals.routes import RouteRegistry, RouteRegistryError
@@ -112,6 +113,15 @@ def run_build(
 
     try:
         with build_lock(private_root):
+            # Visibility changes apply even on a partial build or when the
+            # affected collector fails. Revoke served copies before collection.
+            for route in registry.envelope_routes():
+                if not route.is_public:
+                    try:
+                        summary_path(route, public_root).unlink(missing_ok=True)
+                    except (OSError, PublishError) as exc:
+                        out(f"FAIL visibility {route.slug}: {exc}")
+                        return 1
             # Collection belongs inside the lock too: otherwise a slow build
             # can publish an older observation after a newer build completes.
             failed = 0
