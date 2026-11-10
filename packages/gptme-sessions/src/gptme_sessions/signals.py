@@ -26,7 +26,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from .deliverables import build_deliverable_detail, project_deliverable_details
 from .pi import (
@@ -488,9 +488,13 @@ def _gh_api_args(segment: str) -> list[str] | None:
         if name == "gh" and tokens[i + 1] == "api":
             args = tokens[i + 2 :]
             # An unmatched ``)`` closes the group or substitution this
-            # invocation sits in; what follows is not its arguments.
+            # invocation sits in; what follows is not its arguments. Option
+            # values are data, so a quoted ``--template ')'`` does not close it.
+            values = _gh_api_parse(args).value_indices
             depth = 0
             for j, tok in enumerate(args):
+                if j in values:
+                    continue
                 depth += _paren_delta(tok)
                 if depth < 0:
                     return args[:j]
@@ -541,32 +545,87 @@ def _paren_delta(tok: str) -> int:
     return 0
 
 
+class _GhApiArgs(NamedTuple):
+    options: list[tuple[str, str | None]]  # (long name, value)
+    positionals: list[str]
+    value_indices: set[int]  # args indices consumed as a separate option value
+    invalid: bool  # gh would reject the flags (unknown shorthand) and send nothing
+
+
+# Short flags of ``gh api`` (see ``gh api --help``), mapped to long names.
+_GH_API_SHORT_VALUE = {
+    "F": "--field",
+    "H": "--header",
+    "q": "--jq",
+    "X": "--method",
+    "p": "--preview",
+    "f": "--raw-field",
+    "t": "--template",
+}
+_GH_API_SHORT_BOOL = {"i": "--include"}
+_GH_API_LONG_VALUE = frozenset({"--cache", "--hostname", "--input", *_GH_API_SHORT_VALUE.values()})
+
+
+def _gh_api_parse(args: list[str]) -> _GhApiArgs:
+    """Parse ``gh api`` arguments the way gh's flag parser (pflag) does.
+
+    Long options take ``--opt value`` or ``--opt=value``. Short boolean flags
+    cluster with a trailing value flag (``-if body=x``, ``-iXPOST``,
+    ``-X=POST``); the value of an option is never read as a flag
+    (``--template '-f'``). An unknown shorthand (``-sf``) makes gh exit before
+    sending anything, so the invocation is marked invalid. ``--`` ends options.
+    """
+    options: list[tuple[str, str | None]] = []
+    positionals: list[str] = []
+    value_indices: set[int] = set()
+    invalid = False
+    i, n = 0, len(args)
+    while i < n:
+        tok = args[i]
+        if tok == "--":
+            positionals.extend(args[i + 1 :])
+            break
+        if tok.startswith("--"):
+            name, eq, val = tok.partition("=")
+            if eq:
+                options.append((name, val))
+            elif name in _GH_API_LONG_VALUE and i + 1 < n:
+                options.append((name, args[i + 1]))
+                value_indices.add(i + 1)
+                i += 1
+            else:
+                options.append((name, None))
+            i += 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            for j, ch in enumerate(tok[1:], start=1):
+                if ch in _GH_API_SHORT_VALUE:
+                    name = _GH_API_SHORT_VALUE[ch]
+                    rest = tok[j + 1 :]
+                    if rest:
+                        options.append((name, rest.removeprefix("=")))
+                    elif i + 1 < n:
+                        options.append((name, args[i + 1]))
+                        value_indices.add(i + 1)
+                        i += 1
+                    else:
+                        options.append((name, None))
+                    break
+                if ch in _GH_API_SHORT_BOOL:
+                    options.append((_GH_API_SHORT_BOOL[ch], None))
+                else:
+                    invalid = True
+            i += 1
+            continue
+        positionals.append(tok)
+        i += 1
+    return _GhApiArgs(options, positionals, value_indices, invalid)
+
+
 def _gh_api_endpoint(args: list[str]) -> str | None:
     """The endpoint (first positional argument) of a ``gh api`` invocation."""
-    i = 0
-    while i < len(args):
-        tok = args[i]
-        if tok in _GH_API_VALUE_OPTS or tok in (
-            "-X",
-            "--method",
-            "-f",
-            "-F",
-            "--field",
-            "--raw-field",
-            "--input",
-        ):
-            i += 2
-            continue
-        if not tok.startswith("-"):
-            return tok
-        i += 1
-    return None
-
-
-# gh api options whose next token is a value, never a flag (``--template '-f'``).
-_GH_API_VALUE_OPTS = frozenset(
-    {"-H", "--header", "-q", "--jq", "-t", "--template", "-p", "--preview", "--hostname", "--cache"}
-)
+    positionals = _gh_api_parse(args).positionals
+    return positionals[0] if positionals else None
 
 
 def _gh_api_writes(args: list[str]) -> bool:
@@ -575,33 +634,18 @@ def _gh_api_writes(args: list[str]) -> bool:
     Flags are read from shell tokens, not raw text, so a quoted argument value
     such as ``-f body='Use -X GET'`` is not mistaken for a method flag, and the
     value of an option like ``--jq``/``--template`` is never read as a flag.
+    gh switches to POST when any field or ``--input`` is given.
     """
+    parsed = _gh_api_parse(args)
+    if parsed.invalid:
+        return False
     method: str | None = None
     has_field = False
-    i = 0
-    while i < len(args):
-        tok = args[i]
-        if tok in _GH_API_VALUE_OPTS:
-            i += 2
-            continue
-        if tok in ("-X", "--method"):
-            if i + 1 < len(args):
-                method = args[i + 1]
-            i += 2
-            continue
-        if tok.startswith("--method="):
-            method = tok.split("=", 1)[1]
-        elif tok.startswith("-X") and len(tok) > 2:
-            method = tok[2:].lstrip("=")
-        elif tok in ("-f", "-F", "--field", "--raw-field", "--input"):
+    for name, value in parsed.options:
+        if name == "--method":
+            method = value
+        elif name in ("--field", "--raw-field", "--input"):
             has_field = True
-            i += 2
-            continue
-        elif tok.startswith(("--field=", "--raw-field=", "--input=")) or (
-            tok[:2] in ("-f", "-F") and len(tok) > 2
-        ):
-            has_field = True
-        i += 1
     if method is not None:
         # HEAD fetches headers only; like GET it posts nothing.
         return method.upper() not in ("GET", "HEAD")

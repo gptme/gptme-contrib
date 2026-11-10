@@ -99,6 +99,12 @@ READS = [
     "bash -c 'gh api repos/o/r/issues/5/comments --jq length'",
     # without -c the operand is a script file, and quoted text after it is data
     "bash run.sh 'gh api repos/o/r/issues/5/comments -f body=x'",
+    # gh rejects an unknown shorthand before sending anything
+    "gh api repos/o/r/issues/5/comments -sf body=LGTM",
+    # a quoted ')' is an option value, not the end of an enclosing group
+    "(gh api repos/o/r/issues/5/comments --template ')' -X GET)",
+    # ``--`` ends options: a later -f is the endpoint's positional, not a field
+    "gh api -- repos/o/r/issues/5/comments",
 ]
 
 WRITES = [
@@ -146,6 +152,14 @@ WRITES = [
     "timeout 30 bash -lc 'cd /tmp && gh api repos/o/r/issues/5/comments -f body=x'",
     'sh -o errexit -c "gh api repos/o/r/issues/5/comments -f body=x"',
     "/bin/bash -e -c 'x=$(gh api repos/o/r/issues/5/comments -f body=x)'",
+    # a quoted ')' option value must not truncate the field that follows it
+    "gh api repos/o/r/issues/5/comments --template ')' -f body=x",
+    "gh api repos/o/r/issues/5/comments -q ')' -f body=x",
+    # short flags cluster the way gh's flag parser (pflag) allows
+    "gh api repos/o/r/issues/5/comments -if body=LGTM",
+    "gh api repos/o/r/issues/5/comments -ifbody=LGTM",
+    "gh api -iX POST repos/o/r/pulls/12/reviews",
+    "gh api -X=POST repos/o/r/pulls/12/reviews",
 ]
 
 
