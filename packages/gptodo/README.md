@@ -365,8 +365,8 @@ Every command has `--help`. The top-level options are `-v/--verbose` and
 
 Scripts should parse `--json` rather than the rendered output, because the emoji and
 formatting may change. Most commands accept `--json`, including `status`, `list`, `ready`,
-`next`, `stale`, `plan`, `fetch`, `sync`, `import`, `expire`, `lint` and `transitions`.
-`list`, `ready` and `stale` also accept `--jsonl` (one task per line).
+`next`, `stale`, `plan`, `fetch`, `sync`, `import`, `expire`, `lint`, `transitions` and
+`edit`. `list`, `ready` and `stale` also accept `--jsonl` (one task per line).
 
 ```bash
 # Is any task active?
@@ -388,6 +388,65 @@ gptodo status --json | jq '.summary.by_state'
 
 With `--all`, the results are grouped under `types`, keyed by directory type, and each
 group has the same `{type, tasks, summary}` shape.
+
+### `edit --json` — mutation result
+
+```bash
+# Capture the new state after a mutation
+gptodo edit my-task --set state active --json
+```
+
+Success response (exit 0):
+
+```json
+{
+  "tasks": [
+    {
+      "id": "my-task",
+      "changes": {
+        "state": { "from": "backlog", "to": "active" }
+      }
+    }
+  ],
+  "exit": 0
+}
+```
+
+Error response (exit 1, JSON still on stdout):
+
+```json
+{ "id": "my-task", "error": "terminal state reopen requires --force", "exit": 1 }
+```
+
+`changes` is a dict of fields that actually changed; it is empty when the edit was a
+no-op (the field was already at the requested value). Human-facing warnings and
+state-transition notices still go to stderr.
+
+For a recurring task that resets on `done`, the per-task result also includes
+`"recurred": true` and `"next_wait": "YYYY-MM-DD..."`.
+
+### `add` — id echo contract
+
+`gptodo add` prints the new task id (the filename stem) on **stdout** and the
+confirmation line on **stderr**, so the id can be captured directly:
+
+```bash
+TASK_ID=$(gptodo add "My task title" </dev/null)
+gptodo edit "$TASK_ID" --set priority high
+```
+
+Always pass `</dev/null` from automation to prevent stdin-read hangs.
+
+### Exit codes
+
+| Exit | Meaning |
+|------|---------|
+| 0 | Success (mutation applied, or clean no-op) |
+| 1 | Refusal or not-found (invalid value, unknown field, missing task, terminal reopen without `--force`, no mutation args) |
+| 2+ | Fatal / unexpected error |
+
+This contract applies to `add`, `edit`, and `show`. Scripts can safely use `&&` chaining
+(`gptodo edit … && <next-step>`) and `$?` checks.
 
 ## Sequential planning (`next --limit`)
 

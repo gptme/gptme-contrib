@@ -2516,7 +2516,20 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
         "'active' when they should be 'waiting'."
     ),
 )
-def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, allow_pending):
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help=(
+        "Emit structured JSON to stdout instead of human-readable output. "
+        "Schema: {id, changes: {field: {from, to}}, exit}. "
+        "Error shape: {id, error, exit}. "
+        "Human-facing warnings and status lines still go to stderr."
+    ),
+)
+def edit(
+    task_ids, set_fields, add_fields, remove_fields, set_subtask, force, allow_pending, output_json
+):
     """Edit task metadata.
 
     Recurring tasks:
@@ -2563,7 +2576,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
         - Date and time: 2025-05-05T10:00:00
         - With timezone: 2025-05-05T10:00:00+02:00
     """
-    console = Console()
+    console = Console(stderr=output_json)
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
 
@@ -2572,7 +2585,10 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
     if not tasks:
         if set_subtask:
             raise click.ClickException("No tasks found")
-        console.print("[red]No tasks found[/]")
+        if output_json:
+            print(json.dumps({"id": None, "error": "No tasks found", "exit": 1}))
+        else:
+            console.print("[red]No tasks found[/]")
         sys.exit(1)
 
     # Find tasks to edit
@@ -2581,7 +2597,10 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
     except ValueError as e:
         if set_subtask:
             raise click.ClickException(str(e)) from e
-        console.print(f"[red]{e}[/]")
+        if output_json:
+            print(json.dumps({"id": None, "error": str(e), "exit": 1}))
+        else:
+            console.print(f"[red]{e}[/]")
         sys.exit(1)
 
     # Validate all field operations before applying any changes
@@ -2739,6 +2758,18 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
                             f"  {tname}: {cur} → {target}. Terminal states are sticky "
                             "by design; use --force if you really mean it."
                         )
+                    if output_json:
+                        names = [t for t, _, _ in terminal_reopens]
+                        print(
+                            json.dumps(
+                                {
+                                    "id": names[0] if len(names) == 1 else None,
+                                    "ids": names,
+                                    "error": "terminal state reopen requires --force",
+                                    "exit": 1,
+                                }
+                            )
+                        )
                     raise SystemExit(1)
 
                 if other_illegal and strict and not force:
@@ -2830,8 +2861,6 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
             # and get a mapping, not a quoted string.
             stripped = value.strip()
             if stripped.startswith(("{", "[")):
-                import json
-
                 try:
                     value = json.loads(stripped)
                 except json.JSONDecodeError as e:
@@ -2964,6 +2993,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
     from gptodo.lifecycle import run_completion_effects
 
     completion_paths: list[Path] = []
+    task_results: list[dict] = []
     try:
         for task in target_tasks:
             try:
@@ -2974,25 +3004,44 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
             except TransitionError as exc:
                 if subtask_edits:
                     raise click.ClickException(f"{task.name}: {exc}") from exc
-                console.print(f"[red]{exc}[/]")
+                if output_json:
+                    print(json.dumps({"id": task.name, "error": str(exc), "exit": 1}))
+                else:
+                    console.print(f"[red]{exc}[/]")
                 raise SystemExit(1) from exc
             if result.requested_state == "done" and result.effective_state == "done":
                 completion_paths.append(task.path)
-            console.print(f"\nChanges to apply:\n  {task.name}:")
-            for field, (current, new) in sorted(result.changed_fields.items()):
-                console.print(f"    {field}: {current} -> {new}")
-            if result.requested_state == "done" and result.effective_state == "waiting":
-                console.print(
-                    f"[cyan]↩ {task.name} recurring — reset to waiting, next wait: {result.post.metadata['wait']}[/]"
-                )
+            if output_json:
+                task_result: dict = {
+                    "id": task.name,
+                    "changes": {
+                        field: {"from": current, "to": new_val}
+                        for field, (current, new_val) in sorted(result.changed_fields.items())
+                    },
+                }
+                if result.requested_state == "done" and result.effective_state == "waiting":
+                    task_result["recurred"] = True
+                    task_result["next_wait"] = str(result.post.metadata.get("wait", ""))
+                task_results.append(task_result)
+            else:
+                console.print(f"\nChanges to apply:\n  {task.name}:")
+                for field, (current, new) in sorted(result.changed_fields.items()):
+                    console.print(f"    {field}: {current} -> {new}")
+                if result.requested_state == "done" and result.effective_state == "waiting":
+                    console.print(
+                        f"[cyan]↩ {task.name} recurring — reset to waiting, next wait: {result.post.metadata['wait']}[/]"
+                    )
     finally:
         # Earlier writes remain committed even if a later read/replace fails.
         for path in completion_paths:
             run_completion_effects(path)
 
-    # Show success message
-    count = len(target_tasks)
-    console.print(f"[green]✓ Updated {count} task{'s' if count > 1 else ''}[/]")
+    if output_json:
+        print(json.dumps({"tasks": task_results, "exit": 0}))
+    else:
+        # Show success message
+        count = len(target_tasks)
+        console.print(f"[green]✓ Updated {count} task{'s' if count > 1 else ''}[/]")
 
 
 # States that cannot be claimed (already terminal or deliberately deferred/blocked).
