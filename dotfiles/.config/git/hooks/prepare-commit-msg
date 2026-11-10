@@ -131,7 +131,7 @@ def strip_stray_reasoning_tags(content: bytes) -> tuple[bytes, int]:
                 and not marker[2].strip()
             ):
                 fence = None
-        elif marker:
+        elif marker and (marker[1][:1] == b"~" or b"`" not in marker[2]):
             fence = marker[1]
         elif stripped in STRAY_REASONING_TAGS:
             removed += 1

@@ -503,3 +503,15 @@ def test_non_utf8_message_survives_reasoning_tag_strip(tmp_path: Path) -> None:
     body = msg.read_bytes()
     assert body.startswith(b"fix: caf\xe9\n")
     assert b"</think>" not in body
+
+
+def test_inline_backtick_span_does_not_disable_tag_filter(tmp_path: Path) -> None:
+    msg = tmp_path / "COMMIT_EDITMSG"
+    example = b"fix: document tags\n\n```<think>```\n"
+    msg.write_bytes(example + b"</think>\n")
+
+    result = _run_hook(msg, _clean_env(GIT_COMMITTER_SESSION_ID="inline42"))
+
+    assert result.returncode == 0, result.stderr
+    assert msg.read_bytes() == example + b"\nGit-Session-Id: inline42\n"
+    assert "dropped 1 stray" in result.stderr
