@@ -133,6 +133,26 @@ def test_cmd_mutation_scratch_vs_repo_redirects() -> None:
     assert label == "scratch"
 
 
+def test_cmd_mutation_ignores_redirect_chars_in_data_heredoc() -> None:
+    # Production false positive (2026-11-09, read-only verifier child): Python
+    # source on stdin contained ``('>','E ')`` and read as ``> ','``.
+    script = "python3 - <<'PY'\nkept = [s for s in ls if s.startswith(('>','E '))]\nPY"
+    assert cmd_mutation(script) == (None, None)
+    tabbed = "cat <<-EOF\n\tfoo > bar.txt\n\tEOF\nls"
+    assert cmd_mutation(tabbed) == (None, None)
+
+
+def test_cmd_mutation_heredoc_keeps_real_shell_mutations() -> None:
+    # Redirects outside the body, bodies fed to a shell, and Python writes
+    # inside the body all still count.
+    after = "python3 - <<'PY'\nx = a > b\nPY\necho hi > out.txt"
+    assert cmd_mutation(after)[0] == "acting"
+    assert cmd_mutation("cat > /home/alice/x.md <<'EOF'\nhi\nEOF")[0] == "acting"
+    assert cmd_mutation("bash <<'EOF'\necho hi > /home/alice/x\nEOF")[0] == "acting"
+    write = "python3 - <<'PY'\nopen('/home/alice/repo/x', 'w').write('y')\nPY"
+    assert cmd_mutation(write)[0] == "acting"
+
+
 def test_cmd_mutation_home_dir_is_user_agnostic() -> None:
     label, _ = cmd_mutation("echo hi > /home/alice/repo/out.md")
     assert label == "acting"
@@ -622,6 +642,24 @@ def test_scan_gptme_child_writes_are_seen() -> None:
     assert scan.write_paths == ["/home/bob/repo/out.md"]
     assert scan.result_bytes == 40
     assert any("curl" in cmd for cmd in scan.bash_cmds)
+
+
+def test_scan_gptme_read_tool_path_is_not_a_write() -> None:
+    # Production false positive (2026-11-09): a read-only verifier child's
+    # ``@read`` calls on conftest.py were counted as writes.
+    from gptme_sessions.subagent_summary import _scan_gptme
+
+    records = [
+        {
+            "role": "assistant",
+            "content": '@read(c1): {"path": "/home/alice/repo/conftest.py"}\n'
+            '@save(c2): {"path": "/home/alice/repo/out.md", "content": "x"}',
+            "timestamp": "2026-03-01T10:00:01Z",
+        }
+    ]
+    scan = _scan_gptme(records)
+    assert scan.tools == {"read": 1, "save": 1}
+    assert scan.write_paths == ["/home/alice/repo/out.md"]
 
 
 def test_summarize_subagents_gptme_child_not_readonly() -> None:

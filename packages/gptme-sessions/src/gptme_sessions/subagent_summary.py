@@ -98,6 +98,42 @@ _NONSCRATCH_PATH_RE = re.compile(
     r"|packages/|gptme-contrib/)"
 )
 _QUOTED_TARGET_RE = re.compile(r"(?<![0-9&<>=!])>{1,2}\s*[\"']([^\"'\n]+)[\"']")
+_HEREDOC_RE = re.compile(r"(?<!<)<<(-?)\s*([\"']?)([A-Za-z_]\w*)\2")
+# A heredoc body fed to a shell is still shell; any other body is stdin data.
+_SHELL_CONSUMER_RE = re.compile(r"\b(?:ba|z|da|k)?sh\b|\bssh\b|\beval\b|\bsource\b")
+
+
+def _strip_heredoc_bodies(cmd: str) -> str:
+    """Drop heredoc bodies that are data, not shell, from ``cmd``.
+
+    ``python3 - <<'PY' ... PY`` passes program text on stdin, so a ``>`` in the
+    Python source (``s.startswith(('>', 'E '))``) is not a shell redirect.
+    Bodies fed to a shell (``bash <<EOF``, ``ssh host <<EOF``) are kept.
+    """
+    lines = cmd.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        quoted = [q.span() for q in _QUOTED_RE.finditer(line)]
+        heredocs = [
+            m for m in _HEREDOC_RE.finditer(line) if not any(a <= m.start() < b for a, b in quoted)
+        ]
+        if not heredocs or _SHELL_CONSUMER_RE.search(_QUOTED_RE.sub("''", line)):
+            continue
+        for m in heredocs:
+            strip_tabs, delim = m.group(1) == "-", m.group(3)
+            while i < len(lines):
+                body = lines[i].lstrip("\t") if strip_tabs else lines[i]
+                i += 1
+                if body == delim:
+                    out.append(lines[i - 1])
+                    break
+    return "\n".join(out)
+
+
 _CD_ANY_RE = re.compile(r"(?:^|[;&|]\s*)cd\s+(\S+)", re.M)
 
 _CC_WRITE_TOOLS = {"Write", "Edit", "NotebookEdit", "MultiEdit"}
@@ -162,12 +198,13 @@ def cmd_mutation(cmd: str, cwd_scratch: bool = False) -> tuple[str | None, str |
     ``cwd_scratch`` says the shell already sits in scratch space (Claude Code's
     Bash keeps its cwd between calls; Codex runs each exec in a fresh shell).
     """
-    unq = _QUOTED_RE.sub("''", cmd)
+    shell = _strip_heredoc_bodies(cmd)
+    unq = _QUOTED_RE.sub("''", shell)
     m = _STRONG_RE.search(unq)
     if m:
         return "acting", unq[max(0, m.start() - 20) : m.end() + 40]
     targets = list(_REDIRECT_RE.findall(unq))
-    targets += list(_QUOTED_TARGET_RE.findall(cmd))
+    targets += list(_QUOTED_TARGET_RE.findall(shell))
     for dl in _DOWNLOAD_RE.finditer(cmd):
         t = (dl.group(1) or dl.group(2) or "").strip("'\"")
         if t and not t.startswith("/dev/"):
@@ -576,6 +613,9 @@ _GPTME_WRITE_LANGS = {
 }
 
 
+# gptme tools whose ``path`` argument names a file they only read.
+_GPTME_READ_TOOLS = {"read", "chats", "vision"}
+
 _TOOL_CALL_HEADER_RE = re.compile(r"^@(\w+)\([^)]+\):", re.M)
 
 
@@ -674,7 +714,7 @@ def _scan_gptme(records: list[dict[str, Any]]) -> TranscriptScan:
                     if args.get("command"):
                         scan.bash_cmds.append(str(args["command"]))
                     path = args.get("path") or args.get("file_path")
-                    if path:
+                    if path and name not in _GPTME_READ_TOOLS:
                         scan.write_paths.append(str(path))
     return scan
 
