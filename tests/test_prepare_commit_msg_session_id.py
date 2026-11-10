@@ -524,6 +524,33 @@ def test_code_indented_tags_are_preserved(
     assert "dropped 1 stray" in result.stderr
 
 
+@pytest.mark.parametrize("prefix", [b"- ", b"* ", b"+ ", b"1. ", b"12) "])
+def test_list_marker_fence_preserves_example_and_strips_following_tag(
+    tmp_path: Path, prefix: bytes
+) -> None:
+    msg = tmp_path / "COMMIT_EDITMSG"
+    indent = b" " * len(prefix)
+    example = (
+        prefix
+        + b"```xml\n"
+        + indent
+        + b"<think>\n"
+        + indent
+        + b"</think>\n"
+        + indent
+        + b"```\n"
+    )
+    msg.write_bytes(b"fix: docs\n\n" + example + b"</think>\n")
+
+    result = _run_hook(msg, _clean_env(GIT_COMMITTER_SESSION_ID="list42"))
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        msg.read_bytes() == b"fix: docs\n\n" + example + b"\nGit-Session-Id: list42\n"
+    )
+    assert "dropped 1 stray" in result.stderr
+
+
 def test_inline_backtick_span_does_not_disable_tag_filter(tmp_path: Path) -> None:
     msg = tmp_path / "COMMIT_EDITMSG"
     example = b"fix: document tags\n\n```<think>```\n"

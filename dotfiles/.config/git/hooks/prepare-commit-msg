@@ -113,6 +113,7 @@ def resolve_session_id(
 
 STRAY_REASONING_TAGS = frozenset({b"<think>", b"</think>"})
 _CODE_FENCE = re.compile(rb" {0,3}(`{3,}|~{3,})(.*)")
+_LIST_PREFIX = re.compile(rb" {0,3}(?:[-+*]|[0-9]{1,9}[.)]) {1,4}")
 
 
 def strip_stray_reasoning_tags(content: bytes) -> tuple[bytes, int]:
@@ -123,10 +124,21 @@ def strip_stray_reasoning_tags(content: bytes) -> tuple[bytes, int]:
     """
     kept: list[bytes] = []
     fence: bytes | None = None
+    list_indent = 0
     removed = 0
     for line in content.splitlines(keepends=True):
         stripped = line.strip()
-        marker = _CODE_FENCE.fullmatch(line.rstrip(b"\r\n"))
+        code_line = line.rstrip(b"\r\n")
+        if fence is not None and list_indent:
+            if code_line.startswith(b" " * list_indent):
+                code_line = code_line[list_indent:]
+            elif stripped:
+                fence = None
+                list_indent = 0
+        prefix = _LIST_PREFIX.match(code_line) if fence is None else None
+        marker = _CODE_FENCE.fullmatch(
+            code_line[prefix.end() :] if prefix else code_line
+        )
         if fence is not None:
             if (
                 marker
@@ -135,8 +147,10 @@ def strip_stray_reasoning_tags(content: bytes) -> tuple[bytes, int]:
                 and not marker[2].strip()
             ):
                 fence = None
+                list_indent = 0
         elif marker and (marker[1][:1] == b"~" or b"`" not in marker[2]):
             fence = marker[1]
+            list_indent = prefix.end() if prefix else 0
         elif stripped in STRAY_REASONING_TAGS:
             indent = line[: len(line) - len(line.lstrip(b" \t"))]
             if len(indent.expandtabs(4)) < 4:
