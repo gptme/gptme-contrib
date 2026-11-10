@@ -1255,20 +1255,28 @@ def _cc_predicted_written_this_run(
 
 def snapshot_gptme_trajectories(
     session_id: str, log_root: Path, *, tmp_dir: Path = Path("/tmp")
-) -> dict[str, tuple[int, int]]:
-    """Snapshot durable and referenced transcripts before invoking the runner."""
-    paths = set((log_root / f"gptme-logs-{session_id}").glob("*/conversation.jsonl"))
-    ref = tmp_dir / f"gptme-traj-{session_id}.path"
-    if ref.is_file():
-        target = ref.read_text(encoding="utf-8", errors="replace").strip()
-        if target:
-            paths.add(Path(target))
-    return {
-        str(path.resolve()): (st.st_mtime_ns, st.st_size)
-        for path in paths
-        if path.is_file()
-        for st in [path.stat()]
-    }
+) -> dict[str, tuple[int, int]] | None:
+    """Snapshot transcripts; unreadable evidence uses the conservative time guard."""
+    try:
+        paths = set(
+            (log_root / f"gptme-logs-{session_id}").glob("*/conversation.jsonl")
+        )
+        ref = tmp_dir / f"gptme-traj-{session_id}.path"
+        if ref.is_file():
+            target = ref.read_text(encoding="utf-8", errors="replace").strip()
+            if target:
+                paths.add(Path(target))
+        return {
+            str(path.resolve()): (st.st_mtime_ns, st.st_size)
+            for path in paths
+            if path.is_file()
+            for st in [path.stat()]
+        }
+    except OSError as exc:
+        # A stale discovery artifact must not prevent the runner replacing it.
+        # None means unknown, not an empty baseline that would admit leftovers.
+        _log(f"WARN: could not snapshot gptme trajectories: {exc}")
+        return None
 
 
 def resolve_backend_trajectory(

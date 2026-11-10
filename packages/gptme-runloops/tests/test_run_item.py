@@ -1874,6 +1874,20 @@ def test_gptme_same_second_trajectory_requires_current_write(
     assert got == ("" if change == "unchanged" else str(expected_path))
 
 
+def test_gptme_snapshot_unreadable_reference_is_unknown(tmp_path, monkeypatch) -> None:
+    ref = tmp_path / "gptme-traj-sid.path"
+    ref.write_text("old target")
+    original_read = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if path == ref:
+            raise PermissionError("unreadable reference")
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    assert snapshot_gptme_trajectories("sid", tmp_path, tmp_dir=tmp_path) is None
+
+
 def test_trajectory_gptme_ignores_missing_sentinel_target(tmp_path) -> None:
     (tmp_path / "gptme-traj-session-123.path").write_text(
         str(tmp_path / "missing.jsonl") + "\n"
