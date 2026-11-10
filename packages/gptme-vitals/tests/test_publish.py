@@ -498,3 +498,37 @@ def test_excessively_nested_stored_json_is_a_blind_page(tmp_path: Path) -> None:
     target.parent.mkdir(parents=True)
     target.write_text("[" * 10000 + "]" * 10000)
     assert load_envelope(route, tmp_path) is None
+
+
+def test_standalone_revocation_finds_renamed_envelope_without_removing_other_data(
+    roots: tuple[Path, Path],
+) -> None:
+    private, public = roots
+    publish_page(
+        RouteRegistry((_route("pub", summary_source="archive/old.data"),)),
+        _env("pub"),
+        private_root=private,
+        public_root=public,
+    )
+    other = public / "other.json"
+    other.write_text(json.dumps(_env("other").to_public()))
+    malformed = public / "broken.json"
+    malformed.write_bytes(b"\xff")
+    publish_page(
+        RouteRegistry(
+            (
+                _route(
+                    "pub",
+                    visibility=Visibility.PRIVATE,
+                    summary_source="new/summary.json",
+                ),
+            )
+        ),
+        _env("pub"),
+        private_root=private,
+        public_root=public,
+    )
+    assert not (public / "archive/old.data").exists()
+    assert other.exists()
+    assert malformed.read_bytes() == b"\xff"
+    assert (private / "new/summary.json").exists()
