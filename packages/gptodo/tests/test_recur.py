@@ -324,6 +324,25 @@ class TestRecurResetUnticksChecklist:
         assert example in post.content
         assert "- [ ] real step" in post.content
 
+    @pytest.mark.parametrize(
+        ("opener", "example", "real"),
+        [
+            ("- > ```markdown", "  > - [x] example", "> - [x] real step"),
+            ("1. > ~~~markdown", "   > - [x] example", "> - [x] real step"),
+            ("> - > ```markdown", ">   > - [x] example", "> > - [x] real step"),
+        ],
+    )
+    def test_reset_ends_nested_quote_fence_at_list_boundary(
+        self, workspace: Path, opener: str, example: str, real: str
+    ):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{opener}\n{example}\n{real}\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert f"{opener}\n{example}" in post.content
+        assert post.content.endswith(real.replace("[x]", "[ ]"))
+
     @pytest.mark.parametrize("quote", ["> ", "> > "])
     def test_reset_reparses_quote_after_list_fence(self, workspace: Path, quote: str):
         path = write_task(workspace, "weekly-review", state="active", recur="7d")

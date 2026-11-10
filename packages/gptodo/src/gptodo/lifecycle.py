@@ -507,6 +507,7 @@ def untick_checklist(content: str) -> str:
     out = []
     fence = ""
     fence_quotes = 0
+    quote_list_boundary: tuple[int, int] | None = None
     list_indent = 0
     list_containers: list[tuple[int, int]] = []
     for line in content.split("\n"):
@@ -521,10 +522,24 @@ def untick_checklist(content: str) -> str:
             container = re.match(rf"^(?:[ \t]*>[ \t]?){{{fence_quotes}}}", line)
             assert container is not None
             candidate = line[container.end() :]
+        outside_quote_list = False
+        if fence and quote_list_boundary:
+            outer_depth, required_indent = quote_list_boundary
+            outer = re.match(rf"^(?:[ \t]*>[ \t]?){{{outer_depth}}}", line)
+            if outer is not None:
+                remainder = line[outer.end() :]
+                padding = remainder[: len(remainder) - len(remainder.lstrip(" \t"))]
+                outside_quote_list = bool(remainder.strip()) and (
+                    _columns(padding, outer.group()) < required_indent
+                )
         source_prefix = line[: len(line) - len(candidate)]
         whitespace = candidate[: len(candidate) - len(candidate.lstrip(" \t"))]
         indent = _columns(whitespace, source_prefix)
-        if fence and (quote_depth < fence_quotes or (candidate.strip() and indent < list_indent)):
+        if fence and (
+            quote_depth < fence_quotes
+            or outside_quote_list
+            or (candidate.strip() and indent < list_indent)
+        ):
             # A container can end a fence without an explicit delimiter. Parse
             # this same line again outside the fence so later work reopens.
             fence = ""
@@ -563,6 +578,9 @@ def untick_checklist(content: str) -> str:
             # Quotes nested in the list item own the fence: continuation lines
             # carry them as a prefix, and indentation restarts inside them.
             nested_quotes = (opening["quotes"] or "").count(">")
+            # Keep the list boundary outside the nested quote as well as the
+            # indentation inside it; a dedented quote starts a new block.
+            quote_list_boundary = list_containers[-1] if nested_quotes else None
             fence_quotes = quote_depth + nested_quotes
             list_indent = list_containers[-1][1] if list_containers and not nested_quotes else 0
         else:
