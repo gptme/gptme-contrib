@@ -146,6 +146,10 @@ def _evaluate(
     greptile_sha = HEAD_SHA if greptile_fresh else "deadbeef"
 
     def checked_gh(args: list[str], timeout: int = 30) -> str:
+        if args[:2] == ["api", "repos/gptme/gptme-cloud/pulls/901/reviews"]:
+            # These fixtures have no operator approval; only machine-review
+            # substitution or the pointer-only waiver can authorize them.
+            return ""
         if args == [
             "api",
             "repos/gptme/gptme-cloud/pulls/901",

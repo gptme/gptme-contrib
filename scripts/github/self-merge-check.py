@@ -3612,7 +3612,6 @@ def operator_approval_ai_review_waiver(
     return None
 
 
-
 def evaluate_pr(
     repo: str, number: int, *, workspace_repos: list[str] | None
 ) -> CheckResult:
