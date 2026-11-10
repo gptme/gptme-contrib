@@ -320,6 +320,37 @@ _GH_INTERACTION_RE = re.compile(
 # productive (gh_interactions >= 1) despite posting nothing.
 
 
+def _subst_end(cmd: str, i: int) -> int:
+    """Index just past the substitution starting at ``cmd[i]``.
+
+    ``cmd[i]`` is ``$``/``<``/``>`` followed by ``(``, or a backtick.
+    Quotes inside the body are honoured when matching the closing paren.
+    """
+    n = len(cmd)
+    if cmd[i] == "`":
+        end = cmd.find("`", i + 1)
+        return n if end < 0 else end + 1
+    j, depth, inner = i + 2, 1, None
+    while j < n:
+        d = cmd[j]
+        if d == "\\" and inner != "'":
+            j += 2
+            continue
+        if inner:
+            if d == inner:
+                inner = None
+        elif d in "'\"":
+            inner = d
+        elif d == "(":
+            depth += 1
+        elif d == ")":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return n
+
+
 def _split_shell_segments(cmd: str) -> list[str]:
     """Split a shell command on ``|``, ``||``, ``&&``, ``;`` and newlines.
 
@@ -337,6 +368,15 @@ def _split_shell_segments(cmd: str) -> list[str]:
         if c == "\\" and quote != "'" and i + 1 < n:
             buf.append(cmd[i : i + 2])
             i += 2
+            continue
+        if quote != "'" and (
+            c == "`" or (c in "$<>" and cmd[i + 1 : i + 2] == "(" and (c == "$" or not quote))
+        ):
+            # A substitution is one word of this command: operators inside
+            # it (``$(printf 1 | cat)``) belong to the inner command.
+            end = _subst_end(cmd, i)
+            buf.append(cmd[i:end])
+            i = end
             continue
         if quote:
             if c == quote:
@@ -388,33 +428,16 @@ def _command_substitutions(cmd: str) -> list[str]:
             if c == "'":
                 quote = None
         elif (c == "$" or (c in "<>" and quote is None)) and cmd[i + 1 : i + 2] == "(":
-            start = j = i + 2
-            depth, inner = 1, None
-            while j < n:
-                d = cmd[j]
-                if d == "\\" and inner != "'":
-                    j += 2
-                    continue
-                if inner:
-                    if d == inner:
-                        inner = None
-                elif d in "'\"":
-                    inner = d
-                elif d == "(":
-                    depth += 1
-                elif d == ")":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                j += 1
-            bodies.append(cmd[start:j])
-            i = j + 1
+            end = _subst_end(cmd, i)
+            body_end = end - 1 if cmd[end - 1 : end] == ")" else end
+            bodies.append(cmd[i + 2 : body_end])
+            i = end
             continue
         elif c == "`":
-            end = cmd.find("`", i + 1)
-            end = n if end < 0 else end
-            bodies.append(cmd[i + 1 : end])
-            i = end + 1
+            end = _subst_end(cmd, i)
+            body_end = end - 1 if cmd[end - 1 : end] == "`" else end
+            bodies.append(cmd[i + 1 : body_end])
+            i = end
             continue
         elif quote == '"':
             if c == '"':
@@ -453,12 +476,13 @@ def _gh_api_args(segment: str) -> list[str] | None:
     The ``gh api`` pair is located anywhere among the shell tokens, so any
     leading syntax resolves without enumerating it: ``VAR=x``, wrappers
     (``env``, ``command``, ``timeout 5``, ``xargs``), shell keywords (``if``,
-    ``then``, ``while``, ``!``), grouping (``(gh``, ``{``) and command
-    substitution (``x=$(gh``, `` `gh``). Command names
-    compare by basename (``/usr/bin/gh``). A ``gh api`` mentioned inside a
+    ``then``, ``while``, ``!``), grouping (``(gh``, ``{``).
+    Substitutions are masked first, so a ``gh api`` inside one is checked
+    separately via ``_command_substitutions``. Command names compare by
+    basename (``/usr/bin/gh``). A ``gh api`` mentioned inside a
     quoted argument stays part of one token and does not count.
     """
-    tokens = _collapse_process_substitutions(_shell_tokens(segment))
+    tokens = _shell_tokens(_mask_substitutions(segment))
     for i in range(len(tokens) - 1):
         name = re.split(r"[=({!$`]", tokens[i])[-1].rsplit("/", 1)[-1]
         if name == "gh" and tokens[i + 1] == "api":
@@ -474,50 +498,40 @@ def _gh_api_args(segment: str) -> list[str] | None:
     return None
 
 
-def _collapse_process_substitutions(tokens: list[str]) -> list[str]:
-    """Replace each substitution's token run with one opaque word.
+def _mask_substitutions(segment: str) -> str:
+    """Replace each substitution in the raw segment with one opaque word.
 
-    Process substitution (``<(...)``/``>(...)``), unquoted command
-    substitution (``body=$(...)``) and backticks are separate commands whose
-    output or path becomes part of a single argument, so ``--input <(gh api
-    -X GET ...)`` or ``-f body=$(gh api -X GET ...)`` must not lend the inner
+    Process substitution (``<(...)``/``>(...)``), command substitution
+    (``body=$(...)``) and backticks are separate commands whose output or
+    path becomes part of a single argument, so ``--input <(gh api -X GET
+    ...)`` or ``-f body=$(gh api -X GET ...)`` must not lend the inner
     ``-X GET`` to the outer invocation. ``_command_substitutions`` checks each
-    body as a command of its own.
+    body as a command of its own. Masking happens before quote removal, so a
+    single-quoted backtick (``--jq '"`"'``) stays literal data.
     """
     out: list[str] = []
-    i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        if _paren_delta(tok) > 0 and tok.startswith(("<(", ">(")):
-            # shlex groups punctuation runs, so ``<(`` arrives as one token.
-            out.append("/dev/fd/63")
-            i = _skip_paren_run(tokens, i)
+    quote: str | None = None
+    i, n = 0, len(segment)
+    while i < n:
+        c = segment[i]
+        if c == "\\" and quote != "'" and i + 1 < n:
+            out.append(segment[i : i + 2])
+            i += 2
             continue
-        nxt = tokens[i + 1] if i + 1 < len(tokens) else ""
-        if tok.endswith("$") and _paren_delta(nxt) > 0 and nxt.startswith("("):
-            # shlex splits ``body=$(`` into ``body=$`` and ``(``.
-            out.append(tok[:-1] + "SUBST")
-            i = _skip_paren_run(tokens, i + 1)
+        if quote != "'" and (
+            c == "`" or (c in "$<>" and segment[i + 1 : i + 2] == "(" and (c == "$" or not quote))
+        ):
+            out.append("/dev/fd/63" if c in "<>" else "SUBST")
+            i = _subst_end(segment, i)
             continue
-        if tok.count("`") % 2 == 1:
-            j = i + 1
-            while j < len(tokens) and tokens[j].count("`") % 2 == 0:
-                j += 1
-            out.append(tok.split("`", 1)[0] + "SUBST")
-            i = j + 1
-            continue
-        out.append(tok)
+        if quote:
+            if c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+        out.append(c)
         i += 1
-    return out
-
-
-def _skip_paren_run(tokens: list[str], i: int) -> int:
-    """Index just past the group opened by ``tokens[i]``."""
-    j, depth = i + 1, _paren_delta(tokens[i])
-    while j < len(tokens) and depth > 0:
-        depth += _paren_delta(tokens[j])
-        j += 1
-    return j
+    return "".join(out)
 
 
 def _paren_delta(tok: str) -> int:

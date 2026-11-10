@@ -260,3 +260,29 @@ def test_unquoted_substitution_read_only_stays_zero() -> None:
         sigs = extract_signals_cc(_bash_msgs(cmd))
         assert sigs.get("comments_posted", 0) == 0, cmd
         assert sigs["gh_interactions"] == 0, cmd
+
+
+def test_pipeline_inside_substitution_keeps_outer_method() -> None:
+    # The pipe inside $(...) belongs to the inner command; splitting on it
+    # would drop the outer ``-X GET`` and count a read as a write.
+    for cmd in (
+        "gh api repos/o/r/issues/5/comments -f per_page=$(printf 100 | cat) -X GET",
+        "gh api repos/o/r/issues/5/comments -f per_page=`printf 100 | cat` -X GET",
+        'gh api repos/o/r/issues/5/comments -f per_page="$(printf 100 | cat)" -X GET',
+        "gh api repos/o/r/issues/5/comments -f per_page=100 -X GET",
+    ):
+        sigs = extract_signals_cc(_bash_msgs(cmd))
+        assert sigs.get("comments_posted", 0) == 0, cmd
+        assert sigs["gh_interactions"] == 0, cmd
+
+
+def test_single_quoted_backtick_is_literal() -> None:
+    # A backtick inside single quotes is jq data, not a substitution, so the
+    # trailing ``-f body=x`` still makes this a write.
+    for cmd in (
+        "gh api repos/o/r/issues/5/comments --jq '\"`\"' -f body=x",
+        "gh api repos/o/r/issues/5/comments --jq '\"x\"' -f body=x",
+    ):
+        sigs = extract_signals_cc(_bash_msgs(cmd))
+        assert sigs["gh_interactions"] == 1, cmd
+        assert sigs["comments_posted"] == 1, cmd
