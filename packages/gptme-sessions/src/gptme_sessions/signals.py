@@ -308,9 +308,379 @@ _GH_INTERACTION_RE = re.compile(
     r"gh\s+(?:"
     r"pr\s+(?:review|comment|close|reopen|merge|edit)"
     r"|issue\s+(?:comment|close|reopen|edit|create)"
-    r"|api\s+repos/[^\s]+/(?:pulls|issues)/\d+/(?:comments|reviews)"
+    r"|api\s+(?:\S+\s+)*?repos/[^\s]+/(?:pulls|issues)/\d+/(?:comments|reviews)"
     r")"
 )
+
+# `gh api` is a GET unless it carries a method override or body fields (gh
+# switches to POST when -f/-F/--field/--raw-field/--input is given), so the
+# api branches of _GH_INTERACTION_RE / _GH_COMMENT_CMD_RE only count when the
+# *same* invocation writes. Without this, a read-only triage session that
+# lists a PR's comments via `gh api repos/o/r/issues/N/comments` was graded
+# productive (gh_interactions >= 1) despite posting nothing.
+
+
+def _subst_end(cmd: str, i: int) -> int:
+    """Index just past the substitution starting at ``cmd[i]``.
+
+    ``cmd[i]`` is ``$``/``<``/``>`` followed by ``(``, or a backtick.
+    Quotes inside the body are honoured when matching the closing paren.
+    """
+    n = len(cmd)
+    if cmd[i] == "`":
+        end = cmd.find("`", i + 1)
+        return n if end < 0 else end + 1
+    j, depth, inner = i + 2, 1, None
+    while j < n:
+        d = cmd[j]
+        if d == "\\" and inner != "'":
+            j += 2
+            continue
+        if inner:
+            if d == inner:
+                inner = None
+        elif d in "'\"":
+            inner = d
+        elif d == "(":
+            depth += 1
+        elif d == ")":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return n
+
+
+def _split_shell_segments(cmd: str) -> list[str]:
+    """Split a shell command on ``|``, ``||``, ``&&``, ``;`` and newlines.
+
+    Operators inside single or double quotes are literal text, not separators,
+    so ``--jq '.a | .b' -f body=x`` stays one segment. Backslash escapes are
+    honoured outside single quotes. Not a full shell parser: an unterminated
+    quote just runs to the end of the command.
+    """
+    segments: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    i, n = 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if c == "\\" and quote != "'" and i + 1 < n:
+            buf.append(cmd[i : i + 2])
+            i += 2
+            continue
+        if quote != "'" and (
+            c == "`" or (c in "$<>" and cmd[i + 1 : i + 2] == "(" and (c == "$" or not quote))
+        ):
+            # A substitution is one word of this command: operators inside
+            # it (``$(printf 1 | cat)``) belong to the inner command.
+            end = _subst_end(cmd, i)
+            buf.append(cmd[i:end])
+            i = end
+            continue
+        if quote:
+            if c == quote:
+                quote = None
+            buf.append(c)
+        elif c in "'\"":
+            quote = c
+            buf.append(c)
+        elif c == "#" and (not buf or buf[-1] in (" ", "\t", "(")):
+            # Unquoted comment: operators in it are not separators. Skip to
+            # the newline, which still ends the segment.
+            while i < n and cmd[i] != "\n":
+                i += 1
+            continue
+        elif c in "|&;\n":
+            if c == "&" and (cmd[i + 1 : i + 2] == ">" or (buf and buf[-1] in "<>")):
+                buf.append(c)  # redirect (2>&1, &>, >&), not a separator
+            else:
+                segments.append("".join(buf))
+                buf = []
+                if c in "|&" and cmd[i + 1 : i + 2] == c:
+                    i += 1
+        else:
+            buf.append(c)
+        i += 1
+    segments.append("".join(buf))
+    return segments
+
+
+def _command_substitutions(cmd: str) -> list[str]:
+    """Bodies of ``$(...)``, backtick and ``<(...)``/``>(...)`` substitutions
+    that bash would execute.
+
+    Substitutions run unquoted and inside double quotes
+    (``x="$(gh api ... -f body=x)"``) but not inside single quotes or shell
+    comments, so ``printf '$(gh api ... -f x)'`` yields nothing. Process
+    substitution only happens unquoted. Only
+    outermost bodies are returned; callers recurse for nested ones.
+    """
+    bodies: list[str] = []
+    quote: str | None = None
+    i, n = 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if c == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote == "'":
+            if c == "'":
+                quote = None
+        elif (c == "$" or (c in "<>" and quote is None)) and cmd[i + 1 : i + 2] == "(":
+            end = _subst_end(cmd, i)
+            body_end = end - 1 if cmd[end - 1 : end] == ")" else end
+            bodies.append(cmd[i + 2 : body_end])
+            i = end
+            continue
+        elif c == "`":
+            end = _subst_end(cmd, i)
+            body_end = end - 1 if cmd[end - 1 : end] == "`" else end
+            bodies.append(cmd[i + 1 : body_end])
+            i = end
+            continue
+        elif quote == '"':
+            if c == '"':
+                quote = None
+        elif c in "'\"":
+            quote = c
+        elif c == "#" and (i == 0 or cmd[i - 1] in " \t\n(;|&"):
+            while i < n and cmd[i] != "\n":
+                i += 1
+            continue
+        i += 1
+    return bodies
+
+
+def _shell_tokens(segment: str) -> list[str]:
+    """Shell words of a segment, with unquoted grouping/redirect punctuation
+    split into tokens of its own (``(gh ... -X GET)`` -> ``GET``, ``)``).
+
+    shlex's own comment handling is disabled: it treats a mid-word ``#`` as a
+    comment (``-H X-Issue:#5 -f body=x`` would lose ``-f``), whereas bash
+    only starts a comment at a word boundary. Segments come from
+    ``_split_shell_segments``, which already drops real comments.
+    """
+    lexer = shlex.shlex(segment, posix=True, punctuation_chars="();<>|&")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        return list(lexer)
+    except ValueError:
+        return segment.split()
+
+
+def _gh_api_args(segment: str) -> list[str] | None:
+    """Arguments after an unquoted ``gh api`` in the segment, or None if absent.
+
+    The ``gh api`` pair is located anywhere among the shell tokens, so any
+    leading syntax resolves without enumerating it: ``VAR=x``, wrappers
+    (``env``, ``command``, ``timeout 5``, ``xargs``), shell keywords (``if``,
+    ``then``, ``while``, ``!``), grouping (``(gh``, ``{``).
+    Substitutions are masked first, so a ``gh api`` inside one is checked
+    separately via ``_command_substitutions``. Command names compare by
+    basename (``/usr/bin/gh``). A ``gh api`` mentioned inside a
+    quoted argument stays part of one token and does not count.
+    """
+    tokens = _shell_tokens(_mask_substitutions(segment))
+    for i in range(len(tokens) - 1):
+        name = re.split(r"[=({!$`]", tokens[i])[-1].rsplit("/", 1)[-1]
+        if name == "gh" and tokens[i + 1] == "api":
+            args = tokens[i + 2 :]
+            # An unmatched ``)`` closes the group or substitution this
+            # invocation sits in; what follows is not its arguments.
+            depth = 0
+            for j, tok in enumerate(args):
+                depth += _paren_delta(tok)
+                if depth < 0:
+                    return args[:j]
+            return args
+    return None
+
+
+def _mask_substitutions(segment: str) -> str:
+    """Replace each substitution in the raw segment with one opaque word.
+
+    Process substitution (``<(...)``/``>(...)``), command substitution
+    (``body=$(...)``) and backticks are separate commands whose output or
+    path becomes part of a single argument, so ``--input <(gh api -X GET
+    ...)`` or ``-f body=$(gh api -X GET ...)`` must not lend the inner
+    ``-X GET`` to the outer invocation. ``_command_substitutions`` checks each
+    body as a command of its own. Masking happens before quote removal, so a
+    single-quoted backtick (``--jq '"`"'``) stays literal data.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    i, n = 0, len(segment)
+    while i < n:
+        c = segment[i]
+        if c == "\\" and quote != "'" and i + 1 < n:
+            out.append(segment[i : i + 2])
+            i += 2
+            continue
+        if quote != "'" and (
+            c == "`" or (c in "$<>" and segment[i + 1 : i + 2] == "(" and (c == "$" or not quote))
+        ):
+            out.append("/dev/fd/63" if c in "<>" else "SUBST")
+            i = _subst_end(segment, i)
+            continue
+        if quote:
+            if c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _paren_delta(tok: str) -> int:
+    """Net ``(`` minus ``)`` of an unquoted punctuation token, else 0."""
+    if tok and not tok.strip("();<>|&"):
+        return tok.count("(") - tok.count(")")
+    return 0
+
+
+def _gh_api_endpoint(args: list[str]) -> str | None:
+    """The endpoint (first positional argument) of a ``gh api`` invocation."""
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok in _GH_API_VALUE_OPTS or tok in (
+            "-X",
+            "--method",
+            "-f",
+            "-F",
+            "--field",
+            "--raw-field",
+            "--input",
+        ):
+            i += 2
+            continue
+        if not tok.startswith("-"):
+            return tok
+        i += 1
+    return None
+
+
+# gh api options whose next token is a value, never a flag (``--template '-f'``).
+_GH_API_VALUE_OPTS = frozenset(
+    {"-H", "--header", "-q", "--jq", "-t", "--template", "-p", "--preview", "--hostname", "--cache"}
+)
+
+
+def _gh_api_writes(args: list[str]) -> bool:
+    """True if ``gh api`` arguments describe a write (non-GET) request.
+
+    Flags are read from shell tokens, not raw text, so a quoted argument value
+    such as ``-f body='Use -X GET'`` is not mistaken for a method flag, and the
+    value of an option like ``--jq``/``--template`` is never read as a flag.
+    """
+    method: str | None = None
+    has_field = False
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok in _GH_API_VALUE_OPTS:
+            i += 2
+            continue
+        if tok in ("-X", "--method"):
+            if i + 1 < len(args):
+                method = args[i + 1]
+            i += 2
+            continue
+        if tok.startswith("--method="):
+            method = tok.split("=", 1)[1]
+        elif tok.startswith("-X") and len(tok) > 2:
+            method = tok[2:].lstrip("=")
+        elif tok in ("-f", "-F", "--field", "--raw-field", "--input"):
+            has_field = True
+            i += 2
+            continue
+        elif tok.startswith(("--field=", "--raw-field=", "--input=")) or (
+            tok[:2] in ("-f", "-F") and len(tok) > 2
+        ):
+            has_field = True
+        i += 1
+    if method is not None:
+        # HEAD fetches headers only; like GET it posts nothing.
+        return method.upper() not in ("GET", "HEAD")
+    return has_field
+
+
+def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
+    """Match a gh write-command pattern, ignoring read-only ``gh api`` calls.
+
+    Non-api matches (``gh pr comment`` etc.) count as before, even when the
+    same segment also runs a ``gh api`` read (e.g. ``--body-file <(gh api
+    ...)``). An api match counts only if the ``gh api`` invocation writes.
+    Executable command substitutions are checked as commands of their own,
+    so a write inside ``x="$(gh api ...)"`` counts even though shell
+    tokenization keeps the quoted substitution in one token.
+    """
+    for sub in _command_substitutions(cmd):
+        if _gh_cmd_matches(pattern, sub):
+            return True
+    for segment in _split_shell_segments(cmd):
+        script = _shell_c_script(segment)
+        if script is not None and _gh_cmd_matches(pattern, script):
+            return True
+        matches = list(pattern.finditer(segment))
+        if not matches:
+            continue
+        if any(not _GH_API_MATCH_RE.match(m.group(0)) for m in matches):
+            return True
+        # No tokenized ``gh api`` invocation means the match was quoted text
+        # (``printf 'gh api ...'``), not a command, so it never counts.
+        args = _gh_api_args(segment)
+        if args is None or not _gh_api_writes(args):
+            continue
+        # Match the endpoint argument itself, not a path quoted in a field
+        # value (``-f body='see repos/o/r/issues/6/comments'``).
+        endpoint = _gh_api_endpoint(args)
+        if endpoint is not None and pattern.search(f"gh api {endpoint}"):
+            return True
+    return False
+
+
+_GH_API_MATCH_RE = re.compile(r"gh\s+api\b")
+
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+
+
+def _shell_c_script(segment: str) -> str | None:
+    """The inline script of a ``bash -c '<script>'`` invocation in the segment.
+
+    Shell tokenization keeps the quoted script in one token, so its ``gh api``
+    is invisible to ``_gh_api_args``; bash still runs it, so the caller checks
+    it as a command of its own. The shell is located among the tokens like
+    ``gh api`` is (``timeout 5 bash -c``, ``env X=1 sh -c``) and ``-c`` may be
+    clustered (``-lc``, ``-ec``). Without ``-c`` the first operand is a script
+    file, which we cannot see, so None.
+    """
+    tokens = _shell_tokens(segment)
+    for i, tok in enumerate(tokens):
+        if tok.rsplit("/", 1)[-1] not in _SHELLS:
+            continue
+        has_c = False
+        j = i + 1
+        while j < len(tokens):
+            opt = tokens[j]
+            if opt in ("-o", "+o", "-O", "+O"):
+                j += 2
+                continue
+            if opt.startswith("--"):
+                j += 1
+                continue
+            if opt[:1] in "-+" and len(opt) > 1:
+                has_c = has_c or (opt[0] == "-" and "c" in opt[1:])
+                j += 1
+                continue
+            break
+        if has_c and j < len(tokens):
+            return tokens[j]
+    return None
+
 
 # Regex for gh pr create command detection (from Bash input).
 # Tracked separately from gh_interactions because PR submission is higher-value
@@ -441,7 +811,8 @@ _GH_PR_REVIEW_CMD_RE = re.compile(r"gh\s+pr\s+review\b")
 
 # Comments posted: PR comments, issue comments, and direct API comment endpoints
 _GH_COMMENT_CMD_RE = re.compile(
-    r"gh\s+(?:pr|issue)\s+comment\b" r"|gh\s+api\s+repos/[^\s]+/(?:pulls|issues)/\d+/comments\b"
+    r"gh\s+(?:pr|issue)\s+comment\b"
+    r"|gh\s+api\s+(?:\S+\s+)*?repos/[^\s]+/(?:pulls|issues)/\d+/comments\b"
 )
 
 # Issues created (gh issue create — creation event, analogous to prs_submitted)
@@ -1391,7 +1762,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     bash_input = item.get("input", {})
                     cmd = bash_input.get("command", "")
                     command_cwd = bash_input.get("cwd") or bash_input.get("workdir") or session_cwd
-                    if _GH_INTERACTION_RE.search(cmd):
+                    if _gh_cmd_matches(_GH_INTERACTION_RE, cmd):
                         gh_interactions += 1
 
                     # Commit commands: remember them so a truncated result (output
@@ -1433,7 +1804,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     # Populated alongside the aggregate gh_interactions count.
                     if _GH_PR_REVIEW_CMD_RE.search(cmd):
                         reviews_submitted += 1
-                    if _GH_COMMENT_CMD_RE.search(cmd):
+                    if _gh_cmd_matches(_GH_COMMENT_CMD_RE, cmd):
                         comments_posted += 1
                     if _GH_ISSUE_CREATE_CMD_RE.search(cmd):
                         issues_created += 1
