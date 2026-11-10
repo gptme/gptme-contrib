@@ -268,7 +268,8 @@ class RouteRegistry:
         # Resolve against the browser URL, never the backing output_path: a
         # registered /odd/ may be built as elsewhere/page.html. Strip the query
         # and fragment before converting the URL to a path.
-        raw_current = urlsplit(current_route).path.lstrip("/")
+        current = urlsplit(current_route)
+        raw_current = current.path.lstrip("/")
         current_directory = not raw_current or raw_current.endswith("/")
         # Keep a directory URL's parent inside that directory rather than
         # climbing one level too far after PurePosixPath drops its trailing slash.
@@ -298,9 +299,13 @@ class RouteRegistry:
         # relative link to a dynamic or differently-pathed route gets the same
         # answer as the root-relative spelling of it.
         directory = _is_directory_url(raw_path) if raw_path else current_directory
-        route = self._route_for_path(
-            normalized, directory=directory, query=parsed.query
+        # An empty reference inherits the base query; an explicit '?' clears it.
+        query = (
+            current.query
+            if not parsed.path and "?" not in href.split("#", 1)[0]
+            else parsed.query
         )
+        route = self._route_for_path(normalized, directory=directory, query=query)
         if route is not None:
             return route.static_target(site_root)
         if directory or not normalized.suffix:
@@ -402,6 +407,9 @@ def _is_directory_url(path: str) -> bool:
 
 def _normalize_relative_path(path: PurePosixPath) -> PurePosixPath | None:
     """Collapse dot segments while keeping the target inside the generated site."""
+    # Percent-decoding a site-relative URL can introduce a filesystem root.
+    if path.is_absolute():
+        return None
     parts: list[str] = []
     for part in path.parts:
         if part in {"", "."}:

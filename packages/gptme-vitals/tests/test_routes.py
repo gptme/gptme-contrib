@@ -577,6 +577,45 @@ def test_encoded_slash_in_current_url_does_not_change_browser_parent(
     )
 
 
+@pytest.mark.parametrize("current", ["/%2Fetc/", "/%2f%2fetc/"])
+@pytest.mark.parametrize("href", ["resolv.conf", "", "?tab=1"])
+def test_decoded_base_cannot_escape_site_root(
+    tmp_path: Path, current: str, href: str
+) -> None:
+    assert (
+        RouteRegistry(()).resolve_internal_target(
+            href, current_route=current, site_root=tmp_path
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("kind", [RouteKind.STATIC, RouteKind.DYNAMIC])
+@pytest.mark.parametrize("href", ["", "?", "?state=closed", "child.html"])
+def test_empty_reference_inherits_query_but_explicit_reference_replaces_it(
+    tmp_path: Path, kind: RouteKind, href: str
+) -> None:
+    filtered = _route(
+        "filtered",
+        href="/decisions/?state=open",
+        kind=kind,
+        output_path="filtered.html" if kind is RouteKind.STATIC else None,
+    )
+    reg = RouteRegistry((_route("decisions", output_path="all.html"), filtered))
+    expected = {
+        "": tmp_path / "filtered.html" if kind is RouteKind.STATIC else None,
+        "?": tmp_path / "all.html",
+        "?state=closed": tmp_path / "all.html",
+        "child.html": tmp_path / "decisions/child.html",
+    }
+    assert (
+        reg.resolve_internal_target(
+            href, current_route="/decisions/?state=open", site_root=tmp_path
+        )
+        == expected[href]
+    )
+
+
 def test_registered_fragment_is_not_resource_identity(tmp_path: Path) -> None:
     route = _route(
         "report", href="/report/#latest", output_path="generated/report.html"
