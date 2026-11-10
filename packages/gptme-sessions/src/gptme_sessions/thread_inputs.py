@@ -235,6 +235,9 @@ def from_records(
                 if text:
                     digest = journal_digest(text)
                     n.update({k: v for k, v in digest.items() if v})
+        if r.session_label and r.session_label.strip():
+            # The record's explicit label wins over journal filename/digest hints.
+            n["short"] = r.session_label.strip().lower()
         nodes.append({k: v for k, v in n.items() if v not in (None, [], "")})
     nodes.sort(key=lambda n: (n["start"], n["id"]))
     return nodes

@@ -108,6 +108,33 @@ def test_from_records_reads_relative_journal_and_skips_shared_ones(tmp_path: Pat
         assert "sessions_mentioned" not in nodes[f"cccc{i}"]
 
 
+def test_record_label_links_without_a_journal_or_matching_uuid() -> None:
+    first = _rec(
+        "aaaaaaaa-0000-0000-0000-000000000000",
+        "2026-11-10T10:00:00Z",
+        "2026-11-10T10:30:00Z",
+        session_label="02FD",
+    )
+    later = _rec(
+        "consumer",
+        "2026-11-10T11:00:00Z",
+        "2026-11-10T11:30:00Z",
+        journal_path="journal/2026-11-10/consumer.md",
+    )
+    for journal in (None, "journal/2026-11-10/session-dead.md"):
+        first.journal_path = journal
+        nodes = from_records(
+            [first, later],
+            agent="bob",
+            read_journal=lambda _: "**Session ID**: dead\nFollow-up to session 02fd.",
+        )
+        assert nodes[0]["short"] == "02fd"
+        rows, _ = build_forest(nodes)
+        assert rows[1]["predecessor"] == first.session_id
+        assert rows[1]["kind"] == "mention"
+        assert from_records([first], agent="bob", read_journal=None)[0]["short"] == "02fd"
+
+
 def test_build_forest_reports_winning_link_and_thread() -> None:
     first = _rec(
         "02fd0000-aaaa",
