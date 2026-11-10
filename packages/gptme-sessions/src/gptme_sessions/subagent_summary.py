@@ -101,6 +101,8 @@ _QUOTED_TARGET_RE = re.compile(r"(?<![0-9&<>=!])>{1,2}\s*[\"']([^\"'\n]+)[\"']")
 _HEREDOC_RE = re.compile(r"(?<!<)<<(-?)\s*([\"']?)([A-Za-z_]\w*)\2")
 # A heredoc body fed to a shell is still shell; any other body is stdin data.
 _SHELL_CONSUMER_RE = re.compile(r"\b(?:ba|z|da|k)?sh\b|\bssh\b|\beval\b|\bsource\b")
+# Even backslash pairs leave the expansion active; an odd backslash escapes it.
+_HEREDOC_SUBSTITUTION_RE = re.compile(r"(?<!\\)(?:\\\\)*(?:\$\((.*?)\)|`(.*?)`)", re.S)
 
 
 def _strip_heredoc_bodies(cmd: str) -> str:
@@ -109,6 +111,9 @@ def _strip_heredoc_bodies(cmd: str) -> str:
     ``python3 - <<'PY' ... PY`` passes program text on stdin, so a ``>`` in the
     Python source (``s.startswith(('>', 'E '))``) is not a shell redirect.
     Bodies fed to a shell (``bash <<EOF``, ``ssh host <<EOF``) are kept.
+    Unquoted data heredocs still execute command substitutions. Keep those
+    separately from the literal text, whose quotes do not suppress expansion.
+    This is a best-effort classifier, not a full shell parser.
     """
     lines = cmd.split("\n")
     out: list[str] = []
@@ -125,12 +130,19 @@ def _strip_heredoc_bodies(cmd: str) -> str:
             continue
         for m in heredocs:
             strip_tabs, delim = m.group(1) == "-", m.group(3)
+            body_lines: list[str] = []
             while i < len(lines):
                 body = lines[i].lstrip("\t") if strip_tabs else lines[i]
                 i += 1
                 if body == delim:
-                    out.append(lines[i - 1])
                     break
+                body_lines.append(body)
+            if not m.group(2):
+                # Backslash-newline is removed before unquoted heredoc expansion.
+                body_text = "\n".join(body_lines).replace("\\\n", "")
+                for substitution in _HEREDOC_SUBSTITUTION_RE.finditer(body_text):
+                    out.append(substitution.group(1) or substitution.group(2) or "")
+            out.append(delim)
     return "\n".join(out)
 
 

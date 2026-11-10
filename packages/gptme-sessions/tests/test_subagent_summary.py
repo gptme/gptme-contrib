@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from gptme_sessions.signals import extract_from_path
 from gptme_sessions.subagent_summary import (
     ChildSpec,
@@ -151,6 +153,31 @@ def test_cmd_mutation_heredoc_keeps_real_shell_mutations() -> None:
     assert cmd_mutation("bash <<'EOF'\necho hi > /home/alice/x\nEOF")[0] == "acting"
     write = "python3 - <<'PY'\nopen('/home/alice/repo/x', 'w').write('y')\nPY"
     assert cmd_mutation(write)[0] == "acting"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "$(git commit -am update)",
+        "`git commit -am update`",
+        "'$(git commit -am update)'",
+        '"$(git commit -am update)"',
+        "$(\ngit commit -am update\n)",
+    ],
+)
+def test_cmd_mutation_unquoted_heredoc_expansions_are_shell(body: str) -> None:
+    assert cmd_mutation(f"cat <<EOF\n{body}\nEOF")[0] == "acting"
+
+
+@pytest.mark.parametrize("delimiter", ["'EOF'", '"EOF"'])
+def test_cmd_mutation_quoted_heredoc_expansions_are_literal(delimiter: str) -> None:
+    assert cmd_mutation(f"cat <<{delimiter}\n$(git commit -am update)\nEOF") == (None, None)
+
+
+def test_cmd_mutation_escaped_heredoc_expansions_are_literal() -> None:
+    assert cmd_mutation("cat <<EOF\n\\$(git commit -am update)\nEOF") == (None, None)
+    assert cmd_mutation("cat <<EOF\n\\`git commit -am update\\`\nEOF") == (None, None)
+    assert cmd_mutation("cat <<EOF\n$(git status --short)\nEOF") == (None, None)
 
 
 def test_cmd_mutation_home_dir_is_user_agnostic() -> None:
