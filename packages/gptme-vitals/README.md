@@ -261,6 +261,12 @@ Every build removes old public summaries and registered HTML outputs for current
 private routes before collection, even when those pages were not selected or
 their emitters fail. HTML cleanup also covers routes without envelopes. Standalone
 `publish_page` revokes both registered files for its private route as well.
+Revocation also scans the served tree for valid page-envelope objects whose schema
+and slug identify the private route. This removes historical summaries after
+`summary_source` is renamed or removed, regardless of filename. Unreadable files
+stop cleanup; malformed/non-envelope files are not attributed to a route. Historical
+HTML paths must still be retained in the registry during revocation or removed by
+the operator: HTML does not carry an envelope ownership contract.
 When any envelope route is private, the old portal and `headline.json` are also
 removed before collection: both can embed text from a formerly public page,
 even after headline ownership moves to another route. Leaving them until core
@@ -301,6 +307,14 @@ unbounded time waiting behind other collectors on the shared build lock. Collect
 must bound their own I/O; a hung collector otherwise stalls every page. Library
 callers can pass `timeout_seconds` to impose an explicit whole-build deadline,
 including lock wait, when their deployment has a known queue bound.
+
+Regeneration removes obsolete generated service/timer files for the same prefix,
+including removed routes and routes that lost their envelope or schedule. Ownership
+is recognized by the generated unit header, not just a filename prefix; unrelated
+units and other prefixes remain untouched. This reconciles files only: the operator
+must stop/disable previously installed timers and reload systemd separately. Output
+filesystem failures return exit 1 with a diagnostic; generation is not transactional
+and can leave a partial set, so install only after a successful command.
 
 `manual` and `n/a` routes get no unit and are listed as skipped, so a page nobody
 refreshes is visible. The CLI refuses a scheduled envelope route without an
