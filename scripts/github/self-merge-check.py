@@ -3875,9 +3875,10 @@ def evaluate_pr(
                         "Could not verify review thread state (API failure)"
                     )
                     waiver = None
-                elif greptile_is_fresh:
+                else:
                     # Approval does not waive the independent fresh-Greptile
-                    # gate. Preserve findings that arrived with this refresh.
+                    # gate. Preserve findings that arrived with this refresh,
+                    # including a review absent from the initial snapshot.
                     refreshed_greptile_unresolved = sum(
                         1
                         for thread in shared_review_data[1]
@@ -3893,10 +3894,16 @@ def evaluate_pr(
                         )
                     )
                     if refreshed_greptile_unresolved and not greptile_unresolved:
-                        result.reasons.append(
-                            f"Greptile reviewed (score {greptile_score}/5); "
-                            f"{refreshed_greptile_unresolved} unresolved thread(s)"
-                        )
+                        signal = _fetch_greptile_summary_signal(repo, number)
+                        signal_sha = signal.get("reviewed_commit")
+                        if greptile_is_fresh or (
+                            isinstance(signal_sha, str)
+                            and _sha_matches_head(signal_sha, result.head_sha or "")
+                        ):
+                            result.reasons.append(
+                                f"Greptile reviewed (score {signal.get('score')}/5); "
+                                f"{refreshed_greptile_unresolved} unresolved thread(s)"
+                            )
         if waiver:
             result.warnings.append(waiver)
         else:

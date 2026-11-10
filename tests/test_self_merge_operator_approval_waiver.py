@@ -105,6 +105,7 @@ def test_malformed_output_fails_closed() -> None:
         "delayed_unreadable",
         "delayed_unresolved",
         "delayed_greptile_unresolved",
+        "new_greptile_unresolved",
     ],
 )
 def test_operator_approval_preserves_human_thread_gate(
@@ -150,7 +151,7 @@ def test_operator_approval_preserves_human_thread_gate(
                         {
                             "author": {
                                 "login": "greptile-apps[bot]"
-                                if thread_state == "delayed_greptile_unresolved"
+                                if "greptile" in thread_state
                                 else "ErikBjare"
                             },
                             "body": "Please fix this",
@@ -167,7 +168,7 @@ def test_operator_approval_preserves_human_thread_gate(
         nonlocal thread_reads_after_approval
         if approval_observed:
             thread_reads_after_approval += 1
-        elif thread_state.startswith("delayed_"):
+        elif thread_state.startswith(("delayed_", "new_")):
             return ([], [])
         return None if thread_state.endswith("unreadable") else ([], threads)
 
@@ -189,6 +190,11 @@ def test_operator_approval_preserves_human_thread_gate(
     )
     monkeypatch.setattr(smc, "greptile_summary_reviewed_commit", lambda *a: HEAD)
     monkeypatch.setattr(smc, "greptile_summary_score", lambda *a: 5)
+    monkeypatch.setattr(
+        smc,
+        "_fetch_greptile_summary_signal",
+        lambda *a: {"reviewed_commit": HEAD, "score": 5},
+    )
     monkeypatch.setattr(smc, "_fetch_greptile_review_data", review_data)
     monkeypatch.setattr(
         smc, "_fetch_ai_review_marker_checked", lambda *a, **k: (None, True)
@@ -210,7 +216,7 @@ def test_operator_approval_preserves_human_thread_gate(
     if thread_state.endswith("unreadable"):
         assert any("AI review required" in reason for reason in result.reasons)
         assert "Could not verify review thread state (API failure)" in result.reasons
-    elif thread_state == "delayed_greptile_unresolved":
+    elif "greptile" in thread_state:
         assert any("1 unresolved thread(s)" in reason for reason in result.reasons)
     elif thread_state.endswith("unresolved"):
         assert any(
