@@ -174,7 +174,7 @@ class RouteRegistry:
                 raise RouteRegistryError(f"duplicate href {route.href!r}")
             by_slug[route.slug] = route
             by_href[decoded_href] = route
-        headlines = [r.slug for r in self.routes if r.is_headline]
+        headlines = [r.slug for r in by_slug.values() if r.is_headline]
         if len(headlines) > 1:
             raise RouteRegistryError(
                 f"exactly one route may set is_headline, got {headlines}"
@@ -230,21 +230,21 @@ class RouteRegistry:
 
     def envelope_routes(self) -> tuple[DashboardRoute, ...]:
         """Routes that emit a page envelope (declare a ``summary_source``)."""
-        return tuple(r for r in self.routes if r.summary_source is not None)
+        return tuple(r for r in self._by_slug.values() if r.summary_source is not None)
 
     # -- core.json derivation --------------------------------------------
 
     def core_dimensions(self) -> dict[str, tuple[DashboardRoute, ...]]:
         """Routes grouped by the ``core.json`` dimension they contribute to."""
         grouped: dict[str, list[DashboardRoute]] = {}
-        for route in self.routes:
+        for route in self._by_slug.values():
             if route.core_dimension is not None:
                 grouped.setdefault(route.core_dimension, []).append(route)
         return {name: tuple(rows) for name, rows in grouped.items()}
 
     def headline_route(self) -> DashboardRoute:
         """The route that owns ``headline.json``; raises unless exactly one."""
-        for route in self.routes:
+        for route in self._by_slug.values():
             if route.is_headline:
                 return route
         raise RouteRegistryError(

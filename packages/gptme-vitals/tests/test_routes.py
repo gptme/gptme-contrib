@@ -505,3 +505,26 @@ def test_encoded_path_delimiters_do_not_alias_url_components(
         reg.resolve_internal_target(encoded, current_route="/", site_root=tmp_path)
         == tmp_path / "first.html"
     )
+
+
+def test_portal_can_own_headline_and_contribute_its_envelope() -> None:
+    portal = replace(
+        PORTAL,
+        summary_source="summary.json",
+        core_dimension="activity",
+        is_headline=True,
+    )
+    reg = RouteRegistry((), portal=portal)
+    assert reg.headline_route() is portal
+    assert reg.envelope_routes() == (portal,)
+    assert reg.core_dimensions() == {"activity": (portal,)}
+    # Portal ownership does not turn it into its own card or grouped nav link.
+    assert reg.public() == ()
+    assert reg.navigable() == ()
+
+
+def test_portal_and_page_cannot_both_own_headline() -> None:
+    portal = replace(PORTAL, summary_source="summary.json", is_headline=True)
+    page = _route("page", summary_source="page/summary.json", is_headline=True)
+    with pytest.raises(RouteRegistryError, match="exactly one"):
+        RouteRegistry((page,), portal=portal)
