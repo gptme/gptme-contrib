@@ -240,3 +240,33 @@ def test_journal_sharing_uses_resolved_file_not_suffix(tmp_path: Path) -> None:
     nodes = from_records(records, agent="bob", read_journal=reader)
     assert reads == []
     assert all("sessions_mentioned" not in n for n in nodes)
+
+
+def test_unusable_journal_does_not_abort_record_processing(tmp_path: Path) -> None:
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)
+    record = _rec(
+        "loop",
+        "2026-11-10T10:00:00Z",
+        "2026-11-10T10:30:00Z",
+        journal_path=str(loop / "entry.md"),
+        dispatch_cause={"task": "keep-me"},
+    )
+    for reader in (None, lambda _: "# Must not read"):
+        (node,) = from_records([record], agent="bob", read_journal=reader)
+        assert node["task"] == "keep-me"
+        assert "title" not in node
+
+
+def test_hardlinked_journals_are_shared(tmp_path: Path) -> None:
+    journal = tmp_path / "daily.md"
+    journal.write_text("# Shared log\nFollow-up to session 02fd.")
+    alias = tmp_path / "alias.md"
+    alias.hardlink_to(journal)
+    records = [
+        _rec(str(i), "2026-11-10T10:00:00Z", "2026-11-10T10:30:00Z", journal_path=str(path))
+        for i, path in enumerate((journal, alias))
+    ]
+    nodes = from_records(records, agent="bob")
+    assert len(nodes) == 2
+    assert all("sessions_mentioned" not in n for n in nodes)

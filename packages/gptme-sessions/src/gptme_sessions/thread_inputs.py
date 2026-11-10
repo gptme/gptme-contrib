@@ -166,21 +166,31 @@ def from_records(
     The result is sorted by start, as ``threads`` requires.
     """
     records = list(records)
-    shared: dict[Path, int] = {}
-    journal_paths: list[Path | None] = []
+    shared: dict[Path | tuple[int, int], int] = {}
+    journal_paths: list[tuple[Path, Path | tuple[int, int]] | None] = []
     for r in records:
-        path = None
-        if r.journal_path:
-            path = Path(r.journal_path).expanduser()
-            if not path.is_absolute():
-                base = journal_root or (Path(r.project).expanduser() if r.project else None)
-                path = (base / path) if base else path
-            path = path.resolve()
-            shared[path] = shared.get(path, 0) + 1
-        journal_paths.append(path)
+        entry = None
+        if r.journal_path and read_journal is not None:
+            try:
+                path = Path(r.journal_path).expanduser()
+                if not path.is_absolute():
+                    base = journal_root or (Path(r.project).expanduser() if r.project else None)
+                    path = (base / path) if base else path
+                path = path.resolve()
+                identity: Path | tuple[int, int] = path
+                try:
+                    stat = path.stat()
+                    identity = (stat.st_dev, stat.st_ino)
+                except FileNotFoundError:
+                    pass  # Custom readers can supply text for paths not on disk.
+                entry = (path, identity)
+                shared[identity] = shared.get(identity, 0) + 1
+            except (OSError, RuntimeError):
+                pass  # Unusable journal evidence must not discard record fields.
+        journal_paths.append(entry)
 
     nodes: list[dict[str, Any]] = []
-    for r, path in zip(records, journal_paths):
+    for r, entry in zip(records, journal_paths):
         start = _epoch(r.start_time)
         end = _epoch(r.end_time)
         duration = r.duration_seconds or 0
@@ -220,8 +230,8 @@ def from_records(
             n["journal"] = jkey
             if m := _LABEL_IN_NAME.search(Path(jkey).stem):
                 n["short"] = m.group(1)
-            if read_journal is not None and path is not None and shared[path] == 1:
-                text = read_journal(path)
+            if read_journal is not None and entry is not None and shared[entry[1]] == 1:
+                text = read_journal(entry[0])
                 if text:
                     digest = journal_digest(text)
                     n.update({k: v for k, v in digest.items() if v})
