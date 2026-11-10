@@ -917,3 +917,37 @@ def test_private_route_losing_envelope_still_revokes_shared_text(
     assert _run_with_emitters(tmp_path, changed, {"sessions": boom})[0] == 1
     assert not (tmp_path / "public/headline.json").exists()
     assert not (tmp_path / "public/index.html").exists()
+
+
+@pytest.mark.parametrize("new_summary", [None, "moved/summary.json"])
+def test_private_transition_revokes_previous_summary_path(
+    tmp_path: Path, new_summary: str | None
+) -> None:
+    from dataclasses import replace
+
+    registry = _portal_registry()
+    assert _run_with_emitters(tmp_path, registry, _all())[0] == 0
+    changed = RouteRegistry(
+        tuple(
+            replace(
+                route,
+                visibility=Visibility.PRIVATE,
+                summary_source=new_summary,
+                core_dimension=None,
+                is_headline=False,
+            )
+            if route.slug == "services"
+            else replace(route, is_headline=True)
+            if route.slug == "sessions"
+            else route
+            for route in registry.routes
+        ),
+        portal=registry.portal,
+    )
+    assert (
+        _run_with_emitters(
+            tmp_path, changed, {"sessions": _emitter("sessions", Status.HEALTHY)}
+        )[0]
+        == 0
+    )
+    assert not (tmp_path / "public/services/summary.json").exists()

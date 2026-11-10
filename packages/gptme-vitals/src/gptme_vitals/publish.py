@@ -99,7 +99,24 @@ def summary_path(route: DashboardRoute, root: Path) -> Path:
 
 
 def revoke_public_route(route: DashboardRoute, root: Path) -> None:
-    """Remove registered served files for a private route, including its HTML."""
+    """Remove registered files and historical envelopes owned by a private route.
+
+    Envelopes identify their owner independently of the current registry path,
+    so removing or renaming summary_source cannot strand a served summary.
+    """
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_bytes())
+        except (ValueError, UnicodeError, RecursionError):
+            continue
+        if (
+            isinstance(data, dict)
+            and data.get("schema") == ENVELOPE_SCHEMA
+            and data.get("slug") == route.slug
+        ):
+            path.unlink()
     for what, source in (
         ("summary_source", route.summary_source),
         ("output_path", route.output_path),
