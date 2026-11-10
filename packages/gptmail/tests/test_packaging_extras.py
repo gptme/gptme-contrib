@@ -52,6 +52,12 @@ def test_secrets_extra_names_the_scanner_distribution() -> None:
         "optional-dependencies"
     ]
     assert _names(extras["secrets"]) == {"gptme-redact"}
+    # gptmail supports 3.10 but the scanner needs 3.11; an unmarked requirement
+    # would make `gptmail[secrets,...]` uninstallable on 3.10.
+    (req,) = (Requirement(r) for r in extras["secrets"])
+    assert req.marker is not None
+    assert req.marker.evaluate({"python_version": "3.10"}) is False
+    assert req.marker.evaluate({"python_version": "3.11"}) is True
 
 
 def test_scanner_distribution_is_a_workspace_member() -> None:

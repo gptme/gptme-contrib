@@ -51,8 +51,10 @@ bridge = [
 # without it). The distribution is `gptme-redact` (import name `redact`); never
 # name bare `redact`, which on PyPI is an unrelated config-template renderer.
 # Resolves from the workspace now; from PyPI once `gptme-redact` is published.
+# The scanner needs Python 3.11 (its regexes use 3.11 syntax); on 3.10 the extra
+# is a no-op and `gptmail agent doctor` reports the scanner missing.
 secrets = [
-    "gptme-redact>=0.1",
+    "gptme-redact>=0.1; python_version >= '3.11'",
 ]
 test = [
     "packaging>=23.0",
