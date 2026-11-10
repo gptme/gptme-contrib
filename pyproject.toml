@@ -62,6 +62,7 @@ gptme-sessions = { workspace = true }
 gptme-usage = { workspace = true }
 gptodo = { workspace = true }
 gptmail = { workspace = true }
+gptme-redact = { workspace = true }
 
 [tool.pytest.ini_options]
 # Required for cross-package test collection (pytest packages/)
