@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from gptme_sessions.signals import extract_from_path
 from gptme_sessions.subagent_summary import (
     ChildSpec,
@@ -131,6 +133,221 @@ def test_cmd_mutation_scratch_vs_repo_redirects() -> None:
     assert label == "acting"
     label, _ = cmd_mutation("echo hi > so.md", cwd_scratch=True)
     assert label == "scratch"
+
+
+def test_cmd_mutation_ignores_redirect_chars_in_data_heredoc() -> None:
+    # Production false positive (2026-11-09, read-only verifier child): Python
+    # source on stdin contained ``('>','E ')`` and read as ``> ','``.
+    script = "python3 - <<'PY'\nkept = [s for s in ls if s.startswith(('>','E '))]\nPY"
+    assert cmd_mutation(script) == (None, None)
+    tabbed = "cat <<-EOF\n\tfoo > bar.txt\n\tEOF\nls"
+    assert cmd_mutation(tabbed) == (None, None)
+
+
+def test_cmd_mutation_heredoc_keeps_real_shell_mutations() -> None:
+    # Redirects outside the body, bodies fed to a shell, and Python writes
+    # inside the body all still count.
+    after = "python3 - <<'PY'\nx = a > b\nPY\necho hi > out.txt"
+    assert cmd_mutation(after)[0] == "acting"
+    assert cmd_mutation("cat > /home/alice/x.md <<'EOF'\nhi\nEOF")[0] == "acting"
+    assert cmd_mutation("bash <<'EOF'\necho hi > /home/alice/x\nEOF")[0] == "acting"
+    write = "python3 - <<'PY'\nopen('/home/alice/repo/x', 'w').write('y')\nPY"
+    assert cmd_mutation(write)[0] == "acting"
+
+
+def test_cmd_mutation_heredoc_evidence_names_actual_fileop() -> None:
+    command = "cat <<'EOF'\n" + "a" * 100 + "\nEOF\ntouch out.txt"
+    label, evidence = cmd_mutation(command)
+    assert label == "acting"
+    assert evidence is not None and "touch out.txt" in evidence
+
+
+@pytest.mark.parametrize("header", ["# example <<EOF", "echo hi # example <<EOF", "cat <<EOF"])
+def test_cmd_mutation_unterminated_or_commented_heredoc_keeps_evidence(header: str) -> None:
+    assert cmd_mutation(f"{header}\ntouch out.txt")[0] == "acting"
+
+
+@pytest.mark.parametrize("delimiter", ["EOF.txt", "EOF-END", "'EOF.txt'", "EOF'part'"])
+def test_cmd_mutation_unsupported_heredoc_delimiter_keeps_following_commands(
+    delimiter: str,
+) -> None:
+    terminator = delimiter.replace("'", "")
+    command = f"cat <<{delimiter}\nhello\n{terminator}\ngit commit -am update"
+    assert cmd_mutation(command)[0] == "acting"
+
+
+@pytest.mark.parametrize("backslashes", [1, 2, 3, 4])
+def test_cmd_mutation_heredoc_line_continuation_respects_escaping(backslashes: int) -> None:
+    command = "cat <<EOF\n" + "\\" * backslashes + "\n$(touch out.txt)\nEOF"
+    assert cmd_mutation(command)[0] == "acting"
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "bash \\\n<<'EOF'",
+        "ba\\\nsh <<'EOF'",
+        "bash \\\n  -s \\\n  <<'EOF'",
+        "cat <<'EOF' | bash",
+    ],
+)
+def test_cmd_mutation_continued_shell_heredoc_keeps_body(header: str, tmp_path: Path) -> None:
+    import subprocess
+
+    command = f"{header}\ntouch out.txt\nEOF"
+    subprocess.run(["bash", "-c", command], cwd=tmp_path, check=True)
+    assert (tmp_path / "out.txt").exists()
+    label, evidence = cmd_mutation(command)
+    assert label == "acting"
+    assert evidence is not None and "touch out.txt" in evidence
+    assert classify_agent({"shell": 1}, [command], [])[0] == "acting"
+
+
+@pytest.mark.parametrize("header", ["cat <<EOF", "cat <<-EOF"])
+def test_cmd_mutation_continued_heredoc_delimiter_keeps_following_write(
+    header: str, tmp_path: Path
+) -> None:
+    import subprocess
+
+    command = f"{header}\nEO\\\nF\ntouch out.txt\ncat <<EOF\nhello\nEOF"
+    subprocess.run(["bash", "-c", command], cwd=tmp_path, check=True, capture_output=True)
+    assert (tmp_path / "out.txt").exists()
+    label, evidence = cmd_mutation(command)
+    assert label == "acting"
+    assert evidence is not None and "touch out.txt" in evidence
+    assert classify_agent({"shell": 1}, [command], [])[0] == "acting"
+    # Quoted delimiters do not fold backslash-newline in their bodies.
+    quoted = "cat <<'EOF'\nEO\\\nF\ntouch out.txt\nEOF"
+    assert cmd_mutation(quoted) == (None, None)
+
+
+def test_cmd_mutation_continued_data_heredoc_remains_literal() -> None:
+    command = "cat \\\n<<'EOF'\ntouch out.txt\nEOF"
+    assert cmd_mutation(command) == (None, None)
+    pipeline = "cat <<'EOF' | cat\ntouch out.txt\nEOF"
+    assert cmd_mutation(pipeline) == (None, None)
+
+
+def test_heredoc_body_precedes_pipeline_continuation(tmp_path: Path) -> None:
+    import subprocess
+
+    # A newline after | starts the pending heredoc, not the next executable.
+    # Putting bash before the body (as one review proposed) is invalid syntax.
+    invalid = "cat <<'EOF' |\nbash\ntouch out.txt\nEOF"
+    result = subprocess.run(["bash", "-c", invalid], cwd=tmp_path, capture_output=True)
+    assert result.returncode == 2
+    assert not (tmp_path / "out.txt").exists()
+    valid = "cat <<'EOF' |\ntouch out.txt\nEOF\nbash"
+    subprocess.run(["bash", "-c", valid], cwd=tmp_path, check=True)
+    assert (tmp_path / "out.txt").exists()
+    assert cmd_mutation(valid)[0] == "acting"
+
+
+@pytest.mark.parametrize(
+    "shell", ['"/bin/bash"', "'/bin/sh'", '"bash"', "env '/bin/bash'", "/bin/ash"]
+)
+def test_cmd_mutation_quoted_shell_heredoc_executes_body(shell: str) -> None:
+    assert cmd_mutation(f"{shell} <<'EOF'\ntouch out.txt\nEOF")[0] == "acting"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "$(git commit -am update)",
+        "`git commit -am update`",
+        "'$(git commit -am update)'",
+        '"$(git commit -am update)"',
+        "$(\ngit commit -am update\n)",
+        "$(printf '%s' \"$(date)\"; touch out.txt)",
+    ],
+)
+def test_cmd_mutation_unquoted_heredoc_expansions_are_shell(body: str) -> None:
+    assert cmd_mutation(f"cat <<EOF\n{body}\nEOF")[0] == "acting"
+
+
+@pytest.mark.parametrize("delimiter", ["'EOF'", '"EOF"'])
+def test_cmd_mutation_quoted_heredoc_expansions_are_literal(delimiter: str) -> None:
+    assert cmd_mutation(f"cat <<{delimiter}\n$(git commit -am update)\nEOF") == (None, None)
+
+
+def test_cmd_mutation_separate_heredoc_expansions_keep_quote_context(tmp_path: Path) -> None:
+    import subprocess
+
+    command = "cat <<EOF\n$(printf x) '$(touch out.txt)' $(printf y)\nEOF"
+    subprocess.run(["bash", "-c", command], cwd=tmp_path, check=True, capture_output=True)
+    assert (tmp_path / "out.txt").exists()
+    assert cmd_mutation(command)[0] == "acting"
+    literal = "cat <<EOF\n$(printf '%s' '$(touch out.txt)')\nEOF"
+    assert cmd_mutation(literal) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "$(case x in\nx)\ntouch out.txt\n;;\nesac)",
+        "$(case x in x) touch out.txt;; esac)",
+        "$(printf '%s' \"$(case x in x) touch out.txt;; esac)\")",
+    ],
+)
+def test_cmd_mutation_heredoc_case_substitution_keeps_write(body: str, tmp_path: Path) -> None:
+    import subprocess
+
+    command = f"cat <<EOF\n{body}\nEOF"
+    subprocess.run(["bash", "-c", command], cwd=tmp_path, check=True, capture_output=True)
+    assert (tmp_path / "out.txt").exists()
+    label, evidence = cmd_mutation(command)
+    assert label == "acting"
+    assert evidence is not None and "touch out.txt" in evidence
+    assert classify_agent({"shell": 1}, [command], [])[0] == "acting"
+    literal = "cat <<EOF\n$(printf '%s' 'case x in x) touch out.txt;; esac')\nEOF"
+    assert cmd_mutation(literal) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "$(printf x # )\ntouch out.txt\n)",
+        "$(printf x # ') case\ntouch out.txt\n)",
+        '$(printf "%s" "$(printf x # )\ntouch out.txt\n)")',
+    ],
+)
+def test_cmd_mutation_heredoc_substitution_comments_keep_write(body: str, tmp_path: Path) -> None:
+    import subprocess
+
+    command = f"cat <<EOF\n{body}\nEOF"
+    subprocess.run(["bash", "-c", command], cwd=tmp_path, check=True, capture_output=True)
+    assert (tmp_path / "out.txt").exists()
+    label, evidence = cmd_mutation(command)
+    assert label == "acting"
+    assert evidence is not None and "touch out.txt" in evidence
+    assert classify_agent({"shell": 1}, [command], [])[0] == "acting"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "$(printf x # ignored\n# touch out.txt\n)",
+        "$(printf '%s' '# ) touch out.txt')",
+        "$(printf '%s' x#) 'touch out.txt'",
+        "$(printf '%s' \\#) 'touch out.txt'",
+    ],
+)
+def test_cmd_mutation_heredoc_comment_and_hash_data_remain_readonly(
+    body: str, tmp_path: Path
+) -> None:
+    import subprocess
+
+    command = f"cat <<EOF\n{body}\nEOF"
+    subprocess.run(["bash", "-c", command], cwd=tmp_path, check=True, capture_output=True)
+    assert not (tmp_path / "out.txt").exists()
+    assert cmd_mutation(command) == (None, None)
+    assert classify_agent({"shell": 1}, [command], [])[0] == "readonly"
+
+
+def test_cmd_mutation_escaped_heredoc_expansions_are_literal() -> None:
+    assert cmd_mutation("cat <<EOF\n\\$(git commit -am update)\nEOF") == (None, None)
+    assert cmd_mutation("cat <<EOF\n\\`git commit -am update\\`\nEOF") == (None, None)
+    assert cmd_mutation("cat <<EOF\n$(git status --short)\nEOF") == (None, None)
 
 
 def test_cmd_mutation_home_dir_is_user_agnostic() -> None:
@@ -622,6 +839,24 @@ def test_scan_gptme_child_writes_are_seen() -> None:
     assert scan.write_paths == ["/home/bob/repo/out.md"]
     assert scan.result_bytes == 40
     assert any("curl" in cmd for cmd in scan.bash_cmds)
+
+
+def test_scan_gptme_read_tool_path_is_not_a_write() -> None:
+    # Production false positive (2026-11-09): a read-only verifier child's
+    # ``@read`` calls on conftest.py were counted as writes.
+    from gptme_sessions.subagent_summary import _scan_gptme
+
+    records = [
+        {
+            "role": "assistant",
+            "content": '@read(c1): {"path": "/home/alice/repo/conftest.py"}\n'
+            '@save(c2): {"path": "/home/alice/repo/out.md", "content": "x"}',
+            "timestamp": "2026-03-01T10:00:01Z",
+        }
+    ]
+    scan = _scan_gptme(records)
+    assert scan.tools == {"read": 1, "save": 1}
+    assert scan.write_paths == ["/home/alice/repo/out.md"]
 
 
 def test_summarize_subagents_gptme_child_not_readonly() -> None:

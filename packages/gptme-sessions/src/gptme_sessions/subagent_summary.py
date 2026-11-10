@@ -98,6 +98,164 @@ _NONSCRATCH_PATH_RE = re.compile(
     r"|packages/|gptme-contrib/)"
 )
 _QUOTED_TARGET_RE = re.compile(r"(?<![0-9&<>=!])>{1,2}\s*[\"']([^\"'\n]+)[\"']")
+_HEREDOC_RE = re.compile(r"(?<!<)<<(-?)\s*([\"']?)([A-Za-z_]\w*)\2(?=\s|[;&|<>()]|$)")
+# A heredoc body fed to a shell is still shell; any other body is stdin data.
+_SHELL_CONSUMER_RE = re.compile(r"\b(?:ba|z|da|k|a)?sh\b|\bssh\b|\beval\b|\bsource\b")
+# Even backslash pairs leave the expansion active; an odd backslash escapes it.
+_HEREDOC_SUBSTITUTION_RE = re.compile(r"(?<!\\)(?:\\\\)*(\$\(|`)")
+
+
+def _heredoc_substitutions(body: str) -> Iterable[str]:
+    """Keep expansions separate: quotes between them are data, not shell syntax."""
+    pos = 0
+    while match := _HEREDOC_SUBSTITUTION_RE.search(body, pos):
+        start = i = match.end()
+        backtick = match.group(1) == "`"
+        quotes: list[tuple[str, int | None]] = []
+        cases: list[int] = []
+        pattern_ends: list[int] = []
+        quote = ""
+        while i < len(body):
+            char = body[i]
+            if char == "\\" and quote != "'":
+                i += 2
+                continue
+            if backtick:
+                if char == "`":
+                    break
+            elif char == quote:
+                quote = ""
+            elif quote != "'" and body.startswith("$(", i):
+                quotes.append((quote, i + 2))
+                quote = ""
+                i += 2
+                continue
+            elif not quote:
+                if char == "#" and (i == start or body[i - 1] in " \t\n;&|()<>"):
+                    # Comments cannot close a substitution or change its quote
+                    # context. Blank them without shifting nested offsets or
+                    # allowing their literal text to become mutation evidence.
+                    end = body.find("\n", i)
+                    if end < 0:
+                        end = len(body)
+                    body = body[:i] + " " * (end - i) + body[end:]
+                    i = end
+                    continue
+                # A case pattern's ')' is not a substitution terminator.
+                # Track case scopes at their parenthesis depth, not quoted
+                # occurrences of the words in printf/echo data.
+                word = re.match(r"(?:case|esac)\b", body[i:]) if char in "ce" else None
+                if word and (i == start or body[i - 1] in " \t\n;&|("):
+                    if word.group() == "case":
+                        cases.append(len(quotes))
+                    elif cases and cases[-1] == len(quotes):
+                        cases.pop()
+                    i += len(word.group())
+                    continue
+                if char in "\"'":
+                    quote = char
+                elif char == "(":
+                    quotes.append((quote, None))
+                elif char == ")":
+                    if cases and cases[-1] == len(quotes):
+                        # Put the arm on a command boundary for the regex
+                        # classifier, including single-line `x) touch ...`.
+                        pattern_ends.append(i)
+                    else:
+                        if not quotes:
+                            break
+                        quote, nested_start = quotes.pop()
+                        if nested_start is not None:
+                            # The outer double quotes do not make a nested
+                            # command substitution literal shell data.
+                            yield body[nested_start:i]
+            i += 1
+        # An unclosed/unsupported expansion stays conservative, not invisible.
+        retained = body[start:i]
+        for end in reversed(pattern_ends):
+            retained = retained[: end - start + 1] + "\n" + retained[end - start + 1 :]
+        yield retained
+        pos = i + 1
+
+
+def _strip_heredoc_bodies(cmd: str) -> str:
+    """Drop heredoc bodies that are data, not shell, from ``cmd``.
+
+    ``python3 - <<'PY' ... PY`` passes program text on stdin, so a ``>`` in the
+    Python source (``s.startswith(('>', 'E '))``) is not a shell redirect.
+    Bodies fed to a shell (``bash <<EOF``, ``ssh host <<EOF``) are kept.
+    Unquoted data heredocs still execute command substitutions. Keep those
+    separately from the literal text, whose quotes do not suppress expansion.
+    This is a best-effort classifier, not a full shell parser.
+    """
+    lines = cmd.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        i += 1
+        # Inspect a continued command as one header, not independent physical
+        # lines. Only join here: quoted heredoc bodies must keep their newlines.
+        while i < len(lines) and (len(line) - len(line.rstrip("\\"))) % 2:
+            line = line[:-1] + lines[i]
+            i += 1
+        out.append(line)
+        quoted = [q.span() for q in _QUOTED_RE.finditer(line)]
+        comment = next(
+            (
+                pos
+                for pos, char in enumerate(line)
+                if char == "#"
+                and (pos == 0 or line[pos - 1].isspace())
+                and not any(a <= pos < b for a, b in quoted)
+            ),
+            len(line),
+        )
+        heredocs = [
+            m
+            for m in _HEREDOC_RE.finditer(line[:comment])
+            if not any(a <= m.start() < b for a, b in quoted)
+        ]
+        # Quoting the executable does not stop it consuming shell input.
+        header = _QUOTED_RE.sub(lambda q: q.group()[1:-1], line)
+        # With a trailing pipe the heredoc precedes the rest of the pipeline;
+        # its consumer can be after the delimiter. Keep this unsupported shape
+        # conservatively rather than hiding an executed body.
+        if (
+            not heredocs
+            or _SHELL_CONSUMER_RE.search(header)
+            or header[:comment].rstrip().endswith("|")
+        ):
+            continue
+        for m in heredocs:
+            strip_tabs, delim = m.group(1) == "-", m.group(3)
+            body_lines: list[str] = []
+            body_start = i
+            while i < len(lines):
+                body = lines[i]
+                i += 1
+                # Unquoted heredocs fold escaped newlines before testing the
+                # delimiter: EO\\\nF closes EOF, exposing following commands.
+                while (
+                    not m.group(2) and i < len(lines) and (len(body) - len(body.rstrip("\\"))) % 2
+                ):
+                    body = body[:-1] + lines[i]
+                    i += 1
+                if strip_tabs:
+                    body = body.lstrip("\t")
+                if body == delim:
+                    break
+                body_lines.append(body)
+            else:
+                # Unsupported/malformed input must not erase later evidence.
+                out.extend(lines[body_start:])
+                return "\n".join(out)
+            if not m.group(2):
+                out.extend(_heredoc_substitutions("\n".join(body_lines)))
+            out.append(delim)
+    return "\n".join(out)
+
+
 _CD_ANY_RE = re.compile(r"(?:^|[;&|]\s*)cd\s+(\S+)", re.M)
 
 _CC_WRITE_TOOLS = {"Write", "Edit", "NotebookEdit", "MultiEdit"}
@@ -162,12 +320,13 @@ def cmd_mutation(cmd: str, cwd_scratch: bool = False) -> tuple[str | None, str |
     ``cwd_scratch`` says the shell already sits in scratch space (Claude Code's
     Bash keeps its cwd between calls; Codex runs each exec in a fresh shell).
     """
-    unq = _QUOTED_RE.sub("''", cmd)
+    shell = _strip_heredoc_bodies(cmd)
+    unq = _QUOTED_RE.sub("''", shell)
     m = _STRONG_RE.search(unq)
     if m:
         return "acting", unq[max(0, m.start() - 20) : m.end() + 40]
     targets = list(_REDIRECT_RE.findall(unq))
-    targets += list(_QUOTED_TARGET_RE.findall(cmd))
+    targets += list(_QUOTED_TARGET_RE.findall(shell))
     for dl in _DOWNLOAD_RE.finditer(cmd):
         t = (dl.group(1) or dl.group(2) or "").strip("'\"")
         if t and not t.startswith("/dev/"):
@@ -189,7 +348,8 @@ def cmd_mutation(cmd: str, cwd_scratch: bool = False) -> tuple[str | None, str |
         # Same bias as the redirect path below: outside known scratch space a
         # relative-path fileop (rm foo, mv a b) is counted as acting rather
         # than scratch — a repo-root cwd is the common case.
-        return "acting", cmd[max(0, fm.start() - 20) : fm.end() + 60]
+        evidence_source = unq if sh else cmd
+        return "acting", evidence_source[max(0, fm.start() - 20) : fm.end() + 60]
     for t in targets:
         if _SCRATCH_PATH_RE.match(t):
             continue
@@ -197,7 +357,12 @@ def cmd_mutation(cmd: str, cwd_scratch: bool = False) -> tuple[str | None, str |
             return "acting", f"redirect > {t}"
         if not t.startswith("$") and not in_scratch:
             return "acting", f"redirect > {t}"
-    ev = ("fileop " + cmd[max(0, fm.start()) : fm.end() + 50]) if fm else f"redirect > {targets[0]}"
+    evidence_source = unq if sh else cmd
+    ev = (
+        "fileop " + evidence_source[max(0, fm.start()) : fm.end() + 50]
+        if fm
+        else f"redirect > {targets[0]}"
+    )
     return "scratch", ev
 
 
@@ -576,6 +741,9 @@ _GPTME_WRITE_LANGS = {
 }
 
 
+# gptme tools whose ``path`` argument names a file they only read.
+_GPTME_READ_TOOLS = {"read", "chats", "vision"}
+
 _TOOL_CALL_HEADER_RE = re.compile(r"^@(\w+)\([^)]+\):", re.M)
 
 
@@ -674,7 +842,7 @@ def _scan_gptme(records: list[dict[str, Any]]) -> TranscriptScan:
                     if args.get("command"):
                         scan.bash_cmds.append(str(args["command"]))
                     path = args.get("path") or args.get("file_path")
-                    if path:
+                    if path and name not in _GPTME_READ_TOOLS:
                         scan.write_paths.append(str(path))
     return scan
 
