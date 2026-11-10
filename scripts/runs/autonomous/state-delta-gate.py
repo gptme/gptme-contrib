@@ -36,6 +36,7 @@ Typical integration in ``autonomous-run-cc.sh``::
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import sys
@@ -80,18 +81,16 @@ def _write_state(state_file: Path, state: dict) -> None:
         with tempfile.NamedTemporaryFile(
             "w", dir=state_file.parent, delete=False, suffix=".tmp"
         ) as tf:
-            tf.write(data)
             tmp = tf.name
+            tf.write(data)
         os.replace(tmp, state_file)
-    except OSError as exc:
+    except OSError:
         if tmp:
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
-        print(
-            f"state-delta-gate: warning: could not write state: {exc}", file=sys.stderr
-        )
+        raise
 
 
 def _check(args: argparse.Namespace) -> int:
@@ -169,40 +168,37 @@ def _check(args: argparse.Namespace) -> int:
     return PROCEED if decision.proceed else SKIP
 
 
-def _record_noop(args: argparse.Namespace) -> int:
+def _record(args: argparse.Namespace, *, productive: bool) -> int:
     state_file = Path(args.state_file)
     if not state_file.is_absolute():
         state_file = Path(args.workspace).resolve() / state_file
 
-    state = _read_state(state_file)
-    streak_raw = state.get("noop_only_streak", 0)
-    streak = int(streak_raw) if isinstance(streak_raw, int | float | str) else 0
-    streak += 1
-    now = _now()
-    state["noop_only_streak"] = streak
-    state["last_executed_ts"] = now.isoformat()
-    _write_state(state_file, state)
-    print(
-        f"state-delta-gate: recorded noop (streak={streak}, ts={now.isoformat()})",
-        file=sys.stderr,
+    try:
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        # Lock a stable sidecar, not the JSON inode replaced by _write_state.
+        # Never unlink it: waiting writers must all acquire the same lock.
+        lock_file = state_file.with_name(state_file.name + ".lock")
+        with lock_file.open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            state = _read_state(state_file)
+            old_streak = state.get("noop_only_streak", 0)
+            streak = int(old_streak) if isinstance(old_streak, int | float | str) else 0
+            streak = 0 if productive else streak + 1
+            now = _now()
+            state["noop_only_streak"] = streak
+            state["last_executed_ts"] = now.isoformat()
+            _write_state(state_file, state)
+    except OSError as exc:
+        print(f"state-delta-gate: could not record state: {exc}", file=sys.stderr)
+        return 1
+
+    detail = (
+        f"productive (streak reset from {old_streak} to 0"
+        if productive
+        else f"noop (streak={streak}"
     )
-    return 0
-
-
-def _record_productive(args: argparse.Namespace) -> int:
-    state_file = Path(args.state_file)
-    if not state_file.is_absolute():
-        state_file = Path(args.workspace).resolve() / state_file
-
-    state = _read_state(state_file)
-    old_streak = state.get("noop_only_streak", 0)
-    now = _now()
-    state["noop_only_streak"] = 0
-    state["last_executed_ts"] = now.isoformat()
-    _write_state(state_file, state)
     print(
-        f"state-delta-gate: recorded productive (streak reset from {old_streak} to 0, "
-        f"ts={now.isoformat()})",
+        f"state-delta-gate: recorded {detail}, ts={now.isoformat()})",
         file=sys.stderr,
     )
     return 0
@@ -307,9 +303,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.subcmd == "check":
         return _check(args)
     if args.subcmd == "record-noop":
-        return _record_noop(args)
+        return _record(args, productive=False)
     if args.subcmd == "record-productive":
-        return _record_productive(args)
+        return _record(args, productive=True)
     if args.subcmd == "status":
         return _status(args)
 

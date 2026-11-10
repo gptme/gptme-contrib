@@ -12,9 +12,11 @@ Contracts:
 
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -38,6 +40,20 @@ SKIP = state_delta_gate_cli.SKIP
 UTC = timezone.utc
 
 
+@pytest.fixture(autouse=True)
+def clean_gate_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Tests must never target a live caller's state or inherit its bypasses.
+    for name in (
+        "STATE_DELTA_GATE_FILE",
+        "STATE_DELTA_GATE_VERBOSE",
+        "GATE_ADDRESSED",
+        "GATE_QUOTA_BEHIND_PACE",
+        "FORCE_SESSION",
+        "GATE_EXPLORE_RATE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def run(workspace: Path, *args: str) -> int:
     return int(state_delta_gate_cli.main(["--workspace", str(workspace), *args]))
 
@@ -51,6 +67,73 @@ def write_state(workspace: Path, **values: object) -> None:
     p = workspace / "state" / "state-delta-gate.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(values) + "\n")
+
+
+@pytest.mark.parametrize("command", ["record-noop", "record-productive"])
+def test_record_holds_sidecar_lock_through_read_and_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    write_state(tmp_path, noop_only_streak=1)
+    state_file = tmp_path / "state" / "state-delta-gate.json"
+    lock_file = state_file.with_name(state_file.name + ".lock")
+    lock_file.touch()
+    original_read = state_delta_gate_cli._read_state
+    original_write = state_delta_gate_cli._write_state
+
+    def assert_locked() -> None:
+        with lock_file.open("a") as lock:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def read(path: Path) -> dict:
+        assert_locked()
+        return dict(original_read(path))
+
+    def write(path: Path, state: dict) -> None:
+        assert_locked()
+        original_write(path, state)
+
+    monkeypatch.setattr(state_delta_gate_cli, "_read_state", read)
+    monkeypatch.setattr(state_delta_gate_cli, "_write_state", write)
+    assert run(tmp_path, command) == 0
+    # The lock must be released, but the stable inode must not be unlinked.
+    with lock_file.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_concurrent_noops_preserve_every_increment(tmp_path: Path) -> None:
+    write_state(tmp_path, noop_only_streak=1)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: run(tmp_path, "record-noop"), range(16)))
+    assert results == [0] * 16
+    assert read_state(tmp_path)["noop_only_streak"] == 17
+
+
+@pytest.mark.parametrize("command", ["record-noop", "record-productive"])
+@pytest.mark.parametrize("failure", ["create", "replace"])
+def test_record_failure_returns_nonzero_without_success_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    command: str,
+    failure: str,
+) -> None:
+    write_state(tmp_path, noop_only_streak=3, last_executed_ts="unchanged")
+    before = read_state(tmp_path)
+
+    def fail(*args, **kwargs):
+        raise OSError("injected write failure")
+
+    if failure == "create":
+        monkeypatch.setattr(state_delta_gate_cli.tempfile, "NamedTemporaryFile", fail)
+    else:
+        monkeypatch.setattr(state_delta_gate_cli.os, "replace", fail)
+    assert run(tmp_path, command) != 0
+    err = capsys.readouterr().err
+    assert "injected write failure" in err
+    assert "recorded" not in err
+    assert read_state(tmp_path) == before
+    assert not list((tmp_path / "state").glob("*.tmp"))
 
 
 # --- First run / no-state ---
