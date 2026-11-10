@@ -24,8 +24,15 @@ behaviour-preserving.
 
 from __future__ import annotations
 
+import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+
+# Reference policy values for the state-delta probe. They live here only so the
+# helpers have a documented default; the gate itself takes resolved inputs.
+DEFAULT_EXPLORE_RATE = 0.05
+DEFAULT_BACKOFF_BASE_SECONDS = 1800
+DEFAULT_BACKOFF_MAX_SECONDS = 14400
 
 
 @dataclass(frozen=True)
@@ -34,64 +41,172 @@ class GateDecision:
 
     ``proceed`` is the admission decision; ``reason`` is a human-readable
     explanation suitable for logging (it mirrors the bash gate's echo lines so
-    logs read identically before and after the cut-over).
+    logs read identically before and after the cut-over). ``cause`` names the
+    branch that decided it (``"inactive"``, ``"quota"``, ``"addressed"``,
+    ``"backoff"``, ``"change"``, ``"explore"`` or ``"skip"``) so the caller can
+    tag dispatch bookkeeping (e.g. ``{"kind": "timer", "gate": cause}``) without
+    parsing prose. Gates that predate this field leave it empty.
     """
 
     proceed: bool
     reason: str
+    cause: str = ""
+
+
+def state_delta_backoff_seconds(
+    consecutive_skips: int,
+    *,
+    base_seconds: int = DEFAULT_BACKOFF_BASE_SECONDS,
+    max_seconds: int = DEFAULT_BACKOFF_MAX_SECONDS,
+) -> int:
+    """Doubling wall-clock backoff for the state-delta probe.
+
+    The replacement for "any change opens the gate" is a deliberate clock: after
+    the gate has skipped ``consecutive_skips`` times in a row, the caller waits
+    ``base_seconds * 2 ** (consecutive_skips - 1)`` since the last session before
+    proceeding, capped at ``max_seconds``. With the reference defaults that is
+    30m, 1h, 2h, then 4h for every further skip.
+
+    ``consecutive_skips <= 0`` returns ``0`` — no backoff configured, which the
+    caller renders as "not elapsed".
+    """
+    if consecutive_skips <= 0:
+        return 0
+    return min(base_seconds * 2 ** (consecutive_skips - 1), max_seconds)
+
+
+def explore_roll(
+    rate: float = DEFAULT_EXPLORE_RATE, *, rng: random.Random | None = None
+) -> bool:
+    """Epsilon-explore decision for the would-be-skip lane.
+
+    Sampling a small fraction of would-be skips and running them is the only way
+    to measure what a skip costs: the productive rate of the explore cohort *is*
+    that cost, observed directly instead of inferred from selection-biased
+    counterfactuals. The caller tags those runs (``GateDecision.cause ==
+    "explore"``) so the cohort can be joined later.
+
+    Deterministic given an injected ``rng``. Rates ``<= 0`` never explore, rates
+    ``>= 1`` always do.
+    """
+    if rate <= 0:
+        return False
+    if rate >= 1:
+        return True
+    return (rng.random() if rng is not None else random.random()) < rate
 
 
 def state_delta_gate(
     *,
     noop_only_streak: int,
     quota_behind_pace: bool,
-    changes_detected: Callable[[], bool],
+    changes_detected: Callable[[], bool] | None = None,
     force_session: bool = False,
+    addressed_signals: Callable[[], bool] | None = None,
+    wall_clock_backoff_expired: bool = False,
+    explore: bool = False,
 ) -> GateDecision:
-    """Skip a session when the last one no-op'd and nothing has changed since.
+    """Skip a session when the last one no-op'd and nothing addressed us since.
 
-    Mechanism (identical decision table to the reference ``autonomous-run-cc.sh`` stage):
+    Mechanism — branches are evaluated in this order, cheapest and
+    highest-precision first (steps 1-3 keep the reference ``autonomous-run-cc.sh``
+    decision table byte-for-byte when the new arguments are omitted):
 
     1. **Gate inactive** when the session is forced or the noop-only streak is 0 —
        there is no reason to suppress a session that isn't part of a noop run.
     2. **Quota bypass** — if quota is materially behind pace, proceed regardless, to
-       keep utilisation catch-up unblocked. Evaluated *before* the change check so
-       the (cheap but non-free) ``changes_detected`` probe is skipped on bypass,
-       preserving the bash evaluation order.
-    3. **Change check** — only now is ``changes_detected`` called. If something
-       changed (new commits, messages, standups, settlement events), proceed.
-    4. Otherwise **skip**: the session would almost certainly be a status-check noop.
+       keep utilisation catch-up unblocked. Evaluated before every probe so none is
+       paid for on bypass.
+    3. **Addressed signal** (``addressed_signals``) — something addressed *to this
+       agent* (agent-msg/inbox, @-mention, review request) → proceed. These are
+       point-to-point signals, so they are unambiguously new work and outrank every
+       frequency-based probe.
+    4. **Wall-clock backoff** (``wall_clock_backoff_expired``) — the caller's
+       deliberate clock elapsed → proceed. Checked before the change probe because
+       it *replaces* it; pair it with :func:`state_delta_backoff_seconds`.
+    5. **Change probe** (``changes_detected``) — legacy regime, kept for callers
+       that have not migrated. It has no discriminating power for whether the next
+       run will be productive (gptme/gptme-contrib#2089: 45-48% productive either
+       way, versus 64% when the gate was inactive), so new callers should omit it
+       and drive throughput from steps 3-4 instead.
+    6. **Epsilon explore** (``explore``, resolved by :func:`explore_roll`) —
+       evaluated *last*, so the explore cohort contains only runs that every other
+       probe would have skipped. That is what makes the cohort's productive rate a
+       valid direct estimate of the skip cost.
+    7. Otherwise **skip**.
 
-    Policy stays with the caller: *which* streak counter is passed as
-    ``noop_only_streak`` (the reference caller deliberately uses NOOP_ONLY_STREAK, not NOOP_STREAK,
-    so runtime failures bypass the gate and reach the fail-guard), the pace-gap
-    threshold that sets ``quota_behind_pace``, and what ``changes_detected`` probes.
+    Policy stays with the caller: *which* streak counter feeds ``noop_only_streak``
+    (the reference caller deliberately uses NOOP_ONLY_STREAK, not NOOP_STREAK, so
+    runtime failures bypass the gate and reach the fail-guard), the pace-gap
+    threshold behind ``quota_behind_pace``, what counts as addressed, the
+    consecutive-skip count and elapsed clock behind ``wall_clock_backoff_expired``,
+    the explore rate (``explore_roll(0.05)``), and what a legacy
+    ``changes_detected`` probes.
 
     Args:
         noop_only_streak: Consecutive *clean* (non-failure) noop sessions. ``>= 1``
             arms the gate.
         quota_behind_pace: True when quota is behind pace enough to justify running
             anyway (the caller applies its own threshold, e.g. > 0.25).
-        changes_detected: Zero-arg callable returning True if state changed since the
-            last session. Called at most once, and only when the gate is armed and
-            quota is not bypassing — mirroring ``state-delta.py --check``.
+        changes_detected: Zero-arg callable returning True if any state changed since
+            the last session, or ``None`` to drop the legacy probe. Called at most
+            once, and only when steps 1-4 did not already decide.
         force_session: When True the gate is inactive (manual/forced runs always
             proceed).
+        addressed_signals: Zero-arg callable returning True when something was
+            addressed to this agent since the last session. Called at most once, and
+            only on the armed, non-bypassed path.
+        wall_clock_backoff_expired: True when the caller's backoff window has
+            elapsed since the last skipped session (see
+            :func:`state_delta_backoff_seconds`). Defaults to False so callers that
+            omit it keep the legacy decision table.
+        explore: True when the caller's epsilon sample selected this would-be skip
+            (see :func:`explore_roll`). Only consulted after every other probe says
+            skip, so it never mislabels a run that would have proceeded anyway.
 
     Returns:
-        A :class:`GateDecision`.
+        A :class:`GateDecision` whose ``cause`` names the deciding branch.
     """
     if force_session or noop_only_streak < 1:
-        return GateDecision(True, "gate inactive (no noop-only streak)")
+        return GateDecision(True, "gate inactive (no noop-only streak)", "inactive")
     if quota_behind_pace:
         return GateDecision(
-            True, "bypassing: quota behind pace — proceeding to improve utilization"
+            True,
+            "bypassing: quota behind pace — proceeding to improve utilization",
+            "quota",
         )
-    if changes_detected():
-        return GateDecision(True, "changes detected despite noop streak — proceeding")
+    if addressed_signals is not None and addressed_signals():
+        return GateDecision(
+            True,
+            "addressed signal since last session — proceeding (point-to-point work)",
+            "addressed",
+        )
+    if wall_clock_backoff_expired:
+        return GateDecision(
+            True,
+            "wall-clock backoff elapsed since last skipped session — proceeding to re-measure",
+            "backoff",
+        )
+    if changes_detected is not None and changes_detected():
+        return GateDecision(
+            True, "changes detected despite noop streak — proceeding", "change"
+        )
+    if explore:
+        return GateDecision(
+            True,
+            "explore lane: sampling a would-be skip to measure its cost — proceeding",
+            "explore",
+        )
+    skipped = []
+    if addressed_signals is not None:
+        skipped.append("no addressed signal")
+    if changes_detected is not None:
+        skipped.append("no state changes since last session")
+    skipped.append("no backoff elapsed")
     return GateDecision(
         False,
-        f"no state changes since last session (noop-only streak: {noop_only_streak}) — skipping",
+        f"{', '.join(skipped)} (noop-only streak: {noop_only_streak}) — skipping",
+        "skip",
     )
 
 
