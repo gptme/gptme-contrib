@@ -33,7 +33,7 @@ class PublishError(ValueError):
 
 
 def check_roots(private_root: Path, public_root: Path) -> None:
-    """Raise unless the two roots are disjoint (neither contains the other)."""
+    """Require disjoint roots and a served tree without symlink aliases."""
     private, public = private_root.resolve(), public_root.resolve()
     if (
         private == public
@@ -44,6 +44,22 @@ def check_roots(private_root: Path, public_root: Path) -> None:
             f"private root {private} and public root {public} overlap; "
             "detail would be reachable through the served tree"
         )
+
+    # An unrelated served alias can expose private data even when no output
+    # path traverses it. Reject all aliases, including dangling links that a
+    # later private write could populate. Do not follow directory links.
+    def scan_error(exc: OSError) -> None:
+        raise PublishError(f"cannot inspect served tree {public}: {exc}") from exc
+
+    try:
+        public.stat()
+    except FileNotFoundError:
+        return  # A first build has no served tree to inspect yet.
+    for directory, dirs, files in os.walk(public, onerror=scan_error):
+        for name in (*dirs, *files):
+            entry = Path(directory) / name
+            if entry.is_symlink():
+                raise PublishError(f"served tree contains a symlink: {entry}")
 
 
 def _relative_inside(slug: str, source: str, root: Path, what: str) -> Path:

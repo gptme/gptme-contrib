@@ -443,3 +443,26 @@ def test_standalone_publish_rejects_collisions_without_changing_files(
     for root in roots:
         assert (root / source).read_bytes() == b"existing output"
         assert [p for p in root.rglob("*") if p.is_file()] == [root / source]
+
+
+@pytest.mark.parametrize("alias_target", ["private", "ancestor", "file"])
+def test_unrelated_served_alias_is_refused_before_private_write(
+    registry: RouteRegistry, roots: tuple[Path, Path], alias_target: str
+) -> None:
+    private, public = roots
+    private.mkdir()
+    public.mkdir()
+    target = {
+        "private": private,
+        "ancestor": private.parent,
+        "file": private / "pub/summary.json",
+    }[alias_target]
+    (public / "archive").symlink_to(target)
+    with pytest.raises(PublishError, match="symlink"):
+        publish_page(
+            registry,
+            _env("pub", detail={"secret": "private data"}),
+            private_root=private,
+            public_root=public,
+        )
+    assert not (private / "pub/summary.json").exists()
