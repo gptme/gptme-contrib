@@ -166,16 +166,25 @@ def publish_page(
         # keep its headline, lines and core reachable at the old URL.
         summary_path(route, public).unlink(missing_ok=True)
     target = summary_path(route, private)
-    _atomic_write(
-        target, json.dumps(envelope.to_private(), indent=2) + "\n", mode=0o600
-    )
+    # Resolve and serialize both destinations before changing either file.
+    public_target = summary_path(route, public) if route.is_public else None
+    private_content = json.dumps(envelope.to_private(), indent=2) + "\n"
+    public_content = json.dumps(envelope.to_public(), indent=2) + "\n"
+    previous = target.read_text() if target.exists() else None
+    _atomic_write(target, private_content, mode=0o600)
     written.append(target)
-    if route.is_public:
-        target = summary_path(route, public)
-        _atomic_write(
-            target, json.dumps(envelope.to_public(), indent=2) + "\n", mode=0o644
-        )
-        written.append(target)
+    if public_target is not None:
+        try:
+            _atomic_write(public_target, public_content, mode=0o644)
+        except Exception:
+            # Derivation reloads private files, so a failed served write must
+            # not leave a newer private observation feeding shared outputs.
+            if previous is None:
+                target.unlink()
+            else:
+                _atomic_write(target, previous, mode=0o600)
+            raise
+        written.append(public_target)
     return written
 
 

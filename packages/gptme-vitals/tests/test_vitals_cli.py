@@ -651,3 +651,31 @@ def test_visibility_cleanup_does_not_depend_on_emitter_success_or_selection(
     assert code == (1 if failed_cost else 0)
     assert not (tmp_path / "public/cost/summary.json").exists()
     assert (tmp_path / "private/cost/summary.json").exists()
+
+
+def test_failed_public_write_keeps_previous_private_and_derived_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gptme_vitals import publish
+
+    assert _run(tmp_path, _all())[0] == 0
+    private = tmp_path / "private/sessions/summary.json"
+    public = tmp_path / "public/sessions/summary.json"
+    previous_private = private.read_text()
+    previous_public = public.read_text()
+    real_write = publish._atomic_write
+
+    def fail_public(path: Path, content: str, *, mode: int) -> None:
+        if path == public:
+            raise PermissionError("served directory unwritable")
+        real_write(path, content, mode=mode)
+
+    monkeypatch.setattr(publish, "_atomic_write", fail_public)
+    code, lines = _run(
+        tmp_path, _all(sessions=_emitter("sessions", Status.DOWN)), pages=("sessions",)
+    )
+    assert code == 1
+    assert any("FAIL sessions: PermissionError" in line for line in lines)
+    assert private.read_text() == previous_private
+    assert public.read_text() == previous_public
+    assert _core(tmp_path)["activity"]["status"] == "healthy"
