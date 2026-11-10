@@ -10,9 +10,16 @@ to one branch of the bash::
         elif state-delta.py --check;                   # -> proceed (changes)
         else                                           # -> skip
     fi                                                 # else -> proceed (inactive)
+
+The first class pins exactly that legacy table (with both new probes omitted). The
+classes after it pin the extension from gptme/gptme-contrib#2089: an
+addressed-signal fast path, a deliberate wall-clock backoff that replaces the
+non-discriminating change probe, and a last-evaluated epsilon-explore lane.
 """
 
 from __future__ import annotations
+
+import random
 
 import pytest
 from gptme_runloops.gates import (
@@ -21,7 +28,9 @@ from gptme_runloops.gates import (
     GateDecision,
     StreakCooldownDecision,
     UtilizationBypassDecision,
+    explore_roll,
     failure_circuit_breaker_gate,
+    state_delta_backoff_seconds,
     state_delta_gate,
     streak_cooldown_gate,
     utilization_bypass_gate,
@@ -41,7 +50,9 @@ class TestStateDeltaGate:
         d = state_delta_gate(
             noop_only_streak=0, quota_behind_pace=False, changes_detected=_never
         )
-        assert d == GateDecision(True, "gate inactive (no noop-only streak)")
+        assert d == GateDecision(
+            True, "gate inactive (no noop-only streak)", "inactive"
+        )
 
     def test_inactive_when_forced_even_mid_streak(self) -> None:
         # FORCE_SESSION=1 short-circuits before the streak check in the bash.
@@ -122,6 +133,230 @@ class TestStateDeltaGate:
             force_session=force,
         )
         assert d.proceed is expected_proceed
+
+
+class TestStateDeltaGateAddressedSignal:
+    """The addressed-signal fast path (gptme/gptme-contrib#2089, change 1).
+
+    Point-to-point signals (agent-msg/inbox, @-mentions, review requests) are
+    unambiguous new work, so they must proceed *before* any frequency-based probe
+    runs — including the legacy change probe, which must not even be called.
+    """
+
+    def test_addressed_signal_proceeds_without_the_change_probe(self) -> None:
+        d = state_delta_gate(
+            noop_only_streak=4,
+            quota_behind_pace=False,
+            changes_detected=_never,
+            addressed_signals=lambda: True,
+        )
+        assert d.proceed is True
+        assert d.cause == "addressed"
+        assert "addressed signal" in d.reason
+
+    def test_no_addressed_signal_falls_through_to_the_next_probe(self) -> None:
+        d = state_delta_gate(
+            noop_only_streak=4,
+            quota_behind_pace=False,
+            changes_detected=lambda: True,
+            addressed_signals=lambda: False,
+        )
+        assert d.proceed is True
+        assert d.cause == "change"
+
+    def test_addressed_probe_called_at_most_once(self) -> None:
+        calls = {"n": 0}
+
+        def probe() -> bool:
+            calls["n"] += 1
+            return False
+
+        state_delta_gate(
+            noop_only_streak=1,
+            quota_behind_pace=False,
+            changes_detected=lambda: False,
+            addressed_signals=probe,
+        )
+        assert calls["n"] == 1
+
+    def test_addressed_probe_skipped_on_inactive_and_bypass_paths(self) -> None:
+        # Same cost discipline as changes_detected: never pay on a path that has
+        # already decided.
+        state_delta_gate(
+            noop_only_streak=0,
+            quota_behind_pace=False,
+            addressed_signals=_never,
+        )
+        state_delta_gate(
+            noop_only_streak=3,
+            quota_behind_pace=True,
+            addressed_signals=_never,
+        )
+
+    def test_addressed_signal_beats_backoff_and_explore(self) -> None:
+        # An addressed run must be labelled as such, not as a backoff or explore
+        # sample, so the explore cohort stays uncontaminated.
+        d = state_delta_gate(
+            noop_only_streak=5,
+            quota_behind_pace=False,
+            addressed_signals=lambda: True,
+            wall_clock_backoff_expired=True,
+            explore=True,
+        )
+        assert d.cause == "addressed"
+
+
+class TestStateDeltaGateBackoff:
+    """Deliberate wall-clock throttle replacing "any change" (change 2).
+
+    Throughput becomes a caller choice (a doubling clock) instead of a function of
+    how often unrelated lanes happen to commit.
+    """
+
+    def test_expired_backoff_proceeds_without_the_change_probe(self) -> None:
+        d = state_delta_gate(
+            noop_only_streak=6,
+            quota_behind_pace=False,
+            changes_detected=_never,
+            wall_clock_backoff_expired=True,
+        )
+        assert d.proceed is True
+        assert d.cause == "backoff"
+        assert "backoff elapsed" in d.reason
+
+    def test_new_style_caller_skips_without_a_change_probe(self) -> None:
+        # The intended post-migration shape: no changes_detected at all. Nothing
+        # addressed, clock not elapsed -> skip.
+        d = state_delta_gate(noop_only_streak=2, quota_behind_pace=False)
+        assert d.proceed is False
+        assert d.cause == "skip"
+        assert "no state changes" not in d.reason
+        assert "no backoff elapsed" in d.reason
+        assert "noop-only streak: 2" in d.reason
+
+    def test_legacy_skip_reason_keeps_the_pinned_phrasing(self) -> None:
+        d = state_delta_gate(
+            noop_only_streak=3,
+            quota_behind_pace=False,
+            changes_detected=lambda: False,
+        )
+        assert "no state changes since last session" in d.reason
+        assert "noop-only streak: 3" in d.reason
+
+
+class TestStateDeltaGateExplore:
+    """Epsilon-explore lane (change 3), evaluated last so it samples real skips."""
+
+    def test_explore_proceeds_after_every_other_probe_declines(self) -> None:
+        d = state_delta_gate(
+            noop_only_streak=3,
+            quota_behind_pace=False,
+            changes_detected=lambda: False,
+            addressed_signals=lambda: False,
+            explore=True,
+        )
+        assert d.proceed is True
+        assert d.cause == "explore"
+
+    def test_explore_still_consults_the_change_probe_first(self) -> None:
+        # Otherwise a run that a change would have opened anyway gets counted as
+        # an explore sample, inflating the measured cost of a skip.
+        calls = {"n": 0}
+
+        def probe() -> bool:
+            calls["n"] += 1
+            return True
+
+        d = state_delta_gate(
+            noop_only_streak=3,
+            quota_behind_pace=False,
+            changes_detected=probe,
+            explore=True,
+        )
+        assert calls["n"] == 1
+        assert d.cause == "change"
+
+    def test_explore_off_skips(self) -> None:
+        d = state_delta_gate(
+            noop_only_streak=3,
+            quota_behind_pace=False,
+            changes_detected=lambda: False,
+        )
+        assert d.proceed is False
+        assert d.cause == "skip"
+
+
+class TestStateDeltaHelpers:
+    @pytest.mark.parametrize("timer_seconds", [600, 1800, 3600])
+    def test_backoff_grows_across_executed_noops_and_resets_on_work(
+        self, timer_seconds: int
+    ) -> None:
+        # Begin just after one executed noop. Skipped timer ticks must change
+        # neither the noop streak nor the last-executed timestamp.
+        noop_only_streak = 1
+        last_executed = 0
+        gaps = []
+        for now in range(timer_seconds, 24 * 3600 + 1, timer_seconds):
+            backoff = state_delta_backoff_seconds(noop_only_streak=noop_only_streak)
+            decision = state_delta_gate(
+                noop_only_streak=noop_only_streak,
+                quota_behind_pace=False,
+                wall_clock_backoff_expired=now - last_executed >= backoff,
+            )
+            if decision.proceed:
+                assert decision.cause == "backoff"
+                gaps.append(now - last_executed)
+                last_executed = now
+                noop_only_streak += 1
+            else:
+                assert decision.cause == "skip"
+
+        expected = [max(timer_seconds, gap) for gap in [1800, 3600, 7200, 14400]]
+        assert gaps[:4] == expected
+        assert all(gap == 14400 for gap in gaps[4:])
+
+        # A productive execution resets the same counter consumed by both APIs.
+        noop_only_streak = 0
+        assert state_delta_backoff_seconds(noop_only_streak=noop_only_streak) == 0
+        assert (
+            state_delta_gate(
+                noop_only_streak=noop_only_streak, quota_behind_pace=False
+            ).cause
+            == "inactive"
+        )
+        assert state_delta_backoff_seconds(noop_only_streak=1) == 1800
+
+    def test_backoff_doubles_from_30m_and_caps_at_4h(self) -> None:
+        # 30m, 1h, 2h, then the 4h cap for every further executed noop.
+        assert state_delta_backoff_seconds(0) == 0
+        assert state_delta_backoff_seconds(-3) == 0
+        assert state_delta_backoff_seconds(1) == 1800
+        assert state_delta_backoff_seconds(2) == 3600
+        assert state_delta_backoff_seconds(3) == 7200
+        assert state_delta_backoff_seconds(4) == 14400
+        assert state_delta_backoff_seconds(9) == 14400
+
+    def test_backoff_honours_custom_bounds(self) -> None:
+        assert state_delta_backoff_seconds(1, base_seconds=60, max_seconds=300) == 60
+        assert state_delta_backoff_seconds(2, base_seconds=60, max_seconds=300) == 120
+        assert state_delta_backoff_seconds(5, base_seconds=60, max_seconds=300) == 300
+
+    def test_explore_roll_bounds_and_rate(self) -> None:
+        assert explore_roll(0) is False
+        assert explore_roll(-0.5) is False
+        assert explore_roll(1) is True
+        assert explore_roll(1.5) is True
+
+    def test_explore_roll_is_deterministic_with_an_injected_rng(self) -> None:
+        rng = random.Random(20261110)
+        draws = [explore_roll(0.05, rng=rng) for _ in range(2000)]
+        rate = sum(draws) / len(draws)
+        assert 0.02 < rate < 0.09  # ~5%, generous bounds for n=2000
+
+    @pytest.mark.parametrize("seed", [1, 2, 3])
+    def test_explore_roll_default_rate_is_low(self, seed: int) -> None:
+        rng = random.Random(seed)
+        assert sum(explore_roll(rng=rng) for _ in range(400)) < 60  # < 15%
 
 
 # Reference weekday/weekend policy values from autonomous-run-cc.sh, passed in by
