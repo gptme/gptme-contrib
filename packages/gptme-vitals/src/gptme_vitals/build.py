@@ -148,6 +148,12 @@ def derive_core(
             "headline.json would be undefined"
         )
     try:
+        if route.is_external:
+            destination = urlsplit(route.href)
+            if destination.scheme not in {"http", "https"} or not destination.hostname:
+                raise BuildError(
+                    f"headline route {route.slug!r} needs an absolute HTTP(S) link"
+                )
         if base_url is not None:
             base = urlsplit(base_url)
             if base.scheme not in {"http", "https"} or not base.hostname:

@@ -300,7 +300,12 @@ def test_invalid_internal_headline_link_is_refused_by_registry(href: str) -> Non
 
 
 @pytest.mark.parametrize("href", ["https://", "http://"])
-def test_hostless_external_headline_link_is_refused_by_build(href: str) -> None:
+@pytest.mark.parametrize(
+    "base_url", [None, "https://bob.example/vitals/", "http://bob.example/vitals/"]
+)
+def test_hostless_external_headline_link_is_refused_by_build(
+    href: str, base_url: str | None
+) -> None:
     reg = RouteRegistry(
         (
             _route(
@@ -317,6 +322,7 @@ def test_hostless_external_headline_link_is_refused_by_build(href: str) -> None:
             reg,
             [_env("services", Status.HEALTHY)],
             agent="bob",
+            base_url=base_url,
         )
 
 
