@@ -70,9 +70,14 @@ def render_unit_pair(
     executable: str,
     build_args: Sequence[str],
     unit_prefix: str = "gptme-vitals",
-    timeout_seconds: int = 300,
+    timeout_seconds: int | None = None,
 ) -> UnitPair:
-    """Render the pair for ``route``; the command is ``executable build <slug> *build_args``."""
+    """Render ``executable build <slug> *build_args``.
+
+    No default startup deadline: it would include time queued on the shared
+    build lock, not just collection. A supplied timeout bounds the whole build.
+    Collectors should bound their own I/O to avoid blocking all page refreshes.
+    """
     if not PurePosixPath(executable).is_absolute():
         raise TimerError(f"executable must be an absolute path, got {executable!r}")
     if not _PREFIX.fullmatch(unit_prefix):
@@ -84,7 +89,7 @@ def render_unit_pair(
         raise TimerError(
             f"route {route.slug!r} has cadence {route.cadence!r}: no schedule"
         )
-    if timeout_seconds <= 0:
+    if timeout_seconds is not None and timeout_seconds <= 0:
         raise TimerError("timeout_seconds must be positive")
     name = f"{unit_prefix}-{route.slug}"
     command = " ".join(
@@ -96,7 +101,7 @@ def render_unit_pair(
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
-        f"TimeoutStartSec={timeout_seconds}\n"
+        f"TimeoutStartSec={timeout_seconds if timeout_seconds is not None else 'infinity'}\n"
         f"ExecStart={command}\n"
     )
     timer = (
@@ -125,7 +130,7 @@ def render_units(
     executable: str,
     build_args: Sequence[str],
     unit_prefix: str = "gptme-vitals",
-    timeout_seconds: int = 300,
+    timeout_seconds: int | None = None,
 ) -> tuple[list[UnitPair], list[str]]:
     """Render a pair for every scheduled envelope route.
 

@@ -140,3 +140,22 @@ def test_unit_prefix_cannot_end_in_newline() -> None:
             build_args=[],
             unit_prefix="vitals\n",
         )
+
+
+def test_default_units_do_not_time_out_while_queued_on_shared_lock() -> None:
+    registry = RouteRegistry(
+        tuple(_route(slug, RefreshCadence.HOURLY) for slug in ("a", "b", "c", "d"))
+    )
+    pairs, _ = render_units(registry, executable=EXE, build_args=[])
+    assert len(pairs) == 4
+    assert all("TimeoutStartSec=infinity\n" in pair.service for pair in pairs)
+
+
+def test_explicit_timeout_remains_a_whole_build_deadline() -> None:
+    pair = render_unit_pair(
+        _route("a", RefreshCadence.HOURLY),
+        executable=EXE,
+        build_args=[],
+        timeout_seconds=17,
+    )
+    assert "TimeoutStartSec=17\n" in pair.service
