@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import socket
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -267,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
-    except (AWClientError, OSError, ValueError) as exc:
+    except (AWClientError, OSError, ValueError, sqlite3.Error) as exc:
         msg = f"aw-watcher-agent: {exc}"
         if args.strict:
             print(msg, file=sys.stderr)

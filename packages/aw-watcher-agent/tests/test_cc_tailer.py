@@ -257,3 +257,34 @@ def test_incomplete_final_row_holds_trailing_block_until_completed(tmp_path, mon
     assert cc_tailer.emit_file(client, "host", transcript, now=now) == 1
     assert client.posted[-1][1].duration == 600
     assert cc_tailer.emit_file(client, "host", transcript, now=now) == 0
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("stage", ["connect", "execute"])
+def test_sqlite_errors_obey_cli_strict_flag(tmp_path, monkeypatch, capsys, strict, stage):
+    import sqlite3
+
+    from aw_watcher_agent import cli
+
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    transcript = tmp_path / "s1.jsonl"
+    transcript.write_text(_row("2026-11-10T09:00:00Z"), encoding="utf-8")
+    closed = []
+
+    class BrokenLock:
+        def execute(self, sql):
+            raise sqlite3.DatabaseError("broken lock")
+
+        def close(self):
+            closed.append(True)
+
+    def connect(*args, **kwargs):
+        if stage == "connect":
+            raise sqlite3.OperationalError("cannot open lock")
+        return BrokenLock()
+
+    monkeypatch.setattr(cc_tailer.sqlite3, "connect", connect)
+    argv = (["--strict"] if strict else []) + ["tail-claude-code", "--file", str(transcript)]
+    assert cli.main(argv) == int(strict)
+    assert "aw-watcher-agent:" in capsys.readouterr().err
+    assert closed == ([True] if stage == "execute" else [])
