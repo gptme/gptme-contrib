@@ -562,3 +562,30 @@ def test_registered_dot_segments_match_resolved_destination(
     )
     with pytest.raises(RouteRegistryError, match="duplicate href"):
         RouteRegistry((route, _route("alias", href="/health/")))
+
+
+def test_encoded_slash_in_current_url_does_not_change_browser_parent(
+    tmp_path: Path,
+) -> None:
+    route = _route("health", output_path="checks.html")
+    reg = RouteRegistry((route,))
+    assert (
+        reg.resolve_internal_target(
+            "../health/", current_route="/reports%2F2026/", site_root=tmp_path
+        )
+        == tmp_path / "checks.html"
+    )
+
+
+def test_registered_fragment_is_not_resource_identity(tmp_path: Path) -> None:
+    route = _route(
+        "report", href="/report/#latest", output_path="generated/report.html"
+    )
+    reg = RouteRegistry((route,))
+    assert (
+        reg.resolve_internal_target(route.href, current_route="/", site_root=tmp_path)
+        == tmp_path / "generated/report.html"
+    )
+    assert reg.get_by_href("/report/#other") is route
+    with pytest.raises(RouteRegistryError, match="duplicate href"):
+        RouteRegistry((route, _route("alias", href="/report/")))

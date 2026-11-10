@@ -268,7 +268,7 @@ class RouteRegistry:
         # Resolve against the browser URL, never the backing output_path: a
         # registered /odd/ may be built as elsewhere/page.html. Strip the query
         # and fragment before converting the URL to a path.
-        raw_current = unquote(urlsplit(current_route).path).lstrip("/")
+        raw_current = urlsplit(current_route).path.lstrip("/")
         current_directory = not raw_current or raw_current.endswith("/")
         # Keep a directory URL's parent inside that directory rather than
         # climbing one level too far after PurePosixPath drops its trailing slash.
@@ -280,11 +280,16 @@ class RouteRegistry:
         raw_path = unquote(parsed.path)
         if not raw_path:
             # Query-only link (`?tab=1`): the target is the current page itself.
-            relative = PurePosixPath(raw_current)
+            relative = PurePosixPath(unquote(raw_current))
         elif raw_path.startswith("/"):
             relative = PurePosixPath(raw_path.lstrip("/"))
         else:
-            relative = current_path.parent / raw_path
+            # Choose the browser's parent before decoding: %2F is not a URL
+            # separator and must not introduce another directory to climb.
+            url_path = _normalize_relative_path(current_path.parent / parsed.path)
+            if url_path is None:
+                return None
+            relative = PurePosixPath(unquote(str(url_path)))
 
         normalized = _normalize_relative_path(relative)
         if normalized is None:
@@ -387,7 +392,7 @@ def _href_key(href: str) -> str:
             path = ("/" if path.startswith("/") else "") + text
             if text and _is_directory_url(unquote(parsed.path)):
                 path += "/"
-    return parsed._replace(path=quote(path, safe="/")).geturl()
+    return parsed._replace(path=quote(path, safe="/"), fragment="").geturl()
 
 
 def _is_directory_url(path: str) -> bool:
