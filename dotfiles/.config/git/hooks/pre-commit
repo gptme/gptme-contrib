@@ -255,6 +255,18 @@ if [ -f ".gitmodules" ]; then
 fi
 
 # --- Part 3: Pre-commit with auto-staging ---
+# gptme-contrib: owns-generated-precommit-checks
+# The chaining wrapper skips generated local runners only with this capability
+# marker: this hook owns the single --files run, avoiding hook-impl stash/restore.
+
+# The runner also reads its policy from the worktree. Check this even when the
+# config is not in the staged diff (or has been deleted only in the worktree).
+if ! git diff --quiet -- .pre-commit-config.yaml; then
+    echo -e "${RED}Cannot run checks with unstaged pre-commit configuration${NC}" >&2
+    echo "Stage the intended configuration or use an isolated worktree; index and worktree left unchanged." >&2
+    exit 1
+fi
+
 # Only run if repo has pre-commit config
 if [ ! -f ".pre-commit-config.yaml" ]; then
     # No pre-commit config, skip this part
@@ -278,9 +290,9 @@ echo -e "${GREEN}Running pre-commit checks (via $PRECOMMIT_CMD)...${NC}"
 # now and when we check later — capturing here ensures we only re-stage our own files.
 # Use 'while read' instead of 'mapfile' for Bash 3.2 compatibility (macOS default shell).
 ORIGINALLY_STAGED_FILES=()
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
     ORIGINALLY_STAGED_FILES+=("$f")
-done < <(git diff --cached --name-only --diff-filter=ACM)
+done < <(git diff --cached --name-only -z --diff-filter=ACM)
 
 # Never run the hook runner without --files: a bare `prek run` (and
 # `pre-commit run`) stashes every unstaged change in the worktree and restores
@@ -291,12 +303,24 @@ done < <(git diff --cached --name-only --diff-filter=ACM)
 # deletions while always_run hooks still run. An empty commit gets a
 # nonexistent placeholder for the same reason.
 HOOK_FILES=()
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
     [ -n "$f" ] && HOOK_FILES+=("$f")
-done < <(git diff --cached --name-only)
+done < <(git diff --cached --name-only -z)
 if [ ${#HOOK_FILES[@]} -eq 0 ]; then
     HOOK_FILES=(".no-staged-files-placeholder")
 fi
+
+# --files validates worktree bytes, not index bytes. Refuse partial staging
+# before checks can format or auto-stage those files. Do not stash/restore:
+# that can overwrite concurrent work. Unstaged changes in other files are fine.
+for staged_file in "${HOOK_FILES[@]}"; do
+    # Child file edits cannot enter a parent commit; a different child HEAD can.
+    if ! git --literal-pathspecs diff --quiet --ignore-submodules=dirty -- "$staged_file"; then
+        echo -e "${RED}Cannot run checks on partially staged files: $staged_file${NC}" >&2
+        echo "Stage the intended complete file or commit from an isolated worktree; index and worktree left unchanged." >&2
+        exit 1
+    fi
+done
 
 run_precommit() {
     "$PRECOMMIT_CMD" run --files "${HOOK_FILES[@]}"
@@ -327,14 +351,14 @@ else
     # Do NOT use 'git add -u' — in multi-session environments that picks up
     # other sessions' changes and causes wrong-file commits.
     # Use 'while read' instead of 'for f in $FILES' to handle filenames with spaces.
-    while IFS= read -r f; do
+    while IFS= read -r -d '' f; do
         for staged_file in "${ORIGINALLY_STAGED_FILES[@]}"; do
             if [ "$f" = "$staged_file" ]; then
-                git add "$f"
+                git --literal-pathspecs add -- "$f"
                 break
             fi
         done
-    done < <(git diff --name-only --diff-filter=M)
+    done < <(git diff --name-only -z --diff-filter=M)
 
     echo -e "${GREEN}Auto-staged formatter fixes. Re-running pre-commit...${NC}"
 
