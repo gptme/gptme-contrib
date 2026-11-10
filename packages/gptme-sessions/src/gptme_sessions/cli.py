@@ -1307,6 +1307,189 @@ def runs(ctx: click.Context, since: str, as_json: bool) -> None:
         format_run_analytics(analytics)
 
 
+# -- threads -----------------------------------------------------------------
+
+
+def _thread_forest(
+    ctx: click.Context,
+    since: str,
+    agent: str,
+    journal_root: Path | None,
+    no_journals: bool,
+    min_weight: float,
+    coherence: float,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    from .thread_inputs import build_forest, from_records, read_journal_text
+
+    store = SessionStore(sessions_dir=ctx.obj["sessions_dir"])
+    records = store.query(since_days=_parse_since(since))
+    nodes = from_records(
+        records,
+        agent=agent,
+        journal_root=journal_root,
+        read_journal=None if no_journals else read_journal_text,
+    )
+    return build_forest(nodes, min_weight=min_weight, coherence=coherence)
+
+
+def _thread_options(func):  # type: ignore[no-untyped-def,unused-ignore]
+    for option in reversed(
+        [
+            click.option("--since", default="14d", help="Time window (e.g. 2h, 7d, 2w, or 'all')"),
+            click.option(
+                "--agent", default="self", help="Agent id to assign these records (default: self)"
+            ),
+            click.option(
+                "--journal-root",
+                type=click.Path(path_type=Path, file_okay=False),  # type: ignore[type-var]
+                default=None,
+                help="Base for relative journal paths (default: each record's project dir)",
+            ),
+            click.option(
+                "--no-journals", is_flag=True, help="Skip journal digests (record fields only)"
+            ),
+            click.option(
+                "--min-weight",
+                type=float,
+                default=0.5,
+                show_default=True,
+                help="Weakest link kept as a predecessor",
+            ),
+            click.option(
+                "--coherence",
+                type=click.FloatRange(0, 1),
+                default=1.0,
+                show_default=True,
+                help="Topic-coherence penalty for off-topic parent/mention/commit/chain links",
+            ),
+            click.option("--json", "as_json", is_flag=True, help="Output as JSON"),
+        ]
+    ):
+        func = option(func)
+    return func
+
+
+def _fmt_ts(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+
+def _fmt_link(row: dict[str, Any]) -> str:
+    if row["predecessor"] is None:
+        return "(root)"
+    key = f" {row['key']}" if row.get("key") else ""
+    return f"<- {str(row['predecessor'])[:8]} {row['kind']} {row['weight']:.2f}{key}"
+
+
+@cli.command()
+@_thread_options
+@click.pass_context
+def threads(
+    ctx: click.Context,
+    since: str,
+    agent: str,
+    journal_root: Path | None,
+    no_journals: bool,
+    min_weight: float,
+    coherence: float,
+    as_json: bool,
+) -> None:
+    """Thread sessions: each session's best predecessor and its thread.
+
+    Mines evidence links between sessions (parent ids, journal mentions, cited
+    commits, shared tasks/PRs) and keeps each session's single strongest link to
+    an earlier one. Each resulting tree is a thread of work.
+    """
+    rows, summary = _thread_forest(
+        ctx, since, agent, journal_root, no_journals, min_weight, coherence
+    )
+    if as_json:
+        click.echo(json.dumps({"sessions": rows, "stats": summary}, indent=2))
+        return
+    for row in rows:
+        title = f"  {row['title']}" if row.get("title") else ""
+        click.echo(
+            f"{_fmt_ts(row['start'])}  {str(row['id'])[:8]}  "
+            f"thread={str(row['thread'])[:8]}  {_fmt_link(row)}{title}"
+        )
+    pct = 100 * summary["linked"] / summary["sessions"] if summary["sessions"] else 0.0
+    click.echo(
+        f"\n{summary['sessions']} sessions, {summary['linked']} linked ({pct:.0f}%), "
+        f"{summary['threads']} threads"
+    )
+
+
+@cli.command()
+@click.argument("session_id")
+@_thread_options
+@click.pass_context
+def thread(
+    ctx: click.Context,
+    session_id: str,
+    since: str,
+    agent: str,
+    journal_root: Path | None,
+    no_journals: bool,
+    min_weight: float,
+    coherence: float,
+    as_json: bool,
+) -> None:
+    """Show one session's ancestry and descendants (id or unique prefix)."""
+    rows, _ = _thread_forest(ctx, since, agent, journal_root, no_journals, min_weight, coherence)
+    by_id = {str(r["id"]): r for r in rows}
+    matches = [k for k in by_id if k == session_id] or [
+        k for k in by_id if k.startswith(session_id)
+    ]
+    if len(matches) != 1:
+        problem = "not found" if not matches else f"ambiguous ({len(matches)} matches)"
+        raise click.ClickException(f"session {session_id!r} {problem} in --since {since}")
+    target = by_id[matches[0]]
+
+    ancestry: list[dict[str, Any]] = []
+    cur: dict[str, Any] | None = target
+    while cur is not None:
+        ancestry.append(cur)
+        pid = cur["predecessor"]
+        cur = by_id.get(str(pid)) if pid is not None else None
+    ancestry.reverse()
+
+    children: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        if r["predecessor"] is not None:
+            children.setdefault(str(r["predecessor"]), []).append(r)
+    descendants: list[tuple[int, dict[str, Any]]] = []
+    stack = [(1, c) for c in reversed(children.get(str(target["id"]), []))]
+    while stack:
+        depth, r = stack.pop()
+        descendants.append((depth, r))
+        stack.extend((depth + 1, c) for c in reversed(children.get(str(r["id"]), [])))
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "session": target,
+                    "ancestry": ancestry[:-1],
+                    "descendants": [dict(r, depth=d) for d, r in descendants],
+                },
+                indent=2,
+            )
+        )
+        return
+
+    def line(r: dict[str, Any], indent: int) -> str:
+        mark = "*" if r is target else " "
+        title = f"  {r['title']}" if r.get("title") else ""
+        return (
+            f"{mark} {'  ' * indent}{_fmt_ts(r['start'])}  {str(r['id'])[:8]}  "
+            f"{_fmt_link(r)}{title}"
+        )
+
+    for r in ancestry:
+        click.echo(line(r, 0))
+    for depth, r in descendants:
+        click.echo(line(r, depth))
+
+
 # -- append ------------------------------------------------------------------
 
 
