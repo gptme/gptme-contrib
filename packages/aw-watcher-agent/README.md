@@ -82,10 +82,6 @@ aw-watcher-agent tail-claude-code            # every transcript
 aw-watcher-agent tail-claude-code --gap 600  # split blocks on 10 min idle
 ```
 
-Use either this tailer or the `emit-start`/`emit-end` hooks for Claude Code on
-a given machine, not both. Both write to the same bucket, so a session tracked
-both ways appears twice on the Timeline and is counted twice in any duration sum.
-
 Only `timestamp`, `sessionId` and `cwd` are read; prompts, replies and tool
 payloads are never touched. A session is split into blocks on idle gaps
 longer than `--gap` (default 15 min), so a session left open overnight is not
@@ -110,8 +106,11 @@ directory. Use either the tailer or lifecycle hooks for a session, not both.
 ### Wiring into Claude Code (or any harness with lifecycle hooks)
 
 Point your harness's session-start / session-end hooks (for Claude Code:
-`SessionStart` / `Stop` in `settings.json`) at `emit-start` / `emit-end`,
-passing the same `--session-id` to both.
+`SessionStart` / `SessionEnd` in `settings.json`) at `emit-start` / `emit-end`,
+passing the same `--session-id` to both. Do not use Claude Code's `Stop` hook for
+`emit-end`: it fires after every response, so the first turn closes the session
+and each later turn posts an empty 0s event. Keep the `SessionEnd` hook
+synchronous (not `async`) so the post finishes before the process exits.
 
 ### Per-tool activity
 
