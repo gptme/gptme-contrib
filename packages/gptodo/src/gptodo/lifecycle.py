@@ -481,9 +481,14 @@ def transform_post(
     return post
 
 
-_TICKED_RE = re.compile(r"^([ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+)(?:\[[xX]\](?=[ \t]|$)|✅)")
+_TICKED_RE = re.compile(
+    r"^([ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+)(?:\[[xX]\](?=[ \t]|$)|✅(?P<tight>(?![ \t]|$))?)"
+)
 _QUOTE_RE = re.compile(r"^([ \t]*>[ \t]?)+")
-_FENCE_RE = re.compile(r"^([ \t]*)(?:((?:[-*+]|[0-9]+[.)])[ \t]+))?(`{3,}|~{3,})")
+# A blockquote may open inside a list item on the marker line (`- > ```...`).
+_FENCE_RE = re.compile(
+    r"^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+(?P<quotes>(?:>[ \t]?)*))?(?P<fence>`{3,}|~{3,})"
+)
 _LIST_RE = re.compile(r"^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+")
 
 
@@ -502,6 +507,7 @@ def untick_checklist(content: str) -> str:
     out = []
     fence = ""
     fence_quotes = 0
+    quote_list_boundary: tuple[int, int] | None = None
     list_indent = 0
     list_containers: list[tuple[int, int]] = []
     for line in content.split("\n"):
@@ -516,10 +522,24 @@ def untick_checklist(content: str) -> str:
             container = re.match(rf"^(?:[ \t]*>[ \t]?){{{fence_quotes}}}", line)
             assert container is not None
             candidate = line[container.end() :]
+        outside_quote_list = False
+        if fence and quote_list_boundary:
+            outer_depth, required_indent = quote_list_boundary
+            outer = re.match(rf"^(?:[ \t]*>[ \t]?){{{outer_depth}}}", line)
+            if outer is not None:
+                remainder = line[outer.end() :]
+                padding = remainder[: len(remainder) - len(remainder.lstrip(" \t"))]
+                outside_quote_list = bool(remainder.strip()) and (
+                    _columns(padding, outer.group()) < required_indent
+                )
         source_prefix = line[: len(line) - len(candidate)]
         whitespace = candidate[: len(candidate) - len(candidate.lstrip(" \t"))]
         indent = _columns(whitespace, source_prefix)
-        if fence and (quote_depth < fence_quotes or (candidate.strip() and indent < list_indent)):
+        if fence and (
+            quote_depth < fence_quotes
+            or outside_quote_list
+            or (candidate.strip() and indent < list_indent)
+        ):
             # A container can end a fence without an explicit delimiter. Parse
             # this same line again outside the fence so later work reopens.
             fence = ""
@@ -550,15 +570,24 @@ def untick_checklist(content: str) -> str:
         elif (
             (opening := _FENCE_RE.match(candidate))
             and indent - container_indent <= 3
-            and not (opening.group(3).startswith("`") and "`" in candidate[opening.end() :])
+            and not (opening["fence"].startswith("`") and "`" in candidate[opening.end() :])
         ):
             # Backtick fence info strings cannot contain backticks: a line
             # like ```example``` is an inline code span, not a fence opener.
-            fence = opening.group(3)
-            fence_quotes = quote_depth
-            list_indent = list_containers[-1][1] if list_containers else 0
+            fence = opening["fence"]
+            # Quotes nested in the list item own the fence: continuation lines
+            # carry them as a prefix, and indentation restarts inside them.
+            nested_quotes = (opening["quotes"] or "").count(">")
+            # Keep the list boundary outside the nested quote as well as the
+            # indentation inside it; a dedented quote starts a new block.
+            quote_list_boundary = list_containers[-1] if nested_quotes else None
+            fence_quotes = quote_depth + nested_quotes
+            list_indent = list_containers[-1][1] if list_containers and not nested_quotes else 0
         else:
-            line = prefix + _TICKED_RE.sub(r"\1[ ]", candidate, count=1)
+            # `- ✅shipped` needs a separator to become a real `- [ ] ` checkbox.
+            line = prefix + _TICKED_RE.sub(
+                lambda m: m[1] + ("[ ] " if m["tight"] is not None else "[ ]"), candidate, count=1
+            )
         out.append(line)
     return "\n".join(out)
 
