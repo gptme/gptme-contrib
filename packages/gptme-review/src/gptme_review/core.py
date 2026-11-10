@@ -4806,7 +4806,9 @@ def _trigger_matches(paths: Sequence[str], patterns: tuple[str, ...]) -> bool:
 #: ``"shared-tooling"`` (T2c-i) — repos that share a library hierarchy.
 #:     Code may be duplicated or placed in the wrong member.  gptme-contrib
 #:     is where generic helpers live; gptme core is the upstream library;
-#:     bob is the brain and should contain only Bob-specific logic.
+#:     agent brain repos should contain only agent-specific logic.
+#:     Two brains in one family also lets the reviewer catch the same helper
+#:     being forked into both, which is the drift gptme-contrib exists to stop.
 #:
 #: ``"component-split"`` (T2c-ii) — one system split across repos by component,
 #:     coupled by API contracts rather than shared code.  A REST shape or
@@ -4853,13 +4855,14 @@ _CROSS_REPO_PLACEMENT_INSTRUCTION = (
     "The placement rules for this family: "
     "gptme-contrib is where generic, reusable helpers live; "
     "gptme core is the upstream library with a stable public API; "
-    "bob is the brain repo and should contain only Bob-specific logic with no "
-    "gptme-contrib dependency that a generic caller could use. "
+    "agent brain repos should contain only agent-specific logic, not generic "
+    "code that another agent or caller could reuse. "
     "Look for: "
     "(1) a helper or utility function added here that already exists in a sibling repo "
-    "— search the sibling checkouts listed in the context with your read tools; "
-    "(2) generic code without Bob-specific dependencies that belongs in gptme-contrib "
-    "rather than bob; "
+    "— including another agent's brain repo — search the sibling checkouts listed in the "
+    "context with your read tools; "
+    "(2) generic code without agent-specific dependencies that belongs in gptme-contrib "
+    "rather than a brain repo; "
     "(3) logic that reimplements part of gptme core's public API instead of calling it. "
     "If you find a likely duplicate, cite the sibling path and symbol. "
     "Report findings as P2 — placement is a design opinion and must never block merge. "
