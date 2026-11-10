@@ -182,6 +182,33 @@ def test_corrupt_snapshot_is_a_miss(tmp_path):
     assert payload["value"] == 42
 
 
+@pytest.mark.parametrize("timestamp", [float("nan"), float("inf"), -float("inf")])
+def test_nonfinite_snapshot_timestamp_is_a_miss(tmp_path, timestamp):
+    (tmp_path / "sig.json").write_text(
+        json.dumps(
+            {
+                "name": "sig",
+                "key": "",
+                "collected_at_epoch": timestamp,
+                "value": 1,
+            }
+        )
+    )
+    assert (
+        sc.cached_signal(
+            "sig",
+            lambda: 42,
+            cache_dir=tmp_path,
+            ttl_seconds=60,
+            now=1000.0,
+        )
+        == 42
+    )
+    assert (
+        json.loads((tmp_path / "sig.json").read_text())["collected_at_epoch"] == 1000.0
+    )
+
+
 def test_deeply_nested_snapshot_is_a_miss(tmp_path):
     (tmp_path / "sig.json").write_text("[" * 10000 + "0" + "]" * 10000)
     assert sc.cached_signal("sig", lambda: 42, cache_dir=tmp_path, ttl_seconds=60) == 42

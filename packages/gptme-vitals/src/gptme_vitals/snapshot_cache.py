@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -88,6 +89,8 @@ def read_snapshot(
         return False, None
     collected_at = payload.get("collected_at_epoch")
     if not isinstance(collected_at, int | float):
+        return False, None
+    if isinstance(collected_at, float) and not math.isfinite(collected_at):
         return False, None
     current = time.time() if now is None else now
     if current - collected_at > ttl_seconds:
