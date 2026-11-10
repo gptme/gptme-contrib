@@ -390,7 +390,7 @@ def transform_post(
         post.metadata.get("state") == "done" and not _recur_is_valid
     )
     if _should_strip_stale_fields:
-        for _stale_field in (
+        _stale_fields = (
             "next_action",
             "waiting_for",
             "waiting_since",
@@ -400,7 +400,24 @@ def transform_post(
             # really stuck?" and is meaningless once the task is closed.
             "first_waiting_since",
             "waiting_spell_count",
-        ):
+        )
+        # An explicit value for a field the strip is about to drop would be
+        # reported as a successful edit while writing nothing. Refuse instead;
+        # clearing (value None) stays allowed. Match the apply loop's
+        # last-assignment-wins semantics when a field is set more than once.
+        _final_stale_sets = {
+            field: value for op, field, value in changes if op == "set" and field in _stale_fields
+        }
+        _explicit_stale = sorted(
+            field for field, value in _final_stale_sets.items() if value is not None
+        )
+        if _explicit_stale:
+            raise TransitionError(
+                f"Refusing to set {', '.join(_explicit_stale)} on a "
+                f"{post.metadata.get('state')} task: terminal tasks drop "
+                "actionable/blocker fields. Reopen the task first."
+            )
+        for _stale_field in _stale_fields:
             post.metadata.pop(_stale_field, None)
 
     # Auto-set completed timestamp when transitioning to a terminal state, and
