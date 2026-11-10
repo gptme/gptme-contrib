@@ -106,6 +106,7 @@ def test_malformed_output_fails_closed() -> None:
         "delayed_unresolved",
         "delayed_greptile_unresolved",
         "new_greptile_unresolved",
+        "stale_greptile_unresolved",
         "new_greptile_low_score",
     ],
 )
@@ -114,6 +115,7 @@ def test_operator_approval_preserves_human_thread_gate(
 ) -> None:
     """Approval must use readable human-thread state fetched after the verdict."""
     monkeypatch.setenv("SELF_MERGE_ACCEPT_AI_REVIEW", "1")
+    monkeypatch.setenv("SELF_MERGE_MIN_GREPTILE_SCORE", "5")
     monkeypatch.setattr(smc, "get_gh_user", lambda: "TimeToBuildBob")
     monkeypatch.setattr(smc, "merge_permission", lambda repo: True)
     monkeypatch.setattr(
@@ -185,11 +187,16 @@ def test_operator_approval_preserves_human_thread_gate(
         smc,
         "fetch_greptile_status",
         lambda *a, **k: {
-            "has_review": thread_state == "delayed_greptile_unresolved",
-            "unresolved": 0,
+            "has_review": thread_state
+            in {"delayed_greptile_unresolved", "stale_greptile_unresolved"},
+            "unresolved": 1 if thread_state == "stale_greptile_unresolved" else 0,
         },
     )
-    monkeypatch.setattr(smc, "greptile_summary_reviewed_commit", lambda *a: HEAD)
+    monkeypatch.setattr(
+        smc,
+        "greptile_summary_reviewed_commit",
+        lambda *a: OLD if thread_state == "stale_greptile_unresolved" else HEAD,
+    )
     monkeypatch.setattr(smc, "greptile_summary_score", lambda *a: 5)
     monkeypatch.setattr(
         smc,

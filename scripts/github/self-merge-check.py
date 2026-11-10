@@ -3901,7 +3901,7 @@ def evaluate_pr(
                         isinstance(signal_sha, str)
                         and _sha_matches_head(signal_sha, result.head_sha or "")
                     ):
-                        if refreshed_greptile_unresolved and not greptile_unresolved:
+                        if refreshed_greptile_unresolved:
                             result.reasons.append(
                                 f"Greptile reviewed (score {signal.get('score')}/5); "
                                 f"{refreshed_greptile_unresolved} unresolved thread(s)"
