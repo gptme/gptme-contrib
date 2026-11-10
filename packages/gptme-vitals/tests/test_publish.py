@@ -479,3 +479,22 @@ def test_standalone_private_publish_revokes_registered_html(
     publish_page(registry, _env("priv"), private_root=private, public_root=public)
     assert not html.exists()
     assert (private / "priv/summary.json").exists()
+
+
+@pytest.mark.parametrize("lines", ["down", {"false": "preview"}])
+def test_stored_lines_must_be_a_json_array(tmp_path: Path, lines: object) -> None:
+    route = _route("pub")
+    target = summary_path(route, tmp_path)
+    target.parent.mkdir(parents=True)
+    data = _env("pub").to_public()
+    data["lines"] = lines
+    target.write_text(json.dumps(data))
+    assert load_envelope(route, tmp_path) is None
+
+
+def test_excessively_nested_stored_json_is_a_blind_page(tmp_path: Path) -> None:
+    route = _route("pub")
+    target = summary_path(route, tmp_path)
+    target.parent.mkdir(parents=True)
+    target.write_text("[" * 10000 + "]" * 10000)
+    assert load_envelope(route, tmp_path) is None

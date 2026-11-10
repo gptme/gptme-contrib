@@ -244,11 +244,14 @@ def load_envelope(route: DashboardRoute, root: str | Path) -> PageEnvelope | Non
     try:
         path = summary_path(route, Path(root))
         data = json.loads(path.read_text())
-    except (OSError, ValueError, PublishError):
+    except (OSError, ValueError, PublishError, RecursionError):
         return None
     if not isinstance(data, dict) or data.get("schema") != ENVELOPE_SCHEMA:
         return None
     if data.get("slug") != route.slug:
+        return None
+    lines = data.get("lines", [])
+    if not isinstance(lines, list):
         return None
     core = data.get("core")
     if core is not None and not isinstance(core, dict):
@@ -259,7 +262,7 @@ def load_envelope(route: DashboardRoute, root: str | Path) -> PageEnvelope | Non
             status=data["status"],
             headline=data["headline"],
             generated_at=data["generated_at"],
-            lines=tuple(data.get("lines", ())),
+            lines=tuple(lines),
             core=core,
         )
     except (KeyError, TypeError, ValueError):
