@@ -805,3 +805,49 @@ def test_timers_refuse_directory_alias_before_writing(
     (root / "a").symlink_to(root, target_is_directory=True)
     assert main(_timers_argv(app)) == 2
     assert not (app / "units").exists()
+
+
+def test_reassigned_headline_cannot_leave_former_private_text(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    registry = RouteRegistry((_route("services", is_headline=True), _route("sessions")))
+    assert (
+        _run_with_emitters(
+            tmp_path,
+            registry,
+            {
+                "services": _emitter(
+                    "services", Status.HEALTHY, lines=("former public secret",)
+                )
+            },
+        )[0]
+        == 0
+    )
+    headline = tmp_path / "public/headline.json"
+    assert "former public secret" in headline.read_text()
+    changed = RouteRegistry(
+        (
+            replace(
+                registry.routes[0], visibility=Visibility.PRIVATE, is_headline=False
+            ),
+            replace(registry.routes[1], is_headline=True),
+        )
+    )
+
+    def boom() -> PageEnvelope:
+        raise RuntimeError("new headline collector unavailable")
+
+    assert _run_with_emitters(tmp_path, changed, {"sessions": boom})[0] == 1
+    assert not headline.exists()
+
+
+def test_timers_refuse_emitter_without_envelope_route(
+    app: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import importlib
+
+    vitals_app = importlib.import_module("vitals_app")
+    vitals_app.EMITTERS["ghost"] = _emitter("ghost", Status.HEALTHY)
+    assert main(_timers_argv(app)) == 2
+    assert "no summary_source route" in capsys.readouterr().err
+    assert not (app / "units").exists()

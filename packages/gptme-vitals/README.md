@@ -253,10 +253,12 @@ output's parent directory, or when no route sets `is_headline`.
 
 Every build removes old public summaries for currently private routes before
 collection, even when those pages were not selected or their emitters fail.
-When any envelope route is private, the old portal is also removed before
-collection: it embeds page headlines and lines, so leaving it until core generation
-succeeds could retain a now-private card on a failing build. A successful build
-replaces it with the current public-only view; a failed build may leave it absent.
+When any envelope route is private, the old portal and `headline.json` are also
+removed before collection: both can embed text from a formerly public page,
+even after headline ownership moves to another route. Leaving them until core
+generation succeeds could retain now-private text on a failing build. A successful
+build replaces them with the current public-only view; a failed build may leave
+them absent.
 A cleanup error stops the build with exit 1 rather than claiming successful privacy
 revocation. For public pages, a failed served-file write restores the previous
 private file byte-for-byte (including invalid UTF-8), or removes a first-time

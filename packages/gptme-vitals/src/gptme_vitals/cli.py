@@ -121,21 +121,21 @@ def run_build(
         with build_lock(private_root):
             # Visibility changes apply even on a partial build or when the
             # affected collector fails. Revoke served copies before collection.
-            # The old portal embeds page content too. Fail closed before any
-            # collector or core failure can leave a now-private card served.
+            # Shared outputs can retain text from a former public route even
+            # after headline ownership changes. Revoke before collection rather
+            # than infer the old owner from the current registry.
             if any(not route.is_public for route in registry.envelope_routes()):
-                target = portal_path(registry, public_root)
-                if target is not None:
-                    try:
+                try:
+                    (public_root / "headline.json").unlink(missing_ok=True)
+                    target = portal_path(registry, public_root)
+                    if target is not None:
                         target.unlink(missing_ok=True)
-                    except OSError as exc:
-                        out(f"FAIL visibility portal: {exc}")
-                        return 1
+                except OSError as exc:
+                    out(f"FAIL visibility shared outputs: {exc}")
+                    return 1
             for route in registry.envelope_routes():
                 if not route.is_public:
                     try:
-                        if route.is_headline:
-                            (public_root / "headline.json").unlink(missing_ok=True)
                         summary_path(route, public_root).unlink(missing_ok=True)
                     except (OSError, PublishError) as exc:
                         out(f"FAIL visibility {route.slug}: {exc}")
@@ -288,6 +288,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "timers":
             check_roots(args.private_root, args.public_root)
             check_outputs(registry)
+            envelope_slugs = {route.slug for route in registry.envelope_routes()}
+            for slug in emitters:
+                if slug not in envelope_slugs:
+                    raise UsageError(
+                        f"emitter for {slug!r}, which has no summary_source route"
+                    )
             for route in registry.envelope_routes():
                 summary_path(route, args.private_root)
                 summary_path(route, args.public_root)
