@@ -345,3 +345,28 @@ class TestSetSubtaskToggleSkipped:
         assert "(deferred:" not in content
         assert "(issue #5)" not in content
         assert count_subtasks(content).skipped == 0
+
+
+class TestOrderedListCheckboxes:
+    """``3. [ ] step`` is a checklist item, matching untick_checklist (gptme-contrib#2102)."""
+
+    def test_ordered_markers_count(self):
+        content = "1. [x] a\n2) [ ] b\n3. [-] c (deferred: x)\n4. [ ] ~~d~~ (dropped: y)\n"
+        assert count_subtasks(content) == SubtaskCount(1, 4, 2)
+        assert count_subtasks(content, checklist_only=True) == SubtaskCount(1, 4, 2)
+
+    def test_ordered_pending_blocks_completion(self):
+        content = "- [x] done\n1. [ ] still open\n"
+        assert count_subtasks(content).pending == 1
+
+    def test_ordered_marker_must_start_the_line(self):
+        assert count_subtasks("Released version 2. [x] stable\n").total == 0
+        assert count_subtasks("1. Not a checkbox\n").total == 0
+
+    def test_ordered_in_quote_and_indented(self):
+        content = "> 1. [ ] quoted\n   2. [x] nested\n"
+        assert count_subtasks(content) == SubtaskCount(1, 2, 0)
+
+    def test_ordered_inside_fence_ignored_when_checklist_only(self):
+        content = "```markdown\n1. [ ] example\n```\n1. [x] real\n"
+        assert count_subtasks(content, checklist_only=True) == SubtaskCount(1, 1, 0)
