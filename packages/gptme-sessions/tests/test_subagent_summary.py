@@ -155,6 +155,11 @@ def test_cmd_mutation_heredoc_keeps_real_shell_mutations() -> None:
     assert cmd_mutation(write)[0] == "acting"
 
 
+@pytest.mark.parametrize("shell", ['"/bin/bash"', "'/bin/sh'", '"bash"', "env '/bin/bash'"])
+def test_cmd_mutation_quoted_shell_heredoc_executes_body(shell: str) -> None:
+    assert cmd_mutation(f"{shell} <<'EOF'\ntouch out.txt\nEOF")[0] == "acting"
+
+
 @pytest.mark.parametrize(
     "body",
     [

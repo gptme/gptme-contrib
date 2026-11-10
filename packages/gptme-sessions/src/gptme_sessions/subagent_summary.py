@@ -126,7 +126,9 @@ def _strip_heredoc_bodies(cmd: str) -> str:
         heredocs = [
             m for m in _HEREDOC_RE.finditer(line) if not any(a <= m.start() < b for a, b in quoted)
         ]
-        if not heredocs or _SHELL_CONSUMER_RE.search(_QUOTED_RE.sub("''", line)):
+        # Quoting the executable does not stop it consuming shell input.
+        header = _QUOTED_RE.sub(lambda q: q.group()[1:-1], line)
+        if not heredocs or _SHELL_CONSUMER_RE.search(header):
             continue
         for m in heredocs:
             strip_tabs, delim = m.group(1) == "-", m.group(3)
