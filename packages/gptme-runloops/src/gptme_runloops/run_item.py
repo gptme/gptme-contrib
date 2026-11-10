@@ -2001,6 +2001,24 @@ def execute_plan(
 
     duration = int(time.time()) - started_epoch
 
+    # Resolve gptme evidence before interpreting ambiguous exit codes. The
+    # /tmp pointer may be gone while a fresh durable trajectory still exists.
+    # Other backends retain their inspection-before-resolution ordering below
+    # (CC/grok inspection can consume their temporary log references).
+    trajectory = plan.trajectory_path
+    if plan.backend == "gptme":
+        trajectory = resolve_backend_trajectory(
+            plan.backend,
+            plan.session_id,
+            predicted=plan.trajectory_path,
+            started_epoch=started_epoch,
+            copilot_state_dir=config.resolved_copilot_state_dir,
+            codex_sessions_dir=config.resolved_codex_sessions_dir,
+            copilot_pre=copilot_pre,
+            codex_pre=codex_pre,
+            gptme_log_root=config.resolved_gptme_log_root,
+        )
+
     rate_limited = False
     counted_failure = False
     deferred = False
@@ -2013,7 +2031,7 @@ def execute_plan(
     # launch never starts gptme, so it leaves no trajectory; a throttled run
     # does. The trajectory's terminal error is the cause signal.
     if exit_code in (75, 76) and plan.backend == "gptme":
-        infra_failure = _inspect_gptme_failure(plan)
+        infra_failure = _inspect_gptme_failure(plan, trajectory=trajectory)
         session_ran = infra_failure is not None
     if exit_code == 124:
         _log(
@@ -2038,10 +2056,9 @@ def execute_plan(
             infra_failure = _inspect_grok_failure(plan)
         elif plan.backend == "gptme" and not session_ran:
             # (already inspected above when the exit was 75/76)
-            infra_failure = _inspect_gptme_failure(plan)
+            infra_failure = _inspect_gptme_failure(plan, trajectory=trajectory)
 
-    trajectory = plan.trajectory_path
-    if not rate_limited:
+    if not rate_limited and plan.backend != "gptme":
         trajectory = resolve_backend_trajectory(
             plan.backend,
             plan.session_id,
@@ -2055,11 +2072,8 @@ def execute_plan(
             cc_predicted_pre=cc_predicted_pre,
             cc_snapshotted=cc_snapshotted,
         )
-    else:
-        # NOTE(parity): the rate-limit branch deletes the CC stream log +
-        # ref (worker.sh:186), so trajectory resolution finds nothing and
-        # the predicted stub path stands. Skip resolution to match.
-        pass
+    # NOTE(parity): the rate-limit branch deletes the CC stream log + ref
+    # (worker.sh:186), so keep the predicted stub path in that case.
 
     return RunItemOutcome(
         exit_code=exit_code,
@@ -2224,20 +2238,24 @@ def _inspect_grok_failure(
 
 
 def _inspect_gptme_failure(
-    plan: ItemPlan, *, tmp_dir: Path = Path("/tmp")
+    plan: ItemPlan, *, trajectory: str | None = None, tmp_dir: Path = Path("/tmp")
 ) -> str | None:
     """Read the gptme trajectory and classify any infra failure.
 
-    The gptme trajectory (pointed to by ``gptme-traj-{session_id}.path``)
-    is the only post-mortem artifact available without capturing the runner's
-    stderr.  Returns an infra_failure key or ``None``.
+    Prefer the caller's resolved trajectory, including the freshness-checked
+    durable fallback. Without one, read ``gptme-traj-{session_id}.path`` for
+    compatibility with standalone callers. An explicitly empty trajectory
+    means resolution found no evidence; do not re-read a stale reference.
+    Returns an infra_failure key or ``None``.
     """
-    if not plan.session_id:
-        return None
-    ref = tmp_dir / f"gptme-traj-{plan.session_id}.path"
-    if not ref.is_file():
-        return None
-    traj_str = ref.read_text(encoding="utf-8", errors="replace").strip()
+    traj_str = trajectory
+    if traj_str is None:
+        if not plan.session_id:
+            return None
+        ref = tmp_dir / f"gptme-traj-{plan.session_id}.path"
+        if not ref.is_file():
+            return None
+        traj_str = ref.read_text(encoding="utf-8", errors="replace").strip()
     traj_path = Path(traj_str) if traj_str else None
     if traj_path is None or not traj_path.is_file():
         return None

@@ -3957,20 +3957,31 @@ class TestGrokBuildInfraFailureRecordedInLedger:
         assert completed["infra_failure"] == "gptme_auth"
 
     @pytest.mark.parametrize(
-        ("with_trajectory", "expect_deferred"), [(True, False), (False, True)]
+        ("exit_code", "error", "infra_failure"),
+        [
+            (75, "status 429: rate limit", "gptme_rate_limit"),
+            (76, "status 401 Unauthorized: invalid api key", "gptme_auth"),
+        ],
     )
-    def test_gptme_exit_75_rate_limit_vs_lock_busy(
-        self, tmp_path, with_trajectory: bool, expect_deferred: bool
+    @pytest.mark.parametrize("trajectory_source", ["ref", "durable", "stale", "none"])
+    def test_gptme_exit_75_76_infra_failure_vs_lock_busy(
+        self,
+        tmp_path,
+        exit_code: int,
+        error: str,
+        infra_failure: str,
+        trajectory_source: str,
     ) -> None:
-        """Exit 75 is a rate limit when gptme left a 429 trajectory, a defer otherwise.
+        """Fresh 429/401 evidence makes 75/76 a failure; absent/stale evidence defers.
 
         The code alone is ambiguous (gptme/gptme-contrib#2084 made gptme's
         real 75 visible); the trajectory is the cause signal.
         """
         item = make_item(types=["notification"], number=0)
         work_file = _write_work_file(tmp_path, item)
-        config = make_config(tmp_path)
+        config = make_config(tmp_path, gptme_log_root=tmp_path / "gptme-runs")
         session_ref: Path | None = None
+        expect_deferred = trajectory_source in ("stale", "none")
 
         def run_cmd(argv, **kwargs):
             nonlocal session_ref
@@ -3978,15 +3989,26 @@ class TestGrokBuildInfraFailureRecordedInLedger:
             if "/fake/run.sh" in argv:
                 env = kwargs.get("env", {})
                 session_id = env.get("BOB_SESSION_ID", "test-gptme-session")
-                if with_trajectory:
-                    traj = tmp_path / "gptme-traj.jsonl"
-                    traj.write_text(
-                        '{"role": "error", "content": "API error (status 429): rate limit"}\n'
+                if trajectory_source != "none":
+                    traj = (
+                        config.resolved_gptme_log_root
+                        / f"gptme-logs-{session_id}"
+                        / "session"
+                        / "conversation.jsonl"
                     )
-                    ref = Path("/tmp") / f"gptme-traj-{session_id}.path"
-                    ref.write_text(str(traj))
-                    session_ref = ref
-                return subprocess.CompletedProcess(argv, 75, "", "")
+                    traj.parent.mkdir(parents=True)
+                    traj.write_text(
+                        json.dumps({"role": "error", "content": error}) + "\n"
+                    )
+                    # Freeze freshness independent of how fast the test runs.
+                    os.utime(
+                        traj, (1, 1) if expect_deferred else (2000000000, 2000000000)
+                    )
+                    if trajectory_source == "ref":
+                        ref = Path("/tmp") / f"gptme-traj-{session_id}.path"
+                        ref.write_text(str(traj))
+                        session_ref = ref
+                return subprocess.CompletedProcess(argv, exit_code, "", "")
             stdout = "abc123\n" if "rev-parse" in argv else ""
             return subprocess.CompletedProcess(argv, 0, stdout, "")
 
@@ -3999,12 +4021,12 @@ class TestGrokBuildInfraFailureRecordedInLedger:
                 session_ref.unlink(missing_ok=True)
 
         completed = [r for r in _ledger_rows(config) if r["phase"] == "completed"][0]
-        assert completed["exit_code"] == 75
+        assert completed["exit_code"] == exit_code
         if expect_deferred:
             assert completed.get("infra_failure") is None
             assert completed["outcome"] != "failed"
         else:
-            assert completed["infra_failure"] == "gptme_rate_limit"
+            assert completed["infra_failure"] == infra_failure
             assert completed["outcome"] == "failed"
 
 
