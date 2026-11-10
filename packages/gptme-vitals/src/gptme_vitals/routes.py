@@ -292,7 +292,7 @@ class RouteRegistry:
         # Resolve the destination URL first and consult the registry, so a
         # relative link to a dynamic or differently-pathed route gets the same
         # answer as the root-relative spelling of it.
-        directory = raw_path.endswith("/") if raw_path else current_directory
+        directory = _is_directory_url(raw_path) if raw_path else current_directory
         route = self._route_for_path(
             normalized, directory=directory, query=parsed.query
         )
@@ -379,7 +379,20 @@ def _href_key(href: str) -> str:
         return href
     # Re-escape decoded path delimiters so a literal '?' or '#' cannot become
     # a query/fragment boundary, and '%' cannot trigger a second decode.
-    return parsed._replace(path=quote(unquote(parsed.path), safe="/")).geturl()
+    path = unquote(parsed.path)
+    if any(part in {".", ".."} for part in path.split("/")):
+        normalized = _normalize_relative_path(PurePosixPath(path.lstrip("/")))
+        if normalized is not None:
+            text = "" if normalized == PurePosixPath(".") else normalized.as_posix()
+            path = ("/" if path.startswith("/") else "") + text
+            if text and _is_directory_url(unquote(parsed.path)):
+                path += "/"
+    return parsed._replace(path=quote(path, safe="/")).geturl()
+
+
+def _is_directory_url(path: str) -> bool:
+    """Terminal dot segments denote a directory even without a trailing slash."""
+    return path.endswith("/") or path.rsplit("/", 1)[-1] in {".", ".."}
 
 
 def _normalize_relative_path(path: PurePosixPath) -> PurePosixPath | None:

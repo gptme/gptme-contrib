@@ -528,3 +528,37 @@ def test_portal_and_page_cannot_both_own_headline() -> None:
     page = _route("page", summary_source="page/summary.json", is_headline=True)
     with pytest.raises(RouteRegistryError, match="exactly one"):
         RouteRegistry((page,), portal=portal)
+
+
+@pytest.mark.parametrize(
+    "href,current,expected",
+    [
+        (".", "/reports/v1.2/", "reports/v1.2/index.html"),
+        ("..", "/reports/v1.2/child/", "reports/v1.2/index.html"),
+        ("%2e", "/reports/v1.2/", "reports/v1.2/index.html"),
+    ],
+)
+def test_terminal_dot_segments_remain_directory_links(
+    tmp_path: Path, href: str, current: str, expected: str
+) -> None:
+    assert (
+        RouteRegistry(()).resolve_internal_target(
+            href, current_route=current, site_root=tmp_path
+        )
+        == tmp_path / expected
+    )
+
+
+@pytest.mark.parametrize("href", ["/reports/../health/", "/reports/%2e%2e/health/"])
+def test_registered_dot_segments_match_resolved_destination(
+    tmp_path: Path, href: str
+) -> None:
+    route = _route("health", href=href, output_path="checks.html")
+    reg = RouteRegistry((route,))
+    assert reg.get_by_href("/health/") is route
+    assert (
+        reg.resolve_internal_target(href, current_route="/", site_root=tmp_path)
+        == tmp_path / "checks.html"
+    )
+    with pytest.raises(RouteRegistryError, match="duplicate href"):
+        RouteRegistry((route, _route("alias", href="/health/")))
