@@ -628,3 +628,24 @@ def test_registered_fragment_is_not_resource_identity(tmp_path: Path) -> None:
     assert reg.get_by_href("/report/#other") is route
     with pytest.raises(RouteRegistryError, match="duplicate href"):
         RouteRegistry((route, _route("alias", href="/report/")))
+
+
+@pytest.mark.parametrize("kind", [RouteKind.STATIC, RouteKind.DYNAMIC])
+@pytest.mark.parametrize(
+    "href", ["%2e%2e/../health/", "../%2E%2E/health/", "../../health/"]
+)
+def test_mixed_encoded_parent_segments_resolve_before_cancellation(
+    tmp_path: Path, kind: RouteKind, href: str
+) -> None:
+    health = _route(
+        "health",
+        kind=kind,
+        output_path="checks.html" if kind is RouteKind.STATIC else None,
+    )
+    expected = tmp_path / "checks.html" if kind is RouteKind.STATIC else None
+    assert (
+        RouteRegistry((health,)).resolve_internal_target(
+            href, current_route="/reports/2026/", site_root=tmp_path
+        )
+        == expected
+    )

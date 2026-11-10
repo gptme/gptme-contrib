@@ -287,7 +287,14 @@ class RouteRegistry:
         else:
             # Choose the browser's parent before decoding: %2F is not a URL
             # separator and must not introduce another directory to climb.
-            url_path = _normalize_relative_path(current_path.parent / parsed.path)
+            # Encoded dot segments are URL traversal too. Decode only those
+            # before cancellation; decoding %2F here would change the parent.
+            url_parts = (current_path.parent / parsed.path).parts
+            url_path = _normalize_relative_path(
+                PurePosixPath(
+                    *(unquote(p) if unquote(p) in {".", ".."} else p for p in url_parts)
+                )
+            )
             if url_path is None:
                 return None
             relative = PurePosixPath(unquote(str(url_path)))
