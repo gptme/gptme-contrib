@@ -213,8 +213,14 @@ through the served tree, so it raises `PublishError` before anything is written.
 Directory symlinks below either root are refused even when their destination is
 inside that root: an alias could otherwise bypass collision checks and replace
 the lock inode or another page's output. A symlink naming the root itself is
-allowed when the resolved roots remain disjoint. The CLI validates all envelope
-paths, including unselected pages and the separate portal, before collection.
+allowed when the resolved roots remain disjoint. The entire served tree must be
+symlink-free, including unrelated and dangling aliases: a same-user HTTP server
+could otherwise follow an alias to private files independently of output paths.
+An unreadable subtree fails validation. These checks assume trusted filesystem
+writers; they do not prevent another process adding aliases after validation or
+exposure through hard links, bind mounts, or server-side alias configuration.
+The CLI validates all envelope paths, including unselected pages and the separate
+portal, before collection.
 
 `load_envelope` reads a stored envelope back and drops `detail`. A missing,
 unparsable, wrongly-shaped or unrecognised-status file is a *blind* page (`None`),
@@ -251,8 +257,10 @@ two outputs would write one file (shared `summary_source`,
 `core.json`/`headline.json`, the portal page), when an output file is another
 output's parent directory, or when no route sets `is_headline`.
 
-Every build removes old public summaries for currently private routes before
-collection, even when those pages were not selected or their emitters fail.
+Every build removes old public summaries and registered HTML outputs for currently
+private routes before collection, even when those pages were not selected or
+their emitters fail. HTML cleanup also covers routes without envelopes. Standalone
+`publish_page` revokes both registered files for its private route as well.
 When any envelope route is private, the old portal and `headline.json` are also
 removed before collection: both can embed text from a formerly public page,
 even after headline ownership moves to another route. Leaving them until core
@@ -287,6 +295,12 @@ Writes `<prefix>-<slug>.service` and `.timer` for every envelope route, running
 over-refresh cheap pages or under-refresh expensive ones. It only renders text:
 it never calls systemctl and never creates the data roots; you place the files and
 enable them.
+
+Services default to `TimeoutStartSec=infinity`: a startup deadline would count
+unbounded time waiting behind other collectors on the shared build lock. Collectors
+must bound their own I/O; a hung collector otherwise stalls every page. Library
+callers can pass `timeout_seconds` to impose an explicit whole-build deadline,
+including lock wait, when their deployment has a known queue bound.
 
 `manual` and `n/a` routes get no unit and are listed as skipped, so a page nobody
 refreshes is visible. The CLI refuses a scheduled envelope route without an
