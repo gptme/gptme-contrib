@@ -56,8 +56,8 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def _parse_dt(value: str | None) -> datetime | None:
-    if not value:
+def _parse_dt(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
         return None
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
@@ -136,9 +136,9 @@ def _check(args: argparse.Namespace) -> int:
         elapsed = (now - last_executed_ts).total_seconds()
         wall_clock_backoff_expired = elapsed >= backoff_seconds
     else:
-        # No timestamp or streak=0 → gate inactive anyway; pass False to let
-        # the gate's own inactive branch decide (it won't reach backoff).
-        wall_clock_backoff_expired = False
+        # An armed streak without a usable timestamp cannot establish a
+        # backoff deadline. Fail open so the next execution can repair it.
+        wall_clock_backoff_expired = backoff_seconds > 0
 
     addressed = (
         args.addressed.lower() in ("1", "true", "yes") if args.addressed else False
@@ -291,7 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
     check_p.add_argument(
         "--explore-rate",
         type=float,
-        default=float(os.environ.get("GATE_EXPLORE_RATE", str(DEFAULT_EXPLORE_RATE))),
+        default=os.environ.get("GATE_EXPLORE_RATE", str(DEFAULT_EXPLORE_RATE)),
         help=f"Epsilon-explore rate for sampling would-be skips (default: {DEFAULT_EXPLORE_RATE}).",
     )
 

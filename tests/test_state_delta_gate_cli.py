@@ -194,6 +194,70 @@ def test_record_failure_returns_nonzero_without_success_message(
     assert not list((tmp_path / "state").glob("*.tmp"))
 
 
+@pytest.mark.parametrize("value", ["", "5%"])
+@pytest.mark.parametrize("command", ["record-noop", "record-productive", "status"])
+def test_invalid_explore_environment_does_not_break_other_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str, command: str
+) -> None:
+    monkeypatch.setenv("GATE_EXPLORE_RATE", value)
+    assert run(tmp_path, command) == 0
+
+
+@pytest.mark.parametrize("value", ["", "5%"])
+def test_explicit_explore_rate_overrides_invalid_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("GATE_EXPLORE_RATE", value)
+    assert run(tmp_path, "check", "--explore-rate", "0") == PROCEED
+
+
+@pytest.mark.parametrize("value", ["", "5%"])
+def test_invalid_explore_environment_reports_argument_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    value: str,
+) -> None:
+    monkeypatch.setenv("GATE_EXPLORE_RATE", value)
+    with pytest.raises(SystemExit) as exc:
+        run(tmp_path, "check")
+    assert exc.value.code == 2
+    assert "invalid float value" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", [123, True, ["timestamp"], {"ts": "bad"}])
+@pytest.mark.parametrize("force", [False, True])
+def test_non_string_timestamp_does_not_suppress_sessions(
+    tmp_path: Path, value: object, force: bool
+) -> None:
+    write_state(tmp_path, noop_only_streak=1, last_executed_ts=value)
+    args = ["check", "--explore-rate", "0"]
+    if force:
+        args.append("--force")
+    assert run(tmp_path, *args) == PROCEED
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        {},
+        {"last_executed_ts": "not-a-date"},
+        {"last_executed_ts": ""},
+        {"last_executed_ts": None},
+    ],
+)
+def test_unknown_timestamp_does_not_lock_out_armed_streak(
+    tmp_path: Path, timestamp: dict
+) -> None:
+    write_state(tmp_path, noop_only_streak=4, **timestamp)
+    before = read_state(tmp_path)
+    assert run(tmp_path, "check", "--explore-rate", "0") == PROCEED
+    assert read_state(tmp_path) == before
+    assert run(tmp_path, "record-noop") == 0
+    assert read_state(tmp_path)["noop_only_streak"] == 5
+    assert run(tmp_path, "check", "--explore-rate", "0") == SKIP
+
+
 # --- First run / no-state ---
 
 
