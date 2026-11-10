@@ -167,5 +167,6 @@ def emit_file(
     client.ensure_bucket(bucket, core.BUCKET_TYPE, core.CLIENT_NAME, hostname)
     for block in new:
         client.post_event(bucket, block.to_event())
-    _write_emitted(path, emitted + len(new))
+        emitted += 1
+        _write_emitted(path, emitted)
     return len(new)

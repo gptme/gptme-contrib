@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from aw_watcher_agent import cc_tailer, core
 from aw_watcher_agent.client import AWClient
 
@@ -100,6 +102,43 @@ def test_emit_holds_open_block_then_emits_each_block_once(tmp_path, monkeypatch)
     assert cc_tailer.emit_file(client, "host", transcript, now=later) == 1
     assert cc_tailer.emit_file(client, "host", transcript, now=later) == 0
     assert len(client.posted) == 2
+
+
+@pytest.mark.parametrize("fail_at", [1, 2, 3])
+def test_emit_resumes_after_last_successful_post(tmp_path, monkeypatch, fail_at):
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    transcript = tmp_path / "s1.jsonl"
+    transcript.write_text(
+        "\n".join(_row(f"2026-11-10T{hour:02d}:00:00Z") for hour in range(9, 13)),
+        encoding="utf-8",
+    )
+    now = _dt("2026-11-10T13:00:00Z")
+    client = _Client()
+
+    # Start with a previously emitted block, then fail partway through the backlog.
+    assert cc_tailer.emit_file(client, "host", transcript, now=_dt("2026-11-10T09:30:00Z")) == 1
+    post_event = client.post_event
+    attempts = 0
+
+    def failing_post(bucket_id, event):
+        nonlocal attempts
+        attempts += 1
+        if attempts == fail_at:
+            raise OSError("temporary server failure")
+        return post_event(bucket_id, event)
+
+    monkeypatch.setattr(client, "post_event", failing_post)
+    with pytest.raises(OSError, match="temporary server failure"):
+        cc_tailer.emit_file(client, "host", transcript, now=now)
+
+    # Use a fresh client as a timer restart would: accepted blocks must not replay.
+    retry_client = _Client()
+    assert cc_tailer.emit_file(retry_client, "host", transcript, now=now) == 4 - fail_at
+    posted = client.posted + retry_client.posted
+    assert [event.timestamp for _, event in posted] == [
+        _dt(f"2026-11-10T{hour:02d}:00:00Z").isoformat() for hour in range(9, 13)
+    ]
+    assert cc_tailer.emit_file(retry_client, "host", transcript, now=now) == 0
 
 
 def test_transcripts_excludes_nested_subagent_logs(tmp_path, monkeypatch):
