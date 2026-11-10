@@ -28,6 +28,7 @@ from gptme_vitals.build import BuildError, derive_core, headline_link, write_cor
 from gptme_vitals.envelope import PageEnvelope
 from gptme_vitals.portal import render_portal
 from gptme_vitals.publish import (
+    LOCK_NAME,
     PublishError,
     check_outputs,
     check_roots,
@@ -40,8 +41,6 @@ from gptme_vitals.routes import RouteRegistry, RouteRegistryError
 from gptme_vitals.timers import TimerError, render_units
 
 Emitter = Callable[[], PageEnvelope]
-
-LOCK_NAME = ".gptme-vitals.lock"
 
 
 @contextlib.contextmanager

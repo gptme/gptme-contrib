@@ -85,6 +85,7 @@ def portal_path(registry: RouteRegistry, root: Path) -> Path | None:
 
 #: Files the build derives into the public root; no page may write to them.
 RESERVED_PUBLIC_FILES = ("core.json", "headline.json")
+LOCK_NAME = ".gptme-vitals.lock"
 
 
 def check_outputs(registry: RouteRegistry) -> None:
@@ -104,6 +105,7 @@ def check_outputs(registry: RouteRegistry) -> None:
         key = tuple(part.casefold() for part in PurePosixPath(path).parts)
         owners.setdefault(key, []).append((kind, owner))
 
+    claim("build lock", LOCK_NAME, LOCK_NAME)
     for name in RESERVED_PUBLIC_FILES:
         claim("derived file", name, name)
     portal = registry.portal

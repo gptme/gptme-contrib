@@ -314,3 +314,9 @@ def test_summary_source_may_not_collide_with_another_routes_page() -> None:
 
 def test_distinct_outputs_pass(registry: RouteRegistry) -> None:
     check_outputs(registry)
+
+
+@pytest.mark.parametrize("name", [".gptme-vitals.lock", "./.GPTME-VITALS.LOCK"])
+def test_summary_source_cannot_replace_the_build_lock(name: str) -> None:
+    with pytest.raises(PublishError, match="lock"):
+        check_outputs(RouteRegistry((_route("a", summary_source=name),)))
