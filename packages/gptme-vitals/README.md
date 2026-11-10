@@ -98,7 +98,8 @@ REGISTRY.core_dimensions()   # {"services": (<route>,)} — input to roll_up_env
 
 Violations raise `RouteRegistryError` at construction, not when a page renders:
 duplicate slug/href (including percent-encoded href aliases), an absolute or
-parent-traversing `output_path`, a private portal, a nav group naming an unknown,
+parent-traversing `output_path`, a non-root-relative internal `href`, a private
+portal, a nav group naming an unknown,
 external or private route, a navigable route missing from every group, more than
 one `is_headline`, and a
 `core_dimension`/`is_headline` on a route with no `summary_source` (nothing to
@@ -111,7 +112,10 @@ but is not rendered as a card linking to itself.
 by us, not an outbound link" and drives link crawling; a private page is still
 internal. `PRIVATE` routes are skipped by the nav and portal cards and are
 meant for the private root only. A registered portal must be public because it
-is linked from every page. Relative links resolve against the current page's
+is linked from every page. Internal registrations (including the portal) use
+root-relative URLs such as `/services/`, so their nav/card links have the same
+destination on every page. Relative links found by the crawler remain supported
+and resolve against the current page's
 URL, then map the destination through the registry to its `output_path`; a
 custom backing path never changes the browser's URL base. An exact query-bearing
 registration wins over a path-only route; otherwise UI query parameters fall

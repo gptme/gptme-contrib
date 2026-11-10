@@ -127,6 +127,17 @@ class DashboardRoute:
             raise RouteRegistryError(
                 f"route {self.slug!r}: external href must be absolute"
             )
+        if self.is_internal:
+            parsed = urlsplit(self.href)
+            if (
+                parsed.scheme
+                or parsed.netloc
+                or not self.href.startswith("/")
+                or self.href.startswith("//")
+            ):
+                raise RouteRegistryError(
+                    f"route {self.slug!r}: internal href must be root-relative"
+                )
         if self.core_dimension is not None and self.summary_source is None:
             # A page with no envelope source has nothing to roll up; declaring a
             # dimension for it would make the dimension permanently blind.

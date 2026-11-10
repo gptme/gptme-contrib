@@ -649,3 +649,30 @@ def test_mixed_encoded_parent_segments_resolve_before_cancellation(
         )
         == expected
     )
+
+
+@pytest.mark.parametrize("kind", [RouteKind.STATIC, RouteKind.DYNAMIC])
+@pytest.mark.parametrize(
+    "href",
+    [
+        "services/",
+        "../services/",
+        "?tab=1",
+        "#top",
+        "//other.example/services/",
+        "https://other.example/services/",
+    ],
+)
+def test_internal_registration_requires_root_relative_url(
+    kind: RouteKind, href: str
+) -> None:
+    route = _route(
+        "services",
+        href=href,
+        kind=kind,
+        output_path="services/index.html" if kind is RouteKind.STATIC else None,
+    )
+    with pytest.raises(RouteRegistryError, match="internal href must be root-relative"):
+        RouteRegistry((route,))
+    with pytest.raises(RouteRegistryError, match="internal href must be root-relative"):
+        RouteRegistry((), portal=route)
