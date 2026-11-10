@@ -428,9 +428,15 @@ def _command_substitutions(cmd: str) -> list[str]:
 
 
 def _shell_tokens(segment: str) -> list[str]:
-    # comments=True: bash never executes a trailing ``# -f body=x``.
+    """Shell words of a segment, with unquoted grouping/redirect punctuation
+    split into tokens of its own (``(gh ... -X GET)`` -> ``GET``, ``)``).
+
+    Comments are honoured: bash never executes a trailing ``# -f body=x``.
+    """
+    lexer = shlex.shlex(segment, posix=True, punctuation_chars="();<>|&")
+    lexer.whitespace_split = True
     try:
-        return shlex.split(segment, comments=True)
+        return list(lexer)
     except ValueError:
         return segment.split()
 

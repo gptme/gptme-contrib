@@ -67,6 +67,10 @@ READS = [
     "if gh api repos/o/r/issues/5/comments; then echo found; fi",
     "! gh api repos/o/r/issues/5/comments >/dev/null",
     "(gh api repos/o/r/issues/5/comments)",
+    # grouping punctuation is not part of the method value (``GET)`` is GET)
+    "(gh api repos/o/r/issues/5/comments -f per_page=100 -X GET)",
+    "{ gh api repos/o/r/issues/5/comments -f per_page=100 -X GET; }",
+    "x=$(gh api repos/o/r/issues/5/comments -f per_page=100 --method GET)",
     "timeout 30 gh api repos/o/r/pulls/12/reviews",
     # option values that look like write flags are values, not flags
     "gh api repos/o/r/issues/5/comments --template '-f'",
@@ -117,6 +121,8 @@ WRITES = [
     'y="`gh api repos/o/r/issues/5/comments -f body=x`"',
     "echo \"posted: $(gh api repos/o/r/issues/5/comments -f body='a) b' --jq .id)\"",
     'x="$(echo "$(gh api repos/o/r/issues/5/comments -f body=x)")"',
+    "(gh api repos/o/r/issues/5/comments -f body=x -X POST)",
+    "(gh api repos/o/r/issues/5/comments -f body=x)",
 ]
 
 
