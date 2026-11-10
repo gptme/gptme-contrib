@@ -50,6 +50,25 @@ def test_missing_or_broken_config_resolves_none(tmp_path: Path) -> None:
     assert got is None
 
 
+def test_invalid_utf8_config_is_skipped(tmp_path: Path) -> None:
+    broken = tmp_path / "broken.toml"
+    broken.write_bytes(b"\xff")
+    valid = _write_config(
+        tmp_path / "valid.toml", {"OPENROUTER_API_KEY_REVIEW": "cfg-review"}
+    )
+    assert (
+        core._resolve_review_key_portable(
+            environ={"OPENROUTER_API_KEY_REVIEW": "env-review"},
+            config_paths=(broken,),
+        )
+        == "env-review"
+    )
+    assert (
+        core._resolve_review_key_portable(environ={}, config_paths=(broken, valid))
+        == "cfg-review"
+    )
+
+
 @pytest.mark.parametrize("invalid_env", ['"invalid"', "42", '["invalid"]'])
 def test_non_table_config_env_is_skipped(tmp_path: Path, invalid_env: str) -> None:
     broken = tmp_path / "broken.toml"

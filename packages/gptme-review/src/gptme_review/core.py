@@ -3200,7 +3200,7 @@ def _resolve_review_key_portable(
         try:
             with path.open("rb") as fh:
                 data = tomllib.load(fh)
-        except (OSError, tomllib.TOMLDecodeError):
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
             continue
         env_table = data.get("env")
         if not isinstance(env_table, dict):
