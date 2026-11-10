@@ -3040,7 +3040,7 @@ def _resolve_agent_name(repo_root: Path, override: str | None) -> str:
                 try:
                     import tomli as tomllib  # type: ignore[import-not-found,no-redef]
                 except ModuleNotFoundError:
-                    console.print(
+                    Console(stderr=True).print(
                         "[yellow]Warning: tomli is required on Python <3.11 to read "
                         "gptme.toml; falling back to 'agent'[/]"
                     )
@@ -3048,7 +3048,7 @@ def _resolve_agent_name(repo_root: Path, override: str | None) -> str:
 
             data = tomllib.loads(gptme_toml.read_text())
         except (OSError, tomllib.TOMLDecodeError) as exc:
-            console.print(
+            Console(stderr=True).print(
                 f"[yellow]Warning: Failed to load {gptme_toml}: {exc}. Falling back to 'agent'.[/]"
             )
             return "agent"
@@ -5629,6 +5629,9 @@ def add(
     treated as no body; an incomplete body fails without creating a task.
     Use --body-stdin to wait until EOF for delayed or slow producers.
 
+    Prints the task ID to stdout and the creation confirmation to stderr,
+    so stdout can be captured directly for a subsequent edit or claim.
+
     Examples:
         # Simple task
         gptodo add "Fix the login bug"
@@ -5682,7 +5685,7 @@ def add(
             raise click.UsageError("Invalid --wait format. Use YYYY-MM-DD or YYYY-MM-DDTHH:MM")
         wait_iso = parsed_wait.isoformat()
 
-    console = Console()
+    console = Console(stderr=True)
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
     assigned_to = _resolve_agent_name(repo_root, assigned_to)
@@ -5763,6 +5766,7 @@ def add(
     filepath.write_text(content)
 
     console.print(f"[green]✓ Created task:[/] {filepath}")
+    print(filepath.stem)
 
 
 def _body_looks_like_frontmatter(body: str) -> bool:

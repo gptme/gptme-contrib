@@ -44,8 +44,8 @@ def test_open_empty_pipe_returns_promptly(workspace: Path) -> None:
     created = workspace / "tasks" / "task-filed-from-a-harness-pipe.md"
     assert created.exists()
     assert "## " not in created.read_text()
-    # Rich may wrap long paths, but there must be no extra task-id line.
-    assert "".join(out.split()) == f"✓Createdtask:{created}"
+    assert out == f"{created.stem}\n"
+    assert "✓ Created task:" in err
 
 
 def _wait(proc: subprocess.Popen[str]) -> tuple[str, str]:
@@ -67,6 +67,46 @@ def test_piped_body_is_still_read(workspace: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "- [ ] one" in (workspace / "tasks" / "task-with-body.md").read_text()
+
+
+@pytest.mark.parametrize(
+    "title",
+    ["Short task", "verify-the-task-authoring-interface-handles-a-deliberately-long-title"],
+)
+@pytest.mark.parametrize("malformed_config", [False, True])
+def test_add_stdout_can_be_chained_into_edit(
+    workspace: Path, title: str, malformed_config: bool
+) -> None:
+    """Capture stdout exactly as TASK_ID=$(gptodo add ... </dev/null) does."""
+    if malformed_config:
+        (workspace / "gptme.toml").write_text("[agent\n")
+    result = subprocess.run(
+        [sys.executable, "-m", "gptodo", "add", title],
+        cwd=workspace,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    # Shell command substitution strips trailing newlines, not other output.
+    task_id = result.stdout.rstrip("\n")
+    edit_result = subprocess.run(
+        [sys.executable, "-m", "gptodo", "edit", task_id, "--set", "priority", "high"],
+        cwd=workspace,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert edit_result.returncode == 0, edit_result.stdout + edit_result.stderr
+    created = next((workspace / "tasks").glob("*.md"))
+    assert result.stdout == f"{created.stem}\n"
+    assert "✓ Created task:" in result.stderr
+    if malformed_config:
+        assert "Warning: Failed to load" in result.stderr
+        assert "assigned_to: agent" in created.read_text()
+    assert "priority: high" in created.read_text()
 
 
 def test_read_piped_body_without_fileno_falls_back_to_read() -> None:
