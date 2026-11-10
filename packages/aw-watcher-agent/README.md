@@ -5,10 +5,10 @@ assistants** (gptme, Claude Code, Codex). It logs agent sessions and per-tool
 activity to your **local** aw-server, so AI work shows up in the aw-webui
 Timeline alongside window/AFK data instead of looking like idle time.
 
-**Status:** alpha (`0.1.0`). Session tracking and the Codex log-tailer work and
-are dogfooded against a local aw-server; the Claude Code log-tailer is tested on
-fixtures and real transcripts but not yet dogfooded. A native gptme plugin hook
-for per-tool events and an aw-webui "AI work" view are not built yet.
+**Status:** alpha (`0.2.0`). Session tracking and the Codex log-tailer work and
+are dogfooded against a local aw-server, as is the Claude Code log-tailer. A
+native gptme plugin hook for per-tool events and an aw-webui "AI work" view are
+not built yet.
 
 This is the controller use case behind
 [ActivityWatch/activitywatch#1215](https://github.com/ActivityWatch/activitywatch/issues/1215).
@@ -30,6 +30,8 @@ This is the controller use case behind
 ## Install
 
 ```bash
+pipx install aw-watcher-agent   # or: pip install aw-watcher-agent / uv tool install aw-watcher-agent
+# latest unreleased master:
 pip install "git+https://github.com/gptme/gptme-contrib#subdirectory=packages/aw-watcher-agent"
 # or, from a gptme-contrib checkout:
 pip install -e packages/aw-watcher-agent
@@ -104,8 +106,11 @@ directory. Use either the tailer or lifecycle hooks for a session, not both.
 ### Wiring into Claude Code (or any harness with lifecycle hooks)
 
 Point your harness's session-start / session-end hooks (for Claude Code:
-`SessionStart` / `Stop` in `settings.json`) at `emit-start` / `emit-end`,
-passing the same `--session-id` to both.
+`SessionStart` / `SessionEnd` in `settings.json`) at `emit-start` / `emit-end`,
+passing the same `--session-id` to both. Do not use Claude Code's `Stop` hook for
+`emit-end`: it fires after every response, so the first turn closes the session
+and each later turn posts an empty 0s event. Keep the `SessionEnd` hook
+synchronous (not `async`) so the post finishes before the process exits.
 
 ### Per-tool activity
 
