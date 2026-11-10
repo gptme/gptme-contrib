@@ -16,6 +16,7 @@ from gptme_vitals.routes import (
     RefreshCadence,
     RouteKind,
     RouteRegistry,
+    RouteRegistryError,
     Visibility,
 )
 
@@ -376,9 +377,10 @@ def test_no_portal_route_means_no_portal_file(tmp_path: Path) -> None:
 
 
 def test_portal_output_path_cannot_escape_the_public_root(tmp_path: Path) -> None:
-    code, lines = _run_with(tmp_path, _portal_registry("../outside.html"))
-    assert code == 1
-    assert any(line.startswith("FAIL portal:") for line in lines)
+    # The route registry now refuses an escaping output_path at registration,
+    # before the build CLI can see it.
+    with pytest.raises(RouteRegistryError, match="contained relative path"):
+        _portal_registry("../outside.html")
     assert not (tmp_path / "outside.html").exists()
 
 
