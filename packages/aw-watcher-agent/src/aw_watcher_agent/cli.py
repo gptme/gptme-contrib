@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import socket
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -162,6 +163,32 @@ def cmd_tail_codex(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tail_claude_code(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from . import cc_tailer
+
+    client = AWClient(args.server)
+    host = _hostname(args.hostname)
+    files = [Path(args.file)] if args.file else cc_tailer.transcripts()
+    if not files:
+        print("no Claude Code transcripts found", file=sys.stderr)
+        return 0
+    total = 0
+    failed = False
+    for path in files:
+        try:
+            total += cc_tailer.emit_file(client, host, path, gap_s=args.gap)
+        except (AWClientError, OSError, ValueError, sqlite3.Error) as exc:
+            failed = True
+            print(f"aw-watcher-agent: {path}: {exc}", file=sys.stderr)
+    print(
+        f"claude-code sessions emitted: {core.bucket_id(host)} "
+        f"events={total} transcripts={len(files)}"
+    )
+    return int(failed and args.strict)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aw-watcher-agent", description=__doc__)
     parser.add_argument("--strict", action="store_true", help="exit non-zero on errors")
@@ -221,6 +248,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_tail.add_argument("--server", default=core_default_server())
     p_tail.set_defaults(func=cmd_tail_codex)
 
+    p_cc = sub.add_parser(
+        "tail-claude-code",
+        help="emit session working blocks from Claude Code transcripts (no hooks needed)",
+    )
+    p_cc.add_argument(
+        "--file", help="transcript JSONL to process (default: all under ~/.claude/projects)"
+    )
+    p_cc.add_argument(
+        "--gap",
+        type=float,
+        default=15 * 60,
+        help="idle gap in seconds that splits a session into blocks (default: 900)",
+    )
+    p_cc.add_argument("--hostname")
+    p_cc.add_argument("--server", default=core_default_server())
+    p_cc.set_defaults(func=cmd_tail_claude_code)
+
     return parser
 
 
@@ -229,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
-    except (AWClientError, OSError, ValueError) as exc:
+    except (AWClientError, OSError, ValueError, sqlite3.Error) as exc:
         msg = f"aw-watcher-agent: {exc}"
         if args.strict:
             print(msg, file=sys.stderr)
