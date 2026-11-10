@@ -98,7 +98,7 @@ _NONSCRATCH_PATH_RE = re.compile(
     r"|packages/|gptme-contrib/)"
 )
 _QUOTED_TARGET_RE = re.compile(r"(?<![0-9&<>=!])>{1,2}\s*[\"']([^\"'\n]+)[\"']")
-_HEREDOC_RE = re.compile(r"(?<!<)<<(-?)\s*([\"']?)([A-Za-z_]\w*)\2")
+_HEREDOC_RE = re.compile(r"(?<!<)<<(-?)\s*([\"']?)([A-Za-z_]\w*)\2(?=\s|[;&|<>()]|$)")
 # A heredoc body fed to a shell is still shell; any other body is stdin data.
 _SHELL_CONSUMER_RE = re.compile(r"\b(?:ba|z|da|k)?sh\b|\bssh\b|\beval\b|\bsource\b")
 # Even backslash pairs leave the expansion active; an odd backslash escapes it.

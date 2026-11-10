@@ -155,6 +155,15 @@ def test_cmd_mutation_heredoc_keeps_real_shell_mutations() -> None:
     assert cmd_mutation(write)[0] == "acting"
 
 
+@pytest.mark.parametrize("delimiter", ["EOF.txt", "EOF-END", "'EOF.txt'", "EOF'part'"])
+def test_cmd_mutation_unsupported_heredoc_delimiter_keeps_following_commands(
+    delimiter: str,
+) -> None:
+    terminator = delimiter.replace("'", "")
+    command = f"cat <<{delimiter}\nhello\n{terminator}\ngit commit -am update"
+    assert cmd_mutation(command)[0] == "acting"
+
+
 @pytest.mark.parametrize("shell", ['"/bin/bash"', "'/bin/sh'", '"bash"', "env '/bin/bash'"])
 def test_cmd_mutation_quoted_shell_heredoc_executes_body(shell: str) -> None:
     assert cmd_mutation(f"{shell} <<'EOF'\ntouch out.txt\nEOF")[0] == "acting"
