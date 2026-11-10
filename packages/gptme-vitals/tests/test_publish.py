@@ -391,3 +391,24 @@ def test_corrupt_private_file_recovers_or_rolls_back_exact_bytes(
         assert (
             json.loads((public / "pub/summary.json").read_text())["status"] == "healthy"
         )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "core.json/summary.json",
+        "HEADLINE.JSON/summary.json",
+        ".gptme-vitals.lock/summary.json",
+        "b/summary.json/child.json",
+        "b",
+        "b/index.html/summary.json",
+        "index.html/summary.json",
+    ],
+)
+def test_output_files_cannot_also_be_directories(source: str) -> None:
+    portal = _route("portal", href="/", output_path="index.html", summary_source=None)
+    registry = RouteRegistry(
+        (_route("a", summary_source=source), _route("b")), portal=portal
+    )
+    with pytest.raises(PublishError, match="ancestor"):
+        check_outputs(registry)

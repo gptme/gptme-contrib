@@ -719,3 +719,58 @@ def test_aliased_output_is_refused_before_collection_or_writes(
     assert not collected
     assert not (tmp_path / "private/.gptme-vitals.lock").exists()
     assert not (tmp_path / "private/services").exists()
+
+
+@pytest.mark.parametrize("failure", ["derive", "write"])
+def test_private_transition_revokes_portal_even_when_core_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from dataclasses import replace
+
+    from gptme_vitals import cli
+    from gptme_vitals.build import BuildError
+
+    private_registry = _portal_registry()
+    public_registry = RouteRegistry(
+        tuple(
+            replace(route, visibility=Visibility.PUBLIC)
+            for route in private_registry.routes
+        ),
+        portal=private_registry.portal,
+    )
+    emitters = _all(
+        cost=_emitter("cost", Status.HEALTHY, lines=("sensitive cost line",))
+    )
+    assert _run_with_emitters(tmp_path, public_registry, emitters)[0] == 0
+    portal = tmp_path / "public/index.html"
+    assert "sensitive cost line" in portal.read_text()
+
+    def fail(*args: object, **kwargs: object) -> None:
+        if failure == "derive":
+            raise BuildError("injected derivation failure")
+        raise PermissionError("injected core write failure")
+
+    monkeypatch.setattr(
+        cli, "derive_core" if failure == "derive" else "write_core_files", fail
+    )
+    code, lines = _run_with_emitters(tmp_path, private_registry, emitters)
+    assert code == 1
+    assert any(line.startswith("FAIL core:") for line in lines)
+    assert not (tmp_path / "public/cost/summary.json").exists()
+    assert not portal.exists() or "sensitive cost line" not in portal.read_text()
+
+
+def test_timers_refuse_scheduled_routes_without_emitters_before_writing(
+    app: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import importlib
+
+    vitals_app = importlib.import_module("vitals_app")
+    setattr(
+        vitals_app,
+        "REGISTRY",
+        RouteRegistry((*vitals_app.REGISTRY.routes, _route("b"))),
+    )
+    assert main(_timers_argv(app)) == 2
+    assert "no emitter registered for scheduled page 'b'" in capsys.readouterr().err
+    assert not (app / "units").exists()

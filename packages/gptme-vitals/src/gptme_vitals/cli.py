@@ -39,7 +39,7 @@ from gptme_vitals.publish import (
     write_text,
 )
 from gptme_vitals.routes import RouteRegistry, RouteRegistryError
-from gptme_vitals.timers import TimerError, render_units
+from gptme_vitals.timers import CALENDAR, TimerError, render_units
 
 Emitter = Callable[[], PageEnvelope]
 
@@ -121,6 +121,16 @@ def run_build(
         with build_lock(private_root):
             # Visibility changes apply even on a partial build or when the
             # affected collector fails. Revoke served copies before collection.
+            # The old portal embeds page content too. Fail closed before any
+            # collector or core failure can leave a now-private card served.
+            if any(not route.is_public for route in registry.envelope_routes()):
+                target = portal_path(registry, public_root)
+                if target is not None:
+                    try:
+                        target.unlink(missing_ok=True)
+                    except OSError as exc:
+                        out(f"FAIL visibility portal: {exc}")
+                        return 1
             for route in registry.envelope_routes():
                 if not route.is_public:
                     try:
@@ -275,6 +285,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         assert isinstance(registry, RouteRegistry) and isinstance(emitters, Mapping)
         if args.command == "timers":
             check_roots(args.private_root, args.public_root)
+            check_outputs(registry)
+            for route in registry.envelope_routes():
+                if route.cadence in CALENDAR and route.slug not in emitters:
+                    raise UsageError(
+                        f"no emitter registered for scheduled page {route.slug!r}"
+                    )
             try:
                 # A unit set whose every run would refuse to start is not worth writing.
                 headline_link(registry.headline_route(), args.base_url)

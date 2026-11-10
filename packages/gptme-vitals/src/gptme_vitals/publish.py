@@ -96,7 +96,7 @@ LOCK_NAME = ".gptme-vitals.lock"
 
 
 def check_outputs(registry: RouteRegistry) -> None:
-    """Raise if two outputs would write the same file under one root.
+    """Raise if outputs share a file or use an output file as a directory.
 
     Covers summary sources, the portal page, the derived ``core.json`` and
     ``headline.json``, and other routes' ``output_path`` values. Compared
@@ -123,6 +123,13 @@ def check_outputs(registry: RouteRegistry) -> None:
         claim("summary_source", route.slug, route.summary_source)
         claim("output_path", route.slug, route.output_path)
     for key, claims in owners.items():
+        for length in range(1, len(key)):
+            ancestor = key[:length]
+            if ancestor in owners:
+                raise PublishError(
+                    f"{'/'.join(ancestor)} is an output file and an ancestor "
+                    f"of output {'/'.join(key)}"
+                )
         # Plain output_path/output_path repeats are the registry's own business.
         if len(claims) > 1 and any(kind != "output_path" for kind, _ in claims):
             who = ", ".join(f"{kind} of {owner!r}" for kind, owner in claims)

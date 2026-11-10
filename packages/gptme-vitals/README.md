@@ -248,11 +248,16 @@ view. A slow collector delays other builds; this deliberately trades throughput
 for ordered observations without relying on emitter-supplied timestamps. The lock
 pathname is reserved against envelope outputs. `build` also refuses to start when
 two outputs would write one file (shared `summary_source`,
-`core.json`/`headline.json`, the portal page) or when no route sets `is_headline`.
+`core.json`/`headline.json`, the portal page), when an output file is another
+output's parent directory, or when no route sets `is_headline`.
 
 Every build removes old public summaries for currently private routes before
-collection, even when those pages were not selected or their emitters fail. A
-cleanup error stops the build with exit 1 rather than claiming successful privacy
+collection, even when those pages were not selected or their emitters fail.
+When any envelope route is private, the old portal is also removed before
+collection: it embeds page headlines and lines, so leaving it until core generation
+succeeds could retain a now-private card on a failing build. A successful build
+replaces it with the current public-only view; a failed build may leave it absent.
+A cleanup error stops the build with exit 1 rather than claiming successful privacy
 revocation. For public pages, a failed served-file write restores the previous
 private file byte-for-byte (including invalid UTF-8), or removes a first-time
 private write, so derivation does not advance
@@ -282,7 +287,9 @@ it never calls systemctl and never creates the data roots; you place the files a
 enable them.
 
 `manual` and `n/a` routes get no unit and are listed as skipped, so a page nobody
-refreshes is visible. Rendering refuses a relative `--executable` (systemd needs
+refreshes is visible. The CLI refuses a scheduled envelope route without an
+emitter before writing any units: its generated `build <slug>` could never run.
+Unscheduled stored-only routes may omit an emitter. Rendering refuses a relative `--executable` (systemd needs
 an absolute path), a slug or prefix outside `[a-z0-9-]`, and any argument with a
 newline or NUL (a newline would end the `ExecStart` directive and let the next
 line be read as a new one). Arguments are quoted by systemd's rules (`%` and `$`
