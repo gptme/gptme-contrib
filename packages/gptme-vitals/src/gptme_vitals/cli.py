@@ -20,6 +20,7 @@ import argparse
 import contextlib
 import fcntl
 import importlib
+import os
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
@@ -57,7 +58,10 @@ def build_lock(private_root: Path) -> Iterator[None]:
     the served tree never sees it. Unix only (``fcntl.flock``), like systemd.
     """
     private_root.mkdir(parents=True, exist_ok=True)
-    with open(private_root / LOCK_NAME, "a") as handle:
+    fd = os.open(
+        private_root / LOCK_NAME, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600
+    )
+    with os.fdopen(fd, "a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         try:
             yield
@@ -319,7 +323,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             portal_path(registry, args.public_root)
             try:
                 # A unit set whose every run would refuse to start is not worth writing.
-                headline_link(registry.headline_route(), args.base_url)
+                headline_route = registry.headline_route()
+                if not headline_route.is_public:
+                    raise BuildError(
+                        f"headline route {headline_route.slug!r} is private"
+                    )
+                headline_link(headline_route, args.base_url)
             except (RouteRegistryError, BuildError) as exc:
                 raise UsageError(str(exc)) from exc
             return run_timers(

@@ -181,8 +181,25 @@ def check_outputs(registry: RouteRegistry) -> None:
             )
 
 
+def _make_public_parents(directory: Path) -> None:
+    """Make new served directories traversable, preserving existing permissions."""
+    if directory.is_dir():
+        return
+    _make_public_parents(directory.parent)
+    try:
+        directory.mkdir()
+    except FileExistsError:
+        if not directory.is_dir():
+            raise
+    else:
+        directory.chmod(0o755)
+
+
 def _atomic_write(path: Path, content: str | bytes, *, mode: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if mode & 0o044:
+        _make_public_parents(path.parent)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
         dir=path.parent, prefix=path.name + ".", suffix=".tmp"
     )

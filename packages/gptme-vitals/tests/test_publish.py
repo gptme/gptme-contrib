@@ -532,3 +532,42 @@ def test_standalone_revocation_finds_renamed_envelope_without_removing_other_dat
     assert other.exists()
     assert malformed.read_bytes() == b"\xff"
     assert (private / "new/summary.json").exists()
+
+
+def test_restrictive_umask_keeps_new_public_directories_traversable(
+    registry: RouteRegistry, roots: tuple[Path, Path]
+) -> None:
+    import os
+
+    private, public = roots
+    public.mkdir(mode=0o755)
+    previous_umask = os.umask(0o077)
+    try:
+        publish_page(registry, _env("pub"), private_root=private, public_root=public)
+    finally:
+        os.umask(previous_umask)
+    assert stat.S_IMODE((public / "pub").stat().st_mode) == 0o755
+    assert stat.S_IMODE((public / "pub/summary.json").stat().st_mode) == 0o644
+    assert stat.S_IMODE((private / "pub").stat().st_mode) == 0o700
+    assert stat.S_IMODE((private / "pub/summary.json").stat().st_mode) == 0o600
+
+
+def test_public_write_creates_all_missing_parents_without_changing_existing_modes(
+    tmp_path: Path,
+) -> None:
+    import os
+
+    from gptme_vitals.publish import write_text
+
+    existing = tmp_path / "existing"
+    existing.mkdir(mode=0o750)
+    target = existing / "public/nested/index.html"
+    previous_umask = os.umask(0o077)
+    try:
+        write_text(target, "public page")
+    finally:
+        os.umask(previous_umask)
+    assert target.read_text() == "public page"
+    assert stat.S_IMODE(existing.stat().st_mode) == 0o750
+    assert stat.S_IMODE(target.parent.stat().st_mode) == 0o755
+    assert stat.S_IMODE(target.parent.parent.stat().st_mode) == 0o755

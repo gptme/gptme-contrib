@@ -1015,3 +1015,60 @@ def test_timer_output_errors_return_operational_failure(
         monkeypatch.setattr(Path, "write_text", fail_write)
     assert main(_timers_argv(app)) == 1
     assert "gptme-vitals:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_lock_symlink_is_refused_before_collection(
+    tmp_path: Path, dangling: bool
+) -> None:
+    private = tmp_path / "private"
+    target = private / "services/summary.json"
+    target.parent.mkdir(parents=True)
+    if not dangling:
+        target.write_bytes(b"previous summary")
+    (private / ".gptme-vitals.lock").symlink_to(target)
+    collected: list[bool] = []
+
+    def emit() -> PageEnvelope:
+        collected.append(True)
+        return PageEnvelope(
+            slug="services",
+            status=Status.HEALTHY,
+            headline="services",
+            generated_at=NOW,
+        )
+
+    code, lines = _run(tmp_path, {"services": emit})
+    assert code == 1
+    assert any(line.startswith("FAIL lock:") for line in lines)
+    assert collected == []
+    assert not (tmp_path / "public").exists()
+    assert (
+        target.read_bytes() == b"previous summary"
+        if not dangling
+        else not target.exists()
+    )
+
+
+def test_timers_refuse_private_headline_without_reconciling_units(
+    app: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import importlib
+    from dataclasses import replace
+
+    vitals_app = importlib.import_module("vitals_app")
+    assert main(_timers_argv(app)) == 0
+    units = {path.name: path.read_bytes() for path in (app / "units").iterdir()}
+    setattr(
+        vitals_app,
+        "REGISTRY",
+        RouteRegistry(
+            tuple(
+                replace(route, visibility=Visibility.PRIVATE)
+                for route in vitals_app.REGISTRY.routes
+            )
+        ),
+    )
+    assert main(_timers_argv(app)) == 2
+    assert "headline route 'a' is private" in capsys.readouterr().err
+    assert {path.name: path.read_bytes() for path in (app / "units").iterdir()} == units
