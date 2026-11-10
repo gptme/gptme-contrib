@@ -73,6 +73,13 @@ READS = [
     "gh api repos/o/r/issues/5/comments -q '-F' -H 'Accept: -f'",
     # a write flag in a trailing shell comment is never executed
     "gh api --paginate repos/o/r/issues/5/comments # -f body=example",
+    # quoted example text is not an invocation
+    "printf '%s\\n' 'gh api repos/o/r/issues/5/comments'",
+    'echo "gh api repos/o/r/issues/5/comments -f body=x"',
+    # operators inside a comment do not start a new command
+    "gh api repos/o/r/issues/5/comments # example only; gh api repos/o/r/issues/5/comments -f body=x",
+    "gh api repos/o/r/issues/5/comments # a | gh api repos/o/r/issues/5/comments -f body=x",
+    "x=$(gh api repos/o/r/issues/5/comments --jq length)",
 ]
 
 WRITES = [
@@ -92,6 +99,13 @@ WRITES = [
     "env gh api repos/o/r/issues/5/comments -f body=LGTM",
     "if gh api repos/o/r/issues/5/comments -f body=x; then echo ok; fi",
     "timeout 30 gh api repos/o/r/issues/5/comments --jq .id -f body=x",
+    # a comment ends at the newline; the next line runs
+    "true # note; x\ngh api repos/o/r/issues/5/comments -f body=x",
+    # an escaped or quoted # is not a comment
+    "gh api repos/o/r/issues/5/comments -f body=issue\\#5 -f x=y",
+    "gh api repos/o/r/issues/5/comments -f body='see #5; ok'",
+    "x=$(gh api repos/o/r/issues/5/comments -f body=x)",
+    "y=`gh api repos/o/r/issues/5/comments -f body=x`",
 ]
 
 
@@ -145,3 +159,6 @@ def test_split_shell_segments_respects_quotes() -> None:
     # lone & backgrounds and terminates a command; redirects keep their &
     assert _split_shell_segments("sleep 1 & echo x") == ["sleep 1 ", " echo x"]
     assert _split_shell_segments("a 2>&1 b &> f >&2") == ["a 2>&1 b &> f >&2"]
+    # unquoted comments swallow operators up to the newline; a#b is a word
+    assert _split_shell_segments("a # x; y | z\nb") == ["a ", "b"]
+    assert _split_shell_segments("a#b; c '#d; e'") == ["a#b", " c '#d; e'"]

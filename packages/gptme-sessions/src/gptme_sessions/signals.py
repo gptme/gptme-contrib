@@ -345,6 +345,12 @@ def _split_shell_segments(cmd: str) -> list[str]:
         elif c in "'\"":
             quote = c
             buf.append(c)
+        elif c == "#" and (not buf or buf[-1] in (" ", "\t", "(")):
+            # Unquoted comment: operators in it are not separators. Skip to
+            # the newline, which still ends the segment.
+            while i < n and cmd[i] != "\n":
+                i += 1
+            continue
         elif c in "|&;\n":
             if c == "&" and (cmd[i + 1 : i + 2] == ">" or (buf and buf[-1] in "<>")):
                 buf.append(c)  # redirect (2>&1, &>, >&), not a separator
@@ -374,13 +380,14 @@ def _gh_api_args(segment: str) -> list[str] | None:
     The ``gh api`` pair is located anywhere among the shell tokens, so any
     leading syntax resolves without enumerating it: ``VAR=x``, wrappers
     (``env``, ``command``, ``timeout 5``, ``xargs``), shell keywords (``if``,
-    ``then``, ``while``, ``!``), and grouping (``(gh``, ``{``). Command names
+    ``then``, ``while``, ``!``), grouping (``(gh``, ``{``) and command
+    substitution (``x=$(gh``, `` `gh``). Command names
     compare by basename (``/usr/bin/gh``). A ``gh api`` mentioned inside a
     quoted argument stays part of one token and does not count.
     """
     tokens = _shell_tokens(segment)
     for i in range(len(tokens) - 1):
-        name = tokens[i].lstrip("({!").rsplit("/", 1)[-1]
+        name = re.split(r"[=({!$`]", tokens[i])[-1].rsplit("/", 1)[-1]
         if name == "gh" and tokens[i + 1] == "api":
             return tokens[i + 2 :]
     return None
@@ -443,8 +450,10 @@ def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
             continue
         if any(not _GH_API_MATCH_RE.match(m.group(0)) for m in matches):
             return True
+        # No tokenized ``gh api`` invocation means the match was quoted text
+        # (``printf 'gh api ...'``), not a command, so it never counts.
         args = _gh_api_args(segment)
-        if args is None or _gh_api_writes(args):
+        if args is not None and _gh_api_writes(args):
             return True
     return False
 
