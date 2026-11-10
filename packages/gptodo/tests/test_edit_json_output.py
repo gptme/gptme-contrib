@@ -30,6 +30,7 @@ def tasks_dir(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GPTODO_TASKS_DIR", str(d))
     monkeypatch.setenv("TASKS_REPO_ROOT", str(tmp_path))
+    monkeypatch.delenv("GPTODO_STRICT_TRANSITIONS", raising=False)
     return d
 
 
