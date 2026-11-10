@@ -406,7 +406,7 @@ def _split_shell_segments(cmd: str) -> list[str]:
     return segments
 
 
-def _command_substitutions(cmd: str) -> list[str]:
+def _command_substitutions(cmd: str, *, heredoc: bool = False) -> list[str]:
     """Bodies of ``$(...)``, backtick and ``<(...)``/``>(...)`` substitutions
     that bash would execute.
 
@@ -415,6 +415,8 @@ def _command_substitutions(cmd: str) -> list[str]:
     comments, so ``printf '$(gh api ... -f x)'`` yields nothing. Process
     substitution only happens unquoted. Only
     outermost bodies are returned; callers recurse for nested ones.
+    In an unquoted heredoc, quotes and comment markers are literal and only
+    command substitutions (not process substitutions) expand.
     """
     bodies: list[str] = []
     quote: str | None = None
@@ -423,6 +425,16 @@ def _command_substitutions(cmd: str) -> list[str]:
         c = cmd[i]
         if c == "\\" and quote != "'":
             i += 2
+            continue
+        if heredoc:
+            if c == "`" or cmd.startswith("$(", i):
+                end = _subst_end(cmd, i)
+                offset, closing = (1, "`") if c == "`" else (2, ")")
+                body_end = end - 1 if cmd[end - 1 : end] == closing else end
+                bodies.append(cmd[i + offset : body_end])
+                i = end
+                continue
+            i += 1
             continue
         if quote == "'":
             if c == "'":
@@ -714,7 +726,10 @@ def _strip_heredoc_bodies(cmd: str) -> str:
                         break
                     body.append(line)
                 if not quoted:
-                    out.extend(f"$({sub})\n" for sub in _command_substitutions("\n".join(body)))
+                    out.extend(
+                        f"$({sub})\n"
+                        for sub in _command_substitutions("\n".join(body), heredoc=True)
+                    )
             pending = []
             continue
         out.append(c)

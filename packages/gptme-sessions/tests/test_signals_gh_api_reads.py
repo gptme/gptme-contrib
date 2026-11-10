@@ -171,6 +171,9 @@ WRITES = [
     "cat <<'EOF'\nDon't post yet\nEOF\ngh api repos/o/r/issues/5/comments -f body=x",
     # an unquoted delimiter still expands substitutions in the body
     "cat <<EOF\nid: $(gh api repos/o/r/issues/5/comments -f body=x --jq .id)\nEOF",
+    # quotes and comment markers are literal data in an unquoted heredoc
+    "cat <<EOF\n'$(gh api repos/o/r/issues/5/comments -f body=x)'\nEOF",
+    "cat <<EOF\n# $(gh api repos/o/r/issues/5/comments -f body=x)\nEOF",
     # a here-string is not a heredoc
     'gh api repos/o/r/issues/5/comments --input - <<< \'{"body": "x"}\'',
     "cat <<< 'EOF'\ngh api repos/o/r/issues/5/comments -f body=x",
