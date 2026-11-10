@@ -16,8 +16,24 @@ from gptme_vitals.envelope import (
     roll_up_envelopes,
     utcnow_rfc3339,
 )
+from gptme_vitals.routes import (
+    NAV_CSS,
+    DashboardRoute,
+    RefreshCadence,
+    RouteKind,
+    RouteRegistry,
+    RouteRegistryError,
+    Visibility,
+)
 
 __all__ = [
+    "NAV_CSS",
+    "DashboardRoute",
+    "RefreshCadence",
+    "RouteKind",
+    "RouteRegistry",
+    "RouteRegistryError",
+    "Visibility",
     "ENVELOPE_SCHEMA",
     "MAX_LINES",
     "RANKABLE_STATUSES",
