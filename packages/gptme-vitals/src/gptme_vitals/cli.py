@@ -352,6 +352,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             title=args.title,
             base_url=args.base_url,
         )
+    except OSError as exc:
+        print(f"gptme-vitals: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
     except (UsageError, PublishError, TimerError) as exc:
         print(f"gptme-vitals: {exc}", file=sys.stderr)
         return 2

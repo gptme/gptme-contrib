@@ -993,3 +993,25 @@ def test_timer_regeneration_removes_obsolete_generated_pairs(
     assert (app / "units/gptme-vitals-a.timer").exists()
     assert unrelated.read_text() == "[Service]\nExecStart=/bin/true\n"
     assert other_prefix.read_text() == "keep"
+
+
+@pytest.mark.parametrize("failure", ["mkdir", "write"])
+def test_timer_output_errors_return_operational_failure(
+    app: Path,
+    failure: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    if failure == "mkdir":
+        (app / "units").write_text("not a directory")
+    else:
+        real_write = Path.write_text
+
+        def fail_write(path: Path, *args: Any, **kwargs: Any) -> int:
+            if path.suffix == ".timer":
+                raise PermissionError("timer destination unavailable")
+            return real_write(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", fail_write)
+    assert main(_timers_argv(app)) == 1
+    assert "gptme-vitals:" in capsys.readouterr().err
