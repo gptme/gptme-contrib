@@ -102,10 +102,45 @@ _HEREDOC_RE = re.compile(r"(?<!<)<<(-?)\s*([\"']?)([A-Za-z_]\w*)\2(?=\s|[;&|<>()
 # A heredoc body fed to a shell is still shell; any other body is stdin data.
 _SHELL_CONSUMER_RE = re.compile(r"\b(?:ba|z|da|k|a)?sh\b|\bssh\b|\beval\b|\bsource\b")
 # Even backslash pairs leave the expansion active; an odd backslash escapes it.
-# Greedy captures deliberately retain nested substitutions rather than silently
-# discarding shell after the first inner closing parenthesis. Multiple expansions
-# may retain intervening data: conservative over-counting beats hiding a write.
-_HEREDOC_SUBSTITUTION_RE = re.compile(r"(?<!\\)(?:\\\\)*(?:\$\((.*)\)|`(.*)`)", re.S)
+_HEREDOC_SUBSTITUTION_RE = re.compile(r"(?<!\\)(?:\\\\)*(\$\(|`)")
+
+
+def _heredoc_substitutions(body: str) -> Iterable[str]:
+    """Keep expansions separate: quotes between them are data, not shell syntax."""
+    pos = 0
+    while match := _HEREDOC_SUBSTITUTION_RE.search(body, pos):
+        start = i = match.end()
+        backtick = match.group(1) == "`"
+        quotes: list[str] = []
+        quote = ""
+        while i < len(body):
+            char = body[i]
+            if char == "\\" and quote != "'":
+                i += 2
+                continue
+            if backtick:
+                if char == "`":
+                    break
+            elif char == quote:
+                quote = ""
+            elif quote != "'" and body.startswith("$(", i):
+                quotes.append(quote)
+                quote = ""
+                i += 2
+                continue
+            elif not quote:
+                if char in "\"'":
+                    quote = char
+                elif char == "(":
+                    quotes.append(quote)
+                elif char == ")":
+                    if not quotes:
+                        break
+                    quote = quotes.pop()
+            i += 1
+        # An unclosed/unsupported expansion stays conservative, not invisible.
+        yield body[start:i]
+        pos = i + 1
 
 
 def _strip_heredoc_bodies(cmd: str) -> str:
@@ -174,8 +209,7 @@ def _strip_heredoc_bodies(cmd: str) -> str:
             if not m.group(2):
                 # Backslash-newline is removed before unquoted heredoc expansion.
                 body_text = re.sub(r"(?<!\\)((?:\\\\)*)\\\n", r"\1", "\n".join(body_lines))
-                for substitution in _HEREDOC_SUBSTITUTION_RE.finditer(body_text):
-                    out.append(substitution.group(1) or substitution.group(2) or "")
+                out.extend(_heredoc_substitutions(body_text))
             out.append(delim)
     return "\n".join(out)
 

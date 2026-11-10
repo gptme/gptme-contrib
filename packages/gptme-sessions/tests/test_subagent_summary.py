@@ -252,6 +252,17 @@ def test_cmd_mutation_quoted_heredoc_expansions_are_literal(delimiter: str) -> N
     assert cmd_mutation(f"cat <<{delimiter}\n$(git commit -am update)\nEOF") == (None, None)
 
 
+def test_cmd_mutation_separate_heredoc_expansions_keep_quote_context(tmp_path: Path) -> None:
+    import subprocess
+
+    command = "cat <<EOF\n$(printf x) '$(touch out.txt)' $(printf y)\nEOF"
+    subprocess.run(["bash", "-c", command], cwd=tmp_path, check=True, capture_output=True)
+    assert (tmp_path / "out.txt").exists()
+    assert cmd_mutation(command)[0] == "acting"
+    literal = "cat <<EOF\n$(printf '%s' '$(touch out.txt)')\nEOF"
+    assert cmd_mutation(literal) == (None, None)
+
+
 def test_cmd_mutation_escaped_heredoc_expansions_are_literal() -> None:
     assert cmd_mutation("cat <<EOF\n\\$(git commit -am update)\nEOF") == (None, None)
     assert cmd_mutation("cat <<EOF\n\\`git commit -am update\\`\nEOF") == (None, None)
