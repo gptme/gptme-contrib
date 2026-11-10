@@ -400,6 +400,24 @@ def test_editor_template_comments_still_stripped_cleanly(tmp_path: Path) -> None
     assert stripped == "feat: x\n\nGit-Session-Id: s2\n"
 
 
+def test_existing_trailer_above_editor_comments_is_preserved(
+    tmp_path: Path,
+) -> None:
+    """-m ... -e with an existing trailer: don't append a second, split trailer."""
+    msg = tmp_path / "COMMIT_EDITMSG"
+    original = (
+        "feat: x\n\nGit-Session-Ids: first, second\n\n"
+        "# Please enter the commit message.\n"
+    )
+    msg.write_text(original)
+    env = _clean_env(GIT_COMMITTER_SESSION_ID="s9")
+
+    result = _run_hook_with_source(msg, "message", env)
+
+    assert result.returncode == 0, result.stderr
+    assert msg.read_text() == original
+
+
 def test_template_source_keeps_trailer_above_comments(tmp_path: Path) -> None:
     msg = tmp_path / "COMMIT_EDITMSG"
     msg.write_text("feat: x\n\n# Please enter the commit message.\n")

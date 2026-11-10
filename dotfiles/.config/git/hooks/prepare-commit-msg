@@ -149,7 +149,12 @@ def main() -> int:
     message = sys.argv[1]
     source = sys.argv[2] if len(sys.argv) > 2 else ""
     git = ["git", *comment_char_override(Path(message).read_bytes(), source)]
-    trailers = subprocess.check_output([*git, "interpret-trailers", "--parse", message])
+    # Check under both comment chars: with -m ... -e an existing trailer sits
+    # above git's '#' editor block, which only the default char sees through.
+    trailers = b"".join(
+        subprocess.check_output([*args, "interpret-trailers", "--parse", message])
+        for args in {tuple(git), ("git",)}
+    )
     if any(
         line.partition(b":")[0].lower() in (b"git-session-id", b"git-session-ids")
         for line in trailers.splitlines()
