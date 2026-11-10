@@ -3156,14 +3156,58 @@ def review_api_key() -> str | None:
     Environment still overrides the config file *within* a given specificity,
     so a caller can override per-run with ``OPENROUTER_API_KEY_REVIEW=``.
     """
-    # Both direct github/ entrypoints and imported helpers use scripts/.
+    # A workspace may ship its own resolver in scripts/openrouter_keys.py (Bob
+    # does: scoped-key fallback chains). Without one the package resolves the
+    # same REVIEW order itself, so the engine runs outside that workspace.
     scripts_dir = str(_REPO_ROOT / "scripts")
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
-    from openrouter_keys import resolve_openrouter_api_key
+    try:
+        from openrouter_keys import resolve_openrouter_api_key
+    except ImportError:
+        return _resolve_review_key_portable()
 
     key: str | None = resolve_openrouter_api_key("REVIEW")
     return key
+
+
+#: gptme config files whose ``[env]`` tables hold API keys; local overrides last.
+REVIEW_KEY_CONFIG_PATHS: tuple[Path, ...] = (
+    Path.home() / ".config" / "gptme" / "config.toml",
+    Path.home() / ".config" / "gptme" / "config.local.toml",
+)
+REVIEW_KEY_NAMES: tuple[str, ...] = ("OPENROUTER_API_KEY_REVIEW", "OPENROUTER_API_KEY")
+
+
+def _resolve_review_key_portable(
+    environ: Mapping[str, str] | None = None,
+    config_paths: tuple[Path, ...] | None = None,
+) -> str | None:
+    """Specific-beats-generic review key lookup with no workspace dependency.
+
+    Each name is checked in the environment and then in the merged config
+    ``[env]`` before the next, more generic name is considered. That is the
+    order :func:`review_api_key` documents.
+    """
+    import tomllib
+
+    env = os.environ if environ is None else environ
+    paths = REVIEW_KEY_CONFIG_PATHS if config_paths is None else config_paths
+    config_env: dict[str, str] = {}
+    for path in paths:
+        try:
+            with path.open("rb") as fh:
+                data = tomllib.load(fh)
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        for name, value in (data.get("env") or {}).items():
+            if isinstance(value, str):
+                config_env[name] = value
+    for name in REVIEW_KEY_NAMES:
+        key = env.get(name, "").strip() or config_env.get(name, "").strip()
+        if key:
+            return key
+    return None
 
 
 def _classify_bad_body(raw: str) -> str:
