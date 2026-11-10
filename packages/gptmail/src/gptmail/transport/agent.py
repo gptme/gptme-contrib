@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -113,25 +114,24 @@ def meta_of(path: Path) -> dict | None:
 
 
 def local_delivery_time(path: Path) -> float:
-    """Receiver-local arrival time, retained across our atomic metadata updates."""
+    """Receiver-stamped mtime, retained across our atomic metadata updates.
+
+    Delivery resets mtime after copying, so incoming YAML and sender mtimes
+    cannot backdate arrival. Metadata-only updates preserve this filesystem
+    timestamp rather than trusting a field in the message itself.
+    """
     with path.open() as source:
-        arrival = os.fstat(source.fileno()).st_ctime
-        meta, _ = split_frontmatter(source.read())
-    value = (meta or {}).get("_local_received_at")
-    return float(value) if isinstance(value, (int, float)) else arrival
+        return os.fstat(source.fileno()).st_mtime
 
 
 def write_inbox_metadata(path: Path, content: str) -> None:
     """Publish read/replied stamps without losing the original arrival time."""
     arrival = local_delivery_time(path)
-    parts = _FM_DELIM.split(content, maxsplit=2)
-    if len(parts) >= 3 and not re.search(r"^_local_received_at:", parts[1], re.MULTILINE):
-        parts[1] = parts[1].rstrip("\n") + f"\n_local_received_at: {arrival}\n"
-        content = "---".join(parts)
     fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as output:
             output.write(content)
+        os.utime(name, (arrival, arrival))
         os.replace(name, path)
     finally:
         Path(name).unlink(missing_ok=True)
@@ -463,9 +463,12 @@ class AgentTransport:
             os.close(fd)
             try:
                 shutil.copy2(local_path, name)
+                arrival = time.time()
+                os.utime(name, (arrival, arrival))  # Discard the sender's timestamp.
                 os.link(name, dest / local_path.name)
             except FileExistsError:
-                pass  # Preserve the first delivery and any receiver-side tracking.
+                # Preserve a previous delivery, but a directory is not a message.
+                return (dest / local_path.name).is_file()
             finally:
                 Path(name).unlink(missing_ok=True)
             return True

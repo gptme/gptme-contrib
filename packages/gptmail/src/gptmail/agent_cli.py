@@ -49,11 +49,11 @@ from pathlib import Path
 import click
 import yaml
 
+from gptmail.communication_utils.state.locks import FileLock
 from gptmail.communication_utils.state.tracking import (
     ConversationTracker,
     MessageState,
 )
-from gptmail.communication_utils.state.locks import FileLock
 from gptmail.transport.agent import (
     _FM_DELIM,
     AgentTransport,
@@ -306,11 +306,22 @@ def _ssh_deliver(agents: dict[str, dict[str, str]], *, mailbox: str = "default")
                     "ssh",
                     *ssh_opts,
                     ssh_target,
-                    # A periodic pull may publish first. Preserve that copy and
-                    # its read/reply metadata, but do not mask other link errors.
-                    # -T prevents a directory collision from receiving the link.
-                    f"ln -T -- {shlex.quote(remote_temp)} {shlex.quote(remote_final)}"
-                    f" || test -f {shlex.quote(remote_final)}",
+                    # Python's link never interprets a directory as a target
+                    # folder, and works on macOS as well as GNU/Linux. A pull
+                    # may win publication; retain its copy and tracking stamps.
+                    "python3 -c "
+                    + shlex.quote(
+                        "import os, sys, time\n"
+                        "source, dest = sys.argv[1:]\n"
+                        "arrival = time.time()\n"
+                        "os.utime(source, (arrival, arrival))\n"
+                        "try:\n"
+                        "    os.link(source, dest)\n"
+                        "except FileExistsError:\n"
+                        "    if not os.path.isfile(dest):\n"
+                        "        raise\n"
+                    )
+                    + f" {shlex.quote(remote_temp)} {shlex.quote(remote_final)}",
                 ],
                 check=True,
                 capture_output=True,
@@ -322,7 +333,12 @@ def _ssh_deliver(agents: dict[str, dict[str, str]], *, mailbox: str = "default")
         finally:
             try:
                 subprocess.run(
-                    ["ssh", *ssh_opts, ssh_target, f"rm -f -- {shlex.quote(remote_temp)}"],
+                    [
+                        "ssh",
+                        *ssh_opts,
+                        ssh_target,
+                        f"rm -f -- {shlex.quote(remote_temp)}",
+                    ],
                     check=True,
                     capture_output=True,
                     timeout=10,
@@ -717,7 +733,17 @@ def _remote_pending_rows(
             err=True,
         )
         return None
-    cmd = ["uv", "run", "gptmail", "agent", "pending", "--for", recipient, "--json", "--local-only"]
+    cmd = [
+        "uv",
+        "run",
+        "gptmail",
+        "agent",
+        "pending",
+        "--for",
+        recipient,
+        "--json",
+        "--local-only",
+    ]
     if all_mailboxes:
         cmd.append("--all-mailboxes")
     else:
@@ -734,7 +760,15 @@ def _remote_pending_rows(
     )
     try:
         result = subprocess.run(
-            ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", agent["ssh"], remote_cmd],
+            [
+                "ssh",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "BatchMode=yes",
+                agent["ssh"],
+                remote_cmd,
+            ],
             capture_output=True,
             text=True,
             check=True,
@@ -749,7 +783,10 @@ def _remote_pending_rows(
         click.echo(f"Warning: invalid pending JSON from {agent_name}: {e}", err=True)
         return None
     if not isinstance(payload, list):
-        click.echo(f"Warning: invalid pending payload from {agent_name}: expected a list", err=True)
+        click.echo(
+            f"Warning: invalid pending payload from {agent_name}: expected a list",
+            err=True,
+        )
         return None
     rows: list[dict] = []
     for item in payload:
@@ -890,7 +927,8 @@ def _find_thread_root(thread: str) -> tuple[str, dict] | None:
 def _scanner_available() -> bool:
     """Whether the outbound secret scanner (``redact``) is importable."""
     try:
-        from redact import collect_secret_literals, redact as _scan  # noqa: F401
+        from redact import collect_secret_literals  # noqa: F401
+        from redact import redact as _scan  # noqa: F401
     except ImportError as exc:
         if exc.name != "redact":
             raise
@@ -1206,7 +1244,12 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
 @agent.command()
 @click.option("--mailbox", default="default", show_default=True, help="Mailbox to inspect.")
 @click.option("--all-mailboxes", is_flag=True, help="Scan default plus every named mailbox.")
-@click.option("--for", "for_recipient", default=None, help="Show messages pending for a recipient.")
+@click.option(
+    "--for",
+    "for_recipient",
+    default=None,
+    help="Show messages pending for a recipient.",
+)
 @click.option(
     "--as",
     "as_identity",
@@ -1381,7 +1424,8 @@ def _fetch_from_agent(
         if dest is None:
             if filename:
                 click.echo(
-                    f"Warning: refusing unsafe filename from {agent_name}: {filename}", err=True
+                    f"Warning: refusing unsafe filename from {agent_name}: {filename}",
+                    err=True,
                 )
             continue
         if dest.exists():
@@ -1401,11 +1445,19 @@ def _fetch_from_agent(
         temp_dest = Path(temp_name)
         try:
             subprocess.run(
-                ["scp", *ssh_opts, f"{ssh_target}:{shlex.quote(remote_path)}", str(temp_dest)],
+                [
+                    "scp",
+                    *ssh_opts,
+                    f"{ssh_target}:{shlex.quote(remote_path)}",
+                    str(temp_dest),
+                ],
                 check=True,
                 capture_output=True,
                 timeout=15,
             )
+            # Receiver-local arrival, not a timestamp supplied by the sender.
+            arrival = time.time()
+            os.utime(temp_dest, (arrival, arrival))
             try:
                 os.link(temp_dest, dest)
             except FileExistsError:
@@ -1432,7 +1484,11 @@ def _fetch_from_agent(
 )
 @click.option("--from", "from_agent", default=None, help="Fetch only from this registered agent.")
 @click.option("--mailbox", default="default", show_default=True, help="Mailbox to fetch into.")
-@click.option("--all-mailboxes", is_flag=True, help="Pull across default plus every named mailbox.")
+@click.option(
+    "--all-mailboxes",
+    is_flag=True,
+    help="Pull across default plus every named mailbox.",
+)
 @click.option(
     "--notify-cmd",
     default=None,
@@ -1514,7 +1570,8 @@ def pull(
                     dest = _pull_destination(row, fallback_mailbox=mailboxes[0])
                 except click.BadParameter as e:
                     click.echo(
-                        f"Warning: refusing invalid mailbox from {agent_name}: {e}", err=True
+                        f"Warning: refusing invalid mailbox from {agent_name}: {e}",
+                        err=True,
                     )
                     continue
                 if dest is None:
@@ -1572,7 +1629,12 @@ def pull(
         env["SUMMARY"] = f"{n} new message(s): {subjects}"
         try:
             subprocess.run(shlex.split(notify_cmd), env=env, timeout=10, check=True)
-        except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        except (
+            OSError,
+            ValueError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ) as e:
             click.echo(f"Warning: --notify-cmd failed: {e}", err=True)
 
     if json_output:
@@ -1817,7 +1879,7 @@ def watch(
         for key, meta, path in inbox_messages:
             if delivered_before is not None:
                 try:
-                    # Metadata rewrites retain the receiver's original ctime.
+                    # Metadata rewrites retain receiver-stamped delivery mtime.
                     if local_delivery_time(path) > delivered_before:
                         continue
                 except FileNotFoundError:
@@ -1857,7 +1919,10 @@ def watch(
                     # Reuse pull's safe atomic delivery, but never scan unrelated peers.
                     sender_pull_cmd = pull_cmd + ["--from", sender]
                     subprocess.run(
-                        sender_pull_cmd, check=False, timeout=_budget(60), stdout=sys.stderr
+                        sender_pull_cmd,
+                        check=False,
+                        timeout=_budget(60),
+                        stdout=sys.stderr,
                     )
                 except (OSError, subprocess.TimeoutExpired) as e:
                     click.echo(f"Warning: --pull failed: {e}", err=True)
