@@ -125,6 +125,7 @@ def _evaluate(
     greptile_fresh: bool = True,
     greptile_unresolved: int = 0,
     merged_upstream: bool | None = True,
+    refusal: str = "abstained",
     gitmodules: str | None = GITMODULES,
     gitlink_patch: str = GITLINK_PATCH,
     allowed_paths: str = "gptme/gptme-cloud:gptme",
@@ -143,12 +144,34 @@ def _evaluate(
         for path in file_paths
     ]
     greptile_sha = HEAD_SHA if greptile_fresh else "deadbeef"
+
+    def checked_gh(args: list[str], timeout: int = 30) -> str:
+        if args == [
+            "api",
+            "repos/gptme/gptme-cloud/pulls/901",
+            "-H",
+            "Accept: application/vnd.github.diff",
+        ]:
+            return "".join(
+                f"diff --git a/{path} b/{path}\n"
+                f"index {OLD_SHA}..{BRANCH_ONLY_SHA} 160000\n{gitlink_patch}"
+                for path in file_paths
+            )
+        raise AssertionError(f"unexpected GitHub call: {args}")
+
     with (
+        patch.object(smc, "run_gh_checked", side_effect=checked_gh),
         patch.dict("os.environ", {"SELF_MERGE_ALLOWED_PATHS": allowed_paths}),
         patch.object(smc, "fetch_pr", return_value=pr_data),
         patch.object(smc, "get_gh_user", return_value="TimeToBuildBob"),
         patch.object(smc, "merge_permission", return_value=True),
-        patch.object(smc, "_fetch_greptile_review_data", return_value=None),
+        patch.object(smc, "_fetch_greptile_review_data", return_value=([], [])),
+        patch.object(smc, "_fetch_ai_review_marker_checked", return_value=None),
+        patch.object(
+            smc,
+            "_fetch_greptile_summary_signal",
+            return_value={"score": greptile_score, "reviewed_commit": greptile_sha},
+        ),
         patch.object(
             smc,
             "fetch_greptile_status",
@@ -173,6 +196,7 @@ def _evaluate(
             return_value={
                 "accepted": False,
                 "detail": "AI reviewer abstained (no score)",
+                "refusal": refusal,
             },
         ),
         patch.object(smc, "_fetch_pr_file_shapes", return_value=shapes),
@@ -195,16 +219,33 @@ def test_evaluate_pr_waives_ai_review_for_901_shape() -> None:
     assert result.category == "repo-allowlisted(gptme/gptme-cloud)"
 
 
-def test_evaluate_pr_blocks_branch_only_pin() -> None:
+@pytest.mark.parametrize(
+    "refusal", ["abstained", "absent", "stale", "consensus_shortfall"]
+)
+def test_evaluate_pr_blocks_branch_only_pin(refusal: str) -> None:
     """Replay gptme-cloud#898's 9da4505: no merged upstream PR → still ineligible."""
     branch_patch = (
         f"@@ -1 +1 @@\n-Subproject commit {OLD_SHA}\n"
         f"+Subproject commit {BRANCH_ONLY_SHA}\n"
     )
-    result = _evaluate(merged_upstream=False, gitlink_patch=branch_patch)
+    result = _evaluate(
+        merged_upstream=False, gitlink_patch=branch_patch, refusal=refusal
+    )
     assert not result.eligible
     assert any("AI review required" in r for r in result.reasons)
     assert not any("AI review waived" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize(
+    "refusal", ["abstained", "absent", "stale", "consensus_shortfall"]
+)
+def test_non_pointer_control_reaches_substitution(refusal: str) -> None:
+    """The branch-pin fixture rejects on patch shape, not missing API stubs."""
+    result = _evaluate(
+        merged_upstream=False, gitlink_patch="+ordinary text", refusal=refusal
+    )
+    assert result.eligible, result.reasons
+    assert any("AI review substituted" in w for w in result.warnings)
 
 
 def test_evaluate_pr_does_not_waive_when_greptile_is_dark() -> None:

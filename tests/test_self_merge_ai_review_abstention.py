@@ -270,7 +270,9 @@ def test_evaluate_pr_blocks_on_abstention() -> None:
     """The regression: gptme-cloud#850 merged with exactly this comment."""
     result = _evaluate(ABSTENTION_BODY)
     assert not result.eligible
-    assert any(ABSTENTION_REASON in r for r in result.reasons)
+    # Thread lookup failed in this fixture. That stronger refusal takes
+    # precedence so an abstention cannot be substituted over unknown findings.
+    assert any("could not read review thread state" in r for r in result.reasons)
 
 
 @pytest.mark.parametrize("body", [ORDINARY_REVIEW_BODY, CLEAN_REVIEW_BODY])
@@ -284,7 +286,9 @@ def test_evaluate_pr_unchanged_by_an_ordinary_ai_review(body: str) -> None:
     result = _evaluate(body)
     assert not any(ABSTENTION_REASON in r for r in result.reasons)
     assert not result.eligible
-    assert any("stale" in r for r in result.reasons)
+    # Staleness no longer short-circuits the disposition lookup. Unknown
+    # thread state must block before a stale marker becomes substitutable.
+    assert any("could not read review thread state" in r for r in result.reasons)
 
 
 def test_evaluate_pr_unchanged_when_there_is_no_ai_review() -> None:
