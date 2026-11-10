@@ -195,6 +195,10 @@ class TestRecurResetUnticksChecklist:
             "> > ```markdown\n> > - [x] example\n> > ```",
             "```markdown\n> ```\n- [x] example\n```",
             "> ```markdown\n> > ```\n> - [x] example\n> ```",
+            "- > ```markdown\n  > - [x] example\n  > ```",
+            "1. > ~~~markdown\n   > - [x] example\n   > ~~~",
+            "- > > ```markdown\n  > > - [x] example\n  > > ```",
+            "> - > ```markdown\n>   > - [x] example\n>   > ```",
         ],
     )
     def test_reset_preserves_fenced_examples(self, workspace: Path, example: str):
@@ -307,6 +311,7 @@ class TestRecurResetUnticksChecklist:
             "- notes\n\n  ```markdown\n  - [x] example",
             "1. notes\n\n   ~~~markdown\n   - [x] example",
             "> - notes\n>\n>   ```markdown\n>   - [x] example",
+            "- > ```markdown\n  > - [x] example",
         ],
     )
     def test_reset_ends_fence_at_container_boundary(self, workspace: Path, example: str):
@@ -369,6 +374,16 @@ class TestRecurResetUnticksChecklist:
         post = frontmatter.load(path)
         assert post.metadata["state"] == "waiting"
         assert post.content.endswith(f"- [ ]{suffix}")
+
+    @pytest.mark.parametrize("marker", ["-", "1.", "> -"])
+    def test_reset_separates_tight_emoji_marker(self, workspace: Path, marker: str):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{marker} ✅shipped\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert post.content.endswith(f"{marker} [ ] shipped")
 
     def test_reset_preserves_links_labelled_x(self, workspace: Path):
         path = write_task(workspace, "weekly-review", state="active", recur="7d")

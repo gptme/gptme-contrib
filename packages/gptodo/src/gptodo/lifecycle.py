@@ -481,9 +481,14 @@ def transform_post(
     return post
 
 
-_TICKED_RE = re.compile(r"^([ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+)(?:\[[xX]\](?=[ \t]|$)|✅)")
+_TICKED_RE = re.compile(
+    r"^([ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+)(?:\[[xX]\](?=[ \t]|$)|✅(?P<tight>(?![ \t]|$))?)"
+)
 _QUOTE_RE = re.compile(r"^([ \t]*>[ \t]?)+")
-_FENCE_RE = re.compile(r"^([ \t]*)(?:((?:[-*+]|[0-9]+[.)])[ \t]+))?(`{3,}|~{3,})")
+# A blockquote may open inside a list item on the marker line (`- > ```...`).
+_FENCE_RE = re.compile(
+    r"^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+(?P<quotes>(?:>[ \t]?)*))?(?P<fence>`{3,}|~{3,})"
+)
 _LIST_RE = re.compile(r"^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+")
 
 
@@ -550,15 +555,21 @@ def untick_checklist(content: str) -> str:
         elif (
             (opening := _FENCE_RE.match(candidate))
             and indent - container_indent <= 3
-            and not (opening.group(3).startswith("`") and "`" in candidate[opening.end() :])
+            and not (opening["fence"].startswith("`") and "`" in candidate[opening.end() :])
         ):
             # Backtick fence info strings cannot contain backticks: a line
             # like ```example``` is an inline code span, not a fence opener.
-            fence = opening.group(3)
-            fence_quotes = quote_depth
-            list_indent = list_containers[-1][1] if list_containers else 0
+            fence = opening["fence"]
+            # Quotes nested in the list item own the fence: continuation lines
+            # carry them as a prefix, and indentation restarts inside them.
+            nested_quotes = (opening["quotes"] or "").count(">")
+            fence_quotes = quote_depth + nested_quotes
+            list_indent = list_containers[-1][1] if list_containers and not nested_quotes else 0
         else:
-            line = prefix + _TICKED_RE.sub(r"\1[ ]", candidate, count=1)
+            # `- ✅shipped` needs a separator to become a real `- [ ] ` checkbox.
+            line = prefix + _TICKED_RE.sub(
+                lambda m: m[1] + ("[ ] " if m["tight"] is not None else "[ ]"), candidate, count=1
+            )
         out.append(line)
     return "\n".join(out)
 
