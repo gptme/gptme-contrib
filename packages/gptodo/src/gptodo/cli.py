@@ -2054,7 +2054,7 @@ def check(fix: bool, task_files: list[str]):
     # archive cost ~1.6s on every single-file pre-commit check, while only the
     # few names a validated task actually requires are ever looked up.
     dependency_universe = build_dependency_universe(
-        {task.id: task for task in all_tasks}, tasks_dir
+        {task.id: task for task in all_tasks}, tasks_dir, preserve_load_order=True
     )
 
     # Determine which tasks to validate

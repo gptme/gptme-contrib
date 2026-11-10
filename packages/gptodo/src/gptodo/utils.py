@@ -1570,52 +1570,55 @@ class _LazyArchiveTasks(Dict[str, TaskInfo]):
         live_tasks: Dict[str, TaskInfo],
         archive_dir: Path,
         errors_out: List[Tuple[Path, str]] | None = None,
+        *,
+        preserve_load_order: bool = False,
     ) -> None:
         super().__init__(live_tasks)
         self._archive_dir = archive_dir
         self._errors_out = errors_out
-        self._archive_index: Optional[Dict[str, Path]] = None
+        self._preserve_load_order = preserve_load_order
+        self._archive_index: Optional[Dict[str, List[Path]]] = None
 
-    def _archived_path(self, name: str) -> Optional[Path]:
-        """Return the archived file for ``name``, indexing the archive on first use."""
+    def _archived_paths(self, name: str) -> List[Path]:
+        """Return archived candidates for ``name``, indexing on first use."""
         if self._archive_index is None:
-            index: Dict[str, Path] = {}
+            index: Dict[str, List[Path]] = {}
             if self._archive_dir.is_dir():
-                # Sorted so the resolution is deterministic when duplicate stems
-                # exist in nested archive subdirectories. Mirror load_tasks'
-                # recursive exclusion list, otherwise a file under
+                # ready/next sort duplicate stems for deterministic resolution;
+                # check preserves load_tasks' recursive traversal. Mirror its
+                # exclusion list, otherwise a file under
                 # archive/templates/ could resolve a dependency here that
                 # `gptodo check` (which uses load_tasks) reports as missing.
-                for path in sorted(self._archive_dir.rglob("*.md")):
+                paths = self._archive_dir.glob("**/*.md")
+                for path in paths if self._preserve_load_order else sorted(paths):
                     if any(d in path.parts for d in EXCLUDED_TASK_DIRS):
                         continue
-                    # Overwrite, not setdefault: the pre-lazy eager path built
-                    # its dict with `dep_dict.update(...)` (last duplicate
-                    # wins), so keep that winner-selection shape. Sorted input
-                    # makes the winner deterministic, which glob order alone
-                    # never was.
-                    index[path.stem] = path
+                    if self._preserve_load_order:
+                        # check used the first successfully parsed task in
+                        # load_tasks' traversal, skipping malformed duplicates.
+                        index.setdefault(path.stem, []).append(path)
+                    else:
+                        # ready/next used dict.update: last duplicate wins.
+                        index[path.stem] = [path]
             self._archive_index = index
-        return self._archive_index.get(name)
+        return self._archive_index.get(name, [])
 
     def has_archived(self, name: str) -> bool:
         """Whether an archived file exists for ``name``, even if it fails to parse."""
-        return self._archived_path(name) is not None
+        return bool(self._archived_paths(name))
 
     def _load_archived(self, name: str) -> Optional[TaskInfo]:
-        path = self._archived_path(name)
-        if path is None:
-            return None
-        # Only the top-level task is looked up, so skip the body subtask scan.
-        for task in load_tasks(
-            self._archive_dir,
-            single_file=path,
-            errors_out=self._errors_out,
-            include_subtasks=False,
-        ):
-            if task.name == name:
-                self[name] = task
-                return task
+        for path in self._archived_paths(name):
+            # Only the top-level task is looked up, so skip the body subtask scan.
+            for task in load_tasks(
+                self._archive_dir,
+                single_file=path,
+                errors_out=self._errors_out,
+                include_subtasks=False,
+            ):
+                if task.name == name:
+                    self[name] = task
+                    return task
         return None
 
     def copy(self) -> "_LazyArchiveTasks":
@@ -1629,7 +1632,12 @@ class _LazyArchiveTasks(Dict[str, TaskInfo]):
         behaviour (and shares the archive index, which is built at most once
         per source dict anyway).
         """
-        dup = _LazyArchiveTasks(self, self._archive_dir, self._errors_out)
+        dup = _LazyArchiveTasks(
+            self,
+            self._archive_dir,
+            self._errors_out,
+            preserve_load_order=self._preserve_load_order,
+        )
         dup._archive_index = self._archive_index
         return dup
 
@@ -1658,6 +1666,8 @@ def build_dependency_universe(
     live_tasks: Dict[str, TaskInfo],
     tasks_dir: Path,
     errors_out: List[Tuple[Path, str]] | None = None,
+    *,
+    preserve_load_order: bool = False,
 ) -> _LazyArchiveTasks:
     """Build the dependency-lookup dict for a task tree, including archived tasks.
 
@@ -1670,9 +1680,13 @@ def build_dependency_universe(
     (thousands of files), while only a handful of names are usually referenced.
     The returned mapping starts from the live tasks and, on a lookup miss,
     indexes the archive by filename stem and parses only the requested file.
-    Live tasks always win over a same-named archived task.
+    Live tasks always win over a same-named archived task. By default, the last
+    sorted archived duplicate wins (ready/next's dict semantics). ``check`` uses
+    ``preserve_load_order`` for its former first-parseable recursive lookup.
     """
-    return _LazyArchiveTasks(live_tasks, tasks_dir / "archive", errors_out)
+    return _LazyArchiveTasks(
+        live_tasks, tasks_dir / "archive", errors_out, preserve_load_order=preserve_load_order
+    )
 
 
 def is_task_ready(
