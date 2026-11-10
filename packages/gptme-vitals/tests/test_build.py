@@ -20,6 +20,7 @@ from gptme_vitals.routes import (
     RefreshCadence,
     RouteKind,
     RouteRegistry,
+    RouteRegistryError,
     Visibility,
 )
 
@@ -246,21 +247,42 @@ def test_relative_headline_link_needs_an_absolute_http_base(
 
 
 @pytest.mark.parametrize(
-    ("href", "base_url", "expected"),
+    ("href", "kind", "base_url", "expected"),
     [
-        ("/services/", "https://bob.example/vitals/", "https://bob.example/services/"),
         (
-            "services/",
+            "/services/",
+            RouteKind.STATIC,
             "https://bob.example/vitals/",
-            "https://bob.example/vitals/services/",
+            "https://bob.example/services/",
         ),
-        ("https://bob.example/services/", None, "https://bob.example/services/"),
+        (
+            "/vitals/",
+            RouteKind.STATIC,
+            "https://bob.example/",
+            "https://bob.example/vitals/",
+        ),
+        (
+            "https://bob.example/services/",
+            RouteKind.EXTERNAL,
+            None,
+            "https://bob.example/services/",
+        ),
     ],
 )
 def test_headline_links_resolve_on_the_producing_agent(
-    href: str, base_url: str | None, expected: str
+    href: str, kind: RouteKind, base_url: str | None, expected: str
 ) -> None:
-    reg = RouteRegistry((_route("services", href=href, is_headline=True),))
+    reg = RouteRegistry(
+        (
+            _route(
+                "services",
+                href=href,
+                kind=kind,
+                output_path="services/index.html" if kind is RouteKind.STATIC else None,
+                is_headline=True,
+            ),
+        )
+    )
     _, headline = derive_core(
         reg, [_env("services", Status.HEALTHY)], agent="bob", base_url=base_url
     )
@@ -269,15 +291,32 @@ def test_headline_links_resolve_on_the_producing_agent(
     assert "detail" not in headline
 
 
-@pytest.mark.parametrize("href", ["javascript:alert(1)", "file:///tmp/services"])
-def test_non_http_headline_link_is_refused(href: str) -> None:
-    reg = RouteRegistry((_route("services", href=href, is_headline=True),))
+@pytest.mark.parametrize(
+    "href", ["services/", "javascript:alert(1)", "file:///tmp/services"]
+)
+def test_invalid_internal_headline_link_is_refused_by_registry(href: str) -> None:
+    with pytest.raises(RouteRegistryError, match="internal href must be root-relative"):
+        RouteRegistry((_route("services", href=href, is_headline=True),))
+
+
+@pytest.mark.parametrize("href", ["https://", "http://"])
+def test_hostless_external_headline_link_is_refused_by_build(href: str) -> None:
+    reg = RouteRegistry(
+        (
+            _route(
+                "services",
+                href=href,
+                kind=RouteKind.EXTERNAL,
+                output_path=None,
+                is_headline=True,
+            ),
+        )
+    )
     with pytest.raises(BuildError, match="absolute HTTP"):
         derive_core(
             reg,
             [_env("services", Status.HEALTHY)],
             agent="bob",
-            base_url="https://bob.example/",
         )
 
 
