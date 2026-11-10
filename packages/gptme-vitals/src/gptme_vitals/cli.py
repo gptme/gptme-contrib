@@ -241,6 +241,20 @@ def run_timers(
         registry, executable=executable, build_args=build_args, unit_prefix=unit_prefix
     )
     out_dir.mkdir(parents=True, exist_ok=True)
+    wanted = {name for pair in pairs for name in (pair.service_name, pair.timer_name)}
+    # Recognize our exact generated headers, including units from before
+    # reconciliation existed. Prefix alone is not proof of ownership.
+    for path in out_dir.iterdir():
+        if not path.name.startswith(unit_prefix + "-") or path.name in wanted:
+            continue
+        if path.suffix not in (".service", ".timer") or path.is_symlink():
+            continue
+        slug = path.stem[len(unit_prefix) + 1 :]
+        header = f"[Unit]\nDescription=Refresh the {slug} dashboard page"
+        text = path.read_text()
+        if text.startswith(header + ("\n" if path.suffix == ".service" else " (")):
+            path.unlink()
+            out(f"removed {path.name}")
     for pair in pairs:
         (out_dir / pair.service_name).write_text(pair.service)
         (out_dir / pair.timer_name).write_text(pair.timer)

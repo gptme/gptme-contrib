@@ -951,3 +951,45 @@ def test_private_transition_revokes_previous_summary_path(
         == 0
     )
     assert not (tmp_path / "public/services/summary.json").exists()
+
+
+@pytest.mark.parametrize("change", ["manual", "removed", "no-envelope"])
+def test_timer_regeneration_removes_obsolete_generated_pairs(
+    app: Path, change: str
+) -> None:
+    import importlib
+    from dataclasses import replace
+
+    vitals_app = importlib.import_module("vitals_app")
+    setattr(
+        vitals_app,
+        "REGISTRY",
+        RouteRegistry((*vitals_app.REGISTRY.routes, _route("b"))),
+    )
+    vitals_app.EMITTERS["b"] = _emitter("b", Status.HEALTHY)
+    assert main(_timers_argv(app)) == 0
+    unrelated = app / "units/gptme-vitals-custom.service"
+    unrelated.write_text("[Service]\nExecStart=/bin/true\n")
+    other_prefix = app / "units/other-b.timer"
+    other_prefix.write_text("keep")
+    b = vitals_app.REGISTRY.routes[1]
+    if change == "manual":
+        b = replace(b, cadence=RefreshCadence.MANUAL)
+    elif change == "no-envelope":
+        b = replace(b, summary_source=None)
+    setattr(
+        vitals_app,
+        "REGISTRY",
+        RouteRegistry(
+            (vitals_app.REGISTRY.routes[0],)
+            if change == "removed"
+            else (vitals_app.REGISTRY.routes[0], b)
+        ),
+    )
+    vitals_app.EMITTERS.pop("b")
+    assert main(_timers_argv(app)) == 0
+    assert not (app / "units/gptme-vitals-b.timer").exists()
+    assert not (app / "units/gptme-vitals-b.service").exists()
+    assert (app / "units/gptme-vitals-a.timer").exists()
+    assert unrelated.read_text() == "[Service]\nExecStart=/bin/true\n"
+    assert other_prefix.read_text() == "keep"
