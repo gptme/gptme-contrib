@@ -367,6 +367,7 @@ def write_post_session_record(
     trajectory_path: str | None,
     post_session: Callable[..., Any],
     make_store: Callable[[Path], Any],
+    session_ran: bool = False,
 ) -> None:
     """Write the monitoring session record via an injected ``post_session``.
 
@@ -374,6 +375,12 @@ def write_post_session_record(
     caller's ``gptme_sessions.post_session.post_session`` and a
     ``SessionStore`` factory taking the sessions dir (the record file's
     parent) — injected so this package does not depend on gptme-sessions.
+
+    ``session_ran`` is the cause signal that disambiguates exit 75/76: the same
+    codes mean "lock busy, nothing ran" (the default) and, for gptme, "rate
+    limit / auth error" after a session did run (gptme/gptme-contrib#2084 made
+    the child's real status visible). The caller sets it when the run left
+    session evidence (see ``run_item``); a code alone cannot tell them apart.
 
     Raises on any failure (the bash uses the heredoc's non-zero exit to
     trigger the legacy fallback writer).
@@ -386,8 +393,10 @@ def write_post_session_record(
     # as a timeout. Lock-busy (75/76) is neither: no session ran. Passing 124
     # as a sentinel would grade/persist the session with timeout semantics
     # before this function could rewrite the returned dict. Write a local
-    # non-failure record instead and skip the canonical writer.
-    if exit_code in (75, 76):
+    # non-failure record instead and skip the canonical writer — unless a
+    # session actually ran, in which case 75/76 is a throttle/auth failure and
+    # the canonical writer must ingest its trajectory.
+    if exit_code in (75, 76) and not session_ran:
         record: dict[str, Any] = {
             "harness": harness,
             "model": model if model else None,
@@ -434,18 +443,21 @@ def write_post_session_record(
 # --- Legacy fallback record write (worker.sh:325-373) ---
 
 
-def fallback_outcome(exit_code: int) -> str:
+def fallback_outcome(exit_code: int, session_ran: bool = False) -> str:
     """The fallback writer's outcome heuristic (worker.sh:325-326).
 
     NOTE(parity): a timeout (exit 124) records as ``"unknown"``, not
     ``"failed"`` or ``"timeout"`` — only non-zero non-124 exits are
     ``"failed"``. Preserved. Lock-busy defers (75/76) also record as
     ``"unknown"``: they are the fleet's SuccessExitStatus conventions, not
-    failures.
+    failures — unless ``session_ran`` (a 75/76 after a session ran is a
+    rate-limit/auth failure, not a defer).
     """
-    if exit_code != 0 and exit_code not in (75, 76, 124):
-        return "failed"
-    return "unknown"
+    if exit_code in (0, 124):
+        return "unknown"
+    if exit_code in (75, 76) and not session_ran:
+        return "unknown"
+    return "failed"
 
 
 def build_fallback_record_payload(

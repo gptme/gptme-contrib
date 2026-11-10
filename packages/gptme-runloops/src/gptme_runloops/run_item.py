@@ -1740,6 +1740,10 @@ class RunItemOutcome:
     #: The harness could not start because its scoped lock was busy (75/76).
     #: No work ran, so post-session finalization must not consume item state.
     deferred: bool = False
+    #: Exit 75/76 with evidence a session ran (gptme wrote a terminal error to
+    #: its trajectory): a rate limit / auth failure, not a lock-busy defer.
+    #: Same codes, opposite meaning — only this cause signal tells them apart.
+    session_ran: bool = False
     #: Worker was hard-killed at its time budget (exit 124). Deliberately NOT a
     #: ``counted_failure`` — an infra timeout must not contaminate the quality
     #: signal — but it is emphatically not a success either, so it is tracked
@@ -1997,17 +2001,44 @@ def execute_plan(
 
     duration = int(time.time()) - started_epoch
 
+    # Resolve gptme evidence before interpreting ambiguous exit codes. The
+    # /tmp pointer may be gone while a fresh durable trajectory still exists.
+    # Other backends retain their inspection-before-resolution ordering below
+    # (CC/grok inspection can consume their temporary log references).
+    trajectory = plan.trajectory_path
+    if plan.backend == "gptme":
+        trajectory = resolve_backend_trajectory(
+            plan.backend,
+            plan.session_id,
+            predicted=plan.trajectory_path,
+            started_epoch=started_epoch,
+            copilot_state_dir=config.resolved_copilot_state_dir,
+            codex_sessions_dir=config.resolved_codex_sessions_dir,
+            copilot_pre=copilot_pre,
+            codex_pre=codex_pre,
+            gptme_log_root=config.resolved_gptme_log_root,
+        )
+
     rate_limited = False
     counted_failure = False
     deferred = False
+    session_ran = False
     timed_out = False
     infra_failure: str | None = None
+    # 75/76 are both the lock-busy defer codes AND gptme's rate-limit/auth
+    # exits (EXIT_RATE_LIMIT / EXIT_AUTH_ERROR), visible since
+    # gptme/gptme-contrib#2084 stopped `| tee` masking the status. A lock-busy
+    # launch never starts gptme, so it leaves no trajectory; a throttled run
+    # does. The trajectory's terminal error is the cause signal.
+    if exit_code in (75, 76) and plan.backend == "gptme":
+        infra_failure = _inspect_gptme_failure(plan, trajectory=trajectory)
+        session_ran = infra_failure is not None
     if exit_code == 124:
         _log(
             f"WARN: Item {plan.index} timed out after {plan.timeout}s ({plan.time_desc})"
         )
         timed_out = True
-    elif exit_code in (75, 76):
+    elif exit_code in (75, 76) and not session_ran:
         # 75/76 are the fleet's scoped-lock / lock-busy conventions (declared
         # SuccessExitStatus in project-monitoring-lib.sh): a transient defer,
         # not a failure. Mark it explicitly so callers skip consuming
@@ -2023,11 +2054,11 @@ def execute_plan(
         elif plan.backend == "grok-build":
             # Must inspect BEFORE resolve_backend_trajectory deletes the ref.
             infra_failure = _inspect_grok_failure(plan)
-        elif plan.backend == "gptme":
-            infra_failure = _inspect_gptme_failure(plan)
+        elif plan.backend == "gptme" and not session_ran:
+            # (already inspected above when the exit was 75/76)
+            infra_failure = _inspect_gptme_failure(plan, trajectory=trajectory)
 
-    trajectory = plan.trajectory_path
-    if not rate_limited:
+    if not rate_limited and plan.backend != "gptme":
         trajectory = resolve_backend_trajectory(
             plan.backend,
             plan.session_id,
@@ -2041,11 +2072,8 @@ def execute_plan(
             cc_predicted_pre=cc_predicted_pre,
             cc_snapshotted=cc_snapshotted,
         )
-    else:
-        # NOTE(parity): the rate-limit branch deletes the CC stream log +
-        # ref (worker.sh:186), so trajectory resolution finds nothing and
-        # the predicted stub path stands. Skip resolution to match.
-        pass
+    # NOTE(parity): the rate-limit branch deletes the CC stream log + ref
+    # (worker.sh:186), so keep the predicted stub path in that case.
 
     return RunItemOutcome(
         exit_code=exit_code,
@@ -2059,6 +2087,7 @@ def execute_plan(
         rate_limited=rate_limited,
         counted_failure=counted_failure,
         deferred=deferred,
+        session_ran=session_ran,
         timed_out=timed_out,
         infra_failure=infra_failure,
     )
@@ -2209,20 +2238,24 @@ def _inspect_grok_failure(
 
 
 def _inspect_gptme_failure(
-    plan: ItemPlan, *, tmp_dir: Path = Path("/tmp")
+    plan: ItemPlan, *, trajectory: str | None = None, tmp_dir: Path = Path("/tmp")
 ) -> str | None:
     """Read the gptme trajectory and classify any infra failure.
 
-    The gptme trajectory (pointed to by ``gptme-traj-{session_id}.path``)
-    is the only post-mortem artifact available without capturing the runner's
-    stderr.  Returns an infra_failure key or ``None``.
+    Prefer the caller's resolved trajectory, including the freshness-checked
+    durable fallback. Without one, read ``gptme-traj-{session_id}.path`` for
+    compatibility with standalone callers. An explicitly empty trajectory
+    means resolution found no evidence; do not re-read a stale reference.
+    Returns an infra_failure key or ``None``.
     """
-    if not plan.session_id:
-        return None
-    ref = tmp_dir / f"gptme-traj-{plan.session_id}.path"
-    if not ref.is_file():
-        return None
-    traj_str = ref.read_text(encoding="utf-8", errors="replace").strip()
+    traj_str = trajectory
+    if traj_str is None:
+        if not plan.session_id:
+            return None
+        ref = tmp_dir / f"gptme-traj-{plan.session_id}.path"
+        if not ref.is_file():
+            return None
+        traj_str = ref.read_text(encoding="utf-8", errors="replace").strip()
     traj_path = Path(traj_str) if traj_str else None
     if traj_path is None or not traj_path.is_file():
         return None
@@ -2486,10 +2519,11 @@ def run_post_session(
             trajectory_path=outcome.trajectory_path,
             post_session=hooks.post_session,
             make_store=hooks.make_store,
+            session_ran=outcome.session_ran,
         )
     except Exception:
         _log(f"WARN: post_session failed for item {plan.index}, using legacy fallback")
-        outcome_str = fallback_outcome(exit_code)
+        outcome_str = fallback_outcome(exit_code, session_ran=outcome.session_ran)
         if hooks.legacy_record_append is not None:
             try:
                 hooks.run_cmd(
@@ -2801,7 +2835,15 @@ def run_post_session(
 
     # 7. Arc continuation record + auto-close (worker.sh:618-659)
     if plan.arc_id and hooks.arc_manager is not None:
-        _update_arc_continuation(plan, item, exit_code, config, hooks)
+        # A 75/76 that reached post-session with session evidence is a
+        # throttle/auth failure; don't let the arc hint call it a lock collision.
+        _update_arc_continuation(
+            plan,
+            item,
+            1 if outcome.session_ran and exit_code in (75, 76) else exit_code,
+            config,
+            hooks,
+        )
 
         pr_state_after = ""
         if record_file.is_file():
