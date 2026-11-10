@@ -166,9 +166,13 @@ def from_records(
     several records in the batch (a per-day log many sessions append to) is kept
     as the ``journal`` id but not digested: its references belong to no single
     session, and attaching them to each would glue unrelated work together.
-    The result is sorted by start, as ``threads`` requires.
+    Repeated session ids use the newest record timestamp (last supplied on a
+    tie), before counting shared journals. The result is sorted by start, as
+    ``threads`` requires.
     """
-    records = list(records)
+    records = list(
+        {r.session_id: r for r in sorted(records, key=lambda r: _epoch(r.timestamp) or 0)}.values()
+    )
     shared: dict[Path | tuple[int, int], int] = {}
     journal_paths: list[tuple[Path, Path | tuple[int, int]] | None] = []
     for r in records:

@@ -211,6 +211,34 @@ def test_threads_cli_json_contract(tmp_path: Path) -> None:
     assert data["sessions"][1]["key"] == "task:same-task"
 
 
+def test_duplicate_records_do_not_create_self_predecessors(tmp_path: Path) -> None:
+    records = [
+        _rec(
+            sid,
+            f"2026-11-10T0{i}:00:00Z",
+            f"2026-11-10T0{i}:30:00Z",
+            dispatch_cause={"task": "same-task"},
+            session_name=f"row-{i}",
+        )
+        for i, sid in enumerate(("before", "repeated", "repeated", "after"))
+    ]
+    nodes = from_records(records, agent="bob", read_journal=None)
+    assert [n["id"] for n in nodes] == ["before", "repeated", "after"]
+    assert nodes[1]["name"] == "row-2"  # Last supplied record is authoritative.
+    store = SessionStore(sessions_dir=tmp_path)
+    for record in records:
+        store.append(record)
+    result = CliRunner().invoke(
+        cli,
+        ["--sessions-dir", str(tmp_path), "thread", "repeated", "--since", "all", "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["session"]["predecessor"] == "before"
+    assert [r["id"] for r in data["ancestry"]] == ["before"]
+    assert [r["id"] for r in data["descendants"]] == ["after"]
+
+
 def test_thread_cli_shows_ancestry_and_descendants(tmp_path: Path) -> None:
     d = str(_store(tmp_path))
     res = CliRunner().invoke(
