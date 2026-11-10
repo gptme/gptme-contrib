@@ -116,14 +116,44 @@ def _opted_out(env: dict[str, str]) -> bool:
     }
 
 
+# git's own core.commentChar=auto candidates (builtin/commit.c).
+_COMMENT_CANDIDATES = "#;@!$%^&|:"
+_SCISSORS = b"------------------------ >8 ------------------------"
+
+
+def comment_char_override(content: bytes, source: str) -> list[str]:
+    """Git -c args so '#' body lines from -m/-F are not read as comments.
+
+    interpret-trailers inserts the trailer *above* trailing comment lines.
+    For -m/-F messages (source "message") git adds no comment block, so a
+    body ending in e.g. "#2077 follow-up" would get the trailer spliced into
+    the body. Pick a comment char that starts no line, as commit's "auto"
+    does. Editor templates (-m -e) still work: their '#' lines then precede
+    the trailer and cleanup=strip removes them. Skip when a scissors line is
+    present (-v), since the trailer must stay above the diff.
+    """
+    if source != "message" or _SCISSORS in content:
+        return []
+    starts = {line[:1] for line in content.splitlines()}
+    for char in _COMMENT_CANDIDATES:
+        if char.encode() not in starts:
+            return ["-c", f"core.commentChar={char}"]
+    return []
+
+
 def main() -> int:
     if _opted_out(dict(os.environ)):
         return 0
     if len(sys.argv) < 2 or not Path(sys.argv[1]).is_file():
         return 0
     message = sys.argv[1]
-    trailers = subprocess.check_output(
-        ["git", "interpret-trailers", "--parse", message]
+    source = sys.argv[2] if len(sys.argv) > 2 else ""
+    git = ["git", *comment_char_override(Path(message).read_bytes(), source)]
+    # Check under both comment chars: with -m ... -e an existing trailer sits
+    # above git's '#' editor block, which only the default char sees through.
+    trailers = b"".join(
+        subprocess.check_output([*args, "interpret-trailers", "--parse", message])
+        for args in {tuple(git), ("git",)}
     )
     if any(
         line.partition(b":")[0].lower() in (b"git-session-id", b"git-session-ids")
@@ -140,7 +170,7 @@ def main() -> int:
                 stream.write(b"\n")
         subprocess.run(
             [
-                "git",
+                *git,
                 "interpret-trailers",
                 "--in-place",
                 "--if-exists",

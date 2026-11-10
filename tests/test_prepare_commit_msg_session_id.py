@@ -346,3 +346,104 @@ def test_pid_one_can_own_the_session_only_in_same_cgroup(
     assert resolve_session_id({}, proc_root=tmp_path, pid=30) == (
         "container42" if same_cgroup else None
     )
+
+
+def _run_hook_with_source(
+    msg_file: Path, source: str, env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(HOOK), str(msg_file), source],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
+    )
+
+
+def test_hash_body_line_from_dash_m_is_not_treated_as_comment(tmp_path: Path) -> None:
+    """`git commit -m` body ending in '#2077 ...' must keep the trailer last.
+
+    Regression: interpret-trailers read the '#' line as a comment and spliced
+    the trailer above it, into the middle of the body.
+    """
+    msg = tmp_path / "COMMIT_EDITMSG"
+    msg.write_text("feat: x\n\nRe-pins onto the still-open\n#2077 branch.\n")
+    env = _clean_env(GIT_COMMITTER_SESSION_ID="s1")
+
+    result = _run_hook_with_source(msg, "message", env)
+
+    assert result.returncode == 0, result.stderr
+    assert msg.read_text() == (
+        "feat: x\n\nRe-pins onto the still-open\n#2077 branch.\n\nGit-Session-Id: s1\n"
+    )
+
+
+def test_editor_template_comments_still_stripped_cleanly(tmp_path: Path) -> None:
+    """-m -e: template '#' lines precede the trailer; strip leaves it last."""
+    msg = tmp_path / "COMMIT_EDITMSG"
+    msg.write_text(
+        "feat: x\n\n# Please enter the commit message.\n# Lines starting with '#'\n"
+    )
+    env = _clean_env(GIT_COMMITTER_SESSION_ID="s2")
+
+    result = _run_hook_with_source(msg, "message", env)
+    assert result.returncode == 0, result.stderr
+    stripped = subprocess.run(
+        ["git", "stripspace", "--strip-comments"],
+        input=msg.read_text(),
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
+    ).stdout
+
+    assert stripped == "feat: x\n\nGit-Session-Id: s2\n"
+
+
+def test_existing_trailer_above_editor_comments_is_preserved(
+    tmp_path: Path,
+) -> None:
+    """-m ... -e with an existing trailer: don't append a second, split trailer."""
+    msg = tmp_path / "COMMIT_EDITMSG"
+    original = (
+        "feat: x\n\nGit-Session-Ids: first, second\n\n"
+        "# Please enter the commit message.\n"
+    )
+    msg.write_text(original)
+    env = _clean_env(GIT_COMMITTER_SESSION_ID="s9")
+
+    result = _run_hook_with_source(msg, "message", env)
+
+    assert result.returncode == 0, result.stderr
+    assert msg.read_text() == original
+
+
+def test_template_source_keeps_trailer_above_comments(tmp_path: Path) -> None:
+    msg = tmp_path / "COMMIT_EDITMSG"
+    msg.write_text("feat: x\n\n# Please enter the commit message.\n")
+    env = _clean_env(GIT_COMMITTER_SESSION_ID="s3")
+
+    result = _run_hook_with_source(msg, "template", env)
+
+    assert result.returncode == 0, result.stderr
+    assert msg.read_text().index("Git-Session-Id: s3") < msg.read_text().index(
+        "# Please"
+    )
+    assert "Git-Session-Id: s3" in _parsed_trailers(msg)
+
+
+def test_scissors_keeps_trailer_above_diff(tmp_path: Path) -> None:
+    """-m -v: the trailer must stay above the scissors line or it is cut."""
+    msg = tmp_path / "COMMIT_EDITMSG"
+    msg.write_text(
+        "feat: x\n\n"
+        "# ------------------------ >8 ------------------------\n"
+        "diff --git a/f b/f\n"
+    )
+    env = _clean_env(GIT_COMMITTER_SESSION_ID="s4")
+
+    result = _run_hook_with_source(msg, "message", env)
+
+    body = msg.read_text()
+    assert result.returncode == 0, result.stderr
+    assert body.index("Git-Session-Id: s4") < body.index(">8")
