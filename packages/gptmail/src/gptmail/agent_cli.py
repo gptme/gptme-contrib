@@ -281,7 +281,7 @@ def _ssh_deliver(agents: dict[str, dict[str, str]], *, mailbox: str = "default")
         ]
         # Stage under a non-message suffix in the same directory. Readers must
         # never see parseable frontmatter before SCP has finished the body.
-        remote_temp = f"{remote_inbox}.{local_path.name}.{uuid.uuid4().hex}.part"
+        remote_temp = f"{remote_inbox}.{uuid.uuid4().hex}.part"
         remote_final = f"{remote_inbox}{local_path.name}"
         try:
             subprocess.run(
@@ -1440,7 +1440,7 @@ def _fetch_from_agent(
             remote_path = f"{workspace}/messages/outbox/{filename}"
         else:
             remote_path = f"{workspace}/messages/mailboxes/{row_mailbox}/outbox/{filename}"
-        fd, temp_name = tempfile.mkstemp(prefix=f".{dest.name}.", dir=dest.parent)
+        fd, temp_name = tempfile.mkstemp(prefix=".delivery-", dir=dest.parent)
         os.close(fd)
         temp_dest = Path(temp_name)
         try:

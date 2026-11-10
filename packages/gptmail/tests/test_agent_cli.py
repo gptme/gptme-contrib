@@ -2387,14 +2387,19 @@ def test_watch_thread_continuous_reports_every_match_once(
 
 
 @pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("long_name", [False, True])
 def test_ssh_push_publishes_only_complete_messages(
-    tmp_path: Path, monkeypatch, failure: bool
+    tmp_path: Path, monkeypatch, failure: bool, long_name: bool
 ) -> None:
     """Exercise the actual remote shell commands locally, inspecting mid-SCP visibility."""
     import shlex
 
     inbox = tmp_path / "peer" / "messages" / "inbox"
-    source = tmp_path / "reply.md"
+    filename = (
+        agent_cli.AgentTransport._make_filename("𐐀" * 15, "𐐀" * 33) if long_name else "reply.md"
+    )
+    assert len(filename.encode()) <= 255
+    source = tmp_path / filename
     source.write_text("---\nfrom: bob\nto: alice\nin_reply_to: ask.md\n---\n\ncomplete body\n")
     run = agent_cli.subprocess.run
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import tempfile
 import time
 from collections.abc import Callable
@@ -126,11 +127,14 @@ def local_delivery_time(path: Path) -> float:
 
 def write_inbox_metadata(path: Path, content: str) -> None:
     """Publish read/replied stamps without losing the original arrival time."""
-    arrival = local_delivery_time(path)
-    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    with path.open() as source:
+        original = os.fstat(source.fileno())
+    arrival = original.st_mtime
+    fd, name = tempfile.mkstemp(prefix=".metadata-", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as output:
             output.write(content)
+            os.fchmod(output.fileno(), stat.S_IMODE(original.st_mode))
         os.utime(name, (arrival, arrival))
         os.replace(name, path)
     finally:
@@ -459,7 +463,7 @@ class AgentTransport:
 
         def _deliver(local_path: Path, _recipient: str) -> bool:
             dest.mkdir(parents=True, exist_ok=True)
-            fd, name = tempfile.mkstemp(prefix=f".{local_path.name}.", dir=dest)
+            fd, name = tempfile.mkstemp(prefix=".delivery-", dir=dest)
             os.close(fd)
             try:
                 shutil.copy2(local_path, name)

@@ -361,6 +361,34 @@ def test_local_delivery_rejects_directory_collision(tmp_path: Path) -> None:
     assert not list(inbox.glob(".*"))
 
 
+@pytest.mark.parametrize("mode", [0o600, 0o640, 0o660])
+@pytest.mark.parametrize("filename", ["reply.md", "r" * 250 + ".md"])
+def test_metadata_update_preserves_permissions_and_long_filename(tmp_path, mode, filename):
+    import os
+    import stat
+
+    from gptmail.transport.agent import local_delivery_time, write_inbox_metadata
+
+    path = tmp_path / filename
+    path.write_text("original body")
+    path.chmod(mode)
+    os.utime(path, (1000, 1000))
+    write_inbox_metadata(path, "updated body")
+    assert path.read_text() == "updated body"
+    assert stat.S_IMODE(path.stat().st_mode) == mode
+    assert local_delivery_time(path) == 1000
+    assert not list(tmp_path.glob(".*"))
+
+
+def test_local_delivery_accepts_long_filename(tmp_path):
+    source = tmp_path / ("r" * 250 + ".md")
+    source.write_text("complete body")
+    inbox = tmp_path / "inbox"
+    assert AgentTransport.local_deliver(inbox)(source, "alice")
+    assert (inbox / source.name).read_text() == "complete body"
+    assert not list(inbox.glob(".*"))
+
+
 def test_local_delivery_resets_sender_mtime_and_ignores_yaml_arrival(
     tmp_path: Path,
 ) -> None:

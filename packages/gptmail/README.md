@@ -204,7 +204,11 @@ agent are ignored. A reply that already exists fires immediately. Replies pushed
 the local inbox are matched as well. Push and pull publish complete files atomically;
 read/reply metadata updates retain the receiver-local arrival time used for the final
 deadline scan. Delivery resets filesystem mtime on the receiving host; incoming YAML
-arrival fields are not trusted. SSH push publication requires `python3` on the peer
+arrival fields are not trusted. The timestamp is sampled immediately before atomic
+publication, not atomically with it: suspension between stamping and linking can make
+a post-deadline publication count as timely. The timeout bounds waiting and network
+operations; it is not a strict publication-order guarantee across paused processes.
+SSH push publication requires `python3` on the peer
 (no remote gptmail installation or GNU coreutils is required). On timeout the command
 exits 124.
 
