@@ -5,7 +5,7 @@ assistants** (gptme, Claude Code, Codex). It logs agent sessions and per-tool
 activity to your **local** aw-server, so AI work shows up in the aw-webui
 Timeline alongside window/AFK data instead of looking like idle time.
 
-**Status:** alpha (`0.1.0`). Session tracking and the Codex log-tailer work and
+**Status:** alpha (`0.2.0`). Session tracking and the Codex log-tailer work and
 are dogfooded against a local aw-server; the Claude Code log-tailer is tested on
 fixtures and real transcripts but not yet dogfooded. A native gptme plugin hook
 for per-tool events and an aw-webui "AI work" view are not built yet.
@@ -30,6 +30,8 @@ This is the controller use case behind
 ## Install
 
 ```bash
+pipx install aw-watcher-agent   # or: pip install aw-watcher-agent / uv tool install aw-watcher-agent
+# latest unreleased master:
 pip install "git+https://github.com/gptme/gptme-contrib#subdirectory=packages/aw-watcher-agent"
 # or, from a gptme-contrib checkout:
 pip install -e packages/aw-watcher-agent

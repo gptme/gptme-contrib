@@ -3,4 +3,4 @@
 from .client import AWClient, AWClientError, Event, DEFAULT_SERVER, utc_now_iso
 
 __all__ = ["AWClient", "AWClientError", "Event", "DEFAULT_SERVER", "utc_now_iso"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"
