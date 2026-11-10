@@ -103,7 +103,9 @@ external or private route, a navigable route missing from every group, more than
 one `is_headline`, and a
 `core_dimension`/`is_headline` on a route with no `summary_source` (nothing to
 roll up, so the dimension would be permanently blind). `headline_route()`
-raises on zero, which is what `build` will call.
+raises on zero, which is what `build` will call. The separately registered portal
+participates in envelope collection, core dimensions, and headline ownership,
+but is not rendered as a card linking to itself.
 
 `visibility` is deliberately **not** `is_internal`. `is_internal` means "hosted
 by us, not an outbound link" and drives link crawling; a private page is still
@@ -111,7 +113,10 @@ internal. `PRIVATE` routes are skipped by the nav and portal cards and are
 meant for the private root only. A registered portal must be public because it
 is linked from every page. Relative links resolve against the current page's
 URL, then map the destination through the registry to its `output_path`; a
-custom backing path never changes the browser's URL base.
+custom backing path never changes the browser's URL base. An exact query-bearing
+registration wins over a path-only route; otherwise UI query parameters fall
+back to the path-only route. Percent-encoded path delimiters remain distinct
+from actual query/fragment boundaries.
 
 Not moved from Bob's `dashboard_routes.py`: his route table and the
 Decisions/Review-queue ownership predicates (they encode his page split).
