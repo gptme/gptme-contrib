@@ -187,3 +187,25 @@ def test_timestamp_only_synced_record_starts_at_first_event() -> None:
 
     assert node["start"] == datetime.fromisoformat(record.timestamp).timestamp()
     assert node["end"] == node["start"] + 3600
+
+
+def test_bare_abbreviated_deliverable_links_to_later_commit_reference() -> None:
+    first = _rec(
+        "producer",
+        "2026-11-10T10:00:00Z",
+        "2026-11-10T10:30:00Z",
+        deliverables=["0cfdcd206"],
+    )
+    later = _rec(
+        "consumer",
+        "2026-11-10T11:00:00Z",
+        "2026-11-10T11:30:00Z",
+        journal_path="journal/2026-11-10/consumer.md",
+    )
+    nodes = from_records(
+        [first, later], agent="bob", read_journal=lambda _: "Follow-up to `0cfdcd206`."
+    )
+    assert nodes[0]["delivered_shas"] == ["0cfdcd206"]
+    rows, _ = build_forest(nodes)
+    assert rows[1]["predecessor"] == "producer"
+    assert rows[1]["kind"] == "commit"

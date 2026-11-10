@@ -37,7 +37,7 @@ _TASK_PATH = re.compile(r"\btasks/(?:archive/)?([a-z0-9][a-z0-9-]*[a-z0-9])\.md\
 _JOURNAL_LINK = re.compile(r"\bjournal/\d{4}-\d{2}-\d{2}/[\w.-]+\.md\b")
 _LABEL_IN_NAME = re.compile(r"session-([0-9a-f]{4,8})(?:-|$)")
 _SUBJECT_SHA = re.compile(r"^(.*?)\s*\(([0-9a-f]{7,40})\)\s*$")
-_FULL_SHA = re.compile(r"[0-9a-f]{40}")
+_BARE_SHA = re.compile(r"[0-9a-f]{7,40}")
 
 WHY_MAX_CHARS = 500
 
@@ -124,7 +124,7 @@ def _deliverables(values: Iterable[object]) -> tuple[list[str], list[str], list[
         if not isinstance(raw, str):
             continue
         v = raw.strip()
-        if _FULL_SHA.fullmatch(v):
+        if _BARE_SHA.fullmatch(v):
             shas.append(v)
         elif m := _SUBJECT_SHA.match(v):
             shas.append(m.group(2))
