@@ -357,3 +357,104 @@ def test_nav_portal_link_uses_the_registered_portal() -> None:
     assert (
         _anchors(RouteRegistry((_route("a"),)).render_shared_nav("/"))[0]["href"] == "/"
     )
+
+
+@pytest.mark.parametrize("current_route", ["/odd/", "/odd/?old=1"])
+@pytest.mark.parametrize("href", ["child.html", "../sibling.html", "?tab=1"])
+def test_relative_urls_use_current_url_not_output_path(
+    tmp_path: Path, href: str, current_route: str
+) -> None:
+    reg = RouteRegistry((_route("odd", output_path="elsewhere/page.html"),))
+    expected = {
+        "child.html": "odd/child.html",
+        "../sibling.html": "sibling.html",
+        "?tab=1": "elsewhere/page.html",
+    }
+    assert (
+        reg.resolve_internal_target(
+            href, current_route=current_route, site_root=tmp_path
+        )
+        == tmp_path / expected[href]
+    )
+
+
+@pytest.mark.parametrize("kind", [RouteKind.STATIC, RouteKind.DYNAMIC])
+def test_encoded_registered_urls_resolve_consistently(
+    tmp_path: Path, kind: RouteKind
+) -> None:
+    route = _route(
+        "encoded",
+        href="/my%20page/",
+        kind=kind,
+        output_path="elsewhere/page.html" if kind is RouteKind.STATIC else None,
+    )
+    reg = RouteRegistry((route,))
+    expected = tmp_path / "elsewhere/page.html" if kind is RouteKind.STATIC else None
+    for href in ("/my%20page/", "/my page/", "../my%20page/"):
+        assert (
+            reg.resolve_internal_target(
+                href, current_route="/tasks/", site_root=tmp_path
+            )
+            == expected
+        )
+
+
+def test_trailing_slash_does_not_match_registered_output_file(tmp_path: Path) -> None:
+    assert (
+        _registry().resolve_internal_target(
+            "/tasks/index.html/", current_route="/", site_root=tmp_path
+        )
+        == tmp_path / "tasks/index.html/index.html"
+    )
+
+
+def test_private_portal_is_rejected() -> None:
+    with pytest.raises(RouteRegistryError, match="portal must be public"):
+        RouteRegistry((), portal=replace(PORTAL, visibility=Visibility.PRIVATE))
+
+
+@pytest.mark.parametrize(
+    "output_path", ["/outside.html", "../outside.html", "a/../../outside.html"]
+)
+def test_output_paths_must_be_contained_relative_paths(output_path: str) -> None:
+    with pytest.raises(
+        RouteRegistryError, match="output_path must be a contained relative path"
+    ):
+        RouteRegistry((_route("a", output_path=output_path),))
+
+
+def test_encoded_href_aliases_are_duplicate_destinations() -> None:
+    with pytest.raises(RouteRegistryError, match="duplicate href"):
+        RouteRegistry(
+            (
+                _route("encoded", href="/my%20page/"),
+                _route("literal", href="/my page/"),
+            )
+        )
+
+
+def test_encoded_current_url_keeps_its_directory(tmp_path: Path) -> None:
+    reg = RouteRegistry(
+        (_route("encoded", href="/my%20page/", output_path="other.html"),)
+    )
+    assert reg.get_by_href("/my%20page/") is reg.get_by_href("/my page/")
+    assert (
+        reg.resolve_internal_target(
+            "child.html", current_route="/my%20page/", site_root=tmp_path
+        )
+        == tmp_path / "my page/child.html"
+    )
+    assert (
+        reg.resolve_internal_target(
+            "?tab=1", current_route="/my%20page/", site_root=tmp_path
+        )
+        == tmp_path / "other.html"
+    )
+
+
+def test_external_url_encoding_does_not_collapse_distinct_queries() -> None:
+    encoded = replace(GRAFANA, href="https://example.com/?filter=a%26b")
+    literal = replace(GRAFANA, slug="other", href="https://example.com/?filter=a&b")
+    reg = RouteRegistry((encoded, literal))
+    assert reg.get_by_href(encoded.href) is encoded
+    assert reg.get_by_href(literal.href) is literal

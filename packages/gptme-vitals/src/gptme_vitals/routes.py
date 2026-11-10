@@ -111,6 +111,12 @@ class DashboardRoute:
             raise RouteRegistryError(
                 f"route {self.slug!r}: static routes need output_path"
             )
+        if self.output_path is not None:
+            output = PurePosixPath(self.output_path)
+            if output.is_absolute() or ".." in output.parts:
+                raise RouteRegistryError(
+                    f"route {self.slug!r}: output_path must be a contained relative path"
+                )
         if self.kind is not RouteKind.STATIC and self.output_path is not None:
             raise RouteRegistryError(
                 f"route {self.slug!r}: only static routes have an output_path"
@@ -155,16 +161,19 @@ class RouteRegistry:
     _by_output: dict[str, DashboardRoute] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if self.portal is not None and not self.portal.is_public:
+            raise RouteRegistryError("portal must be public")
         by_slug: dict[str, DashboardRoute] = {}
         by_href: dict[str, DashboardRoute] = {}
         for route in (*self.routes, *((self.portal,) if self.portal else ())):
             route.validate()
             if route.slug in by_slug:
                 raise RouteRegistryError(f"duplicate slug {route.slug!r}")
-            if route.href in by_href:
+            decoded_href = _href_key(route.href)
+            if decoded_href in by_href:
                 raise RouteRegistryError(f"duplicate href {route.href!r}")
             by_slug[route.slug] = route
-            by_href[route.href] = route
+            by_href[decoded_href] = route
         headlines = [r.slug for r in self.routes if r.is_headline]
         if len(headlines) > 1:
             raise RouteRegistryError(
@@ -203,7 +212,7 @@ class RouteRegistry:
         return self._by_slug.get(slug)
 
     def get_by_href(self, href: str) -> DashboardRoute | None:
-        return self._by_href.get(href)
+        return self._by_href.get(_href_key(href))
 
     def in_section(self, section: str) -> tuple[DashboardRoute, ...]:
         return tuple(r for r in self.routes if r.section == section)
@@ -256,26 +265,22 @@ class RouteRegistry:
         ):
             return None
 
-        current = self.get_by_href(current_route)
-        if current is not None and current.output_path is not None:
-            current_path = PurePosixPath(current.output_path)
-        else:
-            # A route ending in "/" is a directory URL: a browser resolves
-            # relative links against that directory, so the path we take
-            # `.parent` of must be the directory's own index page. Without the
-            # explicit "index.html" the trailing slash is dropped and `.parent`
-            # climbs one level too far, which reports false broken links for
-            # every generated detail page below a directory route.
-            raw_current = current_route.lstrip("/")
-            if not raw_current or raw_current.endswith("/"):
-                raw_current += "index.html"
-            current_path = PurePosixPath(raw_current)
+        # Resolve against the browser URL, never the backing output_path: a
+        # registered /odd/ may be built as elsewhere/page.html. Strip the query
+        # and fragment before converting the URL to a path.
+        raw_current = unquote(urlsplit(current_route).path).lstrip("/")
+        current_directory = not raw_current or raw_current.endswith("/")
+        # Keep a directory URL's parent inside that directory rather than
+        # climbing one level too far after PurePosixPath drops its trailing slash.
+        current_path = PurePosixPath(
+            raw_current + "index.html" if current_directory else raw_current
+        )
         # Decode first: `%20` is a space on disk, and `%2e%2e` must be normalised
         # (and contained) like a literal `..`, not slip past the dot-segment check.
         raw_path = unquote(parsed.path)
         if not raw_path:
             # Query-only link (`?tab=1`): the target is the current page itself.
-            relative = current_path
+            relative = PurePosixPath(raw_current)
         elif raw_path.startswith("/"):
             relative = PurePosixPath(raw_path.lstrip("/"))
         else:
@@ -287,10 +292,11 @@ class RouteRegistry:
         # Resolve the destination URL first and consult the registry, so a
         # relative link to a dynamic or differently-pathed route gets the same
         # answer as the root-relative spelling of it.
-        route = self._route_for_path(normalized, directory=raw_path.endswith("/"))
+        directory = raw_path.endswith("/") if raw_path else current_directory
+        route = self._route_for_path(normalized, directory=directory)
         if route is not None:
             return route.static_target(site_root)
-        if raw_path.endswith("/") or not normalized.suffix:
+        if directory or not normalized.suffix:
             normalized /= "index.html"
         return site_root / normalized
 
@@ -303,7 +309,7 @@ class RouteRegistry:
             route = self._by_href.get(candidate)
             if route is not None and (candidate.endswith("/") or not directory):
                 return route
-        return self._by_output.get(text)
+        return None if directory else self._by_output.get(text)
 
     # -- rendering --------------------------------------------------------
 
@@ -359,6 +365,14 @@ class RouteRegistry:
                 "</a>"
             )
         return "\n".join(cards)
+
+
+def _href_key(href: str) -> str:
+    """Decode only local URL paths; queries and external URLs keep their identity."""
+    parsed = urlsplit(href)
+    if parsed.scheme or parsed.netloc:
+        return href
+    return parsed._replace(path=unquote(parsed.path)).geturl()
 
 
 def _normalize_relative_path(path: PurePosixPath) -> PurePosixPath | None:

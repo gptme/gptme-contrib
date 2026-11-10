@@ -97,8 +97,10 @@ REGISTRY.core_dimensions()   # {"services": (<route>,)} — input to roll_up_env
 ```
 
 Violations raise `RouteRegistryError` at construction, not when a page renders:
-duplicate slug/href, a nav group naming an unknown, external or private route,
-a navigable route missing from every group, more than one `is_headline`, and a
+duplicate slug/href (including percent-encoded href aliases), an absolute or
+parent-traversing `output_path`, a private portal, a nav group naming an unknown,
+external or private route, a navigable route missing from every group, more than
+one `is_headline`, and a
 `core_dimension`/`is_headline` on a route with no `summary_source` (nothing to
 roll up, so the dimension would be permanently blind). `headline_route()`
 raises on zero, which is what `build` will call.
@@ -106,7 +108,10 @@ raises on zero, which is what `build` will call.
 `visibility` is deliberately **not** `is_internal`. `is_internal` means "hosted
 by us, not an outbound link" and drives link crawling; a private page is still
 internal. `PRIVATE` routes are skipped by the nav and portal cards and are
-meant for the private root only.
+meant for the private root only. A registered portal must be public because it
+is linked from every page. Relative links resolve against the current page's
+URL, then map the destination through the registry to its `output_path`; a
+custom backing path never changes the browser's URL base.
 
 Not moved from Bob's `dashboard_routes.py`: his route table and the
 Decisions/Review-queue ownership predicates (they encode his page split).
