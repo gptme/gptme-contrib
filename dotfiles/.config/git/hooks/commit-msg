@@ -16,8 +16,11 @@ import sys
 from pathlib import Path
 
 REASONING_TAGS = frozenset({b"<think>", b"</think>"})
-_FENCE = re.compile(rb" {0,3}(`{3,}|~{3,})(.*)")
-_SCISSORS = b"------------------------ >8 ------------------------"
+# Any indentation: a fence nested in a list is still an example, and a
+# misread fence can only let a commit through, never reject one.
+_FENCE = re.compile(rb"[ \t]*(`{3,}|~{3,})(.*)")
+# `commit -v` cut line: comment char(s), then the marker, alone on the line.
+_SCISSORS = re.compile(rb"\S{1,8} -{24} >8 -{24}")
 
 
 def stray_tag_lines(content: bytes) -> list[int]:
@@ -25,7 +28,7 @@ def stray_tag_lines(content: bytes) -> list[int]:
     found: list[int] = []
     fence: bytes | None = None
     for number, line in enumerate(content.splitlines(), start=1):
-        if _SCISSORS in line:
+        if _SCISSORS.fullmatch(line.rstrip()):
             break  # `commit -v` diff below; git drops it
         marker = _FENCE.fullmatch(line)
         if fence is not None:

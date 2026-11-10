@@ -36,6 +36,7 @@ def _run(tmp_path: Path, body: bytes) -> tuple[subprocess.CompletedProcess[str],
         b"fix: caf\xe9\n\n\t</think>\r\n",
         b"fix: thing\n\n```xml\n<think>\n```\n</think>\n",
         b"fix: thing\n\n```\nunclosed ``` x\n```\n</think>\n",
+        b"fix: doc ------------------------ >8 ------------------------\n</think>\n",
     ],
 )
 def test_bare_tag_line_rejects_and_leaves_message_untouched(
@@ -55,6 +56,8 @@ def test_bare_tag_line_rejects_and_leaves_message_untouched(
         b"fix: docs\n\n```xml\n<think>\nexample\n</think>\n```\n",
         b"fix: docs\n\n  ~~~~\n</think>\n~~~\n<think>\n  ~~~~\n",
         b"fix: docs\n\n- Example:\n  ```xml\n  <think>\n  ```\n",
+        b"fix: docs\n\n- Example:\n\n    ```xml\n    <think>\n    ```\n",
+        b"fix: docs\n\n1. Step\n\t```\n\t</think>\n\t```\n",
         b"fix: thing\n\n# ------------------------ >8 ------------------------\n"
         b" </think>\n",
         b"",
