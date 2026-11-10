@@ -235,14 +235,24 @@ partial build never leaves the fleet view describing only what was just touched.
 Reading from the private root (not the served one) means a private page feeding a
 dimension counts the same whether or not it was rebuilt this run.
 
-Builds are serialised: publishing, deriving and the shared writes
+Builds are serialised: collection, publishing, deriving and the shared writes
 (`core.json`, `headline.json`, portal) run under an exclusive `flock` on
 `<private-root>/.gptme-vitals.lock` (Unix only), because per-page timers share the
 top of the hour and an older build finishing second would otherwise replace a newer
-view. Emitters run *before* the lock is taken, so a slow collector does not block
-the others. `build` also refuses to start when two outputs would write one file
-(shared `summary_source`, `core.json`/`headline.json`, the portal page) or when no
-route sets `is_headline`.
+view. A slow collector delays other builds; this deliberately trades throughput
+for ordered observations without relying on emitter-supplied timestamps. The lock
+pathname is reserved against envelope outputs. `build` also refuses to start when
+two outputs would write one file (shared `summary_source`,
+`core.json`/`headline.json`, the portal page) or when no route sets `is_headline`.
+
+Every build removes old public summaries for currently private routes before
+collection, even when those pages were not selected or their emitters fail. A
+cleanup error stops the build with exit 1 rather than claiming successful privacy
+revocation. For public pages, a failed served-file write restores the previous
+private file (or removes a first-time private write), so derivation does not advance
+the failed page. This is error recovery, not a crash-atomic two-root transaction:
+readers can observe intermediate generations, and a process crash or a failed
+rollback can require operator recovery.
 
 A failing emitter is reported, the other pages still publish, and the failed
 page keeps its previous file. Exit status is 1 if any page or the derived files
