@@ -718,10 +718,10 @@ def _strip_heredoc_bodies(cmd: str) -> str:
             out.append(cmd[i:end])
             i = end
             continue
-        elif cmd.startswith("$((", i):
+        elif cmd.startswith("$((", i) or cmd.startswith("((", i):
             # Arithmetic left shifts are not heredoc redirections. Preserve
             # the expression so later substitution extraction can inspect it.
-            end = _subst_end(cmd, i)
+            end = _subst_end(cmd, i) if c == "$" else i + _subst_end("$" + cmd[i:], 0) - 1
             out.append(cmd[i:end])
             i = end
             continue
@@ -823,6 +823,11 @@ def _shell_reads_stdin(segment: str) -> bool:
     only direct invocations and the usual command wrappers are recognized.
     ``-c``, a script-file operand and noexec mode do not execute stdin.
     """
+    # Redirections are consumed by the caller shell, never script operands.
+    # Strip them before shlex loses whether an adjacent number is an fd.
+    segment = re.sub(
+        r"(?<!\S)\d*(?:>>?|<|>&|<&|&>)(?:\s*)(?:'[^']*'|\"[^\"]*\"|[^\s;|&]+)", " ", segment
+    )
     tokens = _shell_tokens(segment)
     for i, tok in enumerate(tokens):
         if tok.rsplit("/", 1)[-1] not in _SHELLS:

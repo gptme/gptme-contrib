@@ -168,6 +168,7 @@ WRITES = [
     "gh api -X=POST repos/o/r/pulls/12/reviews",
     "gh api repos/o/r/issues/5/comments -i=false -f body=x",
     "echo $((1 << 2))\ngh api repos/o/r/issues/5/comments -f body=x",
+    "((1 << 2))\ngh api repos/o/r/issues/5/comments -f body=x",
     # the command after a heredoc terminator still runs, apostrophes in the body
     # notwithstanding
     "cat <<'EOF'\nDon't post yet\nEOF\ngh api repos/o/r/issues/5/comments -f body=x",
@@ -261,7 +262,17 @@ def test_endpoint_in_field_value_is_not_comment() -> None:
         assert sigs["gh_interactions"] == 0, cmd
 
 
-@pytest.mark.parametrize("header", ["bash", "/bin/bash -e", "sh -s -- arg", "timeout 30 bash"])
+@pytest.mark.parametrize(
+    "header",
+    [
+        "bash",
+        "/bin/bash -e",
+        "sh -s -- arg",
+        "timeout 30 bash",
+        "bash > /dev/null",
+        "bash 2>/dev/null",
+    ],
+)
 def test_shell_stdin_heredoc_write_counts(header: str) -> None:
     cmd = f"{header} <<'EOF'\ngh api repos/o/r/issues/5/comments -f body=x\nEOF"
     sigs = extract_signals_cc(_bash_msgs(cmd))
@@ -279,11 +290,19 @@ def test_nonexecuted_shell_stdin_heredoc_is_data(header: str) -> None:
     assert sigs.get("comments_posted", 0) == 0
 
 
-def test_shell_heredoc_with_trailing_script_operand_is_data() -> None:
-    cmd = "bash <<'EOF' script.sh\ngh api repos/o/r/issues/5/comments -f body=x\nEOF"
+@pytest.mark.parametrize("tail", ["script.sh", "' > /dev/null'"])
+def test_shell_heredoc_with_trailing_script_operand_is_data(tail: str) -> None:
+    cmd = f"bash <<'EOF' {tail}\ngh api repos/o/r/issues/5/comments -f body=x\nEOF"
     sigs = extract_signals_cc(_bash_msgs(cmd))
     assert sigs["gh_interactions"] == 0
     assert sigs.get("comments_posted", 0) == 0
+
+
+def test_shell_heredoc_with_trailing_redirect_executes() -> None:
+    cmd = "bash <<'EOF' > /dev/null\ngh api repos/o/r/issues/5/comments -f body=x\nEOF"
+    sigs = extract_signals_cc(_bash_msgs(cmd))
+    assert sigs["gh_interactions"] == 1
+    assert sigs["comments_posted"] == 1
 
 
 def test_bash_c_write_counts_comment() -> None:
