@@ -551,6 +551,35 @@ def test_list_marker_fence_preserves_example_and_strips_following_tag(
     assert "dropped 1 stray" in result.stderr
 
 
+@pytest.mark.parametrize("prefix", [b"- ", b"1. ", b"12) "])
+@pytest.mark.parametrize("tab_line", [b"\ttext\n", b" \ttext\n", b"\t\t```\n"])
+def test_list_fence_tab_indentation_preserves_example(
+    tmp_path: Path, prefix: bytes, tab_line: bytes
+) -> None:
+    msg = tmp_path / "COMMIT_EDITMSG"
+    indent = b" " * len(prefix)
+    example = (
+        prefix
+        + b"```xml\n"
+        + tab_line
+        + indent
+        + b"<think>\n"
+        + indent
+        + b"</think>\n"
+        + indent
+        + b"```\n"
+    )
+    msg.write_bytes(b"fix: docs\n\n" + example + b"</think>\n")
+
+    result = _run_hook(msg, _clean_env(GIT_COMMITTER_SESSION_ID="tabs42"))
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        msg.read_bytes() == b"fix: docs\n\n" + example + b"\nGit-Session-Id: tabs42\n"
+    )
+    assert "dropped 1 stray" in result.stderr
+
+
 def test_inline_backtick_span_does_not_disable_tag_filter(tmp_path: Path) -> None:
     msg = tmp_path / "COMMIT_EDITMSG"
     example = b"fix: document tags\n\n```<think>```\n"

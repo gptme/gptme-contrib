@@ -130,6 +130,9 @@ def strip_stray_reasoning_tags(content: bytes) -> tuple[bytes, int]:
         stripped = line.strip()
         code_line = line.rstrip(b"\r\n")
         if fence is not None and list_indent:
+            # Match container indentation in columns, retaining any part of a
+            # tab beyond the prefix. Only this parsing copy is expanded.
+            code_line = code_line.expandtabs(4)
             if code_line.startswith(b" " * list_indent):
                 code_line = code_line[list_indent:]
             elif stripped:
