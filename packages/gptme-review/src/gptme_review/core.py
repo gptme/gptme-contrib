@@ -3164,7 +3164,9 @@ def review_api_key() -> str | None:
         sys.path.insert(0, scripts_dir)
     try:
         from openrouter_keys import resolve_openrouter_api_key
-    except ImportError:
+    except ModuleNotFoundError as exc:
+        if exc.name != "openrouter_keys":
+            raise
         return _resolve_review_key_portable()
 
     key: str | None = resolve_openrouter_api_key("REVIEW")

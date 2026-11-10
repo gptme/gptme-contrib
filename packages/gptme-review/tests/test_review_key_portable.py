@@ -60,3 +60,39 @@ def test_review_api_key_falls_back_without_workspace_resolver(
     monkeypatch.delenv("OPENROUTER_API_KEY_REVIEW", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     assert core.review_api_key() == "portable"
+
+
+@pytest.mark.parametrize(
+    ("resolver_source", "error_type", "error_match"),
+    [
+        (
+            "import missing_review_resolver_dependency\n",
+            ModuleNotFoundError,
+            "missing_review_resolver_dependency",
+        ),
+        (
+            "# No resolver function exported\n",
+            ImportError,
+            "resolve_openrouter_api_key",
+        ),
+    ],
+)
+def test_review_api_key_propagates_broken_workspace_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    resolver_source: str,
+    error_type: type[ImportError],
+    error_match: str,
+) -> None:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "openrouter_keys.py").write_text(resolver_source)
+    monkeypatch.setattr(core, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    # Register restoration even when the module was not previously imported.
+    monkeypatch.setitem(sys.modules, "openrouter_keys", None)
+    monkeypatch.delitem(sys.modules, "openrouter_keys")
+    monkeypatch.setattr(core, "_resolve_review_key_portable", lambda: "generic-key")
+
+    with pytest.raises(error_type, match=error_match):
+        core.review_api_key()
