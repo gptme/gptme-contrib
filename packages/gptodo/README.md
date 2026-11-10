@@ -420,7 +420,11 @@ Error response (exit 1, JSON still on stdout):
 
 `changes` is a dict of fields that actually changed; it is empty when the edit was a
 no-op (the field was already at the requested value). Human-facing warnings and
-state-transition notices still go to stderr.
+state-transition notices still go to stderr. Edit-level validation and lifecycle refusals
+use the error response above; `id` is the failing task id (or the sole requested selector),
+or `null` when a batch-wide refusal cannot identify one task. Click argument/option parsing
+errors happen before the edit callback, exit 2, and use the usual stderr diagnostics
+rather than JSON. Unexpected exceptions are not converted into refusal responses.
 
 For a recurring task that resets on `done`, the per-task result also includes
 `"recurred": true` and `"next_wait": "YYYY-MM-DD..."`.
@@ -443,10 +447,14 @@ Always pass `</dev/null` from automation to prevent stdin-read hangs.
 |------|---------|
 | 0 | Success (mutation applied, or clean no-op) |
 | 1 | Refusal or not-found (invalid value, unknown field, missing task, terminal reopen without `--force`, no mutation args) |
-| 2+ | Fatal / unexpected error |
+| 2 | Click usage error (unknown option, missing argument, invalid option choice, or invalid `add` waiting options) |
 
-This contract applies to `add`, `edit`, and `show`. Scripts can safely use `&&` chaining
-(`gptodo edit … && <next-step>`) and `$?` checks.
+These are expected statuses for `add`, `edit`, and `show`, not a classification of
+unexpected failures: an unhandled exception can also exit 1. In particular,
+`gptodo add "Later" --state waiting </dev/null` exits 2 when `--waiting-for` is
+missing. Scripts can use `&&` chaining (`gptodo edit … && <next-step>`) to require
+success, but must inspect diagnostics (or the `edit --json` error object) rather
+than treating every nonzero status as fatal.
 
 ## Sequential planning (`next --limit`)
 
