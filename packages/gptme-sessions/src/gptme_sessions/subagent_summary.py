@@ -123,8 +123,20 @@ def _strip_heredoc_bodies(cmd: str) -> str:
         out.append(line)
         i += 1
         quoted = [q.span() for q in _QUOTED_RE.finditer(line)]
+        comment = next(
+            (
+                pos
+                for pos, char in enumerate(line)
+                if char == "#"
+                and (pos == 0 or line[pos - 1].isspace())
+                and not any(a <= pos < b for a, b in quoted)
+            ),
+            len(line),
+        )
         heredocs = [
-            m for m in _HEREDOC_RE.finditer(line) if not any(a <= m.start() < b for a, b in quoted)
+            m
+            for m in _HEREDOC_RE.finditer(line[:comment])
+            if not any(a <= m.start() < b for a, b in quoted)
         ]
         # Quoting the executable does not stop it consuming shell input.
         header = _QUOTED_RE.sub(lambda q: q.group()[1:-1], line)
@@ -133,12 +145,17 @@ def _strip_heredoc_bodies(cmd: str) -> str:
         for m in heredocs:
             strip_tabs, delim = m.group(1) == "-", m.group(3)
             body_lines: list[str] = []
+            body_start = i
             while i < len(lines):
                 body = lines[i].lstrip("\t") if strip_tabs else lines[i]
                 i += 1
                 if body == delim:
                     break
                 body_lines.append(body)
+            else:
+                # Unsupported/malformed input must not erase later evidence.
+                out.extend(lines[body_start:])
+                return "\n".join(out)
             if not m.group(2):
                 # Backslash-newline is removed before unquoted heredoc expansion.
                 body_text = "\n".join(body_lines).replace("\\\n", "")

@@ -155,6 +155,11 @@ def test_cmd_mutation_heredoc_keeps_real_shell_mutations() -> None:
     assert cmd_mutation(write)[0] == "acting"
 
 
+@pytest.mark.parametrize("header", ["# example <<EOF", "echo hi # example <<EOF", "cat <<EOF"])
+def test_cmd_mutation_unterminated_or_commented_heredoc_keeps_evidence(header: str) -> None:
+    assert cmd_mutation(f"{header}\ntouch out.txt")[0] == "acting"
+
+
 @pytest.mark.parametrize("delimiter", ["EOF.txt", "EOF-END", "'EOF.txt'", "EOF'part'"])
 def test_cmd_mutation_unsupported_heredoc_delimiter_keeps_following_commands(
     delimiter: str,
