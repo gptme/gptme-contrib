@@ -154,3 +154,249 @@ class TestRecurCliReset:
 
         post = frontmatter.load(workspace / "tasks" / "mystery-task.md")
         assert post.metadata["state"] == "done"
+
+
+class TestRecurResetUnticksChecklist:
+    """A recurrence reset must reopen last cycle's checklist (gordon 2026-11-07:
+    a revived biweekly task showed N/N done and could be closed without the work)."""
+
+    def test_reset_unticks_done_items(self, workspace: Path):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(
+            path.read_text()
+            + "\n\n- [x] step one\n  - [X] nested step\n> - [x] quoted\n* [x] star bullet\n"
+            "- [-] skipped (not needed this cycle)\n\n"
+            "```\n- [x] example in code fence\n```\n\nprose with - [x] inline\n"
+        )
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        body = post.content
+        assert "- [ ] step one" in body
+        assert "  - [ ] nested step" in body
+        assert "> - [ ] quoted" in body
+        assert "* [ ] star bullet" in body
+        assert "- [-] skipped (not needed this cycle)" in body
+        assert "- [x] example in code fence" in body
+        assert "prose with - [x] inline" in body
+
+    @pytest.mark.parametrize(
+        "example",
+        [
+            "````markdown\n```python\n- [x] example\n```\n````",
+            "~~~markdown\n```\n- [x] example\n~~~",
+            "> ```markdown\n> - [x] example\n> ```",
+            "```markdown\n```not-a-closer\n- [x] example\n```",
+            "- ```markdown\n  - [x] example\n  ```",
+            "1. ~~~markdown\n   - [x] example\n   ~~~",
+            "> - ```markdown\n>   - [x] example\n>   ```",
+            "> > ```markdown\n> > - [x] example\n> > ```",
+            "```markdown\n> ```\n- [x] example\n```",
+            "> ```markdown\n> > ```\n> - [x] example\n> ```",
+        ],
+    )
+    def test_reset_preserves_fenced_examples(self, workspace: Path, example: str):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{example}\n\n- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        body = frontmatter.load(path).content
+        assert example in body
+        assert "- [ ] real step" in body
+
+    @pytest.mark.parametrize("indent", range(4))
+    @pytest.mark.parametrize("container", ["", "- notes\n\n  ", "1. notes\n\n   "])
+    def test_reset_accepts_fence_indent_within_container(
+        self, workspace: Path, indent: int, container: str
+    ):
+        continuation = container.rsplit("\n", 1)[-1]
+        example = (
+            f"{container}{' ' * indent}```markdown\n"
+            f"{continuation}- [x] example\n{continuation}{' ' * indent}```"
+        )
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{example}\n\n- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert post.content.endswith(f"{example}\n\n- [ ] real step")
+
+    @pytest.mark.parametrize(
+        "example",
+        [
+            "    ```\n    example",
+            "\t~~~\n\texample",
+            ">     ```\n>     example",
+            "- notes\n\n      ```\n      example",
+            "1. notes\n\n       ~~~\n       example",
+        ],
+    )
+    def test_reset_ignores_overindented_fence_opener(self, workspace: Path, example: str):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{example}\n\n- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert post.content.endswith(f"{example}\n\n- [ ] real step")
+
+    @pytest.mark.parametrize(
+        "example",
+        [
+            "```markdown\n    ```\n- [x] example\n```",
+            "~~~markdown\n\t~~~\n- [x] example\n~~~",
+            "> ```markdown\n>     ```\n> - [x] example\n> ```",
+            "- ```markdown\n      ```\n  - [x] example\n  ```",
+            "1. notes\n\n   ~~~markdown\n       ~~~\n   - [x] example\n   ~~~",
+            "   ```markdown\n    ```\n- [x] example\n```",
+        ],
+    )
+    def test_reset_ignores_overindented_fence_closer(self, workspace: Path, example: str):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{example}\n\n- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert post.content.endswith(f"{example}\n\n- [ ] real step")
+
+    @pytest.mark.parametrize("inline", ["```example```", "- ```example```", "> ```example```"])
+    def test_reset_does_not_treat_inline_code_as_fence(self, workspace: Path, inline: str):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{inline}\n\n- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        body = frontmatter.load(path).content
+        assert inline in body
+        assert "- [ ] real step" in body
+
+    def test_reset_reopens_completed_emoji_items(self, workspace: Path):
+        from gptodo.utils import count_subtasks
+
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(
+            path.read_text() + "\n\n- ✅ shipped\n  - ✅ nested\n> - ✅ quoted\n* ✅ star bullet\n"
+            "\n```markdown\n- ✅ example\n```\n\nprose with - ✅ inline\n"
+        )
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert "- [ ] shipped" in post.content
+        assert "  - [ ] nested" in post.content
+        assert "> - [ ] quoted" in post.content
+        assert "* [ ] star bullet" in post.content
+        assert "```markdown\n- ✅ example\n```" in post.content
+        assert "prose with - ✅ inline" in post.content
+        assert count_subtasks(post.content, checklist_only=True).completed == 0
+
+    @pytest.mark.parametrize(
+        "example",
+        [
+            "- ```markdown\n  - [x] example",
+            "1. ~~~markdown\n   - [x] example",
+            "> ```markdown\n> - [x] example",
+            "> - ```markdown\n>   - [x] example",
+            "> > ```markdown\n> > - [x] example",
+            "- ```markdown\n\n  - [x] example",
+            "1. ~~~markdown\n\n   - [x] example",
+            "- notes\n\n  ```markdown\n  - [x] example",
+            "1. notes\n\n   ~~~markdown\n   - [x] example",
+            "> - notes\n>\n>   ```markdown\n>   - [x] example",
+        ],
+    )
+    def test_reset_ends_fence_at_container_boundary(self, workspace: Path, example: str):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{example}\n\n- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert example in post.content
+        assert "- [ ] real step" in post.content
+
+    @pytest.mark.parametrize("quote", ["> ", "> > "])
+    def test_reset_reparses_quote_after_list_fence(self, workspace: Path, quote: str):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        example = "- ```markdown\n  - [x] example"
+        path.write_text(path.read_text() + f"\n\n{example}\n\n{quote}- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert post.content.endswith(f"{example}\n\n{quote}- [ ] real step")
+
+    @pytest.mark.parametrize(
+        "example",
+        [
+            "- ```markdown\n\t- [x] example\n\t```",
+            "1. ~~~markdown\n\t- [x] example\n\t~~~",
+            "-\t```markdown\n    - [x] example\n    ```",
+            "- notes\n\n\t```markdown\n\t- [x] example\n\t```",
+            "> - ```markdown\n> \t- [x] example\n> \t```",
+        ],
+    )
+    def test_reset_preserves_tab_indented_fence(self, workspace: Path, example: str):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{example}\n\n- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert post.content.endswith(f"{example}\n\n- [ ] real step")
+
+    @pytest.mark.parametrize("marker", ["1.", "2)", "-", "*", "+"])
+    def test_reset_reopens_list_markers(self, workspace: Path, marker: str):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n{marker}  [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        assert f"{marker}  [ ] real step" in frontmatter.load(path).content
+
+    @pytest.mark.parametrize("suffix", ["", " step", "\tstep"])
+    @pytest.mark.parametrize("marker", ["x", "X"])
+    def test_reset_reopens_checkbox_at_marker_boundary(
+        self, workspace: Path, suffix: str, marker: str
+    ):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        path.write_text(path.read_text() + f"\n\n- [{marker}]{suffix}\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert post.content.endswith(f"- [ ]{suffix}")
+
+    def test_reset_preserves_links_labelled_x(self, workspace: Path):
+        path = write_task(workspace, "weekly-review", state="active", recur="7d")
+        links = (
+            "- [x](https://example.com) reference\n"
+            "* [X][target]\n"
+            "> 1. [x]shortcut\n"
+            "\n[target]: https://example.com\n"
+        )
+        path.write_text(path.read_text() + f"\n\n{links}\n- [x] real step\n")
+        result = CliRunner().invoke(cli, ["edit", "weekly-review", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "waiting"
+        assert post.content.endswith(f"{links}\n- [ ] real step")
+
+    def test_non_recurring_done_keeps_ticks(self, workspace: Path):
+        path = write_task(workspace, "one-off", state="active")
+        path.write_text(path.read_text() + "\n\n- [x] did it\n")
+        result = CliRunner().invoke(cli, ["edit", "one-off", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        assert "- [x] did it" in frontmatter.load(path).content
+
+    def test_cron_recur_keeps_ticks(self, workspace: Path):
+        path = write_task(workspace, "cron-task", state="active", recur='"0 9 * * 1"')
+        path.write_text(path.read_text() + "\n\n- [x] did it\n")
+        result = CliRunner().invoke(cli, ["edit", "cron-task", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post.metadata["state"] == "done"
+        assert "- [x] did it" in post.content

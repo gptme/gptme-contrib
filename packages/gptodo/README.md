@@ -189,7 +189,9 @@ Behaviour attached to particular fields:
       ref: "owner/repo#123"
   ```
 - **Recurring tasks.** With `recur: 7d`, `24h`, `weekly` or `monthly` set, marking the task
-  `done` re-parks it as `waiting` with the next `wait:` date instead of closing it. Cron
+  `done` re-parks it as `waiting` with the next `wait:` date instead of closing it.
+  Completed checklist items reopen for the next cycle; fenced examples and documented
+  skips remain intact. Cycle-specific skip decisions must be revisited manually. Cron
   expressions are accepted but not evaluated, so such a task closes normally.
 - **Auto-unblock.** Marking a task `done` updates the tasks that depend on it. If the
   `HOOK_TASK_DONE` environment variable names an executable, it is run as

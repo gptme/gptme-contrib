@@ -11,6 +11,7 @@ import copy
 import fcntl
 import hashlib
 import os
+import re
 import tempfile
 import warnings
 from contextlib import contextmanager
@@ -473,7 +474,93 @@ def transform_post(
             post.metadata.pop("probe", None)
             if not _completed_explicitly_set:
                 post.metadata.pop("completed", None)
+            # A new cycle starts with an open checklist. Leaving last cycle's
+            # `- [x]` ticked makes the revived task show N/N done, so it can be
+            # closed again without doing the work.
+            post.content = untick_checklist(post.content)
     return post
+
+
+_TICKED_RE = re.compile(r"^([ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+)(?:\[[xX]\](?=[ \t]|$)|✅)")
+_QUOTE_RE = re.compile(r"^([ \t]*>[ \t]?)+")
+_FENCE_RE = re.compile(r"^([ \t]*)(?:((?:[-*+]|[0-9]+[.)])[ \t]+))?(`{3,}|~{3,})")
+_LIST_RE = re.compile(r"^[ \t]*(?:[-*+]|[0-9]+[.)])[ \t]+")
+
+
+def _columns(text: str, prefix: str) -> int:
+    """Measure Markdown indentation with four-column tabs at the source offset."""
+    return len((prefix + text).expandtabs(4)) - len(prefix.expandtabs(4))
+
+
+def untick_checklist(content: str) -> str:
+    """Reset `- [x]` and `- ✅` items to `- [ ]` for a new recurrence cycle.
+
+    Fenced code blocks are left alone (they hold examples, not the task's
+    checklist). `- [-]` skipped items keep their marker and reason: a skip is a
+    deliberate, documented decision, not a completed action to reopen.
+    """
+    out = []
+    fence = ""
+    fence_quotes = 0
+    list_indent = 0
+    list_containers: list[tuple[int, int]] = []
+    for line in content.split("\n"):
+        # Remove quote containers for parsing only; retain their exact bytes.
+        quote = _QUOTE_RE.match(line)
+        prefix = quote.group() if quote else ""
+        candidate = line[len(prefix) :]
+        quote_depth = prefix.count(">")
+        if fence and quote_depth >= fence_quotes:
+            # Inside code, additional '>' characters are literal content, not
+            # new quote containers (and must not turn into closing fences).
+            container = re.match(rf"^(?:[ \t]*>[ \t]?){{{fence_quotes}}}", line)
+            assert container is not None
+            candidate = line[container.end() :]
+        source_prefix = line[: len(line) - len(candidate)]
+        whitespace = candidate[: len(candidate) - len(candidate.lstrip(" \t"))]
+        indent = _columns(whitespace, source_prefix)
+        if fence and (quote_depth < fence_quotes or (candidate.strip() and indent < list_indent)):
+            # A container can end a fence without an explicit delimiter. Parse
+            # this same line again outside the fence so later work reopens.
+            fence = ""
+            candidate = line[len(prefix) :]
+            whitespace = candidate[: len(candidate) - len(candidate.lstrip(" \t"))]
+            indent = _columns(whitespace, prefix)
+        if not fence:
+            # List context survives blank lines and also owns fences opened on
+            # continuation lines, rather than directly after a list marker.
+            while list_containers and (
+                quote_depth != list_containers[-1][0]
+                or (candidate.strip() and indent < list_containers[-1][1])
+            ):
+                list_containers.pop()
+            # Fence indentation is relative to the enclosing container, not
+            # the new list marker (if any) on this line. Four extra columns
+            # denote indented code, not a fence delimiter.
+            container_indent = list_containers[-1][1] if list_containers else 0
+            if item := _LIST_RE.match(candidate):
+                list_containers.append((quote_depth, _columns(item.group(), prefix)))
+        if fence:
+            # Only a matching delimiter of at least the opening length closes
+            # a fence; inner examples and info strings are not closing fences.
+            if indent - list_indent <= 3 and re.fullmatch(
+                rf"[ \t]*{re.escape(fence[0])}{{{len(fence)},}}\s*", candidate
+            ):
+                fence = ""
+        elif (
+            (opening := _FENCE_RE.match(candidate))
+            and indent - container_indent <= 3
+            and not (opening.group(3).startswith("`") and "`" in candidate[opening.end() :])
+        ):
+            # Backtick fence info strings cannot contain backticks: a line
+            # like ```example``` is an inline code span, not a fence opener.
+            fence = opening.group(3)
+            fence_quotes = quote_depth
+            list_indent = list_containers[-1][1] if list_containers else 0
+        else:
+            line = prefix + _TICKED_RE.sub(r"\1[ ]", candidate, count=1)
+        out.append(line)
+    return "\n".join(out)
 
 
 @contextmanager
