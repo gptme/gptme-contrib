@@ -7,7 +7,7 @@ recovers it. Agent-neutral: AGENT_* first, BOB_* kept as compatibility.
 
 Also drops standalone ``<think>``/``</think>`` lines: some reasoning-model
 streams leak the tag into model-authored commit messages (gptme/gptme#4803),
-but preserves tags quoted inside fenced code examples.
+but preserves tags inside fenced examples or indented by four columns or more.
 """
 
 from __future__ import annotations
@@ -116,7 +116,11 @@ _CODE_FENCE = re.compile(rb" {0,3}(`{3,}|~{3,})(.*)")
 
 
 def strip_stray_reasoning_tags(content: bytes) -> tuple[bytes, int]:
-    """Remove standalone reasoning tags outside fenced code examples."""
+    """Remove lightly indented standalone tags outside fenced examples.
+
+    Preserve code-indented lines conservatively, including nested list examples,
+    without needing to parse Markdown containers. Tabs advance to four columns.
+    """
     kept: list[bytes] = []
     fence: bytes | None = None
     removed = 0
@@ -134,8 +138,10 @@ def strip_stray_reasoning_tags(content: bytes) -> tuple[bytes, int]:
         elif marker and (marker[1][:1] == b"~" or b"`" not in marker[2]):
             fence = marker[1]
         elif stripped in STRAY_REASONING_TAGS:
-            removed += 1
-            continue
+            indent = line[: len(line) - len(line.lstrip(b" \t"))]
+            if len(indent.expandtabs(4)) < 4:
+                removed += 1
+                continue
         kept.append(line)
     return b"".join(kept), removed
 

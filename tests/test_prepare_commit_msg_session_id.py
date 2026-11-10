@@ -505,6 +505,25 @@ def test_non_utf8_message_survives_reasoning_tag_strip(tmp_path: Path) -> None:
     assert b"</think>" not in body
 
 
+@pytest.mark.parametrize("indent", [b"    ", b"\t", b" \t", b"        "])
+@pytest.mark.parametrize("fenced", [False, True])
+def test_code_indented_tags_are_preserved(
+    tmp_path: Path, indent: bytes, fenced: bool
+) -> None:
+    msg = tmp_path / "COMMIT_EDITMSG"
+    example = indent + b"<think>\n" + indent + b"example\n" + indent + b"</think>\n"
+    if fenced:
+        example = indent + b"```xml\n" + example + indent + b"```\n"
+    body = b"fix: docs\n\n- Example:\n\n" + example
+    msg.write_bytes(body + b"</think>\n")
+
+    result = _run_hook(msg, _clean_env(GIT_COMMITTER_SESSION_ID="nested42"))
+
+    assert result.returncode == 0, result.stderr
+    assert msg.read_bytes() == body + b"\nGit-Session-Id: nested42\n"
+    assert "dropped 1 stray" in result.stderr
+
+
 def test_inline_backtick_span_does_not_disable_tag_filter(tmp_path: Path) -> None:
     msg = tmp_path / "COMMIT_EDITMSG"
     example = b"fix: document tags\n\n```<think>```\n"
