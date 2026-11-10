@@ -170,3 +170,56 @@ def test_transcripts_excludes_nested_subagent_logs(tmp_path, monkeypatch):
     (proj / "s1.jsonl").write_text("", encoding="utf-8")
     (proj / "s1" / "subagents" / "agent-x.jsonl").write_text("", encoding="utf-8")
     assert cc_tailer.transcripts() == [proj / "s1.jsonl"]
+
+
+def test_long_transcript_path_has_bounded_collision_resistant_cursor(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    project = tmp_path / ("p" * 180)
+    project.mkdir()
+    transcript = project / "12345678-1234-1234-1234-123456789abc.jsonl"
+    transcript.write_text(_row("2026-11-10T09:00:00Z"), encoding="utf-8")
+    client = _Client()
+    now = _dt("2026-11-10T10:00:00Z")
+    assert cc_tailer.emit_file(client, "host", transcript, now=now) == 1
+    assert cc_tailer.emit_file(client, "host", transcript, now=now) == 0
+    assert len(cc_tailer._cursor_path(transcript).name.encode()) < 100
+    assert cc_tailer._cursor_path(tmp_path / "a_b" / "c.jsonl") != cc_tailer._cursor_path(
+        tmp_path / "a" / "b_c.jsonl"
+    )
+
+
+def test_changed_gap_is_rejected_before_posting(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    transcript = tmp_path / "s1.jsonl"
+    transcript.write_text(
+        "\n".join(_row(f"2026-11-10T09:{minute:02d}:00Z") for minute in (0, 12, 24)),
+        encoding="utf-8",
+    )
+    client = _Client()
+    now = _dt("2026-11-10T10:00:00Z")
+    assert cc_tailer.emit_file(client, "host", transcript, now=now) == 1
+    with pytest.raises(ValueError, match="gap"):
+        cc_tailer.emit_file(client, "host", transcript, now=now, gap_s=600)
+    assert len(client.posted) == 1
+    assert cc_tailer.emit_file(client, "host", transcript, now=now) == 0
+
+
+def test_interrupted_checkpoint_preserves_previous_cursor(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    transcript = tmp_path / "s1.jsonl"
+    cc_tailer._write_emitted(transcript, 1)
+    cursor = cc_tailer._cursor_path(transcript)
+    previous = cursor.read_bytes()
+    write_text = Path.write_text
+
+    def interrupted_write(path, *args, **kwargs):
+        write_text(path, "{", encoding="utf-8")
+        raise OSError("disk write interrupted")
+
+    monkeypatch.setattr(Path, "write_text", interrupted_write)
+    with pytest.raises(OSError, match="disk write interrupted"):
+        cc_tailer._write_emitted(transcript, 2)
+    assert cursor.read_bytes() == previous
+    assert cc_tailer._read_emitted(transcript) == 1

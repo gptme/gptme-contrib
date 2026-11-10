@@ -20,9 +20,9 @@ complete, instead of growing under repeated runs.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -123,23 +123,33 @@ def parse_session(lines: Iterable[str], *, gap_s: float = DEFAULT_GAP_S) -> list
 
 
 def _cursor_path(transcript: Path) -> Path:
-    safe = re.sub(r"[^a-zA-Z0-9._-]", "_", str(transcript.absolute()))
-    return core.state_dir() / f"cc-cursor-{safe}.json"
+    digest = hashlib.sha256(os.fsencode(transcript.resolve())).hexdigest()
+    return core.state_dir() / f"cc-cursor-{digest}.json"
 
 
-def _read_emitted(transcript: Path) -> int:
+def _read_emitted(transcript: Path, gap_s: float = DEFAULT_GAP_S) -> int:
     try:
         data = json.loads(_cursor_path(transcript).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return 0
     count = data.get("emitted_blocks") if isinstance(data, dict) else None
+    if isinstance(count, int) and count > 0 and data.get("gap_s", DEFAULT_GAP_S) != gap_s:
+        raise ValueError("Cannot change --gap for a transcript with already emitted blocks")
     return count if isinstance(count, int) and count >= 0 else 0
 
 
-def _write_emitted(transcript: Path, count: int) -> None:
+def _write_emitted(transcript: Path, count: int, gap_s: float = DEFAULT_GAP_S) -> None:
     path = _cursor_path(transcript)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"emitted_blocks": count}), encoding="utf-8")
+    # The caller holds the transcript lock, so one fixed sibling temp is safe.
+    temporary = path.with_suffix(".tmp")
+    try:
+        temporary.write_text(
+            json.dumps({"emitted_blocks": count, "gap_s": gap_s}), encoding="utf-8"
+        )
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def emit_file(
@@ -185,7 +195,7 @@ def _emit_file_locked(
     text = path.read_text(encoding="utf-8", errors="replace")
     blocks = parse_session(text.splitlines(), gap_s=gap_s)
     finished = [b for b in blocks if (now - b.end).total_seconds() > gap_s]
-    emitted = _read_emitted(path)
+    emitted = _read_emitted(path, gap_s)
     new = finished[emitted:]
     if not new:
         return 0
@@ -195,5 +205,5 @@ def _emit_file_locked(
     for block in new:
         client.post_event(bucket, block.to_event())
         emitted += 1
-        _write_emitted(path, emitted)
+        _write_emitted(path, emitted, gap_s)
     return len(new)

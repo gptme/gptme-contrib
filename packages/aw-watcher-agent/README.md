@@ -84,10 +84,15 @@ Only `timestamp`, `sessionId` and `cwd` are read; prompts, replies and tool
 payloads are never touched. A session is split into blocks on idle gaps
 longer than `--gap` (default 15 min), so a session left open overnight is not
 counted as agent time. The trailing block is held back until it has been idle
-for `--gap`, and a per-transcript cursor makes re-runs emit each block once,
-so it is safe to run from a timer. Events land in the same session bucket as
-the hooks below, with `harness=claude-code` and `workspace` set to the
-project directory.
+for `--gap`, and a per-transcript cursor records each successful post. Overlapping
+invocations skip transcripts already being processed. Cursor writes are atomic;
+retrying a failed later post does not replay the checkpointed prefix. Once blocks
+have been emitted, changing `--gap` for that transcript is rejected rather than
+posting overlapping representations. This is not transactional exactly-once
+delivery: a crash after the server accepts a post but before its checkpoint can
+still duplicate that last event on retry. Events land in the same session bucket
+as the hooks below, with `harness=claude-code` and `workspace` set to the project
+directory. Use either the tailer or lifecycle hooks for a session, not both.
 
 ### Wiring into Claude Code (or any harness with lifecycle hooks)
 
