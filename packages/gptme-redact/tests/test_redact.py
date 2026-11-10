@@ -725,6 +725,32 @@ def test_collect_secret_literals_includes_and_sorts_extras():
     assert literals.index("muchlongerliteral") < literals.index("short")
 
 
+def test_collect_secret_literals_repr_withholds_values(monkeypatch):
+    """A printed collector must not dump the whole live secret set.
+
+    Regression: 2026-11-07 a debug session printed collect_secret_literals()
+    and put 18 live .env credentials into tool output, the run's
+    conversation/events JSONL and a PM-slot log.
+    """
+    monkeypatch.setenv("MY_TEST_API_KEY", "supersecretvalue123")
+    literals = collect_secret_literals()
+    for rendered in (repr(literals), str(literals), f"{literals}", f"{literals!r}"):
+        assert "supersecretvalue123" not in rendered
+    # repr inside a container is masked too (list/tuple repr uses element repr)
+    assert "supersecretvalue123" not in repr([literals])
+    assert str(len(literals)) in repr(literals)
+
+
+def test_collect_secret_literals_still_behaves_like_a_list(monkeypatch):
+    monkeypatch.setenv("MY_TEST_API_KEY", "supersecretvalue123")
+    literals = collect_secret_literals(extra=["muchlongerliteral"])
+    assert isinstance(literals, list)
+    assert "supersecretvalue123" in literals
+    assert literals[0] == max(literals, key=len)  # longest-first preserved
+    assert len(list(iter(literals))) == len(literals)
+    assert set(json.loads(json.dumps(literals))) == set(literals)
+
+
 # --- Result / Finding serialization ------------------------------------------
 
 

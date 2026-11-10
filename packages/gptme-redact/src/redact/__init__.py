@@ -668,13 +668,37 @@ def secret_env_names() -> list[str]:
     return [name for name, _ in _secret_env_items()]
 
 
+class SecretLiterals(list):
+    """Live secret values, safe to print.
+
+    Behaves exactly like ``list[str]`` for every read (iteration, indexing,
+    ``in``, ``len``, slicing, ``json.dumps``), but ``repr``/``str`` never
+    reveal a value — so an incidental ``print()``, an f-string, a logger call
+    or a traceback that reprs locals cannot leak the whole secret set.
+
+    Why this exists (2026-11-07): a debug session printed
+    ``redact.collect_secret_literals()`` while investigating a redaction bug.
+    The plain list repr dumped 18 live ``.env`` credentials into the tool
+    output, the run's conversation/events/compacted JSONL, and a concurrent
+    PM-slot log. The shell guard could only cover the shell path; the type
+    itself has to be safe in every harness, tool and traceback.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return f"<SecretLiterals: {len(self)} value(s) withheld>"
+
+    __str__ = __repr__
+
+
 def collect_secret_literals(extra: list[str] | None = None) -> list[str]:
     """Layer 1 source: env-var values that look like secrets, plus user literals."""
     literals: list[str] = [value for _, value in _secret_env_items()]
     if extra:
         literals.extend(s for s in extra if s)
     # longest-first so overlapping literals redact the broadest match
-    return sorted(set(literals), key=len, reverse=True)
+    return SecretLiterals(sorted(set(literals), key=len, reverse=True))
 
 
 def redact(
