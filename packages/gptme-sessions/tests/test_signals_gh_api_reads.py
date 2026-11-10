@@ -261,6 +261,31 @@ def test_endpoint_in_field_value_is_not_comment() -> None:
         assert sigs["gh_interactions"] == 0, cmd
 
 
+@pytest.mark.parametrize("header", ["bash", "/bin/bash -e", "sh -s -- arg", "timeout 30 bash"])
+def test_shell_stdin_heredoc_write_counts(header: str) -> None:
+    cmd = f"{header} <<'EOF'\ngh api repos/o/r/issues/5/comments -f body=x\nEOF"
+    sigs = extract_signals_cc(_bash_msgs(cmd))
+    assert sigs["gh_interactions"] == 1
+    assert sigs["comments_posted"] == 1
+
+
+@pytest.mark.parametrize(
+    "header", ["cat", "cat bash", "bash script.sh", "bash -c 'cat'", "bash -n"]
+)
+def test_nonexecuted_shell_stdin_heredoc_is_data(header: str) -> None:
+    cmd = f"{header} <<'EOF'\ngh api repos/o/r/issues/5/comments -f body=x\nEOF"
+    sigs = extract_signals_cc(_bash_msgs(cmd))
+    assert sigs["gh_interactions"] == 0
+    assert sigs.get("comments_posted", 0) == 0
+
+
+def test_shell_heredoc_with_trailing_script_operand_is_data() -> None:
+    cmd = "bash <<'EOF' script.sh\ngh api repos/o/r/issues/5/comments -f body=x\nEOF"
+    sigs = extract_signals_cc(_bash_msgs(cmd))
+    assert sigs["gh_interactions"] == 0
+    assert sigs.get("comments_posted", 0) == 0
+
+
 def test_bash_c_write_counts_comment() -> None:
     # The same write graded directly and through an inline -c script.
     for cmd in (

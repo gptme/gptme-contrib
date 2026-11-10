@@ -694,10 +694,11 @@ def _strip_heredoc_bodies(cmd: str) -> str:
     ``<<\\EOF``) the body is fully literal and is removed. With an unquoted
     delimiter bash still expands ``$(...)``/backticks in it, so only those
     substitutions are kept, one per line. ``<<-`` strips leading tabs before
-    matching the terminator; ``<<<`` (here-string) is not a heredoc.
+    matching the terminator; ``<<<`` (here-string) is not a heredoc. Bodies
+    supplied as a shell's stdin script are retained for recursive matching.
     """
     out: list[str] = []
-    pending: list[tuple[str, bool, bool]] = []  # (delimiter, quoted, strip_tabs)
+    pending: list[tuple[str, bool, bool, int]] = []  # delimiter, quoted, strip_tabs, header_start
     quote: str | None = None
     i, n = 0, len(cmd)
     while i < n:
@@ -734,16 +735,20 @@ def _strip_heredoc_bodies(cmd: str) -> str:
                 bare = m.group(5)
                 word = m.group(2) if m.group(2) is not None else m.group(3)
                 quoted = bare is None or bool(m.group(4))
-                pending.append((bare if word is None else word, quoted, bool(m.group(1))))
+                header = "".join(out)
+                start = len(header) - len(_split_shell_segments(header)[-1])
+                pending.append((bare if word is None else word, quoted, bool(m.group(1)), start))
                 # The shell consumes the operator and delimiter, not gh's
                 # argument parser (where -EOF would look like a flag).
                 out.append(" ")
                 i = m.end()
                 continue
         elif c == "\n" and pending:
+            header = "".join(out)
             out.append(c)
             i += 1
-            for word, quoted, strip_tabs in pending:
+            for word, quoted, strip_tabs, start in pending:
+                script = _shell_reads_stdin(_split_shell_segments(header[start:])[0])
                 body: list[str] = []
                 while i < n:
                     end = cmd.find("\n", i)
@@ -752,8 +757,13 @@ def _strip_heredoc_bodies(cmd: str) -> str:
                     i = end + 1
                     if (line.lstrip("\t") if strip_tabs else line) == word:
                         break
-                    body.append(line)
-                if not quoted:
+                    body.append(line.lstrip("\t") if strip_tabs else line)
+                if script:
+                    # A shell with no script operand (or with -s) executes
+                    # stdin. Keep it as a separate script for recursive matching.
+                    script_body = "\n".join(body)
+                    out.append(f"$({script_body})\n")
+                elif not quoted:
                     out.extend(
                         f"$({sub})\n"
                         for sub in _command_substitutions("\n".join(body), heredoc=True)
@@ -804,6 +814,57 @@ def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
 _GH_API_MATCH_RE = re.compile(r"gh\s+api\b")
 
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+
+
+def _shell_reads_stdin(segment: str) -> bool:
+    """Whether a shell invocation consumes stdin as an executable script.
+
+    Document producers mentioning a shell (``cat bash``) are not interpreters;
+    only direct invocations and the usual command wrappers are recognized.
+    ``-c``, a script-file operand and noexec mode do not execute stdin.
+    """
+    tokens = _shell_tokens(segment)
+    for i, tok in enumerate(tokens):
+        if tok.rsplit("/", 1)[-1] not in _SHELLS:
+            continue
+        prefix = tokens[:i]
+        if (
+            prefix
+            and prefix[0].rsplit("/", 1)[-1]
+            not in {
+                "env",
+                "timeout",
+                "command",
+                "exec",
+                "sudo",
+            }
+            and not all("=" in word for word in prefix)
+        ):
+            return False
+        stdin = False
+        j = i + 1
+        while j < len(tokens):
+            opt = tokens[j]
+            if opt == "--":
+                j += 1
+                break
+            if opt in ("-o", "+o", "-O", "+O"):
+                if opt == "-o" and tokens[j + 1 : j + 2] == ["noexec"]:
+                    return False
+                j += 2
+                continue
+            if opt.startswith("--"):
+                j += 1
+                continue
+            if opt.startswith("-") and len(opt) > 1:
+                if "c" in opt[1:] or "n" in opt[1:]:
+                    return False
+                stdin = stdin or "s" in opt[1:]
+                j += 1
+                continue
+            break
+        return stdin or j == len(tokens)
+    return False
 
 
 def _shell_c_script(segment: str) -> str | None:
