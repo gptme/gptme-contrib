@@ -183,6 +183,26 @@ def test_cmd_mutation_heredoc_line_continuation_respects_escaping(backslashes: i
 
 
 @pytest.mark.parametrize(
+    "header", ["bash \\\n<<'EOF'", "ba\\\nsh <<'EOF'", "bash \\\n  -s \\\n  <<'EOF'"]
+)
+def test_cmd_mutation_continued_shell_heredoc_keeps_body(header: str, tmp_path: Path) -> None:
+    import subprocess
+
+    command = f"{header}\ntouch out.txt\nEOF"
+    subprocess.run(["bash", "-c", command], cwd=tmp_path, check=True)
+    assert (tmp_path / "out.txt").exists()
+    label, evidence = cmd_mutation(command)
+    assert label == "acting"
+    assert evidence is not None and "touch out.txt" in evidence
+    assert classify_agent({"shell": 1}, [command], [])[0] == "acting"
+
+
+def test_cmd_mutation_continued_data_heredoc_remains_literal() -> None:
+    command = "cat \\\n<<'EOF'\ntouch out.txt\nEOF"
+    assert cmd_mutation(command) == (None, None)
+
+
+@pytest.mark.parametrize(
     "shell", ['"/bin/bash"', "'/bin/sh'", '"bash"', "env '/bin/bash'", "/bin/ash"]
 )
 def test_cmd_mutation_quoted_shell_heredoc_executes_body(shell: str) -> None:

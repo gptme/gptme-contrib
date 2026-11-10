@@ -123,8 +123,13 @@ def _strip_heredoc_bodies(cmd: str) -> str:
     i = 0
     while i < len(lines):
         line = lines[i]
-        out.append(line)
         i += 1
+        # Inspect a continued command as one header, not independent physical
+        # lines. Only join here: quoted heredoc bodies must keep their newlines.
+        while i < len(lines) and (len(line) - len(line.rstrip("\\"))) % 2:
+            line = line[:-1] + lines[i]
+            i += 1
+        out.append(line)
         quoted = [q.span() for q in _QUOTED_RE.finditer(line)]
         comment = next(
             (
