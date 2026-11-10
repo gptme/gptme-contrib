@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Reject commit messages containing a stray ``<think>``/``</think>`` line.
+
+A line that is only a reasoning tag means the model stream that wrote the
+message was corrupted at that point (gptme/gptme#4803). The surrounding text
+is not trustworthy either, so the message is rejected rather than cleaned:
+rewrite it. Inline mentions and fenced examples are allowed, so commits
+*about* the tags still go through. Indent the example inside a fence if a
+message must show a bare tag line.
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+REASONING_TAGS = frozenset({b"<think>", b"</think>"})
+_FENCE = re.compile(rb" {0,3}(`{3,}|~{3,})(.*)")
+_SCISSORS = b"------------------------ >8 ------------------------"
+
+
+def stray_tag_lines(content: bytes) -> list[int]:
+    """1-based line numbers of bare reasoning tags outside fenced blocks."""
+    found: list[int] = []
+    fence: bytes | None = None
+    for number, line in enumerate(content.splitlines(), start=1):
+        if _SCISSORS in line:
+            break  # `commit -v` diff below; git drops it
+        marker = _FENCE.fullmatch(line)
+        if fence is not None:
+            if (
+                marker
+                and marker[1][:1] == fence[:1]
+                and len(marker[1]) >= len(fence)
+                and not marker[2].strip()
+            ):
+                fence = None
+        elif marker and (marker[1][:1] == b"~" or b"`" not in marker[2]):
+            fence = marker[1]
+        elif line.strip() in REASONING_TAGS:
+            found.append(number)
+    return found
+
+
+def main() -> int:
+    if len(sys.argv) < 2 or not Path(sys.argv[1]).is_file():
+        return 0
+    lines = stray_tag_lines(Path(sys.argv[1]).read_bytes())
+    if not lines:
+        return 0
+    where = ", ".join(map(str, lines))
+    print(
+        f"commit-msg: rejected: bare <think>/</think> line(s) at {where}.\n"
+        "This usually means the model stream that wrote the message was\n"
+        "corrupted. Rewrite the message rather than deleting the tag; the\n"
+        "surrounding text may be damaged too. Fence the tag in a code block\n"
+        "if the commit is about it.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

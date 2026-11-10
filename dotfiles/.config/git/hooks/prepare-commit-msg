@@ -4,10 +4,6 @@
 Replaces the env-only bash hook. Subagents, worktrees, and systemd-run
 children often lose GIT_COMMITTER_SESSION_ID; walking same-cgroup ancestors
 recovers it. Agent-neutral: AGENT_* first, BOB_* kept as compatibility.
-
-Also drops standalone ``<think>``/``</think>`` lines: some reasoning-model
-streams leak the tag into model-authored commit messages (gptme/gptme#4803),
-but preserves tags inside fenced examples or indented by four columns or more.
 """
 
 from __future__ import annotations
@@ -111,58 +107,6 @@ def resolve_session_id(
     return None
 
 
-STRAY_REASONING_TAGS = frozenset({b"<think>", b"</think>"})
-_CODE_FENCE = re.compile(rb" {0,3}(`{3,}|~{3,})(.*)")
-_LIST_PREFIX = re.compile(rb" {0,3}(?:[-+*]|[0-9]{1,9}[.)]) {1,4}")
-
-
-def strip_stray_reasoning_tags(content: bytes) -> tuple[bytes, int]:
-    """Remove lightly indented standalone tags outside fenced examples.
-
-    Preserve code-indented lines conservatively, including nested list examples,
-    without needing to parse Markdown containers. Tabs advance to four columns.
-    """
-    kept: list[bytes] = []
-    fence: bytes | None = None
-    list_indent = 0
-    removed = 0
-    for line in content.splitlines(keepends=True):
-        stripped = line.strip()
-        code_line = line.rstrip(b"\r\n")
-        if fence is not None and list_indent:
-            # Match container indentation in columns, retaining any part of a
-            # tab beyond the prefix. Only this parsing copy is expanded.
-            code_line = code_line.expandtabs(4)
-            if code_line.startswith(b" " * list_indent):
-                code_line = code_line[list_indent:]
-            elif stripped:
-                fence = None
-                list_indent = 0
-        prefix = _LIST_PREFIX.match(code_line) if fence is None else None
-        marker = _CODE_FENCE.fullmatch(
-            code_line[prefix.end() :] if prefix else code_line
-        )
-        if fence is not None:
-            if (
-                marker
-                and marker[1][:1] == fence[:1]
-                and len(marker[1]) >= len(fence)
-                and not marker[2].strip()
-            ):
-                fence = None
-                list_indent = 0
-        elif marker and (marker[1][:1] == b"~" or b"`" not in marker[2]):
-            fence = marker[1]
-            list_indent = prefix.end() if prefix else 0
-        elif stripped in STRAY_REASONING_TAGS:
-            indent = line[: len(line) - len(line.lstrip(b" \t"))]
-            if len(indent.expandtabs(4)) < 4:
-                removed += 1
-                continue
-        kept.append(line)
-    return b"".join(kept), removed
-
-
 def _opted_out(env: dict[str, str]) -> bool:
     return env.get("AGENT_SESSION_TRAILER", "1").strip().lower() in {
         "0",
@@ -203,14 +147,6 @@ def main() -> int:
     if len(sys.argv) < 2 or not Path(sys.argv[1]).is_file():
         return 0
     message = sys.argv[1]
-    cleaned, removed = strip_stray_reasoning_tags(Path(message).read_bytes())
-    if removed:
-        Path(message).write_bytes(cleaned)
-        print(
-            f"prepare-commit-msg: dropped {removed} stray <think>/</think> "
-            "line(s) from the commit message",
-            file=sys.stderr,
-        )
     source = sys.argv[2] if len(sys.argv) > 2 else ""
     git = ["git", *comment_char_override(Path(message).read_bytes(), source)]
     # Check under both comment chars: with -m ... -e an existing trailer sits
