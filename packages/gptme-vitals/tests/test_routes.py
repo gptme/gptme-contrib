@@ -487,3 +487,21 @@ def test_query_bearing_routes_resolve_before_path_only_fallback(
         )
         == tmp_path / "all.html"
     )
+
+
+@pytest.mark.parametrize(
+    "encoded,other",
+    [("/a%3Fb/", "/a?b/"), ("/a%23b/", "/a#b/"), ("/a%253Fb/", "/a%3Fb/")],
+)
+def test_encoded_path_delimiters_do_not_alias_url_components(
+    tmp_path: Path, encoded: str, other: str
+) -> None:
+    first = _route("first", href=encoded, output_path="first.html")
+    second = _route("second", href=other, output_path="second.html")
+    reg = RouteRegistry((first, second))
+    assert reg.get_by_href(encoded) is first
+    assert reg.get_by_href(other) is second
+    assert (
+        reg.resolve_internal_target(encoded, current_route="/", site_root=tmp_path)
+        == tmp_path / "first.html"
+    )

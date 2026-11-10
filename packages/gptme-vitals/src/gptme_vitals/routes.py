@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from html import escape
 from pathlib import Path, PurePosixPath
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 
 class RouteRegistryError(ValueError):
@@ -311,7 +311,7 @@ class RouteRegistry:
         # remain crawlable with arbitrary UI query parameters.
         for suffix in (f"?{query}", "") if query else ("",):
             for candidate in (f"/{text}", f"/{text}/" if text else "/"):
-                route = self._by_href.get(candidate + suffix)
+                route = self._by_href.get(quote(candidate, safe="/") + suffix)
                 if route is not None and (candidate.endswith("/") or not directory):
                     return route
         return None if directory else self._by_output.get(text)
@@ -377,7 +377,9 @@ def _href_key(href: str) -> str:
     parsed = urlsplit(href)
     if parsed.scheme or parsed.netloc:
         return href
-    return parsed._replace(path=unquote(parsed.path)).geturl()
+    # Re-escape decoded path delimiters so a literal '?' or '#' cannot become
+    # a query/fragment boundary, and '%' cannot trigger a second decode.
+    return parsed._replace(path=quote(unquote(parsed.path), safe="/")).geturl()
 
 
 def _normalize_relative_path(path: PurePosixPath) -> PurePosixPath | None:
