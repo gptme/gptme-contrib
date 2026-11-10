@@ -20,6 +20,7 @@ from gptme_vitals.routes import (
 )
 
 NOW = "2026-11-07T20:00:00Z"
+BASE_URL = "https://bob.example/"
 
 
 def _route(slug: str, **kw: object) -> DashboardRoute:
@@ -72,6 +73,7 @@ def _run(
         private_root=tmp_path / "private",
         public_root=tmp_path / "public",
         agent="bob",
+        base_url=BASE_URL,
         out=lines.append,
     )
     return code, lines
@@ -217,6 +219,7 @@ def test_overlapping_roots_are_refused(tmp_path: Path) -> None:
             private_root=tmp_path,
             public_root=tmp_path / "web",
             agent="bob",
+            base_url=BASE_URL,
             out=lambda _: None,
         )
 
@@ -255,6 +258,7 @@ def _argv(tmp: Path, **kw: str) -> list[str]:
         "--private-root": str(tmp / "private"),
         "--public-root": str(tmp / "public"),
         "--agent": "bob",
+        "--base-url": BASE_URL,
     }
     opts.update(kw)
     return ["build", *[x for pair in opts.items() for x in pair]]
@@ -292,6 +296,7 @@ def _timers_argv(tmp: Path, **kw: str) -> list[str]:
         "--private-root": str(tmp / "private"),
         "--public-root": str(tmp / "public"),
         "--agent": "bob",
+        "--base-url": BASE_URL,
         "--out": str(tmp / "units"),
         "--executable": "/usr/bin/gptme-vitals",
     }
@@ -341,6 +346,7 @@ def _run_with(
         private_root=tmp_path / "private",
         public_root=tmp_path / "public",
         agent="bob",
+        base_url=BASE_URL,
         title=title,
         out=lines.append,
     )
@@ -384,11 +390,62 @@ def test_partial_build_keeps_blind_pages_visible_on_the_portal(tmp_path: Path) -
         private_root=tmp_path / "private",
         public_root=tmp_path / "public",
         agent="bob",
+        base_url=BASE_URL,
         out=lambda _: None,
     )
     html = (tmp_path / "public/index.html").read_text()
     sessions_card = html.split('data-route="sessions"')[1].split("</a>")[0]
     assert "no data" in sessions_card
+
+
+def test_relative_headline_without_base_url_builds_nothing(tmp_path: Path) -> None:
+    called: list[str] = []
+    inner = _emitter("services", Status.HEALTHY)
+
+    def emit() -> PageEnvelope:
+        called.append("services")
+        envelope: PageEnvelope = inner()
+        return envelope
+
+    with pytest.raises(UsageError, match="supply base_url"):
+        run_build(
+            _registry(),
+            _all(services=emit),
+            pages=(),
+            private_root=tmp_path / "private",
+            public_root=tmp_path / "public",
+            agent="bob",
+            out=lambda _: None,
+        )
+    assert called == []
+    assert not (tmp_path / "public").exists()
+
+
+def test_main_headline_link_is_absolute(app: Path) -> None:
+    assert main(_argv(app)) == 0
+    headline = json.loads((app / "public/headline.json").read_text())
+    assert headline["link"] == "https://bob.example/a/"
+
+
+def test_main_without_base_url_exits_2(
+    app: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = [x for x in _argv(app) if x not in ("--base-url", BASE_URL)]
+    assert main(argv) == 2
+    assert "base_url" in capsys.readouterr().err
+    assert not (app / "public").exists()
+
+
+def test_timers_pass_the_base_url_through(app: Path) -> None:
+    assert main(_timers_argv(app)) == 0
+    service = (app / "units/gptme-vitals-a.service").read_text()
+    assert f'"--base-url" "{BASE_URL}"' in service
+
+
+def test_timers_without_base_url_for_relative_headline_exit_2(app: Path) -> None:
+    argv = [x for x in _timers_argv(app) if x not in ("--base-url", BASE_URL)]
+    assert main(argv) == 2
+    assert not (app / "units").exists()
 
 
 def test_timers_pass_the_title_through(app: Path) -> None:
@@ -428,6 +485,7 @@ def test_registry_without_a_headline_fails_before_any_page_is_built(
             private_root=tmp_path / "private",
             public_root=tmp_path / "public",
             agent="bob",
+            base_url=BASE_URL,
             out=lambda _: None,
         )
     assert not (tmp_path / "private").exists()
@@ -450,6 +508,7 @@ def test_colliding_outputs_fail_before_any_page_is_built(tmp_path: Path) -> None
             private_root=tmp_path / "private",
             public_root=tmp_path / "public",
             agent="bob",
+            base_url=BASE_URL,
             out=lambda _: None,
         )
     assert not (tmp_path / "private").exists()
@@ -529,6 +588,7 @@ def _run_with_emitters(
         private_root=tmp_path / "private",
         public_root=tmp_path / "public",
         agent="bob",
+        base_url=BASE_URL,
         out=lines.append,
     )
     return code, lines

@@ -220,10 +220,15 @@ others rebuilding.
 
 ```txt
 gptme-vitals build [page...] --registry pkg.mod:REGISTRY --emitters pkg.mod:EMITTERS \
-    --private-root DIR --public-root DIR --agent NAME
+    --private-root DIR --public-root DIR --agent NAME [--base-url URL] [--title TEXT]
 ```
 
 `REGISTRY` is a `RouteRegistry`; `EMITTERS` maps `slug -> () -> PageEnvelope`.
+`--base-url` is the absolute HTTP(S) URL the public root is served at. It is
+required when the headline route's `href` is relative, because `headline.json`
+is pulled by other agents' fleet views and its link must resolve off-host; both
+`build` and `timers` refuse up front rather than build pages (or write units)
+that could never produce `headline.json`.
 Naming pages rebuilds only those. `core.json` and `headline.json` are always
 re-derived over **all** pages, the rest read back from the private root, so a
 partial build never leaves the fleet view describing only what was just touched.
@@ -249,7 +254,8 @@ by itself, so schedule a freshness check on `generated_at` if that matters.
 
 ```txt
 gptme-vitals timers --registry … --emitters … --private-root … --public-root … \
-    --agent NAME --executable /abs/path/to/gptme-vitals --out DIR [--unit-prefix gptme-vitals]
+    --agent NAME --executable /abs/path/to/gptme-vitals --out DIR [--unit-prefix gptme-vitals] \
+    [--base-url URL] [--title TEXT]
 ```
 
 Writes `<prefix>-<slug>.service` and `.timer` for every envelope route, running

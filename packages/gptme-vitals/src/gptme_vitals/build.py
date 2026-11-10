@@ -27,7 +27,7 @@ from gptme_vitals.envelope import (
     roll_up_envelopes,
     utcnow_rfc3339,
 )
-from gptme_vitals.routes import RouteRegistry
+from gptme_vitals.routes import DashboardRoute, RouteRegistry
 
 CORE_SCHEMA = "fleet-vitals/core@1"
 HEADLINE_SCHEMA = "fleet-vitals/headline@1"
@@ -43,6 +43,36 @@ RESERVED_ROOT_KEYS = frozenset({"schema", "agent", "generated_at", "status"})
 
 class BuildError(ValueError):
     """The envelopes and registry cannot be turned into a valid core/headline."""
+
+
+def headline_link(route: DashboardRoute, base_url: str | None) -> str:
+    """Resolve the headline route's link to the absolute URL ``headline.json`` carries.
+
+    The fleet view may be served on a different host, so a relative ``href`` needs
+    the producing agent's absolute HTTP(S) ``base_url``. Raises :class:`BuildError`
+    when no absolute HTTP(S) link results.
+    """
+    try:
+        if route.is_external:
+            destination = urlsplit(route.href)
+            if destination.scheme not in {"http", "https"} or not destination.hostname:
+                raise BuildError(
+                    f"headline route {route.slug!r} needs an absolute HTTP(S) link"
+                )
+        if base_url is not None:
+            base = urlsplit(base_url)
+            if base.scheme not in {"http", "https"} or not base.hostname:
+                raise BuildError("base_url must be an absolute HTTP(S) URL")
+        link = urljoin(base_url or "", route.href)
+        parsed = urlsplit(link)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise BuildError(
+                f"headline route {route.slug!r} needs an absolute HTTP(S) link; "
+                "supply base_url for relative routes"
+            )
+    except ValueError as exc:
+        raise BuildError(f"headline requires an absolute HTTP(S) URL: {exc}") from exc
+    return link
 
 
 def derive_core(
@@ -147,26 +177,7 @@ def derive_core(
             f"headline route {route.slug!r} emitted no envelope; "
             "headline.json would be undefined"
         )
-    try:
-        if route.is_external:
-            destination = urlsplit(route.href)
-            if destination.scheme not in {"http", "https"} or not destination.hostname:
-                raise BuildError(
-                    f"headline route {route.slug!r} needs an absolute HTTP(S) link"
-                )
-        if base_url is not None:
-            base = urlsplit(base_url)
-            if base.scheme not in {"http", "https"} or not base.hostname:
-                raise BuildError("base_url must be an absolute HTTP(S) URL")
-        link = urljoin(base_url or "", route.href)
-        parsed = urlsplit(link)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise BuildError(
-                f"headline route {route.slug!r} needs an absolute HTTP(S) link; "
-                "supply base_url for relative routes"
-            )
-    except ValueError as exc:
-        raise BuildError(f"headline requires an absolute HTTP(S) URL: {exc}") from exc
+    link = headline_link(route, base_url)
     headline: dict[str, object] = {
         "schema": HEADLINE_SCHEMA,
         "agent": agent,

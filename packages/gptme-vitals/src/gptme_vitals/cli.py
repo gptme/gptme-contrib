@@ -24,7 +24,7 @@ import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 
-from gptme_vitals.build import BuildError, derive_core, write_core_files
+from gptme_vitals.build import BuildError, derive_core, headline_link, write_core_files
 from gptme_vitals.envelope import PageEnvelope
 from gptme_vitals.portal import render_portal
 from gptme_vitals.publish import (
@@ -90,16 +90,17 @@ def run_build(
     public_root: Path,
     agent: str,
     title: str | None = None,
+    base_url: str | None = None,
     out: Callable[[str], None] = print,
 ) -> int:
     """Rebuild ``pages`` (all emitters when empty); return the exit status."""
     check_roots(private_root, public_root)
     check_outputs(registry)
     try:
-        registry.headline_route()
-    except RouteRegistryError as exc:
-        # derive_core needs it; failing here means no page is built against a
-        # registry that could never produce core.json.
+        # derive_core needs both; failing here means no page is built against a
+        # registry that could never produce core.json/headline.json.
+        headline_link(registry.headline_route(), base_url)
+    except (RouteRegistryError, BuildError) as exc:
         raise UsageError(str(exc)) from exc
     envelope_slugs = {r.slug for r in registry.envelope_routes()}
     for slug in emitters:
@@ -137,6 +138,7 @@ def run_build(
                 public_root=public_root,
                 agent=agent,
                 title=title,
+                base_url=base_url,
                 out=out,
             )
     except OSError as exc:  # unwritable private root: no lock, so nothing is written
@@ -153,6 +155,7 @@ def _publish_and_derive(
     public_root: Path,
     agent: str,
     title: str | None,
+    base_url: str | None,
     out: Callable[[str], None],
 ) -> int:
     """Publish ``emitted``, then re-derive core/headline/portal. Hold the build lock."""
@@ -172,7 +175,9 @@ def _publish_and_derive(
     # file rather than being treated as absent).
     envelopes = load_envelopes(registry, private_root)
     try:
-        core, headline = derive_core(registry, envelopes, agent=agent)
+        core, headline = derive_core(
+            registry, envelopes, agent=agent, base_url=base_url
+        )
         write_core_files(public_root, core, headline)
     except (BuildError, OSError) as exc:
         out(f"FAIL core: {exc}")
@@ -225,6 +230,11 @@ def _add_page_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--public-root", required=True, type=Path)
     parser.add_argument("--agent", required=True)
     parser.add_argument("--title", help="portal page title (default: the agent name)")
+    parser.add_argument(
+        "--base-url",
+        help="absolute HTTP(S) URL the public root is served at; required when the "
+        "headline route's href is relative (headline.json links must be absolute)",
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -251,6 +261,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         assert isinstance(registry, RouteRegistry) and isinstance(emitters, Mapping)
         if args.command == "timers":
             check_roots(args.private_root, args.public_root)
+            try:
+                # A unit set whose every run would refuse to start is not worth writing.
+                headline_link(registry.headline_route(), args.base_url)
+            except (RouteRegistryError, BuildError) as exc:
+                raise UsageError(str(exc)) from exc
             return run_timers(
                 registry,
                 out_dir=args.out,
@@ -268,6 +283,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "--agent",
                     args.agent,
                     *(["--title", args.title] if args.title else []),
+                    *(["--base-url", args.base_url] if args.base_url else []),
                 ],
             )
         return run_build(
@@ -278,6 +294,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             public_root=args.public_root,
             agent=args.agent,
             title=args.title,
+            base_url=args.base_url,
         )
     except (UsageError, PublishError, TimerError) as exc:
         print(f"gptme-vitals: {exc}", file=sys.stderr)
