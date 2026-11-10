@@ -98,7 +98,14 @@ def test_malformed_output_fails_closed() -> None:
 
 @pytest.mark.parametrize(
     "thread_state",
-    ["unreadable", "clear", "unresolved", "delayed_unreadable", "delayed_unresolved"],
+    [
+        "unreadable",
+        "clear",
+        "unresolved",
+        "delayed_unreadable",
+        "delayed_unresolved",
+        "delayed_greptile_unresolved",
+    ],
 )
 def test_operator_approval_preserves_human_thread_gate(
     monkeypatch: pytest.MonkeyPatch, thread_state: str
@@ -140,7 +147,14 @@ def test_operator_approval_preserves_human_thread_gate(
                 "isResolved": False,
                 "comments": {
                     "nodes": [
-                        {"author": {"login": "ErikBjare"}, "body": "Please fix this"}
+                        {
+                            "author": {
+                                "login": "greptile-apps[bot]"
+                                if thread_state == "delayed_greptile_unresolved"
+                                else "ErikBjare"
+                            },
+                            "body": "Please fix this",
+                        }
                     ]
                 },
             }
@@ -159,9 +173,22 @@ def test_operator_approval_preserves_human_thread_gate(
 
     def approved_review(*a: Any, **k: Any) -> str:
         nonlocal approval_observed
+        assert a[0][1] == "repos/gptme/gptme-contrib/pulls/2098/reviews"
         approval_observed = True
         return json.dumps(_review("APPROVED", HEAD))
 
+    # Isolate the independent Greptile signal: its summary reader can spawn
+    # a helper subprocess, which a run_gh stub alone does not intercept.
+    monkeypatch.setattr(
+        smc,
+        "fetch_greptile_status",
+        lambda *a, **k: {
+            "has_review": thread_state == "delayed_greptile_unresolved",
+            "unresolved": 0,
+        },
+    )
+    monkeypatch.setattr(smc, "greptile_summary_reviewed_commit", lambda *a: HEAD)
+    monkeypatch.setattr(smc, "greptile_summary_score", lambda *a: 5)
     monkeypatch.setattr(smc, "_fetch_greptile_review_data", review_data)
     monkeypatch.setattr(
         smc, "_fetch_ai_review_marker_checked", lambda *a, **k: (None, True)
@@ -183,6 +210,8 @@ def test_operator_approval_preserves_human_thread_gate(
     if thread_state.endswith("unreadable"):
         assert any("AI review required" in reason for reason in result.reasons)
         assert "Could not verify review thread state (API failure)" in result.reasons
+    elif thread_state == "delayed_greptile_unresolved":
+        assert any("1 unresolved thread(s)" in reason for reason in result.reasons)
     elif thread_state.endswith("unresolved"):
         assert any(
             "unresolved human review thread" in reason for reason in result.reasons
