@@ -82,7 +82,7 @@ if fresh and fp_match:
     else:
         print('Claude Max Subscription Usage')
         print('=' * 60)
-        for key, label in [('five_hour', 'Session (5h)'), ('seven_day', 'Weekly (all)'), ('seven_day_sonnet', 'Weekly (Sonnet)')]:
+        for key, label in [('five_hour', 'Session (5h)'), ('seven_day', 'Weekly (all)'), ('seven_day_sonnet', 'Weekly (Sonnet)'), ('seven_day_fable', 'Weekly (Fable)')]:
             info = cached.get(key)
             if info and isinstance(info, dict):
                 util = info.get('utilization', 0)
@@ -137,7 +137,7 @@ if cached.get('_cred_fingerprint', '') == '$fp':
     else:
         print('Claude Max Subscription Usage')
         print('=' * 60)
-        for key, label in [('five_hour', 'Session (5h)'), ('seven_day', 'Weekly (all)'), ('seven_day_sonnet', 'Weekly (Sonnet)')]:
+        for key, label in [('five_hour', 'Session (5h)'), ('seven_day', 'Weekly (all)'), ('seven_day_sonnet', 'Weekly (Sonnet)'), ('seven_day_fable', 'Weekly (Fable)')]:
             info = cached.get(key)
             if info and isinstance(info, dict):
                 util = info.get('utilization', 0)

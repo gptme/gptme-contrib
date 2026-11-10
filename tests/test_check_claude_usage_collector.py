@@ -20,10 +20,13 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import stat
 import subprocess
 import textwrap
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "check-claude-usage.sh"
@@ -80,9 +83,11 @@ def _fake_home(tmp_path: Path, payload: str, *, delayed_payload: str = "") -> Pa
     """Install no-op sleep + a tmux stub that serves ``payload`` after init."""
     home = tmp_path / "home"
     bin_dir = home / ".local" / "bin"
-    bin_dir.mkdir(parents=True)
-    (home / ".claude").mkdir(parents=True)
-    (home / ".claude" / ".credentials.json").write_text("{}\n")
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    creds = home / ".claude" / ".credentials.json"
+    if not creds.exists():  # keep inode:mtime stable across re-runs (cache fingerprint)
+        creds.write_text("{}\n")
 
     payload_file = tmp_path / "payload.txt"
     payload_file.write_text(payload)
@@ -238,3 +243,32 @@ def test_weekly_only_captures_sonnet_on_next_render(tmp_path: Path) -> None:
     assert "Current week (Sonnet only)" in result.stdout
     assert "95% used" in result.stdout
     assert _right_count(tmp_path) == 2
+
+
+@pytest.mark.parametrize("stale_locked", [False, True], ids=["fresh", "stale-locked"])
+def test_cached_human_render_shows_fable_window(
+    tmp_path: Path, stale_locked: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both cached renders must list Fable without starting another scrape."""
+    monkeypatch.setenv("CLAUDE_USAGE_CACHE_TTL", "600")
+    if stale_locked and shutil.which("flock") is None:
+        pytest.skip("stale-cache fallback requires flock")
+    payload = (
+        "shortcuts\nCurrent week (all models)\n33% used\n"
+        "Current week (Fable)\n12% used\n"
+    )
+    first = _run_collector(tmp_path, payload, "--json")
+    assert first.returncode == 0, first.stderr
+    assert "seven_day_fable" in first.stdout, first.stdout
+    with (tmp_path / "scrape.lock").open("w") as lock:
+        if stale_locked:
+            fcntl = pytest.importorskip("fcntl")
+            os.utime(tmp_path / "usage-cache.json", (0, 0))
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        cached = _run_collector(tmp_path, payload)
+    assert cached.returncode == 0, cached.stderr
+    assert "Weekly (Fable)" in cached.stdout, cached.stdout
+    assert "12% used" in cached.stdout, cached.stdout
+    # _fake_home resets this counter before each invocation. A fresh scrape
+    # prints Fable too, so the label alone cannot prove either cache path ran.
+    assert (tmp_path / "capture-count.txt").read_text() == "0"
