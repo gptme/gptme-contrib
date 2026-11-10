@@ -174,6 +174,7 @@ def publish_page(
     """
     private, public = Path(private_root), Path(public_root)
     check_roots(private, public)
+    check_outputs(registry)
     route = registry.get_by_slug(envelope.slug)
     if route is None:
         raise PublishError(f"envelope for unregistered slug {envelope.slug!r}")

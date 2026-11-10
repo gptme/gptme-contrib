@@ -412,3 +412,34 @@ def test_output_files_cannot_also_be_directories(source: str) -> None:
     )
     with pytest.raises(PublishError, match="ancestor"):
         check_outputs(registry)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "core.json",
+        "headline.json",
+        ".gptme-vitals.lock",
+        "b/summary.json",
+        "index.html",
+    ],
+)
+@pytest.mark.parametrize("visibility", [Visibility.PUBLIC, Visibility.PRIVATE])
+def test_standalone_publish_rejects_collisions_without_changing_files(
+    roots: tuple[Path, Path], source: str, visibility: Visibility
+) -> None:
+    private, public = roots
+    portal = _route("portal", href="/", output_path="index.html", summary_source=None)
+    registry = RouteRegistry(
+        (_route("a", summary_source=source, visibility=visibility), _route("b")),
+        portal=portal,
+    )
+    for root in roots:
+        target = root / source
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"existing output")
+    with pytest.raises(PublishError, match="more than one output"):
+        publish_page(registry, _env("a"), private_root=private, public_root=public)
+    for root in roots:
+        assert (root / source).read_bytes() == b"existing output"
+        assert [p for p in root.rglob("*") if p.is_file()] == [root / source]
