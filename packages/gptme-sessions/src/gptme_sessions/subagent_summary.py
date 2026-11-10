@@ -111,7 +111,9 @@ def _heredoc_substitutions(body: str) -> Iterable[str]:
     while match := _HEREDOC_SUBSTITUTION_RE.search(body, pos):
         start = i = match.end()
         backtick = match.group(1) == "`"
-        quotes: list[str] = []
+        quotes: list[tuple[str, int | None]] = []
+        cases: list[int] = []
+        pattern_ends: list[int] = []
         quote = ""
         while i < len(body):
             char = body[i]
@@ -124,22 +126,45 @@ def _heredoc_substitutions(body: str) -> Iterable[str]:
             elif char == quote:
                 quote = ""
             elif quote != "'" and body.startswith("$(", i):
-                quotes.append(quote)
+                quotes.append((quote, i + 2))
                 quote = ""
                 i += 2
                 continue
             elif not quote:
+                # A case pattern's ')' is not a substitution terminator.
+                # Track case scopes at their parenthesis depth, not quoted
+                # occurrences of the words in printf/echo data.
+                word = re.match(r"(?:case|esac)\b", body[i:]) if char in "ce" else None
+                if word and (i == start or body[i - 1] in " \t\n;&|("):
+                    if word.group() == "case":
+                        cases.append(len(quotes))
+                    elif cases and cases[-1] == len(quotes):
+                        cases.pop()
+                    i += len(word.group())
+                    continue
                 if char in "\"'":
                     quote = char
                 elif char == "(":
-                    quotes.append(quote)
+                    quotes.append((quote, None))
                 elif char == ")":
-                    if not quotes:
-                        break
-                    quote = quotes.pop()
+                    if cases and cases[-1] == len(quotes):
+                        # Put the arm on a command boundary for the regex
+                        # classifier, including single-line `x) touch ...`.
+                        pattern_ends.append(i)
+                    else:
+                        if not quotes:
+                            break
+                        quote, nested_start = quotes.pop()
+                        if nested_start is not None:
+                            # The outer double quotes do not make a nested
+                            # command substitution literal shell data.
+                            yield body[nested_start:i]
             i += 1
         # An unclosed/unsupported expansion stays conservative, not invisible.
-        yield body[start:i]
+        retained = body[start:i]
+        for end in reversed(pattern_ends):
+            retained = retained[: end - start + 1] + "\n" + retained[end - start + 1 :]
+        yield retained
         pos = i + 1
 
 

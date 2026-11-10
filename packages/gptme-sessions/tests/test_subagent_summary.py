@@ -281,6 +281,28 @@ def test_cmd_mutation_separate_heredoc_expansions_keep_quote_context(tmp_path: P
     assert cmd_mutation(literal) == (None, None)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "$(case x in\nx)\ntouch out.txt\n;;\nesac)",
+        "$(case x in x) touch out.txt;; esac)",
+        "$(printf '%s' \"$(case x in x) touch out.txt;; esac)\")",
+    ],
+)
+def test_cmd_mutation_heredoc_case_substitution_keeps_write(body: str, tmp_path: Path) -> None:
+    import subprocess
+
+    command = f"cat <<EOF\n{body}\nEOF"
+    subprocess.run(["bash", "-c", command], cwd=tmp_path, check=True, capture_output=True)
+    assert (tmp_path / "out.txt").exists()
+    label, evidence = cmd_mutation(command)
+    assert label == "acting"
+    assert evidence is not None and "touch out.txt" in evidence
+    assert classify_agent({"shell": 1}, [command], [])[0] == "acting"
+    literal = "cat <<EOF\n$(printf '%s' 'case x in x) touch out.txt;; esac')\nEOF"
+    assert cmd_mutation(literal) == (None, None)
+
+
 def test_cmd_mutation_escaped_heredoc_expansions_are_literal() -> None:
     assert cmd_mutation("cat <<EOF\n\\$(git commit -am update)\nEOF") == (None, None)
     assert cmd_mutation("cat <<EOF\n\\`git commit -am update\\`\nEOF") == (None, None)
