@@ -129,16 +129,37 @@ def _cursor_path(transcript: Path, server: str = "", hostname: str = "") -> Path
 
 
 def _read_emitted(
-    transcript: Path, gap_s: float = DEFAULT_GAP_S, *, server: str = "", hostname: str = ""
+    transcript: Path,
+    gap_s: float = DEFAULT_GAP_S,
+    *,
+    server: str = "",
+    hostname: str = "",
+    prefix_digests: list[str] | None = None,
 ) -> int:
     try:
         data = json.loads(_cursor_path(transcript, server, hostname).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except FileNotFoundError:
         return 0
     count = data.get("emitted_blocks") if isinstance(data, dict) else None
-    if isinstance(count, int) and count > 0 and data.get("gap_s", DEFAULT_GAP_S) != gap_s:
+    if type(count) is not int or count < 0:
+        raise ValueError("Invalid Claude Code cursor: emitted_blocks must be a nonnegative integer")
+    if count > 0 and data.get("gap_s", DEFAULT_GAP_S) != gap_s:
         raise ValueError("Cannot change --gap for a transcript with already emitted blocks")
-    return count if isinstance(count, int) and count >= 0 else 0
+    if count > 0 and prefix_digests is not None:
+        if count > len(prefix_digests) or data.get("prefix_digest") != prefix_digests[count - 1]:
+            raise ValueError("Claude Code checkpointed prefix changed or cannot be verified")
+    return count
+
+
+def _prefix_digests(blocks: list[WorkBlock]) -> list[str]:
+    """Hash emitted event metadata incrementally, without storing transcript content."""
+    digest = hashlib.sha256()
+    prefixes = []
+    for block in blocks:
+        digest.update(json.dumps(block.to_event().to_payload(), sort_keys=True).encode())
+        digest.update(b"\n")
+        prefixes.append(digest.hexdigest())
+    return prefixes
 
 
 def _write_emitted(
@@ -148,6 +169,7 @@ def _write_emitted(
     *,
     server: str = "",
     hostname: str = "",
+    prefix_digest: str | None = None,
 ) -> None:
     path = _cursor_path(transcript, server, hostname)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,7 +177,8 @@ def _write_emitted(
     temporary = path.with_suffix(".tmp")
     try:
         temporary.write_text(
-            json.dumps({"emitted_blocks": count, "gap_s": gap_s}), encoding="utf-8"
+            json.dumps({"emitted_blocks": count, "gap_s": gap_s, "prefix_digest": prefix_digest}),
+            encoding="utf-8",
         )
         temporary.replace(path)
     finally:
@@ -215,7 +238,10 @@ def _emit_file_locked(
     # already have a complete successor establishing their idle boundary.
     candidates = blocks[:-1] if incomplete else blocks
     finished = [b for b in candidates if (now - b.end).total_seconds() > gap_s]
-    emitted = _read_emitted(path, gap_s, server=client.server, hostname=hostname)
+    prefix_digests = _prefix_digests(finished)
+    emitted = _read_emitted(
+        path, gap_s, server=client.server, hostname=hostname, prefix_digests=prefix_digests
+    )
     new = finished[emitted:]
     if not new:
         return 0
@@ -225,5 +251,12 @@ def _emit_file_locked(
     for block in new:
         client.post_event(bucket, block.to_event())
         emitted += 1
-        _write_emitted(path, emitted, gap_s, server=client.server, hostname=hostname)
+        _write_emitted(
+            path,
+            emitted,
+            gap_s,
+            server=client.server,
+            hostname=hostname,
+            prefix_digest=prefix_digests[emitted - 1],
+        )
     return len(new)

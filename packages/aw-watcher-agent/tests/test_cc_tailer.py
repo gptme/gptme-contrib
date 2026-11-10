@@ -288,3 +288,97 @@ def test_sqlite_errors_obey_cli_strict_flag(tmp_path, monkeypatch, capsys, stric
     assert cli.main(argv) == int(strict)
     assert "aw-watcher-agent:" in capsys.readouterr().err
     assert closed == ([True] if stage == "execute" else [])
+
+
+@pytest.mark.parametrize("failure", [PermissionError("unreadable cursor"), OSError("I/O failure")])
+def test_cursor_read_failure_never_replays_history(tmp_path, monkeypatch, failure):
+    from pathlib import Path
+
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    transcript = tmp_path / "s1.jsonl"
+    transcript.write_text(_row("2026-11-10T09:00:00Z"), encoding="utf-8")
+    client = _Client()
+    now = _dt("2026-11-10T10:00:00Z")
+    assert cc_tailer.emit_file(client, "host", transcript, now=now) == 1
+    cursor = cc_tailer._cursor_path(transcript, client.server, "host")
+    read_text = Path.read_text
+
+    def unreadable(path, *args, **kwargs):
+        if path == cursor:
+            raise failure
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    with pytest.raises(OSError):
+        cc_tailer.emit_file(client, "host", transcript, now=now)
+    assert len(client.posted) == 1
+
+
+@pytest.mark.parametrize(
+    "contents", ["{", "{}", "[]", '{"emitted_blocks": true}', '{"emitted_blocks": -1}']
+)
+def test_invalid_cursor_never_initializes_progress(tmp_path, monkeypatch, contents):
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    transcript = tmp_path / "s1.jsonl"
+    transcript.write_text(_row("2026-11-10T09:00:00Z"), encoding="utf-8")
+    client = _Client()
+    cursor = cc_tailer._cursor_path(transcript, client.server, "host")
+    cursor.parent.mkdir()
+    cursor.write_text(contents, encoding="utf-8")
+    with pytest.raises(ValueError):
+        cc_tailer.emit_file(client, "host", transcript, now=_dt("2026-11-10T12:00:00Z"))
+    assert client.posted == []
+
+
+@pytest.mark.parametrize("change", ["prepend", "extend", "truncate", "workspace"])
+def test_changed_checkpointed_prefix_rejected_before_posting(tmp_path, monkeypatch, change):
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    transcript = tmp_path / "s1.jsonl"
+    original = _row("2026-11-10T09:00:00Z")
+    transcript.write_text(original + "\n", encoding="utf-8")
+    client = _Client()
+    now = _dt("2026-11-10T12:00:00Z")
+    assert cc_tailer.emit_file(client, "host", transcript, now=now) == 1
+    if change == "prepend":
+        changed = (
+            original + "\n" + _row("2026-11-10T08:00:00Z") + "\n" + _row("2026-11-10T11:00:00Z")
+        )
+    elif change == "extend":
+        changed = original + "\n" + _row("2026-11-10T09:10:00Z")
+    elif change == "workspace":
+        changed = _row("2026-11-10T09:00:00Z", cwd="/different")
+    else:
+        changed = ""
+    transcript.write_text(changed, encoding="utf-8")
+    with pytest.raises(ValueError, match="checkpointed prefix"):
+        cc_tailer.emit_file(client, "host", transcript, now=now)
+    assert len(client.posted) == 1
+    transcript.write_text(original + "\n" + _row("2026-11-10T11:00:00Z"), encoding="utf-8")
+    assert cc_tailer.emit_file(client, "host", transcript, now=now) == 1
+    assert cc_tailer.emit_file(client, "host", transcript, now=now) == 0
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("error", [OSError("unreadable transcript"), ValueError("invalid cursor")])
+def test_scan_continues_after_transcript_failure(tmp_path, monkeypatch, capsys, strict, error):
+    from aw_watcher_agent import cli
+
+    first = tmp_path / "bad.jsonl"
+    second = tmp_path / "good.jsonl"
+    monkeypatch.setattr(cc_tailer, "transcripts", lambda: [first, second])
+    visited = []
+
+    def emit(client, host, path, **kwargs):
+        visited.append(path)
+        if path == first:
+            raise error
+        return 2
+
+    monkeypatch.setattr(cc_tailer, "emit_file", emit)
+    argv = (["--strict"] if strict else []) + ["tail-claude-code"]
+    assert cli.main(argv) == int(strict)
+    assert visited == [first, second]
+    output = capsys.readouterr()
+    assert str(first) in output.err
+    assert str(error) in output.err
+    assert "events=2" in output.out

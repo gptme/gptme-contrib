@@ -175,13 +175,18 @@ def cmd_tail_claude_code(args: argparse.Namespace) -> int:
         print("no Claude Code transcripts found", file=sys.stderr)
         return 0
     total = 0
+    failed = False
     for path in files:
-        total += cc_tailer.emit_file(client, host, path, gap_s=args.gap)
+        try:
+            total += cc_tailer.emit_file(client, host, path, gap_s=args.gap)
+        except (AWClientError, OSError, ValueError, sqlite3.Error) as exc:
+            failed = True
+            print(f"aw-watcher-agent: {path}: {exc}", file=sys.stderr)
     print(
         f"claude-code sessions emitted: {core.bucket_id(host)} "
         f"events={total} transcripts={len(files)}"
     )
-    return 0
+    return int(failed and args.strict)
 
 
 def build_parser() -> argparse.ArgumentParser:

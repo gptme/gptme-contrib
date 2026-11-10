@@ -88,7 +88,14 @@ for `--gap`, and a per-transcript cursor records each successful post. Overlappi
 invocations skip transcripts already being processed. Cursor writes are atomic;
 retrying a failed later post does not replay the checkpointed prefix. Once blocks
 have been emitted, changing `--gap` for that transcript is rejected rather than
-posting overlapping representations. This is not transactional exactly-once
+posting overlapping representations. A digest of the checkpointed event metadata
+also rejects historical inserts, rewrites or truncation that change already emitted
+blocks; it does not silently skip or replay them. Only a missing cursor starts a
+new import: unreadable, corrupt or older count-only cursors fail closed. Preserve
+such a cursor and reconcile the destination events before resetting it, since
+removing it reimports the transcript. A failed transcript is reported on stderr
+without preventing other transcripts from being processed; `--strict` returns
+nonzero after the scan if any failed. This is not transactional exactly-once
 delivery: a crash after the server accepts a post but before its checkpoint can
 still duplicate that last event on retry. Events land in the same session bucket
 as the hooks below, with `harness=claude-code` and `workspace` set to the project
