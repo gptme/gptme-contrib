@@ -6,8 +6,9 @@ activity to your **local** aw-server, so AI work shows up in the aw-webui
 Timeline alongside window/AFK data instead of looking like idle time.
 
 **Status:** alpha (`0.1.0`). Session tracking and the Codex log-tailer work and
-are dogfooded against a local aw-server; a native gptme plugin hook for per-tool
-events and an aw-webui "AI work" view are not built yet.
+are dogfooded against a local aw-server; the Claude Code log-tailer is tested on
+fixtures and real transcripts but not yet dogfooded. A native gptme plugin hook
+for per-tool events and an aw-webui "AI work" view are not built yet.
 
 This is the controller use case behind
 [ActivityWatch/activitywatch#1215](https://github.com/ActivityWatch/activitywatch/issues/1215).
@@ -67,6 +68,27 @@ passed to `emit-end` override the ones saved at start.
 Start state is kept per session id under
 `$XDG_STATE_HOME/aw-watcher-agent/` (default `~/.local/state/aw-watcher-agent/`).
 
+### Claude Code without hooks (log-tailer)
+
+`tail-claude-code` reads the transcripts Claude Code already writes under
+`~/.claude/projects/` (or `$CLAUDE_CONFIG_DIR/projects`) and posts one
+session event per working block, so Claude Code work shows up on the Timeline
+with no harness configuration:
+
+```bash
+aw-watcher-agent tail-claude-code            # every transcript
+aw-watcher-agent tail-claude-code --gap 600  # split blocks on 10 min idle
+```
+
+Only `timestamp`, `sessionId` and `cwd` are read; prompts, replies and tool
+payloads are never touched. A session is split into blocks on idle gaps
+longer than `--gap` (default 15 min), so a session left open overnight is not
+counted as agent time. The trailing block is held back until it has been idle
+for `--gap`, and a per-transcript cursor makes re-runs emit each block once,
+so it is safe to run from a timer. Events land in the same session bucket as
+the hooks below, with `harness=claude-code` and `workspace` set to the
+project directory.
+
 ### Wiring into Claude Code (or any harness with lifecycle hooks)
 
 Point your harness's session-start / session-end hooks (for Claude Code:
@@ -114,6 +136,7 @@ each Codex run.
 | `emit-end` | Replace the placeholder with one event carrying duration + `--outcome` |
 | `emit-activity` | Record one tool-activity heartbeat (`--tool` required) |
 | `tail-codex` | Emit per-tool activity from a Codex rollout transcript |
+| `tail-claude-code` | Emit session working blocks from Claude Code transcripts (no hooks) |
 
 Global flag: `--strict` (exit non-zero on errors). Run
 `aw-watcher-agent <command> --help` for all options.

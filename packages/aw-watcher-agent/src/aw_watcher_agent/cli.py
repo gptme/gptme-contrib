@@ -162,6 +162,27 @@ def cmd_tail_codex(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tail_claude_code(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from . import cc_tailer
+
+    client = AWClient(args.server)
+    host = _hostname(args.hostname)
+    files = [Path(args.file)] if args.file else cc_tailer.transcripts()
+    if not files:
+        print("no Claude Code transcripts found", file=sys.stderr)
+        return 0
+    total = 0
+    for path in files:
+        total += cc_tailer.emit_file(client, host, path, gap_s=args.gap)
+    print(
+        f"claude-code sessions emitted: {core.bucket_id(host)} "
+        f"events={total} transcripts={len(files)}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aw-watcher-agent", description=__doc__)
     parser.add_argument("--strict", action="store_true", help="exit non-zero on errors")
@@ -220,6 +241,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_tail.add_argument("--hostname")
     p_tail.add_argument("--server", default=core_default_server())
     p_tail.set_defaults(func=cmd_tail_codex)
+
+    p_cc = sub.add_parser(
+        "tail-claude-code",
+        help="emit session working blocks from Claude Code transcripts (no hooks needed)",
+    )
+    p_cc.add_argument(
+        "--file", help="transcript JSONL to process (default: all under ~/.claude/projects)"
+    )
+    p_cc.add_argument(
+        "--gap",
+        type=float,
+        default=15 * 60,
+        help="idle gap in seconds that splits a session into blocks (default: 900)",
+    )
+    p_cc.add_argument("--hostname")
+    p_cc.add_argument("--server", default=core_default_server())
+    p_cc.set_defaults(func=cmd_tail_claude_code)
 
     return parser
 
