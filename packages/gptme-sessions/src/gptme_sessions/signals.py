@@ -709,7 +709,9 @@ def _strip_heredoc_bodies(cmd: str) -> str:
                 word = m.group(2) if m.group(2) is not None else m.group(3)
                 quoted = bare is None or bool(m.group(4))
                 pending.append((bare if word is None else word, quoted, bool(m.group(1))))
-                out.append(m.group(0))
+                # The shell consumes the operator and delimiter, not gh's
+                # argument parser (where -EOF would look like a flag).
+                out.append(" ")
                 i = m.end()
                 continue
         elif c == "\n" and pending:

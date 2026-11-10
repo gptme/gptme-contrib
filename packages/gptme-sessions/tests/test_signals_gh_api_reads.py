@@ -174,6 +174,8 @@ WRITES = [
     # quotes and comment markers are literal data in an unquoted heredoc
     "cat <<EOF\n'$(gh api repos/o/r/issues/5/comments -f body=x)'\nEOF",
     "cat <<EOF\n# $(gh api repos/o/r/issues/5/comments -f body=x)\nEOF",
+    # heredoc redirect operands are shell syntax, not gh shorthand flags
+    'gh api repos/o/r/issues/5/comments --input - <<-\'EOF\'\n\t{"body":"x"}\n\tEOF',
     # a here-string is not a heredoc
     'gh api repos/o/r/issues/5/comments --input - <<< \'{"body": "x"}\'',
     "cat <<< 'EOF'\ngh api repos/o/r/issues/5/comments -f body=x",
