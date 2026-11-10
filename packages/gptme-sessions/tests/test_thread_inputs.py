@@ -209,3 +209,34 @@ def test_bare_abbreviated_deliverable_links_to_later_commit_reference() -> None:
     rows, _ = build_forest(nodes)
     assert rows[1]["predecessor"] == "producer"
     assert rows[1]["kind"] == "commit"
+
+
+def test_journal_sharing_uses_resolved_file_not_suffix(tmp_path: Path) -> None:
+    suffix = "journal/2026-11-10/session-ab12.md"
+    records = [
+        _rec(
+            f"project-{name}",
+            "2026-11-10T10:00:00Z",
+            "2026-11-10T10:30:00Z",
+            project=str(tmp_path / name),
+            journal_path=suffix,
+        )
+        for name in ("a", "b")
+    ]
+    reads: list[Path] = []
+
+    def reader(path: Path) -> str:
+        reads.append(path)
+        return f"# {path.parents[2].name} journal\nFollow-up to session 02fd."
+
+    nodes = from_records(records, agent="bob", read_journal=reader)
+    assert reads == [tmp_path / "a" / suffix, tmp_path / "b" / suffix]
+    assert [n["title"] for n in nodes] == ["a journal", "b journal"]
+    assert all(n["sessions_mentioned"] == ["02fd"] for n in nodes)
+
+    # Absolute and relative aliases of the same file must still skip digestion.
+    records[1].journal_path = str(tmp_path / "a" / "journal" / ".." / suffix)
+    reads.clear()
+    nodes = from_records(records, agent="bob", read_journal=reader)
+    assert reads == []
+    assert all("sessions_mentioned" not in n for n in nodes)

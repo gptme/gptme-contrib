@@ -166,14 +166,21 @@ def from_records(
     The result is sorted by start, as ``threads`` requires.
     """
     records = list(records)
-    shared: dict[str, int] = {}
+    shared: dict[Path, int] = {}
+    journal_paths: list[Path | None] = []
     for r in records:
+        path = None
         if r.journal_path:
-            k = journal_key(r.journal_path)
-            shared[k] = shared.get(k, 0) + 1
+            path = Path(r.journal_path).expanduser()
+            if not path.is_absolute():
+                base = journal_root or (Path(r.project).expanduser() if r.project else None)
+                path = (base / path) if base else path
+            path = path.resolve()
+            shared[path] = shared.get(path, 0) + 1
+        journal_paths.append(path)
 
     nodes: list[dict[str, Any]] = []
-    for r in records:
+    for r, path in zip(records, journal_paths):
         start = _epoch(r.start_time)
         end = _epoch(r.end_time)
         duration = r.duration_seconds or 0
@@ -213,11 +220,7 @@ def from_records(
             n["journal"] = jkey
             if m := _LABEL_IN_NAME.search(Path(jkey).stem):
                 n["short"] = m.group(1)
-            if read_journal is not None and shared[jkey] == 1:
-                path = Path(r.journal_path).expanduser()
-                if not path.is_absolute():
-                    base = journal_root or (Path(r.project).expanduser() if r.project else None)
-                    path = (base / path) if base else path
+            if read_journal is not None and path is not None and shared[path] == 1:
                 text = read_journal(path)
                 if text:
                     digest = journal_digest(text)
