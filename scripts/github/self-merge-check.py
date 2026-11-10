@@ -3859,7 +3859,10 @@ def evaluate_pr(
             greptile_unresolved=greptile_unresolved,
             greptile_score=greptile_score,
         )
-        if not waiver:
+        # Operator approval waives machine review, not verification that human
+        # threads are resolved. The human-thread counter reports zero on an
+        # unreadable fetch, so this fallback must retain the AI-review blocker.
+        if not waiver and shared_review_data is not None:
             waiver = operator_approval_ai_review_waiver(
                 repo=repo, number=number, head_sha=result.head_sha or ""
             )

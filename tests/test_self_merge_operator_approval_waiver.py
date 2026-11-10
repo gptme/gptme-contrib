@@ -94,3 +94,78 @@ def test_malformed_output_fails_closed() -> None:
             )
             is None
         )
+
+
+@pytest.mark.parametrize("thread_state", ["unreadable", "clear", "unresolved"])
+def test_operator_approval_preserves_human_thread_gate(
+    monkeypatch: pytest.MonkeyPatch, thread_state: str
+) -> None:
+    """REST approval cannot turn unknown GraphQL thread state into permission."""
+    monkeypatch.setattr(smc, "get_gh_user", lambda: "TimeToBuildBob")
+    monkeypatch.setattr(smc, "merge_permission", lambda repo: True)
+    monkeypatch.setattr(
+        smc,
+        "fetch_pr",
+        lambda *a: {
+            "number": 2098,
+            "title": "docs: explain review policy",
+            "url": "https://github.com/gptme/gptme-contrib/pull/2098",
+            "author": {"login": "TimeToBuildBob"},
+            "headRefOid": HEAD,
+            "isDraft": False,
+            "state": "OPEN",
+            "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
+            "reviewDecision": None,
+            "files": [{"path": "docs/review-tools.md"}],
+            "labels": [],
+        },
+    )
+    monkeypatch.setattr(
+        smc,
+        "_fetch_contrib_pr_file_shapes",
+        lambda *a: [
+            {"path": "docs/review-tools.md", "status": "modified", "patch": "+Policy"}
+        ],
+    )
+    threads = (
+        []
+        if thread_state != "unresolved"
+        else [
+            {
+                "isResolved": False,
+                "comments": {
+                    "nodes": [
+                        {"author": {"login": "ErikBjare"}, "body": "Please fix this"}
+                    ]
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        smc,
+        "_fetch_greptile_review_data",
+        lambda *a: None if thread_state == "unreadable" else ([], threads),
+    )
+    monkeypatch.setattr(
+        smc, "_fetch_ai_review_marker_checked", lambda *a, **k: (None, True)
+    )
+    monkeypatch.setattr(
+        smc,
+        "fetch_ai_review_status",
+        lambda *a, **k: {"accepted": False, "detail": "no consensus review"},
+    )
+    monkeypatch.setattr(smc, "run_gh", lambda *a, **k: "")
+    monkeypatch.setattr(
+        smc, "run_gh_checked", lambda *a, **k: json.dumps(_review("APPROVED", HEAD))
+    )
+    result = smc.evaluate_pr(
+        "gptme/gptme-contrib", 2098, workspace_repos=["gptme/gptme-contrib"]
+    )
+    assert result.eligible is (thread_state == "clear"), result.reasons
+    if thread_state == "unreadable":
+        assert any("AI review required" in reason for reason in result.reasons)
+    elif thread_state == "unresolved":
+        assert any(
+            "unresolved human review thread" in reason for reason in result.reasons
+        )
