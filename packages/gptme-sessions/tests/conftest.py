@@ -47,3 +47,48 @@ def isolate_live_openrouter_config(
 
     monkeypatch.setattr(judge, "_load_config_env", load_config_env)
     monkeypatch.setattr(judge, "CONFIG_PATHS", ())
+
+
+# Spawner-provided session lineage env that ``post_session`` falls back to.
+# An agent running this suite from inside its own session exports these, and
+# they override whatever a test sets via the legacy ``BOB_*`` alias.
+_DISPATCH_ENV = (
+    "AGENT_DISPATCH_CAUSE",
+    "BOB_DISPATCH_CAUSE",
+    "AGENT_DISPATCH_KIND",
+    "BOB_DISPATCH_KIND",
+    "AGENT_DISPATCH_ID",
+    "BOB_DISPATCH_ID",
+    "PM_DISPATCH_ID",
+    "AGENT_PARENT_SESSION_ID",
+    "BOB_PARENT_SESSION_ID",
+    "GIT_COMMITTER_SESSION_ID",
+)
+
+
+@pytest.fixture(autouse=True)
+def isolate_host_dispatch_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every test with no inherited dispatch/lineage env.
+
+    Without this, running the suite inside an agent session (which exports
+    ``AGENT_DISPATCH_CAUSE`` etc.) fails the dispatch-cause tests, and the
+    failures read as "pre-existing" noise that hides real regressions.
+    """
+    for name in _DISPATCH_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def isolate_host_git_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the host's global git hooks and signing off throwaway test repos.
+
+    Agent hosts set ``core.hooksPath`` to hooks that enforce an identity
+    allowlist, so ``git commit`` as ``test@example.com`` in a tmp repo aborts.
+    Env-injected config outranks global and repo config for every git
+    subprocess the tests spawn.
+    """
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_KEY_1", "commit.gpgsign")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_1", "false")
