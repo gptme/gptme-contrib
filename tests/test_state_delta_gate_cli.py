@@ -258,6 +258,34 @@ def test_unknown_timestamp_does_not_lock_out_armed_streak(
     assert run(tmp_path, "check", "--explore-rate", "0") == SKIP
 
 
+@pytest.mark.parametrize(
+    "value", ["0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00"]
+)
+def test_timestamp_utc_overflow_fails_open(tmp_path: Path, value: str) -> None:
+    write_state(tmp_path, noop_only_streak=1, last_executed_ts=value)
+    assert run(tmp_path, "check", "--force", "--explore-rate", "0") == PROCEED
+    assert run(tmp_path, "check", "--explore-rate", "0") == PROCEED
+
+
+@pytest.mark.parametrize("failure", ["invalid-state", "missing-library"])
+def test_fail_open_emits_machine_readable_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    failure: str,
+) -> None:
+    if failure == "invalid-state":
+        state_file = tmp_path / "state" / "state-delta-gate.json"
+        state_file.parent.mkdir()
+        state_file.write_text("[]")
+    else:
+        monkeypatch.setitem(sys.modules, "gptme_runloops.gates", None)
+    assert run(tmp_path, "check", "--explore-rate", "0") == PROCEED
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "GATE_CAUSE=error GATE_PROCEED=1"
+    assert "state-delta-gate:" in captured.err
+
+
 # --- First run / no-state ---
 
 

@@ -61,7 +61,7 @@ def _parse_dt(value: object) -> datetime | None:
         return None
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
 
 
@@ -115,6 +115,7 @@ def _check(args: argparse.Namespace) -> int:
             f"state-delta-gate: gptme_runloops not installed — {exc}",
             file=sys.stderr,
         )
+        print("GATE_CAUSE=error GATE_PROCEED=1")
         return PROCEED  # fail open: missing library must not suppress sessions
 
     state_file = Path(args.state_file)
@@ -125,6 +126,7 @@ def _check(args: argparse.Namespace) -> int:
         state = _read_state(state_file)
     except (OSError, ValueError) as exc:
         print(f"state-delta-gate: could not read state: {exc}", file=sys.stderr)
+        print("GATE_CAUSE=error GATE_PROCEED=1")
         return PROCEED  # Admission fails open; recording must report failures.
     now = _now()
 
