@@ -466,3 +466,16 @@ def test_unrelated_served_alias_is_refused_before_private_write(
             public_root=public,
         )
     assert not (private / "pub/summary.json").exists()
+
+
+def test_standalone_private_publish_revokes_registered_html(
+    roots: tuple[Path, Path],
+) -> None:
+    private, public = roots
+    html = public / "priv/index.html"
+    html.parent.mkdir(parents=True)
+    html.write_text("formerly public page")
+    registry = RouteRegistry((_route("priv", visibility=Visibility.PRIVATE),))
+    publish_page(registry, _env("priv"), private_root=private, public_root=public)
+    assert not html.exists()
+    assert (private / "priv/summary.json").exists()

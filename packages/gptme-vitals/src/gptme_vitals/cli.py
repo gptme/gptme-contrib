@@ -35,6 +35,7 @@ from gptme_vitals.publish import (
     load_envelopes,
     portal_path,
     publish_page,
+    revoke_public_route,
     summary_path,
     write_text,
 )
@@ -133,10 +134,10 @@ def run_build(
                 except OSError as exc:
                     out(f"FAIL visibility shared outputs: {exc}")
                     return 1
-            for route in registry.envelope_routes():
+            for route in registry.routes:
                 if not route.is_public:
                     try:
-                        summary_path(route, public_root).unlink(missing_ok=True)
+                        revoke_public_route(route, public_root)
                     except (OSError, PublishError) as exc:
                         out(f"FAIL visibility {route.slug}: {exc}")
                         return 1

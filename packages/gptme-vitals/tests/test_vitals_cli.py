@@ -851,3 +851,27 @@ def test_timers_refuse_emitter_without_envelope_route(
     assert main(_timers_argv(app)) == 2
     assert "no summary_source route" in capsys.readouterr().err
     assert not (app / "units").exists()
+
+
+@pytest.mark.parametrize("has_summary", [False, True])
+def test_partial_build_revokes_private_html_even_without_an_envelope(
+    tmp_path: Path, has_summary: bool
+) -> None:
+    html = tmp_path / "public/cost/index.html"
+    html.parent.mkdir(parents=True)
+    html.write_text("formerly public cost page")
+    registry = RouteRegistry(
+        (
+            _route("services", is_headline=True),
+            _route(
+                "cost",
+                visibility=Visibility.PRIVATE,
+                summary_source="cost/summary.json" if has_summary else None,
+            ),
+        )
+    )
+    code, _ = _run_with_emitters(
+        tmp_path, registry, {"services": _emitter("services", Status.HEALTHY)}
+    )
+    assert code == 0
+    assert not html.exists()

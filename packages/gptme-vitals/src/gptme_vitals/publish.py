@@ -98,6 +98,16 @@ def summary_path(route: DashboardRoute, root: Path) -> Path:
     return _relative_inside(route.slug, route.summary_source, root, "summary_source")
 
 
+def revoke_public_route(route: DashboardRoute, root: Path) -> None:
+    """Remove registered served files for a private route, including its HTML."""
+    for what, source in (
+        ("summary_source", route.summary_source),
+        ("output_path", route.output_path),
+    ):
+        if source is not None:
+            _relative_inside(route.slug, source, root, what).unlink(missing_ok=True)
+
+
 def portal_path(registry: RouteRegistry, root: Path) -> Path | None:
     """Where the portal page is written, or ``None`` if the registry has none."""
     portal = registry.portal
@@ -198,7 +208,7 @@ def publish_page(
     if not route.is_public:
         # A route that used to be public may have a served copy; leaving it would
         # keep its headline, lines and core reachable at the old URL.
-        summary_path(route, public).unlink(missing_ok=True)
+        revoke_public_route(route, public)
     target = summary_path(route, private)
     # Resolve and serialize both destinations before changing either file.
     public_target = summary_path(route, public) if route.is_public else None
