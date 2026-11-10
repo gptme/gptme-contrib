@@ -7,7 +7,7 @@ recovers it. Agent-neutral: AGENT_* first, BOB_* kept as compatibility.
 
 Also drops standalone ``<think>``/``</think>`` lines: some reasoning-model
 streams leak the tag into model-authored commit messages (gptme/gptme#4803),
-and a lone tag line is never meaningful message content.
+but preserves tags quoted inside fenced code examples.
 """
 
 from __future__ import annotations
@@ -112,13 +112,32 @@ def resolve_session_id(
 
 
 STRAY_REASONING_TAGS = frozenset({b"<think>", b"</think>"})
+_CODE_FENCE = re.compile(rb"(`{3,}|~{3,})(.*)")
 
 
 def strip_stray_reasoning_tags(content: bytes) -> tuple[bytes, int]:
-    """Remove lines that are exactly a reasoning tag; return (content, removed)."""
-    lines = content.splitlines(keepends=True)
-    kept = [line for line in lines if line.strip() not in STRAY_REASONING_TAGS]
-    return b"".join(kept), len(lines) - len(kept)
+    """Remove standalone reasoning tags outside fenced code examples."""
+    kept: list[bytes] = []
+    fence: bytes | None = None
+    removed = 0
+    for line in content.splitlines(keepends=True):
+        stripped = line.strip()
+        marker = _CODE_FENCE.fullmatch(stripped)
+        if fence is not None:
+            if (
+                marker
+                and marker[1][:1] == fence[:1]
+                and len(marker[1]) >= len(fence)
+                and not marker[2].strip()
+            ):
+                fence = None
+        elif marker:
+            fence = marker[1]
+        elif stripped in STRAY_REASONING_TAGS:
+            removed += 1
+            continue
+        kept.append(line)
+    return b"".join(kept), removed
 
 
 def _opted_out(env: dict[str, str]) -> bool:

@@ -466,6 +466,31 @@ def test_stray_reasoning_tag_lines_are_dropped(tmp_path: Path) -> None:
     assert b"Git-Session-Id: f05eabcd" in body
 
 
+@pytest.mark.parametrize(
+    ("opening", "inside", "closing"),
+    [
+        (b"```xml", b"<think>\nexample\n</think>\n", b"```"),
+        (b"  ~~~xml", b"<think>\nexample\n</think>\n", b"  ~~~~"),
+        (b"````xml", b"```\n<think>\n~~~\n</think>\n", b"````"),
+        (b"```xml", b"```not-a-close\n<think>\n", b"```"),
+    ],
+)
+def test_reasoning_tags_inside_fences_are_preserved(
+    tmp_path: Path, opening: bytes, inside: bytes, closing: bytes
+) -> None:
+    msg = tmp_path / "COMMIT_EDITMSG"
+    example = opening + b"\n" + inside + closing + b"\n"
+    msg.write_bytes(b"fix: document protocol\n</think>\n\n" + example + b"<think>\n")
+
+    result = _run_hook(msg, _clean_env(GIT_COMMITTER_SESSION_ID="fenced42"))
+
+    assert result.returncode == 0, result.stderr
+    assert msg.read_bytes() == (
+        b"fix: document protocol\n\n" + example + b"\nGit-Session-Id: fenced42\n"
+    )
+    assert "dropped 2 stray" in result.stderr
+
+
 def test_non_utf8_message_survives_reasoning_tag_strip(tmp_path: Path) -> None:
     msg = tmp_path / "COMMIT_EDITMSG"
     msg.write_bytes(b"fix: caf\xe9\n</think>\n")
