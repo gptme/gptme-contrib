@@ -6,6 +6,7 @@ plus the stdlib-only primitives (SVG renderers, coercion helpers, snapshot
 cache) every agent's pages need.
 """
 
+from gptme_vitals.build import BuildError, derive_core, write_core_files
 from gptme_vitals.envelope import (
     ENVELOPE_SCHEMA,
     MAX_LINES,
@@ -39,6 +40,9 @@ __all__ = [
     "TOKENS_CSS",
     "render_head_assets",
     "render_theme_toggle",
+    "BuildError",
+    "derive_core",
+    "write_core_files",
     "NAV_CSS",
     "DashboardRoute",
     "RefreshCadence",
