@@ -26,7 +26,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from .deliverables import build_deliverable_detail, project_deliverable_details
 from .pi import (
@@ -406,7 +406,7 @@ def _split_shell_segments(cmd: str) -> list[str]:
     return segments
 
 
-def _command_substitutions(cmd: str) -> list[str]:
+def _command_substitutions(cmd: str, *, heredoc: bool = False) -> list[str]:
     """Bodies of ``$(...)``, backtick and ``<(...)``/``>(...)`` substitutions
     that bash would execute.
 
@@ -415,6 +415,8 @@ def _command_substitutions(cmd: str) -> list[str]:
     comments, so ``printf '$(gh api ... -f x)'`` yields nothing. Process
     substitution only happens unquoted. Only
     outermost bodies are returned; callers recurse for nested ones.
+    In an unquoted heredoc, quotes and comment markers are literal and only
+    command substitutions (not process substitutions) expand.
     """
     bodies: list[str] = []
     quote: str | None = None
@@ -423,6 +425,16 @@ def _command_substitutions(cmd: str) -> list[str]:
         c = cmd[i]
         if c == "\\" and quote != "'":
             i += 2
+            continue
+        if heredoc:
+            if c == "`" or cmd.startswith("$(", i):
+                end = _subst_end(cmd, i)
+                offset, closing = (1, "`") if c == "`" else (2, ")")
+                body_end = end - 1 if cmd[end - 1 : end] == closing else end
+                bodies.append(cmd[i + offset : body_end])
+                i = end
+                continue
+            i += 1
             continue
         if quote == "'":
             if c == "'":
@@ -488,9 +500,13 @@ def _gh_api_args(segment: str) -> list[str] | None:
         if name == "gh" and tokens[i + 1] == "api":
             args = tokens[i + 2 :]
             # An unmatched ``)`` closes the group or substitution this
-            # invocation sits in; what follows is not its arguments.
+            # invocation sits in; what follows is not its arguments. Option
+            # values are data, so a quoted ``--template ')'`` does not close it.
+            values = _gh_api_parse(args).value_indices
             depth = 0
             for j, tok in enumerate(args):
+                if j in values:
+                    continue
                 depth += _paren_delta(tok)
                 if depth < 0:
                     return args[:j]
@@ -541,32 +557,106 @@ def _paren_delta(tok: str) -> int:
     return 0
 
 
+class _GhApiArgs(NamedTuple):
+    options: list[tuple[str, str | None]]  # (long name, value)
+    positionals: list[str]
+    value_indices: set[int]  # args indices consumed as a separate option value
+    invalid: bool  # gh would reject the flags (unknown shorthand) and send nothing
+
+
+# Short flags of ``gh api`` (see ``gh api --help``), mapped to long names.
+_GH_API_SHORT_VALUE = {
+    "F": "--field",
+    "H": "--header",
+    "q": "--jq",
+    "X": "--method",
+    "p": "--preview",
+    "f": "--raw-field",
+    "t": "--template",
+}
+_GH_API_SHORT_BOOL = {"i": "--include"}
+_GH_API_LONG_VALUE = frozenset({"--cache", "--hostname", "--input", *_GH_API_SHORT_VALUE.values()})
+
+
+def _gh_api_parse(args: list[str]) -> _GhApiArgs:
+    """Parse ``gh api`` arguments the way gh's flag parser (pflag) does.
+
+    Long options take ``--opt value`` or ``--opt=value``. Short boolean flags
+    cluster with a trailing value flag (``-if body=x``, ``-iXPOST``,
+    ``-X=POST``); the value of an option is never read as a flag
+    (``--template '-f'``). An unknown shorthand (``-sf``) makes gh exit before
+    sending anything, so the invocation is marked invalid. ``--`` ends options.
+    """
+    options: list[tuple[str, str | None]] = []
+    positionals: list[str] = []
+    value_indices: set[int] = set()
+    invalid = False
+    i, n = 0, len(args)
+    while i < n:
+        tok = args[i]
+        if tok == "--":
+            positionals.extend(args[i + 1 :])
+            break
+        if tok.startswith("--"):
+            name, eq, val = tok.partition("=")
+            if eq:
+                options.append((name, val))
+            elif name in _GH_API_LONG_VALUE and i + 1 < n:
+                options.append((name, args[i + 1]))
+                value_indices.add(i + 1)
+                i += 1
+            else:
+                options.append((name, None))
+            i += 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            for j, ch in enumerate(tok[1:], start=1):
+                if ch in _GH_API_SHORT_VALUE:
+                    name = _GH_API_SHORT_VALUE[ch]
+                    rest = tok[j + 1 :]
+                    if rest:
+                        options.append((name, rest.removeprefix("=")))
+                    elif i + 1 < n:
+                        options.append((name, args[i + 1]))
+                        value_indices.add(i + 1)
+                        i += 1
+                    else:
+                        options.append((name, None))
+                    break
+                if ch in _GH_API_SHORT_BOOL:
+                    rest = tok[j + 1 :]
+                    if rest.startswith("="):
+                        value = rest[1:]
+                        invalid |= value not in (
+                            "1",
+                            "t",
+                            "T",
+                            "TRUE",
+                            "true",
+                            "True",
+                            "0",
+                            "f",
+                            "F",
+                            "FALSE",
+                            "false",
+                            "False",
+                        )
+                        options.append((_GH_API_SHORT_BOOL[ch], value))
+                        break
+                    options.append((_GH_API_SHORT_BOOL[ch], None))
+                else:
+                    invalid = True
+            i += 1
+            continue
+        positionals.append(tok)
+        i += 1
+    return _GhApiArgs(options, positionals, value_indices, invalid)
+
+
 def _gh_api_endpoint(args: list[str]) -> str | None:
     """The endpoint (first positional argument) of a ``gh api`` invocation."""
-    i = 0
-    while i < len(args):
-        tok = args[i]
-        if tok in _GH_API_VALUE_OPTS or tok in (
-            "-X",
-            "--method",
-            "-f",
-            "-F",
-            "--field",
-            "--raw-field",
-            "--input",
-        ):
-            i += 2
-            continue
-        if not tok.startswith("-"):
-            return tok
-        i += 1
-    return None
-
-
-# gh api options whose next token is a value, never a flag (``--template '-f'``).
-_GH_API_VALUE_OPTS = frozenset(
-    {"-H", "--header", "-q", "--jq", "-t", "--template", "-p", "--preview", "--hostname", "--cache"}
-)
+    positionals = _gh_api_parse(args).positionals
+    return positionals[0] if positionals else None
 
 
 def _gh_api_writes(args: list[str]) -> bool:
@@ -575,37 +665,114 @@ def _gh_api_writes(args: list[str]) -> bool:
     Flags are read from shell tokens, not raw text, so a quoted argument value
     such as ``-f body='Use -X GET'`` is not mistaken for a method flag, and the
     value of an option like ``--jq``/``--template`` is never read as a flag.
+    gh switches to POST when any field or ``--input`` is given.
     """
+    parsed = _gh_api_parse(args)
+    if parsed.invalid:
+        return False
     method: str | None = None
     has_field = False
-    i = 0
-    while i < len(args):
-        tok = args[i]
-        if tok in _GH_API_VALUE_OPTS:
-            i += 2
-            continue
-        if tok in ("-X", "--method"):
-            if i + 1 < len(args):
-                method = args[i + 1]
-            i += 2
-            continue
-        if tok.startswith("--method="):
-            method = tok.split("=", 1)[1]
-        elif tok.startswith("-X") and len(tok) > 2:
-            method = tok[2:].lstrip("=")
-        elif tok in ("-f", "-F", "--field", "--raw-field", "--input"):
+    for name, value in parsed.options:
+        if name == "--method":
+            method = value
+        elif name in ("--field", "--raw-field", "--input"):
             has_field = True
-            i += 2
-            continue
-        elif tok.startswith(("--field=", "--raw-field=", "--input=")) or (
-            tok[:2] in ("-f", "-F") and len(tok) > 2
-        ):
-            has_field = True
-        i += 1
     if method is not None:
         # HEAD fetches headers only; like GET it posts nothing.
         return method.upper() not in ("GET", "HEAD")
     return has_field
+
+
+_HEREDOC_OP_RE = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|(\\?)([A-Za-z0-9_.@%+-]+))")
+
+
+def _strip_heredoc_bodies(cmd: str) -> str:
+    """Drop here-document bodies, which bash feeds as data, not commands.
+
+    A body line such as ``gh api ... -f body=x`` inside ``cat > doc.md <<'EOF'``
+    is text, not a command. With a quoted delimiter (``<<'EOF'``, ``<<"EOF"``,
+    ``<<\\EOF``) the body is fully literal and is removed. With an unquoted
+    delimiter bash still expands ``$(...)``/backticks in it, so only those
+    substitutions are kept, one per line. ``<<-`` strips leading tabs before
+    matching the terminator; ``<<<`` (here-string) is not a heredoc. Bodies
+    supplied as a shell's stdin script are retained for recursive matching.
+    """
+    out: list[str] = []
+    pending: list[tuple[str, bool, bool, int]] = []  # delimiter, quoted, strip_tabs, header_start
+    quote: str | None = None
+    i, n = 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if c == "\\" and quote != "'" and i + 1 < n:
+            out.append(cmd[i : i + 2])
+            i += 2
+            continue
+        if quote:
+            if c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+        elif c == "#" and (i == 0 or cmd[i - 1] in " \t\n;|&("):
+            end = cmd.find("\n", i)
+            end = n if end < 0 else end
+            out.append(cmd[i:end])
+            i = end
+            continue
+        elif cmd.startswith("$((", i) or cmd.startswith("((", i):
+            # Arithmetic left shifts are not heredoc redirections. Preserve
+            # the expression so later substitution extraction can inspect it.
+            end = _subst_end(cmd, i) if c == "$" else i + _subst_end("$" + cmd[i:], 0) - 1
+            out.append(cmd[i:end])
+            i = end
+            continue
+        elif cmd.startswith("<<<", i):
+            out.append("<<<")
+            i += 3
+            continue
+        elif c == "<" and cmd.startswith("<<", i):
+            m = _HEREDOC_OP_RE.match(cmd, i)
+            if m:
+                bare = m.group(5)
+                word = m.group(2) if m.group(2) is not None else m.group(3)
+                quoted = bare is None or bool(m.group(4))
+                header = "".join(out)
+                start = len(header) - len(_split_shell_segments(header)[-1])
+                pending.append((bare if word is None else word, quoted, bool(m.group(1)), start))
+                # The shell consumes the operator and delimiter, not gh's
+                # argument parser (where -EOF would look like a flag).
+                out.append(" ")
+                i = m.end()
+                continue
+        elif c == "\n" and pending:
+            header = "".join(out)
+            out.append(c)
+            i += 1
+            for word, quoted, strip_tabs, start in pending:
+                script = _shell_reads_stdin(_split_shell_segments(header[start:])[0])
+                body: list[str] = []
+                while i < n:
+                    end = cmd.find("\n", i)
+                    end = n if end < 0 else end
+                    line = cmd[i:end]
+                    i = end + 1
+                    if (line.lstrip("\t") if strip_tabs else line) == word:
+                        break
+                    body.append(line.lstrip("\t") if strip_tabs else line)
+                if script:
+                    # A shell with no script operand (or with -s) executes
+                    # stdin. Keep it as a separate script for recursive matching.
+                    script_body = "\n".join(body)
+                    out.append(f"$({script_body})\n")
+                elif not quoted:
+                    out.extend(
+                        f"$({sub})\n"
+                        for sub in _command_substitutions("\n".join(body), heredoc=True)
+                    )
+            pending = []
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
@@ -618,6 +785,7 @@ def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
     so a write inside ``x="$(gh api ...)"`` counts even though shell
     tokenization keeps the quoted substitution in one token.
     """
+    cmd = _strip_heredoc_bodies(cmd)
     for sub in _command_substitutions(cmd):
         if _gh_cmd_matches(pattern, sub):
             return True
@@ -646,6 +814,62 @@ def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
 _GH_API_MATCH_RE = re.compile(r"gh\s+api\b")
 
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+
+
+def _shell_reads_stdin(segment: str) -> bool:
+    """Whether a shell invocation consumes stdin as an executable script.
+
+    Document producers mentioning a shell (``cat bash``) are not interpreters;
+    only direct invocations and the usual command wrappers are recognized.
+    ``-c``, a script-file operand and noexec mode do not execute stdin.
+    """
+    # Redirections are consumed by the caller shell, never script operands.
+    # Strip them before shlex loses whether an adjacent number is an fd.
+    segment = re.sub(
+        r"(?<!\S)\d*(?:>>?|<|>&|<&|&>)(?:\s*)(?:'[^']*'|\"[^\"]*\"|[^\s;|&]+)", " ", segment
+    )
+    tokens = _shell_tokens(segment)
+    for i, tok in enumerate(tokens):
+        if tok.rsplit("/", 1)[-1] not in _SHELLS:
+            continue
+        prefix = tokens[:i]
+        if (
+            prefix
+            and prefix[0].rsplit("/", 1)[-1]
+            not in {
+                "env",
+                "timeout",
+                "command",
+                "exec",
+                "sudo",
+            }
+            and not all("=" in word for word in prefix)
+        ):
+            return False
+        stdin = False
+        j = i + 1
+        while j < len(tokens):
+            opt = tokens[j]
+            if opt == "--":
+                j += 1
+                break
+            if opt in ("-o", "+o", "-O", "+O"):
+                if opt == "-o" and tokens[j + 1 : j + 2] == ["noexec"]:
+                    return False
+                j += 2
+                continue
+            if opt.startswith("--"):
+                j += 1
+                continue
+            if opt.startswith("-") and len(opt) > 1:
+                if "c" in opt[1:] or "n" in opt[1:]:
+                    return False
+                stdin = stdin or "s" in opt[1:]
+                j += 1
+                continue
+            break
+        return stdin or j == len(tokens)
+    return False
 
 
 def _shell_c_script(segment: str) -> str | None:

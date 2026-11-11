@@ -99,6 +99,18 @@ READS = [
     "bash -c 'gh api repos/o/r/issues/5/comments --jq length'",
     # without -c the operand is a script file, and quoted text after it is data
     "bash run.sh 'gh api repos/o/r/issues/5/comments -f body=x'",
+    # gh rejects an unknown shorthand before sending anything
+    "gh api repos/o/r/issues/5/comments -sf body=LGTM",
+    # a quoted ')' is an option value, not the end of an enclosing group
+    "(gh api repos/o/r/issues/5/comments --template ')' -X GET)",
+    # ``--`` ends options: a later -f is the endpoint's positional, not a field
+    "gh api -- repos/o/r/issues/5/comments",
+    # heredoc bodies are data: a documented gh api write is not a write
+    "cat > doc.md <<'EOF'\ngh api repos/o/r/issues/5/comments -f body=x\nEOF",
+    "cat <<'EOF'\n$(gh api -X POST repos/o/r/issues/5/comments -f body=x)\nEOF",
+    'cat <<"EOF"\n`gh api repos/o/r/issues/5/comments -f body=x`\nEOF',
+    "cat <<EOF\ngh api repos/o/r/issues/5/comments -f body=x\nEOF",
+    "cat <<-'EOF'\n\tgh api repos/o/r/issues/5/comments -f body=x\n\tEOF",
 ]
 
 WRITES = [
@@ -146,6 +158,30 @@ WRITES = [
     "timeout 30 bash -lc 'cd /tmp && gh api repos/o/r/issues/5/comments -f body=x'",
     'sh -o errexit -c "gh api repos/o/r/issues/5/comments -f body=x"',
     "/bin/bash -e -c 'x=$(gh api repos/o/r/issues/5/comments -f body=x)'",
+    # a quoted ')' option value must not truncate the field that follows it
+    "gh api repos/o/r/issues/5/comments --template ')' -f body=x",
+    "gh api repos/o/r/issues/5/comments -q ')' -f body=x",
+    # short flags cluster the way gh's flag parser (pflag) allows
+    "gh api repos/o/r/issues/5/comments -if body=LGTM",
+    "gh api repos/o/r/issues/5/comments -ifbody=LGTM",
+    "gh api -iX POST repos/o/r/pulls/12/reviews",
+    "gh api -X=POST repos/o/r/pulls/12/reviews",
+    "gh api repos/o/r/issues/5/comments -i=false -f body=x",
+    "echo $((1 << 2))\ngh api repos/o/r/issues/5/comments -f body=x",
+    "((1 << 2))\ngh api repos/o/r/issues/5/comments -f body=x",
+    # the command after a heredoc terminator still runs, apostrophes in the body
+    # notwithstanding
+    "cat <<'EOF'\nDon't post yet\nEOF\ngh api repos/o/r/issues/5/comments -f body=x",
+    # an unquoted delimiter still expands substitutions in the body
+    "cat <<EOF\nid: $(gh api repos/o/r/issues/5/comments -f body=x --jq .id)\nEOF",
+    # quotes and comment markers are literal data in an unquoted heredoc
+    "cat <<EOF\n'$(gh api repos/o/r/issues/5/comments -f body=x)'\nEOF",
+    "cat <<EOF\n# $(gh api repos/o/r/issues/5/comments -f body=x)\nEOF",
+    # heredoc redirect operands are shell syntax, not gh shorthand flags
+    'gh api repos/o/r/issues/5/comments --input - <<-\'EOF\'\n\t{"body":"x"}\n\tEOF',
+    # a here-string is not a heredoc
+    'gh api repos/o/r/issues/5/comments --input - <<< \'{"body": "x"}\'',
+    "cat <<< 'EOF'\ngh api repos/o/r/issues/5/comments -f body=x",
 ]
 
 
@@ -224,6 +260,49 @@ def test_endpoint_in_field_value_is_not_comment() -> None:
         sigs = extract_signals_cc(_bash_msgs(cmd))
         assert sigs.get("comments_posted", 0) == 0, cmd
         assert sigs["gh_interactions"] == 0, cmd
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "bash",
+        "/bin/bash -e",
+        "sh -s -- arg",
+        "timeout 30 bash",
+        "bash > /dev/null",
+        "bash 2>/dev/null",
+    ],
+)
+def test_shell_stdin_heredoc_write_counts(header: str) -> None:
+    cmd = f"{header} <<'EOF'\ngh api repos/o/r/issues/5/comments -f body=x\nEOF"
+    sigs = extract_signals_cc(_bash_msgs(cmd))
+    assert sigs["gh_interactions"] == 1
+    assert sigs["comments_posted"] == 1
+
+
+@pytest.mark.parametrize(
+    "header", ["cat", "cat bash", "bash script.sh", "bash -c 'cat'", "bash -n"]
+)
+def test_nonexecuted_shell_stdin_heredoc_is_data(header: str) -> None:
+    cmd = f"{header} <<'EOF'\ngh api repos/o/r/issues/5/comments -f body=x\nEOF"
+    sigs = extract_signals_cc(_bash_msgs(cmd))
+    assert sigs["gh_interactions"] == 0
+    assert sigs.get("comments_posted", 0) == 0
+
+
+@pytest.mark.parametrize("tail", ["script.sh", "' > /dev/null'"])
+def test_shell_heredoc_with_trailing_script_operand_is_data(tail: str) -> None:
+    cmd = f"bash <<'EOF' {tail}\ngh api repos/o/r/issues/5/comments -f body=x\nEOF"
+    sigs = extract_signals_cc(_bash_msgs(cmd))
+    assert sigs["gh_interactions"] == 0
+    assert sigs.get("comments_posted", 0) == 0
+
+
+def test_shell_heredoc_with_trailing_redirect_executes() -> None:
+    cmd = "bash <<'EOF' > /dev/null\ngh api repos/o/r/issues/5/comments -f body=x\nEOF"
+    sigs = extract_signals_cc(_bash_msgs(cmd))
+    assert sigs["gh_interactions"] == 1
+    assert sigs["comments_posted"] == 1
 
 
 def test_bash_c_write_counts_comment() -> None:
