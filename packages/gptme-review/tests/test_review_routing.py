@@ -159,6 +159,32 @@ def test_admission_probe_failure_fails_open() -> None:
     assert routing.consensus_admission("o/r", resolve_cli=boom).mode == "unknown"
 
 
+def test_admission_config_error_does_not_grant_merge_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ReviewError from PRODUCTION config must not produce full/merge_authority.
+
+    Alice's report: when gptme-usage is present but harness-quota.toml has no
+    [model_routes] review, PRODUCTION.resolve raises ReviewError. The degraded
+    probe then resolves to llm (OpenRouter available). Without the re-probe fix
+    this returned ConsensusAdmission('full', merge_authority=True).
+    """
+
+    class _BrokenProduction:
+        def resolve(self, state: object) -> object:
+            raise core.ReviewError("harness-quota.toml missing [model_routes] 'review'")
+
+    monkeypatch.setattr(routing, "PRODUCTION", _BrokenProduction())
+
+    # OpenRouter is available (no blockers, no subscription panel) so the
+    # single-pass degraded probe will return llm.
+    be = FakeBackend()
+    result = routing.consensus_admission("o/r", resolve_cli=_cli(be))
+    assert result.mode == "unknown", f"expected unknown, got {result.mode}"
+    assert not result.merge_authority, "config error must not grant merge authority"
+    assert result.cause == "probe_error"
+
+
 def test_refusal_none_when_admitted() -> None:
     cli = _cli(FakeBackend((A, B, C), blocked=True))
     assert routing.consensus_route_refusal("o/r", resolve_cli=cli) is None
