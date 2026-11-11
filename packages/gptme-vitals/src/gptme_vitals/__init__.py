@@ -25,8 +25,20 @@ from gptme_vitals.routes import (
     RouteRegistryError,
     Visibility,
 )
+from gptme_vitals.theme import (
+    BASE_CSS,
+    THEME_INIT_JS,
+    TOKENS_CSS,
+    render_head_assets,
+    render_theme_toggle,
+)
 
 __all__ = [
+    "BASE_CSS",
+    "THEME_INIT_JS",
+    "TOKENS_CSS",
+    "render_head_assets",
+    "render_theme_toggle",
     "NAV_CSS",
     "DashboardRoute",
     "RefreshCadence",
