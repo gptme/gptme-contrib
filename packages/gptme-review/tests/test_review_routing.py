@@ -53,6 +53,22 @@ class FakeBackend(OpenRouterBackend):
 A, B, C = Rev("a", "fa"), Rev("b", "fb"), Rev("c", "fc")
 
 
+class _Resolved:
+    def cli_args(self) -> list[str]:
+        return ["--force", "--passes", "3", "--min-agreement", "2"]
+
+
+class _Production:
+    def resolve(self, state: object) -> _Resolved:
+        return _Resolved()
+
+
+@pytest.fixture(autouse=True)
+def _production_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--consensus`` expands through PRODUCTION, which reads workspace config."""
+    monkeypatch.setattr(routing, "PRODUCTION", _Production())
+
+
 def test_default_backend_routes_llm_and_agent() -> None:
     be = OpenRouterBackend()
     assert routing.resolve_route("o/r", backend=be).engine == "llm"
