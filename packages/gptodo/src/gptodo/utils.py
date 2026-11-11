@@ -690,6 +690,24 @@ def task_has_waiting_blocker(task: "TaskInfo") -> bool:
     return bool(waiting_for)
 
 
+def task_wait_gate_passed(task: "TaskInfo") -> bool:
+    """Return True when a task is still blocked although its ``wait:`` date has passed.
+
+    ``task_has_waiting_blocker`` treats any human ``waiting_for`` and any
+    ``state: waiting`` as a blocker regardless of ``wait:``; only machine
+    recurrence gates self-release. A ``wait:`` set as a re-check date therefore
+    never re-surfaces the task. This predicate finds those tasks so they can be
+    listed for re-checking (``gptodo ready --overdue``). It does not release
+    them: a human ``waiting_for`` may still be a real, unresolved event gate.
+    """
+    if task.wait is None:
+        return False
+    state = normalize_state(task.state or "", warn=False) if task.state else ""
+    if state in ("done", "cancelled", "expired", "someday", "draft"):
+        return False
+    return task_has_waiting_blocker(task) and not task_is_waiting_for_date(task)
+
+
 def task_pool(task: "TaskInfo") -> str:
     """Return effective pool for a task: 'frontier' or 'general'.
 
