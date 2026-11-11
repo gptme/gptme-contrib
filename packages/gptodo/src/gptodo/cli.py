@@ -3021,8 +3021,15 @@ def edit(
     if output_json:
 
         def json_safe(value: Any) -> Any:
-            # YAML mappings can have date keys, which default=str cannot handle.
+            # Keep every entry when distinct YAML keys stringify identically.
             if isinstance(value, dict):
+                keys = [str(key) for key in value]
+                if len(set(keys)) != len(keys):
+                    return {
+                        "$yaml_mapping": [
+                            [json_safe(key), json_safe(item)] for key, item in value.items()
+                        ]
+                    }
                 return {str(key): json_safe(item) for key, item in value.items()}
             if isinstance(value, (list, tuple)):
                 return [json_safe(item) for item in value]

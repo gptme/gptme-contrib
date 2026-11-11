@@ -172,6 +172,32 @@ def test_json_replacing_extension_with_yaml_date_keys(tasks_dir: Path, monkeypat
     assert "value: new" in (tasks_dir / "t.md").read_text()
 
 
+@pytest.mark.parametrize(
+    "mapping, expected",
+    [
+        ('{1: numeric, "1": textual}', [[1, "numeric"], ["1", "textual"]]),
+        (
+            '{2026-06-01: date, "2026-06-01": text}',
+            [["2026-06-01", "date"], ["2026-06-01", "text"]],
+        ),
+    ],
+)
+def test_json_preserves_colliding_yaml_keys(
+    tasks_dir: Path, monkeypatch, mapping: str, expected: list
+) -> None:
+    monkeypatch.setenv("GPTODO_EXTRA_FRONTMATTER_FIELDS", "custom_field")
+    (tasks_dir / "t.md").write_text(
+        f"---\nstate: todo\ncustom_field:\n  nested: [{mapping}]\n---\n# t\n"
+    )
+    payload, code = _edit_json(tasks_dir, "t", "--set", "custom_field", "replacement")
+    assert code == payload["exit"] == 0
+    assert payload["tasks"][0]["changes"]["custom_field"] == {
+        "from": {"nested": [{"$yaml_mapping": expected}]},
+        "to": "replacement",
+    }
+    assert "custom_field: replacement" in (tasks_dir / "t.md").read_text()
+
+
 def test_json_invalid_extension_refusal(tasks_dir: Path, monkeypatch) -> None:
     monkeypatch.setenv("GPTODO_EXTRA_FRONTMATTER_FIELDS", "custom_field")
     payload, code = _edit_json(tasks_dir, "t", "--set", "custom_field", "{invalid")

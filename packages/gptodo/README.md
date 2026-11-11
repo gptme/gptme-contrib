@@ -426,6 +426,14 @@ or `null` when a batch-wide refusal cannot identify one task. Click argument/opt
 errors happen before the edit callback, exit 2, and use the usual stderr diagnostics
 rather than JSON. Unexpected exceptions are not converted into refusal responses.
 
+YAML values outside JSON's type system are normalized for the response: dates and
+other non-JSON scalars become strings, and mapping keys become strings. If distinct
+keys would collide (for example, integer `1` and string `"1"`), that mapping is
+represented as `{"$yaml_mapping": [[key, value], ...]}` instead, preserving every
+entry in order. Keys in this pair list use the same scalar normalization, so the
+response is a JSON diff, not a lossless YAML round-trip format. These conversions
+apply recursively and do not change the stored frontmatter.
+
 For a recurring task that resets on `done`, the per-task result also includes
 `"recurred": true` and `"next_wait": "YYYY-MM-DD..."`.
 
