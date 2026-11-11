@@ -79,6 +79,7 @@ class OpenRouterBackend:
     """Backend for hosts with no subscription panel."""
 
     def openrouter_unavailable(self) -> bool:
+        """Always False; subclass and override to wire a circuit-breaker."""
         return False
 
     def repo_is_sensitive(self, repo: str) -> bool:
