@@ -84,6 +84,17 @@ def test_default_backend_refuses_subscription() -> None:
         routing.resolve_route("o/r", backend=_SensitiveBackend(), engine="subscription")
 
 
+def test_default_backend_refuses_subscription_on_public_repo() -> None:
+    """Public repo, default backend: no panel means a shortage refusal, not a policy one."""
+
+    class _PublicBackend(OpenRouterBackend):
+        def repo_is_sensitive(self, repo: str) -> bool:
+            return False
+
+    with pytest.raises(core.ReviewError, match="only 0 independent"):
+        routing.resolve_route("o/r", backend=_PublicBackend(), engine="subscription")
+
+
 def test_outage_with_no_panel_refuses_instead_of_llm() -> None:
     be = FakeBackend(blocked=True)
     with pytest.raises(core.ReviewError):
