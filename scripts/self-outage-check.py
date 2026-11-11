@@ -149,9 +149,14 @@ _SECRET_PATTERNS = (
 
 # Opening of a quoted value for a secret-ish key: ``password="``, ``"token": '``.
 _QUOTED_SECRET_OPEN = re.compile(
-    r"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|"
+    r"(?i)\b(?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?key|private[_-]?key|"
+    r"access[_-]?token|refresh[_-]?token|token|secret|credentials?|"
     r"password|passwd|authorization|x-api-key)[\"']?\s*[:=]\s*([\"'])"
 )
+
+
+# Whitespace, then the start of a ``key=value`` / ``"key": value`` assignment.
+_NEXT_ASSIGNMENT = re.compile(r"""\s+["']?[\w.-]+["']?\s*[:=]""")
 
 
 def _redact_ambiguous_quoted(text: str) -> str:
@@ -160,8 +165,9 @@ def _redact_ambiguous_quoted(text: str) -> str:
     ``password="alpha "beta" omega" tail`` has no unique end: the value can't be
     told from the inner quotes, so the regex rules below would stop at the first
     one and publish ``beta``/``omega``. A closing quote is trusted only when it
-    is followed by end/whitespace/punctuation *and* the rest of the string has
-    balanced quotes of the same kind; otherwise the quoting is ambiguous and we
+    is followed by end/punctuation, or by whitespace and either no further quote
+    or another ``key=`` assignment, *and* the rest of the string has balanced
+    quotes of the same kind; otherwise the quoting is ambiguous and we
     redact greedily — over-redacting costs diagnostic detail, a leak costs a
     secret. Unambiguous values are left to the regex rules.
     """
@@ -186,7 +192,13 @@ def _redact_ambiguous_quoted(text: str) -> str:
             return text
         after = text[close + 1 :]
         stray = re.sub(r"\\.", "", after).count(quote)
-        if (after[:1].isalnum() or after[:1] == "_") or stray % 2 == 1:
+        if after[:1].isalnum() or after[:1] == "_" or stray % 2 == 1:
+            return text[: m.end()] + "[REDACTED]"
+        # Whitespace after the close quote is not a delimiter by itself: with
+        # balanced quotes left over, ``password="alpha " beta " omega" tail``
+        # still has inner quotes. Trust it only if no quote follows, or the
+        # next token starts another ``key=``/``key:`` assignment.
+        if after[:1].isspace() and stray and not _NEXT_ASSIGNMENT.match(after):
             return text[: m.end()] + "[REDACTED]"
         pos = close + 1
 
@@ -264,7 +276,7 @@ def _error_text(record: dict) -> str:
 # Dict keys whose value is a credential, matched case-insensitively with ``-``
 # and ``_`` ignored (``api_key``, ``apiKey``, ``X-Api-Key``, ``client_secret``).
 _SECRET_KEY_RE = re.compile(
-    r"apikey|token|secret|passw(?:or)?d|authorization|credential|privatekey"
+    r"apikey|accesskey|token|secret|passw(?:or)?d|authorization|credential|privatekey"
 )
 
 

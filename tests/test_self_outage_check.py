@@ -926,6 +926,21 @@ def test_ambiguous_quoted_secret_in_structured_value_redacted(
     assert "login failed" in sample
 
 
+@pytest.mark.parametrize("key", ["password", "client_secret", "aws_secret_access_key"])
+@pytest.mark.parametrize("structured", [False, True])
+def test_whitespace_separated_inner_quotes_redact_to_end(
+    tmp_path: Path, key: str, structured: bool
+) -> None:
+    error = f'login failed: {key}="alpha " beta " omega" tail'
+    sample, body = _sample_for(
+        tmp_path, {"message": error, "code": 401} if structured else error
+    )
+    for leaked in ("alpha", "beta", "omega", "tail"):
+        assert leaked not in sample
+        assert leaked not in body
+    assert "login failed" in sample
+
+
 def test_unbalanced_trailing_quote_redacts_to_end() -> None:
     # Closing quote looks fine (followed by a space) but a stray quote later
     # means the quoting is broken, so the extent is a guess.
@@ -977,18 +992,24 @@ def test_structured_redaction_still_scrubs_embedded_secrets_in_free_text() -> No
     assert out == {"detail": "token [REDACTED] rejected", "n": 3}
 
 
-def test_deeply_nested_error_survives_structural_redaction(tmp_path: Path) -> None:
+def _walk_hits_recursion_limit(_raw: object) -> object:
+    raise RecursionError("maximum recursion depth exceeded")
+
+
+def test_deeply_nested_error_survives_structural_redaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Regression: _redact_structured() is recursive, so nesting that
     # json.loads() (and therefore load_records()) accepts could raise
     # RecursionError inside _redacted_error_text() and abort assess() before
     # any escalation — the failure mode the iterative _is_structured_403()
     # walk was introduced to prevent (contrib#2038, fp 39d8ac08fea2).
-    # 1400 is past the recursive walk's limit but still parses as JSON.
-    nested: Any = {"code": 403, "token": "t0ps3cret"}
-    for _ in range(1400):
-        nested = [nested]
-    with pytest.raises(RecursionError):
-        soc._redact_structured(nested)
+    # The walk's real depth limit varies with the interpreter (frames per
+    # nested list differ between 3.11 and 3.12) and with pytest's own stack,
+    # so force the exhaustion instead of building a depth that only trips it on
+    # one Python version. The guard is what is under test.
+    monkeypatch.setattr(soc, "_redact_structured", _walk_hits_recursion_limit)
+    nested: Any = [[{"code": 403, "token": "t0ps3cret"}]]
     assert soc._redacted_error_text({"error": nested}) == "<unserializable list error>"
 
     records = [rec(40, "productive")]
@@ -1009,10 +1030,25 @@ def test_structured_redaction_does_not_alter_classification(tmp_path: Path) -> N
     records = [rec(40, "productive")]
     for h in (1, 2, 3, 4):
         r = rec(h, "failed", "auth")
-        r["error"] = {"code": 403, "token": "t0ps3cret value"}
+        r["error"] = {"token": {"code": 403, "message": "t0ps3cret value"}}
         records.append(r)
     write_records(tmp_path, records)
     status = assess(tmp_path)
     assert status["billing_outage"] is True
     assert "t0ps3cret" not in status["sample_error"]
     assert "value" not in status["sample_error"]
+    assert "403" not in status["sample_error"]
+    assert json.loads(status["sample_error"]) == {"token": "[REDACTED]"}
+
+
+@pytest.mark.parametrize("key", ["access_key", "accessKey", "access-key"])
+def test_access_key_structured_value_replaced_outright(
+    tmp_path: Path, key: str
+) -> None:
+    # Regression (contrib#2070 review, fp 9bb901e28cd5): the structural key
+    # matcher omitted ``access_key`` although the text redactor knows it, so a
+    # value with a space (which no text rule can bound) was published verbatim.
+    sample, body = _sample_for(tmp_path, {key: "alpha beta", "code": 401})
+    for leaked in ("alpha", "beta"):
+        assert leaked not in sample
+        assert leaked not in body
