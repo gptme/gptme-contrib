@@ -23,6 +23,7 @@ Features:
 
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -3033,9 +3034,13 @@ def edit(
                 return {str(key): json_safe(item) for key, item in value.items()}
             if isinstance(value, (list, tuple)):
                 return [json_safe(item) for item in value]
+            if isinstance(value, float) and not math.isfinite(value):
+                return str(value)
             return value
 
-        print(json.dumps(json_safe({"tasks": task_results, "exit": 0}), default=str))
+        print(
+            json.dumps(json_safe({"tasks": task_results, "exit": 0}), default=str, allow_nan=False)
+        )
     else:
         # Show success message
         count = len(target_tasks)

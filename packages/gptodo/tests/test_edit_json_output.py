@@ -198,6 +198,31 @@ def test_json_preserves_colliding_yaml_keys(
     assert "custom_field: replacement" in (tasks_dir / "t.md").read_text()
 
 
+@pytest.mark.parametrize("scalar, expected", [(".nan", "nan"), (".inf", "inf"), ("-.inf", "-inf")])
+@pytest.mark.parametrize("nested", [False, True])
+def test_json_normalizes_nonfinite_yaml_floats(
+    tasks_dir: Path, monkeypatch, scalar: str, expected: str, nested: bool
+) -> None:
+    monkeypatch.setenv("GPTODO_EXTRA_FRONTMATTER_FIELDS", "custom_field")
+    value = f"{{nested: [{scalar}]}}" if nested else scalar
+    (tasks_dir / "t.md").write_text(f"---\nstate: todo\ncustom_field: {value}\n---\n# t\n")
+    result = CliRunner().invoke(
+        cli, ["edit", "--json", "t", "--set", "custom_field", "replacement"]
+    )
+    assert result.exit_code == 0, result.exception
+
+    def reject_constant(token: str) -> None:
+        pytest.fail(f"Non-JSON numeric token in stdout: {token}")
+
+    payload = json.loads(result.stdout, parse_constant=reject_constant)
+    assert payload["exit"] == 0
+    assert payload["tasks"][0]["changes"]["custom_field"] == {
+        "from": {"nested": [expected]} if nested else expected,
+        "to": "replacement",
+    }
+    assert "custom_field: replacement" in (tasks_dir / "t.md").read_text()
+
+
 def test_json_invalid_extension_refusal(tasks_dir: Path, monkeypatch) -> None:
     monkeypatch.setenv("GPTODO_EXTRA_FRONTMATTER_FIELDS", "custom_field")
     payload, code = _edit_json(tasks_dir, "t", "--set", "custom_field", "{invalid")

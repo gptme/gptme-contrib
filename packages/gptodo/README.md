@@ -427,7 +427,8 @@ errors happen before the edit callback, exit 2, and use the usual stderr diagnos
 rather than JSON. Unexpected exceptions are not converted into refusal responses.
 
 YAML values outside JSON's type system are normalized for the response: dates and
-other non-JSON scalars become strings, and mapping keys become strings. If distinct
+other non-JSON scalars become strings, non-finite floats become `"nan"`, `"inf"`, or
+`"-inf"` strings, and mapping keys become strings. Finite numbers remain numbers. If distinct
 keys would collide (for example, integer `1` and string `"1"`), that mapping is
 represented as `{"$yaml_mapping": [[key, value], ...]}` instead, preserving every
 entry in order. Keys in this pair list use the same scalar normalization, so the
