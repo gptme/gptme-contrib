@@ -236,12 +236,11 @@ def resolve_route(
                 f"subscription review refused for private/unknown repository: {why}"
             )
     independent = distinct_families(available)
-    # Overflow gives an unpinned 2-of-3 request a fourth family when the
+    # Overflow gives an unpinned 2-of-3 request a third family when the
     # default roster left exactly two. The backend decides whether the extra
-    # family exists (the brain keeps the Copilot opt-in on it, so with the opt-in
-    # off this path cannot add the third family and resolve_route refuses; that
-    # refusal is intended, see idea backlog #6079 and
-    # knowledge/analysis/2026-10-20-two-family-overflow-contract.md).
+    # family exists (a host may gate it behind an opt-in; with the opt-in off
+    # this path cannot add the third family and resolve_route refuses, which is
+    # intended).
     if (
         not pinned
         and not sensitive
@@ -293,7 +292,12 @@ def resolve_cli_route(
     parser.add_argument("--model")
     parser.add_argument("--passes", type=int, default=CONSENSUS_PASSES)
     parser.add_argument("--min-agreement", type=int, default=None)
-    args, _ = parser.parse_known_args(expanded)
+    try:
+        args, _ = parser.parse_known_args(expanded)
+    except (
+        SystemExit
+    ) as e:  # argparse exits on bad argv; honour the ReviewError contract
+        raise ReviewError(f"invalid review argv: {expanded!r}") from e
     if args.min_agreement is None:
         args.min_agreement = min(CONSENSUS_MIN_AGREEMENT, args.passes)
     return resolve(

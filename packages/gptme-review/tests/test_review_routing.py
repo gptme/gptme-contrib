@@ -222,3 +222,10 @@ def test_main_exit_codes(capsys: pytest.CaptureFixture[str]) -> None:
     assert capsys.readouterr().out.strip() == "llm"
     refused = _cli(FakeBackend(blocked=True))
     assert routing.main(["o/r", "--passes", "1"], resolve_cli=refused) == 75
+
+
+def test_malformed_argv_raises_review_error_not_system_exit() -> None:
+    cli = _cli(FakeBackend())
+    with pytest.raises(core.ReviewError, match="invalid review argv"):
+        cli(["o/r", "--passes", "not-an-int"])
+    assert routing.main(["o/r", "--passes", "x"], resolve_cli=cli) == 75
