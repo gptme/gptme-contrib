@@ -162,6 +162,21 @@ gptme-sessions search "rate limit" --days 30
 `--since` accepts sub-day windows and natural phrasing (`30m`, `2h`, `7d`, `2w`,
 `"2 hours ago"`, `all`).
 
+### Threads
+
+```bash
+gptme-sessions threads --since 7d --json   # each session's best predecessor + thread id
+gptme-sessions thread a1b2                  # one session's ancestry and descendants
+```
+
+`threads` mines evidence links between sessions (parent ids, journal mentions,
+cited commits, shared tasks/PRs) and keeps each session's single strongest link
+to an earlier one, so each tree is a thread of work (`gptme_sessions.threads`).
+Journals named by `journal_path` are digested for references; relative paths
+resolve against `--journal-root` (default: the record's project dir).
+`--agent` names the agent the records belong to; `--min-weight` and
+`--coherence` tune link strength and the topic-coherence penalty.
+
 ### All commands
 
 | Group | Commands |
@@ -171,7 +186,7 @@ gptme-sessions search "rate limit" --days 30
 | Trajectories | `discover`, `signals PATH` (productivity signals, grade, `--usage`), `transcript PATH` (normalised transcript), `replay TARGET` (terminal replay) |
 | Classify & grade | `classify`, `classify-stats`, `auto-tag`, `judge`, `regrade`, `repair-grades` |
 | Maintenance | `dedup` (merge duplicate records), `rotate` (archive records older than `--keep-days`, default 30) |
-| Provenance | `blame` |
+| Provenance | `blame`, `threads`, `thread ID` |
 
 Run `gptme-sessions <command> --help` for options.
 
