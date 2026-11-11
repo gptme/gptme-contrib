@@ -3554,6 +3554,64 @@ def greptile_satisfies_ai_review(
     )
 
 
+# The operator's APPROVED review is a human merge authorization (ErikBjare/bob#1471).
+# Verify the numeric account id, never the login alone.
+_OPERATOR_APPROVERS = {"ErikBjare": 1405370}
+# Review states that change a reviewer's verdict; COMMENTED and PENDING do not.
+_VERDICT_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "DISMISSED"})
+
+
+def operator_approval_ai_review_waiver(
+    *, repo: str, number: int, head_sha: str
+) -> str | None:
+    """Waive the AI-review *requirement* when the operator approved the exact head.
+
+    Returns a warning string, else None. Only the machine-review requirement is
+    waived: CI, unresolved human threads, mergeability, draft state and path
+    policy are evaluated as before. The operator's latest verdict review must be
+    APPROVED on ``head_sha`` exactly, so a later CHANGES_REQUESTED or dismissal,
+    or any new push, revokes it. A failed API read fails closed.
+    """
+    if not head_sha:
+        return None
+    raw = run_gh_checked(
+        [
+            "api",
+            f"repos/{repo}/pulls/{number}/reviews",
+            "--paginate",
+            "--jq",
+            ".[] | {id, state, commit_id, user_id: .user.id,"
+            " login: .user.login, type: .user.type}",
+        ]
+    )
+    if raw is None:
+        return None
+    latest: dict[str, dict[str, Any]] = {}
+    try:
+        for line in raw.splitlines():
+            if not line.strip():
+                continue
+            review = json.loads(line)
+            login = review.get("login")
+            if (
+                login in _OPERATOR_APPROVERS
+                and review.get("user_id") == _OPERATOR_APPROVERS[login]
+                and review.get("type") == "User"
+                and review.get("state") in _VERDICT_REVIEW_STATES
+            ):
+                # The reviews endpoint lists in submission order.
+                latest[login] = review
+    except (ValueError, TypeError, AttributeError):
+        return None
+    for login, review in latest.items():
+        if review.get("state") == "APPROVED" and review.get("commit_id") == head_sha:
+            return (
+                f"AI review waived: {login} approved head {head_sha[:12]} "
+                "(operator approval authorizes merge, ErikBjare/bob#1471)"
+            )
+    return None
+
+
 def evaluate_pr(
     repo: str, number: int, *, workspace_repos: list[str] | None
 ) -> CheckResult:
@@ -3800,6 +3858,57 @@ def evaluate_pr(
             greptile_unresolved=greptile_unresolved,
             greptile_score=greptile_score,
         )
+        # Operator approval waives machine review, not verification that human
+        # threads are resolved. The human-thread counter reports zero on an
+        # unreadable fetch, so this fallback must retain the AI-review blocker.
+        if not waiver and shared_review_data is not None:
+            waiver = operator_approval_ai_review_waiver(
+                repo=repo, number=number, head_sha=result.head_sha or ""
+            )
+            if waiver:
+                # The approval can postdate the initial thread snapshot and
+                # contain inline feedback of its own. The human gate below
+                # must consume thread state read after that approval.
+                shared_review_data = _fetch_greptile_review_data(repo, number)
+                if shared_review_data is None:
+                    result.reasons.append(
+                        "Could not verify review thread state (API failure)"
+                    )
+                    waiver = None
+                else:
+                    # Approval does not waive the independent fresh-Greptile
+                    # gate. Preserve findings that arrived with this refresh,
+                    # including a review absent from the initial snapshot.
+                    # Use the initial gate's review-cycle filtering so approval
+                    # does not resurrect superseded Greptile threads.
+                    refreshed_greptile = fetch_greptile_status(
+                        repo, number, review_data=shared_review_data
+                    )
+                    refreshed_greptile_unresolved = int(
+                        refreshed_greptile.get("unresolved") or 0
+                    )
+                    # A summary can arrive without inline threads. Always
+                    # refresh its score as well as the thread snapshot.
+                    signal = _fetch_greptile_summary_signal(repo, number)
+                    signal_sha = signal.get("reviewed_commit")
+                    if greptile_is_fresh or (
+                        isinstance(signal_sha, str)
+                        and _sha_matches_head(signal_sha, result.head_sha or "")
+                    ):
+                        if refreshed_greptile_unresolved:
+                            result.reasons.append(
+                                f"Greptile reviewed (score {signal.get('score')}/5); "
+                                f"{refreshed_greptile_unresolved} unresolved thread(s)"
+                            )
+                        refreshed_score = signal.get("score")
+                        min_score = _parse_self_merge_min_greptile_score()
+                        if type(refreshed_score) is int and refreshed_score < min_score:
+                            reason = (
+                                f"Greptile score {refreshed_score}/5 "
+                                f"below floor {min_score}/5"
+                            )
+                            if reason not in result.reasons:
+                                result.reasons.append(reason)
         if waiver:
             result.warnings.append(waiver)
         else:
