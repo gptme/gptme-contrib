@@ -3181,19 +3181,14 @@ REVIEW_KEY_CONFIG_PATHS: tuple[Path, ...] = (
 REVIEW_KEY_NAMES: tuple[str, ...] = ("OPENROUTER_API_KEY_REVIEW", "OPENROUTER_API_KEY")
 
 
-def _resolve_review_key_portable(
-    environ: Mapping[str, str] | None = None,
-    config_paths: tuple[Path, ...] | None = None,
-) -> str | None:
-    """Specific-beats-generic review key lookup with no workspace dependency.
+def _config_env(config_paths: tuple[Path, ...] | None = None) -> dict[str, str]:
+    """Merged string values of the gptme config ``[env]`` tables, later files win.
 
-    Each name is checked in the environment and then in the merged config
-    ``[env]`` before the next, more generic name is considered. That is the
-    order :func:`review_api_key` documents.
+    Unreadable, non-UTF-8 or malformed files are skipped, as is an ``[env]``
+    that is not a table: one broken file must not hide a valid one after it.
     """
     import tomllib
 
-    env = os.environ if environ is None else environ
     paths = REVIEW_KEY_CONFIG_PATHS if config_paths is None else config_paths
     config_env: dict[str, str] = {}
     for path in paths:
@@ -3208,6 +3203,21 @@ def _resolve_review_key_portable(
         for name, value in env_table.items():
             if isinstance(value, str):
                 config_env[name] = value
+    return config_env
+
+
+def _resolve_review_key_portable(
+    environ: Mapping[str, str] | None = None,
+    config_paths: tuple[Path, ...] | None = None,
+) -> str | None:
+    """Specific-beats-generic review key lookup with no workspace dependency.
+
+    Each name is checked in the environment and then in the merged config
+    ``[env]`` before the next, more generic name is considered. That is the
+    order :func:`review_api_key` documents.
+    """
+    env = os.environ if environ is None else environ
+    config_env = _config_env(config_paths)
     for name in REVIEW_KEY_NAMES:
         key = env.get(name, "").strip() or config_env.get(name, "").strip()
         if key:
@@ -4809,6 +4819,8 @@ def _trigger_matches(paths: Sequence[str], patterns: tuple[str, ...]) -> bool:
 #:     agent brain repos should contain only agent-specific logic.
 #:     Two brains in one family also lets the reviewer catch the same helper
 #:     being forked into both, which is the drift gptme-contrib exists to stop.
+#:     Brain repos are host config, not package literals: see
+#:     :func:`review_brain_repos`.
 #:
 #: ``"component-split"`` (T2c-ii) — one system split across repos by component,
 #:     coupled by API contracts rather than shared code.  A REST shape or
@@ -4818,7 +4830,7 @@ def _trigger_matches(paths: Sequence[str], patterns: tuple[str, ...]) -> bool:
 #:
 #: Each entry: ``(family_name, family_type, frozenset_of_repos)``.
 _GPTME_FAMILY: frozenset[str] = frozenset(
-    ["gptme/gptme", "gptme/gptme-contrib", "gptme/gptme-cloud", "ErikBjare/bob"]
+    ["gptme/gptme", "gptme/gptme-contrib", "gptme/gptme-cloud"]
 )
 _ACTIVITYWATCH_FAMILY: frozenset[str] = frozenset(
     [
@@ -4839,12 +4851,42 @@ REPO_FAMILIES: tuple[tuple[str, str, frozenset[str]], ...] = (
 )
 
 
+#: Family that configured agent brain repos join.
+BRAIN_REPO_FAMILY = "gptme"
+#: Environment / config ``[env]`` name listing agent brain repos, e.g.
+#: ``GPTME_REVIEW_BRAIN_REPOS = "ErikBjare/bob,ErikBjare/alice"``.  It lives in
+#: ``[env]`` because gptme strips unknown top-level config tables on load.
+REVIEW_BRAIN_REPOS_ENV = "GPTME_REVIEW_BRAIN_REPOS"
+
+
+def review_brain_repos(
+    environ: Mapping[str, str] | None = None,
+    config_paths: tuple[Path, ...] | None = None,
+) -> frozenset[str]:
+    """Agent brain repos (``owner/name``) that join :data:`BRAIN_REPO_FAMILY`.
+
+    Each agent host lists its own brain and the peer brains it reviews, so the
+    package carries no agent names.  A non-empty environment value beats the
+    config ``[env]`` value, as for the review key.  Entries are separated by
+    commas or whitespace.
+    """
+    env = os.environ if environ is None else environ
+    raw = env.get(REVIEW_BRAIN_REPOS_ENV, "").strip()
+    if not raw:
+        raw = _config_env(config_paths).get(REVIEW_BRAIN_REPOS_ENV, "")
+    return frozenset(name for name in re.split(r"[\s,]+", raw) if name)
+
+
 def repo_family(repo: str) -> tuple[str, str, frozenset[str]] | None:
-    """Return ``(family_name, family_type, all_repos)`` for *repo*, or None."""
-    for entry in REPO_FAMILIES:
-        _, _, repos = entry
+    """Return ``(family_name, family_type, all_repos)`` for *repo*, or None.
+
+    :data:`BRAIN_REPO_FAMILY` includes this host's :func:`review_brain_repos`.
+    """
+    for name, family_type, repos in REPO_FAMILIES:
+        if name == BRAIN_REPO_FAMILY:
+            repos = repos | review_brain_repos()
         if repo in repos:
-            return entry
+            return name, family_type, repos
     return None
 
 
