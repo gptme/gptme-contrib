@@ -76,8 +76,12 @@ def test_default_backend_routes_llm_and_agent() -> None:
 
 
 def test_default_backend_refuses_subscription() -> None:
+    class _SensitiveBackend(OpenRouterBackend):
+        def repo_is_sensitive(self, repo: str) -> bool:
+            return True
+
     with pytest.raises(core.ReviewError, match="no subscription reviewers configured"):
-        routing.resolve_route("o/r", backend=OpenRouterBackend(), engine="subscription")
+        routing.resolve_route("o/r", backend=_SensitiveBackend(), engine="subscription")
 
 
 def test_outage_with_no_panel_refuses_instead_of_llm() -> None:

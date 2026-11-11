@@ -249,7 +249,7 @@ def resolve_route(
         and len(independent) == 2
     ):
         extra, extra_skipped = backend.overflow_reviewers(repo)
-        skipped.update(extra_skipped)
+        skipped = {**skipped, **extra_skipped}
         independent = distinct_families([*independent, *extra])
     if len(independent) < passes:
         raise ReviewError(
