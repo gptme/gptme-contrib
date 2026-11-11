@@ -397,23 +397,14 @@ def consensus_admission(
             f"degraded probe failed: {type(exc).__name__}: {exc}",
             cause="probe_error",
         )
-    if single.engine != "subscription" or not single.reviewers:
-        # The single-pass probe resolved outside subscription (e.g. llm) or
-        # returned no reviewers. This can happen when the first probe failed
-        # for a config reason while OpenRouter is available, in which case the
-        # consensus route is still refused. Re-probe before granting merge
-        # authority; return unknown on a second refusal so callers dispatch
-        # but do not self-merge.
-        try:
-            resolve_cli([repo, "--consensus"])
-        except Exception:  # noqa: BLE001
-            return ConsensusAdmission(
-                "unknown",
-                f"consensus route still refused: {reason}",
-                cause="probe_error",
-            )
+    # Do not re-probe consensus: the first probe already refused it, and a
+    # re-probe that happens to succeed only means state changed in the brief
+    # window between probes — granting merge authority on a race.
+    if not single.reviewers:
         return ConsensusAdmission(
-            "full", None, merge_authority=True, cause="route_admitted"
+            "unknown",
+            f"degraded probe returned {single.engine!r} with no reviewers: {reason}",
+            cause="probe_error",
         )
     return ConsensusAdmission(
         "degraded-1",

@@ -185,6 +185,32 @@ def test_admission_config_error_does_not_grant_merge_authority(
     assert result.cause == "probe_error"
 
 
+def test_admission_no_reprobe_race(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-probe race must not grant merge_authority on flaky state.
+
+    If PRODUCTION is broken on the first consensus probe but would succeed on a
+    re-probe, the old code granted full/merge_authority=True. The fix removes the
+    re-probe entirely; a second call to PRODUCTION must never happen after the
+    first refusal.
+    """
+    call_count = 0
+
+    class _FlakyProduction:
+        def resolve(self, state: object) -> object:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise core.ReviewError("quota temporarily unavailable")
+            return _Resolved()  # would have granted full on a re-probe
+
+    monkeypatch.setattr(routing, "PRODUCTION", _FlakyProduction())
+    be = FakeBackend()  # OpenRouter available, no subscription panel
+    result = routing.consensus_admission("o/r", resolve_cli=_cli(be))
+    assert result.mode != "full", "race must not grant full admission"
+    assert not result.merge_authority, "race must not grant merge authority"
+    assert call_count == 1, "consensus must not be re-probed after first refusal"
+
+
 def test_refusal_none_when_admitted() -> None:
     cli = _cli(FakeBackend((A, B, C), blocked=True))
     assert routing.consensus_route_refusal("o/r", resolve_cli=cli) is None
