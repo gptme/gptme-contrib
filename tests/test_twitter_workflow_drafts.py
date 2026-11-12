@@ -2124,3 +2124,25 @@ def test_thread_context_reads_one_page_of_ten(workflow_module: Any) -> None:
     )
     assert len(searches) == 1
     assert searches[0]["max_results"] == 10
+
+
+def test_live_duplicate_guard_preserves_search_depth(workflow_module, monkeypatch):
+    """A reply beyond the cheap context window must still prevent a second post."""
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(username="TestBotUser")),
+    )
+    posts = [
+        {"id": str(i), "author": "someoneelse", "replied_to_id": "4242"}
+        for i in range(10)
+    ] + [{"id": "9001", "author": "TestBotUser", "replied_to_id": "4242"}]
+    calls = []
+
+    def conversation(client, tweet_id, max_pages=1, max_tweets_per_page=10):
+        calls.append((tweet_id, max_pages, max_tweets_per_page))
+        return posts[: max_pages * max_tweets_per_page]
+
+    monkeypatch.setattr(workflow_module, "get_conversation_thread", conversation)
+    assert workflow_module._find_live_duplicate_reply_ids(object(), "4242") == ["9001"]
+    assert calls == [("4242", 3, 100)]

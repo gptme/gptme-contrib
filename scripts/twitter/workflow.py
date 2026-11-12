@@ -1246,7 +1246,12 @@ def _find_live_duplicate_reply_ids(client, tweet_id: str) -> list[str]:
         if not username:
             return []
 
-        thread_context = get_conversation_thread(client, tweet_id)
+        # Keep the safety check's previous search depth: our reply may be older
+        # than the ten posts fetched for ordinary LLM context. This runs only
+        # before posting, not for every tweet we evaluate.
+        thread_context = get_conversation_thread(
+            client, tweet_id, max_pages=3, max_tweets_per_page=100
+        )
         tweet_id = str(tweet_id)
         username = username.lower()
 

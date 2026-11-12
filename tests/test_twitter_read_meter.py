@@ -90,3 +90,40 @@ def test_failed_response_is_not_counted(tw, monkeypatch):
     tw.install_read_meter()
     tw.tweepy.Client(bearer_token="x").request("GET", "/2/tweets")
     assert tw.daily_reads_used() == 0
+
+
+@pytest.mark.parametrize("return_type", ["response", "dict", "http"])
+def test_meter_wraps_http_response_before_tweepy_conversion(
+    tw, monkeypatch, return_type
+):
+    """Exercise real BaseClient.request and _make_request, not a request stub."""
+    import requests
+
+    types = {
+        "response": tw.tweepy.Response,
+        "dict": dict,
+        "http": requests.Response,
+    }
+    client = tw.tweepy.Client(bearer_token="x", return_type=types[return_type])
+    calls = []
+
+    def transport(method, url, **kwargs):
+        calls.append((method, url))
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b'{"data": [{"id": "1", "text": "hello", "edit_history_tweet_ids": ["1"]}], "includes": {"users": [{"id": "2", "name": "Bot", "username": "bot"}]}}'
+        return response
+
+    monkeypatch.setattr(client.session, "request", transport)
+    # Restore the real request on teardown, even though installation patches it.
+    monkeypatch.setattr(
+        tw.tweepy.client.BaseClient, "request", tw.tweepy.client.BaseClient.request
+    )
+    monkeypatch.setenv("TWITTER_DAILY_READ_LIMIT", "3")
+    tw.install_read_meter()
+    result = client.get_tweets(ids=[1])
+    assert isinstance(result, types[return_type])
+    assert tw.daily_reads_used() == 3
+    with pytest.raises(tw.DailyReadLimitReached):
+        client.get_tweets(ids=[1])
+    assert len(calls) == 1
