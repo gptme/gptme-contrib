@@ -658,7 +658,7 @@ def review_pr(
 @click.option(
     "--config",
     "config_path",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    type=click.Path(dir_okay=False, path_type=Path),
     default=None,
     help="Path to harness-quota.toml (default: ~/.config/gptme/harness-quota.toml)",
 )
@@ -669,23 +669,106 @@ def review_pr(
     help="Block-registry state directory (default: ~/.local/share/gptme/block-registry)",
 )
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option("--lane", default=None, help="Decide for this lane ([lanes.<lane>])")
+@click.option(
+    "--class", "cls", default=None, help="Work class ([lanes.<lane>.<class>])"
+)
+@click.option("--work-item", default=None, help="Work item id, recorded only")
+@click.option(
+    "--exclude",
+    "excludes",
+    multiple=True,
+    help="backend:model that just failed (repeatable; pairs with --reason)",
+)
+@click.option(
+    "--reason",
+    "reasons",
+    multiple=True,
+    help="Why the excluded arm failed: rate_limited, auth or crash",
+)
+@click.option(
+    "--default-arm", default=None, help="backend:model to run if routing fails"
+)
+@click.option("--default-effort", default=None, help="Effort to run if routing fails")
+@click.option("--shadow", is_flag=True, help="Log the decision; always exit 0")
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["json", "shell"]),
+    default="json",
+    show_default=True,
+    help="Lane decision output (shell: KEY=value lines for eval)",
+)
+@click.option("--explain", is_flag=True, help="Human-readable trace on stderr")
+@click.option(
+    "--validate", is_flag=True, help="Check the routing tables and exit (1 on errors)"
+)
+@click.option(
+    "--log",
+    "log_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Decision log (default: <state-dir>/routing/decisions.jsonl)",
+)
 def select_cmd(
     profile: str | None,
     config_path: Path | None,
     state_dir: Path | None,
     as_json: bool,
+    lane: str | None,
+    cls: str | None,
+    work_item: str | None,
+    excludes: tuple[str, ...],
+    reasons: tuple[str, ...],
+    default_arm: str | None,
+    default_effort: str | None,
+    shadow: bool,
+    fmt: str,
+    explain: bool,
+    validate: bool,
+    log_path: Path | None,
 ) -> None:
-    """Select the first viable backend + model from the candidate list.
+    """Select the backend + model (and, with --lane, effort) to run now.
 
-    Reads harness-quota.toml, filters out binary-unavailable and block-registry-blocked
-    candidates, and prints the first viable {backend, model} pair.
+    Without --lane: reads the [[candidates]] list of harness-quota.toml, filters
+    out binary-unavailable and block-registry-blocked candidates, and prints the
+    first viable {backend, model} pair. Exit code 1 when none is viable.
 
-    Exit code 1 when no viable candidate is found.
+    With --lane: one decision from the lane policy ([routing], [pools.*],
+    [lanes.*]). Exit 0 with a decision, 76 for no_capacity, 2 on an internal
+    error without --default-arm; --shadow always exits 0. --validate checks the
+    routing tables instead.
     """
     import json as _json
 
+    if validate:
+        from gptme_runloops.select_lane import validate_policy
+
+        lines, code = validate_policy(config_path)
+        click.echo("\n".join(lines))
+        sys.exit(code)
+    if lane is not None:
+        _select_lane_cmd(
+            lane, cls, work_item, excludes, reasons, default_arm, default_effort,
+            shadow, fmt, explain, config_path, state_dir, log_path,
+        )  # fmt: skip
+        return
+    lane_only = {
+        "--class": cls, "--work-item": work_item, "--exclude": excludes,
+        "--reason": reasons, "--default-arm": default_arm,
+        "--default-effort": default_effort, "--shadow": shadow,
+        "--explain": explain, "--log": log_path,
+    }  # fmt: skip
+    used = [flag for flag, value in lane_only.items() if value]
+    if used or fmt != "json":
+        raise click.UsageError(f"{', '.join(used) or '--format'} requires --lane")
+
     from gptme_runloops.select import load_select_config, select_backend
 
+    if config_path is not None and not config_path.exists():
+        raise click.BadParameter(
+            f"File {str(config_path)!r} does not exist.", param_hint="'--config'"
+        )
     try:
         config = load_select_config(config_path)
     except ValueError as exc:
@@ -706,6 +789,54 @@ def select_cmd(
         click.echo(_json.dumps(result.to_dict()))
     else:
         click.echo(f"backend={result.backend} model={result.model}")
+
+
+def _select_lane_cmd(
+    lane: str,
+    cls: str | None,
+    work_item: str | None,
+    excludes: tuple[str, ...],
+    reasons: tuple[str, ...],
+    default_arm: str | None,
+    default_effort: str | None,
+    shadow: bool,
+    fmt: str,
+    explain: bool,
+    config_path: Path | None,
+    state_dir: Path | None,
+    log_path: Path | None,
+) -> None:
+    """``select --lane``: print the decision and exit with its code."""
+    import json as _json
+
+    from gptme_runloops.select_lane import select_lane
+    from gptme_runloops.select_rules import (
+        format_explain,
+        format_shell,
+        pair_exclusions,
+    )
+
+    outcome = select_lane(
+        lane,
+        cls=cls,
+        work_item=work_item,
+        excluded=pair_exclusions(list(excludes), list(reasons)),
+        default_arm=default_arm,
+        default_effort=default_effort,
+        shadow=shadow,
+        config_path=config_path,
+        state_dir=state_dir,
+        log_path=log_path,
+    )
+    if outcome.error:
+        click.echo(f"[select] routing error, failing open: {outcome.error}", err=True)
+    if explain:
+        click.echo(format_explain(outcome.decision), err=True)
+    if fmt == "shell":
+        click.echo(format_shell(outcome.decision))
+    else:
+        click.echo(_json.dumps(outcome.decision, default=str))
+    sys.exit(outcome.exit_code)
 
 
 @main.command("run")
