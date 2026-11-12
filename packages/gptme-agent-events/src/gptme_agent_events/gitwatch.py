@@ -8,7 +8,8 @@ record every HEAD movement and every push, so this module tails them:
 - ``<common>/logs/HEAD`` and ``<common>/worktrees/*/logs/HEAD``: entries whose
   message starts with ``commit`` become ``commit`` events;
 - ``<common>/logs/refs/remotes/**``: ``update by push`` entries become ``push``
-  events.
+  events. These are checked only on rediscovery passes (the follower's rescan
+  cadence), since a repo can have thousands of remote-tracking refs.
 
 Each commit is attributed to a session through its ``Git-Session-Id`` trailer
 (the fleet's session-lineage convention). A push is attributed through the
@@ -167,6 +168,10 @@ class GitWatcher:
                 self._log_lists[common] = self._reflogs(common)
             for log in self._log_lists[common]:
                 is_remote = "remotes" in log.relative_to(common).parts
+                if is_remote and not rediscover:
+                    # Repos can have thousands of remote-tracking reflogs; pushes
+                    # are checked on the slower rediscovery cadence only.
+                    continue
                 for line in self._new_lines(log, since):
                     m = _REFLOG_RE.match(line)
                     if not m:
