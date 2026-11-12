@@ -38,6 +38,7 @@ import math
 import os
 import re
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 from collections.abc import Collection, Sequence
 from typing import Any
@@ -86,6 +87,33 @@ _REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _REPO_SSH_RE = re.compile(r"git@[^:]+:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?$")
 #: HTTPS remote form: https://github.com/owner/repo(.git)
 _REPO_HTTPS_RE = re.compile(r"https?://[^/]+/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?(?:/.*)?$")
+
+
+# Skill names shorter than this are usually common words ("end", "ship",
+# "spec", "plan", "auth") that appear in unrelated prose even on word
+# boundaries, so they only match an explicit invocation form.
+_SHORT_SKILL_NAME_LEN = 5
+
+
+@lru_cache(maxsize=1024)
+def _skill_name_pattern(name: str) -> re.Pattern[str]:
+    """Regex detecting a mention of skill ``name`` in a lowercased message.
+
+    Names match on word boundaries, never as a plain substring: ``end``
+    must not fire on "send" or "backend" (gptme/gptme#4869). Hyphenated
+    names also match with spaces or no separator. Short single-word names
+    match only an explicit invocation: ``/end``, ``skill:end`` (including
+    ``/skill:end``) or "end skill". Mirrors ``gptme.lessons.matcher``.
+    """
+    name_lower = name.lower()
+    if len(name_lower) < _SHORT_SKILL_NAME_LEN and "-" not in name_lower:
+        n = re.escape(name_lower)
+        return re.compile(rf"(?<![\w/])/{n}(?![\w-])|\bskill:{n}(?![\w-])|\b{n} skill\b")
+    variants = dict.fromkeys(
+        [name_lower, name_lower.replace("-", " "), name_lower.replace("-", "")]
+    )
+    alternation = "|".join(re.escape(v) for v in variants)
+    return re.compile(rf"(?<![\w-])(?:{alternation})(?![\w-])")
 
 
 def normalize_repo_slug(value: str) -> str | None:
@@ -1510,12 +1538,9 @@ def score_lessons(
 
         # 3. Skill name exact / near-match
         if lesson.get("skill_name"):
-            name_lower = lesson["skill_name"].lower()
-            for variant in [name_lower, name_lower.replace("-", " ")]:
-                if variant in prompt_lower:
-                    score += 1.5
-                    matched_by.append(f"skill:{lesson['skill_name']}")
-                    break
+            if _skill_name_pattern(lesson["skill_name"]).search(prompt_lower):
+                score += 1.5
+                matched_by.append(f"skill:{lesson['skill_name']}")
 
         # 4. Skill descriptor token overlap
         desc_score, desc_matches = _score_skill_descriptor(lesson, prompt_lower)

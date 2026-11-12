@@ -2153,3 +2153,74 @@ def test_bm25_min_z_override_suppresses_weak_matches(monkeypatch, is_skill, exem
         score_lessons(lessons, "needle", bm25_min_z=4.25, skill_bm25_min_z=4.25)[0]["path"]
         == "target"
     )
+
+
+class TestSkillNameWordBoundary:
+    """Skill names match on word boundaries, not substrings (gptme/gptme#4869)."""
+
+    @staticmethod
+    def _skill(name: str) -> list[dict]:
+        return [
+            {
+                "path": f"skills/{name}/SKILL.md",
+                "title": name,
+                "id": None,
+                "keywords": [],
+                "patterns": [],
+                "skill_name": name,
+                "description": "",
+                "when_to_use": "",
+                "tags": [],
+                "harness_restrict": [],
+                "session_categories": [],
+                "is_skill": True,
+                "body": "",
+                "n_keywords": 0,
+            }
+        ]
+
+    @staticmethod
+    def _hits(name: str, prompt: str) -> bool:
+        return bool(score_lessons(TestSkillNameWordBoundary._skill(name), prompt, use_bm25=False))
+
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "send the report",
+            "fix the backend",
+            "depend on it",
+            "pending review",
+            "the end of the file",
+            "see path/to/end",
+            "GET /endpoint",
+        ],
+    )
+    def test_short_name_end_does_not_fire_in_prose(self, prompt):
+        assert not self._hits("end", prompt)
+
+    @pytest.mark.parametrize(
+        "prompt", ["/end", "run skill:end now", "use /skill:end", "run the end skill"]
+    )
+    def test_short_name_end_fires_on_explicit_invocation(self, prompt):
+        assert self._hits("end", prompt)
+
+    @pytest.mark.parametrize(
+        "name,prompt",
+        [
+            ("ship", "our relationship"),
+            ("spec", "inspect the code"),
+            ("auth", "the author said"),
+            ("plan", "an explanation"),
+        ],
+    )
+    def test_short_names_do_not_fire_inside_words(self, name, prompt):
+        assert not self._hits(name, prompt)
+
+    def test_long_name_not_matched_inside_longer_token(self):
+        assert not self._hits("research", "researcher notes")
+
+    def test_long_and_hyphenated_names_match_on_boundary(self):
+        assert self._hits("research", "do some research today")
+        assert self._hits("python-repl", "use the python-repl")
+        assert self._hits("python-repl", "use the python repl")
+        assert self._hits("python-repl", "use the pythonrepl")
