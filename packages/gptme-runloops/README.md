@@ -138,11 +138,11 @@ gptme-runloops select --lane autonomous [--class C] [--work-item ID] \
 | `routing.schema_version` | Required, must be `1` |
 | `pools.<p>.provider` | Usage reader: `claude-usage` (default) or `none` |
 | `pools.<p>.usage_cache` | `claude-usage`: cache file of `scripts/check-claude-usage.sh` (default `/tmp/claude-usage-cache.json`) |
-| `pools.<p>.usage_command` | `claude-usage`: run this instead (list or string), e.g. `["bash", "/path/check-claude-usage.sh", "--json"]` |
-| `pools.<p>.usage_max_age_s` / `usage_timeout_s` | Older readings count as unknown (default 1800) / command timeout (default 90) |
+| `pools.<p>.usage_command` | `claude-usage`: run this instead (list or string), e.g. `["bash", "/path/check-claude-usage.sh", "--json"]`. It runs on the launch path (a fresh scrape can take ~25 s); reading the cache is the cheap route |
+| `pools.<p>.usage_max_age_s` / `usage_timeout_s` | Older readings count as unknown (default 1800) / command timeout (default 15; a timeout reads as unknown) |
 | `pools.<p>.no_capacity_at` | Weekly use at or above this: rule `no_capacity` unless a fallback applies |
 | `pools.<p>.owner_reserve` | Share kept for the owner; sets the ceiling to `1 - owner_reserve` when `no_capacity_at` is unset |
-| `pools.<p>.effort_steps` | `{at, down = n}` or `{at, to = effort}`; the highest reached step applies (no stacking) |
+| `pools.<p>.effort_steps` | `{at, down = n}` or `{at, to = effort}`; the highest reached step applies (no stacking); `--validate` warns when a later step resolves to a higher effort than an earlier one |
 | `pools.<p>.pace_guard` | More than this ahead of even pace forces at least one step down (max with the step, not sum) |
 | `pools.<p>.usage_unknown` | Effort when usage is unreadable: `base` (default) or an effort on the ladder |
 | `lanes.<l>.arm` | `backend:model`; bare aliases (`opus`, `sonnet`, `haiku`, `fable`) are rejected |
@@ -156,32 +156,57 @@ gptme-runloops select --lane autonomous [--class C] [--work-item ID] \
 Rules, first that applies: `excluded_fallback` (lane arm passed in `--exclude`; first fallback whose
 `on` matches the reason), `lane` (lane arm at base effort), `lane_pressure` (lane arm at a
 stepped-down effort), `fallback` (lane arm blocked in the block registry, binary missing, or pool at
-`no_capacity_at`), `no_capacity` (none of the above found an arm), `fail_open`.
+`no_capacity_at`), `no_capacity` (pool at its ceiling and no fallback applies), `no_arm` (lane arm
+excluded, blocked or missing and no fallback applies), `fail_open`. A `--reason` outside the trigger
+vocabulary is treated as `unspecified` (only fallbacks without `on` match it), with a note in `reason`.
 
-Exit codes: 0 with a decision, 76 for `no_capacity`, 2 after an internal error without
-`--default-arm`; `--shadow` always exits 0. **Fail open:** an unreadable or invalid config, unknown
-schema version, unknown lane or unexpected exception yields rule `fail_open` for `--default-arm` /
-`--default-effort` (exit 0). A failing or stale usage reading counts as unknown: base effort, never
-`no_capacity`. Errors in one lane's row do not affect other lanes.
+| Exit | Rule | Caller should |
+|------|------|---------------|
+| 0 | `lane`, `lane_pressure`, `fallback`, `excluded_fallback`, `fail_open` with `--default-arm` | Run `ROUTE_*` |
+| 76 | `no_capacity` | Skip this run (quota) |
+| 69 | `no_arm` | Run its default and report an outage; not a quota skip |
+| 2 | `fail_open` without `--default-arm` | Run its default |
+| other | (click-level failure, see below) | Run its default |
 
-The JSON decision has `backend`, `model`, `effort`, `scope`, `rule`, `reason`, `lane`, `class`,
-`work_item`, `decision_id` (uuid4), `policy_version` (12-hex hash of the routing tables),
-`policy_expired`, `shadow`, `pool` (`name`, `used`, `pace_gap`, `age_s`, `source`; `pace_gap > 0`
-means ahead of even pace) and `skipped`. Every decision, shadow ones included, is appended to
-`<state-dir>/routing/decisions.jsonl` (or `--log`); a logging failure is only a warning.
-`--format shell` prints quoted `ROUTE_BACKEND`, `ROUTE_MODEL`, `ROUTE_EFFORT`, `ROUTE_SCOPE`,
-`ROUTE_RULE`, `ROUTE_REASON` and `ROUTE_DECISION_ID` lines for `eval`; `--explain` writes a trace to
-stderr; `--validate` lists errors and warnings and exits 1 only for errors. Record the decision id
-with the session (for example in its `dispatch_cause`) to link sessions to decisions.
+`--shadow` always exits 0. **Fail open:** an unreadable or invalid config, unknown schema version,
+unknown lane or unexpected exception yields rule `fail_open` for `--default-arm` /
+`--default-effort` (exit 0). A failing, slow or stale usage reading counts as unknown: base effort,
+never `no_capacity`. Errors in one lane's row do not affect other lanes.
 
-Capture the exit code before `eval`, since `eval "$(...)"` hides it:
+The JSON decision has `backend`, `model`, `effort`, `scope`, `rule`, `trigger` (why the lane arm
+was not used: an exclusion reason, `blocked`, `missing` or `no_capacity`; null when it was used),
+`reason`, `lane`, `class`, `work_item`, `decision_id` (uuid4), `policy_version` (12-hex hash of the
+routing tables), `policy_expired`, `shadow`, `pool` (`name`, `used`, `pace_gap`, `age_s`, `source`;
+`pace_gap > 0` means ahead of even pace) and `skipped`. Every decision, shadow ones included, is
+appended to `<state-dir>/routing/decisions.jsonl` (or `--log`); a logging failure is only a
+warning. `--format shell` prints quoted `ROUTE_BACKEND`, `ROUTE_MODEL`, `ROUTE_EFFORT`,
+`ROUTE_SCOPE`, `ROUTE_RULE`, `ROUTE_TRIGGER`, `ROUTE_REASON` and `ROUTE_DECISION_ID` lines for
+`eval`; `--explain` writes a trace to stderr; `--validate` lists errors and warnings and exits 1
+only for errors. Record the decision id with the session (for example in its `dispatch_cause`) to
+link sessions to decisions.
+
+Treat any exit other than 0, 76 and 69 as "run your default": click-level failures (an older
+installed version without `--lane`, or `--config` pointing at a directory) exit 2 with empty stdout
+and bypass both `--default-arm` and `--shadow`. Capture the exit code without tripping `set -e`,
+and clear `ROUTE_*` before `eval` so a loop cannot reuse a previous iteration's values:
 
 ```bash
+unset ROUTE_BACKEND ROUTE_MODEL ROUTE_EFFORT ROUTE_SCOPE ROUTE_RULE ROUTE_TRIGGER \
+      ROUTE_REASON ROUTE_DECISION_ID
+rc=0
 out=$(gptme-runloops select --lane autonomous --format shell \
-      --default-arm claude-code:claude-opus-5-5 --default-effort high); rc=$?
-[ "$rc" -eq 76 ] && exit 0          # no capacity: skip this run
-[ "$rc" -eq 0 ] && eval "$out"      # sets ROUTE_* variables
+      --default-arm claude-code:claude-opus-5-5 --default-effort high) || rc=$?
+case "$rc" in
+  0)  eval "$out" ;;                                   # sets ROUTE_* variables
+  76) echo "no capacity, skipping"; exit 0 ;;          # quota skip
+  69) echo "routing: no arm available, running default" >&2 ;;  # outage, not quota
+  *)  echo "routing failed (rc=$rc), running default" >&2 ;;
+esac
+BACKEND="${ROUTE_BACKEND:-claude-code}" MODEL="${ROUTE_MODEL:-claude-opus-5-5}"
+EFFORT="${ROUTE_EFFORT-high}"   # set but empty: the routed backend has no effort setting
 ```
+
+Run shadow calls as `gptme-runloops select --lane autonomous --shadow ... >/dev/null || true`.
 
 ## Review artifact output
 
