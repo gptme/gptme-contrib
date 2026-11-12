@@ -587,7 +587,17 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
             record["bob_quote_skip_reason"] = reason
             quote_id = None
         elif not posted:
-            # Keep the pending marker so a later run refuses blind retry.
+            if _is_post_never_created(out):
+                # No quote exists: retry only this step after credentials or
+                # API access recover, preserving the announcement and reply.
+                print(
+                    f"{key}: quote failed (nothing was posted); "
+                    "cleared the pending marker so a later run can retry",
+                    file=sys.stderr,
+                )
+                record.pop(_pending_key("bob_quote_id"), None)
+                save_state(state)
+            # Otherwise keep the pending marker so a later run refuses blind retry.
             return 1
         _finish_post(state, record, "bob_quote_id", quote_id)
 
