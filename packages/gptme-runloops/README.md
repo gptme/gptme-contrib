@@ -72,6 +72,7 @@ Other options: `--prompt-file`, `--timeout` (default 1800 s); `--backend` defaul
 |---------|-------------|
 | `run [PROMPT]` | One prompt on any backend, JSON result (see above) |
 | `select [--config PATH] [--state-dir DIR] [--json]` | Print the first viable `backend`/`model` from `harness-quota.toml`, skipping candidates whose binary is missing or that are blocked in the block registry. Exit 1 if none |
+| `select --lane LANE [...]` | One routing decision (backend, model, effort) from the lane policy; see [Lane policy](#lane-policy-select---lane) |
 | `autonomous` | One autonomous session. Prompt from `scripts/runs/autonomous/autonomous-prompt.txt` in the workspace, else a built-in fallback |
 | `monitoring [--org ORG]... [--repo OWNER/REPO]... [--author LOGIN] [--agent-name NAME]` | GitHub project monitoring: find PRs/issues needing action (CI failures, review comments, merge eligibility) and act on them. Defaults to the `claude-code` backend |
 | `run-item --workspace DIR [--work-file F] ...` | Execute a single project-monitoring work item (`--dry-run` prints the execution plan) |
@@ -95,6 +96,91 @@ priority = 1
 backend  = "gptme"
 model    = "openrouter/deepseek/deepseek-chat-v3-0324:free"
 priority = 2
+```
+
+### Lane policy: `select --lane`
+
+With `--lane`, `select` reads a lane policy from the same `harness-quota.toml` and returns one
+decision: backend, model, reasoning effort, scope, the single rule that decided, a decision id and
+the pool reading it used. Effort steps down under weekly pool pressure, a fallback list covers
+blocked or excluded arms, and the command never takes the agent down because of its own failure.
+Without `--lane` the `[[candidates]]` behaviour above is unchanged.
+
+A single-lane agent:
+
+```toml
+[routing]
+schema_version = 1
+
+[pools.claude-max]                       # provider = "claude-usage" (default)
+no_capacity_at = 0.90                    # weekly use at or above this: do not launch
+effort_steps = [{ at = 0.60, down = 1 }, { at = 0.85, to = "low" }]
+pace_guard = 0.10                        # >10 points ahead of even pace: one step down
+
+[lanes.autonomous]
+arm = "claude-code:claude-opus-5-5"      # backend:model, explicit model id
+effort = "high"
+effort_ladder = ["high", "medium", "low"]
+pool = "claude-max"
+fallback = [{ arm = "gptme:gemini/gemini-flash-latest", scope = "lights-on", on = ["auth", "blocked"] }]
+```
+
+```bash
+gptme-runloops select --lane autonomous [--class C] [--work-item ID] \
+    [--exclude BACKEND:MODEL --reason rate_limited|auth|crash]... \
+    [--default-arm BACKEND:MODEL --default-effort E] \
+    [--shadow] [--format json|shell] [--explain] [--validate] \
+    [--config PATH] [--state-dir DIR] [--log PATH]
+```
+
+| Table / key | Meaning |
+|-------------|---------|
+| `routing.schema_version` | Required, must be `1` |
+| `pools.<p>.provider` | Usage reader: `claude-usage` (default) or `none` |
+| `pools.<p>.usage_cache` | `claude-usage`: cache file of `scripts/check-claude-usage.sh` (default `/tmp/claude-usage-cache.json`) |
+| `pools.<p>.usage_command` | `claude-usage`: run this instead (list or string), e.g. `["bash", "/path/check-claude-usage.sh", "--json"]` |
+| `pools.<p>.usage_max_age_s` / `usage_timeout_s` | Older readings count as unknown (default 1800) / command timeout (default 90) |
+| `pools.<p>.no_capacity_at` | Weekly use at or above this: rule `no_capacity` unless a fallback applies |
+| `pools.<p>.owner_reserve` | Share kept for the owner; sets the ceiling to `1 - owner_reserve` when `no_capacity_at` is unset |
+| `pools.<p>.effort_steps` | `{at, down = n}` or `{at, to = effort}`; the highest reached step applies (no stacking) |
+| `pools.<p>.pace_guard` | More than this ahead of even pace forces at least one step down (max with the step, not sum) |
+| `pools.<p>.usage_unknown` | Effort when usage is unreadable: `base` (default) or an effort on the ladder |
+| `lanes.<l>.arm` | `backend:model`; bare aliases (`opus`, `sonnet`, `haiku`, `fable`) are rejected |
+| `lanes.<l>.effort` / `effort_ladder` | Base effort and its ladder, highest first; omit both for backends without effort |
+| `lanes.<l>.pool` | Pool this lane draws from (optional) |
+| `lanes.<l>.expires` | After this date the row is still used, and decisions carry `policy_expired: true` |
+| `lanes.<l>.scope` | Scope reported for the lane arm (default none) |
+| `lanes.<l>.fallback` | Ordered `{arm, scope, on, effort}`; `on` lists triggers (`rate_limited`, `auth`, `crash`, `blocked`, `missing`, `no_capacity`); omitted `on` matches any |
+| `[lanes.<l>.<class>]` | Per-class overrides; missing keys and missing classes fall back to the lane row |
+
+Rules, first that applies: `excluded_fallback` (lane arm passed in `--exclude`; first fallback whose
+`on` matches the reason), `lane` (lane arm at base effort), `lane_pressure` (lane arm at a
+stepped-down effort), `fallback` (lane arm blocked in the block registry, binary missing, or pool at
+`no_capacity_at`), `no_capacity` (none of the above found an arm), `fail_open`.
+
+Exit codes: 0 with a decision, 76 for `no_capacity`, 2 after an internal error without
+`--default-arm`; `--shadow` always exits 0. **Fail open:** an unreadable or invalid config, unknown
+schema version, unknown lane or unexpected exception yields rule `fail_open` for `--default-arm` /
+`--default-effort` (exit 0). A failing or stale usage reading counts as unknown: base effort, never
+`no_capacity`. Errors in one lane's row do not affect other lanes.
+
+The JSON decision has `backend`, `model`, `effort`, `scope`, `rule`, `reason`, `lane`, `class`,
+`work_item`, `decision_id` (uuid4), `policy_version` (12-hex hash of the routing tables),
+`policy_expired`, `shadow`, `pool` (`name`, `used`, `pace_gap`, `age_s`, `source`; `pace_gap > 0`
+means ahead of even pace) and `skipped`. Every decision, shadow ones included, is appended to
+`<state-dir>/routing/decisions.jsonl` (or `--log`); a logging failure is only a warning.
+`--format shell` prints quoted `ROUTE_BACKEND`, `ROUTE_MODEL`, `ROUTE_EFFORT`, `ROUTE_SCOPE`,
+`ROUTE_RULE`, `ROUTE_REASON` and `ROUTE_DECISION_ID` lines for `eval`; `--explain` writes a trace to
+stderr; `--validate` lists errors and warnings and exits 1 only for errors. Record the decision id
+with the session (for example in its `dispatch_cause`) to link sessions to decisions.
+
+Capture the exit code before `eval`, since `eval "$(...)"` hides it:
+
+```bash
+out=$(gptme-runloops select --lane autonomous --format shell \
+      --default-arm claude-code:claude-opus-5-5 --default-effort high); rc=$?
+[ "$rc" -eq 76 ] && exit 0          # no capacity: skip this run
+[ "$rc" -eq 0 ] && eval "$out"      # sets ROUTE_* variables
 ```
 
 ## Review artifact output
