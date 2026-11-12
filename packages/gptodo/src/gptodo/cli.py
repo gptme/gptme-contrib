@@ -2989,7 +2989,8 @@ def edit(
         op == "set" and field == "state" and value == "done" for op, field, value in changes
     )
     sets_verified = any(
-        op == "set" and field == "verified" and str(value).strip() for op, field, value in changes
+        op == "set" and field == "verified" and value is not None and str(value).strip()
+        for op, field, value in changes
     )
     unverified: list[str] = []
     if setting_done and not sets_verified:

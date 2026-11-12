@@ -87,3 +87,14 @@ def test_json_mode_refusal_is_machine_readable(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done", "--json"])
     assert result.exit_code != 0
     assert '"error"' in result.output and "verified" in result.output
+
+
+def test_clearing_verified_does_not_count_as_evidence(tmp_path, monkeypatch):
+    path = make_task(tmp_path, monkeypatch, CRITERION)
+    before = path.read_bytes()
+    result = CliRunner().invoke(
+        cli, ["edit", "task", "--set", "state", "done", "--set", "verified", "none"]
+    )
+    assert result.exit_code != 0, result.output
+    assert "verified" in result.output
+    assert path.read_bytes() == before
