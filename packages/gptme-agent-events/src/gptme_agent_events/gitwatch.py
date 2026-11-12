@@ -8,8 +8,10 @@ record every HEAD movement and every push, so this module tails them:
 - ``<common>/logs/HEAD`` and ``<common>/worktrees/*/logs/HEAD``: entries whose
   message starts with ``commit`` become ``commit`` events;
 - ``<common>/logs/refs/remotes/**``: ``update by push`` entries become ``push``
-  events. These are checked only on rediscovery passes (the follower's rescan
-  cadence), since a repo can have thousands of remote-tracking refs.
+  events. A repo can have thousands of remote-tracking refs, so only the
+  ``refs/remotes`` directories are stat'ed each poll: git updates a ref by
+  renaming a lock file into place, which bumps its directory's mtime, and only
+  reflogs under changed directories are read.
 
 Each commit is attributed to a session through its ``Git-Session-Id`` trailer
 (the fleet's session-lineage convention). A push is attributed through the
@@ -73,7 +75,8 @@ class GitWatcher:
         self._common: dict[str, Path | None] = {}  # directory -> common git dir
         self._repos: dict[Path, tuple[str | None, float]] = {}  # common -> (slug, since)
         self._logs: dict[Path, tuple[int, int]] = {}  # reflog -> (offset, inode)
-        self._log_lists: dict[Path, list[Path]] = {}  # common -> its reflog files
+        self._log_lists: dict[Path, list[Path]] = {}  # common -> HEAD/worktree reflogs
+        self._ref_dirs: dict[Path, dict[Path, float]] = {}  # common -> refs/remotes dirs
 
     # -- registration --------------------------------------------------------
 
@@ -107,10 +110,62 @@ class GitWatcher:
     def _reflogs(self, common: Path) -> list[Path]:
         logs = [common / "logs" / "HEAD"]
         logs += sorted(common.glob("worktrees/*/logs/HEAD"))
-        remotes = common / "logs" / "refs" / "remotes"
-        if remotes.is_dir():
-            logs += sorted(p for p in remotes.rglob("*") if p.is_file())
         return [p for p in logs if p.is_file()]
+
+    def _remote_reflogs(self, common: Path, since: float) -> list[Path]:
+        """Reflogs of remote-tracking refs whose directory changed since last poll."""
+        refs_root = common / "refs" / "remotes"
+        logs_root = common / "logs" / "refs" / "remotes"
+        dirs = self._ref_dirs.get(common)
+        if dirs is None:
+            # First pass: remember every directory; ones touched around
+            # registration count as changed (the push may precede the event).
+            dirs = self._ref_dirs[common] = {}
+            for root, _subdirs, _files in os.walk(refs_root):
+                try:
+                    dirs[Path(root)] = Path(root).stat().st_mtime
+                except OSError:
+                    continue
+            changed = [d for d, m in dirs.items() if m >= since - self.slack]
+        else:
+            changed = []
+            if refs_root not in dirs and refs_root.is_dir():
+                dirs[refs_root] = 0.0  # appeared with the first fetch or push
+            for d, old in list(dirs.items()):
+                try:
+                    mtime = d.stat().st_mtime
+                except OSError:
+                    del dirs[d]
+                    continue
+                if mtime == old:
+                    continue
+                dirs[d] = mtime
+                changed.append(d)
+                # New branch namespaces (e.g. origin/ itself on the first push)
+                # are new directories: take them in now, recursively.
+                stack = [d]
+                while stack:
+                    try:
+                        entries = list(os.scandir(stack.pop()))
+                    except OSError:
+                        continue
+                    for entry in entries:
+                        sub = Path(entry.path)
+                        if entry.is_dir() and sub not in dirs:
+                            try:
+                                dirs[sub] = sub.stat().st_mtime
+                            except OSError:
+                                continue
+                            changed.append(sub)
+                            stack.append(sub)
+        logs: list[Path] = []
+        for d in changed:
+            log_dir = logs_root / d.relative_to(refs_root)
+            try:
+                logs += [Path(e.path) for e in os.scandir(log_dir) if e.is_file()]
+            except OSError:
+                continue
+        return logs
 
     def _new_lines(self, log: Path, since: float) -> list[str]:
         try:
@@ -166,12 +221,8 @@ class GitWatcher:
         for common, (slug, since) in list(self._repos.items()):
             if rediscover or common not in self._log_lists:
                 self._log_lists[common] = self._reflogs(common)
-            for log in self._log_lists[common]:
+            for log in self._log_lists[common] + self._remote_reflogs(common, since):
                 is_remote = "remotes" in log.relative_to(common).parts
-                if is_remote and not rediscover:
-                    # Repos can have thousands of remote-tracking reflogs; pushes
-                    # are checked on the slower rediscovery cadence only.
-                    continue
                 for line in self._new_lines(log, since):
                     m = _REFLOG_RE.match(line)
                     if not m:
