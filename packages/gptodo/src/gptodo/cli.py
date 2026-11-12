@@ -128,6 +128,7 @@ from gptodo.utils import (
     build_dependency_universe,
     check_links,
     count_subtasks,
+    skipped_subtask_items,
     find_repo_root,
     get_blocking_reasons,
     # Cache
@@ -2974,6 +2975,31 @@ def edit(
                 click_error=True,
             )
         console.print(f"[yellow]--allow-pending: {details}[/]")
+
+    # Skipped items are a legitimate way to close, but they should stay visible
+    # at the moment of closing: name them, and flag promised follow-ups that do
+    # not yet link the task or issue that owns them.
+    for task in target_tasks:
+        post = frontmatter.load(task.path)
+        prior = normalize_state(str(post.metadata.get("state", "backlog") or "backlog"), warn=False)
+        if prior == "done" or not any(
+            op == "set" and field == "state" and value == "done" for op, field, value in changes
+        ):
+            continue
+        skipped_items = skipped_subtask_items(_projected_content(post))
+        if not skipped_items:
+            continue
+        err_console = Console(stderr=True)
+        err_console.print(
+            f"[yellow]⚠ {task.name}: closing with {len(skipped_items)} skipped item(s):[/]"
+        )
+        for title, needs_link in skipped_items:
+            err_console.print(f"[yellow]    - {title}[/]")
+            if needs_link:
+                err_console.print(
+                    "[yellow]      ↳ promises a follow-up but links no task or issue; "
+                    "add the tasks/<id>.md path or issue ref that owns it[/]"
+                )
 
     from gptodo.lifecycle import run_completion_effects
 

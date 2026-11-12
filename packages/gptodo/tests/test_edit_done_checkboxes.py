@@ -92,3 +92,41 @@ def test_legacy_done_edits_and_cancellation_remain_valid(tmp_path, monkeypatch, 
     result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", target])
     assert result.exit_code == 0, result.output
     assert frontmatter.load(path)["state"] == target
+
+
+def test_completion_names_skipped_items(tmp_path, monkeypatch):
+    (path,) = make_tasks(
+        tmp_path,
+        monkeypatch,
+        {"task": "- [x] complete\n- [-] wire indexing (deferred: replaced by scoping)"},
+    )
+    result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done"])
+    assert result.exit_code == 0, result.output
+    assert frontmatter.load(path)["state"] == "done"
+    assert "closing with 1 skipped item(s)" in result.output
+    assert "wire indexing" in result.output
+    assert "promises a follow-up" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("title", "needs_link"),
+    [
+        ("split auth (file as separate task)", True),
+        ("split auth (needs its own task)", True),
+        ("split auth (filed as tasks/split-auth.md)", False),
+        ("split auth (follow-up issue gptme/gptme#12)", False),
+        ("split auth (decided against: superseded)", False),
+    ],
+)
+def test_completion_hints_unlinked_follow_up(tmp_path, monkeypatch, title, needs_link):
+    make_tasks(tmp_path, monkeypatch, {"task": f"- [x] complete\n- [-] {title}"})
+    result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done"])
+    assert result.exit_code == 0, result.output
+    assert ("promises a follow-up" in result.output) is needs_link
+
+
+def test_completion_without_skips_prints_no_skip_warning(tmp_path, monkeypatch):
+    make_tasks(tmp_path, monkeypatch, {"task": "- [x] complete"})
+    result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done"])
+    assert result.exit_code == 0, result.output
+    assert "skipped item" not in result.output
