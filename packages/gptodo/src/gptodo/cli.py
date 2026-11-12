@@ -2992,11 +2992,14 @@ def edit(
         pending = count_subtasks(projected, checklist_only=True).pending
         # A recurring task keeps its skipped items across the reset, so the
         # dropped work does not vanish with the cycle; only one-shot tasks must
-        # account for it.
+        # account for it. Use the final recurrence value, including same-edit
+        # additions/removals, just as mutate_task does when applying the edit.
+        recur = next(
+            (value for op, field, value in reversed(changes) if op == "set" and field == "recur"),
+            post.metadata.get("recur"),
+        )
         unowned = (
-            []
-            if post.metadata.get("recur")
-            else [title for title, ok in skipped_subtask_items(projected) if not ok]
+            [] if recur else [title for title, ok in skipped_subtask_items(projected) if not ok]
         )
         problems = []
         if pending:

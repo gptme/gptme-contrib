@@ -115,6 +115,9 @@ def test_completion_names_skipped_items(tmp_path, monkeypatch):
         ("split auth (needs its own task)", False),
         ("profile the slow path (deferred: not needed for this task)", False),
         ("profile the slow path (declined)", False),
+        ("split auth (declined:)", False),
+        ("split auth (declined:   )", False),
+        ("split auth [decided against:]", False),
         ("split auth (filed as tasks/split-auth.md)", True),
         ("split auth (follow-up issue gptme/gptme#12)", True),
         ("split auth (see https://example.com/issue)", True),
@@ -211,3 +214,46 @@ def test_recurring_task_skips_need_no_follow_up(tmp_path, monkeypatch):
     )
     result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done"])
     assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("adding_recurrence", [False, True])
+@pytest.mark.parametrize("state_first", [False, True])
+def test_skip_gate_uses_resulting_recurrence(tmp_path, monkeypatch, adding_recurrence, state_first):
+    (path,) = make_tasks(
+        tmp_path,
+        monkeypatch,
+        {"task": "- [x] a\n- [-] b (deferred: later)"},
+        extra="" if adding_recurrence else "recur: 7d\n",
+    )
+    before = path.read_bytes()
+    recur_edit = ["--set", "recur", "7d" if adding_recurrence else "none"]
+    state_edit = ["--set", "state", "done"]
+    edits = state_edit + recur_edit if state_first else recur_edit + state_edit
+    result = CliRunner().invoke(cli, ["edit", "task", *edits])
+    if adding_recurrence:
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert post["state"] == "waiting"
+        assert post["recur"] == "7d"
+        assert "- [-] b (deferred: later)" in post.content
+    else:
+        assert result.exit_code != 0, result.output
+        assert "no follow-up link or 'declined:'" in result.output
+        assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "target", ["./split-auth.md", "split-auth.md", "archive/split-auth.md#plan"]
+)
+def test_skip_accepts_relative_markdown_follow_up(tmp_path, monkeypatch, target):
+    (path,) = make_tasks(
+        tmp_path,
+        monkeypatch,
+        {"task": f"- [-] split auth (see [follow-up]({target}))"},
+    )
+    owner = path.parent / target.split("#")[0]
+    owner.parent.mkdir(parents=True, exist_ok=True)
+    owner.write_text("---\nstate: backlog\ncreated: 2026-01-01T00:00:00+00:00\n---\n# Split auth\n")
+    result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done"])
+    assert result.exit_code == 0, result.output
+    assert frontmatter.load(path)["state"] == "done"
