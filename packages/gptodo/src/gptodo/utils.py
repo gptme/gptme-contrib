@@ -1184,7 +1184,7 @@ def count_subtasks(content: str, *, checklist_only: bool = False) -> SubtaskCoun
 # went: a link to the task or issue that now owns it, or an explicit decision
 # not to do it. Anything else silently disappears when the task closes.
 _FOLLOW_UP_LINK = re.compile(
-    r"(?:#\d+|tasks/[\w./-]+|https?://|\[\[[^\]]+\]\]"
+    r"(?:\b[\w-]+/[\w.-]+#\d+\b|tasks/[\w./-]+|https?://|\[\[[^\]]+\]\]"
     r"|(?<!!)\[[^\]]*\]\([^\s()]+\.md(?:#[^\s()]*)?\))"
 )
 _DECLINED = re.compile(r"\b(?:declined|decided against)\s*:\s*[^\s)\]}.,;:!?]", re.IGNORECASE)
