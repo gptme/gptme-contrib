@@ -644,6 +644,38 @@ def test_sync_closed_issue_does_not_advance_existing_recurrence_gate(tmp_path, m
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize("reverse_order", [False, True])
+def test_removing_recur_keeps_legacy_machine_date_releasable(tmp_path, monkeypatch, reverse_order):
+    from gptodo.utils import task_has_waiting_blocker, task_is_waiting_for_date
+
+    path = write_task(
+        tmp_path,
+        state="waiting",
+        recur="7d",
+        wait="2025-01-01",
+        wait_kind="machine",
+        waiting_for="next recurrence gate (wait: 2025-01-01)",
+        waiting_since="2025-01-01",
+    )
+    monkeypatch.chdir(tmp_path)
+    assignments = [("recur", "none"), ("wait", "2025-06-15")]
+    if reverse_order:
+        assignments.reverse()
+    args = ["edit", "task"]
+    for field, value in assignments:
+        args.extend(["--set", field, value])
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    post = frontmatter.load(path)
+    assert "recur" not in post.metadata
+    assert post.metadata["state"] == "waiting"
+    task = load_tasks(tmp_path / "tasks")[0]
+    assert not task_is_waiting_for_date(task)
+    assert not task_has_waiting_blocker(task)
+    assert "waiting_for" not in post.metadata
+    assert post.metadata["wait_kind"] == "machine"
+
+
 def test_terminal_alias_reopen_clears_completed(tmp_path):
     path = write_task(tmp_path, state="done", completed="2026-01-01")
     result = mutate_task(path, patch={"state": "new"}, force=True)

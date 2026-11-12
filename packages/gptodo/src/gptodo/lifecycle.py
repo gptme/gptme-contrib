@@ -231,7 +231,11 @@ def transform_post(
             # human blocker.
             for _field in ("waiting_for", "waiting_since", "wait_kind"):
                 post.metadata.pop(_field, None)
-        elif post.metadata.get("recur"):
+        elif post.metadata.get("recur") or (
+            post.metadata.get("wait") is not None and post.metadata.get("wait_kind") == "machine"
+        ):
+            # Removing recur leaves a one-off machine date gate. Its generated
+            # description is still redundant, and may now name the old date.
             post.metadata.pop("waiting_for", None)
     # Gate updates follow the final value, just like the last-assignment-wins
     # apply loop (e.g. --set wait none --set wait NEW preserves the gate).
