@@ -2025,8 +2025,14 @@ def status(
 
 @cli.command()
 @click.option("--fix", is_flag=True, help="Try to fix simple issues")
+@click.option(
+    "--done-unresolved",
+    is_flag=True,
+    help="List done tasks that still carry open or skipped checklist items "
+    "(newest first) instead of running integrity checks",
+)
 @click.argument("task_files", nargs=-1, type=click.Path())
-def check(fix: bool, task_files: list[str]):
+def check(fix: bool, done_unresolved: bool, task_files: list[str]):
     """Check task integrity and relationships.
 
     If task files are provided, only check those files.
@@ -2046,6 +2052,29 @@ def check(fix: bool, task_files: list[str]):
     all_tasks = load_tasks(tasks_dir, errors_out=global_load_errors)
     if not all_tasks and not global_load_errors:
         console.print("[yellow]No tasks found in tasks directory![/]")
+        return
+
+    if done_unresolved:
+        offenders = sorted(
+            (
+                t
+                for t in all_tasks
+                if t.state == "done" and (t.subtasks.pending > 0 or t.subtasks.skipped > 0)
+            ),
+            key=lambda t: t.modified,
+            reverse=True,
+        )
+        if not offenders:
+            console.print("[green]No done tasks with open or skipped items.[/]")
+            return
+        console.print(
+            f"[bold]{len(offenders)} done task(s) with open or skipped items[/] (newest first):"
+        )
+        for t in offenders:
+            console.print(
+                f"  {t.name}  {t.subtasks.completed}/{t.subtasks.total} done, "
+                f"{t.subtasks.pending} open, {t.subtasks.skipped} skipped"
+            )
         return
 
     # Dependency resolution must also see archived tasks (tasks/archive/**),

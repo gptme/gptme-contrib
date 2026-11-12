@@ -130,3 +130,25 @@ def test_completion_without_skips_prints_no_skip_warning(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done"])
     assert result.exit_code == 0, result.output
     assert "skipped item" not in result.output
+
+
+def test_check_done_unresolved_lists_offenders_only(tmp_path, monkeypatch):
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    monkeypatch.chdir(tmp_path)
+    bodies = {
+        "clean": ("done", "- [x] a"),
+        "skipped": ("done", "- [x] a\n- [-] b (file as separate task)"),
+        "open-done": ("done", "- [x] a\n- [ ] b"),
+        "active-open": ("active", "- [ ] b"),
+    }
+    for name, (state, body) in bodies.items():
+        (tasks_dir / f"{name}.md").write_text(
+            f"---\nstate: {state}\ncreated: 2026-01-01T00:00:00+00:00\n---\n# {name}\n\n{body}\n"
+        )
+    result = CliRunner().invoke(cli, ["check", "--done-unresolved"])
+    assert result.exit_code == 0, result.output
+    assert "skipped" in result.output and "open-done" in result.output
+    assert "clean" not in result.output
+    assert "active-open" not in result.output
+    assert "2 done task(s)" in result.output
