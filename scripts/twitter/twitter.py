@@ -61,6 +61,7 @@ import sys
 import time
 import warnings
 from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -106,6 +107,10 @@ console = Console(stderr=True)
 # request is made. Counting is always on; blocking only when the limit is set.
 READ_COUNTER_DIR_ENV = "TWITTER_READ_COUNTER_DIR"
 DAILY_READ_LIMIT_ENV = "TWITTER_DAILY_READ_LIMIT"
+_METER_ACTIVE: ContextVar[bool] = ContextVar("twitter_meter_active", default=False)
+_AUTH_IDENTITY_READ: ContextVar[bool] = ContextVar(
+    "twitter_auth_identity_read", default=False
+)
 
 
 class DailyReadLimitReached(tweepy.TweepyException):
@@ -137,35 +142,28 @@ def daily_reads_used() -> int:
         return 0
 
 
-def count_billable_reads(payload: object) -> int:
-    """Billable units in a response body: posts returned (data + included posts)
-    count 1 each, included users count 2 (user reads cost twice a post read)."""
+def count_billable_reads(payload: object, route: str = "") -> int:
+    """Billable post-equivalent units: posts cost 1, users cost 2.
+
+    User timelines return posts despite having a /users/ route prefix.
+    """
     if not isinstance(payload, dict):
         return 0
     data = payload.get("data")
     n = len(data) if isinstance(data, list) else (1 if isinstance(data, dict) else 0)
+    parts = route.strip("/").split("/")
+    user_data = (
+        len(parts) >= 2
+        and parts[1] == "users"
+        and parts[-1] not in {"tweets", "mentions", "liked_tweets", "bookmarks"}
+    ) or parts[-1] in {"liking_users", "retweeted_by"}
+    if user_data:
+        n *= 2
     includes = payload.get("includes")
     if isinstance(includes, dict):
         n += len(includes.get("tweets") or [])
         n += 2 * len(includes.get("users") or [])
     return n
-
-
-def _record_reads(n: int) -> None:
-    if n <= 0:
-        return
-    path = _read_counter_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a+") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        f.seek(0)
-        try:
-            used = int(json.loads(f.read() or "{}").get("reads", 0))
-        except (ValueError, AttributeError):
-            used = 0
-        f.seek(0)
-        f.truncate()
-        f.write(json.dumps({"reads": used + n}))
 
 
 def install_read_meter() -> None:
@@ -176,20 +174,39 @@ def install_read_meter() -> None:
     original = base.request
 
     def metered(self, method, route, *args, **kwargs):
-        is_read = str(method).upper() == "GET"
-        limit = daily_read_limit()
-        if is_read and limit and daily_reads_used() >= limit:
-            raise DailyReadLimitReached(
-                f"Daily read limit reached ({limit} billable reads, UTC day); "
-                f"not calling {route}"
-            )
-        response = original(self, method, route, *args, **kwargs)
-        if is_read and getattr(response, "ok", False):
+        # Tweepy retries 429s recursively through self.request. Keep one lock
+        # and count only the final response, not each unwinding retry frame.
+        if str(method).upper() != "GET" or _METER_ACTIVE.get():
+            return original(self, method, route, *args, **kwargs)
+        path = _read_counter_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a+") as counter:
+            fcntl.flock(counter, fcntl.LOCK_EX)
+            counter.seek(0)
             try:
-                _record_reads(count_billable_reads(response.json()))
-            except (ValueError, OSError):
-                pass
-        return response
+                used = int(json.loads(counter.read() or "{}").get("reads", 0))
+            except (ValueError, AttributeError):
+                used = 0
+            limit = daily_read_limit()
+            # Identity verification is required to safely permit writes. It
+            # remains metered, but cannot trigger an OAuth reauthentication loop.
+            identity = route == "/2/users/me" and _AUTH_IDENTITY_READ.get()
+            if limit and used >= limit and not identity:
+                raise DailyReadLimitReached(
+                    f"Daily read limit reached ({limit} billable reads, UTC day); "
+                    f"not calling {route}"
+                )
+            token = _METER_ACTIVE.set(True)
+            try:
+                response = original(self, method, route, *args, **kwargs)
+            finally:
+                _METER_ACTIVE.reset(token)
+            if getattr(response, "ok", False):
+                n = count_billable_reads(response.json(), route)
+                counter.seek(0)
+                counter.truncate()
+                counter.write(json.dumps({"reads": used + n}))
+            return response
 
     metered._read_meter = True  # type: ignore[attr-defined]
     base.request = metered
@@ -215,6 +232,15 @@ def cached_get_me(client, user_auth: bool = False):
         # user_id = cached_get_me(client, user_auth=False).data.id
     """
     return client.get_me(user_auth=user_auth)
+
+
+def _authentication_get_me(client, user_auth: bool):
+    """Allow only the loader's identity check past the read budget."""
+    token = _AUTH_IDENTITY_READ.set(True)
+    try:
+        return cached_get_me(client, user_auth=user_auth)
+    finally:
+        _AUTH_IDENTITY_READ.reset(token)
 
 
 def _get_user_auth(client) -> bool:
@@ -450,13 +476,7 @@ def load_twitter_client(
     stale refresh token will result in a 400 Bad Request error.
     """
     install_read_meter()
-    requested_account = current_account()
-    account_was_explicit = "TWITTER_ACCOUNT" in os.environ
-    load_dotenv(override=True)
-    if account_was_explicit:
-        # An explicit CLI/env selection, including the empty default-account
-        # sentinel, must outrank TWITTER_ACCOUNT in the workspace .env.
-        os.environ["TWITTER_ACCOUNT"] = requested_account
+    _load_environment()
 
     # Resolve the .env path from THIS script's frame — critical because
     # save_tokens_to_env() calls find_dotenv() from gptmail's installed location
@@ -470,7 +490,7 @@ def load_twitter_client(
 
     _account = current_account()
     if _account:
-        _env_path = _activate_account_profile(_account)
+        _env_path = account_env_path(_account)
         console.print(f"[dim]Account profile: @{_account} ({_env_path})")
 
     # Check for bearer token (required for read operations)
@@ -539,7 +559,7 @@ def load_twitter_client(
                     client._use_user_auth = False  # OAuth 2.0: use bearer token
 
                     # Test the credentials
-                    test = cached_get_me(client, user_auth=False)
+                    test = _authentication_get_me(client, user_auth=False)
                     if test.data:
                         _verify_account_identity(test.data.username, console)
                         console.print(
@@ -735,7 +755,7 @@ def load_twitter_client(
                     client._use_user_auth = False  # OAuth 2.0: use bearer token
 
                     # Test the credentials with OAuth 2.0
-                    test = cached_get_me(client, user_auth=False)
+                    test = _authentication_get_me(client, user_auth=False)
                     if test.data:
                         _verify_account_identity(test.data.username, console)
                         console.print(
@@ -813,7 +833,7 @@ def load_twitter_client(
 
         # Test the credentials with a simple API call
         console.print("[yellow]Debug: Testing OAuth credentials...")
-        test = cached_get_me(client, user_auth=True)
+        test = _authentication_get_me(client, user_auth=True)
         if test.data:
             _verify_account_identity(test.data.username, console)
             console.print(f"[green]Successfully authenticated as @{test.data.username}")
@@ -906,6 +926,17 @@ def display_tweets(tweets: tweepy.Response, username: str) -> None:
         display_tweet(tweet)
 
 
+def _load_environment() -> None:
+    """Shared configuration for API commands and the network-free budget CLI."""
+    requested_account = current_account()
+    account_was_explicit = "TWITTER_ACCOUNT" in os.environ
+    load_dotenv(override=True)
+    if account_was_explicit:
+        os.environ["TWITTER_ACCOUNT"] = requested_account
+    if current_account():
+        _activate_account_profile(current_account())
+
+
 @click.group()
 @click.option(
     "--account",
@@ -929,6 +960,7 @@ def read_budget() -> None:
     No API call is made. Callers (loops) use the exit code to skip a read cycle
     before X's own spend cap does.
     """
+    _load_environment()
     used, limit = daily_reads_used(), daily_read_limit()
     click.echo(f"{used}/{limit if limit else 'unlimited'} billable reads (UTC day)")
     if limit and used >= limit:
