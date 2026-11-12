@@ -480,3 +480,23 @@ def test_discarding_merge_only_commits_materializes_index_and_worktree(
     assert (clone / "upstream.txt").read_text() == "up\n"
     reflog = _git("reflog", "show", "main", "-1", "--format=%gs", cwd=clone).stdout
     assert "git-safe-push-master" in reflog
+
+
+def test_skipped_locally_edited_path_leaves_unreconciled_marker(remote_and_clone):
+    """A path the materializer skips (the session is editing it) must be recorded
+    where that session's next commit can see it, not only in the journal."""
+    clone = remote_and_clone("main")
+    _commit(clone, "shared.txt", "base\n", "feat: shared")
+    _git("push", "origin", "main", cwd=clone, check=True)
+    _commit(clone, "local.txt", "local\n", "feat: local")
+    (clone / "shared.txt").write_text("session edit\n")
+    _advance_remote(clone, "main", "shared.txt", "upstream edit\n")
+
+    res = _run(SAFE_PUSH, clone)
+
+    assert res.returncode == 0, res.stderr
+    assert (clone / "shared.txt").read_text() == "session edit\n"
+    marker = clone / ".git" / "gsc-unreconciled.tsv"
+    rows = [line.split("\t") for line in marker.read_text().splitlines()]
+    assert [row[0] for row in rows] == ["shared.txt"]
+    assert rows[0][1] != rows[0][2]
