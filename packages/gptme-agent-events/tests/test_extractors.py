@@ -8,7 +8,8 @@ import subprocess
 import pytest
 
 from gptme_agent_events import ClaudeCodeExtractor, CodexExtractor, GptmeExtractor
-from gptme_agent_events.extractors import github_slug, landing_detail
+from gptme_agent_events.event import normalize_ts
+from gptme_agent_events.extractors import github_slug, gptme_result_failed, landing_detail
 
 
 def kinds(events):
@@ -275,3 +276,32 @@ class TestLandingDetail:
     def test_unknown_repo_gives_no_detail(self, tmp_path):
         assert landing_detail("push", "git push", str(tmp_path), "") == {}
         assert github_slug("relative/path") is None
+
+
+class TestTimestamps:
+    def test_all_harnesses_share_one_utc_format(self):
+        assert normalize_ts("2026-11-12T10:20:34.334Z") == "2026-11-12T10:20:34.334+00:00"
+        assert normalize_ts("2026-11-12T11:20:34.334+01:00") == "2026-11-12T10:20:34.334+00:00"
+        naive = normalize_ts("2026-11-12T07:30:13.266047")
+        assert naive.endswith("+00:00") and len(naive) == len("2026-11-12T07:30:13.266+00:00")
+
+    def test_bad_values_fall_back_to_now(self):
+        assert normalize_ts(None).endswith("+00:00")
+        assert normalize_ts("yesterday").endswith("+00:00")
+
+    def test_events_carry_normalized_ts(self):
+        ev = GptmeExtractor("c").feed(gptme_msg("assistant", "done"))[0]
+        assert ev.ts == normalize_ts("2026-11-12T11:00:00")
+
+
+class TestGptmeFailure:
+    def test_hook_error_line_inside_output_is_not_a_failure(self):
+        out = "Ran command: `git commit -m x`\n\n```stdout\nerror: hook warning\n[main abc1234] x\n```\n"
+        assert not gptme_result_failed(out)
+
+    def test_status_line_after_long_output_is_a_failure(self):
+        out = "Ran command\n\n```stdout\n" + "x\n" * 3000 + "```\n\nReturn code: 1\n"
+        assert gptme_result_failed(out)
+
+    def test_tool_exception(self):
+        assert gptme_result_failed("Error executing tool 'shell': boom")

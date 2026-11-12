@@ -21,7 +21,7 @@ from typing import Any
 from gptme_sessions.shell_parse import command_repo_dir
 
 from .classify import classify_tool, landing_kinds
-from .event import AgentEvent, utc_now
+from .event import AgentEvent, normalize_ts
 
 _COMMIT_LINE_RE = re.compile(r"^\[[^\]\n]*?\b([0-9a-f]{7,40})\]", re.MULTILINE)
 _PR_URL_RE = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/\d+")
@@ -36,6 +36,7 @@ def github_slug(directory: str) -> str | None:
     try:
         url = subprocess.run(
             ["git", "-C", directory, "remote", "get-url", "origin"],
+            check=False,
             capture_output=True,
             text=True,
             timeout=5,
@@ -98,7 +99,7 @@ class Extractor:
         kw.setdefault("subagent", self.subagent)
         return AgentEvent(
             kind=kind,
-            ts=ts if isinstance(ts, str) and ts else utc_now(),
+            ts=normalize_ts(ts),
             harness=self.harness,
             session=self.session,
             agent=self.agent,
@@ -213,9 +214,18 @@ _GPTME_CALL_RE = re.compile(r"\n@(\w+)\(([^)\s]+)\):\s*(.*)", re.DOTALL)
 _GPTME_FENCE_RE = re.compile(
     r"^```(\w+)(?:[ \t]+(\S+))?[^\n]*\n(.*?)^```", re.MULTILINE | re.DOTALL
 )
-_GPTME_ERROR_RE = re.compile(
-    r"^(?:Error\b|Return code: -?[1-9]|Process interrupted)", re.MULTILINE | re.IGNORECASE
-)
+# gptme's own result framing, outside the fenced stdout/stderr blocks: a tool
+# exception ("Error executing tool ...") or a shell status line. Matching only
+# there keeps a line like "error: ..." printed by a hook during a successful
+# commit from turning the commit into an error.
+_GPTME_FENCED_RE = re.compile(r"^```.*?^```[ \t]*$", re.MULTILINE | re.DOTALL)
+_GPTME_STATUS_RE = re.compile(r"^(?:Return code: -?[1-9]\d*|Process interrupted\b)", re.MULTILINE)
+
+
+def gptme_result_failed(content: str) -> bool:
+    if content.lstrip().startswith("Error"):
+        return True
+    return bool(_GPTME_STATUS_RE.search(_GPTME_FENCED_RE.sub("", content)))
 
 
 class GptmeExtractor(Extractor):
@@ -231,7 +241,7 @@ class GptmeExtractor(Extractor):
         if role == "system":
             call_id = rec.get("call_id")
             if isinstance(call_id, str):
-                failed = bool(_GPTME_ERROR_RE.search(content[:2000]))
+                failed = gptme_result_failed(content)
                 return self._result(ts, call_id, failed, content)
             return []
         if role != "assistant":

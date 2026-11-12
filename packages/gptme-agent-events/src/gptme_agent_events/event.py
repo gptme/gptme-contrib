@@ -37,6 +37,28 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def normalize_ts(ts: Any) -> str:
+    """Any harness timestamp as UTC ISO 8601 with milliseconds and ``+00:00``.
+
+    Claude Code and Codex write ``...Z``; gptme writes naive local time, which
+    is read as the local time of the host running the follower (the agent's own
+    host). One format means events from different harnesses order correctly and
+    compare as strings. Unparseable or missing values fall back to now.
+    """
+    if not isinstance(ts, str) or not ts.strip():
+        return utc_now()
+    text = ts.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return utc_now()
+    if dt.tzinfo is None:
+        dt = dt.astimezone()  # naive: local time
+    return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds")
+
+
 @dataclass
 class AgentEvent:
     kind: str

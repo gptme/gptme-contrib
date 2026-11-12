@@ -6,6 +6,19 @@ followed from their current end, so only new activity is reported (pass
 ``from_start`` to replay recent files). Files that appear later are read from
 the beginning and announce themselves with a ``session_start`` event.
 
+Hosts accumulate tens of thousands of old trajectories, so discovery is
+tiered. A quick scan (every ``rescan_interval``) lists only the roots and
+"warm" directories: those modified within ``warm_horizon`` or newly appeared.
+A full sweep (every ``full_scan_interval``) walks everything, re-checks idle
+files so a resumed session is picked up, and recomputes which directories are
+warm. Only files active within ``active_window`` are kept open for polling;
+idle ones are kept as a compact (offset, inode) record.
+
+Files that appear after startup are read from the start, but events older than
+their discovery time (minus ``discovery_slack``) are dropped, so a conversation
+directory that is copied or moved into place does not replay its history as
+live activity.
+
 The follower polls with ``stat`` only, so it needs no inotify and works the same
 on Linux and macOS. It copes with the ways harnesses write their logs:
 
@@ -22,9 +35,11 @@ import os
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from fnmatch import fnmatch
 from pathlib import Path
 
-from .event import AgentEvent, utc_now
+from .event import AgentEvent
 from .extractors import EXTRACTORS, Extractor
 
 HARNESSES = tuple(EXTRACTORS)
@@ -75,12 +90,17 @@ class _File:
     path: Path
     offset: int
     inode: int
-    is_new: bool
+    mtime: float
+    announce: bool = False  # emit session_start before the first kept event
+    not_before: str = ""  # drop events older than this (files found after startup)
     buf: bytes = b""
     last_ts: str = ""
     skip_until: str = ""
     extractor: Extractor | None = None
-    mtime: float = 0.0
+
+
+def _iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat(timespec="milliseconds")
 
 
 class Follower:
@@ -91,6 +111,9 @@ class Follower:
         *,
         active_window: float = 600.0,
         rescan_interval: float = 5.0,
+        full_scan_interval: float = 60.0,
+        warm_horizon: float = 86400.0,
+        discovery_slack: float = 120.0,
         from_start: bool = False,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -98,39 +121,108 @@ class Follower:
         self.agent = agent
         self.active_window = active_window
         self.rescan_interval = rescan_interval
+        self.full_scan_interval = full_scan_interval
+        self.warm_horizon = warm_horizon
+        self.discovery_slack = discovery_slack
         self.from_start = from_start
         self.clock = clock
-        self._files: dict[Path, _File] = {}
+        self._files: dict[Path, _File] = {}  # followed (recently active)
+        self._cold: dict[Path, tuple[int, int]] = {}  # idle: (offset, inode)
+        self._children: dict[Path, set[str]] = {}  # directory listings
+        self._warm: set[Path] = set()  # directories quick scans descend into
         self._last_scan: float | None = None
+        self._last_full: float | None = None
 
     # -- discovery ---------------------------------------------------------
 
-    def _scan(self) -> None:
-        first = self._last_scan is None
+    def _walk(self, directory: Path, parts: tuple[str, ...], full: bool, now: float):
+        """Yield files under ``directory`` matching ``parts``, pruning cold dirs on quick scans."""
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            return
+        known = self._children.get(directory)
+        self._children[directory] = {e.name for e in entries}
+        if len(parts) == 1:
+            for e in entries:
+                if fnmatch(e.name, parts[0]) and e.is_file():
+                    yield Path(e.path)
+            return
+        for e in entries:
+            if not fnmatch(e.name, parts[0]) or not e.is_dir():
+                continue
+            sub = Path(e.path)
+            if full:
+                try:
+                    recent = now - e.stat().st_mtime <= self.warm_horizon
+                except OSError:
+                    continue
+                if recent:
+                    self._warm.add(sub)
+                else:
+                    self._warm.discard(sub)
+            elif known is None or e.name not in known:
+                self._warm.add(sub)  # appeared since the last listing
+            if full or sub in self._warm:
+                yield from self._walk(sub, parts[1:], full, now)
+
+    def _scan(self, full: bool) -> None:
         now = self.clock()
+        first = self._last_full is None
         self._last_scan = now
+        if full:
+            self._last_full = now
+        seen: set[Path] = set()
         for src in self.sources:
             if not src.root.is_dir():
                 continue
             for pattern in src.patterns:
-                for path in src.root.glob(pattern):
-                    try:
-                        st = path.stat()
-                    except OSError:
-                        continue
-                    if path in self._files:
-                        self._files[path].mtime = st.st_mtime
-                        continue
-                    recent = now - st.st_mtime <= self.active_window
-                    replay = first and self.from_start and recent
-                    self._files[path] = _File(
-                        harness=src.harness,
-                        path=path,
-                        offset=0 if (replay or not first) else st.st_size,
-                        inode=st.st_ino,
-                        is_new=not first,
-                        mtime=st.st_mtime,
-                    )
+                for path in self._walk(src.root, Path(pattern).parts, full, now):
+                    seen.add(path)
+                    self._consider(src.harness, path, full, first, now)
+        if full:
+            for gone in [p for p in self._cold if p not in seen]:
+                del self._cold[gone]
+
+    def _consider(self, harness: str, path: Path, full: bool, first: bool, now: float) -> None:
+        if path in self._files or (path in self._cold and not full):
+            return  # followed files are polled; idle ones are re-checked on full sweeps
+        try:
+            st = path.stat()
+        except OSError:
+            return
+        if path in self._cold:
+            offset, inode = self._cold[path]
+            if st.st_ino == inode and st.st_size == offset:
+                return
+            del self._cold[path]
+            appended = st.st_ino == inode and st.st_size > offset
+            self._files[path] = _File(
+                harness,
+                path,
+                offset=offset if appended else 0,
+                inode=st.st_ino,
+                mtime=st.st_mtime,
+                not_before="" if appended else _iso(now - self.discovery_slack),
+            )
+            return
+        if first:
+            if now - st.st_mtime > self.active_window:
+                self._cold[path] = (st.st_size, st.st_ino)
+                return
+            offset = 0 if self.from_start else st.st_size
+            self._files[path] = _File(harness, path, offset, st.st_ino, st.st_mtime)
+            return
+        # Appeared after startup: a new session, or history moved into place.
+        self._files[path] = _File(
+            harness,
+            path,
+            offset=0,
+            inode=st.st_ino,
+            mtime=st.st_mtime,
+            announce="subagents" not in path.parts,  # subagents belong to their parent
+            not_before=_iso(now - self.discovery_slack),
+        )
 
     # -- reading -----------------------------------------------------------
 
@@ -162,8 +254,7 @@ class Follower:
         except OSError:
             return []
         f.offset += len(chunk)
-        data = f.buf + chunk
-        lines = data.split(b"\n")
+        lines = (f.buf + chunk).split(b"\n")
         f.buf = lines.pop()
 
         ex = self._extractor(f)
@@ -180,15 +271,16 @@ class Follower:
 
         if f.skip_until:
             events = [e for e in events if e.ts > f.skip_until]
+        if f.not_before:
+            events = [e for e in events if e.ts >= f.not_before]
         if events:
             f.skip_until = ""
             f.last_ts = max(f.last_ts, *(e.ts for e in events))
-        if f.is_new and lines:
-            f.is_new = False
-            if not ex.subagent:  # a subagent is part of its parent's session
+            if f.announce:
+                f.announce = False
                 start = AgentEvent(
                     kind="session_start",
-                    ts=events[0].ts if events else utc_now(),
+                    ts=events[0].ts,
                     harness=f.harness,
                     session=ex.session,
                     agent=self.agent,
@@ -197,15 +289,18 @@ class Follower:
         return events
 
     def poll(self) -> list[AgentEvent]:
-        """One pass: rescan if due, then read new lines from active files."""
+        """One pass: scan if due, read new lines from followed files, retire idle ones."""
         now = self.clock()
-        if self._last_scan is None or now - self._last_scan >= self.rescan_interval:
-            self._scan()
+        if self._last_full is None or now - self._last_full >= self.full_scan_interval:
+            self._scan(full=True)
+        elif self._last_scan is None or now - self._last_scan >= self.rescan_interval:
+            self._scan(full=False)
         events: list[AgentEvent] = []
         for f in list(self._files.values()):
-            # Idle files are skipped; the rescan refreshes their mtime.
-            if f.is_new or now - f.mtime <= self.active_window:
-                events += self._read(f)
+            events += self._read(f)
+            if f.path in self._files and now - f.mtime > self.active_window:
+                del self._files[f.path]
+                self._cold[f.path] = (f.offset - len(f.buf), f.inode)
         return events
 
     def run(self, interval: float = 0.5) -> Iterator[AgentEvent]:
