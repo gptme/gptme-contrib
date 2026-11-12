@@ -2988,20 +2988,22 @@ def edit(
     setting_done = any(
         op == "set" and field == "state" and value == "done" for op, field, value in changes
     )
-    sets_verified = any(
-        op == "set" and field == "verified" and value is not None and str(value).strip()
-        for op, field, value in changes
-    )
     unverified: list[str] = []
-    if setting_done and not sets_verified:
+    if setting_done:
         for task in target_tasks:
             meta = frontmatter.load(task.path).metadata
             prior = normalize_state(str(meta.get("state", "backlog") or "backlog"), warn=False)
             if prior == "done" or meta.get("recur"):
                 continue
+            # Evidence as it will be on disk: apply this command's verified edits
+            # in order, so `--set verified none` clears rather than supplies it.
+            final_verified = meta.get("verified")
+            for op, field, value in changes:
+                if op == "set" and field == "verified":
+                    final_verified = value
             if (
                 str(meta.get("success_criterion") or "").strip()
-                and not str(meta.get("verified") or "").strip()
+                and not str(final_verified or "").strip()
             ):
                 unverified.append(task.name)
     if unverified:

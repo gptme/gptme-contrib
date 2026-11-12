@@ -98,3 +98,35 @@ def test_clearing_verified_does_not_count_as_evidence(tmp_path, monkeypatch):
     assert result.exit_code != 0, result.output
     assert "verified" in result.output
     assert path.read_bytes() == before
+
+
+def test_clearing_existing_verified_while_done_is_refused(tmp_path, monkeypatch):
+    path = make_task(tmp_path, monkeypatch, CRITERION + "verified: measured 14%\n")
+    before = path.read_bytes()
+    result = CliRunner().invoke(
+        cli, ["edit", "task", "--set", "state", "done", "--set", "verified", "none"]
+    )
+    assert result.exit_code != 0, result.output
+    assert "verified" in result.output
+    assert path.read_bytes() == before
+
+
+def test_last_verified_assignment_wins(tmp_path, monkeypatch):
+    make_task(tmp_path, monkeypatch, CRITERION + "verified: measured 14%\n")
+    result = CliRunner().invoke(
+        cli,
+        [
+            "edit",
+            "task",
+            "--set",
+            "state",
+            "done",
+            "--set",
+            "verified",
+            "none",
+            "--set",
+            "verified",
+            "re-measured 12%",
+        ],
+    )
+    assert result.exit_code == 0, result.output
