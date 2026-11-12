@@ -287,7 +287,11 @@ def _parse_ladder(raw: dict, effort: str | None, w: _Where) -> tuple[str, ...]:
 
 
 def _check_pool(
-    name: object, pools: Mapping[str, PoolPolicy], ladder: tuple[str, ...], w: _Where
+    name: object,
+    pools: Mapping[str, PoolPolicy],
+    effort: str | None,
+    ladder: tuple[str, ...],
+    w: _Where,
 ) -> None:
     if name is None:
         return
@@ -302,6 +306,31 @@ def _check_pool(
             w.err(f"pool {name!r} steps to {step.to!r}, not in ladder {list(ladder)}")
     if pool.usage_unknown != "base" and pool.usage_unknown not in ladder:
         w.err(f"pool {name!r} usage_unknown {pool.usage_unknown!r} is not in ladder")
+    if effort in ladder:
+        _warn_non_monotonic(pool, ladder.index(effort), ladder, w)
+
+
+def _warn_non_monotonic(
+    pool: PoolPolicy, base: int, ladder: tuple[str, ...], w: _Where
+) -> None:
+    """Warn when a higher ``at`` resolves to a higher effort than a lower one.
+
+    The highest reached step wins, so such a step raises effort again as usage
+    grows. Positions are resolved as in ``select_rules.compute_effort``.
+    """
+    deepest, deepest_at = base, None
+    for step in pool.effort_steps:
+        if step.to is not None and step.to not in ladder:
+            return  # already an error
+        pos = base + step.down if step.down else ladder.index(step.to or "")
+        pos = min(max(base, pos), len(ladder) - 1)
+        if pos < deepest:
+            w.warn(
+                f"pool {pool.name!r} effort_steps step back up at {step.at}: "
+                f"{ladder[pos]} after {ladder[deepest]} at {deepest_at}"
+            )
+            return
+        deepest, deepest_at = pos, step.at
 
 
 def _parse_fallbacks(raw: object, w: _Where) -> tuple[FallbackEntry, ...]:
@@ -358,7 +387,7 @@ def _parse_row(
         w.err(f"must be a non-empty string, got {effort!r}", ".effort")
         effort = None
     ladder = _parse_ladder(raw, effort, w)
-    _check_pool(raw.get("pool"), pools, ladder, w)
+    _check_pool(raw.get("pool"), pools, effort, ladder, w)
     expires = None
     if "expires" in raw:
         try:

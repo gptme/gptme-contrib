@@ -735,8 +735,8 @@ def select_cmd(
     first viable {backend, model} pair. Exit code 1 when none is viable.
 
     With --lane: one decision from the lane policy ([routing], [pools.*],
-    [lanes.*]). Exit 0 with a decision, 76 for no_capacity, 2 on an internal
-    error without --default-arm; --shadow always exits 0. --validate checks the
+    [lanes.*]). Exit 0 with a decision, 76 for no_capacity, 69 for no_arm, 2 on
+    an internal error without --default-arm; --shadow always exits 0. --validate checks the
     routing tables instead.
     """
     import json as _json

@@ -32,7 +32,7 @@ from typing import Any
 #: Cache written by ``scripts/check-claude-usage.sh`` (its default location).
 DEFAULT_CLAUDE_USAGE_CACHE = "/tmp/claude-usage-cache.json"
 DEFAULT_MAX_AGE_S = 1800.0
-DEFAULT_TIMEOUT_S = 90.0
+DEFAULT_TIMEOUT_S = 15.0  # on the launch path; the cache read is the cheap route
 WEEK_SECONDS = 7 * 24 * 3600
 #: Pace target used by check-claude-usage's ``_pacing``: 90% of the week by reset.
 CLAUDE_PACE_TARGET = 0.9
@@ -87,7 +87,9 @@ def _pace_gap(
         from gptme_subscription.routing import compute_window_pacing_snapshot
     except Exception:  # optional package missing or broken: use the script's value
         legacy = _number(pacing.get("pace_gap")) if isinstance(pacing, dict) else None
-        # check-claude-usage reports ``target - used``; flip to the canonical sign.
+        # scripts/check-claude-usage-parser.py computes ``target = elapsed * 0.9;
+        # pace_gap = target - actual`` (negative = overusing); flip it to the
+        # canonical ``used - target`` sign (positive = ahead of even pace).
         return None if legacy is None else round(-legacy, 3)
     snapshot = compute_window_pacing_snapshot(
         used,

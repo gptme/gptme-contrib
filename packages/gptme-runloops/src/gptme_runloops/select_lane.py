@@ -22,11 +22,14 @@ from pathlib import Path
 from typing import Any
 
 from . import select as _select
-from .select_policy import NO_CAPACITY_EXIT, PolicyError, parse_routing
+from .select_policy import NO_CAPACITY_EXIT, TRIGGERS, PolicyError, parse_routing
 from .select_rules import choose_arm
 from .select_usage import PoolReading, read_pool_usage
 
 FAIL_OPEN_NO_DEFAULT_EXIT = 2
+#: ``no_arm``: the lane arm is excluded, blocked or missing and no fallback
+#: applies. Not a quota skip: callers run their default and report an outage.
+NO_ARM_EXIT = 69  # EX_UNAVAILABLE
 
 
 @dataclass
@@ -95,7 +98,7 @@ def _new_decision(
         "rule": "fail_open", "reason": "", "lane": lane, "class": cls,
         "work_item": work_item, "decision_id": str(uuid.uuid4()),
         "policy_version": None, "policy_expired": False, "shadow": shadow,
-        "pool": None, "skipped": [],
+        "pool": None, "skipped": [], "trigger": None,
     }  # fmt: skip
 
 
@@ -133,10 +136,24 @@ def _decide(
         backend=choice.arm.backend if choice.arm else None,
         model=choice.arm.model if choice.arm else None,
         effort=choice.effort, scope=choice.scope, rule=choice.rule,
-        reason=choice.reason, skipped=choice.skipped,
+        reason=choice.reason, skipped=choice.skipped, trigger=choice.trigger,
         policy_expired=row.expired(today),
         pool=reading.to_dict(pool.name) if pool else None,
     )  # fmt: skip
+
+
+def _known_reasons(
+    excluded: dict[str, str | None],
+) -> tuple[dict[str, str | None], list[str]]:
+    """Map ``--reason`` values outside the trigger vocabulary to ``unspecified``."""
+    out: dict[str, str | None] = {}
+    notes: list[str] = []
+    for arm, reason in excluded.items():
+        if reason is not None and reason not in TRIGGERS:
+            notes.append(f"unknown --reason {reason!r} treated as unspecified")
+            reason = None
+        out[arm] = reason
+    return out, notes
 
 
 def _fail_open(
@@ -153,6 +170,7 @@ def _fail_open(
         model=model if usable else None,
         effort=effort if usable else None,
         scope=None, rule="fail_open", reason=error, pool=None, skipped=[],
+        trigger=None,
     )  # fmt: skip
     return error
 
@@ -174,7 +192,8 @@ def select_lane(
     """Decide what ``lane`` runs now, log the decision, and never raise.
 
     Exit codes: 0 with a decision; 76 (:data:`NO_CAPACITY_EXIT`) for
-    ``no_capacity``; 2 after an internal error without ``default_arm``.
+    ``no_capacity``; 69 (:data:`NO_ARM_EXIT`) for ``no_arm``; 2 after an
+    internal error without ``default_arm``.
     ``shadow`` always exits 0.
     """
     state_dir = state_dir or _select._DEFAULT_STATE_DIR
@@ -182,19 +201,16 @@ def select_lane(
     if default_arm:
         decision["default"] = {"arm": default_arm, "effort": default_effort}
     error: str | None = None
+    excluded, notes = _known_reasons(excluded or {})
     try:
-        _decide(
-            decision,
-            config_path,
-            state_dir,
-            dict(excluded or {}),
-            today or date.today(),
-        )
+        _decide(decision, config_path, state_dir, excluded, today or date.today())
     except Exception as exc:  # fail open on anything, by contract
         text = (
             str(exc) if isinstance(exc, PolicyError) else f"{type(exc).__name__}: {exc}"
         )
         error = _fail_open(decision, text, default_arm, default_effort)
+    if notes:
+        decision["reason"] = "; ".join([decision["reason"], *notes])
     decision["ts"] = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
     _append_log(log_path or state_dir / "routing" / "decisions.jsonl", decision)
     if shadow:
@@ -203,6 +219,8 @@ def select_lane(
         code = FAIL_OPEN_NO_DEFAULT_EXIT
     elif decision["rule"] == "no_capacity":
         code = NO_CAPACITY_EXIT
+    elif decision["rule"] == "no_arm":
+        code = NO_ARM_EXIT
     else:
         code = 0
     return LaneOutcome(decision, code, error)

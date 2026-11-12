@@ -233,11 +233,12 @@ def test_fallback_on_missing_binary(tmp_path, reading, env):
     assert "not found" in d["skipped"][0]["why"]
 
 
-def test_missing_binary_not_in_on_list_is_no_capacity(tmp_path, reading, env):
+def test_missing_binary_not_in_on_list_is_no_arm(tmp_path, reading, env):
     reading(0.1)
     env["missing"] = {"claude-code"}
     out = run(tmp_path)
-    assert out.exit_code == 76 and out.decision["rule"] == "no_capacity"
+    assert out.exit_code == 69
+    assert (out.decision["rule"], out.decision["trigger"]) == ("no_arm", "missing")
 
 
 def test_fallback_skipped_when_its_binary_missing(tmp_path, reading, env):
@@ -245,7 +246,8 @@ def test_fallback_skipped_when_its_binary_missing(tmp_path, reading, env):
     env["blocked"] = {LANE_ARM: "blocked"}
     env["missing"] = {"gptme"}
     out = run(tmp_path)
-    assert out.decision["rule"] == "no_capacity" and out.exit_code == 76
+    assert out.decision["rule"] == "no_arm" and out.exit_code == 69
+    assert out.decision["trigger"] == "blocked"
     assert [s["arm"] for s in out.decision["skipped"]] == [LANE_ARM, FALLBACK_ARM]
 
 
@@ -253,7 +255,7 @@ def test_excluded_fallback_matching_reason(tmp_path, reading, env):
     reading(0.1)
     out = run(tmp_path, excluded={LANE_ARM: "auth"})
     d = out.decision
-    assert out.exit_code == 0
+    assert out.exit_code == 0 and d["trigger"] == "auth"
     assert (d["rule"], d["backend"], d["scope"]) == (
         "excluded_fallback",
         "gptme",
@@ -261,17 +263,32 @@ def test_excluded_fallback_matching_reason(tmp_path, reading, env):
     )
 
 
+def test_unknown_reason_treated_as_unspecified(tmp_path, reading, env):
+    reading(0.1)
+    cfg = write_config(
+        tmp_path, POLICY.replace('["auth", "blocked"]', '["rate_limited"]')
+    )
+    out = run(tmp_path, config_path=cfg, excluded={LANE_ARM: "rate-limited"})
+    d = out.decision
+    assert (d["rule"], d["trigger"], out.exit_code) == ("no_arm", "unspecified", 69)
+    assert "unknown --reason 'rate-limited' treated as unspecified" in d["reason"]
+    out = run(tmp_path, config_path=cfg, excluded={LANE_ARM: "rate_limited"})
+    assert out.decision["rule"] == "excluded_fallback"
+    assert "unknown --reason" not in out.decision["reason"]
+
+
 def test_excluded_fallback_non_matching_reason(tmp_path, reading, env):
     reading(0.1)
     out = run(tmp_path, excluded={LANE_ARM: "crash"})
-    assert out.exit_code == 76 and out.decision["rule"] == "no_capacity"
+    assert out.exit_code == 69 and out.decision["rule"] == "no_arm"
+    assert out.decision["trigger"] == "crash"
     assert "does not match crash" in out.decision["skipped"][1]["why"]
 
 
 def test_excluded_fallback_arm_is_skipped(tmp_path, reading, env):
     reading(0.1)
     out = run(tmp_path, excluded={LANE_ARM: "auth", FALLBACK_ARM: "auth"})
-    assert out.decision["rule"] == "no_capacity"
+    assert out.decision["rule"] == "no_arm" and out.exit_code == 69
 
 
 def test_no_capacity_exit_76(tmp_path, reading, env):
@@ -279,6 +296,12 @@ def test_no_capacity_exit_76(tmp_path, reading, env):
     out = run(tmp_path)
     assert out.exit_code == 76
     assert out.decision["rule"] == "no_capacity" and out.decision["backend"] is None
+    assert out.decision["trigger"] == "no_capacity"
+
+
+def test_lane_arm_chosen_has_null_trigger(tmp_path, reading, env):
+    reading(0.67)
+    assert run(tmp_path).decision["trigger"] is None
 
 
 def test_owner_reserve_sets_ceiling_when_no_capacity_at_unset(tmp_path, reading, env):
@@ -292,6 +315,7 @@ def test_no_capacity_uses_fallback_whose_on_matches(tmp_path, reading, env):
     cfg = write_config(tmp_path, POLICY.replace('"blocked"]', '"no_capacity"]'))
     d = run(tmp_path, config_path=cfg).decision
     assert d["rule"] == "fallback" and d["backend"] == "gptme"
+    assert d["trigger"] == "no_capacity"
 
 
 def test_unknown_usage_never_no_capacity(tmp_path, reading, env):
@@ -448,6 +472,17 @@ def test_validate_ok_cli(tmp_path, reading):
     )
     assert result.exit_code == 0, result.output
     assert "ok: 1 lane(s), 1 pool(s)" in result.output
+    assert "0 warning(s)" in result.output
+
+
+def test_validate_warns_on_steps_that_step_back_up(tmp_path, reading):
+    steps = "effort_steps = [{ at = 0.50, down = 2 }, { at = 0.80, down = 1 }]"
+    text = POLICY.replace(
+        'effort_steps = [{ at = 0.60, down = 1 }, { at = 0.85, to = "low" }]', steps
+    )
+    lines, code = validate_policy(write_config(tmp_path, text))
+    assert code == 0
+    assert any("step back up at 0.8: medium after low at 0.5" in ln for ln in lines)
 
 
 def test_policy_version_stable_and_sensitive():
@@ -489,6 +524,44 @@ def test_parse_claude_usage_pace_sign():
     assert used == 0.67 and gap == pytest.approx(0.22, abs=1e-3)
 
 
+def _script_pace_gap(used: float, resets_in_seconds: int) -> float:
+    """``_pacing.pace_gap`` exactly as scripts/check-claude-usage-parser.py computes it."""
+    elapsed_frac = max(0.0, 1.0 - resets_in_seconds / (7 * 24 * 3600))
+    target = elapsed_frac * 0.9
+    return round(target - used, 3)
+
+
+@pytest.mark.parametrize(
+    ("used", "effort", "rule"),
+    [
+        (0.58, "medium", "lane_pressure"),  # 0.13 ahead of pace: guard fires
+        (0.30, "high", "lane"),  # 0.15 behind pace: guard does not fire
+    ],
+)
+def test_legacy_pace_branch_sign(tmp_path, monkeypatch, env, used, effort, rule):
+    """Without gptme_subscription the script's ``target - used`` value is flipped."""
+    monkeypatch.setitem(sys.modules, "gptme_subscription", None)
+    monkeypatch.setitem(sys.modules, "gptme_subscription.routing", None)
+    resets = 302400  # half the week left: pace target 0.45
+    cache = tmp_path / "usage.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "seven_day": {"utilization": used, "resets_in_seconds": resets},
+                "_pacing": {"pace_gap": _script_pace_gap(used, resets)},
+            }
+        )
+    )
+    used_read, gap = parse_claude_usage(json.loads(cache.read_text()))
+    assert gap == pytest.approx(round(used - 0.45, 3))
+    assert (gap > 0) == (used > 0.45)
+    text = POLICY.replace('provider = "fake"', f'usage_cache = "{cache}"')
+    d = run(tmp_path, config_path=write_config(tmp_path, text)).decision
+    assert d["pool"]["source"] == "claude-usage:cache"
+    assert d["pool"]["pace_gap"] == gap
+    assert (d["effort"], d["rule"]) == (effort, rule), d["reason"]
+
+
 def test_parse_claude_usage_unknown_shapes():
     assert parse_claude_usage({}) == (None, None)
     assert parse_claude_usage({"seven_day": {"utilization": "x"}}) == (None, None)
@@ -527,6 +600,13 @@ def test_claude_usage_command(tmp_path):
         {"usage_command": cmd, "usage_cache": str(tmp_path / "none")},
     )
     assert r.used == 0.61 and r.source == "claude-usage:command"
+
+
+def test_claude_usage_command_timeout_is_unknown(tmp_path):
+    cmd = [sys.executable, "-c", "import time; time.sleep(5)"]
+    r = read_pool_usage("claude-usage", {"usage_command": cmd, "usage_timeout_s": 0.2})
+    assert r.used is None and "TimeoutExpired" in (r.note or "")
+    assert select_usage.DEFAULT_TIMEOUT_S == 15.0
 
 
 def test_claude_usage_command_failure_is_unknown(tmp_path):
@@ -607,6 +687,19 @@ def test_cli_no_capacity_exit_76(tmp_path, reading, env):
     assert invoke(tmp_path, "--lane", "autonomous").exit_code == 76
 
 
+def test_cli_no_arm_exit_69_and_shadow_0(tmp_path, reading, env):
+    reading(0.1)
+    args = ["--lane", "autonomous", "--exclude", LANE_ARM, "--reason", "crash"]
+    result = invoke(tmp_path, *args, "--format", "shell")
+    assert result.exit_code == 69
+    assert "ROUTE_RULE=no_arm" in result.stdout
+    assert "ROUTE_TRIGGER=crash" in result.stdout
+    assert invoke(tmp_path, *args, "--shadow").exit_code == 0
+    log = tmp_path / "state" / "routing" / "decisions.jsonl"
+    rows = [json.loads(ln) for ln in log.read_text().splitlines()]
+    assert [r["trigger"] for r in rows] == ["crash", "crash"]
+
+
 def test_cli_exclude_with_reason(tmp_path, reading, env):
     reading(0.1)
     result = invoke(
@@ -621,10 +714,11 @@ def test_cli_shell_format_is_eval_safe(tmp_path, reading, env):
     assert result.exit_code == 0
     script = (
         result.stdout
-        + '\nprintf "%s|%s|%s" "$ROUTE_MODEL" "$ROUTE_EFFORT" "$ROUTE_RULE"'
+        + '\nprintf "%s|%s|%s|%s" "$ROUTE_MODEL" "$ROUTE_EFFORT" "$ROUTE_RULE"'
+        + ' "${ROUTE_TRIGGER-unset}"'
     )
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
-    assert out.stdout == "claude-opus-5-5|medium|lane_pressure"
+    assert out.stdout == "claude-opus-5-5|medium|lane_pressure|"
 
 
 def test_format_shell_quotes_hostile_values(tmp_path):

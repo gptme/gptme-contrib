@@ -78,6 +78,7 @@ class Choice:
     scope: str | None
     reason: str
     skipped: list[dict[str, str]] = field(default_factory=list)
+    trigger: str | None = None  # why the lane arm was not used; None if it was
 
 
 def choose_arm(
@@ -91,7 +92,8 @@ def choose_arm(
 
     ``excluded`` maps ``backend:model`` to the failure reason passed with
     ``--exclude``; ``unavailable`` maps an arm to ``(trigger, why)`` where
-    trigger is ``blocked`` or ``missing``.
+    trigger is ``blocked`` or ``missing``. With no applicable fallback the
+    rule is ``no_capacity`` when the pool ceiling triggered, else ``no_arm``.
     """
     lane_arm = str(row.arm)
     threshold = pool.capacity_threshold if pool else None
@@ -125,17 +127,13 @@ def choose_arm(
         elif arm in unavailable:
             skipped.append({"arm": arm, "why": unavailable[arm][1]})
         else:
+            reason = f"{lead}: fallback {arm}"
             return Choice(
-                on_success,
-                fb.arm,
-                fb.effort,
-                fb.scope,
-                f"{lead}: fallback {arm}",
-                skipped,
+                on_success, fb.arm, fb.effort, fb.scope, reason, skipped, trigger
             )
-    return Choice(
-        "no_capacity", None, None, None, f"{lead}; no fallback applies", skipped
-    )
+    rule = "no_capacity" if trigger == "no_capacity" else "no_arm"
+    reason = f"{lead}; no fallback applies"
+    return Choice(rule, None, None, None, reason, skipped, trigger)
 
 
 def pair_exclusions(arms: list[str], reasons: list[str]) -> dict[str, str | None]:
@@ -155,6 +153,7 @@ _SHELL_FIELDS = (
     ("ROUTE_EFFORT", "effort"),
     ("ROUTE_SCOPE", "scope"),
     ("ROUTE_RULE", "rule"),
+    ("ROUTE_TRIGGER", "trigger"),
     ("ROUTE_REASON", "reason"),
     ("ROUTE_DECISION_ID", "decision_id"),
 )
@@ -191,6 +190,8 @@ def format_explain(decision: Mapping[str, Any]) -> str:
         )
     for s in decision.get("skipped") or []:
         lines.append(f"skipped: {s['arm']}: {s['why']}")
+    if decision.get("trigger"):
+        lines.append(f"trigger: {decision['trigger']}")
     lines.append(f"rule: {decision.get('rule')}  ({decision.get('reason')})")
     lines.append(
         f"run: {arm}  effort {decision.get('effort') or '-'}  scope {decision.get('scope') or '-'}"
