@@ -169,9 +169,9 @@ class Follower:
             return
         if not full and self._listed_mtime.get(directory) == mtime:
             if len(parts) > 1:
-                for name in self._children.get(directory, ()):
-                    sub = directory / name
-                    if sub in self._warm and fnmatch(name, parts[0]):
+                # Iterate the (small) warm set, not the (possibly huge) listing.
+                for sub in [w for w in self._warm if w.parent == directory]:
+                    if fnmatch(sub.name, parts[0]):
                         yield from self._walk(sub, parts[1:], full, now)
             return
         try:
