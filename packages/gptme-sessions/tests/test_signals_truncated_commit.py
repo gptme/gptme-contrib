@@ -232,3 +232,18 @@ def test_standalone_quiet_push_is_credited():
     cmd = "git push -q origin master >/dev/null 2>&1"
     signals = extract_signals_cc(_bash("t1", cmd, ""))
     assert any(d["kind"] == "push" for d in signals["deliverable_details"])
+
+
+def test_direct_commit_records_repo_of_cd_target():
+    """A normal ``[branch sha] msg`` commit carries cwd and repo evidence too.
+
+    Commits made via ``cd <worktree> && git commit`` belong to the worktree,
+    not to the session's cwd.
+    """
+    cmd = "cd /tmp/worktrees/gptme-fix && git add -A && git commit -m 'fix: thing'"
+    result = "[fix-branch 1a2b3c4d] fix: thing\n 1 file changed, 2 insertions(+)"
+    signals = extract_signals_cc(_bash("t9", cmd, result, cwd="/home/bob/bob"))
+    detail = next(d for d in signals["deliverable_details"] if d["kind"] == "commit")
+    assert detail["value"] == "fix: thing (1a2b3c4d)"
+    assert detail["evidence"]["repo"] == "/tmp/worktrees/gptme-fix"
+    assert detail["evidence"]["cwd"] == "/home/bob/bob"

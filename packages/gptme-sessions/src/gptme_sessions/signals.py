@@ -40,6 +40,7 @@ from .pi import (
     validate_pi_records,
 )
 from .shell_parse import bash_heredoc_write_paths as _shell_parse_heredoc_write_paths
+from .shell_parse import command_repo_dir
 
 # Regex for git commit lines in shell output (works for both harnesses)
 _COMMIT_RE = re.compile(
@@ -56,7 +57,6 @@ _COMMIT_SUBJECT_RE = re.compile(r"""-m\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""")
 _COMMIT_HEREDOC_SUBJECT_RE = re.compile(
     r"""-m\s+"\$\(cat\s+<<-?\s*'?(\w+)'?\s*\n(.*?)\n\1\b""", re.S
 )
-_GIT_REPO_RE = re.compile(r"""\bgit\s+-C\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([^\s;&|]+))""")
 _GIT_PUSH_CMD_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+push\b")
 _QUIET_PUSH_RE = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+push\b[^;&|\n]*(?:\s-q\b|--quiet\b)")
 
@@ -187,10 +187,7 @@ def _subject_matches(observed: str, expected: str) -> bool:
 
 
 def _command_repo(cmd: str, cwd: str | None) -> str | None:
-    match = _GIT_REPO_RE.search(cmd)
-    if not match:
-        return cwd
-    return next((group for group in match.groups() if group is not None), cwd)
+    return command_repo_dir(cmd, cwd)
 
 
 def _cc_session_cwd(msgs: list[dict]) -> str | None:
@@ -2202,7 +2199,17 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                             value=commit_value,
                             kind="commit",
                             provenance_class="session_committed",
-                            evidence={"source": "trajectory", "tool_name": "Bash"},
+                            evidence={
+                                "source": "trajectory",
+                                "tool_name": "Bash",
+                                **{
+                                    key: value
+                                    for key, value in _commit_cmd_pending.get(
+                                        tool_use_id, {}
+                                    ).items()
+                                    if key in ("cwd", "repo") and value is not None
+                                },
+                            },
                         )
 
                     # Formatting-independent fallback: a commit command whose

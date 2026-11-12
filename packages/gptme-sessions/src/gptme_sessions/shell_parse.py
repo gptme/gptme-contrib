@@ -17,6 +17,8 @@ has_git_push_command(cmd) -> bool
 
 from __future__ import annotations
 
+import os.path
+
 import re
 from typing import Any
 
@@ -309,3 +311,38 @@ def has_git_push_command(cmd: str) -> bool:
     if _TREE_SITTER_AVAILABLE:
         return _ts_has_git_push(cmd)
     return bool(_PUSH_CMD_RE.search(cmd))
+
+
+_GIT_C_RE = re.compile(r"""\bgit\s+-C\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([^\s;&|]+))""")
+_CD_RE = re.compile(r"""(?:^|[;&|(\n])\s*cd\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([^\s;&|)]+))""")
+
+
+def _first_group(m: re.Match[str]) -> str:
+    return next(g for g in m.groups() if g is not None)
+
+
+def command_repo_dir(cmd: str, cwd: str | None = None) -> str | None:
+    """Directory a command's ``git commit``/``git push`` runs in.
+
+    Starts at ``cwd`` and applies each ``cd <dir>`` before the git call, then
+    the call's own ``git -C <dir>``, so relative steps resolve as the shell
+    would. Returns a local directory (not a remote slug); callers resolve the
+    remote if they need one.
+    """
+    git = _COMMIT_CMD_RE.search(cmd) or _PUSH_CMD_RE.search(cmd)
+    end = git.end() if git else len(cmd)
+    line_start = cmd.rfind("\n", 0, git.start()) + 1 if git else 0
+    stmt_start = max(cmd.rfind(c, line_start, end) for c in ";&|") + 1
+    explicit = _GIT_C_RE.search(cmd, max(stmt_start, line_start), end)
+    steps = [_first_group(m) for m in _CD_RE.finditer(cmd, 0, git.start() if git else end)]
+    if explicit:
+        steps.append(_first_group(explicit))
+    if not steps:
+        return cwd
+    here = cwd
+    for step in steps:
+        step = os.path.expanduser(step)
+        here = (
+            step if os.path.isabs(step) or not here else os.path.normpath(os.path.join(here, step))
+        )
+    return here
