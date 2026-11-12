@@ -4653,7 +4653,10 @@ def sync(update, output_json, use_cache, light, full, changes_only):
             issue_state == "CLOSED"
             and task.state == "waiting"
             and bool(task.metadata.get("recur"))
-            and is_generated_recurrence_waiting_for(task.metadata.get("waiting_for"))
+            and (
+                not task.metadata.get("waiting_for")
+                or is_generated_recurrence_waiting_for(task.metadata.get("waiting_for"))
+            )
         )
         in_sync = (
             task.state == "cancelled"

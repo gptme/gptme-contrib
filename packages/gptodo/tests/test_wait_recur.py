@@ -296,10 +296,7 @@ def test_recur_reset_strips_preexisting_waiting_for(
     post = fm.load(tasks_dir / "human-wait-recur.md")
     assert post.metadata["state"] == "waiting", "recurring task must reset to waiting"
     assert post.metadata.get("wait_kind") == "machine"
-    waiting_for = post.metadata.get("waiting_for", "")
-    assert "John" not in waiting_for, "human leftover waiting_for must not survive reset"
-    assert "recurrence gate" in waiting_for
-    assert str(post.metadata["wait"]) in waiting_for
+    assert "waiting_for" not in post.metadata, "leftover waiting_for must not survive reset"
     waiting_since = str(post.metadata.get("waiting_since", ""))
     assert waiting_since, "state=waiting requires waiting_since"
     assert not waiting_since.startswith("2026-08-01"), "waiting_since must be refreshed"
@@ -643,7 +640,7 @@ def test_recur_reset_clears_stale_probe(tmp_path: Path, monkeypatch: pytest.Monk
     )
 
 
-def test_set_wait_on_recurrence_gate_updates_waiting_for(
+def test_set_wait_on_legacy_recurrence_gate_drops_waiting_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """--set wait on a recurrence-gate waiting task must keep waiting_for in sync.
@@ -680,14 +677,14 @@ def test_set_wait_on_recurrence_gate_updates_waiting_for(
     assert str(post.metadata["wait"]).startswith(
         new_wait
     ), f"wait: must be updated to {new_wait}, got {post.metadata['wait']}"
-    wf = post.metadata.get("waiting_for", "")
-    assert new_wait in wf, (
-        f"waiting_for must reference the new wait date {new_wait!r}; got {wf!r}. "
-        "A stale waiting_for permanently traps the task after the new gate expires."
+    assert "waiting_for" not in post.metadata, (
+        "recur: + wait: is the recurrence gate; a waiting_for restating the "
+        f"date would have to be kept in sync; got {post.metadata.get('waiting_for')!r}"
     )
+    assert post.metadata.get("wait_kind") == "machine"
 
 
-def test_set_wait_and_state_waiting_together_updates_waiting_for(
+def test_set_wait_and_state_waiting_together_drops_legacy_waiting_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Combined --set wait + --set state waiting must still sync waiting_for.
@@ -738,14 +735,14 @@ def test_set_wait_and_state_waiting_together_updates_waiting_for(
     assert str(post.metadata["wait"]).startswith(
         new_wait
     ), f"wait: must be updated to {new_wait}, got {post.metadata['wait']}"
-    wf = post.metadata.get("waiting_for", "")
-    assert new_wait in wf, (
-        f"waiting_for must reference the new wait date {new_wait!r}; got {wf!r}. "
-        "A stale waiting_for permanently traps the task after the new gate expires."
+    assert "waiting_for" not in post.metadata, (
+        "recur: + wait: is the recurrence gate; a waiting_for restating the "
+        f"date would have to be kept in sync; got {post.metadata.get('waiting_for')!r}"
     )
+    assert post.metadata.get("wait_kind") == "machine"
 
 
-def test_last_set_wait_wins_in_waiting_for_sync(
+def test_last_set_wait_wins_on_legacy_recurrence_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Multiple --set wait in one edit must sync waiting_for to the LAST value.
@@ -797,13 +794,11 @@ def test_last_set_wait_wins_in_waiting_for_sync(
     assert str(post.metadata["wait"]).startswith(
         last_wait
     ), f"wait: must be the last --set wait {last_wait}, got {post.metadata['wait']}"
-    wf = post.metadata.get("waiting_for", "")
-    assert (
-        last_wait in wf
-    ), f"waiting_for must reference the last wait date {last_wait!r}; got {wf!r}."
-    assert (
-        first_wait not in wf
-    ), f"waiting_for must not keep the first --set wait {first_wait!r}; got {wf!r}."
+    assert "waiting_for" not in post.metadata, (
+        "recur: + wait: is the recurrence gate; a waiting_for restating the "
+        f"date would have to be kept in sync; got {post.metadata.get('waiting_for')!r}"
+    )
+    assert post.metadata.get("wait_kind") == "machine"
 
 
 def test_trailing_set_wait_none_releases_recurrence_gate(
@@ -1299,11 +1294,35 @@ def test_set_wait_after_wait_none_staying_waiting_restores_recurrence_gate(
         "later --set wait must restore wait_kind=machine so the new date remains "
         f"a releasable recurrence gate; got {post.metadata.get('wait_kind')!r}"
     )
-    wf = post.metadata.get("waiting_for", "")
-    assert new_wait in str(wf), (
-        f"waiting_for must reference the new wait date {new_wait!r}; got {wf!r}. "
-        "A leftover generated string for the old date permanently traps the task."
+    assert "waiting_for" not in post.metadata
+
+
+def test_recur_and_wait_alone_are_the_recurrence_gate(tmp_path: Path) -> None:
+    """A waiting recurring task with no waiting_for is gated by recur: + wait:.
+
+    Blocked while the date is in the future; released once it has passed, even
+    without wait_kind, so a hand-edited task cannot be trapped by the absence of
+    a generated string.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    future = (date.today() + timedelta(days=5)).isoformat()
+    past = (date.today() - timedelta(days=2)).isoformat()
+    write_task(
+        tasks_dir, "future-cycle", state="waiting", created="2026-01-01", recur="7d", wait=future
     )
-    assert old_wait not in str(
-        wf
-    ), f"waiting_for must not keep the old wait date {old_wait!r}; got {wf!r}."
+    write_task(tasks_dir, "due-cycle", state="waiting", created="2026-01-01", recur="7d", wait=past)
+    write_task(
+        tasks_dir,
+        "due-cycle-human",
+        state="waiting",
+        created="2026-01-01",
+        recur="7d",
+        wait=past,
+        waiting_for="Erik to approve the budget",
+    )
+    tasks = {t.name: t for t in load_tasks(tasks_dir)}
+    assert task_has_waiting_blocker(tasks["future-cycle"]) is True
+    assert task_has_waiting_blocker(tasks["due-cycle"]) is False
+    # A declared human blocker still wins over the clock.
+    assert task_has_waiting_blocker(tasks["due-cycle-human"]) is True

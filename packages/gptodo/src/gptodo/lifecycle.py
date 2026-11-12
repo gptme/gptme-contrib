@@ -220,85 +220,51 @@ def transform_post(
                     value = normalize_state(value, warn=False)
 
                 post.metadata[field] = value
-    # When --set wait is used on a recurrence-reset task (state=waiting,
-    # wait_kind=machine, waiting_for="next recurrence gate (wait: ...)"),
-    # keep waiting_for in sync with the new wait value so
-    # task_has_waiting_blocker can still match the recurrence-gate pattern.
-    # Without this, a manual wait adjustment permanently traps the task.
-    #
-    # Must run AFTER every --set in this invocation is applied. Doing it
-    # inside the per-field loop misses `--set wait X --set state waiting`
-    # because state still holds the pre-edit value when wait is processed
-    # (P1 on gptme/gptme-contrib#1539). Combined with the existing
-    # transitioning_to_waiting check just below, this covers both orderings.
-    # Last --set wait wins (same as the apply loop). next() without
-    # reversed() would rewrite waiting_for from the first wait while
-    # metadata['wait'] holds a later one, permanently trapping the task.
-    wait_change = next(
-        (
-            (True, value)
-            for op, field, value in reversed(changes)
-            if op == "set" and field == "wait"
-        ),
-        (False, None),
-    )
-    wait_was_set, wait_set = wait_change
-    if wait_was_set:
-        _wf = post.metadata.get("waiting_for", "")
-        generated_wf = is_generated_recurrence_waiting_for(_wf)
-        wait_kind = post.metadata.get("wait_kind")
-        # A leftover generated waiting_for without wait_kind is still a
-        # recurrence gate: `--set wait none --set state waiting` pops
-        # wait_kind (state=waiting requires waiting_for) and a later
-        # `--set wait NEW` must restore the machine gate. Otherwise the
-        # old generated string permanently traps the task after the new
-        # date expires (P1 on gptme/gptme-contrib#1539 / 7a046593).
-        recurrence_gate = generated_wf and wait_kind in ("machine", None)
-        if recurrence_gate and wait_set is None:
-            # Clearing a generated recurrence gate means it is no longer
-            # a machine time-gate. Remove the generated blocker metadata as
-            # one unit so the task cannot stay permanently blocked without
-            # a date. Only default state to todo when this edit did not
-            # set state — `--set wait none --set state done` must not
-            # overwrite the explicit state (P1 on gptme/gptme-contrib#1539).
-            explicit_state = any(op == "set" and field == "state" for op, field, _value in changes)
-            # Only default waiting → todo. A leftover recurrence-gate
-            # string on done/cancelled/active must not reopen or demote
-            # the task (P1 on gptme/gptme-contrib#1539 / ecb15242).
-            if not explicit_state and post.metadata.get("state") == "waiting":
-                post.metadata["state"] = "todo"
-            if post.metadata.get("state") == "waiting":
-                # `--set wait none --set state waiting` must not pop
-                # waiting_for/waiting_since: state=waiting requires both
-                # (P1 on gptme/gptme-contrib#1539 / b859fbf4). Drop
-                # wait_kind so this is no longer a machine time-gate.
-                post.metadata.pop("wait_kind", None)
-            else:
-                post.metadata.pop("waiting_for", None)
-                post.metadata.pop("waiting_since", None)
-                post.metadata.pop("wait_kind", None)
-        elif recurrence_gate and post.metadata.get("state") == "waiting":
-            post.metadata["waiting_for"] = f"next recurrence gate (wait: {wait_set})"
-            post.metadata["wait_kind"] = "machine"
-        elif recurrence_gate:
-            # Wait changed but the task is no longer waiting. Drop the
-            # generated recurrence string so it cannot trap a todo/done
-            # task as a leftover human-looking blocker.
+    # Recurrence state is ``recur:`` + ``wait:``; gptodo no longer writes a
+    # generated ``waiting_for: next recurrence gate (wait: ...)`` that restates
+    # the date (it needed sync branches on every wait/state edit and trapped
+    # tasks whenever the copies drifted). A legacy generated string is dropped
+    # on any edit, so the fields stay the only source of the gate.
+    if is_generated_recurrence_waiting_for(post.metadata.get("waiting_for", "")):
+        if post.metadata.get("state") != "waiting":
+            # Leftover gate metadata on a todo/done task must not read as a
+            # human blocker.
+            for _field in ("waiting_for", "waiting_since", "wait_kind"):
+                post.metadata.pop(_field, None)
+        elif post.metadata.get("recur"):
             post.metadata.pop("waiting_for", None)
-            post.metadata.pop("waiting_since", None)
+    wait_cleared = any(
+        op == "set" and field == "wait" and value is None for op, field, value in changes
+    )
+    wait_set = any(
+        op == "set" and field == "wait" and value is not None for op, field, value in changes
+    )
+    explicit_state = any(op == "set" and field == "state" for op, field, _value in changes)
+    # A machine gate without a date or probe is no longer a machine gate.
+    if wait_cleared and not post.metadata.get("probe"):
+        if post.metadata.get("wait_kind") == "machine":
             post.metadata.pop("wait_kind", None)
-    # Drop generated recurrence-gate waiting_for whenever the final state
-    # is not waiting, even if this edit did not touch wait. A state-only
-    # `--set state todo` used to skip the wait-sync (gated on wait_was_set)
-    # and leave waiting_for, which task_has_waiting_blocker treats as a
-    # human blocker on non-waiting states (P1 on gptme/gptme-contrib#1539
-    # / 69034e96). Keep wait: — the user did not ask to clear the date.
-    if post.metadata.get("state") != "waiting" and is_generated_recurrence_waiting_for(
-        post.metadata.get("waiting_for", "")
+    # A new date on a waiting recurring task with no other blocker is its
+    # recurrence gate again.
+    if (
+        wait_set
+        and post.metadata.get("state") == "waiting"
+        and post.metadata.get("recur")
+        and not post.metadata.get("waiting_for")
     ):
-        post.metadata.pop("waiting_for", None)
-        post.metadata.pop("waiting_since", None)
-        post.metadata.pop("wait_kind", None)
+        post.metadata["wait_kind"] = "machine"
+    # Clearing wait: on a recurrence-gated waiting task means it is no longer
+    # gated. Without an explicit state or another declared blocker, release it
+    # to todo instead of leaving a waiting task with nothing to wait on.
+    if (
+        wait_cleared
+        and not explicit_state
+        and post.metadata.get("state") == "waiting"
+        and post.metadata.get("recur")
+        and not post.metadata.get("waiting_for")
+        and not post.metadata.get("probe")
+    ):
+        post.metadata["state"] = "todo"
     # A manual release out of waiting (`--set state todo`) clears the human
     # blocker too: a leftover waiting_for keeps the released task hidden from
     # ready selection exactly like the recurrence case above. Fields this edit
@@ -485,9 +451,10 @@ def transform_post(
                 state="waiting",
                 wait=wait_iso,
                 wait_kind="machine",
-                waiting_for=f"next recurrence gate (wait: {wait_iso})",
                 waiting_since=now.isoformat(timespec="seconds"),
             )
+            # recur: + wait: are the gate; no waiting_for restating the date.
+            post.metadata.pop("waiting_for", None)
             post.metadata.pop("probe", None)
             if not _completed_explicitly_set:
                 post.metadata.pop("completed", None)
