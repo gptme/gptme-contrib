@@ -448,6 +448,37 @@ def test_pending_excludes_sender_declared_no_reply_but_list_keeps_it(
     assert "please advise" in read.output
 
 
+def test_ack_removes_from_pending_keeps_in_list_and_sends_nothing(
+    workspace: Path,
+) -> None:
+    name = _seed_inbox(workspace)
+    outbox = workspace / "messages" / "outbox"
+    sent_before = sorted(outbox.glob("*.md")) if outbox.exists() else []
+
+    before = CliRunner().invoke(agent, ["pending"])
+    assert name in before.output
+
+    acked = CliRunner().invoke(agent, ["ack", name])
+    assert acked.exit_code == 0, acked.output
+
+    after = CliRunner().invoke(agent, ["pending"])
+    assert after.exit_code == 0, after.output
+    assert name not in after.output
+    assert name in CliRunner().invoke(agent, ["list", "--all"]).output
+    fm = _frontmatter(workspace / "messages" / "inbox" / name)
+    assert fm["replied"] is True
+    assert fm["read"] is True
+    assert (sorted(outbox.glob("*.md")) if outbox.exists() else []) == sent_before
+
+    again = CliRunner().invoke(agent, ["ack", name])
+    assert again.exit_code == 0, again.output
+
+
+def test_ack_unknown_message_fails(workspace: Path) -> None:
+    result = CliRunner().invoke(agent, ["ack", "nope.md"])
+    assert result.exit_code == 1
+
+
 def test_pending_excludes_configured_no_reply_subject(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

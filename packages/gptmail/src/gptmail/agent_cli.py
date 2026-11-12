@@ -1191,6 +1191,26 @@ def read(message_id: str, thread: bool, mailbox: str | None) -> None:
 
 @agent.command()
 @click.argument("message_id")
+@click.option("--mailbox", default=None, help="Restrict lookup to a specific mailbox.")
+def ack(message_id: str, mailbox: str | None) -> None:
+    """Mark an inbox message handled without sending a reply.
+
+    For information-only messages that need no answer: stamps ``replied: true``
+    (and ``read: true``) so the message leaves ``pending`` but stays in ``list``.
+    """
+    resolved = _resolve_message(message_id, folder="inbox", mailbox=mailbox)
+    if resolved is None:
+        click.echo(f"Error: message not found: {message_id}", err=True)
+        sys.exit(1)
+    mailbox_name, msg_path = resolved
+    transport = _transport(mailbox=mailbox_name)
+    with _send_lock(transport, f"reply:{msg_path.name}"):
+        _mark_replied(msg_path)
+    click.echo(f"Acknowledged {msg_path.name} (no reply sent).")
+
+
+@agent.command()
+@click.argument("message_id")
 @click.argument("content", required=False)
 @click.option("--mailbox", default=None, help="Restrict lookup to a specific mailbox.")
 def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
