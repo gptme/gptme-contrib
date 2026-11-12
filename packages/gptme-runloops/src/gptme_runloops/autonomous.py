@@ -127,6 +127,14 @@ def parse_cascade_selector_output(data: dict) -> str:
     if routing_hint:
         intent["routing_hint"] = routing_hint
 
+    # Payoff stamps for frontier-pool work (pool / frontier / experiment_cell):
+    # agents record the whole intent on the session record, which is what a
+    # frontier-vs-routine payoff readout joins on.
+    for key in ("pool", "frontier", "experiment_cell"):
+        value = sel.get(key)
+        if value not in (None, ""):
+            intent[key] = value
+
     scope = data.get("recommended_scope", "standard")
     selected_id = sel.get("id", "")
     category = sel.get("category", "")
