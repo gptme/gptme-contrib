@@ -1180,6 +1180,47 @@ def count_subtasks(content: str, *, checklist_only: bool = False) -> SubtaskCoun
     return SubtaskCount(completed, completed + pending + skipped, skipped)
 
 
+# A skipped item that promises a follow-up should name the task or issue that
+# now owns it; otherwise the dropped work silently disappears.
+_FOLLOW_UP_PROMISE = re.compile(
+    r"\b(?:file|filed|separate|own|follow[- ]?up)\b[^.;]{0,30}\b(?:task|issue)",
+    re.IGNORECASE,
+)
+_FOLLOW_UP_LINK = re.compile(r"(?:#\d+|tasks/[\w./-]+|https?://|\[\[[^\]]+\]\])")
+
+
+def skipped_subtask_items(content: str) -> list[tuple[str, bool]]:
+    """Return ``(title, needs_owner_link)`` for each intentionally-skipped item.
+
+    Recognises the same skipped forms as :func:`count_subtasks` (``[-]``,
+    ``[SKIP]`` and the two strikethrough forms), outside fenced code blocks.
+    ``needs_owner_link`` is true when the item promises a follow-up task or
+    issue but links none.
+    """
+    items: list[tuple[str, bool]] = []
+    fence = ""
+    for raw in content.splitlines():
+        line = re.sub(r"^\s*(?:>\s*)?", "", raw)
+        if fence:
+            if re.fullmatch(rf"{re.escape(fence[0])}{{{len(fence)},}}\s*", line):
+                fence = ""
+            continue
+        opening = re.match(r"(`{3,}|~{3,})", line)
+        if opening:
+            fence = opening.group(1)
+            continue
+        item = re.match(r"(?:-|\d+[.)]) (\[[ x-]\]|\[SKIP\])\s*(.*)", line)
+        if not item:
+            continue
+        marker, title = item.groups()
+        if marker in ("[-]", "[SKIP]") or re.match(r"~~.+?~~", title):
+            needs_link = bool(_FOLLOW_UP_PROMISE.search(title)) and not _FOLLOW_UP_LINK.search(
+                title
+            )
+            items.append((title.strip(), needs_link))
+    return items
+
+
 # =============================================================================
 # Task Validation and Loading
 # =============================================================================

@@ -128,6 +128,7 @@ from gptodo.utils import (
     build_dependency_universe,
     check_links,
     count_subtasks,
+    skipped_subtask_items,
     find_repo_root,
     get_blocking_reasons,
     # Cache
@@ -2024,8 +2025,14 @@ def status(
 
 @cli.command()
 @click.option("--fix", is_flag=True, help="Try to fix simple issues")
+@click.option(
+    "--done-unresolved",
+    is_flag=True,
+    help="List done tasks that still carry open or skipped checklist items "
+    "(newest first) instead of running integrity checks",
+)
 @click.argument("task_files", nargs=-1, type=click.Path())
-def check(fix: bool, task_files: list[str]):
+def check(fix: bool, done_unresolved: bool, task_files: list[str]):
     """Check task integrity and relationships.
 
     If task files are provided, only check those files.
@@ -2045,6 +2052,29 @@ def check(fix: bool, task_files: list[str]):
     all_tasks = load_tasks(tasks_dir, errors_out=global_load_errors)
     if not all_tasks and not global_load_errors:
         console.print("[yellow]No tasks found in tasks directory![/]")
+        return
+
+    if done_unresolved:
+        offenders = sorted(
+            (
+                t
+                for t in all_tasks
+                if t.state == "done" and (t.subtasks.pending > 0 or t.subtasks.skipped > 0)
+            ),
+            key=lambda t: t.modified,
+            reverse=True,
+        )
+        if not offenders:
+            console.print("[green]No done tasks with open or skipped items.[/]")
+            return
+        console.print(
+            f"[bold]{len(offenders)} done task(s) with open or skipped items[/] (newest first):"
+        )
+        for t in offenders:
+            console.print(
+                f"  {t.name}  {t.subtasks.completed}/{t.subtasks.total} done, "
+                f"{t.subtasks.pending} open, {t.subtasks.skipped} skipped"
+            )
         return
 
     # Dependency resolution must also see archived tasks (tasks/archive/**),
@@ -2974,6 +3004,32 @@ def edit(
                 click_error=True,
             )
         console.print(f"[yellow]--allow-pending: {details}[/]")
+
+    # Skipped items are a legitimate way to close, but they should stay visible
+    # at the moment of closing: name them, and flag promised follow-ups that do
+    # not yet link the task or issue that owns them.
+    for task in target_tasks:
+        post = frontmatter.load(task.path)
+        prior = normalize_state(str(post.metadata.get("state", "backlog") or "backlog"), warn=False)
+        if prior == "done" or not any(
+            op == "set" and field == "state" and value == "done" for op, field, value in changes
+        ):
+            continue
+        skipped_items = skipped_subtask_items(_projected_content(post))
+        if not skipped_items:
+            continue
+        err_console = Console(stderr=True)
+        err_console.print(
+            f"[yellow]⚠ {markup_escape(task.name)}: marking done with "
+            f"{len(skipped_items)} skipped item(s):[/]"
+        )
+        for title, needs_link in skipped_items:
+            err_console.print(f"[yellow]    - {markup_escape(title)}[/]")
+            if needs_link:
+                err_console.print(
+                    "[yellow]      ↳ promises a follow-up but links no task or issue; "
+                    "add the tasks/<id>.md path or issue ref that owns it[/]"
+                )
 
     from gptodo.lifecycle import run_completion_effects
 
