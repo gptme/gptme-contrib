@@ -3142,3 +3142,23 @@ def test_review_only_ledger_does_not_credit_suppressed_work(tmp_path, phase):
     assert json.loads(work.read_text())["types"] == original_types
     if phase == "completed":
         assert entry["outcome"] == "succeeded"
+
+
+class TestIsErikAgentMessage:
+    """is_erik_agent_message(): Erik's agent messages get the direct-mention timeout floor."""
+
+    def test_erik_sender_matches(self) -> None:
+        from gptme_runloops.pm_dispatch import is_erik_agent_message
+
+        detail = "file=20261112-112321-erik-Hot-burn.md sender=erik subject=Hot burn"
+        assert is_erik_agent_message(detail) is True
+        assert is_erik_agent_message("sender=Erik") is True
+        assert is_erik_agent_message("x; sender=erik") is True
+
+    def test_other_senders_and_lookalikes_do_not(self) -> None:
+        from gptme_runloops.pm_dispatch import is_erik_agent_message
+
+        assert is_erik_agent_message("sender=alice subject=hi") is False
+        assert is_erik_agent_message("sender=erikbot") is False
+        assert is_erik_agent_message("subject=sender=erik") is False
+        assert is_erik_agent_message("") is False

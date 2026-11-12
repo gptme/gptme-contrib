@@ -164,6 +164,20 @@ def is_direct_mention(detail: str) -> bool:
     return False
 
 
+def is_erik_agent_message(detail: str) -> bool:
+    """Return True when *detail* describes a peer-agent message sent by Erik.
+
+    Agent-msg items carry ``sender=<name>`` in their detail. A message from
+    Erik is a high-signal ask like a direct mention, so it gets the same
+    timeout floor: a 900 s fast-lane session was cut while its commit was
+    still running (2026-11-12, mail 20261112-112321).
+    """
+    return (
+        re.search(r"(?:^|[\s;])sender=erik(?=$|[\s;])", detail, re.IGNORECASE)
+        is not None
+    )
+
+
 # --- Data classes ---
 
 
