@@ -425,9 +425,58 @@ def test_dry_run_behind_remote_previews_reset_without_moving_trunk(
 
     res = _run(SAFE_PUSH, clone, env_extra={"PATH": path}, args=("--dry-run",))
     assert res.returncode == 0, res.stderr
-    assert "would reset local trunk" in res.stdout
+    assert "behind" in res.stdout
     assert "local-only merge commits" not in res.stdout
     assert _local_state(clone) == before_local
     assert _bare_head(clone, "main") == before_remote
     assert not (clone / "upstream.txt").exists()
     assert not _git_subcommands(log) & FORBIDDEN_PUBLISH
+
+
+def test_behind_remote_does_not_move_ref_or_revert_upstream(remote_and_clone):
+    """Strictly behind: nothing to publish, and nothing may move.
+
+    Regression: moving the ref without the index left the old tree staged, whose
+    diff is the inverse of the upstream commit (a later scoped commit published it).
+    """
+    clone = remote_and_clone("main")
+    _advance_remote(clone, "main", "upstream.txt", "up\n")
+    before_head = _git("rev-parse", "HEAD", cwd=clone).stdout
+    reflog_before = _git("reflog", "show", "main", cwd=clone).stdout
+
+    res = _run(SAFE_PUSH, clone)
+
+    assert res.returncode == 0, res.stderr
+    assert _git("rev-parse", "HEAD", cwd=clone).stdout == before_head
+    assert _git("reflog", "show", "main", cwd=clone).stdout == reflog_before
+    assert _git("status", "--porcelain", cwd=clone).stdout == ""
+    assert _git("diff", "--cached", "--name-status", cwd=clone).stdout == ""
+
+
+def test_discarding_merge_only_commits_materializes_index_and_worktree(
+    remote_and_clone,
+):
+    """Diverged but only local merge commits: the ref moves to origin, and the
+    index and files must follow, so HEAD, index and worktree stay equal."""
+    clone = remote_and_clone("main")
+    _git("checkout", "-b", "side", cwd=clone, check=True)
+    _commit(clone, "side.txt", "side\n", "feat: side")
+    _git("push", "origin", "side:main", cwd=clone, check=True)
+    _git("checkout", "main", cwd=clone, check=True)
+    _commit(clone, "extra.txt", "extra\n", "feat: extra")
+    _git("merge", "--no-ff", "side", "-m", "merge side", cwd=clone, check=True)
+    # Publish "extra" as upstream's own commit so the local side has merges only.
+    _git("push", "origin", "main", "--force", cwd=clone, check=True)
+    _git("reset", "--hard", "HEAD~1", cwd=clone, check=True)
+    _git("merge", "--no-ff", "side", "-m", "merge side again", cwd=clone, check=True)
+    _advance_remote(clone, "main", "upstream.txt", "up\n")
+
+    res = _run(SAFE_PUSH, clone)
+
+    assert res.returncode == 0, res.stderr
+    remote = _git("rev-parse", "origin/main", cwd=clone).stdout
+    assert _git("rev-parse", "HEAD", cwd=clone).stdout == remote
+    assert _git("status", "--porcelain", cwd=clone).stdout == ""
+    assert (clone / "upstream.txt").read_text() == "up\n"
+    reflog = _git("reflog", "show", "main", "-1", "--format=%gs", cwd=clone).stdout
+    assert "git-safe-push-master" in reflog

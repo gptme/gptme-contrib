@@ -165,6 +165,160 @@ fetch_trunk() {
     return 1
 }
 
+# Bring the index and worktree from BEFORE's tree to AFTER's tree after a ref move.
+# Every local ref move that changes the tree must go through this: moving the ref
+# alone leaves the old tree in the index, whose staged diff is the inverse of the
+# upstream commits (and a later scoped commit then publishes that revert).
+materialize_local() {
+    local before="$1" after="$2"
+if ! python3 - "$before" "$after" <<'PY'
+import os
+import stat
+import subprocess
+import sys
+
+
+def git(*args, **kwargs):
+    return subprocess.check_output(["git", *args], **kwargs)
+
+
+def within(path, root):
+    return path == root or path.startswith(root + b"/")
+
+
+def tree(revision):
+    entries = {}
+    for record in git("ls-tree", "-rz", revision).split(b"\0"):
+        if record:
+            metadata, path = record.split(b"\t", 1)
+            mode, _, oid = metadata.split()
+            entries[path] = (mode, oid)
+    return entries
+
+
+def main():
+    os.chdir(os.fsdecode(git("rev-parse", "--show-toplevel")[:-1]))
+    before, after = sys.argv[1:]
+    old, new = tree(before), tree(after)
+    index = {}
+    for record in git("ls-files", "--stage", "-z").split(b"\0"):
+        if record:
+            metadata, path = record.split(b"\t", 1)
+            mode, oid, stage = metadata.split()
+            index.setdefault(path, []).append((mode, oid, stage))
+    flagged = set()
+    for record in git("ls-files", "-v", "-z").split(b"\0"):
+        if record and record[:1] != b"H":
+            flagged.add(record[2:])
+
+    changed = set(filter(None, git(
+        "diff", "--no-renames", "--name-only", "-z", before, after
+    ).split(b"\0")))
+    roots = set()
+    for path in changed:
+        # A tracked leaf in either tree can replace a directory in the other.
+        ancestors = path.split(b"/")
+        root = path
+        for length in range(1, len(ancestors)):
+            ancestor = b"/".join(ancestors[:length])
+            if ancestor in old or ancestor in new:
+                root = ancestor
+                break
+        roots.add(root)
+    roots = {root for root in roots if not any(
+        other != root and within(root, other) for other in roots
+    )}
+
+    def disk_matches(path, expected):
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            return not expected
+        if not expected:
+            # Includes untracked/ignored files, dangling symlinks and directories.
+            return False
+        if path in expected:
+            mode, oid = expected[path]
+            if mode == b"120000" and stat.S_ISLNK(info.st_mode):
+                actual = git("hash-object", "--stdin", input=os.readlink(path)).strip()
+            elif mode in (b"100644", b"100755") and stat.S_ISREG(info.st_mode):
+                executable = bool(info.st_mode & 0o111)
+                if executable != (mode == b"100755"):
+                    return False
+                # Raw bytes only: clean filters/line-ending normalization can
+                # hide a session edit, and running filters can have side effects.
+                actual = git("hash-object", "--no-filters", "--", path).strip()
+            else:
+                # Never traverse symlinks, submodules or special files.
+                return False
+            return actual == oid
+        if not stat.S_ISDIR(info.st_mode):
+            return False
+        children = {entry.split(b"/", 1)[0] for entry in (
+            name[len(path) + 1:] for name in expected if within(name, path)
+        )}
+        if set(os.listdir(path)) != children:
+            return False
+        return all(disk_matches(path + b"/" + child, expected) for child in children)
+
+    materialized = skipped = failed = 0
+    for root in sorted(roots):
+        expected = {path: entry for path, entry in old.items() if within(path, root)}
+        expected_index = {path: [(mode, oid, b"0")]
+                          for path, (mode, oid) in expected.items()}
+        actual_index = {path: entries for path, entries in index.items() if within(path, root)}
+        unsupported = any(mode not in (b"100644", b"100755", b"120000")
+                          for entries in (old, new) for path, (mode, _) in entries.items()
+                          if within(path, root))
+        try:
+            # An untracked symlink/file in an ancestor must not redirect checkout.
+            parts = root.split(b"/")
+            ancestors_clean = True
+            for length in range(1, len(parts)):
+                ancestor = b"/".join(parts[:length])
+                if (ancestor in index or ancestor in flagged
+                        or (os.path.lexists(ancestor)
+                            and not stat.S_ISDIR(os.lstat(ancestor).st_mode))):
+                    ancestors_clean = False
+                    break
+            if (unsupported or actual_index != expected_index
+                    or any(within(path, root) for path in flagged)
+                    or not ancestors_clean or not disk_matches(root, expected)):
+                skipped += 1
+                continue
+            # Literal root includes all leaves of a type transition. Unlike
+            # checkout, restore also handles paths deleted from the source tree.
+            subprocess.run(["git", "restore", "--source", after, "--staged",
+                            "--worktree", "--", b":(literal)" + root], check=True)
+            materialized += 1
+        except (OSError, subprocess.CalledProcessError) as error:
+            failed += 1
+            print(f"warning: materialization failed/potentially partial for "
+                  f"{os.fsdecode(root)!r}: {error}; stopping further restores",
+                  file=sys.stderr)
+            break
+    unattempted = len(roots) - materialized - skipped - failed
+    print(f"  Local materialization: {materialized} clean group(s) updated, "
+          f"{skipped} locally changed/unsupported skipped, {failed} failed, "
+          f"{unattempted} unattempted")
+    if skipped or failed:
+        print("warning: publication succeeded; skipped/failed local paths remain unreconciled. "
+              "Inspect disk/index before any path-scoped recovery; never reset the shared worktree.",
+              file=sys.stderr)
+    return bool(failed)
+
+
+try:
+    sys.exit(main())
+except (OSError, subprocess.CalledProcessError) as error:
+    print(f"warning: local materialization could not complete: {error}", file=sys.stderr)
+    sys.exit(1)
+PY
+then
+    echo "warning: ref moved but local materialization was incomplete; inspect disk/index separately." >&2
+fi
+}
+
 # Cleanup trap: release the lock
 trap 'exec 9>&-' EXIT
 
@@ -196,13 +350,22 @@ fi
 LOCAL_COMMIT_COUNT=$(git log --no-merges --format="%H" "$REMOTE_SHA".."$LOCAL_SHA" | wc -l)
 
 if [ "$LOCAL_COMMIT_COUNT" -eq 0 ]; then
+    if git merge-base --is-ancestor "$LOCAL_SHA" "$REMOTE_SHA" 2>/dev/null; then
+        # Strictly behind: nothing to publish. Moving the ref here would leave the
+        # old tree in the index and revert upstream commits; git-safe-pull
+        # fast-forwards the ref, index and worktree together.
+        echo "✓ Nothing to publish: local $TRUNK is behind $REMOTE/$TRUNK; run git-safe-pull to fast-forward"
+        exit 0
+    fi
     if [ "$DRY_RUN" -eq 1 ]; then
         echo "Dry-run: would reset local trunk to $REMOTE/$TRUNK (no unpublished non-merge commits); no changes made"
         exit 0
     fi
     # Only merge commits locally — accumulated from previous failed pushes; discard them
-    if git update-ref "refs/heads/$TRUNK" "$REMOTE_SHA" "$LOCAL_SHA" 2>/dev/null; then
+    if git update-ref -m "git-safe-push-master: discard local-only merge commits" \
+        "refs/heads/$TRUNK" "$REMOTE_SHA" "$LOCAL_SHA" 2>/dev/null; then
         echo "✓ Discarded local-only merge commits; reset to $REMOTE/$TRUNK"
+        materialize_local "$LOCAL_SHA" "$REMOTE_SHA"
     else
         echo "warning: could not update local $TRUNK (concurrent commit?)" >&2
     fi
@@ -442,7 +605,10 @@ while [ "$PUSH_ATTEMPT" -lt "$MAX_PUSH_RETRIES" ]; do
     REMAINING=$(git log --no-merges --format="%H" "$REMOTE_SHA".."$LOCAL_SHA" | wc -l)
     if [ "$REMAINING" -eq 0 ]; then
         # Our commits were already published by a sibling session in their squash
-        git update-ref "refs/heads/$TRUNK" "$REMOTE_SHA" "$LOCAL_SHA" 2>/dev/null || true
+        if git update-ref -m "git-safe-push-master: commits already published by sibling" \
+            "refs/heads/$TRUNK" "$REMOTE_SHA" "$LOCAL_SHA" 2>/dev/null; then
+            materialize_local "$LOCAL_SHA" "$REMOTE_SHA"
+        fi
         echo "✓ Commits already published by sibling session (after retry)"
         exit 0
     fi
@@ -461,7 +627,8 @@ while [ "$PUSH_ATTEMPT" -lt "$MAX_PUSH_RETRIES" ]; do
 done
 
 # Push succeeded: update the local trunk to the squash commit (removes accumulated merge commits)
-if ! git update-ref "refs/heads/$TRUNK" "$SQUASH_COMMIT" "$LOCAL_SHA" 2>/dev/null; then
+if ! git update-ref -m "git-safe-push-master: publish squash" \
+    "refs/heads/$TRUNK" "$SQUASH_COMMIT" "$LOCAL_SHA" 2>/dev/null; then
     echo "warning: pushed OK but failed to update local $TRUNK (concurrent commit?)" >&2
     echo "         Preserve local disk/index state; inspect refs and retry after the concurrent writer finishes." >&2
     exit 0
@@ -471,152 +638,7 @@ fi
 # compare complete index entries and actual filesystem types, not only blob IDs.
 # File/directory transitions are checked as a unit so a clean sibling cannot cause
 # checkout to remove a dirty descendant. NUL-delimited Git output preserves names.
-if ! python3 - "$LOCAL_SHA" "$SQUASH_COMMIT" <<'PY'
-import os
-import stat
-import subprocess
-import sys
-
-
-def git(*args, **kwargs):
-    return subprocess.check_output(["git", *args], **kwargs)
-
-
-def within(path, root):
-    return path == root or path.startswith(root + b"/")
-
-
-def tree(revision):
-    entries = {}
-    for record in git("ls-tree", "-rz", revision).split(b"\0"):
-        if record:
-            metadata, path = record.split(b"\t", 1)
-            mode, _, oid = metadata.split()
-            entries[path] = (mode, oid)
-    return entries
-
-
-def main():
-    os.chdir(os.fsdecode(git("rev-parse", "--show-toplevel")[:-1]))
-    before, after = sys.argv[1:]
-    old, new = tree(before), tree(after)
-    index = {}
-    for record in git("ls-files", "--stage", "-z").split(b"\0"):
-        if record:
-            metadata, path = record.split(b"\t", 1)
-            mode, oid, stage = metadata.split()
-            index.setdefault(path, []).append((mode, oid, stage))
-    flagged = set()
-    for record in git("ls-files", "-v", "-z").split(b"\0"):
-        if record and record[:1] != b"H":
-            flagged.add(record[2:])
-
-    changed = set(filter(None, git(
-        "diff", "--no-renames", "--name-only", "-z", before, after
-    ).split(b"\0")))
-    roots = set()
-    for path in changed:
-        # A tracked leaf in either tree can replace a directory in the other.
-        ancestors = path.split(b"/")
-        root = path
-        for length in range(1, len(ancestors)):
-            ancestor = b"/".join(ancestors[:length])
-            if ancestor in old or ancestor in new:
-                root = ancestor
-                break
-        roots.add(root)
-    roots = {root for root in roots if not any(
-        other != root and within(root, other) for other in roots
-    )}
-
-    def disk_matches(path, expected):
-        try:
-            info = os.lstat(path)
-        except FileNotFoundError:
-            return not expected
-        if not expected:
-            # Includes untracked/ignored files, dangling symlinks and directories.
-            return False
-        if path in expected:
-            mode, oid = expected[path]
-            if mode == b"120000" and stat.S_ISLNK(info.st_mode):
-                actual = git("hash-object", "--stdin", input=os.readlink(path)).strip()
-            elif mode in (b"100644", b"100755") and stat.S_ISREG(info.st_mode):
-                executable = bool(info.st_mode & 0o111)
-                if executable != (mode == b"100755"):
-                    return False
-                # Raw bytes only: clean filters/line-ending normalization can
-                # hide a session edit, and running filters can have side effects.
-                actual = git("hash-object", "--no-filters", "--", path).strip()
-            else:
-                # Never traverse symlinks, submodules or special files.
-                return False
-            return actual == oid
-        if not stat.S_ISDIR(info.st_mode):
-            return False
-        children = {entry.split(b"/", 1)[0] for entry in (
-            name[len(path) + 1:] for name in expected if within(name, path)
-        )}
-        if set(os.listdir(path)) != children:
-            return False
-        return all(disk_matches(path + b"/" + child, expected) for child in children)
-
-    materialized = skipped = failed = 0
-    for root in sorted(roots):
-        expected = {path: entry for path, entry in old.items() if within(path, root)}
-        expected_index = {path: [(mode, oid, b"0")]
-                          for path, (mode, oid) in expected.items()}
-        actual_index = {path: entries for path, entries in index.items() if within(path, root)}
-        unsupported = any(mode not in (b"100644", b"100755", b"120000")
-                          for entries in (old, new) for path, (mode, _) in entries.items()
-                          if within(path, root))
-        try:
-            # An untracked symlink/file in an ancestor must not redirect checkout.
-            parts = root.split(b"/")
-            ancestors_clean = True
-            for length in range(1, len(parts)):
-                ancestor = b"/".join(parts[:length])
-                if (ancestor in index or ancestor in flagged
-                        or (os.path.lexists(ancestor)
-                            and not stat.S_ISDIR(os.lstat(ancestor).st_mode))):
-                    ancestors_clean = False
-                    break
-            if (unsupported or actual_index != expected_index
-                    or any(within(path, root) for path in flagged)
-                    or not ancestors_clean or not disk_matches(root, expected)):
-                skipped += 1
-                continue
-            # Literal root includes all leaves of a type transition. Unlike
-            # checkout, restore also handles paths deleted from the source tree.
-            subprocess.run(["git", "restore", "--source", after, "--staged",
-                            "--worktree", "--", b":(literal)" + root], check=True)
-            materialized += 1
-        except (OSError, subprocess.CalledProcessError) as error:
-            failed += 1
-            print(f"warning: materialization failed/potentially partial for "
-                  f"{os.fsdecode(root)!r}: {error}; stopping further restores",
-                  file=sys.stderr)
-            break
-    unattempted = len(roots) - materialized - skipped - failed
-    print(f"  Local materialization: {materialized} clean group(s) updated, "
-          f"{skipped} locally changed/unsupported skipped, {failed} failed, "
-          f"{unattempted} unattempted")
-    if skipped or failed:
-        print("warning: publication succeeded; skipped/failed local paths remain unreconciled. "
-              "Inspect disk/index before any path-scoped recovery; never reset the shared worktree.",
-              file=sys.stderr)
-    return bool(failed)
-
-
-try:
-    sys.exit(main())
-except (OSError, subprocess.CalledProcessError) as error:
-    print(f"warning: local materialization could not complete: {error}", file=sys.stderr)
-    sys.exit(1)
-PY
-then
-    echo "warning: push succeeded but local materialization was incomplete; inspect disk/index separately." >&2
-fi
+materialize_local "$LOCAL_SHA" "$SQUASH_COMMIT"
 
 MERGE_SKIPPED=$((LOCAL_MERGE_COUNT + 0))
 echo "✓ Published $(git rev-parse --short "$SQUASH_COMMIT" 2>/dev/null) to $REMOTE/$TRUNK"
