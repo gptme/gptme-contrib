@@ -1183,7 +1183,7 @@ def count_subtasks(content: str, *, checklist_only: bool = False) -> SubtaskCoun
 # A skipped item that promises a follow-up should name the task or issue that
 # now owns it; otherwise the dropped work silently disappears.
 _FOLLOW_UP_PROMISE = re.compile(
-    r"(?:file|filed|separate|own|follow[- ]?up)\b[^.;]{0,30}\b(?:task|issue)",
+    r"\b(?:file|filed|separate|own|follow[- ]?up)\b[^.;]{0,30}\b(?:task|issue)",
     re.IGNORECASE,
 )
 _FOLLOW_UP_LINK = re.compile(r"(?:#\d+|tasks/[\w./-]+|https?://|\[\[[^\]]+\]\])")

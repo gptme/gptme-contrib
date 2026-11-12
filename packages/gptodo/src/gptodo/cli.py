@@ -3020,10 +3020,11 @@ def edit(
             continue
         err_console = Console(stderr=True)
         err_console.print(
-            f"[yellow]⚠ {task.name}: closing with {len(skipped_items)} skipped item(s):[/]"
+            f"[yellow]⚠ {markup_escape(task.name)}: marking done with "
+            f"{len(skipped_items)} skipped item(s):[/]"
         )
         for title, needs_link in skipped_items:
-            err_console.print(f"[yellow]    - {title}[/]")
+            err_console.print(f"[yellow]    - {markup_escape(title)}[/]")
             if needs_link:
                 err_console.print(
                     "[yellow]      ↳ promises a follow-up but links no task or issue; "

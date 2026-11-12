@@ -103,7 +103,7 @@ def test_completion_names_skipped_items(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done"])
     assert result.exit_code == 0, result.output
     assert frontmatter.load(path)["state"] == "done"
-    assert "closing with 1 skipped item(s)" in result.output
+    assert "marking done with 1 skipped item(s)" in result.output
     assert "wire indexing" in result.output
     assert "promises a follow-up" not in result.output
 
@@ -116,6 +116,7 @@ def test_completion_names_skipped_items(tmp_path, monkeypatch):
         ("split auth (filed as tasks/split-auth.md)", False),
         ("split auth (follow-up issue gptme/gptme#12)", False),
         ("split auth (decided against: superseded)", False),
+        ("profile the slow path (deferred: not needed for this task)", False),
     ],
 )
 def test_completion_hints_unlinked_follow_up(tmp_path, monkeypatch, title, needs_link):
@@ -123,6 +124,18 @@ def test_completion_hints_unlinked_follow_up(tmp_path, monkeypatch, title, needs
     result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done"])
     assert result.exit_code == 0, result.output
     assert ("promises a follow-up" in result.output) is needs_link
+
+
+def test_completion_escapes_brackets_in_skipped_titles(tmp_path, monkeypatch):
+    make_tasks(
+        tmp_path,
+        monkeypatch,
+        {"task": "- [x] complete\n- [-] split auth [/bar] see [[owner-task]] (deferred)"},
+    )
+    result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done"])
+    assert result.exit_code == 0, result.output
+    assert "[/bar]" in result.output
+    assert "[[owner-task]]" in result.output
 
 
 def test_completion_without_skips_prints_no_skip_warning(tmp_path, monkeypatch):
