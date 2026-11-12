@@ -16,9 +16,9 @@ import importlib
 import os
 import shutil
 import subprocess
-import sys
 import time
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 from .event import AgentEvent
@@ -109,33 +109,72 @@ class SoundPlayer:
         self._spawn = spawn or self._popen
         self._inflight: list[subprocess.Popen] = []
         self._last_tool = float("-inf")
+        self.last_status = ""
 
     @staticmethod
     def _popen(cmd: list[str]) -> subprocess.Popen:
         return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def handle(self, event: AgentEvent) -> str | None:
-        """Play the sound for ``event``; returns its name, or None if skipped."""
+        """Play the sound for ``event``; returns its name, or None if skipped.
+
+        ``last_status`` says what happened: ``played``, ``dry-run``, ``silent``
+        (no sound mapped), ``throttled``, ``busy`` or ``unavailable``.
+        """
         name = self.mapping.get(sound_key(event))
         if not name:
+            self.last_status = "silent"
             return None
         self._inflight = [p for p in self._inflight if p.poll() is None]
         now = self.clock()
         if event.kind == "tool":
-            if now - self._last_tool < self.min_gap or len(self._inflight) >= self.max_concurrent:
+            if now - self._last_tool < self.min_gap:
+                self.last_status = "throttled"
+                return None
+            if len(self._inflight) >= self.max_concurrent:
+                self.last_status = "busy"
                 return None
             self._last_tool = now
         elif len(self._inflight) >= self.max_concurrent * 2:
+            self.last_status = "busy"
             return None
+        if self.dry_run:
+            self.last_status = "dry-run"
+            return name
         path = self.sounds_dir / f"{name}.wav"
         volume = self.volume * self.agent_volume.get(event.agent, 1.0)
-        if self.dry_run:
-            print(f"{event.agent or '-'} {sound_key(event)} -> {name}", file=sys.stderr)
-            return name
         cmd = player_command(path, volume)
         if cmd is None or not path.exists():
+            self.last_status = "unavailable"
             return None
         proc = self._spawn(cmd)
         if proc is not None:
             self._inflight.append(proc)
+        self.last_status = "played"
         return name
+
+
+def describe(event: AgentEvent, sound: str | None, status: str) -> str:
+    """One terminal line per event: when, who, what, and what was played."""
+    try:
+        when = datetime.fromisoformat(event.ts).astimezone().strftime("%H:%M:%S")
+    except ValueError:
+        when = event.ts[11:19] or "--:--:--"
+    what = sound_key(event)
+    extra = []
+    if event.tool:
+        extra.append(event.tool)
+    d = event.detail
+    if d.get("repo"):
+        extra.append(str(d["repo"]) + (f"@{d['sha']}" if d.get("sha") else ""))
+    if d.get("url"):
+        extra.append(str(d["url"]))
+    if d.get("ref"):
+        extra.append(str(d["ref"]))
+    if d.get("source") == "git":
+        extra.append("(git)")
+    played = f"♪ {sound}" if status in ("played", "dry-run") and sound else f"· {status}"
+    return (
+        f"{when} {event.agent or '-':<8} {event.harness:<11} {event.session[:8]:<8} "
+        f"{what:<14} {' '.join(extra):<40} {played}"
+    )

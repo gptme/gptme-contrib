@@ -128,7 +128,7 @@ class Follower:
         *,
         active_window: float = 600.0,
         rescan_interval: float = 5.0,
-        full_scan_interval: float = 60.0,
+        full_scan_interval: float = 300.0,
         warm_horizon: float = 86400.0,
         discovery_slack: float = 120.0,
         from_start: bool = False,

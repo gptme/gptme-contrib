@@ -112,6 +112,16 @@ host must drop `detail.cwd`, `detail.dir` and `detail.path`, and only forward
 
 ## Sounds
 
+`sound` prints one line per event (local time, agent, harness, session,
+event kind, tool, repo@sha or URL, then `♪ sound` or why it was skipped:
+`throttled`, `busy`, `silent`), so the terminal doubles as a live log; `-q`
+turns that off.
+
+```
+11:48:48 bob      claude-code 9e91d4cc tool:shell     Bash                                     ♪ seashell_click
+11:48:49 bob      claude-code 9e91d4cc commit         Bash ErikBjare/bob@d6e437d98e80 (git)     ♪ chime_clean_ring
+```
+
 `gptme-agent-events sound --list` shows the mapping. Defaults use the sounds
 gptme ships with:
 

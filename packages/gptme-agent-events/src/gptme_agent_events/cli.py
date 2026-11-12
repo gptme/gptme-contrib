@@ -20,7 +20,7 @@ import click
 from .event import AgentEvent
 from .follow import HARNESSES, SOURCE_FACTORIES, Follower, Source
 from .gitwatch import GitWatcher
-from .sound import DEFAULT_SOUNDS, SoundPlayer, find_sounds_dir
+from .sound import DEFAULT_SOUNDS, SoundPlayer, describe, find_sounds_dir
 
 
 def _default_agent() -> str:
@@ -135,7 +135,8 @@ def _pairs(values: tuple[str, ...], what: str) -> dict[str, str]:
 @click.option("--only-agent", multiple=True, help="Only play events from these agents.")
 @click.option("--min-gap", default=0.15, show_default=True, help="Min seconds between tool sounds.")
 @click.option("--sounds-dir", type=click.Path(file_okay=False), help="gptme media dir.")
-@click.option("--dry-run", is_flag=True, help="Print what would play instead of playing.")
+@click.option("--dry-run", is_flag=True, help="Don't play anything; just print the lines.")
+@click.option("--quiet", "-q", is_flag=True, help="Don't print a line per event.")
 @click.option("--list", "list_sounds", is_flag=True, help="Show the event-to-sound mapping.")
 def sound(
     volume: float,
@@ -145,6 +146,7 @@ def sound(
     min_gap: float,
     sounds_dir: str | None,
     dry_run: bool,
+    quiet: bool,
     list_sounds: bool,
 ) -> None:
     """Play gptme sound effects for events read as JSON lines from stdin."""
@@ -181,7 +183,10 @@ def sound(
             event = AgentEvent.from_dict(data)
             if only_agent and event.agent not in only_agent:
                 continue
-            player.handle(event)
+            sound_name = player.handle(event)
+            if not quiet:
+                click.echo(describe(event, sound_name, player.last_status))
+                sys.stdout.flush()
     except KeyboardInterrupt:
         pass
 
