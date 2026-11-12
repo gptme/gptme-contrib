@@ -1160,6 +1160,10 @@ def test_is_post_never_created_predicate():
     assert ra._is_post_never_created(
         "tweepy.errors.TooManyRequests: 429 Too Many Requests"
     )
+    # twitter.py exits before building a client when credentials are missing.
+    assert ra._is_post_never_created(
+        "Account profile: @gptmeorg (/x/gptmeorg.env)\nMissing TWITTER_BEARER_TOKEN in .env"
+    )
     assert not ra._is_post_never_created("tweepy.errors.TwitterServerError: 503 x")
     assert not ra._is_post_never_created("ReadTimeout: HTTPSConnectionPool")
 

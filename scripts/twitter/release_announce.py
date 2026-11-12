@@ -126,15 +126,24 @@ _DEFINITE_REJECTION_RE = re.compile(
 )
 
 
-def _is_post_never_created(output: str) -> bool:
-    """True when the API refused the request outright, creating nothing.
+# ``twitter.py`` exits before it builds an API client when its credentials are
+# absent from the environment (a unit that lost its EnvironmentFile, a moved
+# secrets file). No request was sent, so nothing can have been posted.
+_MISSING_CREDENTIALS_RE = re.compile(r"Missing TWITTER_[A-Z0-9_]+ in \.env")
 
-    Such a failure must not leave an ambiguous-side-effect marker behind: the
-    post provably does not exist, so the marker would only wedge this tag until
-    someone reconciles it by hand. Transient failures stay ambiguous and keep
-    their marker.
+
+def _is_post_never_created(output: str) -> bool:
+    """True when the post provably does not exist.
+
+    Either the API refused the request outright, or ``twitter.py`` failed on
+    missing credentials before sending anything. Such a failure must not leave
+    an ambiguous-side-effect marker behind: the marker would only wedge this tag
+    until someone reconciles it by hand. Transient failures stay ambiguous and
+    keep their marker.
     """
-    return bool(_DEFINITE_REJECTION_RE.search(output))
+    return bool(
+        _DEFINITE_REJECTION_RE.search(output) or _MISSING_CREDENTIALS_RE.search(output)
+    )
 
 
 def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
