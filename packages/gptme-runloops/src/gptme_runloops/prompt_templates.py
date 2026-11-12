@@ -1106,6 +1106,9 @@ uv run coordination work-claim "{claim_agent}" "agent-msg:reply:MSG_FILE" --ttl 
 cd {workspace}
 python3 scripts/agent-msg.py read MSG_FILE
 python3 scripts/agent-msg.py reply MSG_FILE "Your reply text"
+# Information-only message that needs no answer? Ack it instead of replying,
+# otherwise it stays pending and is re-dispatched every few hours:
+# python3 scripts/agent-msg.py ack MSG_FILE
 uv run coordination work-complete "{claim_agent}" "agent-msg:reply:MSG_FILE"
 ```
 {policy_block}"""

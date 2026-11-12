@@ -448,6 +448,63 @@ def test_pending_excludes_sender_declared_no_reply_but_list_keeps_it(
     assert "please advise" in read.output
 
 
+def test_ack_removes_from_pending_keeps_in_list_and_sends_nothing(
+    workspace: Path,
+) -> None:
+    name = _seed_inbox(workspace)
+    outbox = workspace / "messages" / "outbox"
+    sent_before = sorted(outbox.glob("*.md")) if outbox.exists() else []
+
+    before = CliRunner().invoke(agent, ["pending"])
+    assert name in before.output
+
+    acked = CliRunner().invoke(agent, ["ack", name])
+    assert acked.exit_code == 0, acked.output
+
+    after = CliRunner().invoke(agent, ["pending"])
+    assert after.exit_code == 0, after.output
+    assert name not in after.output
+    assert name in CliRunner().invoke(agent, ["list", "--all"]).output
+    fm = _frontmatter(workspace / "messages" / "inbox" / name)
+    assert fm["replied"] is True
+    assert fm["read"] is True
+    assert (sorted(outbox.glob("*.md")) if outbox.exists() else []) == sent_before
+
+    again = CliRunner().invoke(agent, ["ack", name])
+    assert again.exit_code == 0, again.output
+
+
+def test_ack_stamps_when_subject_contains_replied(workspace: Path) -> None:
+    # Regression: a "replied:" substring elsewhere in frontmatter must not
+    # suppress the stamp, or ack reports success while the message stays pending.
+    inbox = workspace / "messages" / "inbox"
+    name = "20260613-000000-000000-bob-autoreplied.md"
+    (inbox / name).write_text(
+        "---\nfrom: bob\nto: alice\ntimestamp: 2026-06-13T00:00:00Z\n"
+        'subject: "Auto-replied: x"\nread: false\n---\n\nfyi\n'
+    )
+    result = CliRunner().invoke(agent, ["ack", name])
+    assert result.exit_code == 0, result.output
+    fm = _frontmatter(inbox / name)
+    assert fm["subject"] == "Auto-replied: x"
+    assert fm["replied"] is True
+    assert name not in CliRunner().invoke(agent, ["pending"]).output
+
+
+def test_ack_fails_when_stamp_cannot_land(workspace: Path) -> None:
+    inbox = workspace / "messages" / "inbox"
+    name = "20260613-000000-000000-bob-nofm.md"
+    (inbox / name).write_text("no frontmatter here\n")
+    result = CliRunner().invoke(agent, ["ack", name])
+    assert result.exit_code == 1
+    assert "Acknowledged" not in result.output
+
+
+def test_ack_unknown_message_fails(workspace: Path) -> None:
+    result = CliRunner().invoke(agent, ["ack", "nope.md"])
+    assert result.exit_code == 1
+
+
 def test_pending_excludes_configured_no_reply_subject(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
