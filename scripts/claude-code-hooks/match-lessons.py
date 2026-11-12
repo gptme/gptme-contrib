@@ -1346,6 +1346,7 @@ def build_pretool_match_text(tool_name: str, tool_input: dict) -> str:
         "query",
         "url",
         "description",
+        "message",
     ):
         val = tool_input.get(key)
         if val and isinstance(val, str):
