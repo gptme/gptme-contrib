@@ -742,29 +742,27 @@ def test_set_wait_and_state_waiting_together_drops_legacy_waiting_for(
     assert post.metadata.get("wait_kind") == "machine"
 
 
-def test_last_set_wait_wins_on_legacy_recurrence_gate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("first_wait", ["2030-06-15", "none"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_last_set_wait_wins_on_recurrence_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_wait: str, legacy: bool
 ) -> None:
-    """Multiple --set wait in one edit must sync waiting_for to the LAST value.
+    """Only the final wait assignment determines the recurrence gate.
 
-    The apply loop overwrites wait in order, so the last --set wait is the
-    effective date. The post-loop sync used to take the first match from
-    `changes`, leaving waiting_for pointing at an earlier date while wait
-    holds the later one. After that later date expires,
-    task_has_waiting_blocker treats the stale string as a human blocker
-    (gptme/gptme-contrib#1539).
+    Clearing then replacing a date must preserve waiting state and metadata,
+    both for fields-only gates and tasks carrying a legacy generated string.
     """
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
     old_wait = "2025-01-01"
-    first_wait = "2030-06-15"
     last_wait = "2030-07-01"
+    legacy_field = f"waiting_for: 'next recurrence gate (wait: {old_wait})'\n" if legacy else ""
     (tasks_dir / "recur-gate-task.md").write_text(
         f"---\n"
         f"state: waiting\n"
         f"wait_kind: machine\n"
         f"wait: {old_wait}\n"
-        f"waiting_for: 'next recurrence gate (wait: {old_wait})'\n"
+        f"{legacy_field}"
         f"waiting_since: 2026-08-01T00:00:00+00:00\n"
         f"created: 2026-01-01\n"
         f"recur: 7d\n"
@@ -798,6 +796,8 @@ def test_last_set_wait_wins_on_legacy_recurrence_gate(
         "recur: + wait: is the recurrence gate; a waiting_for restating the "
         f"date would have to be kept in sync; got {post.metadata.get('waiting_for')!r}"
     )
+    assert post.metadata["state"] == "waiting"
+    assert str(post.metadata["waiting_since"]).startswith("2026-08-01")
     assert post.metadata.get("wait_kind") == "machine"
 
 

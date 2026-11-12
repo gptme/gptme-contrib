@@ -233,12 +233,11 @@ def transform_post(
                 post.metadata.pop(_field, None)
         elif post.metadata.get("recur"):
             post.metadata.pop("waiting_for", None)
-    wait_cleared = any(
-        op == "set" and field == "wait" and value is None for op, field, value in changes
-    )
-    wait_set = any(
-        op == "set" and field == "wait" and value is not None for op, field, value in changes
-    )
+    # Gate updates follow the final value, just like the last-assignment-wins
+    # apply loop (e.g. --set wait none --set wait NEW preserves the gate).
+    wait_changed = any(op == "set" and field == "wait" for op, field, _value in changes)
+    wait_cleared = wait_changed and post.metadata.get("wait") is None
+    wait_set = wait_changed and not wait_cleared
     explicit_state = any(op == "set" and field == "state" for op, field, _value in changes)
     # A machine gate without a date or probe is no longer a machine gate.
     if wait_cleared and not post.metadata.get("probe"):
