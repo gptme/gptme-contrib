@@ -141,3 +141,38 @@ def test_mutate_task_refuses_new_invalid_gate(tmp_path: Path) -> None:
     path = _write(tmp_path, dict(DECISION))
     with pytest.raises(TransitionError, match="gate.kind"):
         mutate_task(path, patch={"gate": {"kind": "someday-maybe"}})
+
+
+@pytest.mark.parametrize(
+    ("meta", "needle"),
+    [
+        ({"gate": "erik"}, "must be a mapping"),
+        ({"gate": dict(DECISION, deadline="next tuesday")}, "gate.deadline must be an ISO"),
+        ({"gate": dict(DECISION, deadline=7)}, "gate.deadline must be an ISO"),
+        ({"gate": dict(DECISION, on_timeout="ask-again")}, "gate.on_timeout must be one of"),
+        ({"gate": dict(DECISION, reversible="no")}, "gate.reversible must be true or false"),
+        ({"gate": {"kind": "task"}}, "must name the task id"),
+        (
+            {"gate": dict(DECISION, original_deadline="2026-12-01T00:00:00+00:00")},
+            "original_deadline must be earlier",
+        ),
+    ],
+)
+def test_malformed_gate_fields_are_reported(meta: dict, needle: str) -> None:
+    assert any(needle in e for e in validate_gate(meta))
+    assert parse_gate(meta) is None
+
+
+def test_datetime_deadline_object_is_accepted() -> None:
+    from datetime import datetime, timezone
+
+    deadline = datetime(2026, 11, 26, 18, tzinfo=timezone.utc)
+    gate = parse_gate({"gate": {"kind": "time", "deadline": deadline}})
+    assert gate is not None and gate.deadline == deadline
+
+
+def test_new_gate_identity_is_not_a_push() -> None:
+    before = {"gate": {"kind": "pr", "ref": "o/r#1", "deadline": "2026-11-20"}}
+    after = {"gate": {"kind": "pr", "ref": "o/r#2", "deadline": "2026-12-20"}}
+    assert check_gate_change(before, after) == []
+    assert check_gate_change({}, after) == []
