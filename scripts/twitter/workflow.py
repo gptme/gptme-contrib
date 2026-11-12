@@ -469,8 +469,8 @@ def save_draft(draft: TweetDraft, status: str = "new") -> Path:
 def get_conversation_thread(
     client,
     tweet_id_or_conversation_id,
-    max_pages=3,
-    max_tweets_per_page=100,
+    max_pages=1,
+    max_tweets_per_page=10,
     *,
     fallback_conversation_id=None,
 ):
@@ -480,8 +480,11 @@ def get_conversation_thread(
     Args:
         client: The Twitter API client
         tweet_id_or_conversation_id: Either a tweet ID or a conversation ID
-        max_pages: Maximum number of pagination pages to fetch (default: 3)
-        max_tweets_per_page: Maximum number of tweets per page (default: 100)
+        max_pages: Maximum number of pagination pages to fetch (default: 1)
+        max_tweets_per_page: Maximum number of tweets per page (default: 10,
+            the API minimum). Every returned post is a billable read
+            ($0.005); at 3 pages of 100, thread context was ~76% of the X
+            spend and exhausted the monthly cap in 18 days (2026-10).
 
     Returns:
         List of tweet data dictionaries in chronological order with thread structure information
@@ -2466,6 +2469,7 @@ def monitor(
                 source = f"list {list_id}"
             else:
                 tweets = client.get_home_timeline(
+                    max_results=10,  # each returned post is a billable read
                     tweet_fields=[
                         "created_at",
                         "author_id",
@@ -2668,6 +2672,7 @@ def auto(
                 source = f"list {list_id}"
             else:
                 tweets = client.get_home_timeline(
+                    max_results=10,  # each returned post is a billable read
                     tweet_fields=[
                         "created_at",
                         "author_id",

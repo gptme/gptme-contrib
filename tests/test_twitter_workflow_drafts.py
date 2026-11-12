@@ -1643,16 +1643,24 @@ def test_conversation_lookup_failure_falls_back_to_canonical_conversation_id(
 
 
 def test_find_live_duplicate_reply_ids_matches_own_replies(
-    workflow_module: Any,
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    workflow_module.cached_get_me = lambda *args, **kwargs: SimpleNamespace(
-        data=SimpleNamespace(username="TestBotUser")
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *args, **kwargs: SimpleNamespace(
+            data=SimpleNamespace(username="TestBotUser")
+        ),
     )
-    workflow_module.get_conversation_thread = lambda *args, **kwargs: [
-        {"id": "9001", "author": "TestBotUser", "replied_to_id": "4242"},
-        {"id": "9002", "author": "someoneelse", "replied_to_id": "4242"},
-        {"id": "9003", "author": "TestBotUser", "replied_to_id": "1111"},
-    ]
+    monkeypatch.setattr(
+        workflow_module,
+        "get_conversation_thread",
+        lambda *args, **kwargs: [
+            {"id": "9001", "author": "TestBotUser", "replied_to_id": "4242"},
+            {"id": "9002", "author": "someoneelse", "replied_to_id": "4242"},
+            {"id": "9003", "author": "TestBotUser", "replied_to_id": "1111"},
+        ],
+    )
 
     duplicate_ids = workflow_module._find_live_duplicate_reply_ids(object(), "4242")
 
@@ -1660,12 +1668,20 @@ def test_find_live_duplicate_reply_ids_matches_own_replies(
 
 
 def test_find_live_duplicate_reply_ids_returns_empty_without_identity(
-    workflow_module: Any,
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    workflow_module.cached_get_me = lambda *args, **kwargs: SimpleNamespace(data=None)
-    workflow_module.get_conversation_thread = lambda *args, **kwargs: [
-        {"id": "9001", "author": "TestBotUser", "replied_to_id": "4242"},
-    ]
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *args, **kwargs: SimpleNamespace(data=None),
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "get_conversation_thread",
+        lambda *args, **kwargs: [
+            {"id": "9001", "author": "TestBotUser", "replied_to_id": "4242"},
+        ],
+    )
 
     duplicate_ids = workflow_module._find_live_duplicate_reply_ids(object(), "4242")
 
@@ -2073,3 +2089,38 @@ def test_thread_followups_stay_replies(workflow_module: Any, tmp_path: Path) -> 
     for call in client_calls:
         assert call["in_reply_to_tweet_id"] is not None
         assert "quote_tweet_id" not in call
+
+
+def test_thread_context_reads_one_page_of_ten(workflow_module: Any) -> None:
+    """Thread context is billed per returned post; keep the default to one small page.
+
+    At 3 pages of 100 it was ~76% of the X read spend and hit the $55 monthly
+    cap in 18 days (2026-10).
+    """
+    searches: list[dict[str, Any]] = []
+
+    class FakeClient:
+        def get_tweet(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("offline")
+
+        def search_recent_tweets(self, **kwargs: Any) -> Any:
+            searches.append(kwargs)
+            tweet = SimpleNamespace(
+                id=str(len(searches)),
+                author_id="1",
+                text="t",
+                created_at=datetime(2026, 11, 12, tzinfo=timezone.utc),
+                conversation_id="c1",
+                in_reply_to_user_id=None,
+                referenced_tweets=None,
+                public_metrics={},
+            )
+            return SimpleNamespace(
+                data=[tweet], includes={}, meta={"next_token": "more"}
+            )
+
+    workflow_module.get_conversation_thread(
+        FakeClient(), "123", fallback_conversation_id="c1"
+    )
+    assert len(searches) == 1
+    assert searches[0]["max_results"] == 10
