@@ -1,0 +1,58 @@
+[project]
+name = "gptme-agent-events"
+version = "0.1.0"
+description = "Live, harness-agnostic event stream of what an agent is doing (tool calls, commits, turn ends), with sinks such as sound effects"
+authors = [
+    {name = "gptme contributors", email = "gptme@superuserlabs.org"}
+]
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["gptme", "ai-agents", "claude-code", "codex", "events", "monitoring"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "click>=8.0",
+    "gptme-sessions",
+]
+
+[project.urls]
+Homepage = "https://github.com/gptme/gptme-contrib"
+Repository = "https://github.com/gptme/gptme-contrib"
+Issues = "https://github.com/gptme/gptme-contrib/issues"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+]
+dev = [
+    "mypy>=1.0.0",
+    "gptme-agent-events[test]",
+]
+
+[project.scripts]
+gptme-agent-events = "gptme_agent_events.cli:main"
+
+[tool.uv.sources]
+gptme-sessions = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gptme_agent_events"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+check_untyped_defs = true
+warn_return_any = true
+warn_unused_configs = true
