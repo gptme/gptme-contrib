@@ -9,7 +9,12 @@ import pytest
 
 from gptme_agent_events import ClaudeCodeExtractor, CodexExtractor, GptmeExtractor
 from gptme_agent_events.event import normalize_ts
-from gptme_agent_events.extractors import github_slug, gptme_result_failed, landing_detail
+from gptme_agent_events.extractors import (
+    _github_slug,
+    github_slug,
+    gptme_result_failed,
+    landing_detail,
+)
 
 
 def kinds(events):
@@ -235,7 +240,7 @@ class TestLandingDetail:
             ["git", "-C", str(d), "remote", "add", "origin", "git@github.com:gptme/gptme.git"],
             check=True,
         )
-        github_slug.cache_clear()
+        _github_slug.cache_clear()
         return d
 
     def test_cc_commit_in_cd_target(self, repo):
@@ -324,7 +329,18 @@ def test_tool_events_carry_cwd_and_repo(tmp_path):
     subprocess.run(
         ["git", "-C", str(d), "remote", "add", "origin", "https://github.com/o/r.git"], check=True
     )
-    github_slug.cache_clear()
+    _github_slug.cache_clear()
     ex = ClaudeCodeExtractor("s")
     (ev,) = ex.feed({**cc_assistant([bash("x", "ls")]), "cwd": str(d)})
     assert ev.detail == {"cwd": str(d), "repo": "o/r"}
+
+
+def test_github_slug_retries_missing_remote(tmp_path):
+    _github_slug.cache_clear()
+    assert github_slug(str(tmp_path)) is None
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "remote", "add", "origin", "https://github.com/o/new.git"],
+        check=True,
+    )
+    assert github_slug(str(tmp_path)) == "o/new"

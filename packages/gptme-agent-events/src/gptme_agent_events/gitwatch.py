@@ -72,9 +72,10 @@ class GitWatcher:
         self.slack = slack
         self.tail_bytes = tail_bytes
         self.clock = clock
-        self._common: dict[str, Path | None] = {}  # directory -> common git dir
+        self._common: dict[str, Path] = {}  # successful directory -> common git dir
         self._repos: dict[Path, tuple[str | None, float]] = {}  # common -> (slug, since)
         self._logs: dict[Path, tuple[int, int]] = {}  # reflog -> (offset, inode)
+        self._reported: dict[Path, tuple[int, set[str]]] = {}  # epoch + lines at that second
         self._log_lists: dict[Path, list[Path]] = {}  # common -> HEAD/worktree reflogs
         self._ref_dirs: dict[Path, dict[Path, float]] = {}  # common -> refs/remotes dirs
 
@@ -89,7 +90,8 @@ class GitWatcher:
             out = _git(["-C", directory, "rev-parse", "--path-format=absolute", "--git-common-dir"])
             if out and os.path.isdir(out):
                 common = Path(out)
-        self._common[directory] = common
+        if common is not None:
+            self._common[directory] = common
         return common
 
     def watch(self, directory: str) -> Path | None:
@@ -179,7 +181,9 @@ class GitWatcher:
             start = max(0, st.st_size - self.tail_bytes)
             first, floor = True, since - self.slack
         else:
-            start, first, floor = known[0], False, 0.0
+            # A truncate-to-empty reset must keep its replay guard when bytes
+            # arrive on a later poll.
+            start, first, floor = known[0], known[0] == 0, since - self.slack
         if st.st_size == start and not first:
             return []
         try:
@@ -193,13 +197,24 @@ class GitWatcher:
         lines = data[:complete].decode("utf-8", "replace").splitlines()
         if first and start > 0 and lines:
             lines = lines[1:]  # partial line at the cut
-        if not floor:
-            return lines
+        last_epoch, reported = self._reported.get(log, (0, set()))
         kept = []
         for line in lines:
             m = _REFLOG_RE.match(line)
-            if m and int(m.group(3)) >= floor:
-                kept.append(line)
+            if not m:
+                continue
+            epoch = int(m.group(3))
+            # `reflog delete --rewrite` changes the old SHA of surviving
+            # entries. Their new SHA, timestamp and action remain stable.
+            identity = " ".join(m.group(i) for i in (2, 3, 4, 5, 6))
+            if first and (epoch < max(floor, last_epoch) or identity in reported):
+                continue
+            kept.append(line)
+            if epoch > last_epoch:
+                last_epoch, reported = epoch, set()
+            if epoch == last_epoch:
+                reported.add(identity)
+        self._reported[log] = (last_epoch, reported)
         return kept
 
     def _session_of(self, common: Path, sha: str) -> str:
@@ -236,7 +251,7 @@ class GitWatcher:
                         kind = "commit"
                     else:
                         continue
-                    detail: dict[str, str] = {"sha": new[:12], "source": "git"}
+                    detail: dict[str, str] = {"sha": new[:12], "source": "git", "dir": str(common)}
                     if slug:
                         detail["repo"] = slug
                     if is_remote:

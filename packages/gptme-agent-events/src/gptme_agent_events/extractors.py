@@ -28,11 +28,19 @@ _PR_URL_RE = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/\d+")
 _GITHUB_REMOTE_RE = re.compile(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$")
 
 
-@lru_cache(maxsize=2048)
 def github_slug(directory: str) -> str | None:
-    """``owner/name`` of a local checkout's ``origin`` on GitHub, if any."""
-    if not os.path.isabs(directory) or not os.path.isdir(directory):
+    """``owner/name`` of a local checkout's origin; cache successes only."""
+    try:
+        return _github_slug(directory)
+    except LookupError:
         return None
+
+
+@lru_cache(maxsize=2048)
+def _github_slug(directory: str) -> str:
+    # lru_cache does not cache exceptions, allowing failed lookups to recover.
+    if not os.path.isabs(directory) or not os.path.isdir(directory):
+        raise LookupError(directory)
     try:
         url = subprocess.run(
             ["git", "-C", directory, "remote", "get-url", "origin"],
@@ -41,10 +49,16 @@ def github_slug(directory: str) -> str | None:
             text=True,
             timeout=5,
         ).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        return None
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise LookupError(directory) from exc
     m = _GITHUB_REMOTE_RE.search(url)
-    return m.group(1) if m else None
+    if not m:
+        raise LookupError(directory)
+    return m.group(1)
+
+
+# Preserve the cache invalidation hook used by callers and tests.
+github_slug.cache_clear = _github_slug.cache_clear  # type: ignore[attr-defined]
 
 
 def landing_detail(kind: str, command: str | None, cwd: str | None, output: str) -> dict:

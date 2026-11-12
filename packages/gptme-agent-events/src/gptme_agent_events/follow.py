@@ -138,6 +138,9 @@ class Follower:
         self.sources = sources
         self.git = git
         self._session_harness: dict[str, str] = {}
+        # Tool results can arrive a poll after the corresponding reflog entry.
+        self._git_shell: list[tuple[float, Path, AgentEvent]] = []
+        self._git_pending: list[tuple[float, Path, AgentEvent]] = []
         self.agent = agent
         self.active_window = active_window
         self.rescan_interval = rescan_interval
@@ -167,7 +170,7 @@ class Follower:
             mtime = directory.stat().st_mtime  # before listing: a racing add re-lists next time
         except OSError:
             return
-        if not full and self._listed_mtime.get(directory) == mtime:
+        if not full and self.rescan_interval > 0 and self._listed_mtime.get(directory) == mtime:
             if len(parts) > 1:
                 # Iterate the (small) warm set, not the (possibly huge) listing.
                 for sub in [w for w in self._warm if w.parent == directory]:
@@ -357,17 +360,73 @@ class Follower:
             for key in ("dir", "cwd"):
                 if isinstance(e.detail.get(key), str):
                     self.git.watch(e.detail[key])
-        kept = [
-            e
-            for e in events
-            if not (
-                e.kind in ("commit", "push")
-                and self.git.watches(str(e.detail.get("dir") or e.detail.get("cwd") or ""))
-            )
-        ]
+        now = self.clock()
+        self._git_shell = [item for item in self._git_shell if now - item[0] <= 120]
+        kept = []
+        for e in events:
+            directory = str(e.detail.get("dir") or e.detail.get("cwd") or "")
+            common = self.git.common_dir(directory) if e.kind in ("commit", "push") else None
+            if common is not None and self.git.watches(directory):
+                self._git_shell.append((now, common, e))
+            else:
+                kept.append(e)
         for e in self.git.poll(rediscover=rediscover):
+            self._git_pending.append((now, Path(e.detail["dir"]), e))
+        pending = []
+        # Count from the original batch, not the shrinking list as matches are
+        # consumed: proximity alone must be unique in both directions.
+        batch = list(self._git_pending)
+        for seen, common, e in batch:
+            matches = []
+            for item in self._git_shell:
+                when, repo, shell = item
+                if repo != common or shell.kind != e.kind:
+                    continue
+                sha = str(shell.detail.get("sha") or "")
+                # A commit hash is stronger evidence than proximity. Push output
+                # has no hash: only use a unique result in a short polling window.
+                if e.kind == "commit" and sha:
+                    git_sha = str(e.detail["sha"])
+                    if not (git_sha.startswith(sha) or sha.startswith(git_sha)):
+                        continue
+                else:
+                    if e.session and shell.session != e.session:
+                        continue
+                    if abs(when - seen) > 5:
+                        continue
+                    possible = [
+                        other
+                        for stamp, repo, other in batch
+                        if repo == common
+                        and other.kind == shell.kind
+                        and abs(when - stamp) <= 5
+                        and (not other.session or other.session == shell.session)
+                    ]
+                    if len(possible) != 1:
+                        continue
+                matches.append(item)
+            if len(matches) == 1:
+                item = matches[0]
+                shell = item[2]
+                if not e.session:
+                    e.session, e.harness = shell.session, shell.harness
+                    e.tool, e.subagent = shell.tool, shell.subagent
+                self._git_shell.remove(item)
+            elif now - seen < 5:
+                pending.append((seen, common, e))
+                continue
             e.harness = self._session_harness.get(e.session, e.harness)
             kept.append(e)
+        self._git_pending = pending
+        # If no reflog exists (e.g. core.logAllRefUpdates=false), retain the
+        # shell evidence rather than silently losing the event altogether.
+        waiting = []
+        for seen, common, e in self._git_shell:
+            if now - seen >= 5:
+                kept.append(e)
+            else:
+                waiting.append((seen, common, e))
+        self._git_shell = waiting
         return kept
 
     def run(self, interval: float = 0.5) -> Iterator[AgentEvent]:

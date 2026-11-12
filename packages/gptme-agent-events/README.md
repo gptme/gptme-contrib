@@ -92,8 +92,15 @@ Commits are attributed to sessions through their `Git-Session-Id` trailer, and a
 push through the trailer of the commit it pushed. When the trailer names a
 session the follower has seen, the event takes that session's harness;
 otherwise `harness` is `git` (for example, a script commit). For watched
-repositories, the commit/push events detected from shell output are dropped, so
-each commit is reported once. Pass `--no-git` to rely on shell output only.
+repositories, shell results annotate matching reflog events rather than producing
+a second event. A missing trailer can inherit the shell result's session,
+harness and tool: commits match by SHA when available, otherwise a unique result
+of the same kind in the same repository within five seconds is required. A
+trailer always wins over shell attribution. Events may wait up to five seconds
+for a tool result from the next poll; unmatched shell evidence is emitted as a
+fallback (including repositories with reflogs disabled). Ambiguous concurrent
+results are not used to guess a session. Pass `--no-git` to rely on shell output
+only.
 
 Without git watching, or for repos that can't be resolved, commits, pushes and
 PRs are reported when the tool **result** shows the command succeeded; a failed
