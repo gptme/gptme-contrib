@@ -388,14 +388,19 @@ class RouteRegistry:
         for route in self.public():
             target = ' target="_blank" rel="noreferrer"' if route.is_external else ""
             badge_class = "badge-yellow" if route.is_external else "badge-green"
+            # An empty badge would still render as a coloured pill.
+            badge = (
+                f'<span class="badge {badge_class}">{escape(route.badge)}</span>'
+                if route.badge
+                else ""
+            )
             cards.append(
                 f'<a class="card" data-route="{escape(route.slug, quote=True)}" '
                 f'href="{escape(route.href, quote=True)}"{target}>'
                 f'<div class="card-title">{escape(route.label)}</div>'
                 f'<div class="card-desc">{escape(route.description)}</div>'
                 f"{meta_html.get(route.slug, '')}{preview_html.get(route.slug, '')}"
-                f'<span class="badge {badge_class}">{escape(route.badge)}</span>'
-                "</a>"
+                f"{badge}</a>"
             )
         return "\n".join(cards)
 

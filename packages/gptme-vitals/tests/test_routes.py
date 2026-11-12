@@ -230,6 +230,13 @@ def test_portal_cards_insert_meta_and_preview() -> None:
     assert "Updated now" in cards and "3 active" in cards
 
 
+def test_portal_card_without_badge_text_renders_no_badge() -> None:
+    reg = RouteRegistry((_route("bare", badge=""), _route("live")))
+    bare, live = reg.render_portal_cards().split("\n")
+    assert 'class="badge' not in bare
+    assert '<span class="badge badge-green">LIVE</span>' in live
+
+
 def test_static_target_uses_output_path(tmp_path: Path) -> None:
     route = _registry().get_by_slug("tasks")
     assert route is not None
