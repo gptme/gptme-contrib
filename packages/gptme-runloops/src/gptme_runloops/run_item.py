@@ -2120,6 +2120,8 @@ INFRA_FAILURE_CC_AUTH = "cc_auth"
 #: Grok Build usage balance exhausted" in the grok-build session log.
 BACKEND_QUOTA_MARKERS: tuple[str, ...] = (
     "status 402",
+    "Error code: 402",
+    "Insufficient credits",
     "Payment Required",
     "usage balance exhausted",
     "balance exhausted",
