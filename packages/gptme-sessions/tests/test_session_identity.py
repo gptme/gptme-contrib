@@ -50,6 +50,15 @@ def test_recurring_label_needs_time_and_picks_nearest_in_window():
     assert idx.stats["out_of_window"] == 1
 
 
+def test_equidistant_sessions_stay_unresolved_regardless_of_order():
+    earlier = {"session_id": "4033", "start_time": "2026-03-12T10:00:00Z"}
+    later = {"session_id": "4033", "start_time": "2026-03-12T12:00:00Z"}
+    for rows in ([earlier, later], [later, earlier]):
+        idx = SessionIndex(rows)
+        assert idx.resolve("4033", at="2026-03-12T11:00:00Z") is None
+        assert idx.stats["ambiguous_time"] == 1
+
+
 def test_single_label_is_still_time_checked():
     row = {"session_id": "4033", "start_time": "2026-02-01T10:00:00+00:00"}
     idx = SessionIndex([row])

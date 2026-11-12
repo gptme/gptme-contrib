@@ -133,6 +133,9 @@ class SessionIndex:
             self.stats["out_of_window"] += 1
             return None
         in_range.sort(key=lambda pair: pair[0])
+        if len(in_range) > 1 and in_range[0][0] == in_range[1][0]:
+            self.stats["ambiguous_time"] += 1
+            return None
         return in_range[0][1]
 
     def resolve(self, ref: object, at: object = None) -> dict | None:
