@@ -1229,31 +1229,44 @@ check_master_ci() {
         return 0
     fi
 
-    # State-track by failure *signature*: the set of workflows currently red,
-    # not the set of run IDs. The run window is a rolling 3 calendar days in
-    # whole dates, so at 00:00 UTC the oldest run drops out and an ID-keyed
-    # hash changed for every repo with an old failure in the window. 11 of 22
+    # State-track by failure *signature*: the workflows currently red, not the
+    # set of run IDs. The run window is a rolling 3 calendar days in whole
+    # dates, so at 00:00 UTC the oldest run drops out and an ID-keyed hash
+    # changed for every repo with an old failure in the window. 11 of 22
     # gptme-cloud cls-regression-check sessions started 00:03-00:29 UTC that
     # way. A workflow that is still red on a newer commit is the same open
-    # signal; only a workflow absent from the recorded set is new.
-    local current_sigs seen_sigs
-    current_sigs=$(echo "$failures" | jq -c '[.[].name] | unique')
-    seen_sigs='[]'
+    # signal; only a workflow absent from the state, or one with a success
+    # newer than the failure we last saw, is new. The state records the newest
+    # failure time per workflow, so a fail -> pass -> fail sequence that
+    # completes between two gate runs still re-emits (the pass is newer than
+    # the stored failure) even though the file is never empty in between.
+    local seen_state newest_failures
+    seen_state='{}'
     if [ -f "$state_file" ]; then
-        # A legacy state file holds an ID hash, not JSON: treat as empty.
-        seen_sigs=$(jq -c 'if type == "array" then . else [] end' "$state_file" 2>/dev/null || echo '[]')
-        [ -n "$seen_sigs" ] || seen_sigs='[]'
+        # A legacy state file holds an ID hash or a name array, not an object:
+        # treat as empty.
+        seen_state=$(jq -c 'if type == "object" then . else {} end' "$state_file" 2>/dev/null || echo '{}')
+        [ -n "$seen_state" ] || seen_state='{}'
     fi
+    newest_failures=$(echo "$failures" | jq -c 'group_by(.name) | map(sort_by(.createdAt) | last)')
     # Record the current set before emitting. A shrinking set is stored too, so
     # a workflow that went green and red again is new on its second failure.
-    echo "$current_sigs" > "$state_file"
+    echo "$newest_failures" | jq -c 'map({(.name): .createdAt}) | add' > "$state_file"
 
     # Emit the newest failing run of each workflow not yet reported.
-    echo "$failures" | jq -c --argjson seen "$seen_sigs" '
-        group_by(.name)
-        | map(sort_by(.createdAt) | last)
-        | .[]
-        | select(.name as $n | $seen | index($n) | not)' | while read -r run; do
+    echo "$newest_failures" | jq -c --argjson seen "$seen_state" --argjson runs "$runs" '
+        def ts: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+        .[]
+        | . as $f
+        | select(
+            ($seen[$f.name] // null) as $at
+            | $at == null
+              or ([$runs[]
+                   | select(.conclusion == "success"
+                       and .name == $f.name
+                       and .event == $f.event
+                       and ((.createdAt | ts) > ($at | ts)))]
+                  | length > 0))' | while read -r run; do
         local run_id run_name
         run_id=$(echo "$run" | jq -r '.databaseId')
         run_name=$(echo "$run" | jq -r '.name')

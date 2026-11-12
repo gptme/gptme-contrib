@@ -411,3 +411,35 @@ def test_regression_after_recovery_is_emitted_again(tmp_path: Path) -> None:
         ],
     )
     assert _emitted(regressed) == [533]
+
+
+def test_fail_pass_fail_between_two_gate_runs_is_emitted_again(tmp_path: Path) -> None:
+    """The reviewer's P1: the whole recovery and the next regression happen
+    between two gate runs, so the failure set is never empty on the gate's
+    side. The success newer than the stored failure still marks a recovery."""
+    first = _run_gate(
+        tmp_path, [_run(541, "push", name="Tests", created_at=_ts(5 * 3600))]
+    )
+    assert _emitted(first) == [541]
+
+    second = _run_gate(
+        tmp_path,
+        [
+            _run(541, "push", name="Tests", created_at=_ts(5 * 3600)),
+            _run(
+                542,
+                "push",
+                name="Tests",
+                conclusion="success",
+                created_at=_ts(3 * 3600),
+            ),
+            _run(543, "push", name="Tests", created_at=_ts(60)),
+        ],
+    )
+    assert _emitted(second) == [543]
+
+    third = _run_gate(
+        tmp_path,
+        [_run(544, "push", name="Tests", created_at=_ts(30))],
+    )
+    assert third.stdout == ""  # same signal again: no further re-emit
