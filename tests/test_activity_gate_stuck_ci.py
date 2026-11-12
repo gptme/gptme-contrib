@@ -507,3 +507,66 @@ check_ci_failures "o/r" '{json.dumps([new_pr])}'
     # The new episode is recorded so the clock starts now, not two hours ago.
     assert state_file.read_text().strip() != stale_digest
     assert time.time() - state_file.stat().st_mtime < 60
+
+
+def _run_gate_once(state_dir: Path, pr: dict) -> str:
+    script = f"""
+set -uo pipefail
+STATE_DIR={state_dir!s}
+CI_STUCK_SECS=3600
+portable_hash() {{ {_sha256_cmd()} | cut -d' ' -f1; }}
+emit_item() {{ echo "EMIT type=$1 repo=$2 pr=$3 detail=$5"; }}
+source_only=1
+{_extract_function()}
+check_ci_failures "o/r" '{json.dumps([pr])}'
+"""
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True).stdout
+
+
+def test_failed_pr_does_not_reemit_as_other_checks_finish(tmp_path: Path) -> None:
+    """One red PR must emit once while its other checks complete, not once per
+    completing check; a second failing check is a new signal."""
+    failed = {"status": "COMPLETED", "conclusion": "FAILURE", "name": "lint"}
+    pr = {
+        "number": 9,
+        "title": "red",
+        "headRefOid": "c" * 40,
+        "statusCheckRollup": [
+            failed,
+            {"status": "IN_PROGRESS", "conclusion": "", "name": "a"},
+            {"status": "IN_PROGRESS", "conclusion": "", "name": "b"},
+        ],
+    }
+    state = tmp_path / "state"
+    state.mkdir()
+    assert "EMIT" in _run_gate_once(state, pr)  # first failure fires at once
+
+    one_done = dict(
+        pr,
+        statusCheckRollup=[
+            failed,
+            {"status": "COMPLETED", "conclusion": "SUCCESS", "name": "a"},
+            {"status": "IN_PROGRESS", "conclusion": "", "name": "b"},
+        ],
+    )
+    assert "EMIT" not in _run_gate_once(state, one_done)
+
+    all_done = dict(
+        pr,
+        statusCheckRollup=[
+            failed,
+            {"status": "COMPLETED", "conclusion": "SUCCESS", "name": "a"},
+            {"status": "COMPLETED", "conclusion": "SUCCESS", "name": "b"},
+        ],
+    )
+    assert "EMIT" not in _run_gate_once(state, all_done)
+
+    second_red = dict(
+        pr,
+        statusCheckRollup=[
+            failed,
+            {"status": "COMPLETED", "conclusion": "FAILURE", "name": "a"},
+            {"status": "COMPLETED", "conclusion": "SUCCESS", "name": "b"},
+        ],
+    )
+    assert "EMIT" in _run_gate_once(state, second_red)

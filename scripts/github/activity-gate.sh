@@ -1026,6 +1026,15 @@ check_ci_failures() {
         # commit, still red, is a fresh actionable signal, not a duplicate.
         ci_hash=$(echo "$pr_data" | jq -r '(.headRefOid // "") + ":" + ([.statusCheckRollup[] | .conclusion // .state // "pending"] | sort | join(","))' | portable_hash)
         detail="CI failing: state_hash=$ci_hash"
+        # Dedup key for the terminal-failure path. `ci_hash` also folds in every
+        # still-running check, so it changes each time a passing check finishes
+        # and one red PR re-emitted once per completing check (28 of 348 audited
+        # monitoring sessions). Only the failing conclusions and the head count
+        # here: a passing check finishing is not a new signal, a second failing
+        # check is. `ci_hash` stays the key for the in-flight/stuck clock and
+        # the detail token, where pending state is the point.
+        local fail_hash
+        fail_hash=$(echo "$pr_data" | jq -r '(.headRefOid // "") + ":" + ([.statusCheckRollup[] | ((.conclusion // .state // "") | ascii_upcase) | select(. != "" and . != "SUCCESS" and . != "SKIPPED" and . != "NEUTRAL" and . != "PENDING" and . != "EXPECTED")] | sort | join(","))' | portable_hash)
 
         if [ "$ci_state" = "inflight" ]; then
             # Checks still running is normal. Only actionable once the state has
@@ -1045,11 +1054,11 @@ check_ci_failures() {
                 continue
             fi
         else
-            if [ -f "$state_file" ] && [ "$(cat "$state_file")" = "$ci_hash" ]; then
-                # CI state unchanged since last check — don't re-trigger
+            if [ -f "$state_file" ] && [ "$(cat "$state_file")" = "$fail_hash" ]; then
+                # Failing set unchanged since last check — don't re-trigger
                 continue
             fi
-            echo "$ci_hash" > "$state_file"
+            echo "$fail_hash" > "$state_file"
         fi
 
         emit_item "ci_failure" "$repo" "$pr_number" "$pr_title" "$detail"
