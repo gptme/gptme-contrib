@@ -339,10 +339,9 @@ come from collectors that read ticket titles and error messages). A route with a
 under the public root after `core.json`, from the same envelopes (so a partial
 build still shows every page). Pass `--title` to name it. `head_html` and
 `toolbar_html` take the theme fragments (`theme.render_head_assets()` /
-`render_theme_toggle()`); the CLI does not pass them yet because the theme module
-lands in its own PR, so until then the page carries only the portal's own CSS.
+`render_theme_toggle()`); the CLI passes both, so a built portal carries the
+shared tokens and the theme toggle.
 
 ## Next in slice 1
 
-Wire the theme fragments into the CLI once the theme PR merges, and switch Bob's
-own repo onto the package.
+Switch Bob's own repo onto the package.
