@@ -54,6 +54,7 @@ For OAuth 2.0 setup:
 import contextlib
 import fcntl
 import hashlib
+import json
 import os
 import re
 import sys
@@ -95,6 +96,103 @@ DEFAULT_LIMIT = 10
 # Initialize rich console (stderr=True so status messages don't pollute stdout
 # when callers capture stdout for JSON output, e.g. twitter-dispatch.sh)
 console = Console(stderr=True)
+
+
+# --- Daily billable-read meter -------------------------------------------------
+# X bills per resource returned (post read $0.005, user read $0.010), so a spend
+# cap that only reacts to X's own "cap reached" error acts after the money is
+# gone. Every GET that goes through tweepy is counted here, per UTC day, and
+# once TWITTER_DAILY_READ_LIMIT is reached further reads raise before any HTTP
+# request is made. Counting is always on; blocking only when the limit is set.
+READ_COUNTER_DIR_ENV = "TWITTER_READ_COUNTER_DIR"
+DAILY_READ_LIMIT_ENV = "TWITTER_DAILY_READ_LIMIT"
+
+
+class DailyReadLimitReached(tweepy.TweepyException):
+    """Raised instead of sending a read once the local daily budget is used."""
+
+
+def _read_counter_path(day: str | None = None) -> Path:
+    base = Path(
+        os.getenv(READ_COUNTER_DIR_ENV)
+        or Path.home() / ".cache" / "twitter-read-counter"
+    )
+    day = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    suffix = f"-{current_account()}" if current_account() else ""
+    return base / f"{day}{suffix}.json"
+
+
+def daily_read_limit() -> int:
+    """Configured daily limit in billable reads; 0 means unlimited."""
+    try:
+        return max(0, int(os.getenv(DAILY_READ_LIMIT_ENV, "0")))
+    except ValueError:
+        return 0
+
+
+def daily_reads_used() -> int:
+    try:
+        return int(json.loads(_read_counter_path().read_text()).get("reads", 0))
+    except (OSError, ValueError, AttributeError):
+        return 0
+
+
+def count_billable_reads(payload: object) -> int:
+    """Billable units in a response body: posts returned (data + included posts)
+    count 1 each, included users count 2 (user reads cost twice a post read)."""
+    if not isinstance(payload, dict):
+        return 0
+    data = payload.get("data")
+    n = len(data) if isinstance(data, list) else (1 if isinstance(data, dict) else 0)
+    includes = payload.get("includes")
+    if isinstance(includes, dict):
+        n += len(includes.get("tweets") or [])
+        n += 2 * len(includes.get("users") or [])
+    return n
+
+
+def _record_reads(n: int) -> None:
+    if n <= 0:
+        return
+    path = _read_counter_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.seek(0)
+        try:
+            used = int(json.loads(f.read() or "{}").get("reads", 0))
+        except (ValueError, AttributeError):
+            used = 0
+        f.seek(0)
+        f.truncate()
+        f.write(json.dumps({"reads": used + n}))
+
+
+def install_read_meter() -> None:
+    """Wrap tweepy's single HTTP entry point (idempotent)."""
+    base = getattr(getattr(tweepy, "client", None), "BaseClient", None)
+    if base is None or getattr(base.request, "_read_meter", False):
+        return
+    original = base.request
+
+    def metered(self, method, route, *args, **kwargs):
+        is_read = str(method).upper() == "GET"
+        limit = daily_read_limit()
+        if is_read and limit and daily_reads_used() >= limit:
+            raise DailyReadLimitReached(
+                f"Daily read limit reached ({limit} billable reads, UTC day); "
+                f"not calling {route}"
+            )
+        response = original(self, method, route, *args, **kwargs)
+        if is_read and getattr(response, "ok", False):
+            try:
+                _record_reads(count_billable_reads(response.json()))
+            except (ValueError, OSError):
+                pass
+        return response
+
+    metered._read_meter = True  # type: ignore[attr-defined]
+    base.request = metered
 
 
 @lru_cache(maxsize=1)
@@ -351,6 +449,7 @@ def load_twitter_client(
     Twitter's refresh tokens are single-use (RFC 6749 Section 6), so using a
     stale refresh token will result in a 400 Bad Request error.
     """
+    install_read_meter()
     requested_account = current_account()
     account_was_explicit = "TWITTER_ACCOUNT" in os.environ
     load_dotenv(override=True)
@@ -821,6 +920,19 @@ def cli(account: str) -> None:
     """Twitter Tool - Simple CLI for Twitter operations"""
     if account:
         os.environ["TWITTER_ACCOUNT"] = account
+
+
+@cli.command("read-budget")
+def read_budget() -> None:
+    """Print today's billable reads; exit 1 when the daily limit is used up.
+
+    No API call is made. Callers (loops) use the exit code to skip a read cycle
+    before X's own spend cap does.
+    """
+    used, limit = daily_reads_used(), daily_read_limit()
+    click.echo(f"{used}/{limit if limit else 'unlimited'} billable reads (UTC day)")
+    if limit and used >= limit:
+        sys.exit(1)
 
 
 @cli.command()
