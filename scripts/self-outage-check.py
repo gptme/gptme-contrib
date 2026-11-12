@@ -147,8 +147,65 @@ _SECRET_PATTERNS = (
 )
 
 
+# Opening of a quoted value for a secret-ish key: ``password="``, ``"token": '``.
+_QUOTED_SECRET_OPEN = re.compile(
+    r"(?i)\b(?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?key|private[_-]?key|"
+    r"access[_-]?token|refresh[_-]?token|token|secret|credentials?|"
+    r"password|passwd|authorization|x-api-key)[\"']?\s*[:=]\s*([\"'])"
+)
+
+
+# Whitespace, then the start of a ``key=value`` / ``"key": value`` assignment.
+_NEXT_ASSIGNMENT = re.compile(r"""\s+["']?[\w.-]+["']?\s*[:=]""")
+
+
+def _redact_ambiguous_quoted(text: str) -> str:
+    """Redact to end-of-string any quoted secret whose extent is a guess.
+
+    ``password="alpha "beta" omega" tail`` has no unique end: the value can't be
+    told from the inner quotes, so the regex rules below would stop at the first
+    one and publish ``beta``/``omega``. A closing quote is trusted only when it
+    is followed by end/punctuation, or by whitespace and either no further quote
+    or another ``key=`` assignment, *and* the rest of the string has balanced
+    quotes of the same kind; otherwise the quoting is ambiguous and we
+    redact greedily — over-redacting costs diagnostic detail, a leak costs a
+    secret. Unambiguous values are left to the regex rules.
+    """
+    pos = 0
+    while True:
+        m = _QUOTED_SECRET_OPEN.search(text, pos)
+        if m is None:
+            return text
+        quote = m.group(1)
+        i = m.end()
+        close = -1
+        while i < len(text):
+            if text[i] == "\\":
+                i += 2
+                continue
+            if text[i] == quote:
+                close = i
+                break
+            i += 1
+        if close == -1:
+            # Unterminated: the regex rules already redact to end-of-string.
+            return text
+        after = text[close + 1 :]
+        stray = re.sub(r"\\.", "", after).count(quote)
+        if after[:1].isalnum() or after[:1] == "_" or stray % 2 == 1:
+            return text[: m.end()] + "[REDACTED]"
+        # Whitespace after the close quote is not a delimiter by itself: with
+        # balanced quotes left over, ``password="alpha " beta " omega" tail``
+        # still has inner quotes. Trust it only if no quote follows, or the
+        # next token starts another ``key=``/``key:`` assignment.
+        if after[:1].isspace() and stray and not _NEXT_ASSIGNMENT.match(after):
+            return text[: m.end()] + "[REDACTED]"
+        pos = close + 1
+
+
 def _redact(text: str) -> str:
     """Scrub credential-shaped substrings from text bound for outbound channels."""
+    text = _redact_ambiguous_quoted(text)
     for pat in _SECRET_PATTERNS:
         if pat.groups:
             text = pat.sub(lambda m: m.group(1) + "[REDACTED]", text)
@@ -212,6 +269,66 @@ def _error_text(record: dict) -> str:
     except RecursionError:
         # Too deeply nested to serialize (str() would recurse too). Keep the
         # record countable rather than crash assess() before escalation.
+        text = f"<unserializable {type(raw).__name__} error>"
+    return text.strip()
+
+
+# Dict keys whose value is a credential, matched case-insensitively with ``-``
+# and ``_`` ignored (``api_key``, ``apiKey``, ``X-Api-Key``, ``client_secret``).
+_SECRET_KEY_RE = re.compile(
+    r"apikey|accesskey|token|secret|passw(?:or)?d|authorization|credential|privatekey"
+)
+
+
+def _is_secret_key(key: object) -> bool:
+    return isinstance(key, str) and bool(
+        _SECRET_KEY_RE.search(re.sub(r"[-_\s]", "", key.lower()))
+    )
+
+
+def _redact_structured(raw: object) -> object:
+    """Return a copy of a structured error with its secrets removed.
+
+    Values under secret-ish keys are replaced outright (whatever their type —
+    the JSON structure, not a regex, defines their extent). Remaining strings
+    still get the text patterns, for secrets embedded in free text. Non-JSON
+    scalars are stringified the way ``json.dumps(default=str)`` would.
+    """
+    if isinstance(raw, dict):
+        return {
+            (_redact(k) if isinstance(k, str) else str(k)): (
+                "[REDACTED]" if _is_secret_key(k) else _redact_structured(v)
+            )
+            for k, v in raw.items()
+        }
+    if isinstance(raw, list | tuple):
+        return [_redact_structured(v) for v in raw]
+    if isinstance(raw, str):
+        return _redact(raw)
+    return raw
+
+
+def _redacted_error_text(record: dict) -> str:
+    """Like ``_error_text()`` but safe to publish.
+
+    Structured errors are redacted *before* serializing, so quoting inside a
+    secret value never has to be inferred from the serialized text.
+    """
+    raw = record.get("error")
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return _redact(raw.strip())
+    try:
+        text = json.dumps(_redact_structured(raw), sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        text = _redact(str(raw))
+    except RecursionError:
+        # Nesting too deep for the structural walk (``_error_text()`` treats
+        # the same payload as unserializable). Publish only the placeholder:
+        # falling back to ``str(raw)`` would recurse too, and raising here
+        # would crash ``assess()`` before escalation — the failure mode the
+        # iterative ``_is_structured_403()`` walk exists to prevent.
         text = f"<unserializable {type(raw).__name__} error>"
     return text.strip()
 
@@ -353,8 +470,8 @@ def assess(
         # A record is billing-bearing if its text carries a billing substring OR
         # its structured payload carries HTTP 403 — the same two signals the
         # classification uses, so the display sample never disagrees with it.
-        billing_errors = [
-            e
+        billing_pairs = [
+            (r, e)
             for r, e in texts_newest_first
             if e
             and (
@@ -362,6 +479,7 @@ def assess(
                 or _is_structured_403(r.get("error"))
             )
         ]
+        billing_errors = [e for _, e in billing_pairs]
         billing_outage = (
             bool(billing_errors)
             or (dominant_reason in BILLING_OUTAGE_REASONS)
@@ -375,15 +493,22 @@ def assess(
         # outage (the recorder only populates it intermittently). Fall back to
         # the newest record that carries any error, so we always surface
         # *something* useful even when the most-recent record has an empty field.
-        err = next(iter(billing_errors or errors_newest_first), "")
+        sample_record = next(
+            iter(billing_pairs or [(r, e) for r, e in texts_newest_first if e]),
+            ({}, ""),
+        )[0]
         # Redact BEFORE truncating, so a secret straddling the cap can't leave
         # an unredacted prefix. Classification above ran on the raw errors.
+        # Structured errors are redacted before they are serialized (see
+        # _redacted_error_text), not by regex over the serialized text.
         # Then flatten it to one line with no backticks: it is untrusted text
         # rendered in an inline code span on an auto-filed issue, and a blank
         # line or a backtick would end the span and let the rest render as
         # markdown (e.g. a live @mention). Every consumer (alert file, --json,
         # issue/reopen bodies, notifier) inherits this.
-        sample_error = _flatten_untrusted(_redact(err))[:400] or None
+        sample_error = (
+            _flatten_untrusted(_redacted_error_text(sample_record))[:400] or None
+        )
         # Same reasoning as billing_outage: decide on the full errors, not the
         # truncated display sample, so a long error can't hide the provider hint.
         oauth_org_block = any(

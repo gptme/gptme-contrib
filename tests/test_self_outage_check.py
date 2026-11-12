@@ -14,6 +14,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "self-outage-check.py"
 SPEC = importlib.util.spec_from_file_location("self_outage_check", SCRIPT)
 assert SPEC and SPEC.loader
@@ -879,3 +881,174 @@ def test_unserializably_deep_error_does_not_crash() -> None:
         nested = [nested]
     assert soc._is_structured_403(nested) is True
     assert soc._error_text({"error": nested}) == "<unserializable list error>"
+
+
+# --- Structural redaction (contrib#2069) -----------------------------------
+
+
+def _sample_for(tmp_path: Path, error: Any) -> tuple[str, str]:
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "auth")
+        r["error"] = error
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    return status["sample_error"], soc._issue_body(cfg_for(tmp_path), status)
+
+
+def test_ambiguous_quoted_secret_in_raw_string_redacted_greedily(
+    tmp_path: Path,
+) -> None:
+    # The inner quotes give ``password="alpha "beta" omega" tail`` no unique
+    # extent; the old regex stopped at the first inner quote and leaked
+    # ``beta``/``omega``. Ambiguous quoting now redacts to end-of-string.
+    sample, body = _sample_for(
+        tmp_path, 'login failed: password="alpha "beta" omega" tail'
+    )
+    assert sample == "login failed: password=[REDACTED]"
+    for leaked in ("alpha", "beta", "omega", "tail"):
+        assert leaked not in body
+
+
+def test_ambiguous_quoted_secret_in_structured_value_redacted(
+    tmp_path: Path,
+) -> None:
+    # Same ambiguity inside a free-text value under a non-secret key (the
+    # serialized-dict path from the issue).
+    sample, body = _sample_for(
+        tmp_path,
+        {"message": 'login failed: password="alpha "beta" omega" tail', "code": 401},
+    )
+    for leaked in ("alpha", "beta", "omega"):
+        assert leaked not in sample
+        assert leaked not in body
+    assert "login failed" in sample
+
+
+@pytest.mark.parametrize("key", ["password", "client_secret", "aws_secret_access_key"])
+@pytest.mark.parametrize("structured", [False, True])
+def test_whitespace_separated_inner_quotes_redact_to_end(
+    tmp_path: Path, key: str, structured: bool
+) -> None:
+    error = f'login failed: {key}="alpha " beta " omega" tail'
+    sample, body = _sample_for(
+        tmp_path, {"message": error, "code": 401} if structured else error
+    )
+    for leaked in ("alpha", "beta", "omega", "tail"):
+        assert leaked not in sample
+        assert leaked not in body
+    assert "login failed" in sample
+
+
+def test_unbalanced_trailing_quote_redacts_to_end() -> None:
+    # Closing quote looks fine (followed by a space) but a stray quote later
+    # means the quoting is broken, so the extent is a guess.
+    out = soc._redact('x password="alpha beta" omega" tail')
+    assert out == "x password=[REDACTED]"
+
+
+def test_unambiguous_quoted_secrets_keep_surrounding_text() -> None:
+    out = soc._redact("a password=\"two words\" b token='x y' c")
+    assert out == "a password=[REDACTED] b token=[REDACTED] c"
+
+
+def test_secret_key_values_replaced_outright_in_structure(tmp_path: Path) -> None:
+    # Values under secret-ish keys are replaced by structure, whatever their
+    # content or type — no regex has to find where the value ends.
+    sample, body = _sample_for(
+        tmp_path,
+        {
+            "code": 401,
+            "password": 'alpha "beta" omega',
+            "headers": {"Authorization": "Basic Zm9vOmJhcg", "X-Api-Key": "k 1"},
+            "auth": [{"client_secret": {"nested": "gamma delta"}}],
+            # list of plain scalars directly under a secret key (issue #2069 shape)
+            "tokens": ["epsilon", "zeta"],
+            "message": "invalid credentials",
+        },
+    )
+    for leaked in (
+        "alpha",
+        "beta",
+        "omega",
+        "Zm9vOmJhcg",
+        "k 1",
+        "gamma",
+        "delta",
+        "epsilon",
+        "zeta",
+    ):
+        assert leaked not in sample
+        assert leaked not in body
+    assert "invalid credentials" in sample
+    assert '"code": 401' in sample
+
+
+def test_structured_redaction_still_scrubs_embedded_secrets_in_free_text() -> None:
+    out = soc._redact_structured(
+        {"detail": "token sk-ant-api03-abcdefghijkl rejected", "n": 3}
+    )
+    assert out == {"detail": "token [REDACTED] rejected", "n": 3}
+
+
+def _walk_hits_recursion_limit(_raw: object) -> object:
+    raise RecursionError("maximum recursion depth exceeded")
+
+
+def test_deeply_nested_error_survives_structural_redaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression: _redact_structured() is recursive, so nesting that
+    # json.loads() (and therefore load_records()) accepts could raise
+    # RecursionError inside _redacted_error_text() and abort assess() before
+    # any escalation — the failure mode the iterative _is_structured_403()
+    # walk was introduced to prevent (contrib#2038, fp 39d8ac08fea2).
+    # The walk's real depth limit varies with the interpreter (frames per
+    # nested list differ between 3.11 and 3.12) and with pytest's own stack,
+    # so force the exhaustion instead of building a depth that only trips it on
+    # one Python version. The guard is what is under test.
+    monkeypatch.setattr(soc, "_redact_structured", _walk_hits_recursion_limit)
+    nested: Any = [[{"code": 403, "token": "t0ps3cret"}]]
+    assert soc._redacted_error_text({"error": nested}) == "<unserializable list error>"
+
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "auth")
+        r["error"] = nested
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    assert status["outage"] is True
+    assert status["billing_outage"] is True
+    assert "t0ps3cret" not in (status["sample_error"] or "")
+
+
+def test_structured_redaction_does_not_alter_classification(tmp_path: Path) -> None:
+    # Classification runs on the raw error; redacting the published sample must
+    # not hide a 403/billing signal that lives under a secret-ish key.
+    records = [rec(40, "productive")]
+    for h in (1, 2, 3, 4):
+        r = rec(h, "failed", "auth")
+        r["error"] = {"token": {"code": 403, "message": "t0ps3cret value"}}
+        records.append(r)
+    write_records(tmp_path, records)
+    status = assess(tmp_path)
+    assert status["billing_outage"] is True
+    assert "t0ps3cret" not in status["sample_error"]
+    assert "value" not in status["sample_error"]
+    assert "403" not in status["sample_error"]
+    assert json.loads(status["sample_error"]) == {"token": "[REDACTED]"}
+
+
+@pytest.mark.parametrize("key", ["access_key", "accessKey", "access-key"])
+def test_access_key_structured_value_replaced_outright(
+    tmp_path: Path, key: str
+) -> None:
+    # Regression (contrib#2070 review, fp 9bb901e28cd5): the structural key
+    # matcher omitted ``access_key`` although the text redactor knows it, so a
+    # value with a space (which no text rule can bound) was published verbatim.
+    sample, body = _sample_for(tmp_path, {key: "alpha beta", "code": 401})
+    for leaked in ("alpha", "beta"):
+        assert leaked not in sample
+        assert leaked not in body
