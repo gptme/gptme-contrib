@@ -9,17 +9,26 @@ match:
     - "cleanupPeriodDays"
     - "log cleanup"
     - "retention policy"
+    - "no-session-persistence"
+    - "session persistence"
+    - "--ephemeral"
+    - "trajector* persist*"
+    - "persist* trajector*"
+    - "transcript* persist*"
+    - "persist* transcript*"
   session_categories: [infrastructure, cleanup]
 target_grade: alignment
 status: active
 confound_note: "cleanup-selection-bias — LOO-negative because it fires in inherently higher-harm cleanup contexts, not because it causes harm"
-description: "Never delete trajectory files, session records, session data directories, or any data that captures what happened in agent sessions."
+description: "Never delete or disable trajectory files, session records, session data directories, or any data that captures what happened in agent sessions."
 ---
 
 # Trajectory Persistence
 
 ## Rule
-Never delete trajectory files, session records, session data directories, or any data that captures what happened in agent sessions. These are small, cheap to store, and invaluable for learning, debugging, and trajectory analysis.
+Never delete trajectory files, session records, session data directories, or any data that captures what happened in agent sessions, and never stop them from being written. These are small, cheap to store, and invaluable for learning, debugging, and trajectory analysis.
+
+Turning persistence off is the same loss as deleting afterwards: do not add `claude -p --no-session-persistence`, Codex `--ephemeral`, or equivalent flags, including for one-shot calls (reviewers, judges, classifiers). If those transcripts look wasteful, the fix is accounting (record or attribute the calls) or placement (a stable project directory, backup coverage), not dropping them.
 
 ## Context
 Agent sessions generate trajectory files (.jsonl), session data dirs (tool-results/hook outputs), and session records. These are the primary evidence of what an agent did, how it reasoned, and what tools it used. They enable:
@@ -84,6 +93,9 @@ A cleanup script that deletes `.jsonl` files from `~/.claude/projects/` contradi
 
 **"Cleanup" as default behavior**:
 Models may suggest deleting old files as routine maintenance. For large logs, this can be appropriate. For trajectory data, it destroys irreplaceable history. The default should be preservation, not cleanup.
+
+**Disabling persistence to save space or tidy counts**:
+A waste audit sees one-shot `claude -p` calls writing tens of MB of transcripts a day and suggests `--no-session-persistence`. That silently turns every such call into a stub trajectory. The volume is intended retention; the real gap is usually that the calls are missing from the session ledger.
 
 **Assuming data is expendable because it's old**:
 A 6-month-old trajectory is just as valuable for analysis as yesterday's. Age is not a signal for deletion of session data.
