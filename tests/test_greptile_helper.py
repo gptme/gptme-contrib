@@ -2288,3 +2288,75 @@ def test_rest_head_gate_preserves_parent_cache_cleanup(tmp_path: Path):
     assert result.stdout.strip() == "needs-re-review"
     leftovers = [p.name for p in tmp_path.glob("greptile-*") if p.is_file()]
     assert leftovers == [], leftovers
+
+
+def _minimize_fixture() -> dict[str, object]:
+    """A re-trigger case whose thread already holds earlier trigger comments."""
+    reviewed_at = _iso_ago(minutes=30)
+
+    def trigger(cid: int, node: str, login: str, body: str, minutes: int):
+        ts = _iso_ago(minutes=minutes)
+        return {
+            "id": cid,
+            "node_id": node,
+            "user": {"login": login},
+            "body": body,
+            "created_at": ts,
+            "updated_at": ts,
+        }
+
+    marked = "@greptileai review\n\n<!-- greptile-helper head-sha: {} -->"
+    return {
+        "pr_number": 781,
+        "raw_comments": [
+            trigger(1, "IC_old1", "test-user", marked.format("aaa1111"), 300),
+            trigger(2, "IC_manual", "test-user", "@greptileai review", 240),
+            trigger(3, "IC_human", "someone-else", marked.format("bbb2222"), 200),
+            trigger(4, "IC_old2", "test-user", marked.format("ccc3333"), 90),
+            _make_greptile_comment(
+                4, reviewed_at=_iso_ago(minutes=60), updated_at=reviewed_at
+            ),
+        ],
+        "raw_commits": [_make_commit(_iso_ago(minutes=10))],
+        "raw_pr": {"head": {"sha": "beef1234"}, "created_at": _iso_ago(minutes=400)},
+        "bot_reaction_count": 1,
+    }
+
+
+def _minimized_ids(calls_path: Path) -> list[str]:
+    ids = []
+    for line in calls_path.read_text().splitlines():
+        argv = json.loads(line)
+        if argv[:2] == ["api", "graphql"] and any("minimizeComment" in a for a in argv):
+            ids += [a.split("=", 1)[1] for a in argv if a.startswith("id=")]
+    return ids
+
+
+def test_trigger_minimizes_own_superseded_helper_triggers(tmp_path):
+    """After a re-trigger posts, earlier helper triggers by this identity collapse.
+
+    Never a manual trigger (no helper marker) or another author's comment.
+    """
+    calls = tmp_path / "calls.jsonl"
+    result, gh_log = _run_helper(
+        "trigger",
+        _minimize_fixture(),
+        capture_gh_log=True,
+        extra_env={"GH_CALLS": str(calls)},
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "Re-triggered successfully" in result.stdout
+    assert "greptile-helper head-sha: beef1234" in gh_log
+    assert sorted(_minimized_ids(calls)) == ["IC_old1", "IC_old2"]
+
+
+def test_trigger_minimize_opt_out(tmp_path):
+    calls = tmp_path / "calls.jsonl"
+    result = _run_helper(
+        "trigger",
+        _minimize_fixture(),
+        extra_env={"GH_CALLS": str(calls), "GREPTILE_MINIMIZE_SUPERSEDED": "0"},
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "Re-triggered successfully" in result.stdout
+    assert _minimized_ids(calls) == []
