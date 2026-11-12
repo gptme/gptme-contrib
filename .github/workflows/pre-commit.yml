@@ -53,7 +53,10 @@ jobs:
           pre-commit try-repo "$GITHUB_WORKSPACE" \
             validate-root-structure --all-files
       - name: Create virtual environment
+        # --locked fails if uv.lock is stale vs any pyproject.toml (e.g. a
+        # version bump without `uv lock`), which otherwise dirties every
+        # consumer's submodule on their next `uv sync`.
         run: |
-          uv sync --all-packages
+          uv sync --all-packages --locked
       - name: Run pre-commit
         run: pre-commit run --all-files
