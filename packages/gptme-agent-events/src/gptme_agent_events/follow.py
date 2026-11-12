@@ -9,7 +9,8 @@ the beginning and announce themselves with a ``session_start`` event.
 Hosts accumulate tens of thousands of old trajectories, so discovery is
 tiered. A quick scan (every ``rescan_interval``) lists only the roots and
 "warm" directories: those modified within ``warm_horizon`` or newly appeared.
-A full sweep (every ``full_scan_interval``) walks everything, re-checks idle
+A quick scan re-lists a directory only if its
+mtime changed (new entries). A full sweep (every ``full_scan_interval``) walks everything, re-checks idle
 files so a resumed session is picked up, and recomputes which directories are
 warm. Only files active within ``active_window`` are kept open for polling;
 idle ones are kept as a compact (offset, inode) record.
@@ -149,19 +150,37 @@ class Follower:
         self._cold: dict[Path, tuple[int, int]] = {}  # idle: (offset, inode)
         self._children: dict[Path, set[str]] = {}  # directory listings
         self._warm: set[Path] = set()  # directories quick scans descend into
+        self._listed_mtime: dict[Path, float] = {}  # directory mtime at last listing
         self._last_scan: float | None = None
         self._last_full: float | None = None
 
     # -- discovery ---------------------------------------------------------
 
     def _walk(self, directory: Path, parts: tuple[str, ...], full: bool, now: float):
-        """Yield files under ``directory`` matching ``parts``, pruning cold dirs on quick scans."""
+        """Yield files under ``directory`` matching ``parts``, pruning cold dirs on quick scans.
+
+        Quick scans don't re-list a directory whose mtime is unchanged since its
+        last listing: no entries were added, so there is nothing new to find
+        there (appends to known files are seen by polling or the full sweep).
+        """
+        try:
+            mtime = directory.stat().st_mtime  # before listing: a racing add re-lists next time
+        except OSError:
+            return
+        if not full and self._listed_mtime.get(directory) == mtime:
+            if len(parts) > 1:
+                for name in self._children.get(directory, ()):
+                    sub = directory / name
+                    if sub in self._warm and fnmatch(name, parts[0]):
+                        yield from self._walk(sub, parts[1:], full, now)
+            return
         try:
             entries = list(os.scandir(directory))
         except OSError:
             return
         known = self._children.get(directory)
         self._children[directory] = {e.name for e in entries}
+        self._listed_mtime[directory] = mtime
         if len(parts) == 1:
             for e in entries:
                 if fnmatch(e.name, parts[0]) and e.is_file():
