@@ -81,6 +81,7 @@ from gptme_runloops.run_item import (
     snapshot_cc_predicted,
     snapshot_codex_rollouts,
     snapshot_copilot_dirs,
+    snapshot_gptme_trajectories,
     timeout_tier,
     write_rate_limit_block_file,
 )
@@ -1824,6 +1825,69 @@ def test_trajectory_gptme_uses_run_sh_sentinel(tmp_path) -> None:
     assert got == str(trajectory)
 
 
+@pytest.mark.parametrize("source", ["ref", "durable", "published_ref"])
+@pytest.mark.parametrize("change", ["unchanged", "modified", "created"])
+@pytest.mark.parametrize("relative_root", [False, True])
+def test_gptme_same_second_trajectory_requires_current_write(
+    tmp_path, monkeypatch, source: str, change: str, relative_root: bool
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    log_root = Path("logs") if relative_root else tmp_path / "logs"
+    trajectory = (
+        log_root / "gptme-logs-sid" / "session" / "conversation.jsonl"
+        if source in ("durable", "published_ref")
+        else tmp_path / "conversation.jsonl"
+    )
+    trajectory.parent.mkdir(parents=True, exist_ok=True)
+    ref = tmp_path / "gptme-traj-sid.path"
+    if change != "created":
+        trajectory.write_text('{"role": "error", "content": "401"}\n')
+        os.utime(trajectory, (1000, 1000))
+        if source == "ref":
+            ref.write_text(str(trajectory))
+    pre = snapshot_gptme_trajectories("sid", log_root, tmp_dir=tmp_path)
+    if change != "unchanged":
+        trajectory.write_text('{"role": "error", "content": "status 429"}\n')
+        # Same second AND identical timestamp: size change still proves a write.
+        os.utime(trajectory, (1000, 1000))
+    if source in ("ref", "published_ref"):
+        # Republishing a pointer alone does not make its target current.
+        ref.write_text(str(trajectory.resolve()))
+
+    got = resolve_backend_trajectory(
+        "gptme",
+        "sid",
+        predicted="",
+        started_epoch=1000,
+        copilot_state_dir=tmp_path,
+        codex_sessions_dir=tmp_path,
+        copilot_pre=None,
+        codex_pre=None,
+        tmp_dir=tmp_path,
+        gptme_log_root=log_root,
+        gptme_pre=pre,
+    )
+
+    expected_path = (
+        trajectory.resolve() if source in ("ref", "published_ref") else trajectory
+    )
+    assert got == ("" if change == "unchanged" else str(expected_path))
+
+
+def test_gptme_snapshot_unreadable_reference_is_unknown(tmp_path, monkeypatch) -> None:
+    ref = tmp_path / "gptme-traj-sid.path"
+    ref.write_text("old target")
+    original_read = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if path == ref:
+            raise PermissionError("unreadable reference")
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    assert snapshot_gptme_trajectories("sid", tmp_path, tmp_dir=tmp_path) is None
+
+
 def test_trajectory_gptme_ignores_missing_sentinel_target(tmp_path) -> None:
     (tmp_path / "gptme-traj-session-123.path").write_text(
         str(tmp_path / "missing.jsonl") + "\n"
@@ -3384,6 +3448,68 @@ def test_execute_plan_runner_base_environment(
     assert plan.runner_env == original_plan_env
 
 
+@pytest.mark.parametrize("exit_code", [75, 76])
+def test_execute_plan_gptme_same_second_retry_ignores_previous_error(
+    tmp_path, monkeypatch, exit_code: int
+) -> None:
+    monkeypatch.setattr("gptme_runloops.run_item.time.time", lambda: 1000)
+    # Keep repeated invocations identical within the test, but isolate its
+    # real /tmp reference from other parametrizations and parallel workers.
+    monkeypatch.setattr(
+        "gptme_runloops.run_item.derive_session_id",
+        lambda slug, salt: derive_session_id(slug, str(tmp_path)),
+    )
+    config = make_config(tmp_path, gptme_log_root=tmp_path / "logs")
+    item = make_item(types=["notification"], number=0)
+    plan = plan_item(
+        item,
+        index=1,
+        config=config,
+        backend="gptme",
+        model="",
+        monitoring_rules="",
+        lifecycle=LifecycleResult(),
+        arc=None,
+        run_salt=1000,
+        records_dir=tmp_path,
+        runner=["/fake/run.sh"],
+        sysprompt_file="",
+    )
+    trajectory = (
+        config.resolved_gptme_log_root
+        / f"gptme-logs-{plan.session_id}"
+        / "session"
+        / "conversation.jsonl"
+    )
+    ref = Path("/tmp") / f"gptme-traj-{plan.session_id}.path"
+
+    def first_run(argv, **kwargs):
+        trajectory.parent.mkdir(parents=True)
+        trajectory.write_text('{"role": "error", "content": "status 401"}\n')
+        os.utime(trajectory, (1000, 1000))
+        ref.write_text(str(trajectory))
+        return subprocess.CompletedProcess(argv, 76)
+
+    try:
+        first = execute_plan(plan, item, config, make_hooks(run_cmd=first_run))
+        second = execute_plan(
+            plan,
+            item,
+            config,
+            make_hooks(run_cmd=FakeRunCmd().on("/fake/run.sh", exit_code)),
+        )
+    finally:
+        ref.unlink(missing_ok=True)
+
+    assert first.session_ran
+    assert first.infra_failure == "gptme_auth"
+    assert second.deferred
+    assert not second.session_ran
+    assert not second.counted_failure
+    assert second.infra_failure is None
+    assert second.trajectory_path == ""
+
+
 def test_execute_plan_pr_before_snapshot_only_for_pr_items(tmp_path) -> None:
     config = make_config(tmp_path)
     run_cmd = FakeRunCmd()
@@ -3963,7 +4089,9 @@ class TestGrokBuildInfraFailureRecordedInLedger:
             (76, "status 401 Unauthorized: invalid api key", "gptme_auth"),
         ],
     )
-    @pytest.mark.parametrize("trajectory_source", ["ref", "durable", "stale", "none"])
+    @pytest.mark.parametrize(
+        "trajectory_source", ["ref", "durable", "stale", "stale_ref", "none"]
+    )
     def test_gptme_exit_75_76_infra_failure_vs_lock_busy(
         self,
         tmp_path,
@@ -3981,7 +4109,7 @@ class TestGrokBuildInfraFailureRecordedInLedger:
         work_file = _write_work_file(tmp_path, item)
         config = make_config(tmp_path, gptme_log_root=tmp_path / "gptme-runs")
         session_ref: Path | None = None
-        expect_deferred = trajectory_source in ("stale", "none")
+        expect_deferred = trajectory_source in ("stale", "stale_ref", "none")
 
         def run_cmd(argv, **kwargs):
             nonlocal session_ref
@@ -4004,9 +4132,11 @@ class TestGrokBuildInfraFailureRecordedInLedger:
                     os.utime(
                         traj, (1, 1) if expect_deferred else (2000000000, 2000000000)
                     )
-                    if trajectory_source == "ref":
+                    if trajectory_source in ("ref", "stale_ref"):
                         ref = Path("/tmp") / f"gptme-traj-{session_id}.path"
                         ref.write_text(str(traj))
+                        if trajectory_source == "stale_ref":
+                            os.utime(ref, (1, 1))
                         session_ref = ref
                 return subprocess.CompletedProcess(argv, exit_code, "", "")
             stdout = "abc123\n" if "rev-parse" in argv else ""

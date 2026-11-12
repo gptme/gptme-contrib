@@ -1253,6 +1253,32 @@ def _cc_predicted_written_this_run(
     return int(st.st_mtime) > started_epoch
 
 
+def snapshot_gptme_trajectories(
+    session_id: str, log_root: Path, *, tmp_dir: Path = Path("/tmp")
+) -> dict[str, tuple[int, int]] | None:
+    """Snapshot transcripts; unreadable evidence uses the conservative time guard."""
+    try:
+        paths = set(
+            (log_root / f"gptme-logs-{session_id}").glob("*/conversation.jsonl")
+        )
+        ref = tmp_dir / f"gptme-traj-{session_id}.path"
+        if ref.is_file():
+            target = ref.read_text(encoding="utf-8", errors="replace").strip()
+            if target:
+                paths.add(Path(target))
+        return {
+            str(path.resolve()): (st.st_mtime_ns, st.st_size)
+            for path in paths
+            if path.is_file()
+            for st in [path.stat()]
+        }
+    except OSError as exc:
+        # A stale discovery artifact must not prevent the runner replacing it.
+        # None means unknown, not an empty baseline that would admit leftovers.
+        _log(f"WARN: could not snapshot gptme trajectories: {exc}")
+        return None
+
+
 def resolve_backend_trajectory(
     backend: str,
     session_id: str,
@@ -1267,6 +1293,7 @@ def resolve_backend_trajectory(
     gptme_log_root: Path | None = None,
     cc_predicted_pre: tuple[int, int] | None = None,
     cc_snapshotted: bool = False,
+    gptme_pre: dict[str, tuple[int, int]] | None = None,
 ) -> str:
     """Resolve the session's real trajectory after the runner returns.
 
@@ -1316,12 +1343,26 @@ def resolve_backend_trajectory(
                     f"Found monitoring trajectory (stream-json, {stream_path.stat().st_size}B): {trajectory}"
                 )
 
+    def gptme_written_this_run(path: Path) -> bool:
+        st = path.stat()
+        if gptme_pre is not None:
+            previous = gptme_pre.get(str(path.resolve()))
+            if previous is None:
+                return st.st_mtime >= started_epoch
+            return previous != (st.st_mtime_ns, st.st_size)
+        # Callers without a snapshot retain the conservative time boundary.
+        return int(st.st_mtime) > started_epoch
+
     if backend == "gptme" and not trajectory and session_id:
         ref = tmp_dir / f"gptme-traj-{session_id}.path"
         if ref.is_file():
             trajectory_text = ref.read_text(encoding="utf-8", errors="replace").strip()
             trajectory_path = Path(trajectory_text) if trajectory_text else None
-            if trajectory_path and trajectory_path.is_file():
+            if (
+                trajectory_path
+                and trajectory_path.is_file()
+                and gptme_written_this_run(trajectory_path)
+            ):
                 trajectory = str(trajectory_path)
                 _log(
                     "Found monitoring trajectory "
@@ -1334,19 +1375,14 @@ def resolve_backend_trajectory(
         if not trajectory and gptme_log_root is not None:
             session_dir = gptme_log_root / f"gptme-logs-{session_id}"
             if session_dir.is_dir():
-                # Only accept files written during this run. The session id is
-                # uuid5(slug, run_salt=int(time.time())), so a retry in the same
-                # second reuses the directory and a prior run's
-                # conversation.jsonl can still be sitting in it — picking the
-                # newest unconditionally would record a stale trajectory as
-                # this run's. mtime > started_epoch mirrors the CC no-snapshot
-                # guard: a same-second legit write is missed (safe direction:
-                # null, not a misattributed leftover).
+                # A same-second retry reuses the session directory. Compare
+                # against the pre-run snapshot, just as for the reference
+                # target above: unchanged leftovers are not this invocation.
                 candidates = sorted(
                     (
                         p
                         for p in session_dir.glob("*/conversation.jsonl")
-                        if int(p.stat().st_mtime) > started_epoch
+                        if p.is_file() and gptme_written_this_run(p)
                     ),
                     key=lambda p: p.stat().st_mtime,
                     reverse=True,
@@ -1950,6 +1986,7 @@ def execute_plan(
     codex_pre = None
     cc_predicted_pre = None
     cc_snapshotted = False
+    gptme_pre = None
     if plan.backend == "copilot-cli":
         copilot_pre = snapshot_copilot_dirs(config.resolved_copilot_state_dir)
     elif plan.backend == "codex":
@@ -1957,6 +1994,10 @@ def execute_plan(
     elif plan.backend == "claude-code":
         cc_predicted_pre = snapshot_cc_predicted(plan.trajectory_path)
         cc_snapshotted = True
+    elif plan.backend == "gptme":
+        gptme_pre = snapshot_gptme_trajectories(
+            plan.session_id, config.resolved_gptme_log_root
+        )
 
     pr_before_json = ""
     if PR_OBSERVE_TYPES & set(item.types):
@@ -2017,6 +2058,7 @@ def execute_plan(
             copilot_pre=copilot_pre,
             codex_pre=codex_pre,
             gptme_log_root=config.resolved_gptme_log_root,
+            gptme_pre=gptme_pre,
         )
 
     rate_limited = False
