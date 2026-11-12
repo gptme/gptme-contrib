@@ -27,7 +27,7 @@ Query a Home Assistant instance for presence, sensor data, calendar events, and 
 
 Set both credentials together in the process environment, a `.env` at your agent
 workspace root, or `~/.config/secrets/ha.env` (use mode `600` for credential files).
-`BOB_SECRETS_DIR` overrides the per-consumer directory.
+`HA_SECRETS_DIR` overrides the per-consumer directory.
 
 ```dotenv
 HA_HOST=https://<your-ha-host>

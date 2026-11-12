@@ -14,7 +14,7 @@ Usage:
     uv run python3 skills/home-assistant/scripts/ha.py --json <subcommand> # JSON output
 
 Credentials: HA_HOST and HA_API_KEY in the environment, a .env file anywhere in the
-CWD→root walk, or ~/.config/secrets/ha.env (per-consumer file; BOB_SECRETS_DIR overrides the directory).
+CWD→root walk, or ~/.config/secrets/ha.env (per-consumer file; HA_SECRETS_DIR overrides the directory).
 """
 
 import argparse
@@ -48,7 +48,7 @@ def _find_env_file() -> Path | None:
 
 def _per_consumer_env_file() -> Path:
     """Credentials kept outside the shared .env: ~/.config/secrets/ha.env."""
-    secrets_dir = os.environ.get("BOB_SECRETS_DIR") or str(
+    secrets_dir = os.environ.get("HA_SECRETS_DIR") or str(
         Path.home() / ".config" / "secrets"
     )
     return Path(secrets_dir) / "ha.env"

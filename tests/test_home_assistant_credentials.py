@@ -12,7 +12,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "skills/home-assistant/scripts/ha
 
 @pytest.fixture
 def config(tmp_path, monkeypatch):
-    for name in ("HA_HOST", "HA_API_KEY", "BOB_SECRETS_DIR"):
+    for name in ("HA_HOST", "HA_API_KEY", "HA_SECRETS_DIR"):
         monkeypatch.delenv(name, raising=False)
     home = tmp_path / "home"
     home.mkdir()
@@ -105,7 +105,7 @@ def test_complete_credentials_preserve_source_precedence(
         (override / "ha.env").write_text(
             "HA_HOST='https://override.example/'\nHA_API_KEY=\"override-token\"\n"
         )
-        monkeypatch.setenv("BOB_SECRETS_DIR", str(override))
+        monkeypatch.setenv("HA_SECRETS_DIR", str(override))
     before = dict(os.environ)
     module = runpy.run_path(str(SCRIPT))
     assert module["HA_HOST"] == f"https://{source}.example"
