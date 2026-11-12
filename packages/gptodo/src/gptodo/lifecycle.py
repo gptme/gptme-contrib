@@ -78,7 +78,9 @@ def validate_transition(
         return str(new)
     if intent == "sync_reopen" and old == "done" and new == "active":
         return str(new)
-    if intent == "requeue" and old == "active" and new == "todo":
+    # Requeue returns an active task to a queue state: todo, or backlog when the
+    # claim that promoted it is released (receipt-bound restore).
+    if intent == "requeue" and old == "active" and new in ("todo", "backlog"):
         return str(new)
     if intent == "alert_refire" and old in ("done", "cancelled") and new in ("todo", "waiting"):
         return str(new)
