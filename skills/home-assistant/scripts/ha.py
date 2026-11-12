@@ -54,18 +54,32 @@ def _per_consumer_env_file() -> Path:
     return Path(secrets_dir) / "ha.env"
 
 
-# Process environment wins; then the walked-up .env; then the per-consumer file.
-for _env_path in (_find_env_file(), _per_consumer_env_file()):
-    if _env_path and _env_path.is_file():
-        for _line in _env_path.read_text().splitlines():
-            _line = _line.strip()
-            if _line and not _line.startswith("#") and "=" in _line:
-                _k, _, _v = _line.partition("=")
-                _v = _v.strip().strip('"').strip("'")
-                os.environ.setdefault(_k.strip(), _v)
+def _load_credentials() -> tuple[str, str]:
+    """Select one source; never pair a private token with another source's host.
 
-HA_HOST = os.environ.get("HA_HOST", "").rstrip("/")
-HA_API_KEY = os.environ.get("HA_API_KEY", "")
+    The first source declaring either HA variable owns both, even if incomplete.
+    Partial or empty credentials fail closed in ha_request().
+    """
+    if "HA_HOST" in os.environ or "HA_API_KEY" in os.environ:
+        return os.environ.get("HA_HOST", ""), os.environ.get("HA_API_KEY", "")
+
+    for env_path in (_find_env_file(), _per_consumer_env_file()):
+        if not env_path or not env_path.is_file():
+            continue
+        values = {}
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                if key.strip() in ("HA_HOST", "HA_API_KEY"):
+                    values[key.strip()] = value.strip().strip('"').strip("'")
+        if values:
+            return values.get("HA_HOST", ""), values.get("HA_API_KEY", "")
+    return "", ""
+
+
+HA_HOST, HA_API_KEY = _load_credentials()
+HA_HOST = HA_HOST.rstrip("/")
 TIMEOUT = 10
 
 
@@ -106,7 +120,11 @@ def _diagnose_dns(hostname: str) -> None:
 
 def ha_request(path: str, method: str = "GET", body: dict | None = None) -> Any:
     if not HA_HOST or not HA_API_KEY:
-        print("ERROR: HA_HOST and HA_API_KEY must be set in .env", file=sys.stderr)
+        print(
+            "ERROR: HA_HOST and HA_API_KEY must both be set in the same source: "
+            "the environment, a .env file, or the per-consumer ha.env file",
+            file=sys.stderr,
+        )
         sys.exit(1)
     url = f"{HA_HOST}/api/{path.lstrip('/')}"
     data = json.dumps(body).encode() if body else None
