@@ -1,5 +1,7 @@
 """Tests for shell_parse — tree-sitter-bash heredoc and commit detection."""
 
+import pytest
+
 from gptme_sessions.shell_parse import (
     bash_heredoc_write_paths,
     has_git_commit_command,
@@ -237,3 +239,27 @@ class TestHasGitPushCommand:
 
     def test_empty(self):
         assert has_git_push_command("") is False
+
+
+class TestCommandRepoDir:
+    """Which directory a commit/push command runs in."""
+
+    @pytest.mark.parametrize(
+        ("cmd", "cwd", "expected"),
+        [
+            ("git commit -m x", "/home/bob/bob", "/home/bob/bob"),
+            ("cd /tmp/wt/gptme && git add . && git commit -m y", "/home/bob/bob", "/tmp/wt/gptme"),
+            ("git -C ../gptme commit -m x", "/home/bob/bob", "/home/bob/gptme"),
+            ('cd "/tmp/a b" && git commit -qm x && git push', "/c", "/tmp/a b"),
+            ("cd /a && make && cd sub && git commit -m x", "/c", "/a/sub"),
+            ("cd /a && git -C sub commit -m x", "/c", "/a/sub"),
+            ("git -C /x log; cd /y && git commit -m z", "/c", "/y"),
+            ("git push origin HEAD", "/repo", "/repo"),
+            ("echo hi", "/c", "/c"),
+            ("cd rel && git commit -m x", None, "rel"),
+        ],
+    )
+    def test_command_repo_dir(self, cmd, cwd, expected):
+        from gptme_sessions.shell_parse import command_repo_dir
+
+        assert command_repo_dir(cmd, cwd) == expected

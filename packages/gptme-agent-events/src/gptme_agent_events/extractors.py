@@ -12,11 +12,72 @@ are never copied into an event.
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+from functools import lru_cache
 from typing import Any
+
+from gptme_sessions.shell_parse import command_repo_dir
 
 from .classify import classify_tool, landing_kinds
 from .event import AgentEvent, utc_now
+
+_COMMIT_LINE_RE = re.compile(r"^\[[^\]\n]*?\b([0-9a-f]{7,40})\]", re.MULTILINE)
+_PR_URL_RE = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/\d+")
+_GITHUB_REMOTE_RE = re.compile(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$")
+
+
+@lru_cache(maxsize=256)
+def github_slug(directory: str) -> str | None:
+    """``owner/name`` of a local checkout's ``origin`` on GitHub, if any."""
+    if not os.path.isabs(directory) or not os.path.isdir(directory):
+        return None
+    try:
+        url = subprocess.run(
+            ["git", "-C", directory, "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = _GITHUB_REMOTE_RE.search(url)
+    return m.group(1) if m else None
+
+
+def landing_detail(kind: str, command: str | None, cwd: str | None, output: str) -> dict:
+    """Public-linkable facts about a landed commit/push/PR: repo slug, sha, url."""
+    detail: dict[str, str] = {}
+    if kind == "pr_open":
+        m = _PR_URL_RE.search(output)
+        if m:
+            detail = {"repo": m.group(1), "url": m.group(0)}
+        return detail
+    directory = command_repo_dir(command or "", cwd)
+    slug = github_slug(directory) if directory else None
+    if slug:
+        detail["repo"] = slug
+    if kind == "commit":
+        m = _COMMIT_LINE_RE.search(output)
+        if m:
+            detail["sha"] = m.group(1)
+    return detail
+
+
+def result_text(content: Any) -> str:
+    """Flatten a tool result (string, or list of text blocks) to text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+            elif isinstance(item, str):
+                parts.append(item)
+        return "\n".join(parts)
+    return ""
 
 
 class Extractor:
@@ -26,8 +87,9 @@ class Extractor:
         self.session = session
         self.agent = agent
         self.subagent = subagent
-        # call id -> (tool name, kinds to emit on success)
-        self._pending: dict[str, tuple[str, list[str]]] = {}
+        self.cwd: str | None = None
+        # call id -> (tool name, kinds to emit on success, command, cwd)
+        self._pending: dict[str, tuple[str, list[str], str | None, str | None]] = {}
 
     def feed(self, rec: dict[str, Any]) -> list[AgentEvent]:
         raise NotImplementedError
@@ -48,16 +110,33 @@ class Extractor:
         cls = classify_tool(self.harness, name, command)
         kinds = landing_kinds(command) if cls in ("shell", "test") else []
         if call_id:
-            self._pending[call_id] = (name, kinds)
+            self._pending[call_id] = (name, kinds, command if kinds else None, self.cwd)
         return self._ev("tool", ts, tool=name, tool_class=cls, **kw), kinds
 
-    def _result(self, ts: Any, call_id: str, failed: bool, **kw: Any) -> list[AgentEvent]:
+    def _landed(
+        self,
+        ts: Any,
+        name: str,
+        kinds: list[str],
+        command: str | None,
+        cwd: str | None,
+        output: str,
+        **kw: Any,
+    ) -> list[AgentEvent]:
+        return [
+            self._ev(k, ts, tool=name, detail=landing_detail(k, command, cwd, output), **kw)
+            for k in kinds
+        ]
+
+    def _result(
+        self, ts: Any, call_id: str, failed: bool, output: str = "", **kw: Any
+    ) -> list[AgentEvent]:
         if call_id not in self._pending:
             return []
-        name, kinds = self._pending.pop(call_id)
+        name, kinds, command, cwd = self._pending.pop(call_id)
         if failed:
             return [self._ev("error", ts, tool=name, **kw)]
-        return [self._ev(k, ts, tool=name, **kw) for k in kinds]
+        return self._landed(ts, name, kinds, command, cwd, output, **kw)
 
 
 class ClaudeCodeExtractor(Extractor):
@@ -79,6 +158,8 @@ class ClaudeCodeExtractor(Extractor):
         if isinstance(sid, str) and sid:
             self.session = sid
         ts = rec.get("timestamp")
+        if isinstance(rec.get("cwd"), str):
+            self.cwd = rec["cwd"]
         sub = {"subagent": True} if rec.get("isSidechain") else {}
         msg = rec.get("message")
         if not isinstance(msg, dict):
@@ -117,7 +198,11 @@ class ClaudeCodeExtractor(Extractor):
             for block in blocks:
                 if block.get("type") == "tool_result" and isinstance(block.get("tool_use_id"), str):
                     out += self._result(
-                        ts, block["tool_use_id"], bool(block.get("is_error")), **sub
+                        ts,
+                        block["tool_use_id"],
+                        bool(block.get("is_error")),
+                        result_text(block.get("content")),
+                        **sub,
                     )
         return out
 
@@ -146,7 +231,8 @@ class GptmeExtractor(Extractor):
         if role == "system":
             call_id = rec.get("call_id")
             if isinstance(call_id, str):
-                return self._result(ts, call_id, bool(_GPTME_ERROR_RE.search(content[:2000])))
+                failed = bool(_GPTME_ERROR_RE.search(content[:2000]))
+                return self._result(ts, call_id, failed, content)
             return []
         if role != "assistant":
             return []
@@ -161,7 +247,7 @@ class GptmeExtractor(Extractor):
             if call_id is None:
                 # Markdown-format results carry no call id to pair with, so
                 # report landings when the call is made.
-                out += [self._ev(k, ts, tool=name) for k in kinds]
+                out += self._landed(ts, name, kinds, command, self.cwd, "")
         if not calls:
             out.append(self._ev("turn_end", ts))
         return out
@@ -219,6 +305,9 @@ class CodexExtractor(Extractor):
             if isinstance(sid, str) and sid:
                 self.session = sid
             return []
+        if rtype == "turn_context" and isinstance(payload.get("cwd"), str):
+            self.cwd = payload["cwd"]
+            return []
         if rtype == "event_msg":
             if payload.get("type") == "task_complete":
                 return [self._ev("turn_end", ts)]
@@ -244,7 +333,7 @@ class CodexExtractor(Extractor):
             out = payload.get("output")
             text = out if isinstance(out, str) else json.dumps(out)
             m = _CODEX_EXIT_RE.search(text)
-            return self._result(ts, call_id, bool(m and int(m.group(1)) != 0))
+            return self._result(ts, call_id, bool(m and int(m.group(1)) != 0), text)
         return []
 
     @staticmethod

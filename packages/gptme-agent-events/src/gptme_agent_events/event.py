@@ -5,10 +5,10 @@ Every harness extractor emits :class:`AgentEvent` objects, and every sink
 small and content-free: tool *names* and *classes*, never prompts, replies,
 commands or tool output.
 
-``detail`` is the one place for harness-specific extras (currently the path of
-a written file). It is meant for the private, local stream only. A sink that
-publishes events beyond the agent's own host must drop it or apply its own
-allowlist.
+``detail`` holds extras: ``path`` for file writes; ``repo`` (GitHub
+``owner/name``), ``sha`` and ``url`` for commits, pushes and PRs. The stream is
+private (stdout, ssh). A sink that publishes beyond the agent's own host must
+drop ``path`` and only forward ``repo``/``sha``/``url`` for public repos.
 """
 
 from __future__ import annotations

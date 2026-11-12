@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
+
+import pytest
 
 from gptme_agent_events import ClaudeCodeExtractor, CodexExtractor, GptmeExtractor
+from gptme_agent_events.extractors import github_slug, landing_detail
 
 
 def kinds(events):
@@ -216,3 +220,58 @@ class TestCodex:
         assert kinds(events) == [("tool", "write")]
         assert events[0].detail == {"path": "src/app.py"}
         assert kinds(ex.feed(codex("event_msg", {"type": "task_complete"}))) == ["turn_end"]
+
+
+class TestLandingDetail:
+    """Commits, pushes and PRs carry what a public link needs: repo, sha, url."""
+
+    @pytest.fixture
+    def repo(self, tmp_path):
+        d = tmp_path / "wt"
+        d.mkdir()
+        subprocess.run(["git", "init", "-q", str(d)], check=True)
+        subprocess.run(
+            ["git", "-C", str(d), "remote", "add", "origin", "git@github.com:gptme/gptme.git"],
+            check=True,
+        )
+        github_slug.cache_clear()
+        return d
+
+    def test_cc_commit_in_cd_target(self, repo):
+        ex = ClaudeCodeExtractor("s")
+        ex.feed(
+            {
+                **cc_assistant([bash("c", f"cd {repo} && git commit -m x && git push")]),
+                "cwd": "/somewhere/else",
+            }
+        )
+        rec = cc_result("c")
+        rec["message"]["content"][0]["content"] = [
+            {"type": "text", "text": "[fix-1 1a2b3c4d] x\n 1 file changed"}
+        ]
+        commit, push = ex.feed(rec)
+        assert commit.detail == {"repo": "gptme/gptme", "sha": "1a2b3c4d"}
+        assert push.detail == {"repo": "gptme/gptme"}
+
+    def test_cc_commit_uses_record_cwd(self, repo):
+        ex = ClaudeCodeExtractor("s")
+        ex.feed({**cc_assistant([bash("c", "git commit -m x")]), "cwd": str(repo)})
+        rec = cc_result("c")
+        rec["message"]["content"][0]["content"] = "[main abcdef1] x"
+        assert ex.feed(rec)[0].detail == {"repo": "gptme/gptme", "sha": "abcdef1"}
+
+    def test_pr_url_from_output(self):
+        ex = GptmeExtractor("c")
+        ex.feed(gptme_msg("assistant", '\n@shell(call_1): {"command": "gh pr create --fill"}'))
+        (ev,) = ex.feed(
+            gptme_msg("system", "https://github.com/gptme/gptme-contrib/pull/2117\n", "call_1")
+        )
+        assert ev.kind == "pr_open"
+        assert ev.detail == {
+            "repo": "gptme/gptme-contrib",
+            "url": "https://github.com/gptme/gptme-contrib/pull/2117",
+        }
+
+    def test_unknown_repo_gives_no_detail(self, tmp_path):
+        assert landing_detail("push", "git push", str(tmp_path), "") == {}
+        assert github_slug("relative/path") is None

@@ -74,7 +74,7 @@ Default roots: `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`),
 | `tool` | The harness's own tool name (`Bash`, `patch`, `exec_command`, …) |
 | `tool_class` | Harness-agnostic class: `read`, `search`, `write`, `shell`, `test`, `web`, `agent`, `other` |
 | `subagent` | `true` for work done by a subagent of the session |
-| `detail` | Private extras; currently only `path` for file writes |
+| `detail` | `path` for file writes; `repo` (GitHub `owner/name`), `sha` and `url` for commits, pushes and PRs |
 
 Commits, pushes and PRs are reported when the tool **result** shows the command
 succeeded; a failed call becomes `error` instead. (gptme's markdown tool format
@@ -84,9 +84,10 @@ has no call ids, so there they are reported with the call.)
 
 Events never contain prompts, replies, shell commands or tool output. Commands
 are inspected in memory to classify them and then dropped. The stream is meant
-to stay private (stdout, ssh). `detail` may hold file paths, so any sink that
-publishes beyond the agent's own host must drop `detail` and apply its own
-allowlist.
+to stay private (stdout, ssh). Any sink that publishes beyond the agent's own
+host must drop `detail.path` and only forward `repo`/`sha`/`url` for public
+repos. The repo slug is resolved on the agent's host from the checkout's
+`origin` remote.
 
 ## Sounds
 
