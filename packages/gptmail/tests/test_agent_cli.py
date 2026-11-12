@@ -89,7 +89,7 @@ def test_doctor_explains_incompatible_scanner(monkeypatch: pytest.MonkeyPatch) -
     result = CliRunner().invoke(agent, ["doctor"])
     assert result.exit_code == 1
     assert "Outbound secret scanner unavailable" in result.output
-    assert "--with /path/to/redact" in result.output
+    assert "subdirectory=packages/gptme-redact" in result.output
     assert "unrelated" in result.output
 
 

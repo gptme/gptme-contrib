@@ -1135,9 +1135,11 @@ def doctor() -> None:
             "or incompatible, so `gptmail agent send` refuses to deliver.\n"
             "Install it alongside the CLI, e.g.\n"
             '  uv tool install --force "git+https://github.com/gptme/gptme-contrib'
-            '#subdirectory=packages/gptmail" --with /path/to/redact\n'
-            "PyPI `redact` is an unrelated project; the outbound scanner must "
-            "currently be installed from its source tree."
+            '#subdirectory=packages/gptmail" \\\n'
+            '    --with "gptme-redact @ git+https://github.com/gptme/gptme-contrib'
+            '.git#subdirectory=packages/gptme-redact"\n'
+            "PyPI `redact` is an unrelated project; the scanner's distribution is "
+            "`gptme-redact`."
         )
     click.echo("outbound secret scanner: ok")
 

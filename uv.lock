@@ -1486,6 +1486,9 @@ oauth = [
     { name = "python-dotenv" },
     { name = "werkzeug" },
 ]
+secrets = [
+    { name = "gptme-redact" },
+]
 test = [
     { name = "mypy" },
     { name = "packaging" },
@@ -1498,6 +1501,7 @@ test = [
 requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "flask", marker = "extra == 'oauth'", specifier = ">=2.0" },
+    { name = "gptme-redact", marker = "extra == 'secrets'", editable = "packages/gptme-redact" },
     { name = "markdown", specifier = ">=3.4" },
     { name = "mcp", marker = "extra == 'bridge'", specifier = ">=1.2" },
     { name = "mypy", marker = "extra == 'test'", specifier = ">=1.0" },
@@ -1514,7 +1518,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'bridge'", specifier = ">=0.23" },
     { name = "werkzeug", marker = "extra == 'oauth'", specifier = ">=2.0" },
 ]
-provides-extras = ["oauth", "bridge", "test"]
+provides-extras = ["oauth", "bridge", "secrets", "test"]
 
 [[package]]
 name = "gptme"
