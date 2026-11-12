@@ -41,6 +41,7 @@ from typing import (
 
 if TYPE_CHECKING:
     from gptodo.frontmatter_compat import Post as fmPost
+from gptodo.gate import validate_gate
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,8 @@ KNOWN_FRONTMATTER_FIELDS: set[str] = {
     # Scheduling / recurring / deferral
     "recur",
     "wait",
+    # Typed wait gate (gptodo.gate): kind/actor/ref/question/default/deadline
+    "gate",
     # Auto-expire (Gordon 2026-07-01): stamped by `gptodo expire` when a
     # long-quiet task auto-transitions to `expired`. `expired_from` records
     # the state we came from so revival (expired → original state) is a
@@ -1314,6 +1317,9 @@ def validate_task_file(file: Path, post: fmPost) -> List[str]:
         wait_val = metadata["wait"]
         if parse_wait(wait_val) is None:
             issues.append("wait must be a date (YYYY-MM-DD) or datetime (YYYY-MM-DDTHH:MM)")
+
+    # Validate the typed wait gate (closed kind enum, required decision fields)
+    issues.extend(validate_gate(metadata))
 
     # Validate recur: field (must be a parseable interval if set)
     if "recur" in metadata:

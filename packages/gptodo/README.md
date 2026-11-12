@@ -295,6 +295,39 @@ does not bypass repository commit hooks. `--force` only overrides transition leg
 `waiting_since`, `first_waiting_since` and `waiting_spell_count`. Moving to `done` or
 `cancelled` clears stale `waiting_for`/`wait`/`next_action` and sets `completed`.
 
+### Typed wait gates
+
+A free-text `waiting_for` can wait forever: nothing reads it as a contract. A
+`gate` block states what the task waits on, who must act and what happens at
+the deadline:
+
+```yaml
+state: waiting
+gate:
+  kind: decision          # decision | pr | issue | task | time | event
+  actor: erik             # who must act; gate_actor(meta) == "erik" is the predicate
+  question: "Rotate the API key now? y/n"
+  default: "rotate on the deadline"
+  deadline: 2026-11-26T18:00:00+00:00
+  on_timeout: escalate    # default | escalate | drop
+  reversible: false       # false forbids on_timeout: default
+```
+
+- `kind` is a closed set. `pr`, `issue`, `task` and `time` gates are derived
+  from `ref`/`deadline` (`gptodo.gate.derived_probe`; a `task` gate must also
+  be in `depends`), so an authored `probe:` next to them is refused. `event`
+  is the only kind that takes an authored probe.
+- `decision` gates need `actor`, `question`, `default`, `deadline`,
+  `on_timeout` and `reversible`. An irreversible gate never auto-applies its
+  default.
+- The deadline may be pushed later once. The first push records
+  `original_deadline` (stamped automatically by `mutate_task`/`gptodo edit`);
+  a second push is refused. Escalate or drop instead.
+
+The schema is checked by `gptodo check` and on every write through the shared
+lifecycle. Existing malformed gates do not block unrelated edits, but a write
+cannot introduce a new gate error.
+
 ## Command reference
 
 Every command has `--help`. The top-level options are `-v/--verbose` and
