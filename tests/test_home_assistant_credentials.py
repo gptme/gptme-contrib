@@ -20,6 +20,8 @@ def config(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
+    # Bound the real CWD-to-root lookup without mocking parent-directory discovery.
+    (tmp_path / ".env").write_text("# Test boundary: no HA credentials here\n")
     secrets = home / ".config/secrets"
     secrets.mkdir(parents=True)
     return workspace, secrets
@@ -109,6 +111,22 @@ def test_complete_credentials_preserve_source_precedence(
     assert module["HA_HOST"] == f"https://{source}.example"
     assert module["HA_API_KEY"] == f"{source}-token"
     assert dict(os.environ) == before
+
+
+@pytest.mark.parametrize("source", ["workspace", "private"])
+@pytest.mark.parametrize("first_token", ["valid-token", ""])
+def test_duplicate_file_keys_keep_first_declaration(config, source, first_token):
+    workspace, secrets = config
+    path = workspace / ".env" if source == "workspace" else secrets / "ha.env"
+    path.write_text(
+        "HA_HOST=https://first.example/\n"
+        "HA_HOST=https://second.example/\n"
+        f"HA_API_KEY={first_token}\n"
+        "HA_API_KEY=expired-token\n"
+    )
+    module = runpy.run_path(str(SCRIPT))
+    assert module["HA_HOST"] == "https://first.example"
+    assert module["HA_API_KEY"] == first_token
 
 
 def test_missing_credentials_make_no_request(config, monkeypatch, capsys):

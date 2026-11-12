@@ -66,13 +66,14 @@ def _load_credentials() -> tuple[str, str]:
     for env_path in (_find_env_file(), _per_consumer_env_file()):
         if not env_path or not env_path.is_file():
             continue
-        values = {}
+        values: dict[str, str] = {}
         for line in env_path.read_text().splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 key, _, value = line.partition("=")
                 if key.strip() in ("HA_HOST", "HA_API_KEY"):
-                    values[key.strip()] = value.strip().strip('"').strip("'")
+                    # Preserve the original loader's first-declaration precedence.
+                    values.setdefault(key.strip(), value.strip().strip('"').strip("'"))
         if values:
             return values.get("HA_HOST", ""), values.get("HA_API_KEY", "")
     return "", ""
