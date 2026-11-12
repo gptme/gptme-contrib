@@ -41,6 +41,7 @@ from pathlib import Path
 
 from .event import AgentEvent
 from .extractors import EXTRACTORS, Extractor
+from .gitwatch import GitWatcher
 
 HARNESSES = tuple(EXTRACTORS)
 
@@ -84,6 +85,21 @@ def session_name(harness: str, path: Path) -> str:
     return path.parent.name if harness == "gptme" else path.stem
 
 
+def gptme_workspace(logdir: Path) -> str | None:
+    """A gptme conversation's workspace: the ``workspace`` link, else config.toml."""
+    link = logdir / "workspace"
+    if link.is_symlink() or link.is_dir():
+        return os.path.realpath(link)
+    try:
+        for line in (logdir / "config.toml").read_text(encoding="utf-8").splitlines():
+            key, sep, value = line.partition("=")
+            if sep and key.strip() == "workspace":
+                return os.path.expanduser(value.strip().strip("\"'"))
+    except OSError:
+        pass
+    return None
+
+
 @dataclass
 class _File:
     harness: str
@@ -115,9 +131,12 @@ class Follower:
         warm_horizon: float = 86400.0,
         discovery_slack: float = 120.0,
         from_start: bool = False,
+        git: GitWatcher | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.sources = sources
+        self.git = git
+        self._session_harness: dict[str, str] = {}
         self.agent = agent
         self.active_window = active_window
         self.rescan_interval = rescan_interval
@@ -233,6 +252,8 @@ class Follower:
                 agent=self.agent,
                 subagent="subagents" in f.path.parts,
             )
+            if f.harness == "gptme":
+                f.extractor.cwd = gptme_workspace(f.path.parent)
         return f.extractor
 
     def _read(self, f: _File) -> list[AgentEvent]:
@@ -291,17 +312,44 @@ class Follower:
     def poll(self) -> list[AgentEvent]:
         """One pass: scan if due, read new lines from followed files, retire idle ones."""
         now = self.clock()
+        scanned = True
         if self._last_full is None or now - self._last_full >= self.full_scan_interval:
             self._scan(full=True)
         elif self._last_scan is None or now - self._last_scan >= self.rescan_interval:
             self._scan(full=False)
+        else:
+            scanned = False
         events: list[AgentEvent] = []
         for f in list(self._files.values()):
             events += self._read(f)
             if f.path in self._files and now - f.mtime > self.active_window:
                 del self._files[f.path]
                 self._cold[f.path] = (f.offset - len(f.buf), f.inode)
+        for e in events:
+            self._session_harness[e.session] = e.harness
+        if self.git is not None:
+            events = self._with_git(events, rediscover=scanned)
         return events
+
+    def _with_git(self, events: list[AgentEvent], rediscover: bool) -> list[AgentEvent]:
+        """Use git's reflogs as the source of truth for commits and pushes."""
+        assert self.git is not None
+        for e in events:
+            for key in ("dir", "cwd"):
+                if isinstance(e.detail.get(key), str):
+                    self.git.watch(e.detail[key])
+        kept = [
+            e
+            for e in events
+            if not (
+                e.kind in ("commit", "push")
+                and self.git.watches(str(e.detail.get("dir") or e.detail.get("cwd") or ""))
+            )
+        ]
+        for e in self.git.poll(rediscover=rediscover):
+            e.harness = self._session_harness.get(e.session, e.harness)
+            kept.append(e)
+        return kept
 
     def run(self, interval: float = 0.5) -> Iterator[AgentEvent]:
         while True:

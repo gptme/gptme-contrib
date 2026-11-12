@@ -251,15 +251,25 @@ class TestLandingDetail:
             {"type": "text", "text": "[fix-1 1a2b3c4d] x\n 1 file changed"}
         ]
         commit, push = ex.feed(rec)
-        assert commit.detail == {"repo": "gptme/gptme", "sha": "1a2b3c4d"}
-        assert push.detail == {"repo": "gptme/gptme"}
+        assert commit.detail == {
+            "cwd": "/somewhere/else",
+            "dir": str(repo),
+            "repo": "gptme/gptme",
+            "sha": "1a2b3c4d",
+        }
+        assert push.detail["repo"] == "gptme/gptme" and "sha" not in push.detail
 
     def test_cc_commit_uses_record_cwd(self, repo):
         ex = ClaudeCodeExtractor("s")
         ex.feed({**cc_assistant([bash("c", "git commit -m x")]), "cwd": str(repo)})
         rec = cc_result("c")
         rec["message"]["content"][0]["content"] = "[main abcdef1] x"
-        assert ex.feed(rec)[0].detail == {"repo": "gptme/gptme", "sha": "abcdef1"}
+        assert ex.feed(rec)[0].detail == {
+            "cwd": str(repo),
+            "dir": str(repo),
+            "repo": "gptme/gptme",
+            "sha": "abcdef1",
+        }
 
     def test_pr_url_from_output(self):
         ex = GptmeExtractor("c")
@@ -274,7 +284,7 @@ class TestLandingDetail:
         }
 
     def test_unknown_repo_gives_no_detail(self, tmp_path):
-        assert landing_detail("push", "git push", str(tmp_path), "") == {}
+        assert landing_detail("push", "git push", str(tmp_path), "") == {"dir": str(tmp_path)}
         assert github_slug("relative/path") is None
 
 
@@ -305,3 +315,16 @@ class TestGptmeFailure:
 
     def test_tool_exception(self):
         assert gptme_result_failed("Error executing tool 'shell': boom")
+
+
+def test_tool_events_carry_cwd_and_repo(tmp_path):
+    d = tmp_path / "wt"
+    d.mkdir()
+    subprocess.run(["git", "init", "-q", str(d)], check=True)
+    subprocess.run(
+        ["git", "-C", str(d), "remote", "add", "origin", "https://github.com/o/r.git"], check=True
+    )
+    github_slug.cache_clear()
+    ex = ClaudeCodeExtractor("s")
+    (ev,) = ex.feed({**cc_assistant([bash("x", "ls")]), "cwd": str(d)})
+    assert ev.detail == {"cwd": str(d), "repo": "o/r"}
