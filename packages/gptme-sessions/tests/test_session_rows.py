@@ -68,6 +68,17 @@ def test_collapses_roleless_child():
     ] == ["w1"]
 
 
+@pytest.mark.parametrize("keep", ["controller", "worker"])
+def test_recurring_label_children_are_preserved_without_unique_identity(keep):
+    controller, worker = _pm_pair("c1", "4033")
+    controller["timestamp"] = "2026-03-12T12:00:00Z"
+    worker["timestamp"] = "2026-03-12T12:00:00Z"
+    unrelated = {"session_id": "4033", "timestamp": "2026-02-01T12:00:00Z"}
+    rows = [controller, worker, unrelated]
+    assert dedupe_monitoring_pairs(rows, keep=keep) == rows
+    assert dedupe_monitoring_pairs([controller, unrelated], keep=keep) == [controller, unrelated]
+
+
 def test_rejects_bad_keep():
     with pytest.raises(ValueError):
         dedupe_monitoring_pairs([], keep="both")

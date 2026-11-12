@@ -20,6 +20,8 @@ import json
 from collections.abc import Iterable
 from pathlib import Path
 
+from .session_identity import id_format
+
 
 def dedupe_monitoring_pairs(rows: Iterable[dict], *, keep: str = "controller") -> list[dict]:
     """Return one row per session by collapsing project-monitoring pairs.
@@ -36,18 +38,21 @@ def dedupe_monitoring_pairs(rows: Iterable[dict], *, keep: str = "controller") -
 
     Only a pair with both sides present is collapsed: a controller without
     children, or a worker whose controller rotated out of the window, stays so
-    nothing is lost. Order is preserved; non-monitoring rows pass through.
+    nothing is lost. Four-character child labels are not unique across history,
+    so those pairs are conservatively retained rather than guessing which row
+    belongs to the controller. Order is preserved; non-monitoring rows pass through.
     """
     if keep not in ("controller", "worker"):
         raise ValueError(f"keep must be 'controller' or 'worker', got {keep!r}")
     rows = list(rows)
-    present = {r.get("session_id") for r in rows}
+    present = {r.get("session_id") for r in rows if id_format(r.get("session_id")) != "label4"}
     if keep == "controller":
         children = {
             c
             for r in rows
             if r.get("execution_role") == "controller"
             for c in (r.get("child_session_ids") or [])
+            if id_format(c) != "label4"
         }
         return [
             r
