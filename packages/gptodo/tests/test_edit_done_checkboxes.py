@@ -43,9 +43,9 @@ def test_pending_completion_preserves_entire_batch(tmp_path, monkeypatch, force)
     "body",
     [
         "- [x] complete",
-        "- [-] dropped (reason: replaced)",
-        "- [ ] ~~dropped~~ (reason: replaced)",
-        "- [x] ~~dropped~~ (reason: replaced)",
+        "- [-] dropped (declined: replaced)",
+        "- [ ] ~~dropped~~ (see tasks/replacement.md)",
+        "- [x] ~~dropped~~ (gptme/gptme#7)",
         "- [x] Refer to - [ ] example\nProse about - [ ] another example",
         "```markdown\n- [ ] example\n```\n- [x] complete",
         "~~~~markdown\n```\n- [ ] example\n~~~\n~~~~\n- [x] complete",
@@ -98,32 +98,67 @@ def test_completion_names_skipped_items(tmp_path, monkeypatch):
     (path,) = make_tasks(
         tmp_path,
         monkeypatch,
-        {"task": "- [x] complete\n- [-] wire indexing (deferred: replaced by scoping)"},
+        {"task": "- [x] complete\n- [-] wire indexing (declined: replaced by scoping)"},
     )
     result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done"])
     assert result.exit_code == 0, result.output
     assert frontmatter.load(path)["state"] == "done"
     assert "marking done with 1 skipped item(s)" in result.output
     assert "wire indexing" in result.output
-    assert "promises a follow-up" not in result.output
+    assert "no follow-up link" not in result.output
 
 
 @pytest.mark.parametrize(
-    ("title", "needs_link"),
+    ("title", "accounted"),
     [
-        ("split auth (file as separate task)", True),
-        ("split auth (needs its own task)", True),
-        ("split auth (filed as tasks/split-auth.md)", False),
-        ("split auth (follow-up issue gptme/gptme#12)", False),
-        ("split auth (decided against: superseded)", False),
+        ("split auth (file as separate task)", False),
+        ("split auth (needs its own task)", False),
         ("profile the slow path (deferred: not needed for this task)", False),
+        ("profile the slow path (declined)", False),
+        ("split auth (filed as tasks/split-auth.md)", True),
+        ("split auth (follow-up issue gptme/gptme#12)", True),
+        ("split auth (see https://example.com/issue)", True),
+        ("split auth (owned by [[split-auth]])", True),
+        ("split auth (declined: superseded by scoping)", True),
+        ("split auth (Decided against: superseded)", True),
+        ("~~split auth~~ (declined: not worth it)", True),
     ],
 )
-def test_completion_hints_unlinked_follow_up(tmp_path, monkeypatch, title, needs_link):
-    make_tasks(tmp_path, monkeypatch, {"task": f"- [x] complete\n- [-] {title}"})
+def test_completion_requires_follow_up_or_declined(tmp_path, monkeypatch, title, accounted):
+    marker = "[ ]" if title.startswith("~~") else "[-]"
+    (path,) = make_tasks(tmp_path, monkeypatch, {"task": f"- [x] complete\n- {marker} {title}"})
+    before = path.read_bytes()
     result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done"])
+    if accounted:
+        assert result.exit_code == 0, result.output
+        assert frontmatter.load(path)["state"] == "done"
+    else:
+        assert result.exit_code != 0, result.output
+        assert "no follow-up link or 'declined:'" in result.output
+        assert path.read_bytes() == before
+
+
+def test_unaccounted_skip_refusal_preserves_batch(tmp_path, monkeypatch):
+    paths = make_tasks(
+        tmp_path,
+        monkeypatch,
+        {"ok": "- [x] complete", "dropped": "- [x] a\n- [-] b (deferred: later)"},
+    )
+    before = [path.read_bytes() for path in paths]
+    result = CliRunner().invoke(cli, ["edit", "ok", "dropped", "--set", "state", "done"])
+    assert result.exit_code != 0, result.output
+    assert "dropped" in result.output
+    assert [path.read_bytes() for path in paths] == before
+
+
+def test_allow_pending_overrides_unaccounted_skip(tmp_path, monkeypatch):
+    (path,) = make_tasks(tmp_path, monkeypatch, {"task": "- [x] a\n- [-] b [/x] (deferred: later)"})
+    result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done", "--allow-pending"])
     assert result.exit_code == 0, result.output
-    assert ("promises a follow-up" in result.output) is needs_link
+    assert frontmatter.load(path)["state"] == "done"
+    assert "--allow-pending" in result.output
+    assert "[/x]" in result.output
+    assert "no follow-up link" in result.output
 
 
 def test_completion_escapes_brackets_in_skipped_titles(tmp_path, monkeypatch):
@@ -165,3 +200,14 @@ def test_check_done_unresolved_lists_offenders_only(tmp_path, monkeypatch):
     assert "clean" not in result.output
     assert "active-open" not in result.output
     assert "2 done task(s)" in result.output
+
+
+def test_recurring_task_skips_need_no_follow_up(tmp_path, monkeypatch):
+    (path,) = make_tasks(
+        tmp_path,
+        monkeypatch,
+        {"task": "- [x] a\n- [-] b (not needed this cycle)"},
+        extra="recur: 7d\n",
+    )
+    result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done"])
+    assert result.exit_code == 0, result.output
