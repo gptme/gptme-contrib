@@ -3561,16 +3561,15 @@ _OPERATOR_APPROVERS = {"ErikBjare": 1405370}
 _VERDICT_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "DISMISSED"})
 
 
-def operator_approval_ai_review_waiver(
+def operator_head_approval_login(
     *, repo: str, number: int, head_sha: str
 ) -> str | None:
-    """Waive the AI-review *requirement* when the operator approved the exact head.
+    """Return the operator login whose latest verdict review APPROVED ``head_sha``.
 
-    Returns a warning string, else None. Only the machine-review requirement is
-    waived: CI, unresolved human threads, mergeability, draft state and path
-    policy are evaluated as before. The operator's latest verdict review must be
-    APPROVED on ``head_sha`` exactly, so a later CHANGES_REQUESTED or dismissal,
-    or any new push, revokes it. A failed API read fails closed.
+    The review must be APPROVED on ``head_sha`` exactly, so a later
+    CHANGES_REQUESTED or dismissal, or any new push, revokes it. The approver
+    identity is checked by login, numeric user id and account type, never by
+    login alone. A failed or malformed API read returns None (fail closed).
     """
     if not head_sha:
         return None
@@ -3603,13 +3602,65 @@ def operator_approval_ai_review_waiver(
                 latest[login] = review
     except (ValueError, TypeError, AttributeError):
         return None
-    for login, review in latest.items():
+    for approver, review in latest.items():
         if review.get("state") == "APPROVED" and review.get("commit_id") == head_sha:
-            return (
-                f"AI review waived: {login} approved head {head_sha[:12]} "
-                "(operator approval authorizes merge, ErikBjare/bob#1471)"
-            )
+            return approver
     return None
+
+
+def operator_approval_ai_review_waiver(
+    *, repo: str, number: int, head_sha: str
+) -> str | None:
+    """Waive the AI-review *requirement* when the operator approved the exact head.
+
+    Returns a warning string, else None. Only the machine-review requirement is
+    waived: CI, unresolved human threads, mergeability, draft state and the
+    sensitive-path stop are evaluated as before.
+    """
+    login = operator_head_approval_login(repo=repo, number=number, head_sha=head_sha)
+    if login is None:
+        return None
+    return (
+        f"AI review waived: {login} approved head {head_sha[:12]} "
+        "(operator approval authorizes merge, ErikBjare/bob#1471)"
+    )
+
+
+# Category refusals an operator approval can never waive. These are the
+# security/infra stops: a head-bound approval is human review of the change,
+# not an exemption from the paths that carry credentials, CI and bot policy.
+_OPERATOR_APPROVAL_HARD_STOPS = frozenset(
+    {
+        "Touches sensitive/security/infra paths",
+        "Bot/CI config changes require human review under current policy",
+    }
+)
+
+
+def operator_approval_category_waiver(
+    reasons: list[str], *, repo: str, number: int, head_sha: str
+) -> tuple[list[str], str | None]:
+    """Drop path/category refusals the operator's head-bound approval overrides.
+
+    ErikBjare/bob#1471 phase 2: an APPROVED review on the exact head is merge
+    authorization, so "outside allowed categories", route-to-Erik diff shapes,
+    placement rules and spec-like-doc stops no longer block. The reasons in
+    ``_OPERATOR_APPROVAL_HARD_STOPS`` always survive. Returns the remaining
+    reasons and a warning naming the waiver, or the input unchanged and None.
+    The reviews API is read only when something is actually waivable.
+    """
+    waivable = [r for r in reasons if r not in _OPERATOR_APPROVAL_HARD_STOPS]
+    if not waivable:
+        return reasons, None
+    login = operator_head_approval_login(repo=repo, number=number, head_sha=head_sha)
+    if login is None:
+        return reasons, None
+    remaining = [r for r in reasons if r in _OPERATOR_APPROVAL_HARD_STOPS]
+    warning = (
+        f"Path/category policy waived: {login} approved head {head_sha[:12]} "
+        f"({len(waivable)} reason(s) overridden, ErikBjare/bob#1471)"
+    )
+    return remaining, warning
 
 
 def evaluate_pr(
@@ -4041,6 +4092,7 @@ def evaluate_pr(
             f"from: {authors}"
         )
 
+    category_reasons: list[str] = []
     if repo == _GPTME_CORE_REPO:
         # gptme/gptme: diff shape, not path category (see the block above
         # classify_category's definition). The sensitive/bot-config/spec-
@@ -4049,15 +4101,15 @@ def evaluate_pr(
         # replaced, and only for this repo.
         if any(is_sensitive_path(path) for path in files):
             result.category = None
-            result.reasons.append("Touches sensitive/security/infra paths")
+            category_reasons.append("Touches sensitive/security/infra paths")
         elif any(is_bot_config(path) for path in files):
             result.category = None
-            result.reasons.append(
+            category_reasons.append(
                 "Bot/CI config changes require human review under current policy"
             )
         elif any(is_doc_file(path) and is_spec_like_doc(path) for path in files):
             result.category = None
-            result.reasons.append(
+            category_reasons.append(
                 "Touches spec-like documentation requiring human review"
             )
         else:
@@ -4067,7 +4119,7 @@ def evaluate_pr(
             )
             if shape_reasons:
                 result.category = None
-                result.reasons.extend(shape_reasons)
+                category_reasons.extend(shape_reasons)
             else:
                 result.category = "gptme-core-diff-shape-eligible"
     elif repo == _GPTME_CONTRIB_REPO:
@@ -4078,17 +4130,27 @@ def evaluate_pr(
         # have already left the PR eligible.
         category, category_reasons = contrib_classify_category(files, repo=repo)
         result.category = category
-        result.reasons.extend(category_reasons)
         if category is not None:
             file_shapes = _fetch_contrib_pr_file_shapes(repo, number)
             agent_literal_reasons = contrib_agent_literal_reasons(file_shapes)
             if agent_literal_reasons:
                 result.category = None
-                result.reasons.extend(agent_literal_reasons)
+                category_reasons.extend(agent_literal_reasons)
     else:
         category, category_reasons = classify_category(files, repo=repo)
         result.category = category
-        result.reasons.extend(category_reasons)
+
+    # ErikBjare/bob#1471 phase 2: a head-bound operator approval overrides
+    # path/category policy, never the sensitive-path or bot-config stop.
+    if category_reasons:
+        category_reasons, category_waiver = operator_approval_category_waiver(
+            category_reasons, repo=repo, number=number, head_sha=result.head_sha
+        )
+        if category_waiver is not None:
+            result.warnings.append(category_waiver)
+            if not category_reasons:
+                result.category = "operator-approved"
+    result.reasons.extend(category_reasons)
 
     review_decision = pr.get("reviewDecision")
     if review_decision == "CHANGES_REQUESTED":
