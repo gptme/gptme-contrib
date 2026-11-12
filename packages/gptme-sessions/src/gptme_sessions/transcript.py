@@ -1672,11 +1672,8 @@ def _codex_rollout_linkage(path: Path) -> tuple[str | None, str | None, int]:
                 value = payload.get("id") or payload.get("session_id")
                 thread_id = value if isinstance(value, str) and value else None
                 source = payload.get("source")
-                spawn = (
-                    ((source.get("subagent") or {}).get("thread_spawn") or {})
-                    if isinstance(source, dict)
-                    else {}
-                )
+                subagent = source.get("subagent") if isinstance(source, dict) else None
+                spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
                 value = spawn.get("parent_thread_id") if isinstance(spawn, dict) else None
                 parent = value if isinstance(value, str) and value else None
                 try:

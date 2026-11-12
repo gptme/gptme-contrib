@@ -1241,3 +1241,25 @@ def test_codex_resumed_parent_finds_later_descendants(tmp_path) -> None:
         (child, {"session_id": "c-1"}, 1),
         (nested, {"session_id": "c-2"}, 2),
     ]
+
+
+@pytest.mark.parametrize("subagent", ["review", ["review"], 42, None, {"thread_spawn": "review"}])
+def test_codex_non_spawn_sibling_does_not_hide_valid_children(tmp_path, subagent) -> None:
+    """Non-spawn subagent sources must not abort the whole summary scan."""
+    from gptme_sessions.signals import extract_from_path
+
+    parent = _codex_rollout(tmp_path / "rollout-parent.jsonl", "p-1", spawn=True)
+    _codex_rollout(tmp_path / "rollout-child.jsonl", "c-1", parent="p-1")
+    (tmp_path / "rollout-other.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "other", "source": {"subagent": subagent}},
+            }
+        )
+        + "\n"
+    )
+
+    summary = extract_from_path(parent)["subagent_summary"]
+    assert summary["subagents_total"] == 1
+    assert summary["spawns_total"] == 1
