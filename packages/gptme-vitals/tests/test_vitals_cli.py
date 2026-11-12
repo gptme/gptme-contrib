@@ -364,6 +364,17 @@ def test_build_renders_the_portal_from_public_pages_only(tmp_path: Path) -> None
     assert 'data-route="cost"' not in html  # private route
 
 
+def test_built_portal_is_themed(tmp_path: Path) -> None:
+    # Without the shared head assets the badge classes and colour tokens the
+    # portal CSS relies on are undefined, so every card renders unstyled.
+    _run_with(tmp_path, _portal_registry())
+    html = (tmp_path / "public/index.html").read_text()
+    head = html.split("</head>")[0]
+    assert "--accent:" in head  # tokens.css defines it; PORTAL_CSS only uses it
+    assert ".badge-green" in head  # theme.BASE_CSS
+    assert 'class="theme-toggle"' in html
+
+
 def test_portal_title_defaults_to_the_agent(tmp_path: Path) -> None:
     _run_with(tmp_path, _portal_registry())
     assert "<title>bob</title>" in (tmp_path / "public/index.html").read_text()

@@ -41,6 +41,7 @@ from gptme_vitals.publish import (
     write_text,
 )
 from gptme_vitals.routes import RouteRegistry, RouteRegistryError
+from gptme_vitals.theme import render_head_assets, render_theme_toggle
 from gptme_vitals.timers import CALENDAR, TimerError, render_units
 
 Emitter = Callable[[], PageEnvelope]
@@ -221,6 +222,8 @@ def _publish_and_derive(
                 registry,
                 envelopes,
                 title=title or agent,
+                head_html=render_head_assets(),
+                toolbar_html=render_theme_toggle(),
                 generated_at=str(core["generated_at"]),
             )
             write_text(target, html)
