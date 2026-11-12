@@ -13,7 +13,8 @@ Usage:
     uv run python3 skills/home-assistant/scripts/ha.py context             # Context snapshot
     uv run python3 skills/home-assistant/scripts/ha.py --json <subcommand> # JSON output
 
-Credentials: HA_HOST and HA_API_KEY in a .env file anywhere in the CWD→root walk.
+Credentials: HA_HOST and HA_API_KEY in the environment, a .env file anywhere in the
+CWD→root walk, or ~/.config/secrets/ha.env (per-consumer file; BOB_SECRETS_DIR overrides the directory).
 """
 
 import argparse
@@ -45,14 +46,23 @@ def _find_env_file() -> Path | None:
         p = parent
 
 
-_env_path = _find_env_file()
-if _env_path:
-    for _line in _env_path.read_text().splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            _v = _v.strip().strip('"').strip("'")
-            os.environ.setdefault(_k.strip(), _v)
+def _per_consumer_env_file() -> Path:
+    """Credentials kept outside the shared .env: ~/.config/secrets/ha.env."""
+    secrets_dir = os.environ.get("BOB_SECRETS_DIR") or str(
+        Path.home() / ".config" / "secrets"
+    )
+    return Path(secrets_dir) / "ha.env"
+
+
+# Process environment wins; then the walked-up .env; then the per-consumer file.
+for _env_path in (_find_env_file(), _per_consumer_env_file()):
+    if _env_path and _env_path.is_file():
+        for _line in _env_path.read_text().splitlines():
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _, _v = _line.partition("=")
+                _v = _v.strip().strip('"').strip("'")
+                os.environ.setdefault(_k.strip(), _v)
 
 HA_HOST = os.environ.get("HA_HOST", "").rstrip("/")
 HA_API_KEY = os.environ.get("HA_API_KEY", "")
