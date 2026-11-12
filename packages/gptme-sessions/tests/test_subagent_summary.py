@@ -1224,3 +1224,20 @@ def test_codex_children_are_resolved_into_subagent_summary(tmp_path) -> None:
     assert summary["subagents_total"] == 2
     assert summary["spawns_total"] == 1  # only the depth-1 child counts as a spawn
     assert summary["subagents_depth_max"] == 2
+
+
+def test_codex_resumed_parent_finds_later_descendants(tmp_path) -> None:
+    """Resumes and nested children may cross arbitrary day/month/year boundaries."""
+    from gptme_sessions.transcript import codex_subagent_rollouts
+
+    parent = _codex_rollout(tmp_path / "2026/11/12/rollout-parent.jsonl", "p-1")
+    child = _codex_rollout(tmp_path / "2026/11/14/rollout-child.jsonl", "c-1", parent="p-1")
+    nested = _codex_rollout(
+        tmp_path / "2027/01/02/rollout-nested.jsonl", "c-2", parent="c-1", depth=2
+    )
+    _codex_rollout(tmp_path / "2027/01/02/rollout-other.jsonl", "x-1", parent="other")
+
+    assert codex_subagent_rollouts(parent) == [
+        (child, {"session_id": "c-1"}, 1),
+        (nested, {"session_id": "c-2"}, 2),
+    ]

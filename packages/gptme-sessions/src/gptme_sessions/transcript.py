@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -1693,10 +1693,10 @@ def codex_subagent_rollouts(parent_jsonl: Path) -> list[tuple[Path, dict, int]]:
     """Child rollouts of a Codex parent, resolved by exact ``parent_thread_id``.
 
     Codex stores each child as its own ``rollout-*.jsonl`` thread, dated by its
-    start, so children live beside the parent or in a later day directory. Scan
-    the parent's directory and the next day's only (never the whole tree), then
-    walk nested descendants from the parent's thread id; nothing is inferred
-    from names or times.
+    start, so children live beside the parent or in a later day directory, even
+    months later after a resume. Index rollout headers in the parent's day and
+    all later day directories under the same sessions root, then walk exact
+    parent links. Dates bound the scan only; they never establish parentage.
     """
     if not parent_jsonl.name.startswith("rollout-"):
         return []
@@ -1706,10 +1706,19 @@ def codex_subagent_rollouts(parent_jsonl: Path) -> list[tuple[Path, dict, int]]:
     dirs = [parent_jsonl.parent]
     try:
         year, month, day = (int(part) for part in parent_jsonl.parent.parts[-3:])
-        nxt = datetime(year, month, day) + timedelta(days=1)
-        dirs.append(parent_jsonl.parent.parents[2] / f"{nxt:%Y}" / f"{nxt:%m}" / f"{nxt:%d}")
+        start = datetime(year, month, day)
     except (ValueError, IndexError):
-        pass
+        pass  # Non-calendar layouts resolve siblings only.
+    else:
+        root = parent_jsonl.parent.parents[2]
+        for directory in sorted(root.glob("[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]")):
+            try:
+                year, month, day = (int(part) for part in directory.parts[-3:])
+                candidate = datetime(year, month, day)
+            except ValueError:
+                continue
+            if candidate > start and directory.is_dir():
+                dirs.append(directory)
     by_parent: dict[str, list[tuple[Path, str]]] = {}
     depths: dict[Path, int] = {}
     for directory in dirs:
