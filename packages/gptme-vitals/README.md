@@ -99,8 +99,8 @@ REGISTRY.core_dimensions()   # {"services": (<route>,)} — input to roll_up_env
 Violations raise `RouteRegistryError` at construction, not when a page renders:
 duplicate slug/href (including percent-encoded href aliases), an absolute or
 parent-traversing `output_path`, a non-root-relative internal `href`, a private
-portal, a nav group naming an unknown,
-external or private route, a navigable route missing from every group, more than
+portal or one that is not a hosted page, a nav group naming an unknown,
+external, private or envelope-only route, a navigable route missing from every group, more than
 one `is_headline`, and a
 `core_dimension`/`is_headline` on a route with no `summary_source` (nothing to
 roll up, so the dimension would be permanently blind). `headline_route()`
@@ -121,6 +121,27 @@ custom backing path never changes the browser's URL base. An exact query-bearing
 registration wins over a path-only route; otherwise UI query parameters fall
 back to the path-only route. Percent-encoded path delimiters remain distinct
 from actual query/fragment boundaries.
+
+### Envelope-only routes
+
+Some pages are only an envelope: they feed a portal card and a `core.json`
+dimension and have no HTML page of their own. Register them as
+`RouteKind.ENVELOPE` with `href=None`, a `summary_source` and no `output_path`:
+
+```python
+DashboardRoute(
+    "inference", "Inference", None, RouteKind.ENVELOPE, "dashboards",
+    RefreshCadence.HOURLY, "Model routing and spend",
+    summary_source="inference/summary.json", core_dimension="inference",
+)
+```
+
+An envelope route is not `is_internal`: it is not crawled, not in `navigable()`
+and may not be named in a nav group. Its portal card is a non-link `<div>` that
+still shows the status, headline and lines. If it is the `is_headline` route,
+`headline.json` links to the portal, where that card is. Declaring the same row
+`STATIC` with an `output_path` nothing writes would put a dead link in the
+portal, the nav and `headline.json`.
 
 Not moved from Bob's `dashboard_routes.py`: his route table and the
 Decisions/Review-queue ownership predicates (they encode his page split).

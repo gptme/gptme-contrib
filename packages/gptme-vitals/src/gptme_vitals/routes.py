@@ -18,6 +18,12 @@ Three fields exist because of measured failure modes, see the README:
 * ``core_dimension`` names the fixed ``core.json`` dimension a page contributes
   to, so the derived rollup never depends on a page's private ``detail``.
 * ``is_headline`` marks the single page whose envelope owns ``headline.json``.
+
+``RouteKind.ENVELOPE`` is a route with an envelope but no page: it feeds the
+portal card and the ``core.json`` rollup, and has no ``href`` to link, crawl or
+put in the nav. Declaring such a row as ``STATIC`` with an ``output_path`` the
+build never writes would ship dead links from the portal, nav and
+``headline.json``.
 """
 
 from __future__ import annotations
@@ -39,6 +45,8 @@ class RouteKind(StrEnum):
     STATIC = "static"
     DYNAMIC = "dynamic"
     EXTERNAL = "external"
+    #: An envelope with no page: a portal card and rollup input, never a link.
+    ENVELOPE = "envelope"
 
 
 class RefreshCadence(StrEnum):
@@ -71,7 +79,7 @@ class DashboardRoute:
 
     slug: str
     label: str
-    href: str
+    href: str | None
     kind: RouteKind
     section: str
     cadence: RefreshCadence
@@ -85,7 +93,8 @@ class DashboardRoute:
 
     @property
     def is_internal(self) -> bool:
-        return self.kind is not RouteKind.EXTERNAL
+        """A page hosted by us: linkable, crawlable and in the nav."""
+        return self.kind in (RouteKind.STATIC, RouteKind.DYNAMIC)
 
     @property
     def is_external(self) -> bool:
@@ -103,10 +112,23 @@ class DashboardRoute:
 
     def validate(self) -> None:
         """Raise ``RouteRegistryError`` when the row is internally inconsistent."""
-        if not (self.slug and self.label and self.href):
+        if not (self.slug and self.label):
             raise RouteRegistryError(
-                f"route {self.slug!r}: slug, label and href are required"
+                f"route {self.slug!r}: slug and label are required"
             )
+        if self.kind is RouteKind.ENVELOPE:
+            if self.href is not None or self.output_path is not None:
+                raise RouteRegistryError(
+                    f"route {self.slug!r}: envelope routes have no page, "
+                    "so no href or output_path"
+                )
+            if self.summary_source is None:
+                raise RouteRegistryError(
+                    f"route {self.slug!r}: envelope routes need a summary_source"
+                )
+            return
+        if not self.href:
+            raise RouteRegistryError(f"route {self.slug!r}: href is required")
         if self.kind is RouteKind.STATIC and not self.output_path:
             raise RouteRegistryError(
                 f"route {self.slug!r}: static routes need output_path"
@@ -174,16 +196,20 @@ class RouteRegistry:
     def __post_init__(self) -> None:
         if self.portal is not None and not self.portal.is_public:
             raise RouteRegistryError("portal must be public")
+        if self.portal is not None and not self.portal.is_internal:
+            raise RouteRegistryError("portal must be a page we host")
         by_slug: dict[str, DashboardRoute] = {}
         by_href: dict[str, DashboardRoute] = {}
         for route in (*self.routes, *((self.portal,) if self.portal else ())):
             route.validate()
             if route.slug in by_slug:
                 raise RouteRegistryError(f"duplicate slug {route.slug!r}")
+            by_slug[route.slug] = route
+            if route.href is None:
+                continue
             decoded_href = _href_key(route.href)
             if decoded_href in by_href:
                 raise RouteRegistryError(f"duplicate href {route.href!r}")
-            by_slug[route.slug] = route
             by_href[decoded_href] = route
         headlines = [r.slug for r in by_slug.values() if r.is_headline]
         if len(headlines) > 1:
@@ -199,7 +225,8 @@ class RouteRegistry:
                 raise RouteRegistryError(f"nav group names unknown route {slug!r}")
             if not route.is_internal or not route.is_public:
                 raise RouteRegistryError(
-                    f"nav group names {slug!r}, which is external or private"
+                    f"nav group names {slug!r}, which is external, private "
+                    "or envelope-only"
                 )
         if self.nav_groups:
             missing = [r.slug for r in self.navigable() if r.slug not in set(grouped)]
@@ -218,6 +245,11 @@ class RouteRegistry:
         )
 
     # -- lookup -----------------------------------------------------------
+
+    @property
+    def portal_href(self) -> str:
+        """Where the portal lives; also the link for an envelope-only headline."""
+        return self.portal.href if self.portal and self.portal.href else "/"
 
     def get_by_slug(self, slug: str) -> DashboardRoute | None:
         return self._by_slug.get(slug)
@@ -348,7 +380,7 @@ class RouteRegistry:
 
     def render_shared_nav(self, current_href: str) -> str:
         """Render Portal plus every navigable route, grouped, current page marked."""
-        portal_href = escape(self.portal.href if self.portal else "/", quote=True)
+        portal_href = escape(self.portal_href, quote=True)
         portal_label = escape(self.portal.label if self.portal else "Portal")
         links = [f'<a class="nav-portal" href="{portal_href}">{portal_label}</a>']
         for group_label, slugs in self.nav_groups:
@@ -356,7 +388,8 @@ class RouteRegistry:
             links.append(f'<span class="nav-group">{escape(group_label)}</span>')
             for slug in slugs:
                 route = self._by_slug[slug]
-                href = escape(route.href, quote=True)
+                # Construction admits only navigable routes, which all have an href.
+                href = escape(route.href or "", quote=True)
                 label = escape(route.label)
                 if route.href == current_href:
                     links.append(
@@ -380,7 +413,8 @@ class RouteRegistry:
         """Render one portal card per public route, in registry order.
 
         ``meta_html`` / ``preview_html`` are pre-escaped fragments keyed by
-        slug; the portal builds them from page envelopes.
+        slug; the portal builds them from page envelopes. An envelope route has
+        no page, so its card is a ``<div>``, not a link.
         """
         meta_html = meta_html or {}
         preview_html = preview_html or {}
@@ -394,14 +428,20 @@ class RouteRegistry:
                 if route.badge
                 else ""
             )
-            cards.append(
-                f'<a class="card" data-route="{escape(route.slug, quote=True)}" '
-                f'href="{escape(route.href, quote=True)}"{target}>'
+            body = (
                 f'<div class="card-title">{escape(route.label)}</div>'
                 f'<div class="card-desc">{escape(route.description)}</div>'
                 f"{meta_html.get(route.slug, '')}{preview_html.get(route.slug, '')}"
-                f"{badge}</a>"
+                f"{badge}"
             )
+            slug_attr = escape(route.slug, quote=True)
+            if route.href is None:
+                cards.append(f'<div class="card" data-route="{slug_attr}">{body}</div>')
+            else:
+                cards.append(
+                    f'<a class="card" data-route="{slug_attr}" '
+                    f'href="{escape(route.href, quote=True)}"{target}>{body}</a>'
+                )
         return "\n".join(cards)
 
 

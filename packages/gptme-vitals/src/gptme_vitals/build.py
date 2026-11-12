@@ -45,16 +45,20 @@ class BuildError(ValueError):
     """The envelopes and registry cannot be turned into a valid core/headline."""
 
 
-def headline_link(route: DashboardRoute, base_url: str | None) -> str:
+def headline_link(
+    route: DashboardRoute, base_url: str | None, *, portal_href: str = "/"
+) -> str:
     """Resolve the headline route's link to the absolute URL ``headline.json`` carries.
 
     The fleet view may be served on a different host, so a relative ``href`` needs
-    the producing agent's absolute HTTP(S) ``base_url``. Raises :class:`BuildError`
-    when no absolute HTTP(S) link results.
+    the producing agent's absolute HTTP(S) ``base_url``. An envelope-only route has
+    no page, so its headline links ``portal_href``, where its card is. Raises
+    :class:`BuildError` when no absolute HTTP(S) link results.
     """
+    href = route.href if route.href is not None else portal_href
     try:
         if route.is_external:
-            destination = urlsplit(route.href)
+            destination = urlsplit(href)
             if destination.scheme not in {"http", "https"} or not destination.hostname:
                 raise BuildError(
                     f"headline route {route.slug!r} needs an absolute HTTP(S) link"
@@ -63,7 +67,7 @@ def headline_link(route: DashboardRoute, base_url: str | None) -> str:
             base = urlsplit(base_url)
             if base.scheme not in {"http", "https"} or not base.hostname:
                 raise BuildError("base_url must be an absolute HTTP(S) URL")
-        link = urljoin(base_url or "", route.href)
+        link = urljoin(base_url or "", href)
         parsed = urlsplit(link)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise BuildError(
@@ -177,7 +181,7 @@ def derive_core(
             f"headline route {route.slug!r} emitted no envelope; "
             "headline.json would be undefined"
         )
-    link = headline_link(route, base_url)
+    link = headline_link(route, base_url, portal_href=registry.portal_href)
     headline: dict[str, object] = {
         "schema": HEADLINE_SCHEMA,
         "agent": agent,

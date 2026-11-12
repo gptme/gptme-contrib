@@ -111,7 +111,9 @@ def run_build(
     try:
         # derive_core needs both; failing here means no page is built against a
         # registry that could never produce core.json/headline.json.
-        headline_link(registry.headline_route(), base_url)
+        headline_link(
+            registry.headline_route(), base_url, portal_href=registry.portal_href
+        )
     except (RouteRegistryError, BuildError) as exc:
         raise UsageError(str(exc)) from exc
     envelope_slugs = {r.slug for r in registry.envelope_routes()}
@@ -331,7 +333,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise BuildError(
                         f"headline route {headline_route.slug!r} is private"
                     )
-                headline_link(headline_route, args.base_url)
+                headline_link(
+                    headline_route, args.base_url, portal_href=registry.portal_href
+                )
             except (RouteRegistryError, BuildError) as exc:
                 raise UsageError(str(exc)) from exc
             return run_timers(

@@ -34,7 +34,7 @@ PORTAL_CSS = """
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
 .card { display: block; padding: 12px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--tile-bg); color: var(--text); text-decoration: none; }
-.card:hover { border-color: var(--accent); }
+a.card:hover { border-color: var(--accent); }
 .card-title { font-weight: 600; }
 .card-desc, .card-lines { color: var(--dim); font-size: 12px; }
 .card-lines { margin: 6px 0 0; padding: 0; list-style: none; }
@@ -102,13 +102,12 @@ def render_portal(
         if generated_at
         else ""
     )
-    portal_href = registry.portal.href if registry.portal else "/"
     return (
         "<!doctype html>\n"
         '<html lang="en"><head><meta charset="utf-8">\n'
         f"<title>{escape(title)}</title>\n"
         f"{head_html}\n<style>\n{PORTAL_CSS}\n</style>\n</head><body>\n"
-        f"{registry.render_shared_nav(portal_href)}\n"
+        f"{registry.render_shared_nav(registry.portal_href)}\n"
         f"{toolbar_html}\n<h1>{escape(title)}</h1>\n{stamp}\n"
         f'<div class="cards">\n{render_cards(registry, envelopes)}\n</div>\n'
         "</body></html>\n"

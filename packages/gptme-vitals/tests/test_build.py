@@ -405,3 +405,32 @@ def test_shared_core_files_are_readable_by_a_separate_server_user(
         write_core_files(tmp_path, core, headline)
         for name in ("core.json", "headline.json"):
             assert (tmp_path / name).stat().st_mode & 0o777 == 0o644
+
+
+def test_envelope_headline_links_the_portal() -> None:
+    """An envelope-only headline has no page, so headline.json links the portal card."""
+    portal = _route(
+        "portal", href="/ops/", output_path="ops/index.html", summary_source=None
+    )
+    reg = RouteRegistry(
+        (
+            _route(
+                "activity",
+                href=None,
+                kind=RouteKind.ENVELOPE,
+                output_path=None,
+                core_dimension="activity",
+                is_headline=True,
+            ),
+        ),
+        portal=portal,
+    )
+    core, headline = derive_core(
+        reg,
+        [_env("activity", Status.HEALTHY)],
+        agent="alice",
+        generated_at=NOW,
+        base_url="https://alice.example/",
+    )
+    assert headline["link"] == "https://alice.example/ops/"
+    assert core["activity"]["status"] == "healthy"  # type: ignore[index]
