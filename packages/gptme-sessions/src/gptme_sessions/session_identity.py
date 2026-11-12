@@ -145,6 +145,20 @@ class SessionIndex:
             return None
         when = _parse_ts(at)
         fmt = id_format(key)
+        if fmt == "label4":
+            # Labels recur across both fields; source precedence must not beat
+            # temporal proximity, or conceal a tie across the two tables.
+            candidates_by_identity = {
+                id(row): row for row in (*self._by_id.get(key, ()), *self._by_alias.get(key, ()))
+            }
+            if candidates_by_identity:
+                row = self._pick(list(candidates_by_identity.values()), when)
+                if row is not None:
+                    source = "id" if any(row is r for r in self._by_id.get(key, ())) else "alias"
+                    self.stats[f"{source}:{fmt}"] += 1
+                    return row
+            self.stats[f"unresolved:{fmt}"] += 1
+            return None
         for source, table in (("id", self._by_id), ("alias", self._by_alias)):
             candidates = table.get(key)
             if not candidates:

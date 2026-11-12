@@ -78,6 +78,18 @@ def test_alias_fields_resolve_to_the_record():
     assert idx.stats["alias:label4"] == 1
 
 
+def test_label_selects_nearest_across_ids_and_aliases():
+    old = {"session_id": "4033", "start_time": "2026-03-11T12:00:00Z"}
+    new = {
+        "session_id": "abcd1234",
+        "session_label": "4033",
+        "start_time": "2026-03-12T12:00:00Z",
+    }
+    assert SessionIndex([old, new]).resolve("4033", at="2026-03-12T13:00:00Z") is new
+    old["start_time"] = "2026-03-12T10:00:00Z"
+    assert SessionIndex([old, new]).resolve("4033", at="2026-03-12T11:00:00Z") is None
+
+
 def test_owner_fields_are_not_aliases():
     worker = {"session_id": UUID, "trajectory_owner_session_id": "aaaabbbb"}
     idx = SessionIndex([worker])
