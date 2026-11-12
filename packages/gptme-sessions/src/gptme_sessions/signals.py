@@ -4599,6 +4599,24 @@ def extract_from_path(jsonl_path: Path) -> dict:
     except Exception:
         pass
     fmt = detect_format(msgs)
+    if fmt == "codex":
+        # Codex children are separate rollout threads. Feed them to the summary
+        # only: merging them into ``msgs`` would let their cumulative token
+        # events replace the parent's usage.
+        try:
+            from .subagent_summary import ChildSpec
+            from .transcript import codex_subagent_rollouts
+
+            for sub_file, meta, depth in codex_subagent_rollouts(jsonl_path):
+                child_specs.append(
+                    ChildSpec(
+                        records=parse_trajectory(sub_file),
+                        spawn_depth=depth,
+                        session_id=meta.get("session_id") or sub_file.stem,
+                    )
+                )
+        except Exception:
+            pass
     if fmt == "claude_code":
         signals = extract_signals_cc(msgs)
         parent_usage = extract_usage_cc(parent_msgs)

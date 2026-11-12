@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -1652,6 +1652,87 @@ def subagent_record_metadata(path: Path) -> list[tuple[Path, dict, int]]:
             depth = 1
         out.append((file, meta, depth))
     return out + native
+
+
+def _codex_rollout_linkage(path: Path) -> tuple[str | None, str | None, int]:
+    """(thread_id, parent_thread_id, depth) from a Codex rollout's leading ``session_meta``."""
+    thread_id: str | None = None
+    parent: str | None = None
+    depth = 1
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for _index, line in zip(range(20), handle):
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                payload = row.get("payload") if isinstance(row, dict) else None
+                if not isinstance(payload, dict) or row.get("type") != "session_meta":
+                    continue
+                value = payload.get("id") or payload.get("session_id")
+                thread_id = value if isinstance(value, str) and value else None
+                source = payload.get("source")
+                spawn = (
+                    ((source.get("subagent") or {}).get("thread_spawn") or {})
+                    if isinstance(source, dict)
+                    else {}
+                )
+                value = spawn.get("parent_thread_id") if isinstance(spawn, dict) else None
+                parent = value if isinstance(value, str) and value else None
+                try:
+                    depth = max(1, int(spawn.get("depth") or 1)) if isinstance(spawn, dict) else 1
+                except (TypeError, ValueError):
+                    depth = 1
+                break
+    except OSError:
+        return None, None, 1
+    return thread_id, parent, depth
+
+
+def codex_subagent_rollouts(parent_jsonl: Path) -> list[tuple[Path, dict, int]]:
+    """Child rollouts of a Codex parent, resolved by exact ``parent_thread_id``.
+
+    Codex stores each child as its own ``rollout-*.jsonl`` thread, dated by its
+    start, so children live beside the parent or in a later day directory. Scan
+    the parent's directory and the next day's only (never the whole tree), then
+    walk nested descendants from the parent's thread id; nothing is inferred
+    from names or times.
+    """
+    if not parent_jsonl.name.startswith("rollout-"):
+        return []
+    parent_id, _, _ = _codex_rollout_linkage(parent_jsonl)
+    if not parent_id:
+        return []
+    dirs = [parent_jsonl.parent]
+    try:
+        year, month, day = (int(part) for part in parent_jsonl.parent.parts[-3:])
+        nxt = datetime(year, month, day) + timedelta(days=1)
+        dirs.append(parent_jsonl.parent.parents[2] / f"{nxt:%Y}" / f"{nxt:%m}" / f"{nxt:%d}")
+    except (ValueError, IndexError):
+        pass
+    by_parent: dict[str, list[tuple[Path, str]]] = {}
+    depths: dict[Path, int] = {}
+    for directory in dirs:
+        for file in sorted(directory.glob("rollout-*.jsonl")):
+            if file == parent_jsonl:
+                continue
+            thread_id, parent, depth = _codex_rollout_linkage(file)
+            if thread_id and parent:
+                by_parent.setdefault(parent, []).append((file, thread_id))
+                depths[file] = depth
+    out: list[tuple[Path, dict, int]] = []
+    seen = {parent_id}
+
+    def walk(thread: str) -> None:
+        for file, thread_id in by_parent.get(thread, []):
+            if thread_id in seen:
+                continue
+            seen.add(thread_id)
+            out.append((file, {"session_id": thread_id}, depths[file]))
+            walk(thread_id)
+
+    walk(parent_id)
+    return out
 
 
 def read_subagent_metadata(path: Path) -> dict:

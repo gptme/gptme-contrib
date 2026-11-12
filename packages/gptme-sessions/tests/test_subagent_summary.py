@@ -1176,3 +1176,51 @@ def test_scan_cc_first_prompt_keeps_text_in_mixed_record() -> None:
     ]
     scan = _scan_cc(records)
     assert scan.first_prompt == "BOB_SESSION_SENTINEL=abc autonomous work"
+
+
+def _codex_rollout(path, thread_id, *, parent=None, depth=1, spawn=False):
+    """Write a minimal Codex rollout; a child names its parent thread."""
+    source = (
+        {"subagent": {"thread_spawn": {"parent_thread_id": parent, "depth": depth}}}
+        if parent
+        else "exec"
+    )
+    rows = [
+        {
+            "type": "session_meta",
+            "timestamp": "2026-11-12T14:00:00Z",
+            "payload": {"id": thread_id, "source": source, "originator": "codex_exec"},
+        }
+    ]
+    if spawn:
+        rows.append(
+            {
+                "type": "response_item",
+                "timestamp": "2026-11-12T14:01:00Z",
+                "payload": {
+                    "type": "function_call",
+                    "name": "spawn_agent",
+                    "arguments": json.dumps({"task_name": "audit", "message": "go"}),
+                },
+            }
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return path
+
+
+def test_codex_children_are_resolved_into_subagent_summary(tmp_path) -> None:
+    """A Codex parent's child rollouts (separate threads) must be counted."""
+    from gptme_sessions.signals import extract_from_path
+
+    day = tmp_path / "2026" / "11" / "12"
+    parent = _codex_rollout(day / "rollout-parent.jsonl", "p-1", spawn=True)
+    _codex_rollout(day / "rollout-child.jsonl", "c-1", parent="p-1")
+    _codex_rollout(day / "rollout-nested.jsonl", "c-2", parent="c-1", depth=2)
+    _codex_rollout(day / "rollout-other.jsonl", "x-9", parent="someone-else")
+
+    summary = extract_from_path(parent)["subagent_summary"]
+
+    assert summary["subagents_total"] == 2
+    assert summary["spawns_total"] == 1  # only the depth-1 child counts as a spawn
+    assert summary["subagents_depth_max"] == 2
