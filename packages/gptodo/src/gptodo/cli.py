@@ -23,6 +23,7 @@ Features:
 
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -33,6 +34,7 @@ from typing import (
     Any,
     Dict,
     List,
+    NoReturn,
     Set,
 )
 
@@ -2516,7 +2518,20 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
         "'active' when they should be 'waiting'."
     ),
 )
-def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, allow_pending):
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help=(
+        "Emit structured JSON to stdout instead of human-readable output. "
+        "Schema: {tasks: [{id, changes: {field: {from, to}}}], exit}. "
+        "Error shape: {id, error, exit}. "
+        "Human-facing warnings and status lines still go to stderr."
+    ),
+)
+def edit(
+    task_ids, set_fields, add_fields, remove_fields, set_subtask, force, allow_pending, output_json
+):
     """Edit task metadata.
 
     Recurring tasks:
@@ -2563,26 +2578,33 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
         - Date and time: 2025-05-05T10:00:00
         - With timezone: 2025-05-05T10:00:00+02:00
     """
-    console = Console()
+    console = Console(stderr=output_json)
+
+    def refuse(message: str, *, task_id: str | None = None, click_error: bool = False) -> NoReturn:
+        """Keep every edit-level refusal machine-readable in JSON mode."""
+        if output_json:
+            if task_id is None and len(task_ids) == 1:
+                task_id = task_ids[0]
+            print(json.dumps({"id": task_id, "error": message, "exit": 1}))
+        elif click_error:
+            raise click.ClickException(message)
+        else:
+            console.print(f"[red]{message}[/]")
+        raise SystemExit(1)
+
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
 
     # Load all tasks
     tasks = load_tasks(tasks_dir)
     if not tasks:
-        if set_subtask:
-            raise click.ClickException("No tasks found")
-        console.print("[red]No tasks found[/]")
-        sys.exit(1)
+        refuse("No tasks found", click_error=bool(set_subtask))
 
     # Find tasks to edit
     try:
         target_tasks = resolve_tasks(task_ids, tasks, tasks_dir)
     except ValueError as e:
-        if set_subtask:
-            raise click.ClickException(str(e)) from e
-        console.print(f"[red]{e}[/]")
-        sys.exit(1)
+        refuse(str(e), click_error=bool(set_subtask))
 
     # Validate all field operations before applying any changes
     changes: list[tuple[str, str, str | None]] = []
@@ -2657,10 +2679,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
     for field, value in set_fields:
         # Check if field is valid
         if field not in VALID_FIELDS:
-            console.print(
-                f"[red]Unknown field: {field}. Valid fields: {', '.join(sorted(VALID_FIELDS.keys()))}[/]"
+            refuse(
+                f"Unknown field: {field}. Valid fields: {', '.join(sorted(VALID_FIELDS.keys()))}"
             )
-            raise SystemExit(1)
 
         field_spec = VALID_FIELDS[field]
 
@@ -2671,10 +2692,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
 
         # List fields should use --add/--remove instead
         if field_spec["type"] == "list":
-            console.print(
-                f"[red]Field '{field}' is a list field. Use --add or --remove instead of --set.[/]"
-            )
-            raise SystemExit(1)
+            refuse(f"Field '{field}' is a list field. Use --add or --remove instead of --set.")
 
         # Validate based on field type
         if field_spec["type"] == "enum":
@@ -2688,8 +2706,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
                     value = normalized
             if value not in field_spec["values"]:  # type: ignore[operator]
                 valid = ", ".join(field_spec["values"])  # type: ignore[arg-type]
-                console.print(f"[red]Invalid {field}: {value}. Valid values: {valid}[/]")
-                raise SystemExit(1)
+                refuse(f"Invalid {field}: {value}. Valid values: {valid}")
 
             # State-transition legality check (Gordon 2026-07-01).
             #
@@ -2739,7 +2756,10 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
                             f"  {tname}: {cur} → {target}. Terminal states are sticky "
                             "by design; use --force if you really mean it."
                         )
-                    raise SystemExit(1)
+                    refuse(
+                        "terminal state reopen requires --force",
+                        task_id=terminal_reopens[0][0] if len(terminal_reopens) == 1 else None,
+                    )
 
                 if other_illegal and strict and not force:
                     console.print(
@@ -2758,7 +2778,10 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
                         "belong in 'waiting' (with `wait:` / `waiting_for:`), "
                         "not 'active'.[/]"
                     )
-                    raise SystemExit(1)
+                    refuse(
+                        "illegal transition requires --force when GPTODO_STRICT_TRANSITIONS=1",
+                        task_id=other_illegal[0][0] if len(other_illegal) == 1 else None,
+                    )
 
                 if other_illegal and not force:
                     # Non-strict: warn, don't block.
@@ -2786,10 +2809,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
 
                 parsed = parse_wait(value)
                 if parsed is None:
-                    console.print(
-                        f"[red]Invalid {field} format. Use YYYY-MM-DD or YYYY-MM-DDTHH:MM[/]"
-                    )
-                    raise SystemExit(1)
+                    refuse(f"Invalid {field} format. Use YYYY-MM-DD or YYYY-MM-DDTHH:MM")
                 if isinstance(parsed, datetime):
                     value = parsed.isoformat()
                 else:
@@ -2799,29 +2819,26 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
                 try:
                     datetime.fromisoformat(value)
                 except ValueError:
-                    console.print(
-                        f"[red]Invalid {field} format. Use YYYY-MM-DD or ISO datetime, "
-                        "or 'none' to clear the field[/]"
+                    refuse(
+                        f"Invalid {field} format. Use YYYY-MM-DD or ISO datetime, "
+                        "or 'none' to clear the field"
                     )
-                    raise SystemExit(1)
             else:
                 try:
                     created_dt = datetime.fromisoformat(value)
                     value = created_dt.isoformat()
                 except ValueError:
-                    console.print(
-                        f"[red]Invalid {field} date format. Use ISO format "
-                        "(YYYY-MM-DD[THH:MM:SS+HH:MM]), or 'none' to clear the field[/]"
+                    refuse(
+                        f"Invalid {field} date format. Use ISO format "
+                        "(YYYY-MM-DD[THH:MM:SS+HH:MM]), or 'none' to clear the field"
                     )
-                    raise SystemExit(1)
         elif field_spec["type"] == "string":
             if field == "recur":
                 if not is_valid_recur_value(value):
-                    console.print(
-                        "[red]Invalid recur format. Use 7d, 24h, weekly, monthly, "
-                        "or a cron expression like '0 9 * * 1'[/]"
+                    refuse(
+                        "Invalid recur format. Use 7d, 24h, weekly, monthly, "
+                        "or a cron expression like '0 9 * * 1'"
                     )
-                    raise SystemExit(1)
             # Arbitrary string value - no validation needed
         elif field_spec["type"] == "extension":
             # Workspace-registered extension fields (e.g. premise_check) may hold
@@ -2830,15 +2847,10 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
             # and get a mapping, not a quoted string.
             stripped = value.strip()
             if stripped.startswith(("{", "[")):
-                import json
-
                 try:
                     value = json.loads(stripped)
                 except json.JSONDecodeError as e:
-                    console.print(
-                        f"[red]Field '{field}': value looks like JSON but could not be parsed: {e}[/]"
-                    )
-                    raise SystemExit(1)
+                    refuse(f"Field '{field}': value looks like JSON but could not be parsed: {e}")
             # Plain scalar extension values pass through unchanged.
 
         changes.append(("set", field, value))
@@ -2846,9 +2858,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
     # Validate subtask operation
     for subtask_text, state in set_subtask:
         if state not in ["done", "todo"]:
-            raise click.ClickException(f"Invalid subtask state: {state}. Valid values: done, todo")
+            refuse(f"Invalid subtask state: {state}. Valid values: done, todo", click_error=True)
         if not subtask_text.strip():
-            raise click.ClickException("Subtask selector must not be empty")
+            refuse("Subtask selector must not be empty", click_error=True)
         changes.append(("set_subtask", subtask_text, state))
 
     # Canonical list fields in task metadata (no aliases)
@@ -2884,10 +2896,9 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
     for op, fields in [("add", add_fields), ("remove", remove_fields)]:
         for field, value in fields:
             if field not in ADDABLE_FIELDS:
-                console.print(
-                    f"[red]Cannot {op} to field: {field}. Use --{op} with deps/tags/requires/related/discovered-from.[/]"
+                refuse(
+                    f"Cannot {op} to field: {field}. Use --{op} with deps/tags/requires/related/discovered-from."
                 )
-                raise SystemExit(1)
 
             # Warn about blocks → requires semantic change
             if field in ("block", "blocks"):
@@ -2901,8 +2912,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
             changes.append((op, field, value))
 
     if not changes:
-        console.print("[red]No changes specified. Use --set, --add, or --remove.[/]")
-        sys.exit(1)
+        refuse("No changes specified. Use --set, --add, or --remove.")
 
     from gptodo.lifecycle import mutate_task, resolve_subtask_lines, TransitionError
 
@@ -2913,7 +2923,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
         try:
             resolve_subtask_lines(frontmatter.load(task.path).content, subtask_edits)
         except TransitionError as exc:
-            raise click.ClickException(f"{task.name}: {exc}") from exc
+            refuse(f"{task.name}: {exc}", task_id=task.name, click_error=True)
 
     # Reject incomplete done transitions before writing any target, so a
     # rejected candidate never half-writes the batch. Counts run on the
@@ -2938,6 +2948,7 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
         return "\n".join(lines)
 
     pending_done = []
+    pending_ids = []
     for task in target_tasks:
         post = frontmatter.load(task.path)
         prior = normalize_state(str(post.metadata.get("state", "backlog") or "backlog"), warn=False)
@@ -2950,20 +2961,24 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
         pending = count_subtasks(_projected_content(post), checklist_only=True).pending
         if pending:
             pending_done.append(f"{task.name}: {pending} unresolved checkbox(es)")
+            pending_ids.append(task.name)
 
     if pending_done:
         details = "; ".join(pending_done)
         if not allow_pending:
-            raise click.ClickException(
+            refuse(
                 f"Cannot mark done: {details}. Tick completed items, skip dropped items "
                 "with a reason, or file a follow-up task and skip with a pointer. "
-                "Use --allow-pending only for an intentional override."
+                "Use --allow-pending only for an intentional override.",
+                task_id=pending_ids[0] if len(pending_ids) == 1 else None,
+                click_error=True,
             )
         console.print(f"[yellow]--allow-pending: {details}[/]")
 
     from gptodo.lifecycle import run_completion_effects
 
     completion_paths: list[Path] = []
+    task_results: list[dict] = []
     try:
         for task in target_tasks:
             try:
@@ -2972,27 +2987,64 @@ def edit(task_ids, set_fields, add_fields, remove_fields, set_subtask, force, al
                 # is still waiting for its explicit edit later in this same command.
                 result = mutate_task(task.path, changes, force=force, completion_effects=False)
             except TransitionError as exc:
-                if subtask_edits:
-                    raise click.ClickException(f"{task.name}: {exc}") from exc
-                console.print(f"[red]{exc}[/]")
-                raise SystemExit(1) from exc
+                refuse(
+                    f"{task.name}: {exc}" if subtask_edits else str(exc),
+                    task_id=task.name,
+                    click_error=bool(subtask_edits),
+                )
             if result.requested_state == "done" and result.effective_state == "done":
                 completion_paths.append(task.path)
-            console.print(f"\nChanges to apply:\n  {task.name}:")
-            for field, (current, new) in sorted(result.changed_fields.items()):
-                console.print(f"    {field}: {current} -> {new}")
-            if result.requested_state == "done" and result.effective_state == "waiting":
-                console.print(
-                    f"[cyan]↩ {task.name} recurring — reset to waiting, next wait: {result.post.metadata['wait']}[/]"
-                )
+            if output_json:
+                task_result: dict = {
+                    "id": task.name,
+                    "changes": {
+                        field: {"from": current, "to": new_val}
+                        for field, (current, new_val) in sorted(result.changed_fields.items())
+                    },
+                }
+                if result.requested_state == "done" and result.effective_state == "waiting":
+                    task_result["recurred"] = True
+                    task_result["next_wait"] = str(result.post.metadata.get("wait", ""))
+                task_results.append(task_result)
+            else:
+                console.print(f"\nChanges to apply:\n  {task.name}:")
+                for field, (current, new) in sorted(result.changed_fields.items()):
+                    console.print(f"    {field}: {current} -> {new}")
+                if result.requested_state == "done" and result.effective_state == "waiting":
+                    console.print(
+                        f"[cyan]↩ {task.name} recurring — reset to waiting, next wait: {result.post.metadata['wait']}[/]"
+                    )
     finally:
         # Earlier writes remain committed even if a later read/replace fails.
         for path in completion_paths:
             run_completion_effects(path)
 
-    # Show success message
-    count = len(target_tasks)
-    console.print(f"[green]✓ Updated {count} task{'s' if count > 1 else ''}[/]")
+    if output_json:
+
+        def json_safe(value: Any) -> Any:
+            # Keep every entry when distinct YAML keys stringify identically.
+            if isinstance(value, dict):
+                keys = [str(key) for key in value]
+                if len(set(keys)) != len(keys):
+                    return {
+                        "$yaml_mapping": [
+                            [json_safe(key), json_safe(item)] for key, item in value.items()
+                        ]
+                    }
+                return {str(key): json_safe(item) for key, item in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [json_safe(item) for item in value]
+            if isinstance(value, float) and not math.isfinite(value):
+                return str(value)
+            return value
+
+        print(
+            json.dumps(json_safe({"tasks": task_results, "exit": 0}), default=str, allow_nan=False)
+        )
+    else:
+        # Show success message
+        count = len(target_tasks)
+        console.print(f"[green]✓ Updated {count} task{'s' if count > 1 else ''}[/]")
 
 
 # States that cannot be claimed (already terminal or deliberately deferred/blocked).
