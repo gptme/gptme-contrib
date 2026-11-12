@@ -132,3 +132,13 @@ def test_dispatch_identity_event_dispatch_has_no_decision():
     assert ident["task_id"] is None
     assert ident["pool"] is None
     assert ident["dispatch_kind"] == "completion_followup"
+
+
+def test_lone_label_without_time_stays_unresolved():
+    # one occurrence in the loaded window does not make a 4-hex label unique
+    # across history, so a time-less lookup must not attribute it
+    row = {"session_id": "4033", "start_time": "2026-02-01T10:00:00+00:00"}
+    idx = SessionIndex([row])
+    assert idx.resolve("4033") is None
+    assert idx.stats["ambiguous_no_time"] == 1
+    assert idx.resolve("4033", at="2026-02-01T11:00:00Z") is row

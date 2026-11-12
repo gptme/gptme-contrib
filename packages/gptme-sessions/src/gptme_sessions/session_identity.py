@@ -119,8 +119,6 @@ class SessionIndex:
         self.stats: Counter[str] = Counter()
 
     def _pick(self, candidates: list[dict], at: datetime | None) -> dict | None:
-        if len(candidates) == 1 and at is None:
-            return candidates[0]
         if at is None:
             self.stats["ambiguous_no_time"] += 1
             return None
