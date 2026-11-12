@@ -474,6 +474,22 @@ def test_build_pretool_match_text_multiple_fields(hook):
     assert "src/foo.py" in text
 
 
+def test_build_pretool_match_text_send_message(hook):
+    """SendMessage text is matched: an agent's advice to a peer can carry the trigger.
+
+    gptme/gptme#4868: a recommendation to add --no-session-persistence went out
+    in a SendMessage and no lesson saw it.
+    """
+    text = hook.build_pretool_match_text(
+        "SendMessage",
+        {
+            "to": "peer",
+            "message": "add --no-session-persistence to both one-shot calls",
+        },
+    )
+    assert "--no-session-persistence" in text
+
+
 def test_build_pretool_match_text_unknown_fields_ignored(hook):
     """Fields not in the known list are ignored."""
     text = hook.build_pretool_match_text("Bash", {"unknown_key": "should not appear"})
