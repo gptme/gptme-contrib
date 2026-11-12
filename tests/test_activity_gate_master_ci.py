@@ -339,3 +339,75 @@ def test_unrecovered_tests_failure_is_still_emitted(tmp_path: Path) -> None:
     assert [(item["type"], item["number"]) for item in items] == [
         ("master_ci_failure", 401),
     ]
+
+
+def _emitted(result: subprocess.CompletedProcess[str]) -> list[int]:
+    return [json.loads(line)["number"] for line in result.stdout.splitlines()]
+
+
+def test_window_edge_dropping_an_old_run_does_not_reemit(tmp_path: Path) -> None:
+    """At 00:00 UTC the whole-date window drops the oldest run. The failure is
+    the same workflow, so the second gate pass must stay silent."""
+    older = _run(501, "push", name="Tests", created_at=_ts(2 * 86400))
+    newer = _run(502, "push", name="Tests", created_at=_ts(3600))
+
+    first = _run_gate(tmp_path, [older, newer])
+    assert _emitted(first) == [502]  # newest run of the workflow only
+
+    second = _run_gate(tmp_path, [newer])  # older run aged out of the window
+    assert second.returncode == 1, second.stdout
+    assert second.stdout == ""
+
+
+def test_still_red_on_a_newer_commit_is_the_same_signal(tmp_path: Path) -> None:
+    first = _run_gate(tmp_path, [_run(511, "push", name="Tests", created_at=_ts(7200))])
+    assert _emitted(first) == [511]
+
+    second = _run_gate(tmp_path, [_run(512, "push", name="Tests", created_at=_ts(60))])
+    assert second.stdout == ""
+
+
+def test_new_failing_workflow_is_emitted_alone(tmp_path: Path) -> None:
+    tests = _run(521, "push", name="Tests", created_at=_ts(7200))
+    _run_gate(tmp_path, [tests])
+
+    lint = _run(522, "push", name="Lint", created_at=_ts(60))
+    second = _run_gate(tmp_path, [tests, lint])
+    assert _emitted(second) == [522]
+
+
+def test_regression_after_recovery_is_emitted_again(tmp_path: Path) -> None:
+    first = _run_gate(
+        tmp_path, [_run(531, "push", name="Tests", created_at=_ts(5 * 3600))]
+    )
+    assert _emitted(first) == [531]
+
+    recovered = _run_gate(
+        tmp_path,
+        [
+            _run(531, "push", name="Tests", created_at=_ts(5 * 3600)),
+            _run(
+                532,
+                "push",
+                name="Tests",
+                conclusion="success",
+                created_at=_ts(3 * 3600),
+            ),
+        ],
+    )
+    assert recovered.stdout == ""
+
+    regressed = _run_gate(
+        tmp_path,
+        [
+            _run(
+                532,
+                "push",
+                name="Tests",
+                conclusion="success",
+                created_at=_ts(3 * 3600),
+            ),
+            _run(533, "push", name="Tests", created_at=_ts(60)),
+        ],
+    )
+    assert _emitted(regressed) == [533]
