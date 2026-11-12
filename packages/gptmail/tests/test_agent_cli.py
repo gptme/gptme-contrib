@@ -119,6 +119,30 @@ def test_send_writes_outbox_and_delivers(workspace: Path) -> None:
     assert len(delivered) == 1
 
 
+def test_send_dash_reads_stdin(workspace: Path) -> None:
+    """'-' is stdin, not a literal body (2026-11-12: a resend arrived as just '-')."""
+    result = CliRunner().invoke(agent, ["send", "bob", "Hello", "-"], input="piped body\n")
+    assert result.exit_code == 0, result.output
+    assert _only_outbox_msg(workspace).read_text().rstrip().endswith("piped body")
+
+
+@pytest.mark.parametrize(
+    ("args", "stdin"),
+    [
+        (["send", "bob", "Hello", ""], None),
+        (["send", "bob", "Hello", "  \n"], None),
+        (["send", "bob", "Hello", "-"], ""),
+        (["send", "bob", "Hello"], ""),
+        (["broadcast", "Hello", "-"], "\n"),
+    ],
+)
+def test_empty_body_is_refused(workspace: Path, args: list[str], stdin: str | None) -> None:
+    result = CliRunner().invoke(agent, args, input=stdin)
+    assert result.exit_code == 2, result.output
+    assert "body is empty" in result.output
+    assert not list((workspace / "messages" / "outbox").glob("*.md"))
+
+
 def test_send_unknown_agent_errors(workspace: Path) -> None:
     result = CliRunner().invoke(agent, ["send", "nobody", "Hi", "x"])
     assert result.exit_code == 1

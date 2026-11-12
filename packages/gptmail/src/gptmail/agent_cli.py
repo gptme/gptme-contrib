@@ -189,6 +189,19 @@ def _self_name() -> str:
     return os.environ.get("AGENT_NAME", os.environ.get("USER", "unknown")).lower()
 
 
+def _read_body(content: str | None) -> str:
+    """Message body from CONTENT, or stdin when CONTENT is omitted or ``-``.
+
+    Refuses an empty body: a message with no text is always a caller bug (a
+    wrapper that lost its stdin, or ``-`` meant as stdin), and sending it reads
+    to the recipient as delivered.
+    """
+    body = sys.stdin.read() if content is None or content == "-" else content
+    if not body.strip():
+        raise click.UsageError("message body is empty; pass CONTENT, or '-' to read stdin.")
+    return body
+
+
 def _load_agents(*, warn_missing: bool = True) -> dict[str, dict[str, str]]:
     """Load the agent registry from ``messages/agents.yaml`` ({} if absent)."""
     config_path = _messages_dir() / "agents.yaml"
@@ -1005,7 +1018,7 @@ def send(
         raise click.UsageError("--watch waits for a reply; it cannot be combined with --no-reply.")
     if watch_reply:
         _parse_duration(watch_timeout)  # validate before sending anything
-    body = content if content is not None else sys.stdin.read()
+    body = _read_body(content)
     agents = _load_agents()
     if to.lower() == _self_name():
         click.echo("Error: cannot send a message to yourself.", err=True)
@@ -1085,7 +1098,7 @@ def _watch_sent_reply(
 )
 def broadcast(subject: str, content: str | None, mailbox: str, no_reply: bool) -> None:
     """Send a message to every agent in the registry except self."""
-    body = content if content is not None else sys.stdin.read()
+    body = _read_body(content)
     agents = _load_agents()
     mailbox = _normalize_mailbox(mailbox)
     transport = _transport(deliver=_ssh_deliver(agents, mailbox=mailbox), mailbox=mailbox)
@@ -1227,7 +1240,7 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
         click.echo(f"Error: message not found: {message_id}", err=True)
         sys.exit(1)
     mailbox_name, msg_path = resolved
-    body = content if content is not None else sys.stdin.read()
+    body = _read_body(content)
     agents = _load_agents()
     transport = _transport(
         deliver=_ssh_deliver(agents, mailbox=mailbox_name),
