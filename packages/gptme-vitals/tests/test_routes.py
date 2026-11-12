@@ -179,7 +179,7 @@ def test_nav_groups_are_checked_at_construction_not_render_time() -> None:
             portal=PORTAL,
             nav_groups=(("A", ("tasks",)), ("B", ("tasks",))),
         )
-    with pytest.raises(RouteRegistryError, match="external or private"):
+    with pytest.raises(RouteRegistryError, match="external, private"):
         RouteRegistry(ROUTES, portal=PORTAL, nav_groups=(*GROUPS, ("Z", ("grafana",))))
     with pytest.raises(RouteRegistryError, match="missing from nav groups"):
         RouteRegistry(ROUTES, portal=PORTAL, nav_groups=(("Work", ("tasks",)),))
@@ -196,7 +196,7 @@ def test_shared_nav_reaches_every_navigable_route_and_marks_current() -> None:
     anchors = _anchors(nav)
     assert anchors[0] == {"class": "nav-portal", "href": "/"}
     hrefs = [a["href"] for a in anchors[1:]]
-    assert sorted(hrefs) == sorted(r.href for r in reg.navigable())
+    assert sorted(hrefs) == sorted(r.href or "" for r in reg.navigable())
     assert [a["href"] for a in anchors if a.get("aria-current") == "page"] == [
         "/services/"
     ]
@@ -463,8 +463,8 @@ def test_external_url_encoding_does_not_collapse_distinct_queries() -> None:
     encoded = replace(GRAFANA, href="https://example.com/?filter=a%26b")
     literal = replace(GRAFANA, slug="other", href="https://example.com/?filter=a&b")
     reg = RouteRegistry((encoded, literal))
-    assert reg.get_by_href(encoded.href) is encoded
-    assert reg.get_by_href(literal.href) is literal
+    assert reg.get_by_href(encoded.href or "") is encoded
+    assert reg.get_by_href(literal.href or "") is literal
 
 
 @pytest.mark.parametrize("kind", [RouteKind.STATIC, RouteKind.DYNAMIC])
@@ -629,7 +629,9 @@ def test_registered_fragment_is_not_resource_identity(tmp_path: Path) -> None:
     )
     reg = RouteRegistry((route,))
     assert (
-        reg.resolve_internal_target(route.href, current_route="/", site_root=tmp_path)
+        reg.resolve_internal_target(
+            "/report/#latest", current_route="/", site_root=tmp_path
+        )
         == tmp_path / "generated/report.html"
     )
     assert reg.get_by_href("/report/#other") is route
@@ -683,3 +685,98 @@ def test_internal_registration_requires_root_relative_url(
         RouteRegistry((route,))
     with pytest.raises(RouteRegistryError, match="internal href must be root-relative"):
         RouteRegistry((), portal=route)
+
+
+# -- envelope-only routes ----------------------------------------------------
+
+INFERENCE = _route(
+    "inference",
+    href=None,
+    kind=RouteKind.ENVELOPE,
+    output_path=None,
+    summary_source="inference/summary.json",
+    core_dimension="inference",
+)
+
+
+def _envelope_registry(**kw: object) -> RouteRegistry:
+    return RouteRegistry(
+        (*ROUTES, INFERENCE),
+        portal=PORTAL,
+        nav_groups=GROUPS,
+        **kw,
+    )
+
+
+def test_envelope_route_is_neither_crawled_nor_navigated() -> None:
+    """An envelope with no page must not join the nav or the crawl set.
+
+    Registering it alongside nav_groups that omit it is the regression: before
+    ENVELOPE existed, a public route with no page was still "navigable", so the
+    registry demanded a nav entry pointing at a 404.
+    """
+    reg = _envelope_registry()
+    assert not INFERENCE.is_internal and not INFERENCE.is_external
+    assert "inference" not in {r.slug for r in reg.internal()}
+    assert "inference" not in {r.slug for r in reg.navigable()}
+    assert "inference" in {r.slug for r in reg.public()}
+    assert "inference" in {r.slug for r in reg.envelope_routes()}
+    assert reg.core_dimensions()["inference"] == (INFERENCE,)
+    assert "inference" not in reg.render_shared_nav("/")
+
+
+def test_envelope_route_cannot_be_named_in_a_nav_group() -> None:
+    with pytest.raises(RouteRegistryError, match="envelope-only"):
+        RouteRegistry(
+            (*ROUTES, INFERENCE),
+            portal=PORTAL,
+            nav_groups=(*GROUPS, ("Infra", ("inference",))),
+        )
+
+
+def test_envelope_route_card_is_not_a_link() -> None:
+    cards = _envelope_registry().render_portal_cards()
+    assert '<div class="card" data-route="inference">' in cards
+    assert "inference" not in {a.get("data-route") for a in _anchors(cards)}
+    # Page routes keep their link cards.
+    assert "tasks" in {a.get("data-route") for a in _anchors(cards)}
+    assert all(a.get("href") for a in _anchors(cards))
+
+
+@pytest.mark.parametrize(
+    ("kw", "message"),
+    [
+        ({"href": "/inference/"}, "no href or output_path"),
+        ({"output_path": "inference/index.html"}, "no href or output_path"),
+        ({"summary_source": None, "core_dimension": None}, "need a summary_source"),
+    ],
+)
+def test_envelope_route_validation(kw: dict[str, object], message: str) -> None:
+    with pytest.raises(RouteRegistryError, match=message):
+        replace(INFERENCE, **kw).validate()  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("kind", [RouteKind.STATIC, RouteKind.DYNAMIC])
+def test_page_routes_still_require_an_href(kind: RouteKind) -> None:
+    with pytest.raises(RouteRegistryError, match="href is required"):
+        replace(ROUTES[0], href=None, kind=kind).validate()
+
+
+def test_several_envelope_routes_do_not_collide_on_href() -> None:
+    second = replace(INFERENCE, slug="budget", summary_source="budget/summary.json")
+    reg = RouteRegistry((INFERENCE, second), portal=PORTAL)
+    assert reg.get_by_slug("budget") is second
+    assert reg.get_by_href("/") is PORTAL
+
+
+def test_portal_must_be_a_page() -> None:
+    with pytest.raises(RouteRegistryError, match="portal must be a page"):
+        RouteRegistry(ROUTES, portal=replace(INFERENCE, slug="portal"))
+
+
+def test_portal_href_defaults_to_root() -> None:
+    assert RouteRegistry((INFERENCE,)).portal_href == "/"
+    assert (
+        RouteRegistry((INFERENCE,), portal=replace(PORTAL, href="/ops/")).portal_href
+        == "/ops/"
+    )
