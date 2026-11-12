@@ -589,10 +589,11 @@ def _mark_replied(path: Path) -> None:
             fm = re.sub(r"^read: false$", "read: true", fm, flags=re.MULTILINE)
         else:
             fm = fm.rstrip("\n") + "\nread: true\n"
-    if "replied:" not in fm:
-        fm = fm.rstrip("\n") + "\nreplied: true\n"
+    # Anchor on the key: a subject like "Auto-replied: x" must not suppress the stamp.
+    if re.search(r"^replied:", fm, flags=re.MULTILINE):
+        fm = re.sub(r"^replied:.*$", "replied: true", fm, flags=re.MULTILINE)
     else:
-        fm = re.sub(r"^replied: false$", "replied: true", fm, flags=re.MULTILINE)
+        fm = fm.rstrip("\n") + "\nreplied: true\n"
     write_inbox_metadata(path, "---".join([parts[0], fm, parts[2]]))
 
 
@@ -1206,6 +1207,12 @@ def ack(message_id: str, mailbox: str | None) -> None:
     transport = _transport(mailbox=mailbox_name)
     with _send_lock(transport, f"reply:{msg_path.name}"):
         _mark_replied(msg_path)
+        meta = meta_of(msg_path)
+    # _mark_replied skips files without parseable frontmatter; never report a
+    # stamp that did not land, or the message stays pending and re-dispatches.
+    if not (meta and meta.get("replied") is True):
+        click.echo(f"Error: could not mark {msg_path.name} replied (no frontmatter?)", err=True)
+        sys.exit(1)
     click.echo(f"Acknowledged {msg_path.name} (no reply sent).")
 
 
