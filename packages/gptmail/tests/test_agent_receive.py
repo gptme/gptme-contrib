@@ -151,6 +151,32 @@ def test_message_filename_is_path_safe() -> None:
     assert len(name) <= 100
 
 
+def test_receive_accepts_a_sender_rendered_message(
+    tmp_path: Path, clean_agent_scanner: None
+) -> None:
+    """Integration: bytes the real sender renders must pass the receiver.
+
+    The unit cases use a hand-written message; this feeds the exact output of
+    ``AgentTransport.send`` (session id, reply_expected, a subject containing
+    separators) through the receiver and then reads it back with a recipient
+    transport, so the two halves cannot drift.
+    """
+    from gptmail.transport.agent import AgentTransport
+
+    sender = AgentTransport(tmp_path / "alice" / "messages", "alice")
+    message_id = sender.send(
+        "bob", "Release / check: v1.2 & notes", "Line one.\n\n---\n\nLine two.\n"
+    )
+    raw = (sender.outbox / message_id).read_text()
+
+    published = publish_message(raw, tmp_path / "bob" / "messages" / "inbox", self_name="bob")
+    recipient = AgentTransport(tmp_path / "bob" / "messages", "bob")
+    assert [name for name, _s, _t in recipient.list_inbox()] == [published.name]
+    body = recipient.read(published.name)
+    assert "Release / check: v1.2 & notes" in body
+    assert "Line two." in body
+
+
 def test_mailbox_name_traversal_is_refused(tmp_path: Path) -> None:
     from gptmail.transport.receive import mailbox_inbox
 
