@@ -53,7 +53,7 @@ injects relevant lessons as `additionalContext` based on:
         "UserPromptSubmit": [{
           "hooks": [{
             "type": "command",
-            "command": "python3 $CLAUDE_PROJECT_DIR/.claude/hooks/match-lessons.py",
+            "command": "\"$CLAUDE_PROJECT_DIR/.venv/bin/python3\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/match-lessons.py\"",
             "timeout": 10
           }]
         }],
@@ -61,7 +61,7 @@ injects relevant lessons as `additionalContext` based on:
           "matcher": "Read|Bash|Grep|WebFetch|WebSearch",
           "hooks": [{
             "type": "command",
-            "command": "python3 $CLAUDE_PROJECT_DIR/.claude/hooks/match-lessons.py",
+            "command": "\"$CLAUDE_PROJECT_DIR/.venv/bin/python3\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/match-lessons.py\"",
             "timeout": 10
           }]
         }]
@@ -71,6 +71,24 @@ injects relevant lessons as `additionalContext` based on:
 
 3. Ensure your workspace has a `gptme.toml` with `[lessons] dirs` configured.
    The hook reads lesson directories from there (same as gptme's config).
+
+4. Install `gptme-rag` in that same workspace venv, not only in a global tool
+   environment. For example, from the workspace root:
+
+    ```sh
+    uv venv .venv
+    uv pip install --python .venv/bin/python3 ./gptme-contrib/packages/gptme-rag
+    .venv/bin/python3 .claude/hooks/match-lessons.py --self-check
+    ```
+
+   The self-check needs no stdin and exits non-zero if the matcher cannot be
+   imported or none of the configured lesson directories exists. Run it after
+   submodule/dependency updates or from a daily workspace health check. It checks
+   installation health, not whether a particular prompt will match a lesson.
+
+   Normal hook calls remain fail-open. An import failure prints one warning to
+   stderr per invocation and writes a zero-byte receipt with
+   `reason: dependency_missing`, rather than masquerading as `no_match`.
 
 ### Workspace Auto-Discovery
 
