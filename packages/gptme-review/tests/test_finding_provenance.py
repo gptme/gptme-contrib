@@ -313,6 +313,31 @@ def test_until_dry_waves_do_not_invent_pass_numbers(monkeypatch):
     assert kept[0]["until_dry_wave"] == 1
 
 
+def test_until_dry_does_not_sum_distinct_independence_keys(monkeypatch):
+    # Every wave runs the same single lens, so there is one independent source
+    # however many waves run. Summing each wave's set size reported one source
+    # per wave that kept any finding, duplicates included (here 3).
+    other = _finding(
+        file="loader.py",
+        line=40,
+        severity="P2",
+        body="The cache key ignores the encoding, so two decodings collide.",
+        quote="key = path",
+    )
+    waves = iter([[_finding()], [_finding(), other], [_finding(), other]])
+    kept, usage = _fanout(
+        monkeypatch,
+        lambda payload: _response(next(waves)),
+        until_dry=True,
+        until_dry_max=3,
+        aspects={"general": ""},
+    )
+
+    assert usage["until_dry_new_groups"] == [1, 1, 0]
+    assert len(kept) == 2
+    assert usage["distinct_independence_keys"] == 1
+
+
 # --- marker metadata ------------------------------------------------------
 
 
