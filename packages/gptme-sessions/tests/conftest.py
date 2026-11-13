@@ -17,6 +17,18 @@ def isolate_native_pi_sessions(
 
 
 @pytest.fixture(autouse=True)
+def isolate_ambient_claude_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a launcher's ``CC_SESSION_ID`` out of fixture transcript ownership.
+
+    ``post_session`` falls back to ``CC_SESSION_ID`` as the expected native
+    Claude UUID. Inside a Claude Code session that is the running session's
+    UUID, so fixtures with their own IDs were rejected as foreign (25 failures).
+    Tests that exercise the fallback set it explicitly.
+    """
+    monkeypatch.delenv("CC_SESSION_ID", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def isolate_live_openrouter_config(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
