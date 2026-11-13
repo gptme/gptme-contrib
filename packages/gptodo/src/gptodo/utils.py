@@ -1180,22 +1180,24 @@ def count_subtasks(content: str, *, checklist_only: bool = False) -> SubtaskCoun
     return SubtaskCount(completed, completed + pending + skipped, skipped)
 
 
-# A skipped item that promises a follow-up should name the task or issue that
-# now owns it; otherwise the dropped work silently disappears.
-_FOLLOW_UP_PROMISE = re.compile(
-    r"\b(?:file|filed|separate|own|follow[- ]?up)\b[^.;]{0,30}\b(?:task|issue)",
-    re.IGNORECASE,
+# A skipped item drops work from this task, so it must say where that work
+# went: a link to the task or issue that now owns it, or an explicit decision
+# not to do it. Anything else silently disappears when the task closes.
+_FOLLOW_UP_LINK = re.compile(
+    r"(?:\b[\w-]+/[\w.-]+#\d+\b|tasks/[\w./-]+|https?://|\[\[[^\]]+\]\]"
+    r"|(?<!!)\[[^\]]*\]\([^\s()]+\.md(?:#[^\s()]*)?\))"
 )
-_FOLLOW_UP_LINK = re.compile(r"(?:#\d+|tasks/[\w./-]+|https?://|\[\[[^\]]+\]\])")
+_DECLINED = re.compile(r"\b(?:declined|decided against)\s*:\s*[^\s)\]}.,;:!?]", re.IGNORECASE)
 
 
 def skipped_subtask_items(content: str) -> list[tuple[str, bool]]:
-    """Return ``(title, needs_owner_link)`` for each intentionally-skipped item.
+    """Return ``(title, accounted_for)`` for each intentionally-skipped item.
 
     Recognises the same skipped forms as :func:`count_subtasks` (``[-]``,
     ``[SKIP]`` and the two strikethrough forms), outside fenced code blocks.
-    ``needs_owner_link`` is true when the item promises a follow-up task or
-    issue but links none.
+    ``accounted_for`` is true when the item links the task or issue that owns
+    the dropped work, or records ``declined: <reason>`` (``decided against:``
+    is accepted as the same decision).
     """
     items: list[tuple[str, bool]] = []
     fence = ""
@@ -1214,10 +1216,8 @@ def skipped_subtask_items(content: str) -> list[tuple[str, bool]]:
             continue
         marker, title = item.groups()
         if marker in ("[-]", "[SKIP]") or re.match(r"~~.+?~~", title):
-            needs_link = bool(_FOLLOW_UP_PROMISE.search(title)) and not _FOLLOW_UP_LINK.search(
-                title
-            )
-            items.append((title.strip(), needs_link))
+            accounted = bool(_FOLLOW_UP_LINK.search(title) or _DECLINED.search(title))
+            items.append((title.strip(), accounted))
     return items
 
 

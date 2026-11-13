@@ -2988,26 +2988,47 @@ def edit(
             op == "set" and field == "state" and value == "done" for op, field, value in changes
         ):
             continue
-        pending = count_subtasks(_projected_content(post), checklist_only=True).pending
+        projected = _projected_content(post)
+        pending = count_subtasks(projected, checklist_only=True).pending
+        # A recurring task keeps its skipped items across the reset, so the
+        # dropped work does not vanish with the cycle; only one-shot tasks must
+        # account for it. Use the final recurrence value, including same-edit
+        # additions/removals, just as mutate_task does when applying the edit.
+        recur = next(
+            (value for op, field, value in reversed(changes) if op == "set" and field == "recur"),
+            post.metadata.get("recur"),
+        )
+        unowned = (
+            [] if recur else [title for title, ok in skipped_subtask_items(projected) if not ok]
+        )
+        problems = []
         if pending:
-            pending_done.append(f"{task.name}: {pending} unresolved checkbox(es)")
+            problems.append(f"{pending} unresolved checkbox(es)")
+        if unowned:
+            problems.append(
+                f"{len(unowned)} skipped item(s) with no follow-up link or 'declined:' "
+                f"({'; '.join(unowned)})"
+            )
+        if problems:
+            pending_done.append(f"{task.name}: {', '.join(problems)}")
             pending_ids.append(task.name)
 
     if pending_done:
         details = "; ".join(pending_done)
         if not allow_pending:
             refuse(
-                f"Cannot mark done: {details}. Tick completed items, skip dropped items "
-                "with a reason, or file a follow-up task and skip with a pointer. "
+                f"Cannot mark done: {details}. Tick completed items; skip a dropped item "
+                "with a link to the follow-up task or issue that owns it (tasks/<id>.md, "
+                "owner/repo#N, URL, [[id]]) or with 'declined: <reason>'. "
                 "Use --allow-pending only for an intentional override.",
                 task_id=pending_ids[0] if len(pending_ids) == 1 else None,
                 click_error=True,
             )
-        console.print(f"[yellow]--allow-pending: {details}[/]")
+        console.print(f"[yellow]--allow-pending: {markup_escape(details)}[/]")
 
     # Skipped items are a legitimate way to close, but they should stay visible
-    # at the moment of closing: name them, and flag promised follow-ups that do
-    # not yet link the task or issue that owns them.
+    # at the moment of closing. Unaccounted ones were refused above unless
+    # --allow-pending was given; flag those again next to their title.
     for task in target_tasks:
         post = frontmatter.load(task.path)
         prior = normalize_state(str(post.metadata.get("state", "backlog") or "backlog"), warn=False)
@@ -3023,12 +3044,12 @@ def edit(
             f"[yellow]⚠ {markup_escape(task.name)}: marking done with "
             f"{len(skipped_items)} skipped item(s):[/]"
         )
-        for title, needs_link in skipped_items:
+        for title, accounted in skipped_items:
             err_console.print(f"[yellow]    - {markup_escape(title)}[/]")
-            if needs_link:
+            if not accounted:
                 err_console.print(
-                    "[yellow]      ↳ promises a follow-up but links no task or issue; "
-                    "add the tasks/<id>.md path or issue ref that owns it[/]"
+                    "[yellow]      ↳ no follow-up link or 'declined:'; add the "
+                    "tasks/<id>.md path or issue ref that owns it, or 'declined: <reason>'[/]"
                 )
 
     from gptodo.lifecycle import run_completion_effects
