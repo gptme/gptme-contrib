@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 from gptme_vitals.envelope import PageEnvelope, Status
-from gptme_vitals.portal import BADGE_CLASS, render_cards, render_portal
+from gptme_vitals.portal import (
+    BADGE_CLASS,
+    render_card_groups,
+    render_cards,
+    render_envelope_page,
+    render_portal,
+)
 from gptme_vitals.routes import (
     NAV_CSS,
     DashboardRoute,
@@ -153,3 +159,68 @@ def test_portal_ships_the_css_for_the_nav_it_renders() -> None:
     html = render_portal(REGISTRY, [_env("services")], title="Bob")
     assert 'class="vitals-nav"' in html
     assert NAV_CSS in html
+
+
+GROUPED = RouteRegistry(
+    (
+        _route("services"),
+        _route("sessions"),
+        _route(
+            "docs",
+            kind=RouteKind.EXTERNAL,
+            href="https://example.com/docs",
+            output_path=None,
+            summary_source=None,
+        ),
+        _route("fleet", kind=RouteKind.ENVELOPE, href=None, output_path=None),
+    ),
+    portal=PORTAL,
+    nav_groups=(("Infra", ("services",)), ("Metrics", ("sessions",))),
+)
+
+
+def test_portal_cards_sit_under_group_headings_in_nav_order() -> None:
+    html = render_card_groups(GROUPED, [])
+    assert html.index("<h2>Infra</h2>") < html.index('data-route="services"')
+    assert html.index('data-route="services"') < html.index("<h2>Metrics</h2>")
+    assert html.index("<h2>Metrics</h2>") < html.index('data-route="sessions"')
+
+
+def test_routes_outside_every_nav_group_share_an_other_section() -> None:
+    html = render_card_groups(GROUPED, [])
+    other = html[html.index("<h2>Other</h2>") :]
+    assert 'data-route="docs"' in other and 'data-route="fleet"' in other
+    assert 'data-route="services"' not in other
+
+
+def test_registry_without_nav_groups_stays_one_ungrouped_grid() -> None:
+    html = render_card_groups(REGISTRY, [])
+    assert "<h2>" not in html
+    assert html.count('class="cards"') == 1
+
+
+def test_portal_page_is_a_centred_column_with_groups() -> None:
+    html = render_portal(GROUPED, [], title="Bob")
+    assert '<main class="portal">' in html and "max-width" in html
+    assert "<h2>Infra</h2>" in html
+
+
+def test_envelope_page_has_nav_status_and_escaped_lines() -> None:
+    env = PageEnvelope(
+        slug="services",
+        status=Status.DEGRADED,
+        headline=PAYLOAD,
+        lines=(PAYLOAD, "second"),
+        generated_at=NOW,
+    )
+    html = render_envelope_page(GROUPED, "services", env)
+    assert 'class="vitals-nav"' in html and 'aria-current="page"' in html
+    assert "badge-yellow" in html and "second" in html
+    assert "<script>alert(1)" not in html
+
+
+def test_envelope_page_without_data_says_so_and_unknown_slug_raises() -> None:
+    html = render_envelope_page(GROUPED, "services", None)
+    assert "no data" in html and "badge-unknown" in html
+    with pytest.raises(KeyError):
+        render_envelope_page(GROUPED, "fleet", None)

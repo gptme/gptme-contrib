@@ -39,6 +39,11 @@ a.card:hover { border-color: var(--accent); }
 .card-desc, .card-lines { color: var(--dim); font-size: 12px; }
 .card-lines { margin: 6px 0 0; padding: 0; list-style: none; }
 .card-headline { margin: 6px 0; font-size: 18px; }
+.portal, .page { max-width: 1100px; margin: 0 auto; padding: 0 16px; }
+.card-group { margin: 0 0 24px; }
+.card-group h2 { margin: 16px 0 8px; font-size: 13px; font-weight: 600; color: var(--dim);
+  text-transform: uppercase; letter-spacing: 0.06em; }
+.page-lines { margin: 12px 0; padding-left: 20px; }
 """.strip()
 
 
@@ -63,8 +68,10 @@ def _preview_html(envelope: PageEnvelope | None) -> str:
     return f'<ul class="card-lines">{items}</ul>'
 
 
-def render_cards(registry: RouteRegistry, envelopes: Iterable[PageEnvelope]) -> str:
-    """Portal cards for the registry's public routes, in registry order.
+def _card_fragments(
+    registry: RouteRegistry, envelopes: Iterable[PageEnvelope]
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Per-slug meta and preview fragments for the registry's public routes.
 
     A route with a ``summary_source`` but no envelope shows "no data" rather than
     looking healthy; a route with no ``summary_source`` (an external link, say)
@@ -79,7 +86,76 @@ def render_cards(registry: RouteRegistry, envelopes: Iterable[PageEnvelope]) -> 
         envelope = by_slug.get(route.slug)
         meta[route.slug] = _meta_html(envelope)
         preview[route.slug] = _preview_html(envelope)
+    return meta, preview
+
+
+def render_cards(registry: RouteRegistry, envelopes: Iterable[PageEnvelope]) -> str:
+    """Portal cards for the registry's public routes, flat, in registry order."""
+    meta, preview = _card_fragments(registry, envelopes)
     return registry.render_portal_cards(meta_html=meta, preview_html=preview)
+
+
+def render_card_groups(
+    registry: RouteRegistry, envelopes: Iterable[PageEnvelope]
+) -> str:
+    """Portal cards under one heading per nav group, in nav order."""
+    meta, preview = _card_fragments(registry, envelopes)
+    return registry.render_portal_groups(meta_html=meta, preview_html=preview)
+
+
+#: First line of every generated envelope page: lets a rebuild tell its own file
+#: from a page another producer owns.
+ENVELOPE_PAGE_MARKER = "<!-- gptme-vitals:envelope-page -->"
+
+
+def render_envelope_page(
+    registry: RouteRegistry,
+    slug: str,
+    envelope: PageEnvelope | None,
+    *,
+    head_html: str = "",
+    toolbar_html: str = "",
+) -> str:
+    """A minimal page for a route that has an envelope but no dedicated renderer.
+
+    Shows status, headline and preview lines (the same three fields as a portal
+    card) under the shared nav, so the nav and portal link never lead to a
+    directory listing. Like the portal it reads only public envelope fields.
+    """
+    route = registry.get_by_slug(slug)
+    if route is None or route.href is None:
+        raise KeyError(f"no page route {slug!r}")
+    lines: list[str]
+    if envelope is None:
+        status_html = (
+            f'<span class="badge {BADGE_CLASS[Status.NO_DATA]}">{Status.NO_DATA}</span>'
+        )
+        headline, lines, stamp = "no data", [], ""
+    else:
+        status = Status(envelope.status)
+        status_html = (
+            f'<span class="badge {BADGE_CLASS[status]}">{escape(str(status))}</span>'
+        )
+        headline, lines = envelope.headline, list(envelope.lines)
+        stamp = (
+            f'<p class="card-desc">Updated {escape(envelope.generated_at)}</p>'
+            if envelope.generated_at
+            else ""
+        )
+    items = "".join(f"<li>{escape(line)}</li>" for line in lines)
+    body_lines = f'<ul class="page-lines">{items}</ul>' if items else ""
+    return (
+        "<!doctype html>\n"
+        f"{ENVELOPE_PAGE_MARKER}\n"
+        '<html lang="en"><head><meta charset="utf-8">\n'
+        f"<title>{escape(route.label)}</title>\n"
+        f"{head_html}\n<style>\n{NAV_CSS}\n{PORTAL_CSS}\n</style>\n</head><body>\n"
+        f'<main class="page">\n{registry.render_shared_nav(route.href)}\n'
+        f"{toolbar_html}\n<h1>{escape(route.label)}</h1>\n"
+        f'<p class="card-desc">{escape(route.description)}</p>\n'
+        f'<p class="card-headline">{escape(headline)} {status_html}</p>\n'
+        f"{body_lines}\n{stamp}\n</main>\n</body></html>\n"
+    )
 
 
 def render_portal(
@@ -107,8 +183,8 @@ def render_portal(
         '<html lang="en"><head><meta charset="utf-8">\n'
         f"<title>{escape(title)}</title>\n"
         f"{head_html}\n<style>\n{NAV_CSS}\n{PORTAL_CSS}\n</style>\n</head><body>\n"
-        f"{registry.render_shared_nav(registry.portal_href)}\n"
+        f'<main class="portal">\n{registry.render_shared_nav(registry.portal_href)}\n'
         f"{toolbar_html}\n<h1>{escape(title)}</h1>\n{stamp}\n"
-        f'<div class="cards">\n{render_cards(registry, envelopes)}\n</div>\n'
-        "</body></html>\n"
+        f"{render_card_groups(registry, envelopes)}\n"
+        "</main>\n</body></html>\n"
     )

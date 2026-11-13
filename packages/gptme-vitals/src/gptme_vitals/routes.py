@@ -28,6 +28,7 @@ build never writes would ship dead links from the portal, nav and
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from html import escape
@@ -418,31 +419,82 @@ class RouteRegistry:
         """
         meta_html = meta_html or {}
         preview_html = preview_html or {}
-        cards: list[str] = []
-        for route in self.public():
-            target = ' target="_blank" rel="noreferrer"' if route.is_external else ""
-            badge_class = "badge-yellow" if route.is_external else "badge-green"
-            # An empty badge would still render as a coloured pill.
-            badge = (
-                f'<span class="badge {badge_class}">{escape(route.badge)}</span>'
-                if route.badge
-                else ""
-            )
-            body = (
-                f'<div class="card-title">{escape(route.label)}</div>'
-                f'<div class="card-desc">{escape(route.description)}</div>'
-                f"{meta_html.get(route.slug, '')}{preview_html.get(route.slug, '')}"
-                f"{badge}"
-            )
-            slug_attr = escape(route.slug, quote=True)
-            if route.href is None:
-                cards.append(f'<div class="card" data-route="{slug_attr}">{body}</div>')
-            else:
-                cards.append(
-                    f'<a class="card" data-route="{slug_attr}" '
-                    f'href="{escape(route.href, quote=True)}"{target}>{body}</a>'
-                )
-        return "\n".join(cards)
+        return "\n".join(
+            self._render_card(route, meta_html, preview_html) for route in self.public()
+        )
+
+    def render_portal_groups(
+        self,
+        *,
+        meta_html: dict[str, str] | None = None,
+        preview_html: dict[str, str] | None = None,
+    ) -> str:
+        """Render the portal body: one heading and card grid per nav group.
+
+        Groups follow ``nav_groups`` order, so the portal reads like the nav.
+        Public routes outside every group (external links, envelope-only
+        routes) share a trailing "Other" section. A registry without
+        ``nav_groups`` gets a single ungrouped grid, as before.
+        """
+        meta_html = meta_html or {}
+        preview_html = preview_html or {}
+        public = {route.slug: route for route in self.public()}
+        if not self.nav_groups:
+            return self._render_grid(public.values(), meta_html, preview_html)
+        sections: list[tuple[str, list[DashboardRoute]]] = []
+        placed: set[str] = set()
+        for label, slugs in self.nav_groups:
+            routes = [public[slug] for slug in slugs if slug in public]
+            placed.update(route.slug for route in routes)
+            if routes:
+                sections.append((label, routes))
+        rest = [route for slug, route in public.items() if slug not in placed]
+        if rest:
+            sections.append(("Other", rest))
+        return "\n".join(
+            f'<section class="card-group"><h2>{escape(label)}</h2>\n'
+            f"{self._render_grid(routes, meta_html, preview_html)}</section>"
+            for label, routes in sections
+        )
+
+    def _render_grid(
+        self,
+        routes: Iterable[DashboardRoute],
+        meta_html: dict[str, str],
+        preview_html: dict[str, str],
+    ) -> str:
+        cards = "\n".join(
+            self._render_card(route, meta_html, preview_html) for route in routes
+        )
+        return f'<div class="cards">\n{cards}\n</div>'
+
+    @staticmethod
+    def _render_card(
+        route: DashboardRoute,
+        meta_html: dict[str, str],
+        preview_html: dict[str, str],
+    ) -> str:
+        target = ' target="_blank" rel="noreferrer"' if route.is_external else ""
+        badge_class = "badge-yellow" if route.is_external else "badge-green"
+        # An empty badge would still render as a coloured pill.
+        badge = (
+            f'<span class="badge {badge_class}">{escape(route.badge)}</span>'
+            if route.badge
+            else ""
+        )
+        body = (
+            f'<div class="card-title">{escape(route.label)}</div>'
+            f'<div class="card-desc">{escape(route.description)}</div>'
+            f"{meta_html.get(route.slug, '')}{preview_html.get(route.slug, '')}"
+            f"{badge}"
+        )
+        slug_attr = escape(route.slug, quote=True)
+        if route.href is None:
+            return f'<div class="card" data-route="{slug_attr}">{body}</div>'
+        return (
+            f'<a class="card" data-route="{slug_attr}" '
+            f'href="{escape(route.href, quote=True)}"{target}>{body}</a>'
+        )
 
 
 def _href_key(href: str) -> str:

@@ -114,6 +114,73 @@ def test_full_build_writes_pages_and_derived_files(tmp_path: Path) -> None:
     assert not (tmp_path / "public/cost").exists()
 
 
+def test_page_without_html_gets_an_envelope_page(tmp_path: Path) -> None:
+    code, lines = _run(tmp_path, _all())
+    assert code == 0
+    page = (tmp_path / "public/services/index.html").read_text()
+    assert "<h1>Services</h1>" in page and 'class="vitals-nav"' in page
+    assert "ok   page services (envelope)" in lines
+    # A private route has no public page.
+    assert not (tmp_path / "public/cost").exists()
+
+
+def test_page_another_producer_wrote_is_left_alone_and_ours_is_refreshed(
+    tmp_path: Path,
+) -> None:
+    own = tmp_path / "public/sessions/index.html"
+    own.parent.mkdir(parents=True)
+    own.write_text("<html>legacy</html>")
+    assert _run(tmp_path, _all())[0] == 0
+    assert own.read_text() == "<html>legacy</html>"
+    generated = tmp_path / "public/services/index.html"
+    first = generated.read_text()
+    assert _run(tmp_path, _all(services=_emitter("services", Status.DOWN)))[0] == 0
+    assert generated.read_text() != first and "badge-red" in generated.read_text()
+
+
+@pytest.mark.parametrize("failure", ["write", "publish", "read"])
+def test_envelope_page_failure_exits_nonzero_and_keeps_publishing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from gptme_vitals import cli
+    from gptme_vitals.publish import PublishError
+
+    target = tmp_path / "public/services/index.html"
+    if failure == "read":
+        target.parent.mkdir(parents=True)
+        target.write_text(cli.ENVELOPE_PAGE_MARKER)
+        real_read = Path.read_text
+
+        def fail_read(path: Path, *args: Any, **kwargs: Any) -> str:
+            if path == target:
+                raise PermissionError("fallback read denied")
+            return real_read(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_read)
+    else:
+        real_write = cli.write_text
+
+        def fail_write(path: Path, content: str) -> None:
+            if path == target:
+                if failure == "publish":
+                    raise PublishError("fallback publish denied")
+                raise PermissionError("fallback write denied")
+            real_write(path, content)
+
+        monkeypatch.setattr(cli, "write_text", fail_write)
+
+    code, lines = _run_with(tmp_path, _portal_registry())
+    assert code == 1
+    assert any(line.startswith("FAIL page services:") for line in lines)
+    assert "ok   page sessions (envelope)" in lines
+    assert (tmp_path / "public/sessions/index.html").is_file()
+    assert (tmp_path / "public/services/summary.json").is_file()
+    assert _core(tmp_path)["status"] == "healthy"
+    assert "ok   portal" in lines
+    if failure != "read":
+        assert not target.exists()
+
+
 def test_partial_build_keeps_the_other_pages_in_core(tmp_path: Path) -> None:
     _run(tmp_path, _all(sessions=_emitter("sessions", Status.DOWN)))
     assert _core(tmp_path)["status"] == "down"
@@ -153,7 +220,9 @@ def test_failing_emitter_is_isolated_and_exits_nonzero(tmp_path: Path) -> None:
     assert "FAIL sessions: RuntimeError: collector down" in lines
     assert "ok   services: healthy" in lines
     assert (tmp_path / "public/services/summary.json").exists()
-    assert not (tmp_path / "public/sessions").exists()
+    assert not (tmp_path / "public/sessions/summary.json").exists()
+    # The nav still links the page, so it says "no data" instead of listing a directory.
+    assert "no data" in (tmp_path / "public/sessions/index.html").read_text()
 
 
 def test_failed_rebuild_keeps_the_previous_page(tmp_path: Path) -> None:
@@ -194,6 +263,39 @@ def test_headline_page_that_failed_before_ever_building_fails_core(
     assert code == 1
     assert any(line.startswith("FAIL core:") for line in lines)
     assert not (tmp_path / "public/core.json").exists()
+    assert "no data" in (tmp_path / "public/services/index.html").read_text()
+    assert "sessions" in (tmp_path / "public/sessions/index.html").read_text()
+    assert not (tmp_path / "public/cost").exists()
+
+
+@pytest.mark.parametrize("failure", ["core-write", "portal-write"])
+def test_shared_output_failure_does_not_skip_envelope_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from gptme_vitals import cli
+
+    if failure == "core-write":
+        # Atomic replacement onto a directory fails.
+        (tmp_path / "public/core.json").mkdir(parents=True)
+    else:
+        real_write = cli.write_text
+
+        def fail_portal(path: Path, content: str) -> None:
+            if path == tmp_path / "public/index.html":
+                raise PermissionError("portal write denied")
+            real_write(path, content)
+
+        monkeypatch.setattr(cli, "write_text", fail_portal)
+    code, lines = _run_with(tmp_path, _portal_registry())
+    assert code == 1
+    prefix = "FAIL core:" if failure == "core-write" else "FAIL portal:"
+    assert any(line.startswith(prefix) for line in lines)
+    for slug in ("services", "sessions"):
+        assert f"ok   page {slug} (envelope)" in lines
+        page = tmp_path / f"public/{slug}/index.html"
+        assert "badge-green" in page.read_text()
+        assert (page.parent / "summary.json").is_file()
+    assert not (tmp_path / "public/cost").exists()
 
 
 def test_unknown_page_is_a_usage_error_before_anything_is_written(

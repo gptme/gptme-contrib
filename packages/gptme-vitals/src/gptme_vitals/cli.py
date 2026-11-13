@@ -24,10 +24,15 @@ import os
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from gptme_vitals.build import BuildError, derive_core, headline_link, write_core_files
 from gptme_vitals.envelope import PageEnvelope
-from gptme_vitals.portal import render_portal
+from gptme_vitals.portal import (
+    ENVELOPE_PAGE_MARKER,
+    render_envelope_page,
+    render_portal,
+)
 from gptme_vitals.publish import (
     LOCK_NAME,
     PublishError,
@@ -180,6 +185,49 @@ def run_build(
         return 1
 
 
+def write_envelope_pages(
+    registry: RouteRegistry,
+    envelopes: Sequence[PageEnvelope],
+    public_root: Path,
+    *,
+    out: Callable[[str], None],
+) -> int:
+    """Write missing/owned envelope pages; return the number of failed pages.
+
+    The nav and portal link each navigable route to ``output_path``; a route
+    whose producer never writes that file would serve a directory listing. A page
+    another producer owns is left alone: only a missing file or one this function
+    wrote (it carries :data:`ENVELOPE_PAGE_MARKER`) is written.
+    """
+    by_slug = {e.slug: e for e in envelopes}
+    head, toolbar = render_head_assets(), render_theme_toggle()
+    failed = 0
+    for route in registry.navigable():
+        try:
+            target = route.static_target(public_root)
+            # A query string means another page serves this route (a headline view).
+            if target is None or (route.href and urlsplit(route.href).query):
+                continue
+            if target.exists() and ENVELOPE_PAGE_MARKER not in target.read_text(
+                encoding="utf-8", errors="replace"
+            ):
+                continue
+            html = render_envelope_page(
+                registry,
+                route.slug,
+                by_slug.get(route.slug),
+                head_html=head,
+                toolbar_html=toolbar,
+            )
+            write_text(target, html)
+        except (OSError, PublishError) as exc:
+            failed += 1
+            out(f"FAIL page {route.slug}: {exc}")
+        else:
+            out(f"ok   page {route.slug} (envelope)")
+    return failed
+
+
 def _publish_and_derive(
     registry: RouteRegistry,
     emitted: Sequence[PageEnvelope],
@@ -208,6 +256,9 @@ def _publish_and_derive(
     # reaches the rollup by the same path (and a failed page keeps its previous
     # file rather than being treated as absent).
     envelopes = load_envelopes(registry, private_root)
+    # Per-route HTML must not depend on shared core/portal publication: a failed
+    # headline collector or shared write must not leave healthy routes unserved.
+    failed += write_envelope_pages(registry, envelopes, public_root, out=out)
     try:
         core, headline = derive_core(
             registry, envelopes, agent=agent, base_url=base_url
