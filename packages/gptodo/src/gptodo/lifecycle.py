@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Literal
 
 from gptodo.frontmatter_compat import frontmatter
+from gptodo.gate import check_gate_change, stamp_deadline_push
 from gptodo.utils import (
     advance_wait,
     find_repo_root,
@@ -461,6 +462,8 @@ def transform_post(
             # recur: + wait: are the gate; no waiting_for restating the date.
             post.metadata.pop("waiting_for", None)
             post.metadata.pop("probe", None)
+            # The completed cycle's gate cannot constrain the next recurrence.
+            post.metadata.pop("gate", None)
             if not _completed_explicitly_set:
                 post.metadata.pop("completed", None)
             # A new cycle starts with an open checklist. Leaving last cycle's
@@ -644,11 +647,13 @@ def mutate_task(
         if prepare is not None:
             operations.extend(prepare(copy.deepcopy(prior)))
         post = transform_post(prior, operations, now=now, force=force, intent=intent, strict=strict)
+        stamp_deadline_push(prior.metadata, post.metadata)
         # Legacy malformed recurrence can still be closed/cleaned. Do not
         # reject an unrelated pre-existing schema defect, but never introduce
         # new ones. State null/invalid is independently rejected above.
         prior_errors = validate_task_file(path, prior)
         errors = [error for error in validate_task_file(path, post) if error not in prior_errors]
+        errors.extend(check_gate_change(prior.metadata, post.metadata))
         if errors:
             raise TransitionError("; ".join(errors))
         fields = {
