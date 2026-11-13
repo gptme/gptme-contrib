@@ -97,6 +97,16 @@ def test_tail_preserves_universal_newlines(tmp_path, newline):
     assert load_jsonl(path, tail=10) == [{"n": 1}, {"n": 2}]
 
 
+@pytest.mark.parametrize("whitespace", ["\u00a0", "\u2003", "\u202f", "\u3000"])
+def test_tail_preserves_unicode_whitespace(tmp_path, whitespace):
+    path = tmp_path / "ledger.jsonl"
+    path.write_text(
+        f'{whitespace}{{"n": 1}}{whitespace}\n{whitespace}\n', encoding="utf-8"
+    )
+    assert load_jsonl(path) == [{"n": 1}]
+    assert load_jsonl(path, tail=1) == load_jsonl(path)
+
+
 @pytest.mark.parametrize("newline", [b"\r", b"\r\n"])
 def test_tail_newline_at_block_boundary(tmp_path, newline):
     path = tmp_path / "ledger.jsonl"
