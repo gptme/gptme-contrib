@@ -91,6 +91,13 @@ class SessionIndex:
     time is nearest to ``at`` within ``window`` before it and ``slack`` after
     (records without ``start_time`` are stamped at session end);
     without ``at``, or with none in range, the result is ``None``.
+
+    This is a bounded proximity heuristic, not an interval-containment check.
+    An end-only timestamp does not establish when that session began. Events
+    more than ``slack`` before an end-only stamp deliberately stay unresolved;
+    callers with known long sessions can supply a larger ``slack`` or enrich
+    rows with ``start_time``. The default prefers missing attribution to
+    guessing across reused labels.
     """
 
     def __init__(

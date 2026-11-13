@@ -65,6 +65,21 @@ def test_single_label_is_still_time_checked():
     assert idx.resolve("4033", at="2026-03-12T00:00:00Z") is None
 
 
+def test_end_only_stamp_does_not_prove_earlier_event_is_inside_session():
+    from datetime import timedelta
+
+    row = {"session_id": "4033", "timestamp": "2026-03-12T18:00:00Z"}
+    idx = SessionIndex([row])
+    assert idx.resolve("4033", at="2026-03-12T13:00:00Z") is None
+    assert idx.stats["out_of_window"] == 1
+    assert (
+        SessionIndex([row], slack=timedelta(hours=6)).resolve("4033", at="2026-03-12T13:00:00Z")
+        is row
+    )
+    with_start = {**row, "start_time": "2026-03-12T12:00:00Z"}
+    assert SessionIndex([with_start]).resolve("4033", at="2026-03-12T13:00:00Z") is with_start
+
+
 def test_alias_fields_resolve_to_the_record():
     row = {
         "session_id": UUID,
