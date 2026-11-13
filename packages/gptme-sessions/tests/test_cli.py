@@ -1164,6 +1164,16 @@ class TestSyncTimestamp:
         assert _project_matches({"harness": "claude-code", "project": "/home/u/.repo"}, wanted)
         assert not _project_matches({"harness": "claude-code", "project": "/home/u/repo"}, wanted)
 
+    def test_project_filter_trailing_punctuation_claude_code(self):
+        """A workspace ending in punctuation matches its decoded CC path (``repo-`` -> ``repo/``)."""
+        from gptme_sessions.cli import _normalize_project, _project_matches
+
+        wanted = {_normalize_project("/home/u/repo-")}
+        assert _project_matches({"harness": "claude-code", "project": "/home/u/repo/"}, wanted)
+        assert not _project_matches({"harness": "claude-code", "project": "/home/u/repo"}, wanted)
+        plain = {_normalize_project("/home/u/repo")}
+        assert not _project_matches({"harness": "claude-code", "project": "/home/u/repo/"}, plain)
+
     def test_sync_imports_real_start_time_from_trajectory(self, tmp_path: Path):
         """sync should record the real start time, not a noon-UTC placeholder.
 
