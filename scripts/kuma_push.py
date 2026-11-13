@@ -242,7 +242,8 @@ def push_url(
             timeout=timeout + 10,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        print(f"WARN: Kuma push {name} failed: {exc}", file=sys.stderr)
+        # TimeoutExpired includes argv, including the secret capability URL.
+        print(f"WARN: Kuma push {name} failed: {type(exc).__name__}", file=sys.stderr)
         return False
     if result.returncode != 0:
         print(

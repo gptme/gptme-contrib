@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -101,6 +102,20 @@ def test_push_curl_missing_is_failure(monkeypatch, capsys):
     monkeypatch.setattr(kuma_push.subprocess, "run", boom)
     assert not kuma_push.push_url("http://kuma/push/x", "up", "x")
     assert "failed" in capsys.readouterr().err
+
+
+def test_push_timeout_does_not_leak_capability_url(monkeypatch, capsys):
+    secret_url = "https://kuma.example/api/push/private-capability"
+
+    def timed_out(args, **kwargs):
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    monkeypatch.setattr(kuma_push.subprocess, "run", timed_out)
+    assert not kuma_push.push_url(secret_url)
+    err = capsys.readouterr().err
+    assert "TimeoutExpired" in err
+    assert "private-capability" not in err
+    assert "kuma.example" not in err
 
 
 def test_load_push_url_env_precedence(tmp_path, monkeypatch):
