@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import math
 import os
 import re
 import subprocess
@@ -2090,7 +2091,11 @@ def _log_usage_record(
     completion_details = usage.get("completion_tokens_details") or {}
     prompt_tokens = usage.get("prompt_tokens")
     cost = usage.get("cost")
-    cost_method = "openrouter_generation" if cost is not None else None
+    cost_method = (
+        usage.get("cost_method") or "openrouter_generation"
+        if cost is not None
+        else None
+    )
     if prompt_tokens is None and usage.get("prompt") is not None:
         prompt_tokens = max(1, len(str(usage["prompt"])) // 4)
     if cost is None:
@@ -2139,6 +2144,7 @@ def _log_usage_record(
         "reasoning_tokens": completion_details.get("reasoning_tokens"),
         "cost": cost,
         "cost_method": cost_method,
+        "generation_id": usage.get("generation_id"),
         "elapsed_s": round(elapsed_s, 3) if elapsed_s is not None else None,
         **{k: usage[k] for k in REQUEST_TIMING_FIELDS if k in usage},
         **({"stalled_at": usage["stalled_at"]} if usage.get("stalled_at") else {}),
@@ -2185,7 +2191,23 @@ def _response_usage(
         else {}
     )
     usage["provider"] = metadata.get("provider") or data.get("provider")
-    usage["cost"] = metadata.get("cost")
+    # Generation metadata can lag or fail. Keep response-reported billing
+    # rather than overwriting it with None and silently estimating the charge.
+    usage["cost"] = None
+    usage.pop("cost_method", None)
+    for cost, method in (
+        (metadata.get("cost"), "openrouter_generation"),
+        ((data.get("usage") or {}).get("cost"), "openrouter_response"),
+    ):
+        if (
+            isinstance(cost, int | float)
+            and not isinstance(cost, bool)
+            and math.isfinite(cost)
+            and cost >= 0
+        ):
+            usage["cost"] = cost
+            usage["cost_method"] = method
+            break
     usage["model"] = model
     usage["generation_id"] = data.get("id")
     timings = data.get("_timings")
