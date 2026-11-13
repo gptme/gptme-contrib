@@ -4719,3 +4719,15 @@ def test_failed_delivery_does_not_promote_repopulated_notifications(
     monkeypatch.setattr(mod, "purge_pending_notif_state", repopulate)
     run_post_session(plan, item, outcome, config, hooks)
     assert not (config.state_dir / "notif-555.state").exists()
+
+
+def test_erik_agent_message_floors_at_assigned_issue_tier(tmp_path) -> None:
+    """A mail from Erik is not a 900 s fast-lane item (2026-11-12 cut mid-commit)."""
+    from gptme_runloops.pm_dispatch import is_erik_agent_message
+
+    config = make_config(tmp_path)
+    detail = "file=m.md sender=erik subject=Fix it"
+    assert timeout_tier(["agent_msg_reply"], False, config) == (900, "~10 minutes")
+    assert timeout_tier(
+        ["agent_msg_reply"], False, config, is_mention=is_erik_agent_message(detail)
+    ) == (1500, "~20 minutes")

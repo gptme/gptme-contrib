@@ -104,6 +104,7 @@ from gptme_runloops.pm_dispatch import (
     classify_item_work_type,
     derive_slot_key,
     is_direct_mention,
+    is_erik_agent_message,
 )
 from gptme_runloops.prompt_templates import (
     ItemPromptParams,
@@ -1596,7 +1597,7 @@ def plan_item(
         bool(greptile_fix),
         config,
         instruction_kind=instruction_kind,
-        is_mention=is_direct_mention(item.detail),
+        is_mention=is_direct_mention(item.detail) or is_erik_agent_message(item.detail),
     )
 
     mention = ""
