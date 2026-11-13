@@ -125,7 +125,7 @@ Standalone scripts and integrations — see [scripts/README.md](./scripts/README
 - **[skills/](./skills/)** — Skill bundles (workflows + scripts + docs): agent onboarding, plugin development, code review, artifact publishing, Home Assistant, and more. See [skills/README.md](./skills/README.md).
 - **[lessons/](./lessons/)** — Shared lessons injected into agent prompts by keyword match, across categories (autonomous, communication, infrastructure, patterns, social, tools, workflow). See [lessons/README.md](./lessons/README.md).
 - **[dotfiles/](./dotfiles/)** — Global git hooks and config for safer agent development workflows. See [dotfiles/README.md](./dotfiles/README.md).
-- **[docs/](./docs/)** — Plugin deep-dives and cross-agent protocols (e.g. the [heartbeat protocol](./docs/protocols/gptme-heartbeat.md)).
+- **[docs/](./docs/)** — Plugin deep-dives and cross-agent protocols (e.g. the [heartbeat protocol](./docs/protocols/gptme-heartbeat.md)), plus the [principal notification and Kuma heartbeat contract](./docs/principal-notify.md).
 
 ## Ecosystem
 

@@ -58,7 +58,9 @@ files are skipped. Keep ShellCheck enabled alongside it.
 | [find-dupes.py](./find-dupes.py) | Find duplicate/near-duplicate files |
 | [fleet_vitals.py](./fleet_vitals.py) | Health overview across an agent fleet |
 | [gptme-heartbeat-validate.py](./gptme-heartbeat-validate.py) | Validate heartbeat protocol messages ([protocol docs](../docs/protocols/gptme-heartbeat.md)) |
+| [kuma_push.py](./kuma_push.py) | Uptime Kuma push helper: URL encoding, acknowledgement checks, ack ledger ([docs](../docs/principal-notify.md)) |
 | [perplexity.py](./perplexity.py) | Web search via the Perplexity API |
+| [principal_notify.py](./principal_notify.py) | Escalate to the agent's principal: Tier-0 local alert plus `github`/`pushover`/`telegram`/`ntfy` ([docs](../docs/principal-notify.md)) |
 | [quota-gate.sh](./quota-gate.sh) | Gate session start on available quota |
 | [search.py](./search.py) | Workspace-wide search |
 | [state-status.py](./state-status.py) | Agent state/health status |
