@@ -262,6 +262,7 @@ def main():
         return all(disk_matches(path + b"/" + child, expected) for child in children)
 
     materialized = skipped = failed = 0
+    unreconciled = []
     for root in sorted(roots):
         expected = {path: entry for path, entry in old.items() if within(path, root)}
         expected_index = {path: [(mode, oid, b"0")]
@@ -285,6 +286,7 @@ def main():
                     or any(within(path, root) for path in flagged)
                     or not ancestors_clean or not disk_matches(root, expected)):
                 skipped += 1
+                unreconciled.append(root)
                 continue
             # Literal root includes all leaves of a type transition. Unlike
             # checkout, restore also handles paths deleted from the source tree.
@@ -298,6 +300,19 @@ def main():
                   file=sys.stderr)
             break
     unattempted = len(roots) - materialized - skipped - failed
+    if unreconciled:
+        # A skipped path keeps the pre-update base on disk. Leave a marker the
+        # editing session's next commit can read: committing that file would
+        # publish a revert of what upstream just landed (the journal line alone
+        # never reaches that session). Format: root TAB before TAB after.
+        marker = os.path.join(os.fsdecode(git("rev-parse", "--git-common-dir")[:-1]),
+                              "gsc-unreconciled.tsv")
+        try:
+            with open(marker, "ab") as handle:
+                for root in unreconciled:
+                    handle.write(root + b"\t" + before.encode() + b"\t" + after.encode() + b"\n")
+        except OSError as error:
+            print(f"warning: could not record unreconciled paths: {error}", file=sys.stderr)
     print(f"  Local materialization: {materialized} clean group(s) updated, "
           f"{skipped} locally changed/unsupported skipped, {failed} failed, "
           f"{unattempted} unattempted")
