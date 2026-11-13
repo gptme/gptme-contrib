@@ -423,3 +423,87 @@ def test_verify_account_identity_passes_on_match(
     console = SimpleNamespace(print=lambda *a, **k: None)
     twitter_module._verify_account_identity("gptmeorg", console)
     twitter_module._verify_account_identity("GPTMEORG", console)
+
+
+class _RefreshReached(BaseException):
+    """Escapes load_twitter_client's broad ``except Exception`` at the refresh call."""
+
+
+def _drive_default_account_refresh(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[list[Any], list[Any]]:
+    """Run load_twitter_client up to the token refresh; return (loaded, refreshed) paths."""
+    import os
+
+    monkeypatch.delenv("TWITTER_ACCOUNT", raising=False)
+    workspace_env = tmp_path / "workspace.env"
+    monkeypatch.setattr(
+        sys.modules["dotenv"], "find_dotenv", lambda *a, **k: str(workspace_env)
+    )
+    creds = {
+        "TWITTER_BEARER_TOKEN": "bearer",
+        "TWITTER_CLIENT_ID": "cid",
+        "TWITTER_CLIENT_SECRET": "csecret",
+        "TWITTER_OAUTH2_ACCESS_TOKEN": "expired-access",
+        "TWITTER_OAUTH2_REFRESH_TOKEN": "refresh",
+        "TWITTER_OAUTH2_EXPIRES_AT": "2000-01-01T00:00:00+00:00",
+    }
+    loaded: list[Any] = []
+
+    def _load(path=None, override=False) -> None:
+        loaded.append(path)
+        for k, v in creds.items():
+            monkeypatch.setenv(k, v)
+
+    refreshed: list[Any] = []
+
+    def _refresh(_manager, env_path):
+        refreshed.append(env_path)
+        raise _RefreshReached
+
+    class _ExpiredToken:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def is_expired(self) -> bool:
+            return True
+
+    monkeypatch.setattr(twitter_module, "load_dotenv", _load)
+    monkeypatch.setattr(twitter_module, "TokenInfo", _ExpiredToken)
+    monkeypatch.setattr(twitter_module, "refresh_twitter_token_if_needed", _refresh)
+    monkeypatch.setattr(
+        twitter_module, "console", SimpleNamespace(print=lambda *a, **k: None)
+    )
+    assert "TWITTER_ACCOUNT" not in os.environ
+
+    with pytest.raises(_RefreshReached):
+        twitter_module.load_twitter_client(require_auth=True)
+    return loaded, refreshed
+
+
+def test_twitter_env_file_is_both_token_source_and_refresh_target(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Rotated refresh tokens must persist where they were loaded from."""
+    store = tmp_path / "secrets" / "twitter.env"
+    monkeypatch.setenv("TWITTER_ENV_FILE", str(store))
+
+    loaded, refreshed = _drive_default_account_refresh(
+        twitter_module, monkeypatch, tmp_path
+    )
+
+    assert loaded == [store]
+    assert refreshed == [store]
+
+
+def test_unset_twitter_env_file_keeps_workspace_dotenv(
+    twitter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("TWITTER_ENV_FILE", raising=False)
+
+    loaded, refreshed = _drive_default_account_refresh(
+        twitter_module, monkeypatch, tmp_path
+    )
+
+    assert loaded == [None]
+    assert refreshed == [tmp_path / "workspace.env"]
