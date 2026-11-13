@@ -1,5 +1,6 @@
 """Portable shard planning preserves byte bounds, anchors and weakest consensus."""
 
+import subprocess
 from collections import Counter
 
 import pytest
@@ -51,6 +52,67 @@ def test_file_sections_round_trip_and_paths():
     assert [s.path for s in sections] == ["a.py", "gone.py", "img.png"]
     assert (sections[0].added, sections[0].removed) == (3, 3)
     assert (sections[1].added, sections[1].removed) == (0, 1)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["é.py", "space name.py", 'quote".py', "back\\slash.py", "tab\t.py", "line\n.py"],
+)
+@pytest.mark.parametrize("change", ["modify", "delete", "binary", "rename"])
+@pytest.mark.parametrize("quote_path", ["true", "false"])
+def test_real_git_quoted_paths_preserve_inventory_and_group(
+    tmp_path, name, change, quote_path
+):
+    """Exercise Git's actual C-quoted UTF-8 bytes, including header-only changes."""
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), *args],
+            check=True,
+            capture_output=True,
+        ).stdout.decode("utf-8")
+
+    git("init", "-q")
+    git("config", "core.quotePath", quote_path)
+    # Fixture repository: do not inherit developer hooks or commit signing.
+    git("config", "core.hooksPath", str(tmp_path / "no-hooks"))
+    git("config", "commit.gpgsign", "false")
+    path = f"packages/é/{name}"
+    source = tmp_path / path
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"old\n" if change != "binary" else b"\x00old\n")
+    git("add", "--", path)
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.org",
+        "commit",
+        "-qm",
+        "base",
+    )
+    expected = path
+    if change == "delete":
+        source.unlink()
+    elif change == "rename":
+        # Mixed quoted/unquoted header tokens must work in either direction.
+        expected = "plain name.py"
+        source.rename(tmp_path / expected)
+    else:
+        source.write_bytes(b"new\n" if change != "binary" else b"\x00new\n")
+    git("add", "-A")
+    diff = git("diff", "--cached", "--find-renames")
+    sections = shard.split_file_sections(diff)
+    assert len(sections) == 1
+    assert sections[0].path == expected
+    assert sections[0].text == diff
+    plan = shard.plan_shards(diff)
+    assert plan[0].paths == [expected]
+    assert shard.file_stats(plan)[0]["path"] == expected
+    assert shard.group_key(expected) == ("" if change == "rename" else "packages/é")
+    if change == "rename":
+        reverse = git("diff", "--cached", "--find-renames", "-R")
+        assert shard.split_file_sections(reverse)[0].path == path
 
 
 @pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\x85", "\v", "\f", "\r"])

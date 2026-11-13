@@ -35,6 +35,7 @@ Pure functions only; credit availability and host reserve policy stay in the cal
 
 from __future__ import annotations
 
+import codecs
 import math
 import re
 from collections.abc import Mapping, Sequence
@@ -93,7 +94,10 @@ DEFERRED_SENTINEL = "ai-review-deferred:"
 _SHARD_WAVES_RE = re.compile(r"\bshard_waves=(\d+)\b")
 
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
-_GIT_HEADER_RE = re.compile(r"^diff --git a/(.*?) b/(.*)$")
+_GIT_QUOTED_PATH = r'"(?:[^"\\]|\\.)*"'
+_GIT_HEADER_RE = re.compile(
+    rf"^diff --git (?:{_GIT_QUOTED_PATH}|a/.*?) ({_GIT_QUOTED_PATH}|b/.*)$"
+)
 
 
 def _nbytes(text: str) -> int:
@@ -162,6 +166,15 @@ def _count_changes(lines: Sequence[str]) -> tuple[int, int]:
     return added, removed
 
 
+def _unquote_path(path: str) -> str:
+    """Decode Git's C-style quoting as bytes before interpreting UTF-8 octets."""
+    if path.startswith('"') and path.endswith('"'):
+        decoded = codecs.escape_decode(path[1:-1].encode("utf-8"))[0]
+        assert isinstance(decoded, bytes)
+        return decoded.decode("utf-8", errors="surrogateescape")
+    return path
+
+
 def _section_path(lines: Sequence[str]) -> str | None:
     """Post-image path of a section (pre-image for a deletion)."""
     pre: str | None = None
@@ -169,15 +182,17 @@ def _section_path(lines: Sequence[str]) -> str | None:
         if line.startswith("@@"):
             break
         if line.startswith("--- "):
-            target = line[4:].rstrip("\r\n").split("\t", 1)[0]
+            target = _unquote_path(line[4:].rstrip("\r\n").split("\t", 1)[0])
             if target != "/dev/null":
                 pre = target.removeprefix("a/")
         elif line.startswith("+++ "):
-            target = line[4:].rstrip("\r\n").split("\t", 1)[0]
+            target = _unquote_path(line[4:].rstrip("\r\n").split("\t", 1)[0])
             return pre if target == "/dev/null" else target.removeprefix("b/")
+        elif line.startswith(("rename to ", "copy to ")):
+            return _unquote_path(line.split(" to ", 1)[1].rstrip("\r\n"))
     # Binary files / pure renames carry no ---/+++ lines.
     m = _GIT_HEADER_RE.match(lines[0].rstrip("\r\n")) if lines else None
-    return m.group(2) if m else pre
+    return _unquote_path(m.group(1)).removeprefix("b/") if m else pre
 
 
 def split_file_sections(diff: str) -> list[FileSection]:
