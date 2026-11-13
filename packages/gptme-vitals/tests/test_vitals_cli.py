@@ -114,6 +114,30 @@ def test_full_build_writes_pages_and_derived_files(tmp_path: Path) -> None:
     assert not (tmp_path / "public/cost").exists()
 
 
+def test_page_without_html_gets_an_envelope_page(tmp_path: Path) -> None:
+    code, lines = _run(tmp_path, _all())
+    assert code == 0
+    page = (tmp_path / "public/services/index.html").read_text()
+    assert "<h1>Services</h1>" in page and 'class="vitals-nav"' in page
+    assert "ok   page services (envelope)" in lines
+    # A private route has no public page.
+    assert not (tmp_path / "public/cost").exists()
+
+
+def test_page_another_producer_wrote_is_left_alone_and_ours_is_refreshed(
+    tmp_path: Path,
+) -> None:
+    own = tmp_path / "public/sessions/index.html"
+    own.parent.mkdir(parents=True)
+    own.write_text("<html>legacy</html>")
+    assert _run(tmp_path, _all())[0] == 0
+    assert own.read_text() == "<html>legacy</html>"
+    generated = tmp_path / "public/services/index.html"
+    first = generated.read_text()
+    assert _run(tmp_path, _all(services=_emitter("services", Status.DOWN)))[0] == 0
+    assert generated.read_text() != first and "badge-red" in generated.read_text()
+
+
 def test_partial_build_keeps_the_other_pages_in_core(tmp_path: Path) -> None:
     _run(tmp_path, _all(sessions=_emitter("sessions", Status.DOWN)))
     assert _core(tmp_path)["status"] == "down"
@@ -153,7 +177,9 @@ def test_failing_emitter_is_isolated_and_exits_nonzero(tmp_path: Path) -> None:
     assert "FAIL sessions: RuntimeError: collector down" in lines
     assert "ok   services: healthy" in lines
     assert (tmp_path / "public/services/summary.json").exists()
-    assert not (tmp_path / "public/sessions").exists()
+    assert not (tmp_path / "public/sessions/summary.json").exists()
+    # The nav still links the page, so it says "no data" instead of listing a directory.
+    assert "no data" in (tmp_path / "public/sessions/index.html").read_text()
 
 
 def test_failed_rebuild_keeps_the_previous_page(tmp_path: Path) -> None:
