@@ -177,6 +177,9 @@ def _emit_context(
             "additionalContext": context,
         }
     }
+    # Matching is complete. Do not let SIGALRM interrupt a JSON write or later
+    # bookkeeping and make the timeout handler append a second response.
+    _disarm_hook_budget()
     json.dump(result, sys.stdout)
     sys.stdout.flush()
     receipt = _write_emission_receipt(
@@ -1391,6 +1394,7 @@ def emit_empty(
     """
     # For PreToolUse, exit 0 with no output is cleanest — doesn't interfere
     # with permissions. For UserPromptSubmit, we emit the standard structure.
+    _disarm_hook_budget()
     if event_name == "UserPromptSubmit":
         json.dump(
             {"hookSpecificOutput": {"hookEventName": event_name}},
@@ -1904,6 +1908,21 @@ def main():
     if event_type == "UserPromptSubmit":
         match_text = hook_input.get("prompt", "")
         max_results = MAX_PROMPT_LESSONS
+        # Prompt suppression must not suppress the intent used by tool-time
+        # selection. Retain raw queries only for enrolled, authorized treatment.
+        if (
+            isinstance(match_text, str)
+            and match_text.strip()
+            and isinstance(session_id, str)
+            and session_id not in ("", "unknown")
+            and _check_enrollment_admission(
+                os.environ.get("BOB_LESSON_ENROLLMENT_REHEARSAL_DIR", ""),
+                os.environ.get("BOB_SESSION_ID", ""),
+            )
+        ):
+            state = load_session_state(session_id)
+            state["selector_query"] = match_text
+            save_session_state(session_id, state)
 
     elif event_type == "PreToolUse":
         # Throttle: skip if we matched recently
@@ -2074,16 +2093,6 @@ def _match_and_emit(
         emit_empty(event_type, session_id, "all_suppressed")
         return
 
-    # --- Update session state ---
-    state = load_session_state(session_id)
-    newly_injected = [m["path"] for m in matches if m["path"] not in already_injected]
-    existing = set(state.get("injected", []))
-    existing.update(newly_injected)
-    state["injected"] = list(existing)
-    if event_type == "PreToolUse":
-        state["last_pretool"] = time.time()
-    save_session_state(session_id, state)
-
     # --- Log trajectory data ---
     tool_sequence = extract_tool_sequence(transcript_path)
     current_tool = ""
@@ -2132,6 +2141,16 @@ def _match_and_emit(
     _emit_context(
         event_type, session_id, context, precision_items=precision_items, intent=intent
     )
+
+    # Commit dedup only after output succeeds. A pre-emission timeout must leave
+    # the real session state retryable, not merely the workspace prompt window.
+    state = load_session_state(session_id)
+    existing = set(state.get("injected", []))
+    existing.update(m["path"] for m in matches)
+    state["injected"] = list(existing)
+    if event_type == "PreToolUse":
+        state["last_pretool"] = time.time()
+    save_session_state(session_id, state)
 
 
 def self_check() -> int:

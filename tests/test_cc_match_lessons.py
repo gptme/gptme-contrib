@@ -1655,7 +1655,10 @@ def test_prompt_repeat_window_env_parsing(hook, monkeypatch):
 
 
 def _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch):
-    """Hermetic wiring for a UserPromptSubmit main() call."""
+    """Hermetic wiring; keep real formatting, emission and session dedup."""
+    monkeypatch.delenv(hook.PROMPT_REPEAT_WINDOW_ENV, raising=False)
+    monkeypatch.setattr(hook, "_selector_settings", lambda: {})
+    monkeypatch.setattr(hook, "_check_enrollment_admission", lambda *a: False)
     lessons = [
         {
             "path": "lessons/sample.md",
@@ -1674,7 +1677,6 @@ def _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch):
     monkeypatch.setattr(hook, "filter_by_harness", lambda items, harness: items)
     monkeypatch.setattr(hook, "filter_by_session_category", lambda items, cat: items)
     monkeypatch.setattr(hook, "filter_by_repo", lambda items, repo: items)
-    monkeypatch.setattr(hook, "get_already_injected", lambda sid, tp=None: set())
     monkeypatch.setattr(hook, "score_lessons", lambda *a, **k: list(lessons))
     monkeypatch.setattr(hook, "score_memories", lambda *a, **k: [])
     monkeypatch.setattr(hook, "get_predicted_lessons", lambda *a, **k: [])
@@ -1687,9 +1689,6 @@ def _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch):
     monkeypatch.setattr(hook, "_log_lesson_events", lambda *a, **k: None)
     monkeypatch.setattr(hook, "extract_tool_sequence", lambda tp: [])
     monkeypatch.setattr(hook, "log_trajectory_match", lambda *a, **k: None)
-    monkeypatch.setattr(
-        hook, "format_lessons", lambda m, a, p, event_type=None: "INJECTED CONTEXT"
-    )
     monkeypatch.delenv("BOB_LESSON_PRECISION_DIR", raising=False)
 
 
@@ -1784,6 +1783,7 @@ def test_main_prompt_repeat_isolates_matching_scope(hook, tmp_path, monkeypatch,
     monkeypatch.setenv("TMPDIR", str(tmp_path))
     payload = {"session_id": "scope", "cwd": str(tmp_path), "prompt": "fixed prompt"}
     for index in range(2):
+        payload["session_id"] = f"scope-{index}"
         if scope == "cwd":
             payload["cwd"] = str(tmp_path / str(index))
         elif scope == "repo":
@@ -1794,10 +1794,10 @@ def test_main_prompt_repeat_isolates_matching_scope(hook, tmp_path, monkeypatch,
         with pytest.raises(SystemExit):
             hook.main()
     receipts = [
-        json.loads(line)
-        for line in (tmp_path / "cc-session-scope-lessons-receipts.jsonl")
-        .read_text()
-        .splitlines()
+        json.loads(
+            (tmp_path / f"cc-session-scope-{index}-lessons-receipts.jsonl").read_text()
+        )
+        for index in range(2)
     ]
     assert [row["outcome"] for row in receipts] == ["emitted", "emitted"]
 
@@ -1857,7 +1857,10 @@ def test_prompt_window_state_io_failure_fails_open(hook, tmp_path):
     state_dir = tmp_path / "not-a-directory"
     state_dir.write_text("blocked")
     assert (
-        prompt_repeat_result(hook, "prompt", tmp_path, state_dir=state_dir)[0] is False
+        prompt_repeat_result(hook, "prompt", tmp_path, window=20, state_dir=state_dir)[
+            0
+        ]
+        is False
     )
 
 
@@ -1871,10 +1874,11 @@ def test_prompt_window_lock_timeout_propagates_and_releases(
 
     monkeypatch.setattr(hook.fcntl, "flock", timeout)
     with pytest.raises(TimeoutError):
-        prompt_repeat_result(hook, "prompt", tmp_path, state_dir=tmp_path)
+        prompt_repeat_result(hook, "prompt", tmp_path, window=20, state_dir=tmp_path)
     monkeypatch.setattr(hook.fcntl, "flock", original)
     assert (
-        prompt_repeat_result(hook, "prompt", tmp_path, state_dir=tmp_path)[0] is False
+        prompt_repeat_result(hook, "prompt", tmp_path, window=20, state_dir=tmp_path)[0]
+        is False
     )
 
 
@@ -1886,7 +1890,9 @@ def test_prompt_window_process_death_allows_retry(hook, tmp_path):
     release = ctx.Event()
 
     def killed_processing():
-        with hook.check_prompt_repeat("prompt", tmp_path, state_dir=tmp_path):
+        with hook.check_prompt_repeat(
+            "prompt", tmp_path, window=20, state_dir=tmp_path
+        ):
             acquired.set()
             release.wait(timeout=10)
 
@@ -1898,7 +1904,8 @@ def test_prompt_window_process_death_allows_retry(hook, tmp_path):
         process.kill()
         process.join(timeout=5)
     assert (
-        prompt_repeat_result(hook, "prompt", tmp_path, state_dir=tmp_path)[0] is False
+        prompt_repeat_result(hook, "prompt", tmp_path, window=20, state_dir=tmp_path)[0]
+        is False
     )
 
 
@@ -1927,3 +1934,97 @@ def test_successful_no_match_is_recorded(hook, tmp_path, monkeypatch):
         .splitlines()
     ]
     assert [row["reason"] for row in receipts] == ["no_match", "fixed_prompt_repeat"]
+
+
+@pytest.mark.parametrize("has_matches", [True, False])
+def test_prompt_window_save_runs_after_budget_disarmed(
+    hook, tmp_path, monkeypatch, capsys, has_matches
+):
+    """Bookkeeping after the final response cannot trigger a second response."""
+    import signal
+
+    _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    if not has_matches:
+        monkeypatch.setattr(hook, "score_lessons", lambda *a, **k: [])
+    monkeypatch.setattr(
+        hook,
+        "_STDIN_CACHE",
+        json.dumps(
+            {
+                "session_id": "post-output",
+                "cwd": str(tmp_path),
+                "prompt": "fixed prompt",
+            }
+        ),
+    )
+    original_save = hook._save_prompt_window
+    saved = []
+
+    def check_save(path, state):
+        assert signal.getitimer(signal.ITIMER_REAL)[0] == 0
+        saved.append(state)
+        original_save(path, state)
+
+    monkeypatch.setattr(hook, "_save_prompt_window", check_save)
+    hook._arm_hook_budget(60)
+    try:
+        with pytest.raises(SystemExit):
+            hook.main()
+    finally:
+        hook._disarm_hook_budget()
+    assert len(saved) == 1
+    output = json.loads(capsys.readouterr().out)
+    assert ("additionalContext" in output["hookSpecificOutput"]) == has_matches
+
+
+def test_repeated_prompt_preserves_tool_selector_query(hook, tmp_path, monkeypatch):
+    """A fresh repeated-prompt session still calls the selector on tool events."""
+    _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    requests_file = tmp_path / "selector-requests.jsonl"
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import json,sys; from pathlib import Path; "
+            "request=json.load(sys.stdin); "
+            f"f=Path({str(requests_file)!r}).open('a'); "
+            "f.write(json.dumps(request)+'\\n'); f.close(); "
+            "print(json.dumps({'version':1, 'status':'empty', 'ids':[]}))"
+        ),
+    ]
+    monkeypatch.setattr(
+        hook,
+        "_selector_settings",
+        lambda: {
+            "LESSONS_SELECTOR_COMMAND": json.dumps(command),
+            "LESSONS_SELECTOR_GUARDS": "lessons/guard.md",
+            "LESSONS_SELECTOR_MODEL": "test-model",
+            "LESSONS_SELECTOR_MAX_CALLS": "2",
+        },
+    )
+    monkeypatch.setattr(hook, "_check_enrollment_admission", lambda *a: True)
+    monkeypatch.setattr(hook, "_classify_lesson", lambda path: ("advisory", ""))
+    payload: dict = {
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": str(tmp_path),
+        "prompt": "fixed prompt",
+    }
+    for sid in ("first", "repeated"):
+        payload["session_id"] = sid
+        monkeypatch.setattr(hook, "_STDIN_CACHE", json.dumps(payload))
+        with pytest.raises(SystemExit):
+            hook.main()
+    assert hook.load_session_state("repeated").get("selector_query") == "fixed prompt"
+    requests_file.write_text("")
+    payload.update(
+        hook_event_name="PreToolUse", tool_name="Bash", tool_input={"command": "ls"}
+    )
+    monkeypatch.setattr(hook, "_STDIN_CACHE", json.dumps(payload))
+    with pytest.raises(SystemExit):
+        hook.main()
+    requests = [json.loads(line) for line in requests_file.read_text().splitlines()]
+    assert len(requests) == 1
+    assert requests[0]["event_kind"] == "tool"
+    assert requests[0]["query"] == "fixed prompt"

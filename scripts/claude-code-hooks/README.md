@@ -156,8 +156,13 @@ A stable per-workspace `flock` sidecar serializes the check, matching and emissi
 with other hook processes. The window is committed only after processing and
 output complete normally (including a successful empty decision). A timeout,
 exception or killed process does not mark the prompt processed; the next call can
-retry. Waiting for the lock shares the hook's existing time budget. State I/O
-errors fail open, leaving normal matching available rather than suppressing it.
+retry. Waiting for the lock shares the hook's existing time budget. Once matching
+has completed, the internal alarm is disarmed before writing the final response;
+post-output session/window bookkeeping cannot append a timeout response to it.
+Session dedup is saved only after successful emission. Authorized selector
+sessions retain the user query even on a suppressed prompt, so subsequent tool
+selection still has the user's intent. State I/O errors fail open, leaving normal
+matching available rather than suppressing it.
 
 The window is per workspace, so several agents sharing `/tmp` do not suppress each
 other. Interactive sessions are affected too: sending the identical prompt twice
