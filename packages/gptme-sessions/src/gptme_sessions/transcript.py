@@ -1654,6 +1654,93 @@ def subagent_record_metadata(path: Path) -> list[tuple[Path, dict, int]]:
     return out + native
 
 
+def _codex_rollout_linkage(path: Path) -> tuple[str | None, str | None, int]:
+    """(thread_id, parent_thread_id, depth) from a Codex rollout's leading ``session_meta``."""
+    thread_id: str | None = None
+    parent: str | None = None
+    depth = 1
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for _index, line in zip(range(20), handle):
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                payload = row.get("payload") if isinstance(row, dict) else None
+                if not isinstance(payload, dict) or row.get("type") != "session_meta":
+                    continue
+                value = payload.get("id") or payload.get("session_id")
+                thread_id = value if isinstance(value, str) and value else None
+                source = payload.get("source")
+                subagent = source.get("subagent") if isinstance(source, dict) else None
+                spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+                value = spawn.get("parent_thread_id") if isinstance(spawn, dict) else None
+                parent = value if isinstance(value, str) and value else None
+                try:
+                    depth = max(1, int(spawn.get("depth") or 1)) if isinstance(spawn, dict) else 1
+                except (TypeError, ValueError):
+                    depth = 1
+                break
+    except (OSError, UnicodeDecodeError):
+        return None, None, 1
+    return thread_id, parent, depth
+
+
+def codex_subagent_rollouts(parent_jsonl: Path) -> list[tuple[Path, dict, int]]:
+    """Child rollouts of a Codex parent, resolved by exact ``parent_thread_id``.
+
+    Codex stores each child as its own ``rollout-*.jsonl`` thread, dated by its
+    start, so children live beside the parent or in a later day directory, even
+    months later after a resume. Index rollout headers in the parent's day and
+    all later day directories under the same sessions root, then walk exact
+    parent links. Dates bound the scan only; they never establish parentage.
+    """
+    if not parent_jsonl.name.startswith("rollout-"):
+        return []
+    parent_id, _, _ = _codex_rollout_linkage(parent_jsonl)
+    if not parent_id:
+        return []
+    dirs = [parent_jsonl.parent]
+    try:
+        year, month, day = (int(part) for part in parent_jsonl.parent.parts[-3:])
+        start = datetime(year, month, day)
+    except (ValueError, IndexError):
+        pass  # Non-calendar layouts resolve siblings only.
+    else:
+        root = parent_jsonl.parent.parents[2]
+        for directory in sorted(root.glob("[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]")):
+            try:
+                year, month, day = (int(part) for part in directory.parts[-3:])
+                candidate = datetime(year, month, day)
+            except ValueError:
+                continue
+            if candidate > start and directory.is_dir():
+                dirs.append(directory)
+    by_parent: dict[str, list[tuple[Path, str]]] = {}
+
+    for directory in dirs:
+        for file in sorted(directory.glob("rollout-*.jsonl")):
+            if file == parent_jsonl:
+                continue
+            thread_id, parent, _ = _codex_rollout_linkage(file)
+            if thread_id and parent:
+                by_parent.setdefault(parent, []).append((file, thread_id))
+    out: list[tuple[Path, dict, int]] = []
+    seen = {parent_id}
+
+    def walk(thread: str, depth: int) -> None:
+        for file, thread_id in by_parent.get(thread, []):
+            if thread_id in seen:
+                continue
+            seen.add(thread_id)
+            # Depth is relative to the selected parent, not Codex's root thread.
+            out.append((file, {"session_id": thread_id}, depth))
+            walk(thread_id, depth + 1)
+
+    walk(parent_id, 1)
+    return out
+
+
 def read_subagent_metadata(path: Path) -> dict:
     """Read child provenance in either CC or native gptme layout."""
     native = path.name == "conversation.jsonl"

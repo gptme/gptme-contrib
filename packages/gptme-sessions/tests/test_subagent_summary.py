@@ -1176,3 +1176,151 @@ def test_scan_cc_first_prompt_keeps_text_in_mixed_record() -> None:
     ]
     scan = _scan_cc(records)
     assert scan.first_prompt == "BOB_SESSION_SENTINEL=abc autonomous work"
+
+
+def _codex_rollout(path, thread_id, *, parent=None, depth=1, spawn=False):
+    """Write a minimal Codex rollout; a child names its parent thread."""
+    source = (
+        {"subagent": {"thread_spawn": {"parent_thread_id": parent, "depth": depth}}}
+        if parent
+        else "exec"
+    )
+    rows = [
+        {
+            "type": "session_meta",
+            "timestamp": "2026-11-12T14:00:00Z",
+            "payload": {"id": thread_id, "source": source, "originator": "codex_exec"},
+        }
+    ]
+    if spawn:
+        rows.append(
+            {
+                "type": "response_item",
+                "timestamp": "2026-11-12T14:01:00Z",
+                "payload": {
+                    "type": "function_call",
+                    "name": "spawn_agent",
+                    "arguments": json.dumps({"task_name": "audit", "message": "go"}),
+                },
+            }
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return path
+
+
+def test_codex_children_are_resolved_into_subagent_summary(tmp_path) -> None:
+    """A Codex parent's child rollouts (separate threads) must be counted."""
+    from gptme_sessions.signals import extract_from_path
+
+    day = tmp_path / "2026" / "11" / "12"
+    parent = _codex_rollout(day / "rollout-parent.jsonl", "p-1", spawn=True)
+    _codex_rollout(day / "rollout-child.jsonl", "c-1", parent="p-1")
+    _codex_rollout(day / "rollout-nested.jsonl", "c-2", parent="c-1", depth=2)
+    _codex_rollout(day / "rollout-other.jsonl", "x-9", parent="someone-else")
+
+    summary = extract_from_path(parent)["subagent_summary"]
+
+    assert summary["subagents_total"] == 2
+    assert summary["spawns_total"] == 1  # only the depth-1 child counts as a spawn
+    assert summary["subagents_depth_max"] == 2
+
+
+def test_codex_resumed_parent_finds_later_descendants(tmp_path) -> None:
+    """Resumes and nested children may cross arbitrary day/month/year boundaries."""
+    from gptme_sessions.transcript import codex_subagent_rollouts
+
+    parent = _codex_rollout(tmp_path / "2026/11/12/rollout-parent.jsonl", "p-1")
+    child = _codex_rollout(tmp_path / "2026/11/14/rollout-child.jsonl", "c-1", parent="p-1")
+    nested = _codex_rollout(
+        tmp_path / "2027/01/02/rollout-nested.jsonl", "c-2", parent="c-1", depth=2
+    )
+    _codex_rollout(tmp_path / "2027/01/02/rollout-other.jsonl", "x-1", parent="other")
+
+    assert codex_subagent_rollouts(parent) == [
+        (child, {"session_id": "c-1"}, 1),
+        (nested, {"session_id": "c-2"}, 2),
+    ]
+
+
+@pytest.mark.parametrize("subagent", ["review", ["review"], 42, None, {"thread_spawn": "review"}])
+def test_codex_non_spawn_sibling_does_not_hide_valid_children(tmp_path, subagent) -> None:
+    """Non-spawn subagent sources must not abort the whole summary scan."""
+    from gptme_sessions.signals import extract_from_path
+
+    parent = _codex_rollout(tmp_path / "rollout-parent.jsonl", "p-1", spawn=True)
+    _codex_rollout(tmp_path / "rollout-child.jsonl", "c-1", parent="p-1")
+    (tmp_path / "rollout-other.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "other", "source": {"subagent": subagent}},
+            }
+        )
+        + "\n"
+    )
+
+    summary = extract_from_path(parent)["subagent_summary"]
+    assert summary["subagents_total"] == 1
+    assert summary["spawns_total"] == 1
+
+
+@pytest.mark.parametrize("corrupt_name", ["rollout-aaa.jsonl", "rollout-zzz.jsonl"])
+def test_codex_invalid_utf8_sibling_does_not_hide_valid_children(tmp_path, corrupt_name) -> None:
+    """A corrupt sibling must not discard children scanned before or after it."""
+    from gptme_sessions.signals import extract_from_path
+    from gptme_sessions.transcript import codex_subagent_rollouts
+
+    parent = _codex_rollout(tmp_path / "rollout-parent.jsonl", "p-1", spawn=True)
+    child = _codex_rollout(tmp_path / "rollout-child.jsonl", "c-1", parent="p-1")
+    (tmp_path / corrupt_name).write_bytes(b'{"type":"session_meta","payload":\xff}\n')
+
+    summary = extract_from_path(parent)["subagent_summary"]
+    assert summary["subagents_total"] == 1
+    assert summary["spawns_total"] == 1
+    assert codex_subagent_rollouts(parent) == [(child, {"session_id": "c-1"}, 1)]
+
+
+@pytest.mark.parametrize("reported_depth", [None, 1, 7])
+def test_codex_summary_depth_is_relative_to_selected_parent(tmp_path, reported_depth) -> None:
+    """Exact parent links define depth, even for a selected child rollout."""
+    from gptme_sessions.signals import extract_from_path
+
+    parent = _codex_rollout(tmp_path / "rollout-parent.jsonl", "p", parent="outer", depth=3)
+    child = _codex_rollout(tmp_path / "rollout-child.jsonl", "c", parent="p")
+    nested = _codex_rollout(tmp_path / "rollout-nested.jsonl", "g", parent="c")
+    for path in (child, nested):
+        row = json.loads(path.read_text())
+        spawn = row["payload"]["source"]["subagent"]["thread_spawn"]
+        if reported_depth is None:
+            spawn.pop("depth")
+        else:
+            spawn["depth"] = reported_depth
+        path.write_text(json.dumps(row) + "\n")
+
+    summary = extract_from_path(parent)["subagent_summary"]
+    assert summary["subagents_total"] == 2
+    assert summary["spawns_total"] == 1
+    assert summary["subagents_depth_max"] == 2
+
+
+@pytest.mark.parametrize("bad_name", ["rollout-aaa.jsonl", "rollout-zzz.jsonl"])
+def test_codex_unreadable_child_keeps_healthy_siblings(tmp_path, monkeypatch, caplog, bad_name):
+    """A child disappearing after header discovery must not abort sibling parsing."""
+    import gptme_sessions.signals as signals
+
+    parent = _codex_rollout(tmp_path / "rollout-parent.jsonl", "p", spawn=True)
+    bad = _codex_rollout(tmp_path / bad_name, "bad", parent="p")
+    _codex_rollout(tmp_path / "rollout-child.jsonl", "c", parent="p")
+    original = signals.parse_trajectory
+
+    def parse(path):
+        if path == bad:
+            raise FileNotFoundError("child disappeared after header scan")
+        return original(path)
+
+    monkeypatch.setattr(signals, "parse_trajectory", parse)
+    summary = signals.extract_from_path(parent)["subagent_summary"]
+    assert summary["subagents_total"] == 1
+    assert summary["spawns_total"] == 1
+    assert str(bad) in caplog.text
