@@ -315,7 +315,8 @@ gate:
 
 - `kind` is a closed set. `pr`, `issue`, `task` and `time` gates are derived
   from `ref`/`deadline` (`gptodo.gate.derived_probe`; a `task` gate must also
-  be in `depends`), so an authored `probe:` next to them is refused. `event`
+  be in the effective dependencies: nonempty `requires`, otherwise `depends`),
+  so an authored `probe:` next to them is refused. `event`
   is the only kind that takes an authored probe.
 - `decision` gates need `actor`, `question`, `default`, `deadline`,
   `on_timeout` and `reversible`. An irreversible gate never auto-applies its

@@ -90,6 +90,36 @@ def test_task_gate_must_be_in_depends() -> None:
     assert validate_gate(meta) == []
 
 
+@pytest.mark.parametrize(
+    ("depends", "requires", "expected", "valid"),
+    [
+        (["x"], ["y"], ["y"], False),
+        (["y"], ["x"], ["x"], True),
+        (["x"], [], ["x"], True),
+        (["x"], None, ["x"], True),
+        (["x"], "y", ["x"], True),
+        ("x", [], [], False),
+        (7, ["x"], ["x"], True),
+        ([], ["x"], ["x"], True),
+    ],
+)
+def test_task_gate_uses_loaded_dependencies(
+    tmp_path: Path, depends, requires, expected: list[str], valid: bool
+) -> None:
+    meta = {"gate": {"kind": "task", "ref": "x"}, "depends": depends, "requires": requires}
+    path = tmp_path / "task.md"
+    post = frontmatter.Post("# task\n", state="waiting", created="2026-11-12", **meta)
+    path.write_text(frontmatter.dumps(post))
+    tasks = load_tasks(tmp_path)
+    assert len(tasks) == 1 and tasks[0].requires == expected
+    errors = validate_gate(meta)
+    if valid:
+        assert errors == []
+    else:
+        assert any("effective dependencies" in error for error in errors)
+        assert parse_gate(meta) is None
+
+
 def test_derived_probe_shapes() -> None:
     pr = parse_gate({"gate": {"kind": "pr", "ref": "gptme/gptme#42"}})
     assert pr is not None
