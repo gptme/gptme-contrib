@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +16,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts" / "twitter"
 def tw(monkeypatch, tmp_path):
     pytest.importorskip("tweepy")
     pytest.importorskip("gptmail")
+    # dotenv/profile activation mutate the mapping directly, bypassing setenv.
+    # Give the test a private mapping and restore the original on teardown.
+    monkeypatch.setattr(os, "environ", os.environ.copy())
     monkeypatch.syspath_prepend(str(SCRIPT_DIR))
     monkeypatch.setenv("TWITTER_READ_COUNTER_DIR", str(tmp_path))
     monkeypatch.delenv("TWITTER_ACCOUNT", raising=False)
@@ -27,6 +32,29 @@ def tw(monkeypatch, tmp_path):
     spec.loader.exec_module(mod)
     yield mod
     sys.modules.pop(spec.name, None)
+
+
+@pytest.mark.parametrize(
+    "command_test",
+    [
+        "test_read_budget_loads_dotenv_without_network",
+        "test_read_budget_uses_named_profile_configuration",
+    ],
+)
+def test_fixture_restores_environment(monkeypatch, tmp_path, command_test):
+    monkeypatch.delenv("TWITTER_DAILY_READ_LIMIT", raising=False)
+    monkeypatch.setenv("TWITTER_API_KEY", "isolation-sentinel")
+    original = os.environ
+    before = dict(original)
+    with pytest.MonkeyPatch.context() as isolated:
+        fixture = inspect.unwrap(tw)(isolated, tmp_path)
+        module = next(fixture)
+        try:
+            globals()[command_test](module, isolated, tmp_path)
+        finally:
+            fixture.close()
+    assert os.environ is original
+    assert dict(os.environ) == before
 
 
 def test_count_billable_reads(tw):
