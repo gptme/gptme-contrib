@@ -214,7 +214,7 @@ def test_receive_rejects_aliased_collection_before_stringifying(tmp_path: Path, 
             f"{field}: *a9",
         )
     )
-    with pytest.raises(ReceiveError, match="must be a string"):
+    with pytest.raises(ReceiveError, match="YAML aliases"):
         publish_message(raw, tmp_path / "inbox")
 
 
@@ -639,3 +639,96 @@ def test_mixed_watch_reports_each_transport_once(workspace: Path, monkeypatch, d
     assert result.stdout.count("Legacy arrival") == 1
     assert polls == ["carol", "carol"]
     assert len(pulls) == int(do_pull)
+
+
+@pytest.mark.parametrize("field", ["timestamp", "message_id", "in_reply_to", "extra"])
+def test_receive_rejects_alias_graph_in_any_metadata(tmp_path: Path, field: str) -> None:
+    aliases = "a0: &a0 [x, x]\n" + "".join(
+        f"a{n}: &a{n} [*a{n - 1}, *a{n - 1}]\n" for n in range(1, 10)
+    )
+    raw = _message().replace("---\n", f"---\n{aliases}{field}: *a9\n", 1)
+    with pytest.raises(ReceiveError, match="aliased collections"):
+        publish_message(raw, tmp_path / "inbox")
+    assert not (tmp_path / "inbox").exists()
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        "/home/bob/.local/bin/gptmail agent receive",
+        "/usr/local/bin/uv run /srv/mail/bin/gptmail agent receive",
+        "AGENT_NAME=bob /srv/mail/bin/gptmail agent receive --workspace /srv/bob",
+    ],
+)
+def test_receive_accepts_absolute_executable_request(original: str) -> None:
+    check_original_command(original)
+
+
+def test_thread_watch_reports_logical_reply_once_across_push_and_remote(
+    workspace: Path, monkeypatch
+) -> None:
+    (workspace / "messages" / "outbox" / "question.md").write_text(
+        _message(sender="bob", recipient="alice", subject="Question")
+    )
+    publish_message(
+        _message(subject="Answer").replace(
+            "from: alice", "message_id: answer.md\nin_reply_to: question.md\nfrom: alice"
+        ),
+        workspace / "messages" / "inbox",
+    )
+    monkeypatch.setattr(
+        agent_cli,
+        "_load_agents",
+        lambda: {"alice": {"ssh": "alice@alice", "workspace": "/srv/alice"}},
+    )
+    monkeypatch.setattr(
+        agent_cli,
+        "_remote_pending_rows",
+        lambda *a, **kw: [
+            {
+                "file": "answer.md",
+                "message_id": "answer.md",
+                "in_reply_to": "question.md",
+                "from": "alice",
+                "to": "bob",
+                "subject": "Answer",
+            }
+        ],
+    )
+
+    def stop(_seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(agent_cli.time, "sleep", stop)
+    result = CliRunner().invoke(agent, ["watch", "--thread", "question.md"])
+    assert result.exit_code == 0, result.output
+    assert result.stderr.count("reply from alice: Answer") == 1
+
+
+def test_receive_refuses_yaml_merge_alias_before_construction(tmp_path: Path) -> None:
+    raw = _message().replace(
+        "---\n", "---\na: &a {x: 1}\nb: &b [*a, *a]\nc: &c [*b, *b]\n<<: *c\n", 1
+    )
+    with pytest.raises(ReceiveError, match="YAML aliases"):
+        publish_message(raw, tmp_path / "inbox")
+    assert not (tmp_path / "inbox").exists()
+
+
+def test_receive_allows_alias_syntax_in_body(tmp_path: Path) -> None:
+    raw = _message(body="YAML example: &anchor [*anchor].")
+    assert publish_message(raw, tmp_path / "inbox").read_text() == raw
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        "/tmp/evil;gptmail agent receive",
+        "/tmp/gptmail agent receive; ls",
+        "/tmp/gptmail agent pending",
+        "/tmp/ls agent receive",
+        "/tmp/uv run /tmp/gptmail agent receive && ls",
+    ],
+)
+def test_absolute_receive_request_still_refuses_other_commands(original: str) -> None:
+    with pytest.raises(ReceiveError, match="refused command"):
+        check_original_command(original)

@@ -44,7 +44,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from gptmail.transport.agent import meta_of, split_frontmatter
+import yaml
+
+from gptmail.transport.agent import _FM_DELIM, meta_of, split_frontmatter
 
 #: A single message, not a bulk import. Guards the receiver against a stream.
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
@@ -89,8 +91,18 @@ def check_original_command(original: str | None) -> None:
     # addressee check; it is never executed here, so accept a plain one.
     while tokens and _ENV_ASSIGN.fullmatch(tokens[0]):
         tokens.pop(0)
+    # Absolute executable paths are valid requests too. These words are never
+    # executed here: sshd already chose the operator's forced command.
+    normalized = list(tokens)
+    for index in (0, 2):
+        if index == 2 and normalized[:2] != ["uv", "run"]:
+            continue
+        if index < len(normalized) and normalized[index].startswith("/"):
+            if not _PLAIN_WORD.fullmatch(normalized[index]):
+                break
+            normalized[index] = Path(normalized[index]).name
     for prefix in _RECEIVE_PREFIXES:
-        if tuple(tokens[: len(prefix)]) == prefix:
+        if tuple(normalized[: len(prefix)]) == prefix:
             # Arguments are ignored (the forced command decides what runs), but
             # they must stay plain words: no shell metacharacters, so the
             # request cannot look like a compound command.
@@ -134,6 +146,18 @@ def validate_message(
     """
     if "\x00" in raw:
         raise ReceiveError("refused: message contains a NUL byte")
+    # Reject aliases before construction, including aliases in optional/unknown
+    # fields and YAML merge keys. Otherwise a bounded document can expand during
+    # parsing or later when a mailbox consumer stringifies its metadata.
+    parts = _FM_DELIM.split(raw, maxsplit=2) if raw.startswith("---") else []
+    if len(parts) == 3:
+        try:
+            if any(isinstance(token, yaml.tokens.AliasToken) for token in yaml.scan(parts[1])):
+                raise ReceiveError(
+                    "refused: YAML aliases (including aliased collections) are not allowed"
+                )
+        except yaml.YAMLError as exc:
+            raise ReceiveError("refused: message has no valid YAML frontmatter") from exc
     meta, body = split_frontmatter(raw)
     if meta is None:
         raise ReceiveError("refused: message has no valid YAML frontmatter")

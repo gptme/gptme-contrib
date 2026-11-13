@@ -2149,7 +2149,10 @@ def watch(
         for key, meta, sender, is_local in candidates:
             if delivered_before is None:
                 _budget(60, check_local=True)
-            if key in reported or key == thread_target:
+            # Local publication names differ from remote outbox names. Keep the
+            # local handle for output/pulls, but deduplicate on logical identity.
+            report_key = _thread_key(meta.get("message_id") or key)
+            if report_key in reported or report_key == thread_target:
                 continue
             if not _reaches_thread(key, thread_target, parents):
                 continue
@@ -2180,7 +2183,7 @@ def watch(
                     continue
             if delivered_before is None:
                 _budget(60, check_local=True)  # Only timely local delivery survives expiry.
-            reported.add(key)
+            reported.add(report_key)
             now_str = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
             filename = f"{key}.md"
             subject = str(meta.get("subject", "(no subject)"))

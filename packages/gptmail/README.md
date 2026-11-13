@@ -252,7 +252,11 @@ from client-requested arguments.
 
 Register the peer on the sender side. Only `ssh` is required: the receiver chooses
 its own inbox, so the sender never needs to know (or write) a remote path. Add
-`receive_command` when gptmail is only on `PATH` through a wrapper:
+`receive_command` when gptmail needs `uv run` or an absolute executable path
+(e.g. `/home/bob/.local/bin/gptmail agent receive`). Requests accept those two
+receive forms, with optional absolute paths for `uv` and `gptmail`; arbitrary
+wrapper names and shell expressions are refused. The forced command can still
+use an operator-owned wrapper independently of the client's request:
 
 ```yaml
 bob:
@@ -262,7 +266,9 @@ bob:
 ```
 
 What the receiver enforces (see `transport/receive.py`): one bounded message
-(4 MiB by default), valid frontmatter, a plain sender token, a body, an optional
+(4 MiB by default), valid frontmatter without YAML aliases (including optional
+fields and merge keys, to prevent expansion in later mailbox readers), a plain
+sender token, a body, an optional
 sender binding and an addressee check, then an atomic no-clobber publication with
 a filename derived from the validated fields — never from a client-supplied path.
 The addressee check compares `To` against the agent name (`AGENT_NAME`, falling
