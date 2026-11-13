@@ -54,7 +54,10 @@ arguments override the existing `AI_REVIEW_PANEL_*` defaults.
 Hosts can pass a private transport mapping to `run_reviewer(..., transports=...)`
 and a `ReviewerRunner` callback to `panel_review(..., runner=...)`. The runner
 receives the reviewer, prompt, deadline-capped timeout and price table, and must
-return a `ReviewerResult` (including failure results). A host wrapper can call
+return a `ReviewerResult` (including failure results). If a runner raises an
+`Exception`, the panel records a failed result with the exception type, message
+and measured runner duration, rather than reporting a deadline abandonment.
+A host wrapper can call
 `run_reviewer` with its own transport mapping, preserving local policy and test
 seams without mutating the package's globals. An explicit empty mapping disables
 all transports for that call; it does not fall back to the built-in table.

@@ -893,9 +893,18 @@ def panel_review(
             )
             return
         lifecycle.stage("subscription_transport", attempt=i + 1)
-        results[i] = reviewer_runner(
-            reviewer, prompt, timeout=transport_timeout, prices=prices
-        )
+        runner_started = time.monotonic()
+        try:
+            results[i] = reviewer_runner(
+                reviewer, prompt, timeout=transport_timeout, prices=prices
+            )
+        except Exception as exc:
+            results[i] = ReviewerResult(
+                reviewer,
+                False,
+                wall_s=time.monotonic() - runner_started,
+                error=f"runner raised {type(exc).__name__}: {exc}",
+            )
 
     threads = [
         threading.Thread(

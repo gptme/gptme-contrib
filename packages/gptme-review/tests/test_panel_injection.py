@@ -195,6 +195,49 @@ def test_custom_runner_failure_keeps_degraded_panel_accounting():
     assert exc.value.reviewer_rows[0]["error"] == "host policy refused"
 
 
+@pytest.mark.parametrize("healthy", ["absent", "clean", "finding"])
+def test_raising_runner_records_failure_not_deadline_abandonment(monkeypatch, healthy):
+    now = [100.0]
+    monkeypatch.setattr(panel.time, "monotonic", lambda: now[0])
+    thread_errors: list[object] = []
+    monkeypatch.setattr(panel.threading, "excepthook", thread_errors.append)
+
+    def runner(reviewer, prompt, *, timeout, prices):
+        if reviewer is SECOND:
+            now[0] += 0.25
+            raise RuntimeError("host bug")
+        return panel.ReviewerResult(
+            reviewer, True, findings=[finding()] if healthy == "finding" else []
+        )
+
+    reviewers = [SECOND] if healthy == "absent" else [FIRST, SECOND]
+    if healthy == "finding":
+        findings, usage = panel.panel_review(
+            "PROMPT", reviewers, timeout=7, min_agreement=2, runner=runner
+        )
+        assert len(findings) == 1
+        assert usage["consensus_requested_passes"] == 2
+        assert usage["consensus_passes"] == usage["consensus_min_agreement"] == 1
+        assert usage["pass_failures"] == [
+            "host:second: runner raised RuntimeError: host bug"
+        ]
+        rows = usage["panel"]["reviewers"]
+    else:
+        message = "all subscription" if healthy == "absent" else "degraded panel"
+        with pytest.raises(panel.PanelReviewError, match=message) as exc:
+            panel.panel_review("PROMPT", reviewers, timeout=7, runner=runner)
+        rows = exc.value.reviewer_rows
+
+    failed = rows[-1]
+    assert failed["key"] == SECOND.key
+    assert failed["outcome"] == "failed"
+    assert failed["error"] == "runner raised RuntimeError: host bug"
+    assert failed["wall_s"] == 0.25
+    assert failed["tokens"] == {}
+    assert failed["list_price_usd"] is None
+    assert not thread_errors
+
+
 def test_overlapping_hosts_keep_their_runner_and_transport_routes():
     entered = Barrier(2)
     original_runner = panel.run_reviewer
