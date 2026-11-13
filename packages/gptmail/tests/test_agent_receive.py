@@ -495,3 +495,50 @@ def test_watch_local_filename_recognizes_logical_ancestor(workspace: Path, monke
     )
     assert result.exit_code == 0, result.output
     assert followup.name in result.output
+
+
+def test_receive_only_refuses_implicit_named_mailbox_routing(tmp_path: Path, monkeypatch) -> None:
+    message = tmp_path / "message.md"
+    message.write_text(_message())
+    calls = _capture_subprocess(monkeypatch)
+    deliver = agent_cli._ssh_deliver(
+        {"bob": {"ssh": "bob@bob", "delivery": "receive-only"}}, mailbox="ops"
+    )
+    assert deliver(message, "bob") is False
+    assert calls == []
+
+
+def test_receive_preserves_existing_logical_message_and_ack(tmp_path: Path) -> None:
+    from gptmail.transport.agent import meta_of
+
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    raw = _message().replace("from: alice", "message_id: original.md\nfrom: alice")
+    existing = inbox / "original.md"
+    existing.write_text(raw)
+    agent_cli._mark_replied(existing)
+    result = publish_message(raw, inbox)
+    assert result == existing
+    assert meta_of(result)["replied"] is True
+    assert list(inbox.glob("*.md")) == [existing]
+
+
+def test_general_watch_keeps_timely_push_at_deadline(workspace: Path, monkeypatch) -> None:
+    import time
+
+    now = [time.monotonic()]
+    monkeypatch.setattr(agent_cli.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        agent_cli,
+        "_load_agents",
+        lambda: {"alice": {"ssh": "alice@alice", "delivery": "receive-only"}},
+    )
+
+    def arrive(seconds):
+        publish_message(_message(), workspace / "messages" / "inbox")
+        now[0] += seconds
+
+    monkeypatch.setattr(agent_cli.time, "sleep", arrive)
+    result = CliRunner().invoke(agent, ["watch", "--once", "--timeout", "1s"])
+    assert result.exit_code == 0, result.output
+    assert "Hello" in result.output

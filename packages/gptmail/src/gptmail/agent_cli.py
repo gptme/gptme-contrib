@@ -340,6 +340,13 @@ def _ssh_deliver(agents: dict[str, dict[str, str]], *, mailbox: str = "default")
         # ssh invocation with the message on stdin. No remote path is needed:
         # the receiver chooses its own inbox, and its key owns the write.
         if agent.get("delivery") == "receive-only":
+            if mailbox != "default":
+                click.echo(
+                    "Error: receive-only delivery supports the default mailbox only; "
+                    "named mailbox routing requires a separately pinned endpoint.",
+                    err=True,
+                )
+                return False
             return _receive_only_deliver(agent, ssh_opts, ssh_target)(local_path, recipient)
         if not agent.get("workspace"):
             click.echo(
@@ -2047,8 +2054,13 @@ def watch(
             # A push may arrive while SSH or sleep consumes the remaining budget.
             # Only local files delivered before expiry can satisfy this final scan;
             # late remote rows and pulls must still fail the monotonic deadline.
-            if check_local and thread_target is not None:
-                if _check_thread({}, delivered_before=wall_deadline):
+            if check_local and watch_local_inbox:
+                found = (
+                    _check_thread({}, delivered_before=wall_deadline)
+                    if thread_target is not None
+                    else _check_local_pushes(delivered_before=wall_deadline)
+                )
+                if found:
                     sys.exit(0)
             click.echo(f"Timed out after {timeout} waiting for {target_desc}.", err=True)
             sys.exit(WATCH_TIMEOUT_EXIT)
@@ -2070,10 +2082,16 @@ def watch(
     reported: set[str] = set()
     local_baseline: set[str] = set()
 
-    def _check_local_pushes() -> bool:
+    def _check_local_pushes(*, delivered_before: float | None = None) -> bool:
         """Report arrivals after the ordinary watch's local baseline."""
         _, messages = _local_thread_messages(mailboxes)
         for key, meta, path in messages:
+            if delivered_before is not None:
+                try:
+                    if local_delivery_time(path) > delivered_before:
+                        continue
+                except FileNotFoundError:
+                    continue
             if key in local_baseline:
                 continue
             local_baseline.add(key)

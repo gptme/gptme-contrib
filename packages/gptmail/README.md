@@ -273,6 +273,11 @@ A client-requested command other than the receive verb is refused, so
 instead of arriving as an empty message. `gptmail agent receive` is also safe to run
 by hand for a smoke test (`echo … | gptmail agent receive`).
 
+**Mailbox scope.** Receive-only sending currently supports the default mailbox.
+A named `--mailbox` fails delivery explicitly rather than silently placing the
+exchange in the default inbox. Custom receiver mailbox routes require separate
+operator-pinned endpoints and are not implemented by this sender.
+
 **Replies and migration.** Replies already travel as ordinary messages: `reply`
 sends a message back to the original sender. New sends carry a logical
 `message_id` (the sender's outbox filename); replies use that ID, while the
@@ -281,6 +286,10 @@ reads recognize the logical ID as well as local filenames. With both directions
 receive-only there is nothing to pull. That is the reply-by-push migration — stop pulling from a
 receive-only peer; `pull`, `watch --pull` and `pending --fleet` skip such registry
 entries automatically (the forced command exposes no shell to read their outbox).
+Sequential push/pull redelivery recognizes a sender's logical ID and retains the
+existing read/replied stamps. This is not an exactly-once protocol: concurrent
+mixed-transport arrivals or an old sender without a logical ID can still duplicate;
+stop legacy polling when switching a direction to push-only delivery.
 Migrate one side at a time: the sender keeps working against a legacy recipient, and
 a migrated recipient still accepts legacy SCP pushes until you remove the old key.
 

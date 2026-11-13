@@ -44,7 +44,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from gptmail.transport.agent import split_frontmatter
+from gptmail.transport.agent import meta_of, split_frontmatter
 
 #: A single message, not a bulk import. Guards the receiver against a stream.
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
@@ -191,6 +191,16 @@ def publish_message(
     staging file is invisible until the link makes it a complete message.
     """
     meta = validate_message(raw, expected_sender=expected_sender, self_name=self_name)
+    # A legacy pull or previous push may already have delivered this logical
+    # message. Keep its local read/replied stamps rather than publishing again.
+    logical_id = meta.get("message_id")
+    if isinstance(logical_id, str) and logical_id:
+        for existing in sorted(inbox.glob("*.md")):
+            prior = meta_of(existing) or {}
+            if prior.get("message_id", existing.name) == logical_id and prior.get(
+                "from"
+            ) == meta.get("from"):
+                return existing
     filename = message_filename(meta)
     inbox.mkdir(parents=True, exist_ok=True)
     fd, staged_name = tempfile.mkstemp(prefix=".receive-", dir=inbox)
