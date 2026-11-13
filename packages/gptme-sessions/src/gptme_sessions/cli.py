@@ -479,8 +479,13 @@ def _project_key(project: str | Path) -> str:
     character with ``-``, and decoding that back is lossy (``/a/b-c`` and
     ``/a/b/c`` both decode to ``/a/b/c``). Only use this for claude-code
     entries; other harnesses keep the exact path.
+
+    The input is encoded as given, not normalized: a decoded Claude Code
+    path like ``/home/u//repo`` (from ``/home/u/.repo``) must keep its
+    doubled separator, which ``abspath()`` would collapse. Callers
+    normalize user-supplied paths before passing them here.
     """
-    return re.sub(r"[^A-Za-z0-9]", "-", _normalize_project(project))
+    return re.sub(r"[^A-Za-z0-9]", "-", str(project).rstrip("/") or "/")
 
 
 def _project_matches(entry: dict, wanted: set[str]) -> bool:
