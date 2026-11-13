@@ -490,6 +490,8 @@ def transform_post(
                 waiting_since=now.isoformat(timespec="seconds"),
             )
             post.metadata.pop("probe", None)
+            # The completed cycle's gate cannot constrain the next recurrence.
+            post.metadata.pop("gate", None)
             if not _completed_explicitly_set:
                 post.metadata.pop("completed", None)
             # A new cycle starts with an open checklist. Leaving last cycle's

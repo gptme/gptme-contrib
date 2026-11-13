@@ -264,6 +264,24 @@ def test_pushed_deadline_can_be_brought_back_to_original_or_earlier(
         mutate_task(path, patch={"gate": dict(earlier, deadline="2026-12-10")})
 
 
+def test_decision_gate_refuses_authored_probe() -> None:
+    assert any(
+        "only kind event" in error for error in validate_gate({"gate": DECISION, "probe": "true"})
+    )
+
+
+def test_recurring_event_gate_retires_finished_cycle(tmp_path: Path) -> None:
+    path = _write(tmp_path, {"kind": "event", "deadline": "2026-11-26"})
+    post = frontmatter.load(path)
+    post.metadata.update(recur="7d", probe="true")
+    path.write_text(frontmatter.dumps(post))
+    mutate_task(path, patch={"state": "done"}, completion_effects=False)
+    reset = frontmatter.load(path).metadata
+    assert reset["state"] == "waiting"
+    assert reset["wait"]
+    assert "gate" not in reset and "probe" not in reset
+
+
 def test_datetime_deadline_object_is_accepted() -> None:
     from datetime import datetime, timezone
 

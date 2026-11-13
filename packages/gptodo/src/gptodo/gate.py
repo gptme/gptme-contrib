@@ -193,6 +193,8 @@ def validate_gate(metadata: dict[str, Any]) -> list[str]:
         errors.append(
             f"gate kind {kind.value} is derived from its ref/deadline; remove the authored probe"
         )
+    if kind is GateKind.DECISION and _text(metadata.get("probe")) is not None:
+        errors.append("gate kind decision refuses an authored probe; only kind event accepts one")
     if kind is GateKind.EVENT and _text(metadata.get("probe")) is None:
         errors.append("gate kind event needs a probe (the only kind with an authored check)")
 
