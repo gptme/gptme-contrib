@@ -138,9 +138,21 @@ def validate_message(
     if meta is None:
         raise ReceiveError("refused: message has no valid YAML frontmatter")
 
-    sender = str(meta.get("from") or "").strip().lower()
-    recipient = str(meta.get("to") or "").strip().lower()
-    subject = str(meta.get("subject") or "").strip()
+    # Never stringify untrusted YAML collections: aliased lists can have an
+    # exponentially larger repr than their bounded input document.
+    for field in ("from", "to", "subject"):
+        value = meta.get(field)
+        if value is None:
+            raise ReceiveError(f"refused: message has no '{field}' field")
+        if not isinstance(value, str):
+            raise ReceiveError(f"refused: '{field}' must be a string")
+        if field in ("from", "to") and value != value.strip():
+            # We publish the original bytes; accept only addresses downstream
+            # readers and reply routing will interpret the same way.
+            raise ReceiveError(f"refused: '{field}' has surrounding whitespace")
+    sender = meta["from"].lower()
+    recipient = meta["to"].lower()
+    subject = meta["subject"].strip()
     if not sender:
         raise ReceiveError("refused: message has no 'from' field")
     if not _SENDER_TOKEN.fullmatch(sender):

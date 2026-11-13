@@ -188,6 +188,46 @@ def test_mailbox_name_traversal_is_refused(tmp_path: Path) -> None:
     assert mailbox_inbox(tmp_path, "work") == tmp_path / "mailboxes" / "work" / "inbox"
 
 
+@pytest.mark.parametrize("field", ["from", "to", "subject"])
+@pytest.mark.parametrize("value", ["[alice, bob]", "{name: alice}", "42", "true"])
+def test_receive_requires_text_fields(tmp_path: Path, field: str, value: str) -> None:
+    raw = _message().replace(
+        {"from": "from: alice", "to": "to: bob", "subject": "subject: Hello"}[field],
+        f"{field}: {value}",
+    )
+    with pytest.raises(ReceiveError, match="must be a string"):
+        publish_message(raw, tmp_path / "inbox")
+    assert not (tmp_path / "inbox").exists()
+
+
+@pytest.mark.parametrize("field", ["from", "to", "subject"])
+def test_receive_rejects_aliased_collection_before_stringifying(tmp_path: Path, field: str) -> None:
+    # A modest expansion reproduces the coercion bug without exhausting the host.
+    aliases = "a0: &a0 [x, x]\n" + "".join(
+        f"a{n}: &a{n} [*a{n - 1}, *a{n - 1}]\n" for n in range(1, 10)
+    )
+    raw = (
+        _message()
+        .replace("---\n", "---\n" + aliases, 1)
+        .replace(
+            {"from": "from: alice", "to": "to: bob", "subject": "subject: Hello"}[field],
+            f"{field}: *a9",
+        )
+    )
+    with pytest.raises(ReceiveError, match="must be a string"):
+        publish_message(raw, tmp_path / "inbox")
+
+
+@pytest.mark.parametrize("field,value", [("from", " alice "), ("to", " bob ")])
+def test_receive_refuses_unroutable_whitespace_addresses(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    raw = _message().replace("from: alice" if field == "from" else "to: bob", f"{field}: '{value}'")
+    with pytest.raises(ReceiveError, match="surrounding whitespace"):
+        publish_message(raw, tmp_path / "inbox", expected_sender="alice", self_name="bob")
+    assert not (tmp_path / "inbox").exists()
+
+
 # -- CLI surface -------------------------------------------------------------
 
 
@@ -387,16 +427,20 @@ def test_receive_only_round_trip_preserves_thread_identity(
 
 
 def test_failed_receive_only_reply_stays_pending(workspace: Path) -> None:
-    from gptmail.transport.agent import AgentTransport
+    from gptmail.transport.agent import AgentTransport, meta_of
 
     inbox = workspace / "messages" / "inbox"
     original = publish_message(_message(), inbox)
     transport = AgentTransport(workspace / "messages", "bob")
     reply = transport.outbox / "reply.md"
     reply.write_text(
-        "---\nfrom: bob\nto: alice\nsubject: Re: Hello\n"
+        "---\nfrom: bob\nto: alice\nsubject: 'Re: Hello'\n"
         f"in_reply_to: {original.name}\ndelivered: false\n---\n\nAnswer\n"
     )
+    reply_meta = meta_of(reply)
+    assert reply_meta is not None
+    assert reply_meta["in_reply_to"] == original.name
+    assert reply_meta["delivered"] is False
     assert agent_cli._is_push_reachable(
         "alice", {"alice": {"ssh": "alice@alice", "delivery": "receive-only"}}
     )
@@ -408,6 +452,18 @@ def test_failed_receive_only_reply_stays_pending(workspace: Path) -> None:
         no_reply_subject_patterns=[],
     )
     assert [message["file"] for message in pending] == [original.name]
+    # Control: this same parseable reply suppresses pending once delivered.
+    reply.write_text(reply.read_text().replace("delivered: false", "delivered: true"))
+    assert (
+        agent_cli._pending_messages(
+            workspace / "messages",
+            "bob",
+            0,
+            agents={"alice": {"ssh": "alice@alice", "delivery": "receive-only"}},
+            no_reply_subject_patterns=[],
+        )
+        == []
+    )
 
 
 def test_receive_selects_workspace_without_git_or_login_cwd(
@@ -542,3 +598,44 @@ def test_general_watch_keeps_timely_push_at_deadline(workspace: Path, monkeypatc
     result = CliRunner().invoke(agent, ["watch", "--once", "--timeout", "1s"])
     assert result.exit_code == 0, result.output
     assert "Hello" in result.output
+
+
+@pytest.mark.parametrize("do_pull", [False, True])
+def test_mixed_watch_reports_each_transport_once(workspace: Path, monkeypatch, do_pull) -> None:
+    monkeypatch.setattr(
+        agent_cli,
+        "_load_agents",
+        lambda: {
+            "alice": {"ssh": "alice@alice", "delivery": "receive-only"},
+            "carol": {"ssh": "carol@carol", "workspace": "/srv/carol"},
+        },
+    )
+    polls = []
+
+    def remote_rows(name, config, **kwargs):
+        polls.append(name)
+        if len(polls) == 1:
+            return []
+        return [{"file": "legacy.md", "from": "carol", "to": "bob", "subject": "Legacy arrival"}]
+
+    sleeps = []
+
+    def arrive(seconds):
+        if sleeps:
+            raise KeyboardInterrupt
+        sleeps.append(seconds)
+        publish_message(_message(subject="Push arrival"), workspace / "messages" / "inbox")
+        (workspace / "messages" / "inbox" / "legacy.md").write_text(
+            _message(sender="carol", subject="Legacy arrival")
+        )
+
+    pulls = []
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", remote_rows)
+    monkeypatch.setattr(agent_cli.time, "sleep", arrive)
+    monkeypatch.setattr(agent_cli.subprocess, "run", lambda *a, **kw: pulls.append(a))
+    result = CliRunner().invoke(agent, ["watch"] + (["--pull"] if do_pull else []))
+    assert result.exit_code == 0, result.output
+    assert result.stdout.count("Push arrival") == 1
+    assert result.stdout.count("Legacy arrival") == 1
+    assert polls == ["carol", "carol"]
+    assert len(pulls) == int(do_pull)

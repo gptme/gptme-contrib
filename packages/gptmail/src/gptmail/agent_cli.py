@@ -2096,7 +2096,13 @@ def watch(
                 continue
             local_baseline.add(key)
             sender = str(meta.get("from", "")).lower()
-            if sender not in watch_agents or not _addressed_to(meta, recipient):
+            # SSH-polled peers are reported by their remote baseline below,
+            # even if they also SCP-push a local copy during migration.
+            if (
+                sender not in watch_agents
+                or sender in ssh_agents
+                or not _addressed_to(meta, recipient)
+            ):
                 continue
             click.echo(f"NEW message from {sender}: {meta.get('subject', '')} ({path.name})")
             if once:
