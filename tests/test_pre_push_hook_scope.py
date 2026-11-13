@@ -1640,3 +1640,148 @@ def test_existing_branch_uses_advertised_old_sha_under_tight_limit(
         env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "1", "MASS_DELETE_THRESHOLD": "1"},
     )
     assert proc.returncode == 0, proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Live default-branch baseline for new-branch pushes.
+#
+# A cached tracking ref cannot prove the server still has its history
+# (gptme/gptme-contrib#1950), so a single-remote repo's first push of a new
+# branch scanned the whole history and blocked. The hook now asks the push
+# destination for its live master/main tips via ls-remote; only those, never a
+# cached ref, may scope the new branch's range.
+# ---------------------------------------------------------------------------
+
+MASS_DELETE_BLOCKED = "deletes 3 files"
+RANGE_BLOCKED = "PUSH BLOCKED: mass-delete scan range exceeds limit"
+
+
+def _repo_with_live_server(tmp_path: Path, history: int = 5) -> tuple[Path, str, str]:
+    """A single-remote clone whose bare origin's master holds ``history`` commits.
+
+    Returns (repo, server_url, published_tip).
+    """
+    server = tmp_path / "server.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(server)], check=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "master", str(repo)], check=True)
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "remote", "add", "origin", str(server))
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (repo / name).write_text("x\n")
+    _git(repo, "add", "a.txt", "b.txt", "c.txt")
+    _git(repo, "commit", "--no-verify", "-qm", "seed")
+    for i in range(history - 1):
+        _commit(repo, f"hist{i}.txt")
+    published = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "push", "--no-verify", "-q", "origin", "master")
+    return repo, str(server), published
+
+
+def test_new_branch_on_live_tip_scans_only_new_commits(tmp_path: Path) -> None:
+    """Five published commits + one new one fit a limit of 2 via the live tip."""
+    repo, server_url, _published = _repo_with_live_server(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "topic")
+    tip = _commit(repo, "new.txt")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {tip} refs/heads/topic {ZERO}\n",
+        "origin",
+        server_url,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "2", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert RANGE_BLOCKED not in proc.stderr, proc.stderr
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
+def test_new_branch_deletion_on_live_tip_still_blocks(tmp_path: Path) -> None:
+    """The live baseline narrows the scan; it does not skip the new commits."""
+    repo, server_url, _published = _repo_with_live_server(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "topic")
+    _git(repo, "rm", "-q", "a.txt", "b.txt", "c.txt")
+    _git(repo, "commit", "--no-verify", "-qm", "delete everything")
+    tip = _git(repo, "rev-parse", "HEAD")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {tip} refs/heads/topic {ZERO}\n",
+        "origin",
+        server_url,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "2", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert MASS_DELETE_BLOCKED in proc.stderr, proc.stderr
+    assert proc.returncode == 1
+
+
+def test_stale_cached_tracking_ref_is_not_trusted_over_live_tip(
+    tmp_path: Path,
+) -> None:
+    """The server was reset behind the clone: only its live tip may scope the range.
+
+    The cached ``origin/master`` still points past a deletion commit the server
+    no longer has. Trusting the cache would hide that deletion; the live tip
+    (the older published commit) keeps it in the scan.
+    """
+    repo, server_url, _published = _repo_with_live_server(tmp_path)
+    _git(repo, "rm", "-q", "a.txt", "b.txt", "c.txt")
+    _git(repo, "commit", "--no-verify", "-qm", "delete everything")
+    deletion = _git(repo, "rev-parse", "HEAD")
+    # The clone believes origin/master already contains the deletion.
+    _git(repo, "update-ref", "refs/remotes/origin/master", deletion)
+    _git(repo, "checkout", "-q", "-b", "topic")
+    tip = _commit(repo, "new.txt")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {tip} refs/heads/topic {ZERO}\n",
+        "origin",
+        server_url,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "2", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert MASS_DELETE_BLOCKED in proc.stderr, proc.stderr
+    assert proc.returncode == 1
+
+
+def test_ls_remote_failure_falls_back_to_range_block(tmp_path: Path) -> None:
+    """An unreachable destination yields no baseline: over-limit still blocks."""
+    repo, _server_url, _published = _repo_with_live_server(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "topic")
+    tip = _commit(repo, "new.txt")
+    unreachable = str(tmp_path / "gone.git")
+    _git(repo, "remote", "set-url", "origin", unreachable)
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {tip} refs/heads/topic {ZERO}\n",
+        "origin",
+        unreachable,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "2", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert RANGE_BLOCKED in proc.stderr, proc.stderr
+    assert "No live destination master/main tip" in proc.stderr
+    assert proc.returncode == 1
+
+
+def test_live_tip_missing_locally_falls_back_to_range_block(tmp_path: Path) -> None:
+    """A server tip this clone never fetched proves nothing about local history."""
+    repo, server_url, _published = _repo_with_live_server(tmp_path)
+    # Someone else advances the server's master; this clone does not fetch it.
+    other = tmp_path / "other"
+    subprocess.run(["git", "clone", "-q", server_url, str(other)], check=True)
+    _git(other, "config", "user.email", "t@t")
+    _git(other, "config", "user.name", "t")
+    _commit(other, "elsewhere.txt")
+    _git(other, "push", "--no-verify", "-q", "origin", "master")
+    # Rewrite local history so no local commit is on the server any more.
+    _git(repo, "checkout", "-q", "--orphan", "topic")
+    for i in range(4):
+        _commit(repo, f"orphan{i}.txt")
+    tip = _git(repo, "rev-parse", "HEAD")
+    proc = _run_hook(
+        repo,
+        f"refs/heads/topic {tip} refs/heads/topic {ZERO}\n",
+        "origin",
+        server_url,
+        env={"MASS_DELETE_COMMIT_RANGE_LIMIT": "2", "MASS_DELETE_THRESHOLD": "1"},
+    )
+    assert RANGE_BLOCKED in proc.stderr, proc.stderr
+    assert proc.returncode == 1
