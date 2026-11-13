@@ -21,6 +21,7 @@ Features:
 import logging
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -39,36 +40,9 @@ from rich.table import Table
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class DirectoryConfig:
-    """Configuration for a directory type."""
-
-    type_name: str
-    states: list[str]
-    special_files: list[str]
-    emoji: str  # Emoji for visual distinction
-
-
-CONFIGS = {
-    "tasks": DirectoryConfig(
-        type_name="tasks",
-        states=["new", "active", "paused", "done", "cancelled"],
-        special_files=["README.md"],
-        emoji="📋",
-    ),
-    "tweets": DirectoryConfig(
-        type_name="tweets",
-        states=["new", "queued", "approved", "posted"],
-        special_files=["README.md", "templates"],
-        emoji="🐦",
-    ),
-    "email": DirectoryConfig(
-        type_name="email",
-        states=["inbox", "drafts", "sent", "archive"],
-        special_files=["README.md", "templates", "config"],
-        emoji="📧",
-    ),
-}
+# Standalone uv invocation must use the same directory states as gptodo.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages/gptodo/src"))
+from gptodo.utils import CONFIGS, DirectoryConfig  # noqa: E402
 
 
 def find_repo_root(start_path: Path) -> Path:

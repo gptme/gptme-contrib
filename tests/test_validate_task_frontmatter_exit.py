@@ -16,6 +16,9 @@ PEP 723 dependencies on each invocation.
 import subprocess
 from pathlib import Path
 
+import pytest
+from gptodo.utils import DEPRECATED_STATE_ALIASES, get_canonical_states
+
 SCRIPT = (
     Path(__file__).parent.parent
     / "scripts"
@@ -96,6 +99,37 @@ def test_exits_nonzero_on_missing_required(tmp_path: Path) -> None:
     assert result.returncode != 0
 
 
+@pytest.mark.parametrize(
+    "state", get_canonical_states() + list(DEPRECATED_STATE_ALIASES)
+)
+def test_accepts_every_gptodo_state(tmp_path: Path, state: str) -> None:
+    f = _make_task(
+        tmp_path,
+        f"---\nstate: {state}\ncreated: 2026-03-02\n---\n# Task\n",
+    )
+    result = _run([str(f)])
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "waiting_for",
+    [
+        '{type: pr_ci, ref: "gptme/gptme#1217"}',
+        '[{type: pr_merged, ref: "gptme/gptme#1217"}, "maintainer reply"]',
+    ],
+)
+def test_accepts_structured_waiting_conditions(
+    tmp_path: Path, waiting_for: str
+) -> None:
+    f = _make_task(
+        tmp_path,
+        "---\nstate: waiting\ncreated: 2026-03-02\n"
+        f"waiting_for: {waiting_for}\nwaiting_since: 2026-03-02\n---\n# Task\n",
+    )
+    result = _run([str(f)])
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_no_files_exits_clean() -> None:
     """precommit can pass empty file lists; should be a no-op."""
     result = _run([])
@@ -165,3 +199,13 @@ def test_task_type_no_template_hint_for_tweets(tmp_path: Path) -> None:
     assert (
         "tasks/templates/default.md" not in output
     ), f"tweet validation must not reference tasks template — got: {output!r}"
+
+
+def test_tweets_do_not_inherit_task_only_fields(tmp_path: Path) -> None:
+    f = _make_task(
+        tmp_path,
+        "---\nstate: approved\ncreated: 2026-03-02\n"
+        "related: https://example.com/post\npool: social\n---\n",
+    )
+    result = _run(["--type", "tweets", str(f)])
+    assert result.returncode == 0, result.stdout + result.stderr
