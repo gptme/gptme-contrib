@@ -6,6 +6,7 @@ import csv
 import json
 import logging
 import math
+import os
 import re
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -464,6 +465,20 @@ def _discover_all(
     # Sort chronologically across harnesses; entries without a date sort last.
     discovered.sort(key=lambda e: e.get("session_date") or date.max)
     return discovered
+
+
+def _project_key(project: str | Path) -> str:
+    """Comparable key for a project path.
+
+    Claude Code names project dirs by replacing every non-alphanumeric
+    character with ``-``, and decoding that back is lossy (``/a/b-c`` and
+    ``/a/b/c`` both decode to ``/a/b/c``). Mapping both sides through the
+    same encoding makes a requested path match its decoded CC project.
+    """
+    raw = str(project)
+    if raw.startswith("/"):
+        raw = os.path.abspath(os.path.expanduser(raw))
+    return re.sub(r"[^A-Za-z0-9]", "-", raw.rstrip("/"))
 
 
 def _count_unsynced(
@@ -2491,6 +2506,16 @@ def replay(
 )
 @click.option("--dry-run", is_flag=True, help="Show what would be imported without writing")
 @click.option(
+    "--project",
+    "projects",
+    multiple=True,
+    help=(
+        "Only import sessions whose project is this path (repeatable). Without it, "
+        "sync imports sessions from every project, including headless calls run "
+        "from other directories."
+    ),
+)
+@click.option(
     "--fix-timestamps",
     is_flag=True,
     help="Backfill correct timestamps for existing records from their trajectory paths",
@@ -2502,6 +2527,7 @@ def sync(
     since: str,
     with_signals: bool,
     dry_run: bool,
+    projects: tuple[str, ...],
     fix_timestamps: bool,
 ) -> None:
     """Discover trajectory files and import them into the session store.
@@ -2580,6 +2606,11 @@ def sync(
     since_days = _parse_since(since)  # None means "all time"
     since_days_effective = since_days if since_days is not None else 36500  # ~100 years
     discovered = _discover_all(since_days=since_days_effective, harness_filter=harness)
+    if projects:
+        wanted = {_project_key(p) for p in projects}
+        discovered = [
+            e for e in discovered if e.get("project") and _project_key(e["project"]) in wanted
+        ]
 
     if not discovered:
         window_desc = f"last {_fmt_since(since_days)}"
