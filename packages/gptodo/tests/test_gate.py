@@ -308,3 +308,21 @@ def test_new_gate_identity_is_not_a_push() -> None:
     after = {"gate": {"kind": "pr", "ref": "o/r#2", "deadline": "2026-12-20"}}
     assert check_gate_change(before, after) == []
     assert check_gate_change({}, after) == []
+
+
+@pytest.mark.parametrize("prior_has_null", [False, True])
+def test_null_original_deadline_allows_exactly_one_push(
+    tmp_path: Path, prior_has_null: bool
+) -> None:
+    gate = {"kind": "time", "deadline": "2026-11-20"}
+    if prior_has_null:
+        gate["original_deadline"] = None
+    path = _write(tmp_path, gate)
+    extended = dict(gate, deadline="2026-12-01", original_deadline=None)
+    assert validate_gate({"gate": extended}) == []
+    mutate_task(path, patch={"gate": extended})
+    pushed = frontmatter.load(path).metadata["gate"]
+    assert pushed["original_deadline"] == "2026-11-20"
+    with pytest.raises(TransitionError, match="second push is refused"):
+        mutate_task(path, patch={"gate": dict(pushed, deadline="2026-12-02")})
+    assert frontmatter.load(path).metadata["gate"] == pushed

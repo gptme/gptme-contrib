@@ -307,7 +307,7 @@ def stamp_deadline_push(prior: dict[str, Any], post: dict[str, Any]) -> None:
         return
     if _gate_identity(before) != _gate_identity(after):
         return
-    if before.get("original_deadline") is not None or "original_deadline" in after:
+    if before.get("original_deadline") is not None or after.get("original_deadline") is not None:
         return
     old_deadline = _as_datetime(before.get("deadline"))
     new_deadline = _as_datetime(after.get("deadline"))
