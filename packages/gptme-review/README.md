@@ -11,6 +11,35 @@ a failed or lagging lookup must not erase a valid response cost. The ledger keep
 `generation_id` for later reconciliation. Missing cost remains unknown/estimated,
 not a billed zero. Subscription list-price equivalents are not OpenRouter charges.
 
+## Subscription reviewer panels
+
+`gptme_review.panel` provides one-shot Codex, Claude Code, Grok and Copilot
+transports plus `PanelReviewer`, `run_reviewer` and `panel_review`. A caller
+passes a **pre-admitted** roster and the complete review prompt. The package
+owns bounded transport execution, response parsing, consensus merging and
+per-reviewer result rows. It refuses to label a partially failed, empty panel
+as a clean review, and retains individual failure rows in `PanelReviewError`.
+Transport provenance is stamped by the executor, not trusted from model output.
+Lifecycle stages use the shared `gptme_review.lifecycle` context, including in
+panel threads.
+
+The host still owns private-repository/provider consent, quota admission,
+reviewer identities, roster selection, budget policy and ledger persistence.
+Importing this module does not select reviewers or grant permission to run
+one. Optional CLI transports use the current user's own installed tools and
+credentials; they never copy credentials from another workspace. Grok's direct
+transport reads the local CLI-owned auth file but does not refresh it.
+
+List-price equivalents are not billed subscription spend. Pass a price table
+explicitly, or load one with `load_prices(path)`. Without an explicit table/path,
+prices remain unknown; the portable module never guesses a brain config path.
+`choose_primary_route` accepts caller-supplied availability and budget counts;
+it does not perform admission or read production ledgers. Explicit per-call
+arguments override the existing `AI_REVIEW_PANEL_*` defaults.
+
+This is an extraction seam, **not yet a portable sweep CLI**. The original host
+adapter continues to own production execution until it adopts this package.
+
 ## Large-diff shard planning
 
 `gptme_review.shard` provides the pure planning and result-merging layer used
