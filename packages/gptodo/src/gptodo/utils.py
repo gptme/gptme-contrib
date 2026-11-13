@@ -187,6 +187,9 @@ KNOWN_FRONTMATTER_FIELDS: set[str] = {
     "completed",
     "output_types",
     "success_criterion",
+    # Evidence that success_criterion was measured (what, where, value, date).
+    # Required by `gptodo edit --set state done` when a criterion is set.
+    "verified",
     # Structured blockers (see TASKS.md "Blocked means waiting"):
     # `wait_kind` classifies WHY a task is waiting (machine|human|external|
     # hypothesis) so sweepers can auto-release only the mechanically-checkable

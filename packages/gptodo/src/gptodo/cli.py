@@ -236,6 +236,7 @@ def cli(verbose, tasks_dir):
         waiting_since: date (GTD)
         parent: string (parent task ID)
         success_criterion: string (verifiable "done" gate)
+        verified: string (what was measured, where, the value, the date)
         tracking_issue: string (human URL of the live coordination issue/PR)
         upstream_coordination_id: string (machine claim key, e.g. github:OWNER/REPO#NUM)
         depends: list (deprecated, use requires)
@@ -2539,6 +2540,15 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
     help="Allow a done transition with unresolved checkboxes. Does not bypass repository commit hooks.",
 )
 @click.option(
+    "--allow-unverified",
+    is_flag=True,
+    help=(
+        "Allow a done transition on a task whose success_criterion has no "
+        "`verified` evidence. Prefer --set verified '<what was measured, where, "
+        "value, date>'."
+    ),
+)
+@click.option(
     "--force",
     is_flag=True,
     help=(
@@ -2560,7 +2570,15 @@ def watch(interval: int, fix: bool, once: bool, verbose: bool):
     ),
 )
 def edit(
-    task_ids, set_fields, add_fields, remove_fields, set_subtask, force, allow_pending, output_json
+    task_ids,
+    set_fields,
+    add_fields,
+    remove_fields,
+    set_subtask,
+    allow_unverified,
+    force,
+    allow_pending,
+    output_json,
 ):
     """Edit task metadata.
 
@@ -2671,6 +2689,7 @@ def edit(
         "recur": {"type": "string"},  # Recurrence interval (7d, 24h, weekly, monthly)
         "parent": {"type": "string"},  # Parent task ID (for subtasks)
         "success_criterion": {"type": "string"},  # Verifiable "done" gate
+        "verified": {"type": "string"},  # Measured evidence for success_criterion
         "tracking_issue": {"type": "string"},  # Human URL of the live coordination issue/PR
         "upstream_coordination_id": {"type": "string"},  # Machine claim key (github:OWNER/REPO#NUM)
         # Auto-expire (Gordon 2026-07-01)
@@ -3012,6 +3031,44 @@ def edit(
         if problems:
             pending_done.append(f"{task.name}: {', '.join(problems)}")
             pending_ids.append(task.name)
+
+    # A task with a success_criterion is done only when the criterion was
+    # measured: `verified` must already be set or be set in this command.
+    # Recurring tasks reset to waiting instead of closing, so they are exempt.
+    setting_done = any(
+        op == "set" and field == "state" and value == "done" for op, field, value in changes
+    )
+    unverified: list[str] = []
+    if setting_done:
+        for task in target_tasks:
+            meta = frontmatter.load(task.path).metadata
+            prior = normalize_state(str(meta.get("state", "backlog") or "backlog"), warn=False)
+            if prior == "done" or meta.get("recur"):
+                continue
+            # Evidence as it will be on disk: apply this command's verified edits
+            # in order, so `--set verified none` clears rather than supplies it.
+            final_verified = meta.get("verified")
+            for op, field, value in changes:
+                if op == "set" and field == "verified":
+                    final_verified = value
+            if (
+                str(meta.get("success_criterion") or "").strip()
+                and not str(final_verified or "").strip()
+            ):
+                unverified.append(task.name)
+    if unverified:
+        names = ", ".join(unverified)
+        if not allow_unverified:
+            refuse(
+                f"Cannot mark done: {names} has a success_criterion but no `verified` "
+                "evidence. Measure the criterion, then add --set verified "
+                "'<what was measured, where, the value, the date>'; if it cannot be "
+                "measured yet, set state waiting with the check date. "
+                "Use --allow-unverified only for an intentional override.",
+                task_id=unverified[0] if len(unverified) == 1 else None,
+                click_error=True,
+            )
+        console.print(f"[yellow]--allow-unverified: {names}[/]")
 
     if pending_done:
         details = "; ".join(pending_done)
