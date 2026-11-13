@@ -1279,3 +1279,26 @@ def test_codex_invalid_utf8_sibling_does_not_hide_valid_children(tmp_path, corru
     assert summary["subagents_total"] == 1
     assert summary["spawns_total"] == 1
     assert codex_subagent_rollouts(parent) == [(child, {"session_id": "c-1"}, 1)]
+
+
+@pytest.mark.parametrize("reported_depth", [None, 1, 7])
+def test_codex_summary_depth_is_relative_to_selected_parent(tmp_path, reported_depth) -> None:
+    """Exact parent links define depth, even for a selected child rollout."""
+    from gptme_sessions.signals import extract_from_path
+
+    parent = _codex_rollout(tmp_path / "rollout-parent.jsonl", "p", parent="outer", depth=3)
+    child = _codex_rollout(tmp_path / "rollout-child.jsonl", "c", parent="p")
+    nested = _codex_rollout(tmp_path / "rollout-nested.jsonl", "g", parent="c")
+    for path in (child, nested):
+        row = json.loads(path.read_text())
+        spawn = row["payload"]["source"]["subagent"]["thread_spawn"]
+        if reported_depth is None:
+            spawn.pop("depth")
+        else:
+            spawn["depth"] = reported_depth
+        path.write_text(json.dumps(row) + "\n")
+
+    summary = extract_from_path(parent)["subagent_summary"]
+    assert summary["subagents_total"] == 2
+    assert summary["spawns_total"] == 1
+    assert summary["subagents_depth_max"] == 2

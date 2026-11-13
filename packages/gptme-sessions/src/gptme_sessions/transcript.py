@@ -1717,27 +1717,27 @@ def codex_subagent_rollouts(parent_jsonl: Path) -> list[tuple[Path, dict, int]]:
             if candidate > start and directory.is_dir():
                 dirs.append(directory)
     by_parent: dict[str, list[tuple[Path, str]]] = {}
-    depths: dict[Path, int] = {}
+
     for directory in dirs:
         for file in sorted(directory.glob("rollout-*.jsonl")):
             if file == parent_jsonl:
                 continue
-            thread_id, parent, depth = _codex_rollout_linkage(file)
+            thread_id, parent, _ = _codex_rollout_linkage(file)
             if thread_id and parent:
                 by_parent.setdefault(parent, []).append((file, thread_id))
-                depths[file] = depth
     out: list[tuple[Path, dict, int]] = []
     seen = {parent_id}
 
-    def walk(thread: str) -> None:
+    def walk(thread: str, depth: int) -> None:
         for file, thread_id in by_parent.get(thread, []):
             if thread_id in seen:
                 continue
             seen.add(thread_id)
-            out.append((file, {"session_id": thread_id}, depths[file]))
-            walk(thread_id)
+            # Depth is relative to the selected parent, not Codex's root thread.
+            out.append((file, {"session_id": thread_id}, depth))
+            walk(thread_id, depth + 1)
 
-    walk(parent_id)
+    walk(parent_id, 1)
     return out
 
 
