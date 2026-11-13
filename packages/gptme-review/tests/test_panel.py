@@ -800,7 +800,6 @@ def test_panel_join_deadline_records_abandoned_reviewer(monkeypatch):
 
     class Deadline(panel.ReviewDeadline):
         def remaining(self, stage: str, *, minimum_s: float = 0) -> float:
-            assert entered.wait(1)
             return 0.01
 
     monkeypatch.setattr(panel, "run_reviewer", slow)
@@ -819,3 +818,73 @@ def test_panel_join_deadline_records_abandoned_reviewer(monkeypatch):
 def test_grok_turn_limit_keeps_safe_default(monkeypatch, raw):
     monkeypatch.setenv("AI_REVIEW_GROK_MAX_TURNS", raw)
     assert panel._positive_int_env("AI_REVIEW_GROK_MAX_TURNS", 3) == 3
+
+
+def test_expired_deadline_never_starts_transport(monkeypatch):
+    from gptme_review.core import ReviewDeadlineExceeded
+
+    called = threading.Event()
+
+    def transport(*args):
+        called.set()
+        return _review_text(), {}, None
+
+    monkeypatch.setattr(panel, "TRANSPORTS", {"codex": transport})
+    deadline = panel.ReviewDeadline(0.001)
+    time.sleep(0.005)
+    with pytest.raises(ReviewDeadlineExceeded):
+        panel.panel_review("p", [CODEX_SOL], deadline=deadline)
+    assert not called.is_set()
+
+
+def test_shared_deadline_caps_transport_timeout(monkeypatch):
+    seen = []
+
+    def transport(reviewer, prompt, timeout):
+        seen.append(timeout)
+        return _review_text(), {}, None
+
+    monkeypatch.setattr(panel, "TRANSPORTS", {"codex": transport})
+    panel.panel_review("p", [CODEX_SOL], timeout=420, deadline=panel.ReviewDeadline(2))
+    assert len(seen) == 1 and 0 < seen[0] <= 2
+
+
+def test_panel_price_total_is_unknown_if_any_price_is_unknown(monkeypatch):
+    _fake_transports(
+        monkeypatch, {CODEX_SOL.key: _review_text(), CLAUDE_SONNET.key: _review_text()}
+    )
+    _, usage = panel.panel_review("p", [CODEX_SOL])
+    assert usage["panel"]["reviewers"][0]["list_price_usd"] is None
+    assert usage["panel"]["list_price_usd"] is None
+    _, usage = panel.panel_review(
+        "p", [CODEX_SOL, CLAUDE_SONNET], prices={"codex": PRICES["codex"]}
+    )
+    assert usage["panel"]["list_price_usd"] is None
+
+
+def test_degraded_consensus_reports_effective_threshold(monkeypatch):
+    _fake_transports(
+        monkeypatch,
+        {
+            CODEX_SOL.key: _review_text(_finding()),
+            CLAUDE_SONNET.key: ReviewError("down"),
+        },
+    )
+    findings, usage = panel.panel_review(
+        "p", [CODEX_SOL, CLAUDE_SONNET], min_agreement=2
+    )
+    assert len(findings) == 1
+    assert usage["consensus_min_agreement_requested"] == 2
+    assert usage["consensus_min_agreement"] == 1
+
+
+def test_consensus_reports_rejected_findings(monkeypatch):
+    _fake_transports(
+        monkeypatch,
+        {CODEX_SOL.key: _review_text(_finding()), CLAUDE_SONNET.key: _review_text()},
+    )
+    findings, usage = panel.panel_review(
+        "p", [CODEX_SOL, CLAUDE_SONNET], min_agreement=2
+    )
+    assert not findings
+    assert usage["consensus_rejected"] == 1

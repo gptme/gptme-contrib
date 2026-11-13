@@ -21,7 +21,11 @@ per-reviewer result rows. It refuses to label a partially failed, empty panel
 as a clean review, and retains individual failure rows in `PanelReviewError`.
 Transport provenance is stamped by the executor, not trusted from model output.
 Lifecycle stages use the shared `gptme_review.lifecycle` context, including in
-panel threads.
+panel threads. A shared deadline is checked before starting requests and caps
+each transport's timeout; exhausted joins retain per-reviewer failure rows.
+Consensus usage reports both requested and effective agreement, including
+rejected findings. The aggregate list-price equivalent remains unknown when
+any reviewer price is unknown, rather than presenting an incomplete sum as zero.
 
 The host still owns private-repository/provider consent, quota admission,
 reviewer identities, roster selection, budget policy and ledger persistence.

@@ -851,11 +851,27 @@ def panel_review(
         )
     prices = prices if prices is not None else load_prices()
     started = time.monotonic()
+    panel_deadline = started + timeout + 30
+    if deadline is not None:
+        # Check before launching any request. Keep an absolute deadline so
+        # thread startup cannot extend the caller's remaining budget.
+        panel_deadline = min(
+            panel_deadline,
+            time.monotonic() + deadline.remaining("subscription panel start"),
+        )
     results: list[ReviewerResult | None] = [None] * len(reviewers)
 
     def _go(i: int, reviewer: PanelReviewer) -> None:
+        transport_timeout = min(timeout, panel_deadline - time.monotonic())
+        if transport_timeout <= 0:
+            results[i] = ReviewerResult(
+                reviewer, False, error="deadline exhausted before transport"
+            )
+            return
         lifecycle.stage("subscription_transport", attempt=i + 1)
-        results[i] = run_reviewer(reviewer, prompt, timeout=timeout, prices=prices)
+        results[i] = run_reviewer(
+            reviewer, prompt, timeout=transport_timeout, prices=prices
+        )
 
     threads = [
         threading.Thread(
@@ -868,12 +884,6 @@ def panel_review(
     ]
     for t in threads:
         t.start()
-    panel_deadline = time.monotonic() + timeout + 30
-    if deadline is not None:
-        panel_deadline = min(
-            panel_deadline,
-            time.monotonic() + deadline.remaining("subscription panel join"),
-        )
     for t in threads:
         t.join(max(0.0, panel_deadline - time.monotonic()))
     final: list[ReviewerResult] = []
@@ -909,7 +919,7 @@ def panel_review(
             ]
         per_model.append(deduplicate_findings(findings))
 
-    kept, _rejected = consensus_findings(
+    kept, rejected = consensus_findings(
         per_model,
         min_agreement=min_agreement,
         pass_aspects=[{"general"} for _ in per_model],
@@ -941,8 +951,8 @@ def panel_review(
         "consensus_requested_jobs": len(final),
         "consensus_answered_jobs": len(answered),
         "consensus_min_agreement_requested": min_agreement,
-        "consensus_min_agreement": min_agreement,
-        "consensus_rejected": 0,
+        "consensus_min_agreement": min(min_agreement, len(answered)),
+        "consensus_rejected": len(rejected),
     }
     if failures:
         usage["pass_failures"] = failures
@@ -958,9 +968,10 @@ def panel_review(
         "families": sorted({r.reviewer.family for r in answered}),
         "reviewers": [r.row() for r in final],
         "wall_s": round(time.monotonic() - started, 2),
-        "list_price_usd": round(
-            sum(r.list_price_usd or 0.0 for r in final),
-            6,
+        "list_price_usd": (
+            round(sum(r.list_price_usd or 0.0 for r in final), 6)
+            if all(r.list_price_usd is not None for r in final)
+            else None
         ),
     }
     kept.sort(key=lambda f: _SEVERITY_RANK.get(str(f.get("severity", "P2")), 9))
