@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location(
     "release_announce", REPO_ROOT / "scripts" / "twitter" / "release_announce.py"
@@ -828,7 +830,17 @@ def test_main_skips_cross_account_quote_and_exits_zero(monkeypatch, tmp_path, ca
     assert len(calls) == 3
 
 
-def test_main_still_refuses_retry_on_transient_quote_failure(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "error",
+    [
+        "429 Too Many Requests",
+        "ReadTimeout: HTTPSConnectionPool",
+        "tweepy.errors.TwitterServerError: 503 Service Unavailable",
+    ],
+)
+def test_main_still_refuses_retry_on_transient_quote_failure(
+    monkeypatch, tmp_path, error
+):
     """A non-API-rule quote failure keeps the pending marker (no blind retry)."""
     monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
     _release_stub(monkeypatch)
@@ -837,7 +849,7 @@ def test_main_still_refuses_retry_on_transient_quote_failure(monkeypatch, tmp_pa
     def fake_post(args, account=None):
         calls.append((account, args))
         if "--quote" in args:
-            return False, None, "twitter.py failed (1):\n429 Too Many Requests\n"
+            return False, None, f"twitter.py failed (1):\n{error}\n"
         return True, str(100 + len(calls)), ""
 
     monkeypatch.setattr(ra, "_post", fake_post)
@@ -1160,6 +1172,10 @@ def test_is_post_never_created_predicate():
     assert ra._is_post_never_created(
         "tweepy.errors.TooManyRequests: 429 Too Many Requests"
     )
+    # twitter.py exits before building a client when credentials are missing.
+    assert ra._is_post_never_created(
+        "Account profile: @gptmeorg (/x/gptmeorg.env)\nMissing TWITTER_BEARER_TOKEN in .env"
+    )
     assert not ra._is_post_never_created("tweepy.errors.TwitterServerError: 503 x")
     assert not ra._is_post_never_created("ReadTimeout: HTTPSConnectionPool")
 
@@ -1201,3 +1217,58 @@ def test_main_retries_after_definite_org_tweet_rejection(monkeypatch, tmp_path):
     # Next run attempts again instead of refusing blind retry.
     assert ra.main() == 1
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "failed_step", ["org_tweet_id", "link_reply_id", "bob_quote_id"]
+)
+@pytest.mark.parametrize(
+    "error",
+    ["Missing TWITTER_BEARER_TOKEN in .env", SPEND_CAP_403],
+    ids=["missing-credentials", "api-rejection"],
+)
+def test_main_retries_known_unsent_step_without_reposting_completed_steps(
+    monkeypatch, tmp_path, failed_step, error
+):
+    monkeypatch.setattr(ra, "STATE_FILE", tmp_path / "ra.json")
+    _release_stub(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["release_announce.py"])
+    steps = ["org_tweet_id", "link_reply_id", "bob_quote_id"]
+    completed = {
+        step: str(101 + i) for i, step in enumerate(steps[: steps.index(failed_step)])
+    }
+    key = "gptme/gptme#v0.13.2"
+    ra.save_state({key: completed})
+    calls = []
+
+    def failed_post(args, account=None):
+        calls.append((account, args))
+        assert ra._pending_key(failed_step) in ra.load_state()[key]
+        return False, None, error
+
+    monkeypatch.setattr(ra, "_post", failed_post)
+    assert ra.main() == 1
+    record = ra.load_state()[key]
+    assert ra._pending_key(failed_step) not in record
+    assert failed_step not in record
+    assert "announced_at" not in record
+    assert len(calls) == 1
+    assert all(record[step] == value for step, value in completed.items())
+
+    retry_calls = []
+
+    def successful_post(args, account=None):
+        retry_calls.append((account, args))
+        return True, str(201 + len(retry_calls)), ""
+
+    monkeypatch.setattr(ra, "_post", successful_post)
+    assert ra.main() == 0
+    assert retry_calls[0] == calls[0]
+    assert len(retry_calls) == len(steps) - len(completed)
+    record = ra.load_state()[key]
+    assert all(record[step] == value for step, value in completed.items())
+    assert all(record[step] for step in steps)
+    assert "announced_at" in record
+    assert not any(field.endswith("_pending_at") for field in record)
+    assert ra.main() == 0
+    assert len(retry_calls) == len(steps) - len(completed)

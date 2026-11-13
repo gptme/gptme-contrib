@@ -126,15 +126,24 @@ _DEFINITE_REJECTION_RE = re.compile(
 )
 
 
-def _is_post_never_created(output: str) -> bool:
-    """True when the API refused the request outright, creating nothing.
+# ``twitter.py`` exits before it builds an API client when its credentials are
+# absent from the environment (a unit that lost its EnvironmentFile, a moved
+# secrets file). No request was sent, so nothing can have been posted.
+_MISSING_CREDENTIALS_RE = re.compile(r"Missing TWITTER_[A-Z0-9_]+ in \.env")
 
-    Such a failure must not leave an ambiguous-side-effect marker behind: the
-    post provably does not exist, so the marker would only wedge this tag until
-    someone reconciles it by hand. Transient failures stay ambiguous and keep
-    their marker.
+
+def _is_post_never_created(output: str) -> bool:
+    """True when the post provably does not exist.
+
+    Either the API refused the request outright, or ``twitter.py`` failed on
+    missing credentials before sending anything. Such a failure must not leave
+    an ambiguous-side-effect marker behind: the marker would only wedge this tag
+    until someone reconciles it by hand. Transient failures stay ambiguous and
+    keep their marker.
     """
-    return bool(_DEFINITE_REJECTION_RE.search(output))
+    return bool(
+        _DEFINITE_REJECTION_RE.search(output) or _MISSING_CREDENTIALS_RE.search(output)
+    )
 
 
 def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -578,7 +587,17 @@ def _main(args: argparse.Namespace, rel: dict) -> int:
             record["bob_quote_skip_reason"] = reason
             quote_id = None
         elif not posted:
-            # Keep the pending marker so a later run refuses blind retry.
+            if _is_post_never_created(out):
+                # No quote exists: retry only this step after credentials or
+                # API access recover, preserving the announcement and reply.
+                print(
+                    f"{key}: quote failed (nothing was posted); "
+                    "cleared the pending marker so a later run can retry",
+                    file=sys.stderr,
+                )
+                record.pop(_pending_key("bob_quote_id"), None)
+                save_state(state)
+            # Otherwise keep the pending marker so a later run refuses blind retry.
             return 1
         _finish_post(state, record, "bob_quote_id", quote_id)
 
