@@ -274,6 +274,42 @@ if [ -n "$_GUARD_SCRIPT" ]; then
     done < <(git for-each-ref --format='%(refname) %(objectname) %(symref)' refs/ 2>/dev/null)
 
 
+    # Live default-branch baseline for new-branch pushes.
+    #
+    # Cached destination tracking refs cannot prove the server still holds
+    # their history (gptme/gptme-contrib#1950). A live advertisement can: ask
+    # the push destination once for its current master/main tips. Any tip that
+    # exists locally is history the server already has, so excluding it from a
+    # NEW branch's scan range hides nothing we are about to publish.
+    #
+    # Queried lazily (only when the conservative range would exceed the limit),
+    # once per invocation, against the push URL git supplied. Bounded by a
+    # timeout, never prompts, discards stderr (an error can echo a credentialed
+    # URL). Any failure yields no tips, i.e. today's scan-or-block behaviour.
+    _live_dest_tips=""
+    _live_dest_tips_loaded=false
+    _load_live_dest_tips() {
+        [ "$_live_dest_tips_loaded" = true ] && return 0
+        _live_dest_tips_loaded=true
+        [ -n "$_dest_push_url" ] || return 0
+        # Never let a URL be parsed as an option.
+        [[ "$_dest_push_url" == -* ]] && return 0
+        local out oid ref timeout_s
+        timeout_s="${MASS_DELETE_LS_REMOTE_TIMEOUT:-15}"
+        case "$timeout_s" in '' | *[!0-9]* | 0) timeout_s=15 ;; esac
+        local -a cmd=(git ls-remote "$_dest_push_url" refs/heads/master refs/heads/main)
+        if command -v timeout >/dev/null 2>&1; then
+            cmd=(timeout "$timeout_s" "${cmd[@]}")
+        fi
+        out="$(GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never "${cmd[@]}" </dev/null 2>/dev/null)" || return 0
+        while read -r oid ref; do
+            case "$ref" in refs/heads/master | refs/heads/main) ;; *) continue ;; esac
+            [[ "$oid" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || continue
+            git cat-file -e "$oid^{commit}" 2>/dev/null || continue
+            _live_dest_tips="$_live_dest_tips $oid"
+        done <<< "$out"
+    }
+
     for line in "${STDIN_LINES[@]}"; do
         read -r local_ref local_sha remote_ref remote_sha <<< "$line"
 
@@ -292,12 +328,14 @@ if [ -n "$_GUARD_SCRIPT" ]; then
         # excluding it would hide the destructive commit from the scan.
         if [ "$remote_sha" != "$ZERO" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
             range="$local_sha --not $remote_sha${_other_remotes:+ $_other_remotes}"
+            _new_branch_range=false
         else
             # Git advertises the old tip without downloading it. If it is not
             # available locally, scan conservatively as for a new branch.
             # Cached destination refs cannot prove the server still has their
             # history, even when they are strict ancestors of the pushed tip.
             range="$local_sha${_other_remotes:+ --not $_other_remotes}"
+            _new_branch_range=true
         fi
 
         # O(N) protection: block an over-limit scan, never silently skip it.
@@ -334,10 +372,28 @@ if [ -n "$_GUARD_SCRIPT" ]; then
             echo "PUSH BLOCKED: cannot enumerate mass-delete scan range" >&2
             exit 1
         fi
+        # A new branch over the limit: retry against the destination's live
+        # default-branch tips (see _load_live_dest_tips above).
+        _live_baseline_note=""
+        if [ "$_new_branch_range" = true ] && [ "$_range_limit" -ne 0 ] \
+            && [ "$_range_count" -gt "$_range_limit" ]; then
+            _load_live_dest_tips
+            if [ -n "$_live_dest_tips" ]; then
+                range="$local_sha --not$_live_dest_tips${_other_remotes:+ $_other_remotes}"
+                if ! _range_count=$(_range_revisions | git rev-list --count --stdin); then
+                    echo "PUSH BLOCKED: cannot enumerate mass-delete scan range" >&2
+                    exit 1
+                fi
+                _live_baseline_note="   Live destination master/main was excluded; the rest is unpublished."
+            else
+                _live_baseline_note="   No live destination master/main tip available locally (offline, or fetch first)."
+            fi
+        fi
         if [ "$_range_limit" -ne 0 ] && [ "$_range_count" -gt "$_range_limit" ]; then
             if [ "${ALLOW_MASS_DELETE:-}" != "1" ]; then
                 echo "PUSH BLOCKED: mass-delete scan range exceeds limit" >&2
                 echo "   Range: $_range_count commits (limit $_range_limit)." >&2
+                [ -n "$_live_baseline_note" ] && echo "$_live_baseline_note" >&2
                 echo "   Run the full scan: MASS_DELETE_COMMIT_RANGE_LIMIT=0 git push ... (may be slow)" >&2
                 echo "   After inspecting history, deliberately override: ALLOW_MASS_DELETE=1 git push ..." >&2
                 exit 1
