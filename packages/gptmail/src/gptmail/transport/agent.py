@@ -300,6 +300,15 @@ class AgentTransport:
         # Check the exact rendered bytes before either publication boundary.
         try:
             allowed = guard_outbound(message, self.channel, self._root.parent, require_scanner=True)
+            if not allowed:
+                raise ValueError("Outbound agent message blocked by secret policy")
+            filename = self._make_filename(self._self, subject)
+            # Preserve the sender's logical ID when a receiver chooses a local
+            # filename. Scan the final bytes too: filename sanitization can
+            # produce text that was not present verbatim in the original.
+            identity = yaml.safe_dump({"message_id": filename}, allow_unicode=True)
+            message = "---\n" + identity + message[4:]
+            allowed = guard_outbound(message, self.channel, self._root.parent, require_scanner=True)
         except SecretScannerUnavailable:
             # No scan ran, so this is a missing dependency, not a secret finding.
             raise ValueError(
@@ -312,7 +321,6 @@ class AgentTransport:
             raise ValueError("Outbound agent message blocked: secret scan failed") from None
         if not allowed:
             raise ValueError("Outbound agent message blocked by secret policy")
-        filename = self._make_filename(self._self, subject)
         local_path = self.outbox / filename
         local_path.write_text(message)
         if self._deliver is not None and not self._deliver(local_path, to.lower()):
@@ -392,19 +400,26 @@ class AgentTransport:
                     write_inbox_metadata(path, content)
         return content
 
-    def _lookup_meta(self, message_id: str) -> dict | None:
+    def _lookup_path(self, message_id: str) -> Path | None:
         for folder in (self.inbox, self.outbox):
             path = self._resolve_within(folder, message_id)
             if path is not None:
-                return self._meta_of(path)
+                return path
+        # Receive-only delivery uses receiver-generated filenames. The logical
+        # ID is data to compare, never a client-selected publication path.
+        for folder in (self.inbox, self.outbox):
+            for path in sorted(folder.glob("*.md")):
+                if (self._meta_of(path) or {}).get("message_id") == message_id:
+                    return path
         return None
 
+    def _lookup_meta(self, message_id: str) -> dict | None:
+        path = self._lookup_path(message_id)
+        return self._meta_of(path) if path is not None else None
+
     def _lookup_content(self, message_id: str) -> str | None:
-        for folder in (self.inbox, self.outbox):
-            path = self._resolve_within(folder, message_id)
-            if path is not None:
-                return path.read_text()
-        return None
+        path = self._lookup_path(message_id)
+        return path.read_text() if path is not None else None
 
     def _thread_chain(self, message_id: str) -> list[str]:
         """Ancestor message bodies (oldest first), following in_reply_to links."""

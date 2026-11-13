@@ -354,3 +354,77 @@ def test_legacy_delivery_still_requires_workspace(
     deliver = agent_cli._ssh_deliver({"bob": {"ssh": "bob@bob"}})
     assert deliver(message, "bob") is False
     assert calls == []
+
+
+def test_receive_only_round_trip_preserves_thread_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_agent_scanner: None
+) -> None:
+    from gptmail.transport.agent import AgentTransport, meta_of
+
+    alice_root = tmp_path / "alice"
+    bob_root = tmp_path / "bob"
+    alice = AgentTransport(alice_root / "messages", "alice")
+    original_id = alice.send("bob", "Question", "Original question")
+    original = publish_message(
+        (alice.outbox / original_id).read_text(), bob_root / "messages" / "inbox"
+    )
+    assert original.name != original_id
+    monkeypatch.setenv("AGENT_NAME", "bob")
+    monkeypatch.setattr(agent_cli, "_repo_root", lambda: bob_root)
+    monkeypatch.setattr(agent_cli, "_load_agents", lambda **kw: {})
+    monkeypatch.setattr(agent_cli, "_ssh_deliver", lambda *a, **kw: lambda *a: True)
+    result = CliRunner().invoke(agent, ["reply", original.name, "Answer"])
+    assert result.exit_code == 0, result.output
+    bob = AgentTransport(bob_root / "messages", "bob")
+    reply_path = next(bob.outbox.glob("*.md"))
+    assert meta_of(reply_path)["in_reply_to"] == original_id
+    received_reply = publish_message(reply_path.read_text(), alice.inbox)
+    assert "Original question" in alice.read(received_reply.name, include_thread=True)
+    monkeypatch.setattr(agent_cli, "_repo_root", lambda: alice_root)
+    parents, messages = agent_cli._local_thread_messages(["default"])
+    target = agent_cli._thread_key(original_id)
+    assert any(agent_cli._reaches_thread(key, target, parents) for key, _, _ in messages)
+
+
+def test_failed_receive_only_reply_stays_pending(workspace: Path) -> None:
+    from gptmail.transport.agent import AgentTransport
+
+    inbox = workspace / "messages" / "inbox"
+    original = publish_message(_message(), inbox)
+    transport = AgentTransport(workspace / "messages", "bob")
+    reply = transport.outbox / "reply.md"
+    reply.write_text(
+        "---\nfrom: bob\nto: alice\nsubject: Re: Hello\n"
+        f"in_reply_to: {original.name}\ndelivered: false\n---\n\nAnswer\n"
+    )
+    assert agent_cli._is_push_reachable(
+        "alice", {"alice": {"ssh": "alice@alice", "delivery": "receive-only"}}
+    )
+    pending = agent_cli._pending_messages(
+        workspace / "messages",
+        "bob",
+        0,
+        agents={"alice": {"ssh": "alice@alice", "delivery": "receive-only"}},
+        no_reply_subject_patterns=[],
+    )
+    assert [message["file"] for message in pending] == [original.name]
+
+
+def test_receive_selects_workspace_without_git_or_login_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "workspace"
+    root.mkdir()
+    monkeypatch.chdir(home)
+    monkeypatch.setenv("AGENT_NAME", "bob")
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "gptmail agent receive")
+    result = CliRunner().invoke(
+        agent,
+        ["receive", "--workspace", str(root), "--expect-sender", "alice"],
+        input=_message(),
+    )
+    assert result.exit_code == 0, result.output
+    assert (root / "messages" / "inbox" / result.output.strip()).exists()
+    assert not (home / "messages").exists()

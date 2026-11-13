@@ -241,8 +241,14 @@ key cannot post as a different one:
 
 ```text
 # ~/.ssh/authorized_keys on the recipient (deployment is the recipient operator's)
-command="gptmail agent receive --expect-sender alice",restrict ssh-ed25519 AAAA... alice
+command="gptmail agent receive --workspace /srv/bob --expect-sender alice",restrict ssh-ed25519 AAAA... alice
 ```
+
+Replace `/srv/bob` with the recipient's absolute workspace path. SSH starts in
+its login home, not necessarily the workspace; `--workspace` avoids cwd and git
+discovery entirely. The sender still requests only `gptmail agent receive`:
+sshd supplies the workspace and sender binding from the forced command, never
+from client-requested arguments.
 
 Register the peer on the sender side. Only `ssh` is required: the receiver chooses
 its own inbox, so the sender never needs to know (or write) a remote path. Add
@@ -252,7 +258,7 @@ its own inbox, so the sender never needs to know (or write) a remote path. Add
 bob:
   ssh: bob@bob-host
   delivery: receive-only
-  # receive_command: uv run gptmail agent receive   # must match the forced command
+  # receive_command: uv run gptmail agent receive   # when the receiver uses uv
 ```
 
 What the receiver enforces (see `transport/receive.py`): one bounded message
@@ -261,15 +267,18 @@ sender binding and an addressee check, then an atomic no-clobber publication wit
 a filename derived from the validated fields — never from a client-supplied path.
 The addressee check compares `To` against the agent name (`AGENT_NAME`, falling
 back to the login name); when those differ, set `AGENT_NAME` in the forced command
-(`command="AGENT_NAME=bob gptmail agent receive",restrict`).
+(`command="AGENT_NAME=bob gptmail agent receive --workspace /srv/bob --expect-sender alice",restrict`).
 A client-requested command other than the receive verb is refused, so
 `ssh recipient 'ls'` fails with `receive-only endpoint: refused command 'ls'`
 instead of arriving as an empty message. `gptmail agent receive` is also safe to run
 by hand for a smoke test (`echo … | gptmail agent receive`).
 
 **Replies and migration.** Replies already travel as ordinary messages: `reply`
-sends a message back to the original sender, so with both directions receive-only
-there is nothing to pull. That is the reply-by-push migration — stop pulling from a
+sends a message back to the original sender. New sends carry a logical
+`message_id` (the sender's outbox filename); replies use that ID, while the
+receiver still chooses its own safe local filename. Thread watches and ancestor
+reads recognize the logical ID as well as local filenames. With both directions
+receive-only there is nothing to pull. That is the reply-by-push migration — stop pulling from a
 receive-only peer; `pull`, `watch --pull` and `pending --fleet` skip such registry
 entries automatically (the forced command exposes no shell to read their outbox).
 Migrate one side at a time: the sender keeps working against a legacy recipient, and
@@ -392,7 +401,7 @@ Run `gptmail --help` or `gptmail <command> --help` for full option details.
 | `reply MESSAGE_ID [CONTENT] [--mailbox NAME]` | Reply to the sender. Refuses if the message is already marked replied. |
 | `pending [--as ID] [--include-stale] [--mailbox NAME \| --all-mailboxes]` | Inbox messages awaiting your reply. |
 | `pending --for NAME [--fleet] [--json]` | Messages addressed to NAME in your outbox (with `--fleet`, in every registered agent's outbox). |
-| `receive [--mailbox NAME] [--expect-sender NAME]` | Receive one message on stdin and publish it atomically to the inbox. The recipient side of the receive-only transport; safe to pin as a forced command (`command="gptmail agent receive",restrict`). Refuses a foreign client command, oversized input or invalid frontmatter. |
+| `receive [--workspace PATH] [--mailbox NAME] [--expect-sender NAME]` | Receive one message on stdin and publish it atomically to the inbox. The recipient side of the receive-only transport; safe to pin as a forced command (`command="gptmail agent receive",restrict`). Refuses a foreign client command, oversized input or invalid frontmatter. |
 | `pull [--as ID] [--from NAME] [--json] [--dry-run] [--notify-cmd CMD]` | Fetch messages addressed to you from every SSH-reachable agent's outbox, or only `NAME` with `--from`. Thread watches pull only the matching sender, so unrelated offline peers cannot delay delivery. `--notify-cmd` runs CMD with `NEW_COUNT` and `SUMMARY` set. |
 | `watch [--to NAME] [--from A,B] [--interval SECS] [--once] [--pull]` | Poll agents' outboxes and print one line per new message. Works with systemd/launchd or a terminal. |
 | `status [--mailbox NAME \| --all-mailboxes]` | Identity, registry and inbox/outbox/pending counts. |

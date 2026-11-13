@@ -544,15 +544,17 @@ def _matches_recipient(meta: dict, recipient: str) -> bool:
 def _is_push_reachable(recipient: str, agents: dict[str, dict[str, str]]) -> bool:
     """True if ``recipient`` has a working push transport in the registry.
 
-    Mirrors the ``_ssh_deliver`` contract: a recipient is push-reachable only if
-    it is registered with non-empty ``ssh`` and ``workspace`` keys. Pull-based
+    Mirrors the ``_ssh_deliver`` contract: receive-only peers need ``ssh``;
+    legacy peers need both ``ssh`` and ``workspace``. Pull-based
     recipients (not in the registry, or missing those keys — e.g. Erik, who polls
     the outbox) can never be delivered to, so their replies stay ``delivered:
     false`` permanently rather than as a transient, retryable failure.
     """
     agent = agents.get(recipient.lower())
-    if not agent:
+    if not agent or agent.get("delivery") == "pull-only":
         return False
+    if agent.get("delivery") == "receive-only":
+        return bool(agent.get("ssh"))
     return all(agent.get(k) for k in ("ssh", "workspace"))
 
 
@@ -610,7 +612,7 @@ def _pending_messages(
             continue
         if m.get("replied"):
             continue
-        if f.name in replied_to:
+        if f.name in replied_to or str(m.get("message_id") or "") in replied_to:
             continue
         in_reply_to = m.get("in_reply_to")
         thread_ids = in_reply_to if isinstance(in_reply_to, list) else [in_reply_to]
@@ -982,7 +984,10 @@ def _local_thread_messages(
                 if not meta:
                     continue
                 key = _thread_key(path.name)
-                parents.setdefault(key, _parent_keys(meta))
+                links = _parent_keys(meta)
+                parents.setdefault(key, links)
+                if meta.get("message_id"):
+                    parents.setdefault(_thread_key(meta["message_id"]), links)
                 if folder == "inbox":
                     inbox_messages.append((key, meta, path))
     return parents, inbox_messages
@@ -1186,6 +1191,12 @@ def broadcast(subject: str, content: str | None, mailbox: str, no_reply: bool) -
 
 @agent.command(name="receive")
 @click.option(
+    "--workspace",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Recipient workspace root. Pin an absolute path in the forced command.",
+)
+@click.option(
     "--mailbox",
     default=None,
     help="Mailbox to receive into (default: $GPTMAIL_RECEIVE_MAILBOX or 'default').",
@@ -1205,14 +1216,16 @@ def broadcast(subject: str, content: str | None, mailbox: str, no_reply: bool) -
     type=int,
     help="Refuse a message larger than this many bytes.",
 )
-def receive_cmd(mailbox: str | None, expect_sender: str | None, max_bytes: int) -> None:
+def receive_cmd(
+    workspace: Path | None, mailbox: str | None, expect_sender: str | None, max_bytes: int
+) -> None:
     """Receive one message on stdin and publish it to the inbox.
 
     This is the whole recipient side of the receive-only transport: an operator
     can pin a sender's key with a forced command, e.g.
 
     \b
-        command="gptmail agent receive --expect-sender alice",restrict ssh-ed25519 ... alice
+        command="gptmail agent receive --workspace /srv/bob --expect-sender alice",restrict ssh-ed25519 ... alice
 
     so the sender never needs a login shell here. The command reads one bounded
     message, validates its frontmatter, and writes it atomically under
@@ -1243,7 +1256,8 @@ def receive_cmd(mailbox: str | None, expect_sender: str | None, max_bytes: int) 
         raise click.ClickException("refused: no message on stdin")
 
     try:
-        inbox = mailbox_inbox(_messages_dir(), mailbox_name)
+        messages = workspace / "messages" if workspace is not None else _messages_dir()
+        inbox = mailbox_inbox(messages, mailbox_name)
         published = publish_message(
             raw,
             inbox,
@@ -1405,7 +1419,10 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
         subject = str(original.get("subject", ""))
         if not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"
-        reply_id = transport.send(recipient, subject, body, reply_to=message_id)
+        # The inbox filename is local; receive-only peers retain the sender's
+        # original ID in frontmatter for reply links across the wire.
+        parent_id = str(original.get("message_id") or message_id)
+        reply_id = transport.send(recipient, subject, body, reply_to=parent_id)
         if _delivery_failed(reply_id, mailbox=mailbox_name):
             click.echo(
                 f"Delivery to {recipient} FAILED — saved to outbox (delivered: false). "
