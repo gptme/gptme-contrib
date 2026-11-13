@@ -13,9 +13,12 @@ Design (from tasks/shared-core-convergence.md):
 - **Tier 0 — universal.** Always writes a local alert file that `context.sh`
   surfaces. Requires only the filesystem + python3. Never a silent no-op: if no
   Tier-1 backend delivers, the local alert still exists and the result is marked
-  `degraded=True`.
-- **Tier 1 — pluggable channel.** `github` (gh), `pushover`, `telegram` today;
-  the registry is open. Selected via config/env, so a core script calls
+  `degraded=True`. **A local alert file is storage, not a notification** — it
+  only helps if something later reads the workspace. Callers that mean "page the
+  operator" must check `result.degraded` (or the CLI exit code), never just
+  "did a file appear".
+- **Tier 1 — pluggable channel.** `github` (gh), `pushover`, `telegram`, `ntfy`
+  today; the registry is open. Selected via config/env, so a core script calls
   `notify_principal(...)` without knowing which channel a given agent uses.
 
 **Identity rule.** An escalation must be attributable to the *agent*, never to
@@ -38,19 +41,33 @@ Config (env; a core script can also pass a Config explicitly):
     PRINCIPAL_NOTIFY_GH_REPO    repo for github backend, e.g. "example-owner/example-repo"
     PUSHOVER_USER_KEY / PUSHOVER_API_TOKEN   pushover backend
     PRINCIPAL_NOTIFY_TG_TOKEN / PRINCIPAL_NOTIFY_TG_CHAT   telegram backend
+    PRINCIPAL_NOTIFY_NTFY_URL   self-hosted ntfy server base, e.g. "http://kuma-host:2586"
+    PRINCIPAL_NOTIFY_NTFY_TOPIC ntfy topic to publish to
+    PRINCIPAL_NOTIFY_NTFY_TOKEN optional bearer token for a protected topic
+    PRINCIPAL_NOTIFY_NTFY_ENV_FILE  optional KEY=VALUE file (mode 600, outside git)
+                                    holding the three NTFY vars; already-set
+                                    environment values win and are never overridden
+
+The ntfy backend's success criterion is the *server acknowledgement*: HTTP 200
+plus a JSON body carrying a message `id`. ntfy has no read receipt, so this must
+not be reported as "the operator saw it" — only as "the server accepted it, and
+one durable receipt was written".
 """
 
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 # --- Config ----------------------------------------------------------------
@@ -90,6 +107,16 @@ class NotifyResult:
     local_alert_path: Path | None = None
     degraded: bool = True  # True while no Tier-1 backend has delivered
 
+    @property
+    def operator_notified(self) -> bool:
+        """True only when a Tier-1 channel accepted the alert.
+
+        Kept separate from `local_alert_path` on purpose: writing the local file
+        always succeeds, so treating it as delivery is how an outage goes
+        unnoticed (gptme/gptme-contrib#2171).
+        """
+        return bool(self.delivered_via)
+
     def as_dict(self) -> dict:
         return {
             "delivered_via": self.delivered_via,
@@ -98,6 +125,7 @@ class NotifyResult:
             if self.local_alert_path
             else None,
             "degraded": self.degraded,
+            "operator_notified": self.operator_notified,
         }
 
 
@@ -244,10 +272,161 @@ def backend_telegram(
     return "sent"
 
 
+# --- ntfy backend ----------------------------------------------------------
+
+# ntfy priorities are 1..5: 1 min, 2 low, 3 default, 4 high, 5 max/urgent.
+# Default (3) is wrong for an escalation: an alarm that arrives at the same
+# volume as chatter is easy to miss, so map the caller's urgency explicitly.
+_NTFY_PRIORITY = {"low": 2, "normal": 3, "high": 4, "critical": 5}
+_NTFY_TOPIC_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+# Receipts live in the workspace so a later reader can prove a page was
+# accepted. Append-only, one JSON object per accepted send.
+_NTFY_ACK_LEDGER = Path("state") / "notify-acks.jsonl"
+
+
+def _load_env_file(path: str) -> dict[str, str]:
+    """Parse a KEY=VALUE env file. Missing/unreadable is an error, not a silent skip.
+
+    Returns only the keys it found; callers merge with the process environment so
+    an explicit env value is never overridden by a file.
+    """
+    values: dict[str, str] = {}
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        # The path itself can carry a username; report only the failure class.
+        raise BackendError(f"ntfy env file unreadable ({type(exc).__name__})") from exc
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, raw = line.partition("=")
+        values[name.strip()] = raw.strip().strip('"').strip("'")
+    return values
+
+
+def _ntfy_settings(cfg: Config) -> tuple[str, str, str]:
+    """Return (url, topic, token) for the ntfy backend.
+
+    Precedence: process/config env, then `PRINCIPAL_NOTIFY_NTFY_ENV_FILE`. Values
+    are validated before any request so a typo fails fast instead of silently
+    paging nobody.
+    """
+    env = dict(cfg.env)
+    env_file = env.get("PRINCIPAL_NOTIFY_NTFY_ENV_FILE", "").strip()
+    if env_file:
+        for name, value in _load_env_file(env_file).items():
+            if name not in env:
+                env[name] = value
+
+    url = env.get("PRINCIPAL_NOTIFY_NTFY_URL", "").strip().rstrip("/")
+    topic = env.get("PRINCIPAL_NOTIFY_NTFY_TOPIC", "").strip()
+    token = env.get("PRINCIPAL_NOTIFY_NTFY_TOKEN", "").strip()
+
+    if not url:
+        raise BackendError("PRINCIPAL_NOTIFY_NTFY_URL not set")
+    if not url.startswith(("http://", "https://")):
+        raise BackendError(
+            "PRINCIPAL_NOTIFY_NTFY_URL must start with http:// or https://"
+        )
+    if not topic:
+        raise BackendError("PRINCIPAL_NOTIFY_NTFY_TOPIC not set")
+    if not _NTFY_TOPIC_RE.fullmatch(topic):
+        raise BackendError(
+            "PRINCIPAL_NOTIFY_NTFY_TOPIC must be 1-64 chars of [A-Za-z0-9_-]"
+        )
+    return url, topic, token
+
+
+def _record_ntfy_ack(
+    cfg: Config, dedup_key: str, subject: str, urgency: str, message_id: str
+) -> None:
+    """Append a durable receipt for an accepted page.
+
+    Best-effort and never fatal: a receipt failure must not downgrade a page the
+    server already accepted. The URL, topic and token are deliberately absent —
+    the topic is a capability on many self-hosted setups.
+    """
+    ledger = cfg.workspace / _NTFY_ACK_LEDGER
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "backend": "ntfy",
+        "agent_id": cfg.agent_id,
+        "dedup_key": dedup_key,
+        "subject": subject,
+        "urgency": urgency,
+        "message_id": message_id,
+    }
+    try:
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        with ledger.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, sort_keys=True) + "\n")
+    except OSError as exc:
+        print(
+            f"principal_notify: ntfy page accepted but receipt not written: {exc}",
+            file=sys.stderr,
+        )
+
+
+def backend_ntfy(cfg: Config, subject: str, body: str, dedup_key: str, urgency: str):
+    """Publish to a self-hosted ntfy server; success requires a server ack.
+
+    Uses ntfy's JSON publish form (`POST <base>` with a `topic` field) so a topic
+    is never spliced into the URL and non-ASCII titles are encoded by JSON.
+    """
+    url, topic, token = _ntfy_settings(cfg)
+    payload = {
+        "topic": topic,
+        "title": f"[{cfg.agent_id}] {subject}",
+        "message": body,
+        "priority": _NTFY_PRIORITY.get(urgency, 3),
+    }
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        request = urllib.request.Request(
+            url, data=json.dumps(payload).encode(), headers=headers, method="POST"
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = str(
+                json.loads(exc.read().decode("utf-8", "replace")).get("error", "")
+            )
+        except (ValueError, OSError):
+            detail = ""
+        suffix = f": {detail[:120]}" if detail else ""
+        raise BackendError(f"ntfy HTTP {exc.code}{suffix}") from exc
+    except urllib.error.URLError as exc:
+        # Never interpolate the request: the exception can carry the URL, and a
+        # self-hosted ntfy URL may embed a capability token.
+        raise BackendError(f"ntfy request failed: {type(exc.reason).__name__}") from exc
+    except (http.client.HTTPException, OSError, ValueError) as exc:
+        # InvalidURL and request/header validation failures may include secrets.
+        raise BackendError(f"ntfy request failed: {type(exc).__name__}") from exc
+
+    try:
+        ack = json.loads(raw)
+    except ValueError as exc:
+        raise BackendError("ntfy returned a non-JSON body; not acknowledged") from exc
+    message_id = ack.get("id") if isinstance(ack, dict) else None
+    if not message_id:
+        raise BackendError(
+            "ntfy accepted the request but returned no message id; not acknowledged"
+        )
+
+    _record_ntfy_ack(cfg, dedup_key, subject, urgency, str(message_id))
+    return f"accepted id={message_id}"
+
+
 BACKENDS = {
     "github": backend_github,
     "pushover": backend_pushover,
     "telegram": backend_telegram,
+    "ntfy": backend_ntfy,
 }
 
 
