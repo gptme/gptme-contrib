@@ -3561,18 +3561,15 @@ _OPERATOR_APPROVERS = {"ErikBjare": 1405370}
 _VERDICT_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "DISMISSED"})
 
 
-def operator_head_approval_login(
-    *, repo: str, number: int, head_sha: str
-) -> str | None:
-    """Return the operator login whose latest verdict review APPROVED ``head_sha``.
+def _operator_latest_verdicts(
+    *, repo: str, number: int
+) -> dict[str, dict[str, Any]] | None:
+    """Return each verified operator's latest verdict review, or None on a failed read.
 
-    The review must be APPROVED on ``head_sha`` exactly, so a later
-    CHANGES_REQUESTED or dismissal, or any new push, revokes it. The approver
-    identity is checked by login, numeric user id and account type, never by
-    login alone. A failed or malformed API read returns None (fail closed).
+    The approver identity is checked by login, numeric user id and account
+    type, never by login alone. COMMENTED and PENDING reviews are ignored, so
+    a later CHANGES_REQUESTED or dismissal replaces an earlier APPROVED.
     """
-    if not head_sha:
-        return None
     raw = run_gh_checked(
         [
             "api",
@@ -3602,9 +3599,104 @@ def operator_head_approval_login(
                 latest[login] = review
     except (ValueError, TypeError, AttributeError):
         return None
+    return latest
+
+
+def operator_head_approval_login(
+    *, repo: str, number: int, head_sha: str
+) -> str | None:
+    """Return the operator login whose latest verdict review APPROVED ``head_sha``.
+
+    The review must be APPROVED on ``head_sha`` exactly, so a later
+    CHANGES_REQUESTED or dismissal, or any new push, revokes it. A failed or
+    malformed API read returns None (fail closed).
+    """
+    if not head_sha:
+        return None
+    latest = _operator_latest_verdicts(repo=repo, number=number)
+    if latest is None:
+        return None
     for approver, review in latest.items():
         if review.get("state") == "APPROVED" and review.get("commit_id") == head_sha:
             return approver
+    return None
+
+
+# ErikBjare/bob#1471 rule 3: an approval followed by review-fix commits still
+# authorizes the merge when the delta is small and stays inside the approved
+# change. Above this many changed lines the fix is treated as a redesign.
+_OPERATOR_FIX_DELTA_MAX_LINES = 150
+# The compare API returns at most 300 files; a list this long may be truncated.
+_COMPARE_FILES_CAP = 300
+
+
+def _compare_refs(repo: str, base: str, head: str) -> dict[str, Any] | None:
+    raw = run_gh_checked(
+        [
+            "api",
+            f"repos/{repo}/compare/{base}...{head}",
+            "--jq",
+            "{status, behind_by, commits: [.commits[] | {author: .author.login,"
+            " parents: (.parents | length)}], files: [.files[] | {filename,"
+            " changes}]}",
+        ]
+    )
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def operator_fix_only_approval(
+    *, repo: str, number: int, head_sha: str, base_ref: str, author: str
+) -> tuple[str, str, int] | None:
+    """Return ``(login, approved_sha, fix_commits)`` for an approval followed by fixes only.
+
+    The operator's latest verdict must be APPROVED on an earlier commit, and
+    every commit since must look like a review fix:
+
+    - the approved commit is an ancestor of head (no rewrite, no force-push);
+    - each later commit is authored by ``author`` and is not a merge commit;
+    - the later commits only touch files the PR already changed at the
+      approved commit, and change at most ``_OPERATOR_FIX_DELTA_MAX_LINES``.
+
+    Any failed API read or unparseable field returns None (fail closed). This
+    only extends the path/category waiver; the AI-review requirement and every
+    other gate still apply to the new head.
+    """
+    if not (head_sha and base_ref and author):
+        return None
+    latest = _operator_latest_verdicts(repo=repo, number=number)
+    if not latest:
+        return None
+    for approver, review in latest.items():
+        approved = review.get("commit_id")
+        if review.get("state") != "APPROVED" or not approved or approved == head_sha:
+            continue
+        delta = _compare_refs(repo, approved, head_sha)
+        if not delta or delta.get("status") != "ahead" or delta.get("behind_by") != 0:
+            continue
+        commits = delta.get("commits") or []
+        files = delta.get("files") or []
+        if not commits or not files or len(files) >= _COMPARE_FILES_CAP:
+            continue
+        if any(c.get("author") != author or c.get("parents") != 1 for c in commits):
+            continue
+        changed = [f.get("changes") for f in files]
+        if not all(type(n) is int for n in changed):
+            continue
+        if sum(changed) > _OPERATOR_FIX_DELTA_MAX_LINES:
+            continue
+        approved_diff = _compare_refs(repo, base_ref, approved)
+        approved_files_list = (approved_diff or {}).get("files") or []
+        if not approved_files_list or len(approved_files_list) >= _COMPARE_FILES_CAP:
+            continue
+        approved_files = {f.get("filename") for f in approved_files_list}
+        if all(f.get("filename") in approved_files for f in files):
+            return approver, approved, len(commits)
     return None
 
 
@@ -3638,12 +3730,19 @@ _OPERATOR_APPROVAL_HARD_STOPS = frozenset(
 
 
 def operator_approval_category_waiver(
-    reasons: list[str], *, repo: str, number: int, head_sha: str
+    reasons: list[str],
+    *,
+    repo: str,
+    number: int,
+    head_sha: str,
+    base_ref: str = "",
+    author: str = "",
 ) -> tuple[list[str], str | None]:
     """Drop path/category refusals the operator's head-bound approval overrides.
 
-    ErikBjare/bob#1471 phase 2: an APPROVED review on the exact head is merge
-    authorization, so "outside allowed categories", route-to-Erik diff shapes,
+    ErikBjare/bob#1471 phase 2: an APPROVED review on the exact head (or, per
+    rule 3, on an earlier commit followed only by small review fixes; see
+    ``operator_fix_only_approval``) is merge authorization, so "outside allowed categories", route-to-Erik diff shapes,
     placement rules and spec-like-doc stops no longer block. The reasons in
     ``_OPERATOR_APPROVAL_HARD_STOPS`` always survive. Returns the remaining
     reasons and a warning naming the waiver, or the input unchanged and None.
@@ -3653,11 +3752,26 @@ def operator_approval_category_waiver(
     if not waivable:
         return reasons, None
     login = operator_head_approval_login(repo=repo, number=number, head_sha=head_sha)
-    if login is None:
-        return reasons, None
+    if login is not None:
+        approval = f"{login} approved head {head_sha[:12]}"
+    else:
+        fix_only = operator_fix_only_approval(
+            repo=repo,
+            number=number,
+            head_sha=head_sha,
+            base_ref=base_ref,
+            author=author,
+        )
+        if fix_only is None:
+            return reasons, None
+        login, approved, fix_commits = fix_only
+        approval = (
+            f"{login} approved {approved[:12]}, followed by {fix_commits} "
+            f"fix-only commit(s) to {head_sha[:12]}"
+        )
     remaining = [r for r in reasons if r in _OPERATOR_APPROVAL_HARD_STOPS]
     warning = (
-        f"Path/category policy waived: {login} approved head {head_sha[:12]} "
+        f"Path/category policy waived: {approval} "
         f"({len(waivable)} reason(s) overridden, ErikBjare/bob#1471)"
     )
     return remaining, warning
@@ -4140,11 +4254,17 @@ def evaluate_pr(
         category, category_reasons = classify_category(files, repo=repo)
         result.category = category
 
-    # ErikBjare/bob#1471 phase 2: a head-bound operator approval overrides
+    # ErikBjare/bob#1471 phase 2/3: an operator approval of the head, or of an
+    # earlier commit followed only by small review fixes, overrides
     # path/category policy, never the sensitive-path or bot-config stop.
     if category_reasons:
         category_reasons, category_waiver = operator_approval_category_waiver(
-            category_reasons, repo=repo, number=number, head_sha=result.head_sha
+            category_reasons,
+            repo=repo,
+            number=number,
+            head_sha=result.head_sha,
+            base_ref=pr.get("baseRefName") or "",
+            author=author,
         )
         if category_waiver is not None:
             result.warnings.append(category_waiver)
