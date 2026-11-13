@@ -37,7 +37,6 @@ under workspace/state/ and created automatically on first use.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import inspect
 import json
@@ -56,6 +55,11 @@ from collections.abc import Collection
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]  # Unavailable on native Windows.
 
 # Re-exec under the workspace venv BEFORE importing gptme-rag. Claude Code
 # invokes this hook as system `python3`, which does not have gptme-rag.
@@ -1136,7 +1140,7 @@ def _load_prompt_window(path: Path) -> dict:
         hashes = {}
     try:
         seq = int(data.get("seq", 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         seq = 0
     return {"seq": seq, "hashes": hashes}
 
@@ -1151,6 +1155,21 @@ def _save_prompt_window(path: Path, state: dict) -> None:
         raise
     except OSError:
         pass  # Fail-open: a state error must never change hook output.
+
+
+def _advance_prompt_window(path: Path, size: int) -> dict:
+    """Read fresh state under the workspace lock and prune expired positions."""
+    state = _load_prompt_window(path)
+    seq = state["seq"] + 1
+    hashes: dict[str, int] = {}
+    for key, value in state["hashes"].items():
+        try:
+            position = int(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if 0 <= seq - position <= size:
+            hashes[str(key)] = position
+    return {"seq": seq, "hashes": hashes}
 
 
 @contextmanager
@@ -1175,7 +1194,9 @@ def check_prompt_repeat(
     forever by its own repeats and never inject at all. This is a cooldown, not a
     permanent block. The caller must return normally after emitting its decision;
     exceptions (including SystemExit) do not commit the position. ``window == 0``
-    disables the check. State I/O errors fail open, but budget timeouts propagate.
+    disables the check, as does unavailable POSIX locking. State I/O errors fail
+    open, but budget timeouts propagate. Only identical scoped prompts serialize
+    processing; the workspace lock covers short state transactions, not matching.
     """
     # Surrounding whitespace is transport noise, not user intent: strip so a
     # prompt that differs only by a trailing newline counts as the same prompt.
@@ -1183,46 +1204,56 @@ def check_prompt_repeat(
         json.dumps([prompt_text.strip(), scope]).encode("utf-8")
     ).hexdigest()
     size = prompt_repeat_window() if window is None else max(int(window), 0)
-    if size == 0:
+    if size == 0 or fcntl is None:
         yield False, digest
         return
-    lock = None
+    prompt_lock = None
+    state_lock = None
     try:
         path = _prompt_window_file(workspace, state_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Stable sidecar: replacing the JSON must not replace the lock inode.
-        lock = path.with_suffix(".lock").open("a")
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        state = _load_prompt_window(path)
-        seq = int(state.get("seq", 0)) + 1
-        hashes: dict[str, int] = {}
-        for key, value in state["hashes"].items():
-            try:
-                position = int(value)
-            except (TypeError, ValueError):
-                continue
-            if seq - position <= size:
-                hashes[str(key)] = position
-        last = hashes.get(digest)
-        repeat = last is not None and (seq - last) < size
-        if not repeat:
-            hashes[digest] = seq
+        # Stable sidecars: replacing JSON must not replace either lock inode.
+        # Always take the scoped prompt lock first, avoiding lock-order cycles.
+        prompt_lock = path.with_suffix(f".{digest}.lock").open("a")
+        fcntl.flock(prompt_lock, fcntl.LOCK_EX)
+        state_lock = path.with_suffix(".lock").open("a")
+        fcntl.flock(state_lock, fcntl.LOCK_EX)
+        state = _advance_prompt_window(path, size)
+        last = state["hashes"].get(digest)
+        repeat = last is not None and (state["seq"] - last) < size
+        fcntl.flock(state_lock, fcntl.LOCK_UN)
     except TimeoutError:
-        if lock is not None:
-            lock.close()
+        if state_lock is not None:
+            state_lock.close()
+        if prompt_lock is not None:
+            prompt_lock.close()
         raise
     except (OSError, ValueError, TypeError):
-        if lock is not None:
-            lock.close()
+        if state_lock is not None:
+            state_lock.close()
+        if prompt_lock is not None:
+            prompt_lock.close()
         yield False, digest
         return
     try:
-        # Hold the lock through matching and emission. Never publish a successful
-        # position on timeout, exception or process death; close releases flock.
+        # Only this scoped prompt stays locked during matching. A timeout,
+        # exception or process death publishes no successful position.
         yield repeat, digest
-        _save_prompt_window(path, {"seq": seq, "hashes": hashes})
+        try:
+            fcntl.flock(state_lock, fcntl.LOCK_EX)
+            # Other prompts may have completed while we matched: merge against
+            # fresh state rather than overwriting their events or hashes.
+            state = _advance_prompt_window(path, size)
+            if not repeat:
+                state["hashes"][digest] = state["seq"]
+            _save_prompt_window(path, state)
+        except TimeoutError:
+            raise
+        except (OSError, ValueError, TypeError):
+            pass  # Output already succeeded; state bookkeeping is fail-open.
     finally:
-        lock.close()
+        state_lock.close()
+        prompt_lock.close()
 
 
 def get_already_injected(

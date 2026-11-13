@@ -152,17 +152,23 @@ category and harness, so different matching scopes do not suppress each other:
   after `window` events instead of being blocked forever;
 - `MATCH_LESSONS_PROMPT_REPEAT_WINDOW=0` restores the previous behaviour.
 
-A stable per-workspace `flock` sidecar serializes the check, matching and emission
-with other hook processes. The window is committed only after processing and
-output complete normally (including a successful empty decision). A timeout,
-exception or killed process does not mark the prompt processed; the next call can
-retry. Waiting for the lock shares the hook's existing time budget. Once matching
+Stable `flock` sidecars serialize matching/emission only for the same scoped
+prompt. Distinct prompts and matching scopes can run concurrently; a short
+workspace-wide lock protects state reads and commits, never matching or selector
+execution. Each commit merges fresh state so parallel completions retain each
+other's hashes and event counts. The window counts successfully completed prompt
+events and is committed only after processing and output complete normally
+(including a successful empty decision). A timeout, exception or killed process
+does not mark the prompt processed; the next call can retry. Waiting for a lock
+shares the hook's existing time budget. Once matching
 has completed, the internal alarm is disarmed before writing the final response;
 post-output session/window bookkeeping cannot append a timeout response to it.
 Session dedup is saved only after successful emission. Authorized selector
 sessions retain the user query even on a suppressed prompt, so subsequent tool
 selection still has the user's intent. State I/O errors fail open, leaving normal
-matching available rather than suppressing it.
+matching available rather than suppressing it. On platforms without `fcntl`
+(including native Windows), the repeat window is disabled rather than disabling
+the hook; ordinary matching still runs.
 
 The window is per workspace, so several agents sharing `/tmp` do not suppress each
 other. Interactive sessions are affected too: sending the identical prompt twice

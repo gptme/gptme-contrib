@@ -2028,3 +2028,97 @@ def test_repeated_prompt_preserves_tool_selector_query(hook, tmp_path, monkeypat
     assert len(requests) == 1
     assert requests[0]["event_kind"] == "tool"
     assert requests[0]["query"] == "fixed prompt"
+
+
+@pytest.mark.parametrize("window", [0, 20])
+def test_prompt_window_without_fcntl_still_matches(tmp_path, monkeypatch, window):
+    original_import = builtins.__import__
+
+    def no_fcntl(name, *args, **kwargs):
+        if name == "fcntl":
+            raise ModuleNotFoundError("No module named 'fcntl'")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_fcntl)
+    portable_hook = load_hook(HOOK_PATH)
+    _patch_main_for_prompt_repeat(portable_hook, tmp_path, monkeypatch)
+    monkeypatch.setenv(portable_hook.PROMPT_REPEAT_WINDOW_ENV, str(window))
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    for index in range(2):
+        monkeypatch.setattr(
+            portable_hook,
+            "_STDIN_CACHE",
+            json.dumps({"session_id": f"portable-{index}", "prompt": "fixed prompt"}),
+        )
+        with pytest.raises(SystemExit):
+            portable_hook.main()
+        receipt = json.loads(
+            (
+                tmp_path / f"cc-session-portable-{index}-lessons-receipts.jsonl"
+            ).read_text()
+        )
+        assert receipt["outcome"] == "emitted"
+
+
+@pytest.mark.parametrize("field", ["seq", "hash"])
+def test_prompt_window_overflow_state_fails_open(hook, tmp_path, field):
+    _, digest = prompt_repeat_result(hook, "prompt", tmp_path, window=0)
+    path = hook._prompt_window_file(tmp_path, tmp_path)
+    state = {"seq": float("inf"), "hashes": {}}
+    if field == "hash":
+        state = {"seq": 1, "hashes": {digest: float("inf")}}
+    path.write_text(json.dumps(state))
+    assert not prompt_repeat_result(
+        hook, "prompt", tmp_path, window=20, state_dir=tmp_path
+    )[0]
+    assert prompt_repeat_result(
+        hook, "prompt", tmp_path, window=20, state_dir=tmp_path
+    )[0]
+
+
+@pytest.mark.parametrize("different_scope", [False, True])
+def test_distinct_prompt_processing_overlaps(hook, tmp_path, different_scope):
+    """Matching can overlap; all independently completed hashes must survive."""
+    import multiprocessing
+
+    ctx = multiprocessing.get_context("fork")
+    matching = ctx.Barrier(4)
+    results = ctx.Queue()
+
+    def run(index):
+        prompt = "prompt" if different_scope else f"prompt-{index}"
+        scope = (str(index),) if different_scope else ()
+        try:
+            with hook.check_prompt_repeat(
+                prompt, tmp_path, window=20, state_dir=tmp_path, scope=scope
+            ) as (repeat, _):
+                assert not repeat
+                matching.wait(timeout=2)
+            results.put("completed")
+        except Exception as exc:
+            results.put(type(exc).__name__)
+
+    processes = [ctx.Process(target=run, args=(index,)) for index in range(4)]
+    for process in processes:
+        process.start()
+    try:
+        outcomes = [results.get(timeout=10) for _ in processes]
+    finally:
+        for process in processes:
+            process.join(timeout=5)
+            if process.is_alive():
+                process.kill()
+                process.join()
+    assert outcomes == ["completed"] * 4
+    state = json.loads(hook._prompt_window_file(tmp_path, tmp_path).read_text())
+    assert state["seq"] == 4
+    assert len(state["hashes"]) == 4
+    for index in range(4):
+        assert prompt_repeat_result(
+            hook,
+            "prompt" if different_scope else f"prompt-{index}",
+            tmp_path,
+            window=20,
+            state_dir=tmp_path,
+            scope=(str(index),) if different_scope else (),
+        )[0]
