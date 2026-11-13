@@ -91,6 +91,7 @@ from twitter.llm import (
     verify_draft,
 )
 from twitter.twitter import (
+    DailyReadLimitReached,
     _find_placeholder_in_text,
     cached_get_me,
     load_twitter_client,
@@ -469,8 +470,8 @@ def save_draft(draft: TweetDraft, status: str = "new") -> Path:
 def get_conversation_thread(
     client,
     tweet_id_or_conversation_id,
-    max_pages=3,
-    max_tweets_per_page=100,
+    max_pages=1,
+    max_tweets_per_page=10,
     *,
     fallback_conversation_id=None,
 ):
@@ -480,8 +481,11 @@ def get_conversation_thread(
     Args:
         client: The Twitter API client
         tweet_id_or_conversation_id: Either a tweet ID or a conversation ID
-        max_pages: Maximum number of pagination pages to fetch (default: 3)
-        max_tweets_per_page: Maximum number of tweets per page (default: 100)
+        max_pages: Maximum number of pagination pages to fetch (default: 1)
+        max_tweets_per_page: Maximum number of tweets per page (default: 10,
+            the API minimum). Every returned post is a billable read
+            ($0.005); at 3 pages of 100, thread context was ~76% of the X
+            spend and exhausted the monthly cap in 18 days (2026-10).
 
     Returns:
         List of tweet data dictionaries in chronological order with thread structure information
@@ -533,6 +537,8 @@ def get_conversation_thread(
                     )
                     all_tweets = {}
                     all_users = {}
+            except DailyReadLimitReached:
+                raise
             except Exception as e:
                 console.print(f"[yellow]Error fetching original tweet: {e}")
                 conversation_id = (
@@ -689,6 +695,10 @@ def get_conversation_thread(
 
         return thread_context
 
+    except DailyReadLimitReached:
+        # A denied read is not an empty conversation. Posting safety checks
+        # must distinguish unknown live state from a successful empty lookup.
+        raise
     except Exception as e:
         console.print(f"[yellow]Error retrieving conversation thread: {e}")
         return []
@@ -1243,7 +1253,12 @@ def _find_live_duplicate_reply_ids(client, tweet_id: str) -> list[str]:
         if not username:
             return []
 
-        thread_context = get_conversation_thread(client, tweet_id)
+        # Keep the safety check's previous search depth: our reply may be older
+        # than the ten posts fetched for ordinary LLM context. This runs only
+        # before posting, not for every tweet we evaluate.
+        thread_context = get_conversation_thread(
+            client, tweet_id, max_pages=3, max_tweets_per_page=100
+        )
         tweet_id = str(tweet_id)
         username = username.lower()
 
@@ -1254,6 +1269,8 @@ def _find_live_duplicate_reply_ids(client, tweet_id: str) -> list[str]:
             and str(tweet.get("author", "")).lower() == username
         }
         return sorted(duplicate_ids)
+    except DailyReadLimitReached:
+        raise
     except Exception as e:
         logger.warning(
             "Live duplicate reply lookup failed",
@@ -1665,9 +1682,16 @@ def post(
             duplicates = _check_for_duplicate_replies_internal(draft)
             live_duplicate_ids = []
             if "posted" not in duplicates:
-                live_duplicate_ids = _find_live_duplicate_reply_ids(
-                    client, str(draft.in_reply_to)
-                )
+                try:
+                    live_duplicate_ids = _find_live_duplicate_reply_ids(
+                        client, str(draft.in_reply_to)
+                    )
+                except DailyReadLimitReached:
+                    console.print(
+                        "[yellow]Read budget exhausted; deferring reply until "
+                        "the live duplicate check can run.[/yellow]"
+                    )
+                    continue
 
             if "posted" in duplicates or live_duplicate_ids:
                 console.print(
@@ -2466,6 +2490,7 @@ def monitor(
                 source = f"list {list_id}"
             else:
                 tweets = client.get_home_timeline(
+                    max_results=10,  # each returned post is a billable read
                     tweet_fields=[
                         "created_at",
                         "author_id",
@@ -2668,6 +2693,7 @@ def auto(
                 source = f"list {list_id}"
             else:
                 tweets = client.get_home_timeline(
+                    max_results=10,  # each returned post is a billable read
                     tweet_fields=[
                         "created_at",
                         "author_id",
@@ -2804,9 +2830,16 @@ def auto(
                     duplicates = _check_for_duplicate_replies_internal(draft)
                     live_duplicate_ids = []
                     if "posted" not in duplicates:
-                        live_duplicate_ids = _find_live_duplicate_reply_ids(
-                            client, str(draft.in_reply_to)
-                        )
+                        try:
+                            live_duplicate_ids = _find_live_duplicate_reply_ids(
+                                client, str(draft.in_reply_to)
+                            )
+                        except DailyReadLimitReached:
+                            console.print(
+                                "[yellow]Read budget exhausted; deferring reply until "
+                                "the live duplicate check can run.[/yellow]"
+                            )
+                            continue
 
                     if "posted" in duplicates or live_duplicate_ids:
                         console.print(

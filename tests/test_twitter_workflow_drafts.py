@@ -95,6 +95,9 @@ def _load_workflow_module() -> tuple[Any, dict[str, Any]]:
     twitter_llm_stub._unescape_literal_newlines = lambda text: text.replace("\\n", "\n")
 
     twitter_api_stub: Any = types.ModuleType("twitter.twitter")
+    twitter_api_stub.DailyReadLimitReached = type(
+        "DailyReadLimitReached", (Exception,), {}
+    )
     twitter_api_stub.cached_get_me = lambda *args, **kwargs: SimpleNamespace(
         data=SimpleNamespace(id=0)
     )
@@ -1643,16 +1646,24 @@ def test_conversation_lookup_failure_falls_back_to_canonical_conversation_id(
 
 
 def test_find_live_duplicate_reply_ids_matches_own_replies(
-    workflow_module: Any,
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    workflow_module.cached_get_me = lambda *args, **kwargs: SimpleNamespace(
-        data=SimpleNamespace(username="TestBotUser")
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *args, **kwargs: SimpleNamespace(
+            data=SimpleNamespace(username="TestBotUser")
+        ),
     )
-    workflow_module.get_conversation_thread = lambda *args, **kwargs: [
-        {"id": "9001", "author": "TestBotUser", "replied_to_id": "4242"},
-        {"id": "9002", "author": "someoneelse", "replied_to_id": "4242"},
-        {"id": "9003", "author": "TestBotUser", "replied_to_id": "1111"},
-    ]
+    monkeypatch.setattr(
+        workflow_module,
+        "get_conversation_thread",
+        lambda *args, **kwargs: [
+            {"id": "9001", "author": "TestBotUser", "replied_to_id": "4242"},
+            {"id": "9002", "author": "someoneelse", "replied_to_id": "4242"},
+            {"id": "9003", "author": "TestBotUser", "replied_to_id": "1111"},
+        ],
+    )
 
     duplicate_ids = workflow_module._find_live_duplicate_reply_ids(object(), "4242")
 
@@ -1660,12 +1671,20 @@ def test_find_live_duplicate_reply_ids_matches_own_replies(
 
 
 def test_find_live_duplicate_reply_ids_returns_empty_without_identity(
-    workflow_module: Any,
+    workflow_module: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    workflow_module.cached_get_me = lambda *args, **kwargs: SimpleNamespace(data=None)
-    workflow_module.get_conversation_thread = lambda *args, **kwargs: [
-        {"id": "9001", "author": "TestBotUser", "replied_to_id": "4242"},
-    ]
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *args, **kwargs: SimpleNamespace(data=None),
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "get_conversation_thread",
+        lambda *args, **kwargs: [
+            {"id": "9001", "author": "TestBotUser", "replied_to_id": "4242"},
+        ],
+    )
 
     duplicate_ids = workflow_module._find_live_duplicate_reply_ids(object(), "4242")
 
@@ -2073,3 +2092,119 @@ def test_thread_followups_stay_replies(workflow_module: Any, tmp_path: Path) -> 
     for call in client_calls:
         assert call["in_reply_to_tweet_id"] is not None
         assert "quote_tweet_id" not in call
+
+
+def test_thread_context_reads_one_page_of_ten(workflow_module: Any) -> None:
+    """Thread context is billed per returned post; keep the default to one small page.
+
+    At 3 pages of 100 it was ~76% of the X read spend and hit the $55 monthly
+    cap in 18 days (2026-10).
+    """
+    searches: list[dict[str, Any]] = []
+
+    class FakeClient:
+        def get_tweet(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("offline")
+
+        def search_recent_tweets(self, **kwargs: Any) -> Any:
+            searches.append(kwargs)
+            tweet = SimpleNamespace(
+                id=str(len(searches)),
+                author_id="1",
+                text="t",
+                created_at=datetime(2026, 11, 12, tzinfo=timezone.utc),
+                conversation_id="c1",
+                in_reply_to_user_id=None,
+                referenced_tweets=None,
+                public_metrics={},
+            )
+            return SimpleNamespace(
+                data=[tweet], includes={}, meta={"next_token": "more"}
+            )
+
+    workflow_module.get_conversation_thread(
+        FakeClient(), "123", fallback_conversation_id="c1"
+    )
+    assert len(searches) == 1
+    assert searches[0]["max_results"] == 10
+
+
+def test_live_duplicate_guard_preserves_search_depth(workflow_module, monkeypatch):
+    """A reply beyond the cheap context window must still prevent a second post."""
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(username="TestBotUser")),
+    )
+    posts = [
+        {"id": str(i), "author": "someoneelse", "replied_to_id": "4242"}
+        for i in range(10)
+    ] + [{"id": "9001", "author": "TestBotUser", "replied_to_id": "4242"}]
+    calls = []
+
+    def conversation(client, tweet_id, max_pages=1, max_tweets_per_page=10):
+        calls.append((tweet_id, max_pages, max_tweets_per_page))
+        return posts[: max_pages * max_tweets_per_page]
+
+    monkeypatch.setattr(workflow_module, "get_conversation_thread", conversation)
+    assert workflow_module._find_live_duplicate_reply_ids(object(), "4242") == ["9001"]
+    assert calls == [("4242", 3, 100)]
+
+
+@pytest.mark.parametrize("command", ["post", "auto"])
+@pytest.mark.parametrize("blocked_stage", ["identity", "original", "search"])
+def test_budget_exhaustion_defers_reply_without_posting(
+    workflow_module, tmp_path, monkeypatch, command, blocked_stage
+):
+    """A blocked live lookup is unknown, not proof that no reply exists."""
+    _set_status_dirs(workflow_module, tmp_path)
+    approved = workflow_module.APPROVED_DIR / "reply.yml"
+    workflow_module.TweetDraft(
+        text="A useful reply", type="reply", in_reply_to="4242"
+    ).save(approved)
+    posted = []
+    identity_calls = []
+    budget_error = type("DailyReadLimitReached", (Exception,), {})
+    monkeypatch.setattr(
+        workflow_module, "DailyReadLimitReached", budget_error, raising=False
+    )
+
+    def identity(*args, **kwargs):
+        identity_calls.append(1)
+        # auto() also reads identity before starting the posting phase.
+        if blocked_stage == "identity" and (
+            command == "post" or len(identity_calls) > 1
+        ):
+            raise budget_error("daily budget exhausted")
+        return SimpleNamespace(data=SimpleNamespace(id="me", username="bob"))
+
+    class Client:
+        def get_home_timeline(self, **kwargs):
+            return SimpleNamespace(data=None)
+
+        def get_tweet(self, *args, **kwargs):
+            if blocked_stage == "original":
+                raise budget_error("daily budget exhausted")
+            return SimpleNamespace(data=None)
+
+        def search_recent_tweets(self, **kwargs):
+            if blocked_stage == "search":
+                raise budget_error("daily budget exhausted")
+            return SimpleNamespace(data=None)
+
+        def create_tweet(self, **kwargs):
+            posted.append(kwargs)
+            return SimpleNamespace(data={"id": "9001"})
+
+    monkeypatch.setattr(workflow_module, "cached_get_me", identity)
+    monkeypatch.setattr(workflow_module, "load_twitter_client", lambda **kw: Client())
+    monkeypatch.setattr(workflow_module, "_validate_draft_urls", lambda draft: [])
+    monkeypatch.setattr(workflow_module, "_validate_draft_length", lambda draft: [])
+    monkeypatch.setattr(workflow_module, "_git_commit_posted", lambda *a: None)
+    if command == "post":
+        workflow_module.post(False, True, None, 1, False)
+    else:
+        workflow_module.auto(None, False, True, False, 1, 1, True, False)
+    assert posted == []
+    assert approved.exists()  # retryable, not rejected as a known duplicate
+    assert list(workflow_module.REJECTED_DIR.iterdir()) == []

@@ -104,6 +104,9 @@ def _load_workflow_module() -> tuple[Any, dict[str, Any]]:
     twitter_llm_stub._unescape_literal_newlines = lambda text: text.replace("\\n", "\n")
 
     twitter_api_stub: Any = types.ModuleType("twitter.twitter")
+    twitter_api_stub.DailyReadLimitReached = type(
+        "DailyReadLimitReached", (Exception,), {}
+    )
     twitter_api_stub.cached_get_me = lambda *args, **kwargs: SimpleNamespace(
         data=SimpleNamespace(id=0)
     )
