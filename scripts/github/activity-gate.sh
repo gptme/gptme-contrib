@@ -1237,7 +1237,8 @@ check_master_ci() {
     # way. A workflow that is still red on a newer commit is the same open
     # signal; only a workflow absent from the state, or one with a success
     # newer than the failure we last saw, is new. The state records the newest
-    # failure time per workflow, so a fail -> pass -> fail sequence that
+    # failure time per workflow/event (matching the recovery filter), so a
+    # fail -> pass -> fail sequence that
     # completes between two gate runs still re-emits (the pass is newer than
     # the stored failure) even though the file is never empty in between.
     local seen_state newest_failures
@@ -1248,10 +1249,10 @@ check_master_ci() {
         seen_state=$(jq -c 'if type == "object" then . else {} end' "$state_file" 2>/dev/null || echo '{}')
         [ -n "$seen_state" ] || seen_state='{}'
     fi
-    newest_failures=$(echo "$failures" | jq -c 'group_by(.name) | map(sort_by(.createdAt) | last)')
+    newest_failures=$(echo "$failures" | jq -c 'group_by([.name, .event]) | map(sort_by(.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) | last)')
     # Record the current set before emitting. A shrinking set is stored too, so
     # a workflow that went green and red again is new on its second failure.
-    echo "$newest_failures" | jq -c 'map({(.name): .createdAt}) | add' > "$state_file"
+    echo "$newest_failures" | jq -c 'map({([.name, .event] | tojson): .createdAt}) | add' > "$state_file"
 
     # Emit the newest failing run of each workflow not yet reported.
     echo "$newest_failures" | jq -c --argjson seen "$seen_state" --argjson runs "$runs" '
@@ -1259,7 +1260,7 @@ check_master_ci() {
         .[]
         | . as $f
         | select(
-            ($seen[$f.name] // null) as $at
+            ($seen[([$f.name, $f.event] | tojson)] // null) as $at
             | $at == null
               or ([$runs[]
                    | select(.conclusion == "success"

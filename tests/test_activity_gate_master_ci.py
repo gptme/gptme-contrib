@@ -443,3 +443,16 @@ def test_fail_pass_fail_between_two_gate_runs_is_emitted_again(tmp_path: Path) -
         [_run(544, "push", name="Tests", created_at=_ts(30))],
     )
     assert third.stdout == ""  # same signal again: no further re-emit
+
+
+def test_new_event_failure_is_not_hidden_by_other_event_state(tmp_path: Path) -> None:
+    push_failure = _run(551, "push", name="Tests", created_at=_ts(7200))
+    assert _emitted(_run_gate(tmp_path, [push_failure])) == [551]
+    schedule_failure = _run(553, "schedule", name="Tests", created_at=_ts(60))
+    runs = [
+        push_failure,
+        _run(552, "push", name="Tests", conclusion="success", created_at=_ts(3600)),
+        schedule_failure,
+    ]
+    assert _emitted(_run_gate(tmp_path, runs)) == [553]
+    assert _run_gate(tmp_path, runs).stdout == ""
