@@ -490,6 +490,18 @@ def _verify_account_identity(username: str, console) -> None:
         sys.exit(1)
 
 
+def _default_env_path() -> Path | None:
+    """Token store for the default account.
+
+    ``TWITTER_ENV_FILE`` points at a dedicated per-consumer file (e.g.
+    ``~/.config/secrets/twitter.env``) used for BOTH reading and writing
+    tokens, so rotated OAuth 2.0 refresh tokens persist to the same place
+    they are loaded from. Unset: fall back to ``find_dotenv()`` (workspace .env).
+    """
+    configured = os.environ.get("TWITTER_ENV_FILE", "").strip()
+    return Path(configured).expanduser() if configured else None
+
+
 def load_twitter_client(
     require_auth: bool = False, headless: bool = False
 ) -> tweepy.Client:
@@ -516,8 +528,10 @@ def load_twitter_client(
     # (often ~/.cache/uv/...) which can't find our workspace .env file.
     from dotenv import find_dotenv
 
-    _env_path_str = find_dotenv()
-    _env_path = Path(_env_path_str) if _env_path_str else None
+    _env_path = _default_env_path()
+    if _env_path is None:
+        _env_path_str = find_dotenv()
+        _env_path = Path(_env_path_str) if _env_path_str else None
     if not _env_path:
         console.print("[yellow]Warning: could not locate .env file for token storage")
 
@@ -967,7 +981,11 @@ def _load_environment() -> None:
     """Shared configuration for API commands and the network-free budget CLI."""
     requested_account = current_account()
     account_was_explicit = "TWITTER_ACCOUNT" in os.environ
-    load_dotenv(override=True)
+    env_path = _default_env_path()
+    if env_path is None:
+        load_dotenv(override=True)
+    else:
+        load_dotenv(env_path, override=True)
     if account_was_explicit:
         os.environ["TWITTER_ACCOUNT"] = requested_account
     if current_account():

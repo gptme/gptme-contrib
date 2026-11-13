@@ -221,7 +221,15 @@ def test_loaded_client_keeps_its_profile_budget(tw, monkeypatch, tmp_path):
     assert json.loads((second_dir / f"{day}-second.json").read_text()) == {"reads": 1}
 
 
-def test_read_budget_loads_dotenv_without_network(tw, monkeypatch, tmp_path):
+def test_read_budget_uses_dedicated_env_file_without_network(tw, monkeypatch, tmp_path):
+    test_read_budget_loads_dotenv_without_network(
+        tw, monkeypatch, tmp_path, dedicated_store=True
+    )
+
+
+def test_read_budget_loads_dotenv_without_network(
+    tw, monkeypatch, tmp_path, dedicated_store=False
+):
     from click.testing import CliRunner
     from dotenv import load_dotenv
 
@@ -232,7 +240,16 @@ def test_read_budget_loads_dotenv_without_network(tw, monkeypatch, tmp_path):
         f"TWITTER_DAILY_READ_LIMIT=10\nTWITTER_READ_COUNTER_DIR={counter_dir}\nTWITTER_ACCOUNT=other\n"
     )
     monkeypatch.setenv("TWITTER_ACCOUNT", "")  # explicit default wins over .env
-    monkeypatch.setattr(tw, "load_dotenv", lambda **kw: load_dotenv(env, **kw))
+    if dedicated_store:
+        monkeypatch.setenv("TWITTER_ENV_FILE", str(env))
+    else:
+        monkeypatch.delenv("TWITTER_ENV_FILE", raising=False)
+
+    def load_config(path=None, **kwargs):
+        assert path == (env if dedicated_store else None)
+        return load_dotenv(env, **kwargs)
+
+    monkeypatch.setattr(tw, "load_dotenv", load_config)
     counter_dir.mkdir()
     day = tw.datetime.now(tw.timezone.utc).strftime("%Y-%m-%d")
     (counter_dir / f"{day}.json").write_text('{"reads":10}')
