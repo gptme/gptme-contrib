@@ -601,7 +601,7 @@ returns `False`.
   `strict=True` (or `GPTODO_STRICT_TRANSITIONS=1`) rejects them. Terminal reopens
   require force or explicit intent. Named machine edges are in `gptodo transitions`.
 - Exceptional intents are narrow: `sync_reopen` authorizes done→active,
-  `requeue` authorizes active→todo and `alert_refire` authorizes terminal→todo/waiting.
+  `requeue` authorizes active→todo/backlog and `alert_refire` authorizes terminal→todo/waiting.
   `operator_reopen`/force are deliberate overrides, not routine automation defaults.
   Sync leaves cancelled tasks sticky for either OPEN or CLOSED remote state.
   Claim refuses expired tasks: revive to backlog/todo explicitly before claiming.

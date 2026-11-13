@@ -132,6 +132,17 @@ def test_strict_normal_machine_edges_and_requeue(tmp_path):
     assert not update_task_state(path, "todo")
 
 
+def test_requeue_returns_active_to_backlog_but_not_elsewhere(tmp_path):
+    path = write_task(tmp_path, state="backlog")
+    mutate_task(path, patch={"state": "active"}, strict=True)
+    with pytest.raises(TransitionError):
+        mutate_task(path, patch={"state": "backlog"}, strict=True)
+    mutate_task(path, patch={"state": "backlog"}, strict=True, intent="requeue")
+    assert frontmatter.load(path).metadata["state"] == "backlog"
+    with pytest.raises(TransitionError):
+        mutate_task(path, patch={"state": "ready_for_review"}, strict=True, intent="requeue")
+
+
 def test_stale_candidate_does_not_overwrite_terminal(tmp_path):
     path = write_task(tmp_path)
     mutate_task(path, patch={"state": "done"})
