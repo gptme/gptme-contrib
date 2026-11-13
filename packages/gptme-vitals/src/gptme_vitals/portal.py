@@ -17,7 +17,7 @@ from collections.abc import Iterable
 from html import escape
 
 from gptme_vitals.envelope import PageEnvelope, Status
-from gptme_vitals.routes import RouteRegistry
+from gptme_vitals.routes import NAV_CSS, RouteRegistry
 
 #: Status -> badge class. Matches the classes ``theme.BASE_CSS`` colours.
 BADGE_CLASS: dict[Status, str] = {
@@ -106,7 +106,7 @@ def render_portal(
         "<!doctype html>\n"
         '<html lang="en"><head><meta charset="utf-8">\n'
         f"<title>{escape(title)}</title>\n"
-        f"{head_html}\n<style>\n{PORTAL_CSS}\n</style>\n</head><body>\n"
+        f"{head_html}\n<style>\n{NAV_CSS}\n{PORTAL_CSS}\n</style>\n</head><body>\n"
         f"{registry.render_shared_nav(registry.portal_href)}\n"
         f"{toolbar_html}\n<h1>{escape(title)}</h1>\n{stamp}\n"
         f'<div class="cards">\n{render_cards(registry, envelopes)}\n</div>\n'

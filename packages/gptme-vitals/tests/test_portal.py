@@ -6,6 +6,7 @@ import pytest
 from gptme_vitals.envelope import PageEnvelope, Status
 from gptme_vitals.portal import BADGE_CLASS, render_cards, render_portal
 from gptme_vitals.routes import (
+    NAV_CSS,
     DashboardRoute,
     RefreshCadence,
     RouteKind,
@@ -144,3 +145,11 @@ def test_page_has_nav_title_cards_and_trusted_fragments() -> None:
     assert 'class="vitals-nav"' in html
     assert f"Updated {NOW}" in html
     assert html.index('data-route="services"') < html.index('data-route="sessions"')
+
+
+def test_portal_ships_the_css_for_the_nav_it_renders() -> None:
+    """The nav markup is useless without its stylesheet: links ran together as
+    ``ServicesCI & PRs|MetricsSessions`` on Bob's live portal."""
+    html = render_portal(REGISTRY, [_env("services")], title="Bob")
+    assert 'class="vitals-nav"' in html
+    assert NAV_CSS in html
