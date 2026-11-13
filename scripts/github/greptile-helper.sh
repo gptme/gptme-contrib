@@ -531,6 +531,36 @@ _our_last_trigger_json() {
     _issue_comments_json | jq "[.[][] | select(.user.login == \"$GITHUB_AUTHOR\" and (.body | test(\"@greptileai review\")))] | sort_by(.created_at) | last // {}" 2>/dev/null || echo "{}"
 }
 
+# --- Helper: collapse our superseded trigger comments ---
+# Each review cycle leaves one more `@greptileai review` comment on the thread
+# (up to 9 on one PR; 42 of Bob's 159 comments on eight unanswered PRs on
+# 2026-11-12), which reads as a bot monologue. Called right after a new trigger
+# posts: every earlier helper trigger by this identity is now superseded, so it
+# is minimized as OUTDATED. Minimize, not delete: the per-cycle count, the
+# MAX_TOTAL_TRIGGERS lifetime cap and the post-recovery bonus marker are all
+# derived from these comments, and minimized comments still come back from the
+# REST comments API, so none of those guards change. Only comments carrying the
+# helper's head-sha marker are touched, never a manual `@greptileai review`.
+# Uses the comments cache filled before the post, so the new trigger is excluded.
+# Best-effort: any failure is ignored. Opt out with GREPTILE_MINIMIZE_SUPERSEDED=0.
+_minimize_superseded_triggers() {
+    [ "${GREPTILE_MINIMIZE_SUPERSEDED:-1}" = "1" ] || return 0
+    local node_id
+    while IFS= read -r node_id; do
+        [ -n "$node_id" ] || continue
+        # shellcheck disable=SC2016  # $id is a GraphQL variable, not shell
+        gh api graphql \
+            -f query='mutation($id: ID!) { minimizeComment(input: {subjectId: $id, classifier: OUTDATED}) { minimizedComment { isMinimized } } }' \
+            -f id="$node_id" --silent >/dev/null 2>&1 || true
+    done < <(_issue_comments_json | jq -r '
+        .[][] | select(.user.login == "'"${GITHUB_AUTHOR}"'"
+            and ((.body // "") | test("^@greptileai review( comment)?(\\s|$)"))
+            and ((.body // "") | test("greptile-helper head-sha: "))
+            and (.node_id // "") != "")
+        | .node_id' 2>/dev/null)
+    return 0
+}
+
 # --- Helper: sha named by the Greptile summary's "Last reviewed commit" footer ---
 # Greptile does not always post a formal PR review object; on many PRs the only
 # artifact is an issue comment whose footer names the commit it actually read.
@@ -984,6 +1014,7 @@ trigger)
                     echo "  [greptile] Warning: could not write trigger-timestamp file; propagation-delay guard disabled for this trigger."
                 fi
                 echo "  [greptile] Re-triggered successfully."
+                _minimize_superseded_triggers
             else
                 echo "  [greptile] Trigger failed (non-fatal)."
             fi
@@ -1113,6 +1144,7 @@ trigger)
     fi
     if BOB_GREPTILE_HELPER=1 gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$_trigger_body" --silent 2>/dev/null; then
         echo "  [greptile] Initial review triggered."
+        _minimize_superseded_triggers
     else
         echo "  [greptile] Trigger failed or its result was ambiguous; retaining the propagation-delay guard for this grace window."
     fi
