@@ -155,7 +155,14 @@ def count_billable_reads(payload: object, route: str = "") -> int:
     user_data = (
         len(parts) >= 2
         and parts[1] == "users"
-        and parts[-1] not in {"tweets", "mentions", "liked_tweets", "bookmarks"}
+        and parts[-1]
+        not in {
+            "tweets",
+            "mentions",
+            "liked_tweets",
+            "bookmarks",
+            "reverse_chronological",
+        }
     ) or parts[-1] in {"liking_users", "retweeted_by"}
     if user_data:
         n *= 2
@@ -206,7 +213,9 @@ def install_read_meter() -> None:
                 # sleeps/retries across midnight. The account lock stays held.
                 path = _read_counter_path()
                 used = daily_reads_used()
-                path.write_text(json.dumps({"reads": used + n}))
+                pending = path.with_suffix(".json.tmp")
+                pending.write_text(json.dumps({"reads": used + n}))
+                os.replace(pending, path)
             return response
 
     metered._read_meter = True  # type: ignore[attr-defined]

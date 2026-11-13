@@ -259,6 +259,7 @@ def test_exhausted_budget_still_validates_identity_and_posts(tw, monkeypatch, oa
         "/2/users/2/mentions",
         "/2/users/2/liked_tweets",
         "/2/users/2/bookmarks",
+        "/2/users/2/timelines/reverse_chronological",
     ],
 )
 def test_user_timelines_still_count_posts(tw, route):
@@ -374,3 +375,21 @@ def test_midnight_rollover_uses_current_day(tw, monkeypatch, rollover_stage):
     with pytest.raises(tw.DailyReadLimitReached):
         client.get_tweets(ids=[1])
     assert len(calls) == (1 if rollover_stage == "lock" else 2)
+
+
+def test_failed_counter_replacement_preserves_previous_usage(tw, monkeypatch):
+    tw._read_counter_path().write_text('{"reads":9}')
+    monkeypatch.setattr(
+        tw.tweepy.client.BaseClient,
+        "request",
+        lambda *a, **kw: SimpleNamespace(ok=True, json=lambda: {"data": {"id": "1"}}),
+    )
+
+    def interrupted_replace(*args):
+        raise OSError("simulated interruption before atomic replacement")
+
+    monkeypatch.setattr(tw.os, "replace", interrupted_replace)
+    tw.install_read_meter()
+    with pytest.raises(OSError, match="simulated interruption"):
+        tw.tweepy.Client(bearer_token="x").request("GET", "/2/tweets/1")
+    assert tw.daily_reads_used() == 9
