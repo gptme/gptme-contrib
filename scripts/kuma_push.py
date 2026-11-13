@@ -269,8 +269,8 @@ def push_url(
         return False
     if key:
         start_tracking(path=ack_path)
-    full_url = build_push_url(push_url_value, status, msg)
     try:
+        full_url = build_push_url(push_url_value, status, msg)
         result = subprocess.run(
             ["curl", "-sS", "-m", str(timeout), full_url],
             check=False,
@@ -278,7 +278,7 @@ def push_url(
             text=True,
             timeout=timeout + 10,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         # TimeoutExpired includes argv, including the secret capability URL.
         print(f"WARN: Kuma push {name} failed: {type(exc).__name__}", file=sys.stderr)
         return False

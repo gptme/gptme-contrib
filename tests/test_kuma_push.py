@@ -147,6 +147,13 @@ def test_push_timeout_does_not_leak_capability_url(monkeypatch, capsys):
     assert "kuma.example" not in err
 
 
+def test_invalid_push_url_is_a_sanitized_failure(capsys):
+    assert not kuma_push.push_url("http://[private-capability")
+    err = capsys.readouterr().err
+    assert "ValueError" in err
+    assert "private-capability" not in err
+
+
 def test_load_push_url_env_precedence(tmp_path, monkeypatch):
     env_file = tmp_path / "push.env"
     env_file.write_text('KUMA_PUSH_URL_X="http://from-file"\nOTHER=1\n')
