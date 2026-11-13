@@ -9,169 +9,45 @@
 # [tool.uv]
 # exclude-newer = "2024-04-01T00:00:00Z"
 # ///
-"""Validate YAML frontmatter in task/tweet files.
+"""Compatibility entry point for task/tweet frontmatter validation.
 
-Checks:
-- Required fields are present
-- Fields have valid values
-- Timestamps are in correct format
+New task hooks should use ``gptodo lint`` with the staged filenames.
+Schema definitions live in gptodo, not in this wrapper.
 """
 
 import sys
-from datetime import date, datetime
 from pathlib import Path
-from typing import List, cast
+from typing import List
 
 import click
-import frontmatter
 from rich.console import Console
 
-# Configure console
+# This script also runs through uv's isolated PEP 723 environment. Import the
+# sibling source package so it uses the schema from this checkout, not an older
+# globally installed gptodo (and requires no workspace installation).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "packages/gptodo/src"))
+
+from gptodo.frontmatter_compat import frontmatter  # noqa: E402
+from gptodo.utils import validate_task_file  # noqa: E402
+from gptodo.validate_frontmatter import (  # noqa: E402
+    validate_optional_fields,
+    validate_schema,
+)
+
 console = Console(stderr=True)
-
-VALID_STATES = {
-    "tasks": [
-        "backlog",
-        "todo",
-        "new",
-        "active",
-        "ready_for_review",
-        "waiting",
-        "paused",
-        "done",
-        "cancelled",
-        "someday",
-        "draft",
-    ],
-    "tweets": ["new", "queued", "approved", "posted"],
-}
-
-VALID_PRIORITIES = ["low", "medium", "high"]
-VALID_TASK_TYPES = ["project", "action"]
-
-# Synonym map: agent-intuitive guesses → canonical GTD values
-TASK_TYPE_SYNONYMS = {
-    "research": "action",
-    "investigation": "action",
-    "chore": "action",
-    "bug": "action",
-    "decision": "action",
-    "task": "action",
-    "epic": "project",
-}
-
-
-def validate_timestamp(ts: str | datetime | date) -> str | None:
-    """Validate an ISO 8601 timestamp or datetime/date object.
-
-    YAML parses a bare ``2026-06-24`` value into a ``datetime.date`` (not a
-    ``datetime`` or ``str``). A date is a valid ISO 8601 timestamp at date
-    precision, so accept it rather than rejecting it as an invalid type.
-    """
-    # datetime is a subclass of date, so this covers both object forms.
-    if isinstance(ts, date):
-        return None
-    elif isinstance(ts, str):
-        try:
-            datetime.fromisoformat(ts)
-            return None
-        except ValueError:
-            return f"Invalid timestamp format: {ts}"
-    else:
-        return f"Invalid timestamp type: {type(ts)}"
 
 
 def validate_frontmatter(file: Path, type_name: str = "tasks") -> List[str]:
-    """Validate frontmatter in a file."""
-    errors = []
-
+    """Delegate task schema checks; preserve the legacy tweet invocation."""
+    if type_name == "tasks":
+        return validate_schema(file)
     try:
         post = frontmatter.load(file)
-    except Exception as e:
-        errors.append(f"Failed to parse frontmatter: {e}")
-        return errors
-
-    metadata = post.metadata
-
-    # Check required fields
-    required_fields = ["state", "created"]  # modified is optional, can use git history
-    for field in required_fields:
-        if field not in metadata:
-            errors.append(f"Missing required field: {field}")
-
-    # Validate state
-    if "state" in metadata:
-        state = metadata["state"]
-        if state not in VALID_STATES[type_name]:
-            errors.append(
-                f"Invalid state: {state}. Must be one of: {', '.join(VALID_STATES[type_name])}"
-            )
-
-    # Validate timestamps
-    for field in ["created", "modified"]:
-        if field in metadata:
-            if error := validate_timestamp(
-                cast("str | datetime | date", metadata[field])
-            ):
-                errors.append(f"Field '{field}': {error}")
-
-    # Validate optional fields
-    if "priority" in metadata:
-        priority = metadata["priority"]
-        if priority not in VALID_PRIORITIES:
-            errors.append(
-                f"Invalid priority: {priority}. Must be one of: {', '.join(VALID_PRIORITIES)}"
-            )
-
-    if "task_type" in metadata:
-        task_type = metadata["task_type"]
-        if task_type not in VALID_TASK_TYPES:
-            suggestion = ""
-            task_type_lower = str(task_type).lower()
-            if task_type_lower in TASK_TYPE_SYNONYMS:
-                canonical = TASK_TYPE_SYNONYMS[task_type_lower]
-                suggestion = f" — did you mean `task_type: {canonical}`?"
-            elif task_type_lower in VALID_TASK_TYPES:
-                suggestion = f" — did you mean `task_type: {task_type_lower}`?"
-            template_hint = (
-                " See tasks/templates/default.md for examples."
-                if type_name == "tasks"
-                else ""
-            )
-            errors.append(
-                f"Invalid task_type: {task_type}. Must be one of: {', '.join(VALID_TASK_TYPES)}{suggestion}.{template_hint}"
-            )
-
-    if "tags" in metadata:
-        tags = metadata["tags"]
-        if not isinstance(tags, list):
-            errors.append("Tags must be a list")
-
-    if "depends" in metadata:
-        depends = metadata["depends"]
-        if not isinstance(depends, list):
-            errors.append("Depends must be a list")
-
-    # Validate waiting_for field
-    if "waiting_for" in metadata:
-        waiting_for = metadata["waiting_for"]
-        if not isinstance(waiting_for, str):
-            errors.append("waiting_for must be a string")
-        elif not waiting_for.strip():
-            errors.append("waiting_for cannot be empty")
-
-    # Validate waiting_since timestamp
-    if "waiting_since" in metadata:
-        if error := validate_timestamp(
-            cast("str | datetime | date", metadata["waiting_since"])
-        ):
-            errors.append(f"Field 'waiting_since': {error}")
-
-    # Check waiting_since requires waiting_for
-    if "waiting_since" in metadata and "waiting_for" not in metadata:
-        errors.append("waiting_since requires waiting_for field to be set")
-
-    return errors
+    except Exception as exc:
+        return [f"Failed to parse frontmatter: {exc}"]
+    return validate_task_file(
+        file, post, type_name=type_name
+    ) + validate_optional_fields(post.metadata, type_name=type_name)
 
 
 @click.command()
@@ -183,14 +59,13 @@ def validate_frontmatter(file: Path, type_name: str = "tasks") -> List[str]:
 @click.option(
     "--type",
     "type_name",
-    type=click.Choice(list(VALID_STATES.keys())),
+    type=click.Choice(["tasks", "tweets"]),
     default="tasks",
     help="Type of files to validate",
 )
 def main(files: List[Path], type_name: str = "tasks") -> None:
     """Validate YAML frontmatter in task/tweet files."""
     exit_code = 0
-
     for file in files:
         if errors := validate_frontmatter(file, type_name):
             console.print(f"[red]Errors in {file}:")
@@ -198,9 +73,7 @@ def main(files: List[Path], type_name: str = "tasks") -> None:
                 console.print(f"  - {error}")
             exit_code = 1
 
-    # click discards return values from command callbacks, so we must call
-    # sys.exit() directly. Without this, the precommit hook silently passes
-    # even when validate_frontmatter() reports errors.
+    # click discards callback return values; errors must set the process status.
     sys.exit(exit_code)
 
 

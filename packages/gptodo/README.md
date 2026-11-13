@@ -561,6 +561,27 @@ gptodo lint tasks/foo.md     # one file
 gptodo lint --strict         # non-zero exit on warnings (for CI / pre-commit)
 ```
 
+For pre-commit, pass the staged filenames to a single schema hook (no separate
+`gptodo check` scan of unrelated tasks). From an agent workspace with the contrib
+submodule:
+
+```yaml
+- id: validate-task-frontmatter
+  name: Lint staged task frontmatter
+  entry: uv run --no-project --with ./gptme-contrib/packages/gptodo gptodo lint
+  language: system
+  types: [markdown]
+  files: ^tasks/(archive/)?[^/]+\.md$
+  exclude: ^tasks/(templates|video-scripts|agent-setup-interview)/
+  pass_filenames: true
+```
+
+This installs gptodo from the workspace's submodule pin instead of relying on a
+possibly stale global installation. Structural errors (including malformed YAML)
+fail the hook; unknown/deprecated fields remain warnings unless `--strict` is
+requested. The legacy `scripts/precommit/validate_task_frontmatter.py` entry point
+remains supported and delegates task validation to this same schema.
+
 A `modified:` timestamp is deliberately not part of the schema. Every edit path would have
 to keep it up to date, and the same information is free from
 `git log -1 --format=%ai tasks/foo.md`. Warnings never reject a task. The linter only

@@ -7369,9 +7369,10 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
     repo_root = find_repo_root(Path.cwd())
     tasks_dir = repo_root / "tasks"
 
-    # Load task files
+    # Validate paths directly: load_tasks drops unparseable files, which would
+    # silently turn a malformed staged task into a successful pre-commit check.
+    paths: list[Path] = []
     if task_files:
-        tasks: list[TaskInfo] = []
         for file in task_files:
             path = Path(file)
             if not path.is_absolute():
@@ -7379,12 +7380,11 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
                     path = repo_root / path
                 else:
                     path = tasks_dir / path
-            file_tasks = load_tasks(path.parent, single_file=path)
-            tasks.extend(file_tasks)
+            paths.append(path)
     else:
-        tasks = load_tasks(tasks_dir)
+        paths = sorted(tasks_dir.glob("*.md"))
 
-    if not tasks:
+    if not paths:
         if output_json:
             print(json.dumps({"findings": [], "count": 0}))
         else:
@@ -7397,14 +7397,14 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
 
     # Collect findings across all tasks
     all_findings: list[dict] = []
-    for task in tasks:
+    for path in paths:
         # Schema errors — always fatal.
         schema_warnings: list[str] = []
-        for error_msg in validate_schema(task.path, collect_warnings=schema_warnings):
+        for error_msg in validate_schema(path, collect_warnings=schema_warnings):
             all_findings.append(
                 {
-                    "task": task.name,
-                    "path": str(task.path.relative_to(repo_root)),
+                    "task": path.stem,
+                    "path": os.path.relpath(path, repo_root),
                     "severity": "error",
                     "field": "-",
                     "message": error_msg,
@@ -7414,21 +7414,26 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
         for warning_msg in schema_warnings:
             all_findings.append(
                 {
-                    "task": task.name,
-                    "path": str(task.path.relative_to(repo_root)),
+                    "task": path.stem,
+                    "path": os.path.relpath(path, repo_root),
                     "severity": "warning",
                     "field": "-",
                     "message": warning_msg,
                 }
             )
-        # Field-level warnings (deprecated / unknown).
+        # Field-level warnings need parsed metadata; schema validation already
+        # reports parse/read failures, so don't discard or double-report them.
+        try:
+            metadata = frontmatter.load(path).metadata
+        except Exception:
+            continue
         for severity, field, message in lint_frontmatter_fields(
-            task.metadata, known_fields=known_fields
+            metadata, known_fields=known_fields
         ):
             all_findings.append(
                 {
-                    "task": task.name,
-                    "path": str(task.path.relative_to(repo_root)),
+                    "task": path.stem,
+                    "path": os.path.relpath(path, repo_root),
                     "severity": severity,
                     "field": field,
                     "message": message,
@@ -7446,7 +7451,7 @@ def lint_cmd(output_json: bool, strict: bool, task_files: tuple[str, ...]) -> No
 
     # Human output — group by task, errors first
     if not all_findings:
-        console.print(f"[green]✓ No frontmatter schema violations across {len(tasks)} task(s).[/]")
+        console.print(f"[green]✓ No frontmatter schema violations across {len(paths)} task(s).[/]")
         return
 
     error_count = sum(1 for f in all_findings if f["severity"] == "error")

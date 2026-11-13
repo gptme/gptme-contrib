@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 
 from gptodo.utils import lint_frontmatter_fields
 from gptodo.validate_frontmatter import (
@@ -179,6 +181,34 @@ def test_valid_minimal_task(tmp_path):
         "---\nstate: backlog\ncreated: 2026-07-01\n---\n# My task\n",
     )
     assert validate_schema(p) == []
+
+
+@pytest.mark.parametrize(
+    "field,value,expected",
+    [
+        ("task_type", "research", "did you mean `task_type: action`"),
+        ("task_type", "bogus", "Invalid task_type"),
+        ("task_type", "Action", "did you mean `task_type: action`"),
+        ("waiting_for", "''", "waiting_for cannot be empty"),
+        ("waiting_for", "42", "waiting_for must be a string"),
+        ("waiting_since", "not-a-date", "Invalid timestamp format"),
+        ("modified", "42", "Invalid timestamp type"),
+    ],
+)
+def test_shared_schema_keeps_legacy_hook_checks(tmp_path, field, value, expected):
+    p = _write_task(
+        tmp_path,
+        f"---\nstate: active\ncreated: 2026-07-01\n{field}: {value}\n---\n# task\n",
+    )
+    assert any(expected in error for error in validate_schema(p))
+
+
+def test_waiting_since_requires_waiting_for(tmp_path):
+    p = _write_task(
+        tmp_path,
+        "---\nstate: waiting\ncreated: 2026-07-01\nwaiting_since: 2026-07-01\n---\n",
+    )
+    assert "waiting_since requires waiting_for field to be set" in validate_schema(p)
 
 
 def test_missing_state(tmp_path):

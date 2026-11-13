@@ -12,6 +12,7 @@ and are NOT part of this module.
 from __future__ import annotations
 
 import re
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -235,6 +236,62 @@ def validate_assigned_to_format(value: Any) -> list[str]:
     return []
 
 
+# Checks formerly owned by scripts/precommit/validate_task_frontmatter.py.
+# Keep them here so the compatibility hook and `gptodo lint` share one schema.
+VALID_TASK_TYPES = ["project", "action"]
+TASK_TYPE_SYNONYMS = {
+    "research": "action",
+    "investigation": "action",
+    "chore": "action",
+    "bug": "action",
+    "decision": "action",
+    "task": "action",
+    "epic": "project",
+}
+
+
+def validate_timestamp(ts: Any) -> str | None:
+    """Accept ISO timestamps and YAML's date/datetime objects."""
+    if isinstance(ts, date):
+        return None
+    if isinstance(ts, str):
+        try:
+            datetime.fromisoformat(ts)
+            return None
+        except ValueError:
+            return f"Invalid timestamp format: {ts}"
+    return f"Invalid timestamp type: {type(ts)}"
+
+
+def validate_optional_fields(metadata: dict[str, Any], *, type_name: str = "tasks") -> list[str]:
+    """Validate the legacy hook's optional fields for tasks and tweets."""
+    errors: list[str] = []
+    for field in ("modified", "waiting_since"):
+        if field in metadata:
+            if error := validate_timestamp(metadata[field]):
+                errors.append(f"Field '{field}': {error}")
+
+    if "task_type" in metadata and metadata["task_type"] not in VALID_TASK_TYPES:
+        task_type = metadata["task_type"]
+        lower = str(task_type).lower()
+        canonical = TASK_TYPE_SYNONYMS.get(lower, lower if lower in VALID_TASK_TYPES else None)
+        suggestion = f" — did you mean `task_type: {canonical}`?" if canonical else ""
+        hint = " See tasks/templates/default.md for examples." if type_name == "tasks" else ""
+        errors.append(
+            f"Invalid task_type: {task_type}. Must be one of: {', '.join(VALID_TASK_TYPES)}{suggestion}.{hint}"
+        )
+
+    if "waiting_for" in metadata:
+        value = metadata["waiting_for"]
+        if not isinstance(value, str):
+            errors.append("waiting_for must be a string")
+        elif not value.strip():
+            errors.append("waiting_for cannot be empty")
+    if "waiting_since" in metadata and "waiting_for" not in metadata:
+        errors.append("waiting_since requires waiting_for field to be set")
+    return errors
+
+
 # ---------------------------------------------------------------------------
 # High-level entry point
 # ---------------------------------------------------------------------------
@@ -288,6 +345,7 @@ def validate_schema(file: Path, *, collect_warnings: list[str] | None = None) ->
 
     # Delegate core field checks (required fields, enum values) to validate_task_file.
     errors.extend(validate_task_file(file, post))
+    errors.extend(validate_optional_fields(metadata))
 
     # assigned_to shape check.
     if "assigned_to" in metadata:

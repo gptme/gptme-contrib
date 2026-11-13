@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from gptodo.cli import cli
@@ -149,6 +150,34 @@ def test_lint_helper_multiple_findings() -> None:
 
 
 # -- CLI tests ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "---\nstate: [broken\n---\n",
+        "---\nstate: []\ncreated: 2026-06-01\n---\n",
+    ],
+)
+def test_lint_explicit_malformed_file_fails(tmp_path: Path, monkeypatch, content: str) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    _write(tasks_dir, "bad", content)
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["lint", "tasks/bad.md"])
+    assert result.exit_code == 1, result.output
+    assert "schema error" in result.output
+
+
+def test_lint_explicit_file_does_not_scan_unstaged_tasks(tmp_path: Path, monkeypatch) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    _write(tasks_dir, "clean", CLEAN_TASK)
+    _write(tasks_dir, "unstaged", "---\nstate: bogus\n---\n")
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["lint", "tasks/clean.md"])
+    assert result.exit_code == 0, result.output
+    assert "1 task(s)" in result.output
 
 
 def test_lint_cli_clean_workspace(tmp_path: Path, monkeypatch) -> None:

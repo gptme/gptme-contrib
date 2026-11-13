@@ -418,21 +418,7 @@ CONFIGS = {
         # - cancelled: won't do
         # Also accepts deprecated aliases: new, paused (with warnings).
         # `paused` is NOT a hold — it normalizes to backlog and is claimable.
-        states=[
-            "backlog",
-            "todo",
-            "active",
-            "ready_for_review",  # Issue #255: review state before done
-            "waiting",
-            "draft",  # in-progress plan; excluded from next/ready/claim
-            "someday",
-            "done",
-            "cancelled",
-            "expired",  # Gordon 2026-07-01: auto-reaped by `gptodo expire`
-            # Deprecated aliases accepted for backward compatibility
-            "new",
-            "paused",
-        ],
+        states=get_canonical_states() + list(DEPRECATED_STATE_ALIASES),
         special_files=["README.md", "templates", "video-scripts"],
         emoji="📋",
     ),
@@ -1234,7 +1220,7 @@ def skipped_subtask_items(content: str) -> list[tuple[str, bool]]:
 # =============================================================================
 
 
-def validate_task_file(file: Path, post: fmPost) -> List[str]:
+def validate_task_file(file: Path, post: fmPost, *, type_name: str = "tasks") -> List[str]:
     """Validate a task file's format and required fields.
 
     Args:
@@ -1270,9 +1256,15 @@ def validate_task_file(file: Path, post: fmPost) -> List[str]:
     if "state" in metadata:
         state = metadata["state"]
         # Normalize deprecated states before validation
-        normalized_state = normalize_state(state, warn=False)
-        # Use canonical states only (not deprecated ones in CONFIGS)
-        canonical_states = get_canonical_states()
+        normalized_state = (
+            normalize_state(state, warn=False)
+            if isinstance(state, str) and type_name == "tasks"
+            else state
+        )
+        # Task aliases normalize to canonical states; other directory types do not.
+        canonical_states = (
+            get_canonical_states() if type_name == "tasks" else CONFIGS[type_name].states
+        )
         if normalized_state not in canonical_states:
             issues.append(f"Invalid state: {state}")
 
@@ -1293,16 +1285,20 @@ def validate_task_file(file: Path, post: fmPost) -> List[str]:
         if priority not in ("high", "medium", "low", None):
             issues.append("Priority must be 'high', 'medium', or 'low'")
 
-    if "pool" in metadata:
-        pool = metadata["pool"]
-        if pool not in ("general", "frontier", None):
-            issues.append("pool must be 'general', 'frontier', or null")
-
     if "tags" in metadata and not isinstance(metadata["tags"], list):
         issues.append("Tags must be a list")
 
     if "depends" in metadata and not isinstance(metadata["depends"], list):
         issues.append("Dependencies must be a list")
+
+    # Legacy tweet validation shares core fields, not task execution metadata.
+    if type_name != "tasks":
+        return issues
+
+    if "pool" in metadata:
+        pool = metadata["pool"]
+        if pool not in ("general", "frontier", None):
+            issues.append("pool must be 'general', 'frontier', or null")
 
     if "requires" in metadata and not isinstance(metadata["requires"], list):
         issues.append("Requires must be a list")
