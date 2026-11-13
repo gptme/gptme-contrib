@@ -57,6 +57,7 @@ one durable receipt was written".
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -383,10 +384,10 @@ def backend_ntfy(cfg: Config, subject: str, body: str, dedup_key: str, urgency: 
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(
-        url, data=json.dumps(payload).encode(), headers=headers, method="POST"
-    )
     try:
+        request = urllib.request.Request(
+            url, data=json.dumps(payload).encode(), headers=headers, method="POST"
+        )
         with urllib.request.urlopen(request, timeout=30) as response:
             raw = response.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
@@ -403,6 +404,9 @@ def backend_ntfy(cfg: Config, subject: str, body: str, dedup_key: str, urgency: 
         # Never interpolate the request: the exception can carry the URL, and a
         # self-hosted ntfy URL may embed a capability token.
         raise BackendError(f"ntfy request failed: {type(exc.reason).__name__}") from exc
+    except (http.client.HTTPException, OSError, ValueError) as exc:
+        # InvalidURL and request/header validation failures may include secrets.
+        raise BackendError(f"ntfy request failed: {type(exc).__name__}") from exc
 
     try:
         ack = json.loads(raw)

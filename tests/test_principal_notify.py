@@ -418,3 +418,26 @@ def test_cli_exits_nonzero_when_ntfy_fails(tmp_path, monkeypatch, capsys):
     assert out["degraded"] is True
     assert out["operator_notified"] is False
     assert Path(out["local_alert_path"]).exists()
+
+
+@pytest.mark.parametrize("failure_stage", ["request", "open"])
+def test_ntfy_malformed_request_is_sanitized(tmp_path, monkeypatch, failure_stage):
+    import http.client
+
+    secret = "private-capability"
+
+    def fail(*args, **kwargs):
+        raise http.client.InvalidURL(f"URL contains invalid characters: {secret} bad")
+
+    monkeypatch.setattr(
+        principal_notify.urllib.request,
+        "Request" if failure_stage == "request" else "urlopen",
+        fail,
+    )
+    res = notify_principal(
+        "s", "b", cfg=cfg(tmp_path, backends=["ntfy"], env=_ntfy_env())
+    )
+    assert res.degraded
+    assert res.local_alert_path.exists()
+    assert "InvalidURL" in res.failures["ntfy"]
+    assert secret not in json.dumps(res.as_dict())
