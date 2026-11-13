@@ -482,10 +482,11 @@ def _project_key(project: str | Path) -> str:
 
     The input is encoded as given, not normalized: a decoded Claude Code
     path like ``/home/u//repo`` (from ``/home/u/.repo``) must keep its
-    doubled separator, which ``abspath()`` would collapse. Callers
+    doubled separator, which ``abspath()`` would collapse, and a trailing
+    one (``/home/u/repo-`` decodes to ``/home/u/repo/``). Callers
     normalize user-supplied paths before passing them here.
     """
-    return re.sub(r"[^A-Za-z0-9]", "-", str(project).rstrip("/") or "/")
+    return re.sub(r"[^A-Za-z0-9]", "-", str(project) or "/")
 
 
 def _project_matches(entry: dict, wanted: set[str]) -> bool:
