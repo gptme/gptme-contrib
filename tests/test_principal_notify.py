@@ -364,6 +364,26 @@ def test_ntfy_env_file_fills_only_missing_env_values(tmp_path, monkeypatch):
     assert seen["url"] == "http://from-file:2586"
 
 
+def test_ntfy_empty_env_token_overrides_file(tmp_path, monkeypatch):
+    env_file = tmp_path / "ntfy.env"
+    env_file.write_text("PRINCIPAL_NOTIFY_NTFY_TOKEN=expired-token\n")
+    seen = _capture_urlopen(monkeypatch)
+    res = notify_principal(
+        "s",
+        "b",
+        cfg=cfg(
+            tmp_path,
+            backends=["ntfy"],
+            env=_ntfy_env(
+                PRINCIPAL_NOTIFY_NTFY_TOKEN="",
+                PRINCIPAL_NOTIFY_NTFY_ENV_FILE=str(env_file),
+            ),
+        ),
+    )
+    assert res.operator_notified
+    assert "Authorization" not in seen["headers"]
+
+
 def test_ntfy_env_file_unreadable_is_a_failure(tmp_path, monkeypatch):
     def explode(*a, **k):
         raise AssertionError("urlopen must not be called")

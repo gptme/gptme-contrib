@@ -315,7 +315,7 @@ def _ntfy_settings(cfg: Config) -> tuple[str, str, str]:
     env_file = env.get("PRINCIPAL_NOTIFY_NTFY_ENV_FILE", "").strip()
     if env_file:
         for name, value in _load_env_file(env_file).items():
-            if not env.get(name):
+            if name not in env:
                 env[name] = value
 
     url = env.get("PRINCIPAL_NOTIFY_NTFY_URL", "").strip().rstrip("/")
