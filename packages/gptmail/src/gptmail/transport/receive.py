@@ -174,6 +174,11 @@ def validate_message(
             # We publish the original bytes; accept only addresses downstream
             # readers and reply routing will interpret the same way.
             raise ReceiveError(f"refused: '{field}' has surrounding whitespace")
+    # Ancestor reads follow one parent ID; do not publish shapes that watches
+    # can parse but the ordinary thread reader cannot consume.
+    parent = meta.get("in_reply_to")
+    if parent is not None and not isinstance(parent, str):
+        raise ReceiveError("refused: 'in_reply_to' must be a string")
     sender = meta["from"].lower()
     recipient = meta["to"].lower()
     subject = meta["subject"].strip()
@@ -233,9 +238,12 @@ def publish_message(
     if isinstance(logical_id, str) and logical_id:
         for existing in sorted(inbox.glob("*.md")):
             prior = meta_of(existing) or {}
-            if prior.get("message_id", existing.name) == logical_id and prior.get(
-                "from"
-            ) == meta.get("from"):
+            prior_sender = prior.get("from")
+            if (
+                prior.get("message_id", existing.name) == logical_id
+                and isinstance(prior_sender, str)
+                and prior_sender.lower() == meta["from"].lower()
+            ):
                 return existing
     filename = message_filename(meta)
     inbox.mkdir(parents=True, exist_ok=True)

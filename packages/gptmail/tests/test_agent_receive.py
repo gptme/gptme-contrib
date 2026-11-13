@@ -228,6 +228,33 @@ def test_receive_refuses_unroutable_whitespace_addresses(
     assert not (tmp_path / "inbox").exists()
 
 
+@pytest.mark.parametrize("value", ["[question.md]", "{id: question.md}", "42", "true"])
+def test_receive_refuses_non_text_reply_parent(tmp_path: Path, value: str) -> None:
+    raw = _message().replace("from: alice", f"in_reply_to: {value}\nfrom: alice")
+    with pytest.raises(ReceiveError, match="'in_reply_to' must be a string"):
+        publish_message(raw, tmp_path / "inbox")
+    assert not (tmp_path / "inbox").exists()
+
+
+def test_receive_redelivery_sender_case_preserves_acknowledgment(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    raw = _message(sender="Alice").replace("from: Alice", "message_id: original.md\nfrom: Alice")
+    original = publish_message(raw, inbox, expected_sender="alice")
+    agent_cli._mark_replied(original)
+    acknowledged = original.read_text()
+    duplicate = publish_message(
+        raw.replace("from: Alice", "from: alice"), inbox, expected_sender="alice"
+    )
+    assert duplicate == original
+    assert original.read_text() == acknowledged
+    assert list(inbox.glob("*.md")) == [original]
+    # A different authenticated sender may legitimately use the same logical ID.
+    different = publish_message(
+        raw.replace("from: Alice", "from: carol"), inbox, expected_sender="carol"
+    )
+    assert different != original
+
+
 # -- CLI surface -------------------------------------------------------------
 
 
@@ -478,7 +505,7 @@ def test_receive_selects_workspace_without_git_or_login_cwd(
     monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "gptmail agent receive")
     result = CliRunner().invoke(
         agent,
-        ["receive", "--workspace", str(root), "--expect-sender", "alice"],
+        ["receive", "--workspace", str(root), "--expect-sender", "alice", "--mailbox", "default"],
         input=_message(),
     )
     assert result.exit_code == 0, result.output
