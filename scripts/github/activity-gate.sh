@@ -1026,6 +1026,15 @@ check_ci_failures() {
         # commit, still red, is a fresh actionable signal, not a duplicate.
         ci_hash=$(echo "$pr_data" | jq -r '(.headRefOid // "") + ":" + ([.statusCheckRollup[] | .conclusion // .state // "pending"] | sort | join(","))' | portable_hash)
         detail="CI failing: state_hash=$ci_hash"
+        # Dedup key for the terminal-failure path. `ci_hash` also folds in every
+        # still-running check, so it changes each time a passing check finishes
+        # and one red PR re-emitted once per completing check (28 of 348 audited
+        # monitoring sessions). Only the failing conclusions and the head count
+        # here: a passing check finishing is not a new signal, a second failing
+        # check is. `ci_hash` stays the key for the in-flight/stuck clock and
+        # the detail token, where pending state is the point.
+        local fail_hash
+        fail_hash=$(echo "$pr_data" | jq -r '(.headRefOid // "") + ":" + ([.statusCheckRollup[] | ((.conclusion // .state // "") | ascii_upcase) | select(. != "" and . != "SUCCESS" and . != "SKIPPED" and . != "NEUTRAL" and . != "PENDING" and . != "EXPECTED")] | sort | join(","))' | portable_hash)
 
         if [ "$ci_state" = "inflight" ]; then
             # Checks still running is normal. Only actionable once the state has
@@ -1045,11 +1054,11 @@ check_ci_failures() {
                 continue
             fi
         else
-            if [ -f "$state_file" ] && [ "$(cat "$state_file")" = "$ci_hash" ]; then
-                # CI state unchanged since last check — don't re-trigger
+            if [ -f "$state_file" ] && [ "$(cat "$state_file")" = "$fail_hash" ]; then
+                # Failing set unchanged since last check — don't re-trigger
                 continue
             fi
-            echo "$ci_hash" > "$state_file"
+            echo "$fail_hash" > "$state_file"
         fi
 
         emit_item "ci_failure" "$repo" "$pr_number" "$pr_title" "$detail"
@@ -1210,24 +1219,55 @@ check_master_ci() {
               )
           ]
     ')
-    local fail_count
+    local fail_count state_file
     fail_count=$(echo "$failures" | jq 'length')
-    [ "$fail_count" -eq 0 ] && return 0
-
-    # State-track by hash of failure IDs to avoid re-triggering
-    local ci_hash state_file
-    ci_hash=$(echo "$failures" | jq -r '[.[].databaseId] | sort | join(",")' | portable_hash)
     state_file="$STATE_DIR/${repo//\//-}-master-ci.state"
-
-    if [ -f "$state_file" ]; then
-        local last_hash
-        last_hash=$(cat "$state_file")
-        [ "$ci_hash" = "$last_hash" ] && return 0
+    if [ "$fail_count" -eq 0 ]; then
+        # Recovered (or the window no longer holds a failure): forget the
+        # signature so a later regression of the same workflow re-emits.
+        rm -f "$state_file"
+        return 0
     fi
-    echo "$ci_hash" > "$state_file"
 
-    # Emit one item per failing run
-    echo "$failures" | jq -c '.[]' | while read -r run; do
+    # State-track by failure *signature*: the workflows currently red, not the
+    # set of run IDs. The run window is a rolling 3 calendar days in whole
+    # dates, so at 00:00 UTC the oldest run drops out and an ID-keyed hash
+    # changed for every repo with an old failure in the window. 11 of 22
+    # gptme-cloud cls-regression-check sessions started 00:03-00:29 UTC that
+    # way. A workflow that is still red on a newer commit is the same open
+    # signal; only a workflow absent from the state, or one with a success
+    # newer than the failure we last saw, is new. The state records the newest
+    # failure time per workflow/event (matching the recovery filter), so a
+    # fail -> pass -> fail sequence that
+    # completes between two gate runs still re-emits (the pass is newer than
+    # the stored failure) even though the file is never empty in between.
+    local seen_state newest_failures
+    seen_state='{}'
+    if [ -f "$state_file" ]; then
+        # A legacy state file holds an ID hash or a name array, not an object:
+        # treat as empty.
+        seen_state=$(jq -c 'if type == "object" then . else {} end' "$state_file" 2>/dev/null || echo '{}')
+        [ -n "$seen_state" ] || seen_state='{}'
+    fi
+    newest_failures=$(echo "$failures" | jq -c 'group_by([.name, .event]) | map(sort_by(.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) | last)')
+    # Record the current set before emitting. A shrinking set is stored too, so
+    # a workflow that went green and red again is new on its second failure.
+    echo "$newest_failures" | jq -c 'map({([.name, .event] | tojson): .createdAt}) | add' > "$state_file"
+
+    # Emit the newest failing run of each workflow not yet reported.
+    echo "$newest_failures" | jq -c --argjson seen "$seen_state" --argjson runs "$runs" '
+        def ts: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+        .[]
+        | . as $f
+        | select(
+            ($seen[([$f.name, $f.event] | tojson)] // null) as $at
+            | $at == null
+              or ([$runs[]
+                   | select(.conclusion == "success"
+                       and .name == $f.name
+                       and .event == $f.event
+                       and ((.createdAt | ts) > ($at | ts)))]
+                  | length > 0))' | while read -r run; do
         local run_id run_name
         run_id=$(echo "$run" | jq -r '.databaseId')
         run_name=$(echo "$run" | jq -r '.name')
