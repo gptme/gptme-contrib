@@ -133,6 +133,9 @@ class Shard:
 
     index: int
     sections: list[FileSection] = field(default_factory=list)
+    #: The budget the plan was cut to, so plan disclosures report the cap the
+    #: caller actually passed to :func:`plan_shards`, not the module default.
+    budget: int = SHARD_BUDGET_BYTES
 
     @property
     def diff(self) -> str:
@@ -442,7 +445,11 @@ def plan_shards(diff: str, budget: int = SHARD_BUDGET_BYTES) -> list[Shard]:
         ):
             best = plan
     assert best is not None
-    return [Shard(i + 1, sections) for i, sections in enumerate(best)]
+    return [Shard(i + 1, sections, budget=budget) for i, sections in enumerate(best)]
+
+
+def _plan_budget(plan: Sequence[Shard]) -> int:
+    return plan[0].budget if plan else SHARD_BUDGET_BYTES
 
 
 def needs_sharding(reviewable_diff: str) -> bool:
@@ -487,7 +494,7 @@ def describe_plan(plan: Sequence[Shard]) -> str:
     """Operator-facing one-shard-per-line plan for logs and ``--plan-only``."""
     lines = [
         f"shard plan: {len(plan)} shard(s) in {shard_waves(len(plan))} wave(s) "
-        f"of <= {SHARD_CONCURRENCY}, budget {SHARD_BUDGET_BYTES // 1000}KB/shard"
+        f"of <= {SHARD_CONCURRENCY}, budget {_plan_budget(plan) // 1000}KB/shard"
     ]
     for shard in plan:
         split = [
@@ -677,7 +684,9 @@ def fit_summaries(texts: Sequence[str], limit: int = MAX_SUMMARY_CHARS) -> str:
 
 
 def merge_shard_usage(
-    per_shard: Sequence[Mapping[str, object]], plan: Sequence[Shard]
+    per_shard: Sequence[Mapping[str, object]],
+    plan: Sequence[Shard],
+    findings: Sequence[Mapping[str, object]] | None = None,
 ) -> dict:
     """Fold per-shard usage dicts into one the single-review code paths read.
 
@@ -686,6 +695,12 @@ def merge_shard_usage(
     and the merge gate never see more agreement than every shard achieved;
     job counts and rejections sum. ``pass_failures`` keep their shard of
     origin. ``sharded`` records the plan for the marker and the summary.
+
+    ``distinct_independence_keys`` is a set size, not a quantity: every shard
+    draws from the same (model, aspect) pool, so summing would count one key
+    once per shard. Pass the shards' ``findings`` to recompute the exact union
+    of their ``distinct_keys``; without them the largest per-shard count is
+    used, a lower bound that never inflates independence.
     """
     n = len(per_shard)
     merged: dict = {}
@@ -718,6 +733,9 @@ def merge_shard_usage(
                 merged.setdefault("response_format_modes", []).append(value)
             elif str(key).startswith("until_dry"):
                 until_dry.setdefault(key, []).append(value)
+            elif key == "distinct_independence_keys":
+                if isinstance(value, int) and not isinstance(value, bool):
+                    merged[key] = max(value, merged.get(key, 0))
             elif isinstance(value, int | float) and not isinstance(value, bool):
                 prev = merged.get(key, 0)
                 if isinstance(prev, int | float) and not isinstance(prev, bool):
@@ -760,11 +778,45 @@ def merge_shard_usage(
         merged["until_dry_pool"] = sum(
             v for v in until_dry.get("until_dry_pool", []) if isinstance(v, int)
         )
+        for key in ("until_dry_jobs_requested", "until_dry_jobs_answered"):
+            if key in until_dry:
+                merged[key] = sum(_ints(until_dry[key]))
+        if caps := _ints(until_dry.get("until_dry_max", [])):
+            merged["until_dry_max"] = max(caps)
+        # Effort is set per wave index by config, so it is the same across
+        # shards; the longest list covers every wave any shard ran.
+        efforts = [
+            v
+            for v in until_dry.get("until_dry_reasoning_efforts", [])
+            if isinstance(v, list)
+        ]
+        if efforts:
+            merged["until_dry_reasoning_efforts"] = max(efforts, key=len)
+        # Keys added to the until-dry record later fall back to the generic
+        # rule (numbers sum, anything else keeps the first shard's value)
+        # instead of vanishing from the merged usage.
+        for key, values in until_dry.items():
+            if key in merged:
+                continue
+            nums = _ints(values, allow_float=True)
+            merged[key] = sum(nums) if nums and len(nums) == len(values) else values[0]
+    if findings is not None:
+        keys: set[str] = set()
+        for f in findings:
+            dk = f.get("distinct_keys")
+            if isinstance(dk, list):
+                keys.update(str(k) for k in dk)
+        merged["distinct_independence_keys"] = len(keys)
     summary = _merge_change_summaries(summaries)
     if summary is not None:
         merged["change_summary"] = summary
     merged["sharded"] = sharding_record(plan)
     return merged
+
+
+def _ints(values: Sequence[object], allow_float: bool = False) -> list:
+    kinds = (int, float) if allow_float else (int,)
+    return [v for v in values if isinstance(v, kinds) and not isinstance(v, bool)]
 
 
 def sharding_record(plan: Sequence[Shard]) -> dict:
@@ -773,7 +825,7 @@ def sharding_record(plan: Sequence[Shard]) -> dict:
         "shards": len(plan),
         "waves": shard_waves(len(plan)),
         "concurrency": SHARD_CONCURRENCY,
-        "budget_bytes": SHARD_BUDGET_BYTES,
+        "budget_bytes": _plan_budget(plan),
         "bytes": [s.nbytes for s in plan],
         "files": [len(s.paths) for s in plan],
     }

@@ -512,3 +512,71 @@ def test_shard_import_does_not_require_host_scripts(tmp_path):
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_merge_usage_does_not_sum_distinct_independence_keys():
+    # Every shard draws from the same (model, aspect) pool: 4 shards that each
+    # saw the one key "m:a" have one independent key between them, not four.
+    plan = shard.plan_shards(_readme_pr())[:2]
+    usages = [{"distinct_independence_keys": 1}, {"distinct_independence_keys": 3}]
+    assert shard.merge_shard_usage(usages, plan)["distinct_independence_keys"] == 3
+
+    findings: list[dict[str, object]] = [
+        {"distinct_keys": ["m1:bugs", "m2:bugs"]},
+        {"distinct_keys": ["m1:bugs"]},
+        {"distinct_keys": ["m1:security"]},
+        {"title": "no consensus metadata"},
+    ]
+    merged = shard.merge_shard_usage(usages, plan, findings=findings)
+    assert merged["distinct_independence_keys"] == 3
+
+
+def test_merge_usage_keeps_until_dry_jobs_cap_and_efforts():
+    plan = shard.plan_shards(_readme_pr())[:2]
+    base = {
+        "until_dry": True,
+        "until_dry_max": 3,
+        "until_dry_stopped": "dry",
+        "until_dry_pool": 2,
+    }
+    usages = [
+        base
+        | {
+            "until_dry_waves": 1,
+            "until_dry_new_groups": [2],
+            "until_dry_jobs_requested": 9,
+            "until_dry_jobs_answered": 8,
+            "until_dry_reasoning_efforts": ["high"],
+        },
+        base
+        | {
+            "until_dry_waves": 3,
+            "until_dry_new_groups": [1, 1, 0],
+            "until_dry_jobs_requested": 27,
+            "until_dry_jobs_answered": 20,
+            "until_dry_reasoning_efforts": ["high", "low", "low"],
+            "until_dry_future_counter": 5,
+        },
+    ]
+    merged = shard.merge_shard_usage(usages, plan)
+    assert merged["until_dry_jobs_requested"] == 36
+    assert merged["until_dry_jobs_answered"] == 28
+    assert merged["until_dry_max"] == 3
+    assert merged["until_dry_waves"] == 3
+    assert merged["until_dry_reasoning_efforts"] == ["high", "low", "low"]
+    # A key this merger does not know yet is kept, not silently dropped.
+    assert merged["until_dry_future_counter"] == 5
+
+
+def test_plan_disclosures_report_the_budget_actually_used():
+    plan = shard.plan_shards(_readme_pr(), budget=2000)
+    assert all(s.budget == 2000 for s in plan)
+    assert "budget 2KB/shard" in shard.describe_plan(plan)
+    assert shard.sharding_record(plan)["budget_bytes"] == 2000
+    assert (
+        shard.merge_shard_usage([{}] * len(plan), plan)["sharded"]["budget_bytes"]
+        == 2000
+    )
+    assert "≤2KB" in shard.sharding_note(shard.sharding_record(plan))
+    default = shard.plan_shards(_readme_pr())
+    assert shard.sharding_record(default)["budget_bytes"] == shard.SHARD_BUDGET_BYTES
