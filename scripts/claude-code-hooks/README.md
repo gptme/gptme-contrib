@@ -87,8 +87,10 @@ injects relevant lessons as `additionalContext` based on:
    installation health, not whether a particular prompt will match a lesson.
 
    Normal hook calls remain fail-open. An import failure prints one warning to
-   stderr per invocation and writes a zero-byte receipt with
+   stderr per invocation and marks the final receipt with
    `reason: dependency_missing`, rather than masquerading as `no_match`.
+   Independent keyword-memory matching still runs: the receipt measures zero
+   bytes when nothing is injected, or the actual emitted bytes for memory hits.
 
 ### Workspace Auto-Discovery
 

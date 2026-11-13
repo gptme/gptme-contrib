@@ -181,3 +181,40 @@ def test_installed_matching_still_injects(cli, tmp_path):
     )
     assert receipt["outcome"] == "emitted"
     assert receipt["bytes"] > 0
+
+
+def test_missing_lesson_dependency_preserves_memory_injection(cli, tmp_path):
+    # Provide the independent memory API without depending on a particular gptme
+    # installation. The lesson import still genuinely takes its fallback path.
+    memory_package = tmp_path / "gptme" / "memory"
+    memory_package.mkdir(parents=True)
+    (memory_package.parent / "__init__.py").write_text("")
+    (memory_package / "__init__.py").write_text(
+        "class MemoryStore:\n"
+        "    @classmethod\n"
+        "    def from_workspace(cls, workspace, *, env):\n"
+        "        return workspace\n"
+    )
+    (memory_package / "match.py").write_text(
+        "from types import SimpleNamespace\n"
+        "def match_memories(store, text, *, limit):\n"
+        "    if 'memory signal' not in text:\n"
+        "        return []\n"
+        "    entry = SimpleNamespace(path=store / 'memory.md',\n"
+        "        index_title='Independent memory', description='memory signal',\n"
+        "        body='Preserve the independent memory source.')\n"
+        "    return [SimpleNamespace(entry=entry, score=10, matched_by=['keyword'])]\n"
+    )
+    result = cli(missing=True, prompt="memory signal")
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert "Preserve the independent memory source" in payload[
+        "hookSpecificOutput"
+    ].get("additionalContext", "")
+    receipt = json.loads(
+        (tmp_path / "cc-session-health-lessons-receipts.jsonl").read_text()
+    )
+    assert receipt["outcome"] == "emitted"
+    assert receipt["bytes"] > 0
+    assert receipt["reason"] == "dependency_missing"
+    assert result.stderr.count("Warning:") == 1

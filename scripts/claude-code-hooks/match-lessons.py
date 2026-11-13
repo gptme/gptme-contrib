@@ -25,7 +25,8 @@ Register in `.claude/settings.json`. Prefer the workspace venv interpreter
 Install gptme-rag in that venv. Run with --self-check (no stdin required)
 for a non-zero exit if the matcher import or lesson-directory resolution fails.
 Normal hook calls remain fail-open, with dependency_missing receipts on import
-failure rather than reporting an ordinary no_match.
+failure rather than reporting an ordinary no_match. Independent keyword-memory
+matching continues, and receipts measure any context it emits.
 
 The hook auto-discovers your workspace root (the directory containing gptme.toml)
 and reads lesson dirs from [lessons] dirs in that config file.
@@ -176,7 +177,11 @@ def _emit_context(
     json.dump(result, sys.stdout)
     sys.stdout.flush()
     receipt = _write_emission_receipt(
-        session_id, event_type, len(context.encode("utf-8")), "emitted"
+        session_id,
+        event_type,
+        len(context.encode("utf-8")),
+        "emitted",
+        reason="dependency_missing" if not _GPTME_RAG_AVAILABLE else "",
     )
     # Raw text is opt-in, private, and tied to this successful final receipt.
     # Missing enrollment/intent/telemetry is unknown precision, never zero.
@@ -1470,6 +1475,8 @@ def emit_empty(
         )
         sys.stdout.flush()
     if session_id:
+        if not _GPTME_RAG_AVAILABLE:
+            reason = "dependency_missing"
         _write_emission_receipt(session_id, event_name, 0, "empty", reason)
 
 
@@ -2002,8 +2009,8 @@ def main():
     transcript_path = hook_input.get("transcript_path")
     if not _GPTME_RAG_AVAILABLE:
         _warn_dependency_missing()
-        emit_empty(event_type, session_id, "dependency_missing")
-        sys.exit(0)
+        # The lesson fallback is empty, but keyword memories use an independent
+        # matcher. Continue through that path and annotate the final receipt.
     # Preserve user intent before all early returns (including no-match).
     private_dir = os.environ.get("BOB_LESSON_PRECISION_DIR", "")
     if private_dir and event_type == "UserPromptSubmit":
