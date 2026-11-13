@@ -1,0 +1,306 @@
+"""Tests for the receive-only transport (``gptmail agent receive``).
+
+Covers the recipient trust boundary (bounded read, frontmatter validation,
+per-key sender binding, atomic no-clobber publication) and the sender side
+(one ``ssh`` invocation with the message on stdin, no scp/mkdir).
+
+No network and no git: the SSH call in the sender tests is a recorded stub, and
+the CLI runs against a temp workspace with ``_repo_root`` patched.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+from click.testing import CliRunner
+
+from gptmail import agent_cli
+from gptmail.agent_cli import agent
+from gptmail.transport.receive import (
+    ReceiveError,
+    check_original_command,
+    message_filename,
+    publish_message,
+)
+
+
+def _message(
+    sender: str = "alice",
+    recipient: str = "bob",
+    subject: str = "Hello",
+    body: str = "Hi Bob.",
+) -> str:
+    return (
+        "---\n"
+        f"from: {sender}\n"
+        f"to: {recipient}\n"
+        "timestamp: 2026-11-13T10:00:00Z\n"
+        f"subject: {subject}\n"
+        "read: false\n"
+        "mailbox: default\n"
+        "---\n\n"
+        f"{body}\n"
+    )
+
+
+# -- receiver trust boundary -------------------------------------------------
+
+
+def test_publish_writes_valid_message_atomically(tmp_path: Path) -> None:
+    inbox = tmp_path / "messages" / "inbox"
+    published = publish_message(_message(), inbox)
+
+    assert published.parent == inbox
+    assert published.name.endswith("-alice-Hello.md")
+    assert published.read_text() == _message()
+    # No staging file may survive a successful publication.
+    assert not [p for p in inbox.iterdir() if p.name.startswith(".receive-")]
+
+
+@pytest.mark.parametrize(
+    "raw, match",
+    [
+        ("no frontmatter here\n", "no valid YAML frontmatter"),
+        ("---\nfrom: alice\n---\n\nbody\n", "no 'to' field"),
+        ("---\nto: bob\n---\n\nbody\n", "no 'from' field"),
+        ("---\nfrom: alice\nto: bob\n---\n\nbody\n", "no 'subject' field"),
+        (_message(body="   "), "empty body"),
+        (_message().replace("from: alice", "from: ../etc"), "invalid sender name"),
+        (_message() + "\x00", "NUL byte"),
+    ],
+)
+def test_publish_rejects_invalid_messages(tmp_path: Path, raw: str, match: str) -> None:
+    inbox = tmp_path / "inbox"
+    with pytest.raises(ReceiveError, match=match):
+        publish_message(raw, inbox)
+    assert not inbox.exists() or not list(inbox.iterdir())
+
+
+def test_expected_sender_binding_is_per_key(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    with pytest.raises(ReceiveError, match="bound to sender 'bob'"):
+        publish_message(_message(sender="alice"), inbox, expected_sender="bob")
+    published = publish_message(_message(sender="alice"), inbox, expected_sender="Alice")
+    assert published.exists()
+
+
+def test_message_addressed_elsewhere_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ReceiveError, match="addressed to 'carol'"):
+        publish_message(_message(recipient="carol"), tmp_path, self_name="bob")
+    published = publish_message(_message(recipient="Bob"), tmp_path, self_name="bob")
+    assert published.exists()
+
+
+@pytest.mark.parametrize(
+    "original, accepted",
+    [
+        (None, True),
+        ("", True),
+        ("gptmail agent receive", True),
+        ("gptmail agent receive --mailbox work", True),
+        ("uv run gptmail agent receive", True),
+        ("ls", False),
+        ("rm -rf /", False),
+        ("gptmail agent receive; rm -rf /", False),
+        ("gptmail agent pending", False),
+    ],
+)
+def test_original_command_check(original: str | None, accepted: bool) -> None:
+    if accepted:
+        check_original_command(original)
+    else:
+        with pytest.raises(ReceiveError, match="receive-only endpoint"):
+            check_original_command(original)
+
+
+def test_publication_never_clobbers_an_existing_message(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    first = inbox / "20260101-000000-000000-alice-Hello.md"
+    first.write_text("original\n")
+    staged = tmp_path / "staged"
+    staged.write_text("second\n")
+
+    # The receiver's own naming is timestamped; this exercises the no-clobber
+    # rule directly (a same-name message must never be replaced).
+    from gptmail.transport.receive import _link_no_clobber
+
+    published = _link_no_clobber(staged, inbox, first.name)
+    assert published.name == "20260101-000000-000000-alice-Hello-2.md"
+    assert first.read_text() == "original\n"
+    assert published.read_text() == "second\n"
+
+
+def test_publication_stamps_receiver_arrival(tmp_path: Path) -> None:
+    old = 1_000_000_000
+    raw = _message()
+    inbox = tmp_path / "inbox"
+    published = publish_message(raw, inbox)
+    os.utime(published, (old, old))
+    republished = publish_message(_message(subject="Second"), inbox)
+    assert republished.stat().st_mtime > old
+
+
+def test_message_filename_is_path_safe() -> None:
+    name = message_filename({"from": "../../etc", "subject": "a/b\nc" + "d" * 100}, now=None)
+    assert "/" not in name and "\\" not in name and "\n" not in name
+    assert name.endswith(".md")
+    assert len(name) <= 100
+
+
+def test_mailbox_name_traversal_is_refused(tmp_path: Path) -> None:
+    from gptmail.transport.receive import mailbox_inbox
+
+    with pytest.raises(ReceiveError, match="invalid mailbox"):
+        mailbox_inbox(tmp_path, "../../etc")
+    assert mailbox_inbox(tmp_path, "work") == tmp_path / "mailboxes" / "work" / "inbox"
+
+
+# -- CLI surface -------------------------------------------------------------
+
+
+@pytest.fixture
+def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    (tmp_path / "messages" / "inbox").mkdir(parents=True)
+    (tmp_path / "messages" / "outbox").mkdir(parents=True)
+    monkeypatch.setenv("AGENT_NAME", "bob")
+    monkeypatch.delenv("SSH_ORIGINAL_COMMAND", raising=False)
+    monkeypatch.delenv("GPTMAIL_SENDER", raising=False)
+    monkeypatch.delenv("GPTMAIL_RECEIVE_MAILBOX", raising=False)
+    monkeypatch.setattr(agent_cli, "_repo_root", lambda: tmp_path)
+    return tmp_path
+
+
+def test_receive_publishes_stdin_message(workspace: Path) -> None:
+    result = CliRunner().invoke(agent, ["receive"], input=_message())
+    assert result.exit_code == 0, result.output
+    published = workspace / "messages" / "inbox" / result.output.strip()
+    assert published.exists()
+    assert published.read_text() == _message()
+
+
+def test_receive_refuses_foreign_ssh_command(workspace: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "ls -la")
+    result = CliRunner().invoke(agent, ["receive"], input="")
+    assert result.exit_code == 1
+    assert "refused command" in result.output
+    assert not list((workspace / "messages" / "inbox").iterdir())
+
+
+def test_receive_enforces_byte_limit(workspace: Path) -> None:
+    result = CliRunner().invoke(agent, ["receive", "--max-bytes", "20"], input=_message())
+    assert result.exit_code == 1
+    assert "exceeds the 20-byte receive limit" in result.output
+    assert not list((workspace / "messages" / "inbox").iterdir())
+
+
+def test_receive_rejects_invalid_utf8(workspace: Path) -> None:
+    result = CliRunner().invoke(agent, ["receive"], input=b"---\nfrom: \xff\n---\n")
+    assert result.exit_code == 1
+    assert "not valid UTF-8" in result.output
+
+
+def test_receive_empty_stdin_is_refused(workspace: Path) -> None:
+    result = CliRunner().invoke(agent, ["receive"], input="")
+    assert result.exit_code == 1
+    assert "no message on stdin" in result.output
+
+
+def test_receive_honours_expect_sender_and_mailbox(workspace: Path) -> None:
+    result = CliRunner().invoke(
+        agent,
+        ["receive", "--expect-sender", "carol", "--mailbox", "work"],
+        input=_message(sender="alice"),
+    )
+    assert result.exit_code == 1
+    assert "bound to sender 'carol'" in result.output
+
+    result = CliRunner().invoke(
+        agent,
+        ["receive", "--expect-sender", "alice", "--mailbox", "work"],
+        input=_message(sender="alice"),
+    )
+    assert result.exit_code == 0, result.output
+    published = workspace / "messages" / "mailboxes" / "work" / "inbox" / result.output.strip()
+    assert published.exists()
+
+
+# -- sender side: one ssh invocation, no scp/mkdir ---------------------------
+
+
+def _capture_subprocess(monkeypatch: pytest.MonkeyPatch, *, returncode: int = 0) -> list[list]:
+    calls: list[list] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append({"argv": list(argv), "stdin": kwargs.get("stdin"), "kwargs": kwargs})
+        return subprocess.CompletedProcess(argv, returncode, stdout=b"", stderr=b"nope")
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", fake_run)
+    return calls
+
+
+def test_receive_only_delivery_is_a_single_ssh_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    message = tmp_path / "msg.md"
+    message.write_text(_message())
+    calls = _capture_subprocess(monkeypatch)
+
+    deliver = agent_cli._ssh_deliver({"bob": {"ssh": "bob@bob", "delivery": "receive-only"}})
+    assert deliver(message, "bob") is True
+
+    assert len(calls) == 1
+    argv = calls[0]["argv"]
+    assert argv[0] == "ssh"
+    assert argv[-1] == "gptmail agent receive"
+    # No remote path, mkdir, scp or cleanup command is needed or sent.
+    assert not {"mkdir", "scp", "rm"} & set(argv)
+    assert calls[0]["stdin"] is not None
+
+
+def test_receive_only_delivery_reports_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    message = tmp_path / "msg.md"
+    message.write_text(_message())
+    _capture_subprocess(monkeypatch, returncode=1)
+
+    deliver = agent_cli._ssh_deliver({"bob": {"ssh": "bob@bob", "delivery": "receive-only"}})
+    assert deliver(message, "bob") is False
+    err = capsys.readouterr().err
+    assert "receive-only endpoint refused" in err
+
+
+def test_receive_only_delivery_uses_configured_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    message = tmp_path / "msg.md"
+    message.write_text(_message())
+    calls = _capture_subprocess(monkeypatch)
+
+    deliver = agent_cli._ssh_deliver(
+        {
+            "bob": {
+                "ssh": "bob@bob",
+                "delivery": "receive-only",
+                "receive_command": "uv run gptmail agent receive",
+            }
+        }
+    )
+    assert deliver(message, "bob") is True
+    assert calls[0]["argv"][-1] == "uv run gptmail agent receive"
+
+
+def test_legacy_delivery_still_requires_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    message = tmp_path / "msg.md"
+    message.write_text(_message())
+    calls = _capture_subprocess(monkeypatch)
+
+    deliver = agent_cli._ssh_deliver({"bob": {"ssh": "bob@bob"}})
+    assert deliver(message, "bob") is False
+    assert calls == []

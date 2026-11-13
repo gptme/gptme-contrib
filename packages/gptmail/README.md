@@ -225,6 +225,62 @@ gptmail agent watch --once --pull              # block until a new message arriv
 `uv run gptmail agent pending --for <you> --json` on each remote agent over SSH. Each
 remote workspace therefore needs gptmail available through `uv run`.
 
+**Receive-only recipients.** The default push runs `mkdir`, `scp` and a remote
+cleanup command, so a sender needs an ordinary login — and the recipient cannot pin
+that login to one command. `delivery: receive-only` replaces the whole push with a
+single `ssh` invocation that streams the message into a receiver on stdin:
+
+```bash
+ssh recipient 'gptmail agent receive'  < message.md   # what `send` runs, nothing else
+```
+
+On the recipient, pin each sender's key to that one command. `restrict` disables
+port forwarding, agent forwarding, PTYs and `~/.ssh/rc`, so the key can do nothing
+but deliver mail; `--expect-sender` binds the key to a specific agent so a leaked
+key cannot post as a different one:
+
+```text
+# ~/.ssh/authorized_keys on the recipient (deployment is the recipient operator's)
+command="gptmail agent receive --expect-sender alice",restrict ssh-ed25519 AAAA... alice
+```
+
+Register the peer on the sender side. Only `ssh` is required: the receiver chooses
+its own inbox, so the sender never needs to know (or write) a remote path. Add
+`receive_command` when gptmail is only on `PATH` through a wrapper:
+
+```yaml
+bob:
+  ssh: bob@bob-host
+  delivery: receive-only
+  # receive_command: uv run gptmail agent receive   # must match the forced command
+```
+
+What the receiver enforces (see `transport/receive.py`): one bounded message
+(4 MiB by default), valid frontmatter, a plain sender token, a body, an optional
+sender binding and an addressee check, then an atomic no-clobber publication with
+a filename derived from the validated fields — never from a client-supplied path.
+A client-requested command other than the receive verb is refused, so
+`ssh recipient 'ls'` fails with `receive-only endpoint: refused command 'ls'`
+instead of arriving as an empty message. `gptmail agent receive` is also safe to run
+by hand for a smoke test (`echo … | gptmail agent receive`).
+
+**Replies and migration.** Replies already travel as ordinary messages: `reply`
+sends a message back to the original sender, so with both directions receive-only
+there is nothing to pull. That is the reply-by-push migration — stop pulling from a
+receive-only peer; `pull`, `watch --pull` and `pending --fleet` skip such registry
+entries automatically (the forced command exposes no shell to read their outbox).
+Migrate one side at a time: the sender keeps working against a legacy recipient, and
+a migrated recipient still accepts legacy SCP pushes until you remove the old key.
+
+**Monitoring that shares the login.** The forced command replaces the recipient's
+usable shell for that key, so every *other* consumer of the same login needs its own
+key with its own forced command, or a published file to read. In this fleet the
+shared-login SSH consumers are `scripts/monitoring/agent-census.sh`,
+`scripts/monitoring/agent-standup-check.py` (service status and journal reads),
+`scripts/monitoring/alice-metrics-collect.sh`, and
+`scripts/monitoring/proxmox-vm-health.py`. The operator owns deployment and revoking
+the old key; do not repoint monitoring credentials at a mail key.
+
 ## How it works
 
 ### Email workspace layout
@@ -280,7 +336,7 @@ installed, gptmail logs a warning and sends normally.
 
 ```text
 <workspace>/messages/
-├── agents.yaml               # registry: name -> {ssh, workspace} or {delivery: pull-only}
+├── agents.yaml               # registry: name -> {ssh, workspace}, {ssh, delivery: receive-only}, or {delivery: pull-only}
 ├── inbox/   outbox/          # default mailbox
 ├── mailboxes/<name>/{inbox,outbox}/   # optional named mailboxes (--mailbox <name>)
 └── .tracking/                # shared reply-tracking state (channel "agent")
@@ -333,6 +389,7 @@ Run `gptmail --help` or `gptmail <command> --help` for full option details.
 | `reply MESSAGE_ID [CONTENT] [--mailbox NAME]` | Reply to the sender. Refuses if the message is already marked replied. |
 | `pending [--as ID] [--include-stale] [--mailbox NAME \| --all-mailboxes]` | Inbox messages awaiting your reply. |
 | `pending --for NAME [--fleet] [--json]` | Messages addressed to NAME in your outbox (with `--fleet`, in every registered agent's outbox). |
+| `receive [--mailbox NAME] [--expect-sender NAME]` | Receive one message on stdin and publish it atomically to the inbox. The recipient side of the receive-only transport; safe to pin as a forced command (`command="gptmail agent receive",restrict`). Refuses a foreign client command, oversized input or invalid frontmatter. |
 | `pull [--as ID] [--from NAME] [--json] [--dry-run] [--notify-cmd CMD]` | Fetch messages addressed to you from every SSH-reachable agent's outbox, or only `NAME` with `--from`. Thread watches pull only the matching sender, so unrelated offline peers cannot delay delivery. `--notify-cmd` runs CMD with `NEW_COUNT` and `SUMMARY` set. |
 | `watch [--to NAME] [--from A,B] [--interval SECS] [--once] [--pull]` | Poll agents' outboxes and print one line per new message. Works with systemd/launchd or a terminal. |
 | `status [--mailbox NAME \| --all-mailboxes]` | Identity, registry and inbox/outbox/pending counts. |
