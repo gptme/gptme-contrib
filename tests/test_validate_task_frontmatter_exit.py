@@ -111,6 +111,25 @@ def test_accepts_every_gptodo_state(tmp_path: Path, state: str) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.parametrize(
+    "waiting_for",
+    [
+        '{type: pr_ci, ref: "gptme/gptme#1217"}',
+        '[{type: pr_merged, ref: "gptme/gptme#1217"}, "maintainer reply"]',
+    ],
+)
+def test_accepts_structured_waiting_conditions(
+    tmp_path: Path, waiting_for: str
+) -> None:
+    f = _make_task(
+        tmp_path,
+        "---\nstate: waiting\ncreated: 2026-03-02\n"
+        f"waiting_for: {waiting_for}\nwaiting_since: 2026-03-02\n---\n# Task\n",
+    )
+    result = _run([str(f)])
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_no_files_exits_clean() -> None:
     """precommit can pass empty file lists; should be a no-op."""
     result = _run([])

@@ -169,6 +169,33 @@ def test_lint_explicit_malformed_file_fails(tmp_path: Path, monkeypatch, content
     assert "schema error" in result.output
 
 
+@pytest.mark.parametrize(
+    "waiting_for",
+    [
+        '{type: pr_ci, ref: "gptme/gptme#1217"}',
+        '\n  - type: pr_ci\n    ref: "gptme/gptme#1217"\n'
+        '  - type: comment\n    ref: "gptme/gptme#1217"\n    pattern: LGTM',
+        '\n  - "maintainer reply"\n  - type: pr_merged\n    ref: "gptme/gptme#1217"',
+        '["maintainer reply", "release published"]',
+    ],
+)
+def test_lint_accepts_supported_waiting_conditions(
+    tmp_path: Path, monkeypatch, waiting_for
+) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    _write(
+        tasks_dir,
+        "waiting",
+        "---\nstate: waiting\ncreated: 2026-06-01\n"
+        f"waiting_for: {waiting_for}\nwaiting_since: 2026-06-01\n---\n# Waiting\n",
+    )
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["lint", "--strict", "tasks/waiting.md"])
+    assert result.exit_code == 0, result.output
+    assert "No frontmatter schema violations" in result.output
+
+
 def test_lint_explicit_file_does_not_scan_unstaged_tasks(tmp_path: Path, monkeypatch) -> None:
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()

@@ -283,9 +283,11 @@ def validate_optional_fields(metadata: dict[str, Any], *, type_name: str = "task
 
     if "waiting_for" in metadata:
         value = metadata["waiting_for"]
-        if not isinstance(value, str):
-            errors.append("waiting_for must be a string")
-        elif not value.strip():
+        # Match waiting.parse_waiting_for: prose, one condition, or a list
+        # of prose/conditions are all supported by check-waiting and watch.
+        if not isinstance(value, (str, dict, list)):
+            errors.append("waiting_for must be a string, mapping, or list")
+        elif not value or (isinstance(value, str) and not value.strip()):
             errors.append("waiting_for cannot be empty")
     if "waiting_since" in metadata and "waiting_for" not in metadata:
         errors.append("waiting_since requires waiting_for field to be set")

@@ -190,6 +190,8 @@ def test_valid_minimal_task(tmp_path):
         ("task_type", "bogus", "Invalid task_type"),
         ("task_type", "Action", "did you mean `task_type: action`"),
         ("waiting_for", "''", "waiting_for cannot be empty"),
+        ("waiting_for", "[]", "waiting_for cannot be empty"),
+        ("waiting_for", "{}", "waiting_for cannot be empty"),
         ("waiting_for", "42", "waiting_for must be a string"),
         ("waiting_since", "not-a-date", "Invalid timestamp format"),
         ("modified", "42", "Invalid timestamp type"),
