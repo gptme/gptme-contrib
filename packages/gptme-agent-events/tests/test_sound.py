@@ -109,9 +109,35 @@ def test_cli_dry_run_reads_stdin(tmp_path):
         main, ["sound", "--dry-run", "--only-agent", "bob", "--only-agent", "alice"], input=lines
     )
     assert result.exit_code == 0, result.output
-    assert "bob turn_end -> bell" in result.output
-    assert "alice commit -> chime_clean_ring" in result.output
+    out = result.output.splitlines()
+    assert len(out) == 2
+    assert out[0].split()[1:3] == ["bob", "claude-code"] and out[0].endswith("♪ bell")
+    assert "alice" in out[1] and "commit" in out[1] and out[1].endswith("♪ chime_clean_ring")
     assert "gordon" not in result.output
+
+
+def test_cli_quiet_prints_nothing():
+    result = CliRunner().invoke(main, ["sound", "--dry-run", "-q"], input=ev("turn_end").to_json())
+    assert result.exit_code == 0 and result.output == ""
+
+
+def test_describe_shows_tool_repo_and_status():
+    from gptme_agent_events.sound import describe
+
+    c = AgentEvent(
+        kind="commit",
+        ts="2026-11-12T10:00:00.000+00:00",
+        harness="claude-code",
+        session="e68fc377-c52e",
+        agent="bob",
+        tool="Bash",
+        detail={"repo": "gptme/gptme", "sha": "1a2b3c4d", "source": "git", "cwd": "/private"},
+    )
+    line = describe(c, "chime_clean_ring", "played")
+    assert "bob" in line and "e68fc377" in line and "commit" in line
+    assert "Bash gptme/gptme@1a2b3c4d (git)" in line and line.endswith("♪ chime_clean_ring")
+    assert "/private" not in line
+    assert describe(ev("tool", "shell"), None, "throttled").endswith("· throttled")
 
 
 def test_cli_list():

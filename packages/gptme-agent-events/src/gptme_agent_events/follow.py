@@ -9,7 +9,8 @@ the beginning and announce themselves with a ``session_start`` event.
 Hosts accumulate tens of thousands of old trajectories, so discovery is
 tiered. A quick scan (every ``rescan_interval``) lists only the roots and
 "warm" directories: those modified within ``warm_horizon`` or newly appeared.
-A full sweep (every ``full_scan_interval``) walks everything, re-checks idle
+A quick scan re-lists a directory only if its
+mtime changed (new entries). A full sweep (every ``full_scan_interval``) walks everything, re-checks idle
 files so a resumed session is picked up, and recomputes which directories are
 warm. Only files active within ``active_window`` are kept open for polling;
 idle ones are kept as a compact (offset, inode) record.
@@ -41,6 +42,7 @@ from pathlib import Path
 
 from .event import AgentEvent
 from .extractors import EXTRACTORS, Extractor
+from .gitwatch import GitWatcher
 
 HARNESSES = tuple(EXTRACTORS)
 
@@ -84,6 +86,21 @@ def session_name(harness: str, path: Path) -> str:
     return path.parent.name if harness == "gptme" else path.stem
 
 
+def gptme_workspace(logdir: Path) -> str | None:
+    """A gptme conversation's workspace: the ``workspace`` link, else config.toml."""
+    link = logdir / "workspace"
+    if link.is_symlink() or link.is_dir():
+        return os.path.realpath(link)
+    try:
+        for line in (logdir / "config.toml").read_text(encoding="utf-8").splitlines():
+            key, sep, value = line.partition("=")
+            if sep and key.strip() == "workspace":
+                return os.path.expanduser(value.strip().strip("\"'"))
+    except OSError:
+        pass
+    return None
+
+
 @dataclass
 class _File:
     harness: str
@@ -111,13 +128,19 @@ class Follower:
         *,
         active_window: float = 600.0,
         rescan_interval: float = 5.0,
-        full_scan_interval: float = 60.0,
+        full_scan_interval: float = 300.0,
         warm_horizon: float = 86400.0,
         discovery_slack: float = 120.0,
         from_start: bool = False,
+        git: GitWatcher | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.sources = sources
+        self.git = git
+        self._session_harness: dict[str, str] = {}
+        # Tool results can arrive a poll after the corresponding reflog entry.
+        self._git_shell: list[tuple[float, Path, AgentEvent]] = []
+        self._git_pending: list[tuple[float, Path, AgentEvent]] = []
         self.agent = agent
         self.active_window = active_window
         self.rescan_interval = rescan_interval
@@ -130,19 +153,37 @@ class Follower:
         self._cold: dict[Path, tuple[int, int]] = {}  # idle: (offset, inode)
         self._children: dict[Path, set[str]] = {}  # directory listings
         self._warm: set[Path] = set()  # directories quick scans descend into
+        self._listed_mtime: dict[Path, float] = {}  # directory mtime at last listing
         self._last_scan: float | None = None
         self._last_full: float | None = None
 
     # -- discovery ---------------------------------------------------------
 
     def _walk(self, directory: Path, parts: tuple[str, ...], full: bool, now: float):
-        """Yield files under ``directory`` matching ``parts``, pruning cold dirs on quick scans."""
+        """Yield files under ``directory`` matching ``parts``, pruning cold dirs on quick scans.
+
+        Quick scans don't re-list a directory whose mtime is unchanged since its
+        last listing: no entries were added, so there is nothing new to find
+        there (appends to known files are seen by polling or the full sweep).
+        """
+        try:
+            mtime = directory.stat().st_mtime  # before listing: a racing add re-lists next time
+        except OSError:
+            return
+        if not full and self.rescan_interval > 0 and self._listed_mtime.get(directory) == mtime:
+            if len(parts) > 1:
+                # Iterate the (small) warm set, not the (possibly huge) listing.
+                for sub in [w for w in self._warm if w.parent == directory]:
+                    if fnmatch(sub.name, parts[0]):
+                        yield from self._walk(sub, parts[1:], full, now)
+            return
         try:
             entries = list(os.scandir(directory))
         except OSError:
             return
         known = self._children.get(directory)
         self._children[directory] = {e.name for e in entries}
+        self._listed_mtime[directory] = mtime
         if len(parts) == 1:
             for e in entries:
                 if fnmatch(e.name, parts[0]) and e.is_file():
@@ -233,6 +274,8 @@ class Follower:
                 agent=self.agent,
                 subagent="subagents" in f.path.parts,
             )
+            if f.harness == "gptme":
+                f.extractor.cwd = gptme_workspace(f.path.parent)
         return f.extractor
 
     def _read(self, f: _File) -> list[AgentEvent]:
@@ -291,17 +334,100 @@ class Follower:
     def poll(self) -> list[AgentEvent]:
         """One pass: scan if due, read new lines from followed files, retire idle ones."""
         now = self.clock()
+        scanned = True
         if self._last_full is None or now - self._last_full >= self.full_scan_interval:
             self._scan(full=True)
         elif self._last_scan is None or now - self._last_scan >= self.rescan_interval:
             self._scan(full=False)
+        else:
+            scanned = False
         events: list[AgentEvent] = []
         for f in list(self._files.values()):
             events += self._read(f)
             if f.path in self._files and now - f.mtime > self.active_window:
                 del self._files[f.path]
                 self._cold[f.path] = (f.offset - len(f.buf), f.inode)
+        for e in events:
+            self._session_harness[e.session] = e.harness
+        if self.git is not None:
+            events = self._with_git(events, rediscover=scanned)
         return events
+
+    def _with_git(self, events: list[AgentEvent], rediscover: bool) -> list[AgentEvent]:
+        """Use git's reflogs as the source of truth for commits and pushes."""
+        assert self.git is not None
+        for e in events:
+            for key in ("dir", "cwd"):
+                if isinstance(e.detail.get(key), str):
+                    self.git.watch(e.detail[key])
+        now = self.clock()
+        self._git_shell = [item for item in self._git_shell if now - item[0] <= 120]
+        kept = []
+        for e in events:
+            directory = str(e.detail.get("dir") or e.detail.get("cwd") or "")
+            common = self.git.common_dir(directory) if e.kind in ("commit", "push") else None
+            if common is not None and self.git.watches(directory):
+                self._git_shell.append((now, common, e))
+            else:
+                kept.append(e)
+        for e in self.git.poll(rediscover=rediscover):
+            self._git_pending.append((now, Path(e.detail["dir"]), e))
+        pending = []
+        # Count from the original batch, not the shrinking list as matches are
+        # consumed: proximity alone must be unique in both directions.
+        batch = list(self._git_pending)
+        for seen, common, e in batch:
+            matches = []
+            for item in self._git_shell:
+                when, repo, shell = item
+                if repo != common or shell.kind != e.kind:
+                    continue
+                sha = str(shell.detail.get("sha") or "")
+                # A commit hash is stronger evidence than proximity. Push output
+                # has no hash: only use a unique result in a short polling window.
+                if e.kind == "commit" and sha:
+                    git_sha = str(e.detail["sha"])
+                    if not (git_sha.startswith(sha) or sha.startswith(git_sha)):
+                        continue
+                else:
+                    if e.session and shell.session != e.session:
+                        continue
+                    if abs(when - seen) > 5:
+                        continue
+                    possible = [
+                        other
+                        for stamp, repo, other in batch
+                        if repo == common
+                        and other.kind == shell.kind
+                        and abs(when - stamp) <= 5
+                        and (not other.session or other.session == shell.session)
+                    ]
+                    if len(possible) != 1:
+                        continue
+                matches.append(item)
+            if len(matches) == 1:
+                item = matches[0]
+                shell = item[2]
+                if not e.session:
+                    e.session, e.harness = shell.session, shell.harness
+                    e.tool, e.subagent = shell.tool, shell.subagent
+                self._git_shell.remove(item)
+            elif now - seen < 5:
+                pending.append((seen, common, e))
+                continue
+            e.harness = self._session_harness.get(e.session, e.harness)
+            kept.append(e)
+        self._git_pending = pending
+        # If no reflog exists (e.g. core.logAllRefUpdates=false), retain the
+        # shell evidence rather than silently losing the event altogether.
+        waiting = []
+        for seen, common, e in self._git_shell:
+            if now - seen >= 5:
+                kept.append(e)
+            else:
+                waiting.append((seen, common, e))
+        self._git_shell = waiting
+        return kept
 
     def run(self, interval: float = 0.5) -> Iterator[AgentEvent]:
         while True:

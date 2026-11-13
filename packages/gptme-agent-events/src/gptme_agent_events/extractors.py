@@ -28,11 +28,19 @@ _PR_URL_RE = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/\d+")
 _GITHUB_REMOTE_RE = re.compile(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$")
 
 
-@lru_cache(maxsize=256)
 def github_slug(directory: str) -> str | None:
-    """``owner/name`` of a local checkout's ``origin`` on GitHub, if any."""
-    if not os.path.isabs(directory) or not os.path.isdir(directory):
+    """``owner/name`` of a local checkout's origin; cache successes only."""
+    try:
+        return _github_slug(directory)
+    except LookupError:
         return None
+
+
+@lru_cache(maxsize=2048)
+def _github_slug(directory: str) -> str:
+    # lru_cache does not cache exceptions, allowing failed lookups to recover.
+    if not os.path.isabs(directory) or not os.path.isdir(directory):
+        raise LookupError(directory)
     try:
         url = subprocess.run(
             ["git", "-C", directory, "remote", "get-url", "origin"],
@@ -41,10 +49,16 @@ def github_slug(directory: str) -> str | None:
             text=True,
             timeout=5,
         ).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        return None
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise LookupError(directory) from exc
     m = _GITHUB_REMOTE_RE.search(url)
-    return m.group(1) if m else None
+    if not m:
+        raise LookupError(directory)
+    return m.group(1)
+
+
+# Preserve the cache invalidation hook used by callers and tests.
+github_slug.cache_clear = _github_slug.cache_clear  # type: ignore[attr-defined]
 
 
 def landing_detail(kind: str, command: str | None, cwd: str | None, output: str) -> dict:
@@ -56,6 +70,8 @@ def landing_detail(kind: str, command: str | None, cwd: str | None, output: str)
             detail = {"repo": m.group(1), "url": m.group(0)}
         return detail
     directory = command_repo_dir(command or "", cwd)
+    if directory:
+        detail["dir"] = directory  # private: where the commit/push ran
     slug = github_slug(directory) if directory else None
     if slug:
         detail["repo"] = slug
@@ -97,6 +113,13 @@ class Extractor:
 
     def _ev(self, kind: str, ts: Any, **kw: Any) -> AgentEvent:
         kw.setdefault("subagent", self.subagent)
+        if self.cwd:
+            # Where the agent is working: private cwd, plus the repo it belongs to.
+            context: dict[str, str] = {"cwd": self.cwd}
+            slug = github_slug(self.cwd)
+            if slug:
+                context["repo"] = slug
+            kw["detail"] = {**context, **(kw.get("detail") or {})}
         return AgentEvent(
             kind=kind,
             ts=normalize_ts(ts),
@@ -188,7 +211,7 @@ class ClaudeCodeExtractor(Extractor):
                     **sub,
                 )
                 if ev.tool_class != "write":
-                    ev.detail = {}
+                    ev.detail.pop("path", None)  # paths only for writes
                 out.append(ev)
             if msg.get("stop_reason") == "end_turn":
                 mid = msg.get("id")
@@ -252,7 +275,7 @@ class GptmeExtractor(Extractor):
         for name, call_id, command, path in calls:
             ev, kinds = self._tool(ts, name, command, call_id)
             if ev.tool_class == "write" and path:
-                ev.detail = {"path": path}
+                ev.detail["path"] = path
             out.append(ev)
             if call_id is None:
                 # Markdown-format results carry no call id to pair with, so
@@ -337,7 +360,7 @@ class CodexExtractor(Extractor):
             if name == "apply_patch":
                 m = _CODEX_PATCH_PATH_RE.search(text)
                 if m:
-                    ev.detail = {"path": m.group(1).strip()}
+                    ev.detail["path"] = m.group(1).strip()
             return [ev]
         if ptype in ("function_call_output", "custom_tool_call_output") and call_id:
             out = payload.get("output")

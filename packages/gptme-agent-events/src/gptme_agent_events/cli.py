@@ -19,7 +19,8 @@ import click
 
 from .event import AgentEvent
 from .follow import HARNESSES, SOURCE_FACTORIES, Follower, Source
-from .sound import DEFAULT_SOUNDS, SoundPlayer, find_sounds_dir
+from .gitwatch import GitWatcher
+from .sound import DEFAULT_SOUNDS, SoundPlayer, describe, find_sounds_dir
 
 
 def _default_agent() -> str:
@@ -47,6 +48,18 @@ def main() -> None:
     metavar="HARNESS=DIR",
     help="Extra or replacement trajectory root, e.g. gptme=~/bob/logs. Repeatable.",
 )
+@click.option(
+    "--repo",
+    "repos",
+    multiple=True,
+    metavar="DIR",
+    help="Watch this repo's commits/pushes from the start (others are added as agents touch them).",
+)
+@click.option(
+    "--no-git",
+    is_flag=True,
+    help="Don't watch git reflogs; report commits/pushes from shell output only.",
+)
 @click.option("--from-start", is_flag=True, help="Replay recently active files first.")
 @click.option("--once", is_flag=True, help="Do one pass and exit (with --from-start: replay).")
 @click.option("--active-window", default=600.0, show_default=True, help="Seconds of idleness.")
@@ -55,6 +68,8 @@ def tail(
     agent: str,
     harnesses: tuple[str, ...],
     roots: tuple[str, ...],
+    repos: tuple[str, ...],
+    no_git: bool,
     from_start: bool,
     once: bool,
     active_window: float,
@@ -74,7 +89,11 @@ def tail(
         dirs: list[Path | None] = list(custom.get(harness, [])) or [None]
         sources += [factory(d) for d in dirs]
 
-    follower = Follower(sources, agent, active_window=active_window, from_start=from_start)
+    git = None if no_git else GitWatcher(agent)
+    for repo in repos:
+        if git is not None and git.watch(os.path.abspath(os.path.expanduser(repo))) is None:
+            raise click.BadParameter(f"not inside a git work tree: {repo}")
+    follower = Follower(sources, agent, active_window=active_window, from_start=from_start, git=git)
     try:
         if once:
             for ev in follower.poll():
@@ -116,7 +135,8 @@ def _pairs(values: tuple[str, ...], what: str) -> dict[str, str]:
 @click.option("--only-agent", multiple=True, help="Only play events from these agents.")
 @click.option("--min-gap", default=0.15, show_default=True, help="Min seconds between tool sounds.")
 @click.option("--sounds-dir", type=click.Path(file_okay=False), help="gptme media dir.")
-@click.option("--dry-run", is_flag=True, help="Print what would play instead of playing.")
+@click.option("--dry-run", is_flag=True, help="Don't play anything; just print the lines.")
+@click.option("--quiet", "-q", is_flag=True, help="Don't print a line per event.")
 @click.option("--list", "list_sounds", is_flag=True, help="Show the event-to-sound mapping.")
 def sound(
     volume: float,
@@ -126,6 +146,7 @@ def sound(
     min_gap: float,
     sounds_dir: str | None,
     dry_run: bool,
+    quiet: bool,
     list_sounds: bool,
 ) -> None:
     """Play gptme sound effects for events read as JSON lines from stdin."""
@@ -162,7 +183,10 @@ def sound(
             event = AgentEvent.from_dict(data)
             if only_agent and event.agent not in only_agent:
                 continue
-            player.handle(event)
+            sound_name = player.handle(event)
+            if not quiet:
+                click.echo(describe(event, sound_name, player.last_status))
+                sys.stdout.flush()
     except KeyboardInterrupt:
         pass
 

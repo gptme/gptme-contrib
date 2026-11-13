@@ -74,22 +74,60 @@ Default roots: `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`),
 | `tool` | The harness's own tool name (`Bash`, `patch`, `exec_command`, …) |
 | `tool_class` | Harness-agnostic class: `read`, `search`, `write`, `shell`, `test`, `web`, `agent`, `other` |
 | `subagent` | `true` for work done by a subagent of the session |
-| `detail` | `path` for file writes; `repo` (GitHub `owner/name`), `sha` and `url` for commits, pushes and PRs |
+| `detail` | `cwd` (private) and `repo` (GitHub `owner/name`) where known; `path` (private) for file writes; `sha`, `url`, `ref`, `dir` (private) and `source` (`git` or shell) for commits, pushes and PRs |
 
-Commits, pushes and PRs are reported when the tool **result** shows the command
-succeeded; a failed call becomes `error` instead. (gptme's markdown tool format
-has no call ids, so there they are reported with the call.)
+### Commits and pushes come from git
+
+Shell output is a weak signal for whether a commit landed: wrapper scripts,
+hooks and `| tail` hide the `[branch sha]` line, unattended scripts commit
+without any tool call, and a commit can be undone a second later. So `tail`
+also watches git's reflogs for every repository an agent touches (any event's
+cwd or commit directory, plus `--repo DIR`):
+
+- `logs/HEAD` and `worktrees/*/logs/HEAD` entries starting with `commit` become
+  `commit` events;
+- `update by push` entries under `logs/refs/remotes/` become `push` events.
+
+Commits are attributed to sessions through their `Git-Session-Id` trailer, and a
+push through the trailer of the commit it pushed. When the trailer names a
+session the follower has seen, the event takes that session's harness;
+otherwise `harness` is `git` (for example, a script commit). For watched
+repositories, shell results annotate matching reflog events rather than producing
+a second event. A missing trailer can inherit the shell result's session,
+harness and tool: commits match by SHA when available, otherwise a unique result
+of the same kind in the same repository within five seconds is required. A
+trailer always wins over shell attribution. Events may wait up to five seconds
+for a tool result from the next poll; unmatched shell evidence is emitted as a
+fallback (including repositories with reflogs disabled). Ambiguous concurrent
+results are not used to guess a session. Pass `--no-git` to rely on shell output
+only.
+
+Without git watching, or for repos that can't be resolved, commits, pushes and
+PRs are reported when the tool **result** shows the command succeeded; a failed
+call becomes `error` instead. PRs always come from the tool result (`gh pr
+create` output). gptme's markdown tool format has no call ids, so there they
+are reported with the call.
 
 ### Privacy
 
 Events never contain prompts, replies, shell commands or tool output. Commands
 are inspected in memory to classify them and then dropped. The stream is meant
 to stay private (stdout, ssh). Any sink that publishes beyond the agent's own
-host must drop `detail.path` and only forward `repo`/`sha`/`url` for public
-repos. The repo slug is resolved on the agent's host from the checkout's
+host must drop `detail.cwd`, `detail.dir` and `detail.path`, and only forward
+`repo`/`sha`/`url`/`ref` for public repos. The repo slug is resolved on the agent's host from the checkout's
 `origin` remote.
 
 ## Sounds
+
+`sound` prints one line per event (local time, agent, harness, session,
+event kind, tool, repo@sha or URL, then `♪ sound` or why it was skipped:
+`throttled`, `busy`, `silent`), so the terminal doubles as a live log; `-q`
+turns that off.
+
+```
+11:48:48 bob      claude-code 9e91d4cc tool:shell     Bash                                     ♪ seashell_click
+11:48:49 bob      claude-code 9e91d4cc commit         Bash ErikBjare/bob@d6e437d98e80 (git)     ♪ chime_clean_ring
+```
 
 `gptme-agent-events sound --list` shows the mapping. Defaults use the sounds
 gptme ships with:

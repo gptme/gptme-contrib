@@ -38,6 +38,7 @@ def make(tmp_path: Path, clock: Clock, **kw) -> Follower:
         [claude_code_source(tmp_path / "projects")],
         agent="bob",
         rescan_interval=0,
+        full_scan_interval=60,
         clock=clock,
         **kw,
     )
