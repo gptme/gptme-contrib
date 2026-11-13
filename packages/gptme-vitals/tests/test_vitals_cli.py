@@ -263,6 +263,39 @@ def test_headline_page_that_failed_before_ever_building_fails_core(
     assert code == 1
     assert any(line.startswith("FAIL core:") for line in lines)
     assert not (tmp_path / "public/core.json").exists()
+    assert "no data" in (tmp_path / "public/services/index.html").read_text()
+    assert "sessions" in (tmp_path / "public/sessions/index.html").read_text()
+    assert not (tmp_path / "public/cost").exists()
+
+
+@pytest.mark.parametrize("failure", ["core-write", "portal-write"])
+def test_shared_output_failure_does_not_skip_envelope_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from gptme_vitals import cli
+
+    if failure == "core-write":
+        # Atomic replacement onto a directory fails.
+        (tmp_path / "public/core.json").mkdir(parents=True)
+    else:
+        real_write = cli.write_text
+
+        def fail_portal(path: Path, content: str) -> None:
+            if path == tmp_path / "public/index.html":
+                raise PermissionError("portal write denied")
+            real_write(path, content)
+
+        monkeypatch.setattr(cli, "write_text", fail_portal)
+    code, lines = _run_with(tmp_path, _portal_registry())
+    assert code == 1
+    prefix = "FAIL core:" if failure == "core-write" else "FAIL portal:"
+    assert any(line.startswith(prefix) for line in lines)
+    for slug in ("services", "sessions"):
+        assert f"ok   page {slug} (envelope)" in lines
+        page = tmp_path / f"public/{slug}/index.html"
+        assert "badge-green" in page.read_text()
+        assert (page.parent / "summary.json").is_file()
+    assert not (tmp_path / "public/cost").exists()
 
 
 def test_unknown_page_is_a_usage_error_before_anything_is_written(

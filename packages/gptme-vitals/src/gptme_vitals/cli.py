@@ -256,6 +256,9 @@ def _publish_and_derive(
     # reaches the rollup by the same path (and a failed page keeps its previous
     # file rather than being treated as absent).
     envelopes = load_envelopes(registry, private_root)
+    # Per-route HTML must not depend on shared core/portal publication: a failed
+    # headline collector or shared write must not leave healthy routes unserved.
+    failed += write_envelope_pages(registry, envelopes, public_root, out=out)
     try:
         core, headline = derive_core(
             registry, envelopes, agent=agent, base_url=base_url
@@ -281,7 +284,6 @@ def _publish_and_derive(
     except (OSError, PublishError) as exc:
         out(f"FAIL portal: {exc}")
         return 1
-    failed += write_envelope_pages(registry, envelopes, public_root, out=out)
     return 1 if failed else 0
 
 
