@@ -100,6 +100,12 @@ def _nbytes(text: str) -> int:
     return len(text.encode("utf-8", errors="replace"))
 
 
+def _diff_lines(text: str) -> list[str]:
+    """Keep LF-delimited Git lines intact, including source Unicode separators."""
+    lines = text.split("\n")
+    return [line + "\n" for line in lines[:-1]] + ([lines[-1]] if lines[-1] else [])
+
+
 @dataclass
 class FileSection:
     """One file's slice of a unified diff (possibly one piece of a split file)."""
@@ -182,7 +188,7 @@ def split_file_sections(diff: str) -> list[FileSection]:
     """
     sections: list[list[str]] = []
     current: list[str] = []
-    for line in (diff or "").splitlines(keepends=True):
+    for line in _diff_lines(diff or ""):
         if line.startswith("diff --git") and current:
             sections.append(current)
             current = []
@@ -277,7 +283,7 @@ def split_section_by_hunks(section: FileSection, budget: int) -> list[FileSectio
     """
     if section.nbytes <= budget:
         return [section]
-    lines = section.text.splitlines(keepends=True)
+    lines = _diff_lines(section.text)
     first_hunk = next((i for i, ln in enumerate(lines) if ln.startswith("@@")), None)
     if first_hunk is None:
         return [section]

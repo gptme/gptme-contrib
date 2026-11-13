@@ -53,6 +53,41 @@ def test_file_sections_round_trip_and_paths():
     assert (sections[1].added, sections[1].removed) == (0, 1)
 
 
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\x85", "\v", "\f", "\r"])
+def test_split_hunks_preserve_lf_lines_and_anchors(separator):
+    """Only LF delimits Git diff lines; source text may contain other separators."""
+    additions = [f"+line {i}{separator}still the same line\n" for i in range(400)]
+    diff = (
+        "diff --git a/new.txt b/new.txt\nnew file mode 100644\n"
+        "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,400 @@\n" + "".join(additions)
+    )
+    sections = shard.split_file_sections(diff)
+    assert len(sections) == 1
+    assert sections[0].text == diff
+    plan = shard.plan_shards(diff, budget=2000)
+    assert len(plan) > 1
+    rebuilt: list[str] = []
+    next_line = 1
+    for part in plan:
+        assert part.nbytes <= 2000
+        for section in part.sections:
+            lines = section.text.split("\n")
+            header_index = next(
+                i for i, line in enumerate(lines) if line.startswith("@@")
+            )
+            match = shard._HUNK_HEADER_RE.fullmatch(lines[header_index])
+            assert match
+            assert (int(match[1]), int(match[2] or 1)) == (0, 0)
+            assert int(match[3]) == next_line
+            body = lines[header_index + 1 : -1]
+            assert all(line.startswith("+") for line in body)
+            assert int(match[4] or 1) == len(body)
+            next_line += len(body)
+            rebuilt.extend(line + "\n" for line in body)
+    assert next_line == 401
+    assert rebuilt == additions
+
+
 def test_small_diff_does_not_need_sharding():
     small = _readme_pr(n_packages=2, n_lines=10)
     assert not shard.needs_sharding(small)
