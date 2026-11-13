@@ -81,6 +81,11 @@ def load_push_url(key: str, env_file: Path = PUSH_ENV) -> str | None:
                 continue
             url = raw.strip().strip('"').strip("'")
             return url or None
+    except UnicodeError as exc:
+        print(
+            f"WARN: Kuma push config unreadable: {type(exc).__name__}", file=sys.stderr
+        )
+        return None
     except OSError:
         return None
     return None
@@ -235,6 +240,11 @@ def configured_keys(env_file: Path = PUSH_ENV) -> list[str]:
     """Keys present in the env file (callers add their own environment keys)."""
     try:
         lines = env_file.read_text(encoding="utf-8").splitlines()
+    except UnicodeError as exc:
+        print(
+            f"WARN: Kuma push config unreadable: {type(exc).__name__}", file=sys.stderr
+        )
+        return []
     except OSError:
         return []
     keys = []

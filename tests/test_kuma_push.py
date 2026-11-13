@@ -171,6 +171,28 @@ def test_unconfigured_key_is_silent(tmp_path, monkeypatch, capsys):
     assert capsys.readouterr().err == ""
 
 
+@pytest.mark.parametrize("operation", ["push", "configured_keys"])
+def test_invalid_utf8_config_is_a_logged_failure(
+    tmp_path, monkeypatch, capsys, operation
+):
+    env_file = tmp_path / "push.env"
+    env_file.write_bytes(b"KUMA_PUSH_URL_X=http://kuma/private-capability\xff\n")
+    monkeypatch.delenv("KUMA_PUSH_URL_X", raising=False)
+
+    def no_network(*args, **kwargs):
+        pytest.fail("invalid configuration must not attempt a heartbeat")
+
+    monkeypatch.setattr(kuma_push.subprocess, "run", no_network)
+    if operation == "push":
+        assert not kuma_push.push("KUMA_PUSH_URL_X", env_file=env_file)
+    else:
+        assert kuma_push.configured_keys(env_file) == []
+    err = capsys.readouterr().err
+    assert "UnicodeDecodeError" in err
+    assert "private-capability" not in err
+    assert str(env_file) not in err
+
+
 def test_configured_keys(tmp_path):
     env_file = tmp_path / "push.env"
     env_file.write_text("# comment\nKUMA_PUSH_URL_A=1\n\nKUMA_PUSH_URL_B=2\n")
