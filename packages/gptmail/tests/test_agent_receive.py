@@ -428,3 +428,70 @@ def test_receive_selects_workspace_without_git_or_login_cwd(
     assert result.exit_code == 0, result.output
     assert (root / "messages" / "inbox" / result.output.strip()).exists()
     assert not (home / "messages").exists()
+
+
+def test_general_watch_observes_new_receive_only_push(workspace: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        agent_cli,
+        "_load_agents",
+        lambda: {"alice": {"ssh": "alice@alice", "delivery": "receive-only"}},
+    )
+
+    def arrive(_seconds):
+        publish_message(_message(), workspace / "messages" / "inbox")
+
+    monkeypatch.setattr(agent_cli.time, "sleep", arrive)
+    result = CliRunner().invoke(agent, ["watch", "--once", "--pull", "--timeout", "1s"])
+    assert result.exit_code == 0, result.output
+    assert "Hello" in result.output
+
+
+def test_pull_skips_logical_id_already_received(workspace: Path, monkeypatch) -> None:
+    raw = _message().replace("from: alice", "message_id: original.md\nfrom: alice")
+    original = publish_message(raw, workspace / "messages" / "inbox")
+    agent_cli._mark_replied(original)
+    monkeypatch.setattr(
+        agent_cli,
+        "_remote_pending_rows",
+        lambda *a, **kw: [
+            {"file": "original.md", "from": "alice", "to": "bob", "mailbox": "default"}
+        ],
+    )
+
+    def no_copy(*a, **kw):
+        pytest.fail("Already-received logical ID must not be fetched again")
+
+    monkeypatch.setattr(agent_cli.subprocess, "run", no_copy)
+    new, failed, unreachable = agent_cli._fetch_from_agent(
+        "alice",
+        {"ssh": "alice@alice", "workspace": "/srv/alice"},
+        self_name="bob",
+        mailboxes=["default"],
+        all_mailboxes=False,
+    )
+    assert new == [] and not failed and not unreachable
+    assert len(list(original.parent.glob("*.md"))) == 1
+
+
+def test_watch_local_filename_recognizes_logical_ancestor(workspace: Path, monkeypatch) -> None:
+    original = publish_message(
+        _message().replace("from: alice", "message_id: original.md\nfrom: alice"),
+        workspace / "messages" / "inbox",
+    )
+    (workspace / "messages" / "outbox" / "reply.md").write_text(
+        "---\nfrom: bob\nto: alice\nsubject: Re\nin_reply_to: original.md\n---\n\nAnswer\n"
+    )
+    followup = publish_message(
+        _message(subject="Followup").replace("from: alice", "in_reply_to: reply.md\nfrom: alice"),
+        original.parent,
+    )
+    monkeypatch.setattr(
+        agent_cli,
+        "_load_agents",
+        lambda: {"alice": {"ssh": "alice@alice", "delivery": "receive-only"}},
+    )
+    result = CliRunner().invoke(
+        agent, ["watch", "--thread", original.name, "--once", "--timeout", "0.01s"]
+    )
+    assert result.exit_code == 0, result.output
+    assert followup.name in result.output

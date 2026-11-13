@@ -1622,7 +1622,13 @@ def _fetch_from_agent(
                     err=True,
                 )
             continue
-        if dest.exists():
+        already_received = any(
+            meta.get("message_id") == filename
+            and str(meta.get("from", "")).lower() == agent_name.lower()
+            for path in dest.parent.glob("*.md")
+            if (meta := meta_of(path))
+        )
+        if dest.exists() or already_received:
             # Skip-if-exists is load-bearing: local inbox copies carry
             # read/replied stamps that the sender's outbox never has.
             # Recopying would silently reset tracking (gptme/gptme-contrib#1476).
@@ -1976,6 +1982,7 @@ def watch(
             )
         else:
             root_mailbox, root_meta = root
+            thread_target = _thread_key(root_meta.get("message_id") or thread)
             if mailbox is None and not all_mailboxes:
                 mailbox = root_mailbox
             root_to = root_meta.get("to")
@@ -2011,10 +2018,12 @@ def watch(
     if skipped:
         click.echo(f"Note: skipping non-SSH agents: {', '.join(skipped)}", err=True)
 
-    # Thread mode also scans the workspace inbox, including pull --as deliveries
-    # for a --to override. Candidate metadata still filters by recipient below.
-    # No SSH-reachable peer is needed for an already-local or pushed reply.
-    watch_local_inbox = thread_target is not None
+    # Thread mode scans local replies immediately; ordinary watches baseline
+    # the inbox for new pushes from receive-only peers. Neither needs a shell
+    # on those peers. Candidate metadata still filters by recipient below.
+    watch_local_inbox = thread_target is not None or any(
+        cfg.get("delivery") == "receive-only" for cfg in watch_agents.values()
+    )
     if not ssh_agents and not watch_local_inbox:
         click.echo("No SSH-reachable agents to watch.", err=True)
         sys.exit(1)
@@ -2059,6 +2068,22 @@ def watch(
         return rows
 
     reported: set[str] = set()
+    local_baseline: set[str] = set()
+
+    def _check_local_pushes() -> bool:
+        """Report arrivals after the ordinary watch's local baseline."""
+        _, messages = _local_thread_messages(mailboxes)
+        for key, meta, path in messages:
+            if key in local_baseline:
+                continue
+            local_baseline.add(key)
+            sender = str(meta.get("from", "")).lower()
+            if sender not in watch_agents or not _addressed_to(meta, recipient):
+                continue
+            click.echo(f"NEW message from {sender}: {meta.get('subject', '')} ({path.name})")
+            if once:
+                return True
+        return False
 
     def _check_thread(
         remote: dict[str, list[dict]], *, delivered_before: float | None = None
@@ -2145,6 +2170,10 @@ def watch(
     if thread_target is not None and _check_thread({}):
         return
 
+    if watch_local_inbox and thread_target is None:
+        _, messages = _local_thread_messages(mailboxes)
+        local_baseline.update(key for key, _, _ in messages)
+
     # Baseline: None = not yet successfully probed; set[str] = known filenames.
     baselines: dict[str, set[str] | None] = {}
     first_rows: dict[str, list[dict]] = {}
@@ -2175,6 +2204,8 @@ def watch(
                     if _check_thread(polled):
                         return
                 continue
+            if watch_local_inbox and _check_local_pushes():
+                return
             for agent_name, agent_cfg in ssh_agents.items():
                 rows = _poll(agent_name, agent_cfg)
                 if rows is None:
