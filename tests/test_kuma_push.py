@@ -96,7 +96,7 @@ def test_push_nonzero_rc_is_logged_failure(tmp_path, monkeypatch, capsys):
     )
     err = capsys.readouterr().err
     assert "curl rc=3" in err
-    assert not (tmp_path / "ack.json").exists()
+    assert "K" not in kuma_push.load_acks(tmp_path / "ack.json")
 
 
 def test_push_unacked_body_is_failure(monkeypatch, capsys):
@@ -192,6 +192,31 @@ def test_record_ack_serializes_read_merge_replace(tmp_path):
 
 def _ts(**delta):
     return datetime.now(timezone.utc) - timedelta(**delta)
+
+
+def test_failed_first_push_starts_bootstrap_only_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        kuma_push.subprocess, "run", lambda *a, **k: _Completed(returncode=7)
+    )
+    target = tmp_path / "ack.json"
+    assert not kuma_push.push_url("http://kuma/push/x", key="K", ack_path=target)
+    first = kuma_push.load_acks(target)
+    assert "_since" in first
+    assert "K" not in first
+    started = datetime.fromisoformat(first["_since"])
+    assert kuma_push.stale_acks(first, ["K"], started, {"K": 1}) == []
+    assert not kuma_push.push_url("http://kuma/push/x", key="K", ack_path=target)
+    later = kuma_push.load_acks(target)
+    assert later["_since"] == first["_since"]
+    problems = kuma_push.stale_acks(
+        later, ["K"], started + timedelta(hours=4), {"K": 1}
+    )
+    assert len(problems) == 1 and "no acknowledged push" in problems[0]
+
+
+def test_missing_bootstrap_is_not_reported_as_healthy():
+    problems = kuma_push.stale_acks({}, ["K"], datetime.now(timezone.utc), {"K": 1})
+    assert len(problems) == 1 and "tracking not initialized" in problems[0]
 
 
 def test_stale_acks_reports_missing_and_stale_only_after_bootstrap():

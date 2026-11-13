@@ -100,7 +100,13 @@ Contract:
   real alert.
 
 Acknowledgement ledger: every acked push stamps `state/kuma-last-ack.json`
-(atomic read-merge-replace; a write failure is logged, never raised).
+(locked, atomic read-merge-replace; a write failure is logged, never raised).
+A configured push starts the bootstrap clock **before** the network attempt,
+so a sender that never succeeds still becomes overdue. Repeated failures do
+not reset that clock. Shell senders' ledger checkers must call
+`start_tracking(path=...)` before `load_acks(path)`; it is idempotent and does
+not record an acknowledgement. A missing or invalid bootstrap stamp is
+reported as uninitialized tracking, never as healthy.
 `stale_acks(acks, keys, now, intervals)` reports keys whose last ack is older
 than `3 ×` the expected cadence, plus keys never acked — but only once tracking
 is older than one tolerance window, so enabling the ledger does not page on the

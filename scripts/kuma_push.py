@@ -130,6 +130,19 @@ def record_ack(key: str, path: Path | None = None, now: datetime | None = None) 
     successful heartbeat into a caller-visible failure. It is logged so the
     ledger being unwritable is itself observable.
     """
+    return _update_ledger(key, path, now)
+
+
+def start_tracking(path: Path | None = None, now: datetime | None = None) -> bool:
+    """Start the bootstrap clock without claiming a successful heartbeat.
+
+    Idempotent: failed pushes and repeated checker runs never reset the clock.
+    Shell senders should call this from their ledger checker before load_acks().
+    """
+    return _update_ledger(None, path, now)
+
+
+def _update_ledger(key: str | None, path: Path | None, now: datetime | None) -> bool:
     path = path or ACK_FILE
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -138,11 +151,14 @@ def record_ack(key: str, path: Path | None = None, now: datetime | None = None) 
         with path.with_suffix(path.suffix + ".lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             acks = load_acks(path)
+            if key is None and _parse_ts(acks.get("_since")) is not None:
+                return True
             stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
             # Bootstrap guard: a key that has never been acked is not "dark" until
             # tracking has been live for one full tolerance window.
             acks.setdefault("_since", stamp)
-            acks[key] = stamp
+            if key is not None:
+                acks[key] = stamp
             fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".kuma-ack-")
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -189,7 +205,12 @@ def stale_acks(
         limit_h = expected_h * factor
         raw = acks.get(key)
         if not raw:
-            if since is None or (now - since).total_seconds() / 3600 <= limit_h:
+            if since is None:
+                problems.append(
+                    f"Kuma push {key}: tracking not initialized; call start_tracking()"
+                )
+                continue
+            if (now - since).total_seconds() / 3600 <= limit_h:
                 continue
             problems.append(
                 f"Kuma push {key}: no acknowledged push on record (expected every "
@@ -246,6 +267,8 @@ def push_url(
     if not push_url_value:
         print(f"WARN: Kuma push {name}: no push URL configured", file=sys.stderr)
         return False
+    if key:
+        start_tracking(path=ack_path)
     full_url = build_push_url(push_url_value, status, msg)
     try:
         result = subprocess.run(
