@@ -523,9 +523,10 @@ def extract_json_from_response(response: str) -> dict[str, Any]:
             pos = start + 1
     if json_objects:
         _narrative_keys = ("narrative", "month_narrative")
-        for obj in reversed(json_objects):
-            if any(obj.get(k) for k in _narrative_keys):
-                return obj
+        candidate: dict[str, Any]
+        for candidate in reversed(json_objects):
+            if any(candidate.get(k) for k in _narrative_keys):
+                return candidate
         return json_objects[-1]
 
     # Return empty dict if no JSON found
