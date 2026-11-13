@@ -6,6 +6,7 @@ import csv
 import json
 import logging
 import math
+import os
 import re
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -464,6 +465,38 @@ def _discover_all(
     # Sort chronologically across harnesses; entries without a date sort last.
     discovered.sort(key=lambda e: e.get("session_date") or date.max)
     return discovered
+
+
+def _normalize_project(project: str | Path) -> str:
+    """Absolute, user-expanded path without a trailing slash."""
+    return os.path.abspath(os.path.expanduser(str(project))).rstrip("/") or "/"
+
+
+def _project_key(project: str | Path) -> str:
+    """Lossy key matching Claude Code's project-dir naming.
+
+    Claude Code names project dirs by replacing every non-alphanumeric
+    character with ``-``, and decoding that back is lossy (``/a/b-c`` and
+    ``/a/b/c`` both decode to ``/a/b/c``). Only use this for claude-code
+    entries; other harnesses keep the exact path.
+
+    The input is encoded as given, not normalized: a decoded Claude Code
+    path like ``/home/u//repo`` (from ``/home/u/.repo``) must keep its
+    doubled separator, which ``abspath()`` would collapse, and a trailing
+    one (``/home/u/repo-`` decodes to ``/home/u/repo/``). Callers
+    normalize user-supplied paths before passing them here.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", str(project) or "/")
+
+
+def _project_matches(entry: dict, wanted: set[str]) -> bool:
+    """Whether a discovered entry's project is one of the normalized ``wanted`` paths."""
+    project = entry.get("project")
+    if not project:
+        return False
+    if entry.get("harness") == "claude-code":
+        return _project_key(project) in {_project_key(w) for w in wanted}
+    return _normalize_project(project) in wanted
 
 
 def _count_unsynced(
@@ -2491,6 +2524,16 @@ def replay(
 )
 @click.option("--dry-run", is_flag=True, help="Show what would be imported without writing")
 @click.option(
+    "--project",
+    "projects",
+    multiple=True,
+    help=(
+        "Only import sessions whose project is this path (repeatable). Without it, "
+        "sync imports sessions from every project, including headless calls run "
+        "from other directories."
+    ),
+)
+@click.option(
     "--fix-timestamps",
     is_flag=True,
     help="Backfill correct timestamps for existing records from their trajectory paths",
@@ -2502,6 +2545,7 @@ def sync(
     since: str,
     with_signals: bool,
     dry_run: bool,
+    projects: tuple[str, ...],
     fix_timestamps: bool,
 ) -> None:
     """Discover trajectory files and import them into the session store.
@@ -2580,6 +2624,9 @@ def sync(
     since_days = _parse_since(since)  # None means "all time"
     since_days_effective = since_days if since_days is not None else 36500  # ~100 years
     discovered = _discover_all(since_days=since_days_effective, harness_filter=harness)
+    if projects:
+        wanted = {_normalize_project(p) for p in projects}
+        discovered = [e for e in discovered if _project_matches(e, wanted)]
 
     if not discovered:
         window_desc = f"last {_fmt_since(since_days)}"
