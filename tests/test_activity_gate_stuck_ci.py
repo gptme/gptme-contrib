@@ -570,3 +570,32 @@ def test_failed_pr_does_not_reemit_as_other_checks_finish(tmp_path: Path) -> Non
         ],
     )
     assert "EMIT" in _run_gate_once(state, second_red)
+
+
+def test_cancelled_with_running_check_waits_then_emits_once(tmp_path: Path) -> None:
+    """The inflight clock is not a delivered failure: terminal cancellation
+    must still emit its first actionable signal after the other check finishes.
+    """
+    cancelled = {"status": "COMPLETED", "conclusion": "CANCELLED", "name": "lint"}
+    pr = {
+        "number": 10,
+        "title": "cancelled",
+        "headRefOid": "d" * 40,
+        "statusCheckRollup": [
+            cancelled,
+            {"status": "IN_PROGRESS", "conclusion": "", "name": "a"},
+        ],
+    }
+    state = tmp_path / "state"
+    state.mkdir()
+    assert "EMIT" not in _run_gate_once(state, pr)
+    assert "EMIT" not in _run_gate_once(state, pr)
+    terminal = dict(
+        pr,
+        statusCheckRollup=[
+            cancelled,
+            {"status": "COMPLETED", "conclusion": "SUCCESS", "name": "a"},
+        ],
+    )
+    assert "EMIT" in _run_gate_once(state, terminal)
+    assert "EMIT" not in _run_gate_once(state, terminal)
