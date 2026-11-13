@@ -248,6 +248,17 @@ def derived_probe(gate: Gate) -> str | None:
     return None
 
 
+def _gate_identity(raw: dict[str, Any]) -> tuple[Any, Any]:
+    """Use the same ref normalization for stamping and enforcing history."""
+    kind, ref = raw.get("kind"), _text(raw.get("ref"))
+    if kind in (GateKind.PR, GateKind.ISSUE) and ref is not None:
+        parsed = parse_github_ref(ref)
+        if parsed is not None:
+            owner, repo, number = parsed
+            return kind, (owner.lower(), repo.lower(), number)
+    return kind, ref
+
+
 def check_gate_change(prior: dict[str, Any], post: dict[str, Any]) -> list[str]:
     """Errors for a gate edit from *prior* to *post* metadata.
 
@@ -259,7 +270,7 @@ def check_gate_change(prior: dict[str, Any], post: dict[str, Any]) -> list[str]:
     before, after = prior.get("gate"), post.get("gate")
     if not isinstance(before, dict) or not isinstance(after, dict):
         return []
-    if (before.get("kind"), before.get("ref")) != (after.get("kind"), after.get("ref")):
+    if _gate_identity(before) != _gate_identity(after):
         return []
     old_deadline = _as_datetime(before.get("deadline"))
     new_deadline = _as_datetime(after.get("deadline"))
@@ -292,7 +303,7 @@ def stamp_deadline_push(prior: dict[str, Any], post: dict[str, Any]) -> None:
     before, after = prior.get("gate"), post.get("gate")
     if not isinstance(before, dict) or not isinstance(after, dict):
         return
-    if (before.get("kind"), before.get("ref")) != (after.get("kind"), after.get("ref")):
+    if _gate_identity(before) != _gate_identity(after):
         return
     if before.get("original_deadline") is not None or "original_deadline" in after:
         return

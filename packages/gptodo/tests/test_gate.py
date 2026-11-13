@@ -272,6 +272,19 @@ def test_datetime_deadline_object_is_accepted() -> None:
     assert gate is not None and gate.deadline == deadline
 
 
+@pytest.mark.parametrize("ref", [" o/r#1 ", "https://github.com/o/r/pull/1", "O/R#1"])
+def test_equivalent_ref_spelling_preserves_deadline_history(tmp_path: Path, ref: str) -> None:
+    gate = {"kind": "pr", "ref": "o/r#1", "deadline": "2026-11-20"}
+    path = _write(tmp_path, gate)
+    mutate_task(path, patch={"gate": dict(gate, ref=ref, deadline="2026-12-01")})
+    pushed = frontmatter.load(path).metadata["gate"]
+    assert pushed["original_deadline"] == gate["deadline"]
+    with pytest.raises(TransitionError, match="one-time record"):
+        mutate_task(path, patch={"gate": dict(gate, deadline="2026-12-20")})
+    with pytest.raises(TransitionError, match="second push is refused"):
+        mutate_task(path, patch={"gate": dict(pushed, ref="o/r#1", deadline="2026-12-20")})
+
+
 def test_new_gate_identity_is_not_a_push() -> None:
     before = {"gate": {"kind": "pr", "ref": "o/r#1", "deadline": "2026-11-20"}}
     after = {"gate": {"kind": "pr", "ref": "o/r#2", "deadline": "2026-12-20"}}
