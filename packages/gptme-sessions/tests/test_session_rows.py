@@ -111,6 +111,27 @@ def test_load_session_rows_excludes_tagged_duplicates(tmp_path):
     assert read_jsonl_rows(p) == rows
 
 
+def test_load_session_rows_keeps_last_unique_id_snapshot_not_recurring_labels(tmp_path):
+    p = tmp_path / "session-records.jsonl"
+    uuid = "01234567-89ab-cdef-0123-456789abcdef"
+    rows = [
+        {"session_id": "AABBCCDD", "token_count": 100},
+        {"session_id": uuid, "token_count": 50},
+        {"session_id": "4033", "token_count": 5},
+        {"session_id": "aabbccdd", "token_count": 200, "unknown": "preserved"},
+        {"session_id": "4033", "token_count": 10},
+        {"token_count": 1},
+        {"token_count": 2},
+        {"session_id": uuid.upper(), "token_count": 150},
+        {"session_id": "custom", "token_count": 3},
+        {"session_id": "custom", "token_count": 4},
+    ]
+    p.write_text("\n".join(json.dumps(r) for r in rows))
+    assert load_session_rows(p) == rows[2:7] + rows[7:]
+    assert sum(r["token_count"] for r in load_session_rows(p)) == 375
+    assert load_session_rows(p, include_duplicates=True) == rows
+
+
 def test_load_session_rows_missing_file(tmp_path):
     assert load_session_rows(tmp_path / "nope.jsonl") == []
 

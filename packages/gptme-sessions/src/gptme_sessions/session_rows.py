@@ -96,7 +96,11 @@ def load_session_rows(
     """Load ``session-records.jsonl`` as one row per session.
 
     Rows tagged with a truthy ``duplicate_of`` by ``gptme-sessions dedup`` are
-    excluded unless ``include_duplicates=True``. Pair collapsing still applies;
+    excluded, and repeated UUID/8-hex ids keep only their last ledger snapshot
+    (resumed sessions record cumulative usage). Recurring 4-hex labels, unknown
+    id formats and missing ids are retained rather than guessed to be duplicates.
+    Surviving rows preserve ledger order. ``include_duplicates=True`` disables
+    both duplicate filters. Pair collapsing still applies;
     use :func:`read_jsonl_rows` for read-modify-write cycles that need every row.
     A missing file yields ``[]``. See :func:`dedupe_monitoring_pairs` for ``keep``.
     """
@@ -106,4 +110,15 @@ def load_session_rows(
     rows = read_jsonl_rows(p)
     if not include_duplicates:
         rows = [row for row in rows if not row.get("duplicate_of")]
+        last = {
+            str(row["session_id"]).strip().lower(): i
+            for i, row in enumerate(rows)
+            if id_format(row.get("session_id")) in ("uuid", "hex8")
+        }
+        rows = [
+            row
+            for i, row in enumerate(rows)
+            if id_format(row.get("session_id")) not in ("uuid", "hex8")
+            or last[str(row["session_id"]).strip().lower()] == i
+        ]
     return dedupe_monitoring_pairs(rows, keep=keep)
