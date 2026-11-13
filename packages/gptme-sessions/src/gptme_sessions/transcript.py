@@ -1681,7 +1681,7 @@ def _codex_rollout_linkage(path: Path) -> tuple[str | None, str | None, int]:
                 except (TypeError, ValueError):
                     depth = 1
                 break
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None, None, 1
     return thread_id, parent, depth
 

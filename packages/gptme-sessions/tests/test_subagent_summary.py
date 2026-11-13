@@ -1263,3 +1263,19 @@ def test_codex_non_spawn_sibling_does_not_hide_valid_children(tmp_path, subagent
     summary = extract_from_path(parent)["subagent_summary"]
     assert summary["subagents_total"] == 1
     assert summary["spawns_total"] == 1
+
+
+@pytest.mark.parametrize("corrupt_name", ["rollout-aaa.jsonl", "rollout-zzz.jsonl"])
+def test_codex_invalid_utf8_sibling_does_not_hide_valid_children(tmp_path, corrupt_name) -> None:
+    """A corrupt sibling must not discard children scanned before or after it."""
+    from gptme_sessions.signals import extract_from_path
+    from gptme_sessions.transcript import codex_subagent_rollouts
+
+    parent = _codex_rollout(tmp_path / "rollout-parent.jsonl", "p-1", spawn=True)
+    child = _codex_rollout(tmp_path / "rollout-child.jsonl", "c-1", parent="p-1")
+    (tmp_path / corrupt_name).write_bytes(b'{"type":"session_meta","payload":\xff}\n')
+
+    summary = extract_from_path(parent)["subagent_summary"]
+    assert summary["subagents_total"] == 1
+    assert summary["spawns_total"] == 1
+    assert codex_subagent_rollouts(parent) == [(child, {"session_id": "c-1"}, 1)]
