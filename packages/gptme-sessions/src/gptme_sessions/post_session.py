@@ -49,6 +49,7 @@ from .record import (
 from .signals import extract_from_path, grade_signals, reclassify_bookkeeping_commits
 from .smell import compute_smell_score
 from .store import SessionStore
+from .trajectory_identity import TrajectoryIdentityError, validate_claude_trajectory
 
 logger = logging.getLogger(__name__)
 
@@ -588,6 +589,21 @@ def post_session(
     tool_ms_total: float | None = None
     subagent_summary: dict[str, Any] | None = None
     trajectory_revision: str | None = None
+
+    # Bind evidence to the harness-native UUID, never the outer run UUID.
+    cc_session_uuid = (
+        (harness_session_id or os.environ.get("CC_SESSION_ID"))
+        if harness == "claude-code"
+        else None
+    )
+    trajectory_rejection = None
+    if harness == "claude-code" and trajectory_path is not None and trajectory_path.is_file():
+        try:
+            validate_claude_trajectory(trajectory_path, cc_session_uuid)
+        except TrajectoryIdentityError as exc:
+            trajectory_rejection = exc.evidence
+            logger.warning("Rejecting foreign trajectory %s: %s", trajectory_path, exc)
+            trajectory_path = None
 
     # --- Extract signals from trajectory ---
     if trajectory_path is not None and trajectory_path.is_file():
@@ -1284,6 +1300,8 @@ def post_session(
     if lesson_events:
         record_kwargs["lesson_events"] = lesson_events
 
+    record_kwargs["cc_session_uuid"] = cc_session_uuid
+    record_kwargs["trajectory_rejection"] = trajectory_rejection
     record = SessionRecord(**record_kwargs)
     # Harness-reported cost (including a real 0.0) is already on the record.
     # Claude Code / grok-build trajectories commonly have tokens and no cost;

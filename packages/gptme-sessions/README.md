@@ -339,6 +339,15 @@ Field notes:
   repeat; never use it for joins, updates, or commit-trailer ownership.
   Legacy short-ID records remain readable without relabelling or deduplication.
   Attempt-kind stamping refuses a four-hex ID spanning distinct timestamps.
+- `cc_session_uuid` is the Claude-native UUID, distinct from the outer run ID.
+  `post_session(harness_session_id=...)` (or `CC_SESSION_ID`) persists it and
+  checks parent `sessionId`/`session_id` fields before extraction. Missing,
+  foreign or mixed IDs reject the trajectory: usage and work signals stay
+  unset, `trajectory_path` is cleared, and `trajectory_rejection` retains the
+  rejected path, expected ID and observed IDs. Process failure evidence is
+  preserved. `sync --signals` and `regrade` also refuse foreign evidence when
+  refreshing records with a native UUID. Legacy records without one retain
+  their existing behaviour; these checks do not infer identity from model names.
 - `session_label` is optional display metadata, independent of the harness's
   native session ID and any trajectory-binding sentinel. This API does not
   allocate a second run ID or migrate existing launcher consumers.
