@@ -52,6 +52,7 @@ from .record import (
 )
 from .pi import PI_EXTRACTION_SCHEMA_VERSION, PiSessionFormatError
 from .signals import extract_from_path
+from .trajectory_identity import TrajectoryIdentityError, validate_claude_trajectory
 from .store import (
     SessionStore,
     compute_run_analytics,
@@ -2633,6 +2634,12 @@ def sync(
 
         if path_str in existing_by_path:
             existing = existing_by_path[path_str]
+            if existing.harness == "claude-code" and traj_path.is_file():
+                try:
+                    validate_claude_trajectory(traj_path, existing.cc_session_uuid)
+                except TrajectoryIdentityError as exc:
+                    click.echo(f"  skipping {existing.session_id}: {exc}", err=True)
+                    continue
             needs_update = False
             signal_extraction_failed = False
 
@@ -2940,6 +2947,8 @@ def regrade(
             continue
 
         try:
+            if rec.harness == "claude-code":
+                validate_claude_trajectory(traj, rec.cc_session_uuid)
             result = extract_from_path(traj)
         except Exception as exc:
             click.echo(

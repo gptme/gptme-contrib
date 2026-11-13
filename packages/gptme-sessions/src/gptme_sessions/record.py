@@ -460,6 +460,8 @@ class SessionRecord:
     deliverables: list[str] = field(default_factory=list)  # commit SHAs, PR URLs
     deliverable_details: list[dict[str, Any]] = field(default_factory=list)
     trajectory_path: str | None = None  # path to trajectory JSONL file (for deduplication)
+    cc_session_uuid: str | None = None  # native Claude UUID, distinct from the outer run id
+    trajectory_rejection: dict[str, Any] | None = None  # rejected path + ownership evidence
     journal_path: str | None = None  # path to human-written journal entry
 
     # Per-dimension grades for the multivariate grading rollout.
