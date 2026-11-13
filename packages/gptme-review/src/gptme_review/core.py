@@ -7331,6 +7331,10 @@ _UNTIL_DRY_USAGE_SKIP = frozenset(
         "consensus_min_agreement_requested",
         "consensus_min_agreement",
         "consensus_rejected",
+        # A set size (distinct model:aspect keys behind the kept findings), not a
+        # quantity: two waves from the same lens would sum to 2 independent
+        # sources. _fanout_until_dry recomputes it as the union across waves.
+        "distinct_independence_keys",
         "change_summary",
         "provider",
         "finish_reason",
@@ -7399,6 +7403,7 @@ def _fanout_until_dry(
     jobs_requested = 0
     jobs_answered = 0
     first_wave_usage: dict[str, object] = {}
+    distinct_keys: set[str] = set()
     stopped = "cap"
 
     wave_kwargs: dict = {
@@ -7467,6 +7472,12 @@ def _fanout_until_dry(
         jobs_requested += int(usage.get("consensus_requested_jobs") or 0)
         jobs_answered += int(usage.get("consensus_answered_jobs") or 0)
 
+        # Collect keys from the wave's own findings, before the union folds a
+        # duplicate into an earlier group and its keys stop being visible.
+        for f in kept:
+            dk = f.get("distinct_keys")
+            if isinstance(dk, list):
+                distinct_keys.update(str(k) for k in dk)
         accumulated, n_new = union_finding_groups(accumulated, kept)
         # Stamp the wave a group *first entered* the pool. Later waves are
         # seeded with "look for what ISN'T in this list", which is exactly the
@@ -7482,6 +7493,7 @@ def _fanout_until_dry(
             break
 
     combined_usage.update(first_wave_usage)
+    combined_usage["distinct_independence_keys"] = len(distinct_keys)
     combined_usage["until_dry"] = True
     combined_usage["until_dry_waves"] = len(new_per_wave)
     combined_usage["until_dry_max"] = cap
