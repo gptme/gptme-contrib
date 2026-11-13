@@ -101,11 +101,10 @@ def load_jsonl(
     rows_iter = iter_jsonl(
         path, encoding=encoding, on_invalid=on_invalid, must_exist=must_exist
     )
-    if tail is not None and tail <= 0:
-        return []
     path = Path(path)
     if (
         tail is not None
+        and tail > 0
         and on_invalid == "skip"
         and path.suffix != ".gz"
         and encoding.lower().replace("_", "-") in ("utf-8", "utf8")
@@ -116,7 +115,7 @@ def load_jsonl(
         return _tail_rows_from_end(path, tail)
     rows = list(rows_iter)
     if tail is not None:
-        return rows[-tail:]
+        return rows[-tail:] if tail > 0 else []
     return rows
 
 
@@ -130,7 +129,10 @@ def _tail_rows_from_end(path: Path, tail: int) -> list[dict[str, Any]]:
             size = min(block_size, position)
             position -= size
             handle.seek(position)
-            lines = (handle.read(size) + carry).split(b"\n")
+            # Match text-mode universal newlines. CRLF becomes two separators,
+            # which is harmless because blank lines are skipped below, even
+            # when the pair straddles a block boundary.
+            lines = (handle.read(size) + carry).replace(b"\r", b"\n").split(b"\n")
             carry = lines[0] if position > 0 else b""
             for raw in reversed(lines[1:] if position > 0 else lines):
                 line = raw.strip()
