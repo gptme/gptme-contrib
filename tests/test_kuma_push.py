@@ -313,7 +313,13 @@ def test_cli_record_ack(tmp_path):
     assert kuma_push.load_acks(tmp_path / "a.json")["K"]
 
 
-def test_cli_push_unconfigured_exits_nonzero(tmp_path):
+def test_cli_push_unconfigured_exits_nonzero(tmp_path, monkeypatch):
+    monkeypatch.delenv("KUMA_PUSH_URL_NOPE", raising=False)
+
+    def no_network(*args, **kwargs):
+        pytest.fail("unconfigured CLI must not invoke curl")
+
+    monkeypatch.setattr(kuma_push.subprocess, "run", no_network)
     rc = kuma_push.main(
         [
             "push",
