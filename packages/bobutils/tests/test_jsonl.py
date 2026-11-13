@@ -4,6 +4,8 @@ found in the #1043 duplicate inventory."""
 import gzip
 import json
 import logging
+import os
+from threading import Thread
 
 import pytest
 from bobutils.jsonl import iter_jsonl, load_jsonl
@@ -105,6 +107,24 @@ def test_tail_preserves_unicode_whitespace(tmp_path, whitespace):
     )
     assert load_jsonl(path) == [{"n": 1}]
     assert load_jsonl(path, tail=1) == load_jsonl(path)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires named pipes")
+def test_tail_preserves_fifo_loading(tmp_path):
+    path = tmp_path / "ledger.jsonl"
+    os.mkfifo(path)
+    writer = Thread(
+        target=path.write_text,
+        args=('{"n": 1}\n',),
+        kwargs={"encoding": "utf-8"},
+        daemon=True,
+    )
+    writer.start()
+    try:
+        assert load_jsonl(path, tail=1) == [{"n": 1}]
+    finally:
+        writer.join(timeout=2)
+    assert not writer.is_alive()
 
 
 def test_tail_propagates_encountered_decoding_errors(tmp_path):

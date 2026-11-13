@@ -108,7 +108,7 @@ def load_jsonl(
         and on_invalid == "skip"
         and path.suffix != ".gz"
         and encoding.lower().replace("_", "-") in ("utf-8", "utf8")
-        and path.exists()
+        and path.is_file()
     ):
         # Skip mode needs no line numbers, so read backwards and stop after
         # ``tail`` rows instead of parsing a whole append-only ledger.
