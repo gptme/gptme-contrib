@@ -133,6 +133,12 @@ def get_canonical_states() -> list[str]:
     ]
 
 
+# Valid values for the optional ``priority`` frontmatter field. ``null`` (unset)
+# is also accepted. Note that PRIORITY_RANK knows ``urgent`` for sorting, but
+# it is not a valid frontmatter value.
+VALID_PRIORITIES: tuple[str, ...] = ("high", "medium", "low")
+
+
 # =============================================================================
 # Frontmatter Schema (Gordon 2026-07-01 upstream fix)
 # =============================================================================
@@ -1290,7 +1296,7 @@ def validate_task_file(file: Path, post: fmPost) -> List[str]:
     # Optional field validation
     if "priority" in metadata:
         priority = metadata["priority"]
-        if priority not in ("high", "medium", "low", None):
+        if priority is not None and priority not in VALID_PRIORITIES:
             issues.append("Priority must be 'high', 'medium', or 'low'")
 
     if "pool" in metadata:

@@ -19,8 +19,9 @@ Checks:
 
 import sys
 from datetime import date, datetime
+from functools import cache
 from pathlib import Path
-from typing import List, cast
+from typing import List, NamedTuple, cast
 
 import click
 import frontmatter
@@ -29,24 +30,58 @@ from rich.console import Console
 # Configure console
 console = Console(stderr=True)
 
-VALID_STATES = {
-    "tasks": [
-        "backlog",
-        "todo",
-        "new",
-        "active",
-        "ready_for_review",
-        "waiting",
-        "paused",
-        "done",
-        "cancelled",
-        "someday",
-        "draft",
-    ],
-    "tweets": ["new", "queued", "approved", "posted"],
-}
+# Task states and priorities are NOT defined here: gptodo owns the task schema
+# (see gptodo.utils.get_canonical_states / DEPRECATED_STATE_ALIASES /
+# VALID_PRIORITIES) and they are loaded from it at runtime by
+# _load_task_schema(). A second hard-coded copy drifted before (gptme-contrib#2161:
+# `gptodo expire` writes `state: expired`, which this hook used to reject).
+VALID_TWEET_STATES = ["new", "queued", "approved", "posted"]
+FILE_TYPES = ["tasks", "tweets"]
 
-VALID_PRIORITIES = ["low", "medium", "high"]
+# gptodo source tree in the same gptme-contrib checkout as this script
+# (scripts/precommit/ -> packages/gptodo/src). Preferred over an installed gptodo
+# so the hook always agrees with the gptodo version it ships with.
+_GPTODO_SRC = Path(__file__).resolve().parents[2] / "packages" / "gptodo" / "src"
+
+
+class TaskSchema(NamedTuple):
+    states: list[str]  # every accepted value (canonical + deprecated aliases)
+    canonical_states: list[str]  # what to suggest in error messages
+    priorities: list[str]
+
+
+@cache
+def _load_task_schema() -> TaskSchema:
+    """Load the task schema from gptodo, the single source of truth.
+
+    Fails loudly (exit 2) instead of falling back to a local copy: a silent
+    fallback is exactly how the two definitions drifted apart.
+    """
+    if _GPTODO_SRC.is_dir() and str(_GPTODO_SRC) not in sys.path:
+        sys.path.insert(0, str(_GPTODO_SRC))
+    try:
+        from gptodo.utils import (  # type: ignore[import-not-found]  # noqa: PLC0415
+            DEPRECATED_STATE_ALIASES,
+            VALID_PRIORITIES,
+            get_canonical_states,
+        )
+    except ImportError as e:
+        console.print(
+            "[red]Cannot load the task schema from gptodo "
+            f"({e}).[/red]\n"
+            f"Expected the gptodo source at {_GPTODO_SRC} (run this script from "
+            "its gptme-contrib checkout) or an up-to-date installed `gptodo` package."
+        )
+        sys.exit(2)
+    canonical = list(get_canonical_states())
+    aliases = [s for s in DEPRECATED_STATE_ALIASES if s not in canonical]
+    return TaskSchema(
+        states=canonical + aliases,
+        canonical_states=canonical,
+        priorities=list(VALID_PRIORITIES),
+    )
+
+
 VALID_TASK_TYPES = ["project", "action"]
 
 # Synonym map: agent-intuitive guesses → canonical GTD values
@@ -99,12 +134,25 @@ def validate_frontmatter(file: Path, type_name: str = "tasks") -> List[str]:
         if field not in metadata:
             errors.append(f"Missing required field: {field}")
 
+    # Enum schemas: tasks come from gptodo, tweets are local to this hook
+    if type_name == "tasks":
+        schema = _load_task_schema()
+        valid_states, suggested_states = schema.states, schema.canonical_states
+        valid_priorities = schema.priorities
+    else:
+        valid_states = suggested_states = VALID_TWEET_STATES
+        # Tweets have no priority schema of their own; reuse gptodo's only if
+        # a tweet actually sets one, so tweets without one never need gptodo.
+        valid_priorities = (
+            _load_task_schema().priorities if "priority" in metadata else []
+        )
+
     # Validate state
     if "state" in metadata:
         state = metadata["state"]
-        if state not in VALID_STATES[type_name]:
+        if state not in valid_states:
             errors.append(
-                f"Invalid state: {state}. Must be one of: {', '.join(VALID_STATES[type_name])}"
+                f"Invalid state: {state}. Must be one of: {', '.join(suggested_states)}"
             )
 
     # Validate timestamps
@@ -118,9 +166,9 @@ def validate_frontmatter(file: Path, type_name: str = "tasks") -> List[str]:
     # Validate optional fields
     if "priority" in metadata:
         priority = metadata["priority"]
-        if priority not in VALID_PRIORITIES:
+        if priority is not None and priority not in valid_priorities:
             errors.append(
-                f"Invalid priority: {priority}. Must be one of: {', '.join(VALID_PRIORITIES)}"
+                f"Invalid priority: {priority}. Must be one of: {', '.join(valid_priorities)}"
             )
 
     if "task_type" in metadata:
@@ -183,7 +231,7 @@ def validate_frontmatter(file: Path, type_name: str = "tasks") -> List[str]:
 @click.option(
     "--type",
     "type_name",
-    type=click.Choice(list(VALID_STATES.keys())),
+    type=click.Choice(FILE_TYPES),
     default="tasks",
     help="Type of files to validate",
 )
