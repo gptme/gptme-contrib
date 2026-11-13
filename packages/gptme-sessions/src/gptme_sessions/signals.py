@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import glob as _glob
 import json
+import logging
 import os
 import re
 import shlex
@@ -4608,9 +4609,16 @@ def extract_from_path(jsonl_path: Path) -> dict:
             from .transcript import codex_subagent_rollouts
 
             for sub_file, meta, depth in codex_subagent_rollouts(jsonl_path):
+                try:
+                    child_records = parse_trajectory(sub_file)
+                except (OSError, UnicodeDecodeError) as exc:
+                    logging.getLogger(__name__).warning(
+                        "Skipping unreadable Codex child %s: %s", sub_file, exc
+                    )
+                    continue
                 child_specs.append(
                     ChildSpec(
-                        records=parse_trajectory(sub_file),
+                        records=child_records,
                         spawn_depth=depth,
                         session_id=meta.get("session_id") or sub_file.stem,
                     )

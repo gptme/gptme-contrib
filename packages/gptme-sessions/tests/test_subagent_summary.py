@@ -1302,3 +1302,25 @@ def test_codex_summary_depth_is_relative_to_selected_parent(tmp_path, reported_d
     assert summary["subagents_total"] == 2
     assert summary["spawns_total"] == 1
     assert summary["subagents_depth_max"] == 2
+
+
+@pytest.mark.parametrize("bad_name", ["rollout-aaa.jsonl", "rollout-zzz.jsonl"])
+def test_codex_unreadable_child_keeps_healthy_siblings(tmp_path, monkeypatch, caplog, bad_name):
+    """A child disappearing after header discovery must not abort sibling parsing."""
+    import gptme_sessions.signals as signals
+
+    parent = _codex_rollout(tmp_path / "rollout-parent.jsonl", "p", spawn=True)
+    bad = _codex_rollout(tmp_path / bad_name, "bad", parent="p")
+    _codex_rollout(tmp_path / "rollout-child.jsonl", "c", parent="p")
+    original = signals.parse_trajectory
+
+    def parse(path):
+        if path == bad:
+            raise FileNotFoundError("child disappeared after header scan")
+        return original(path)
+
+    monkeypatch.setattr(signals, "parse_trajectory", parse)
+    summary = signals.extract_from_path(parent)["subagent_summary"]
+    assert summary["subagents_total"] == 1
+    assert summary["spawns_total"] == 1
+    assert str(bad) in caplog.text
