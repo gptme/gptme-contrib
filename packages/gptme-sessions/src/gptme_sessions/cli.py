@@ -467,18 +467,30 @@ def _discover_all(
     return discovered
 
 
+def _normalize_project(project: str | Path) -> str:
+    """Absolute, user-expanded path without a trailing slash."""
+    return os.path.abspath(os.path.expanduser(str(project))).rstrip("/") or "/"
+
+
 def _project_key(project: str | Path) -> str:
-    """Comparable key for a project path.
+    """Lossy key matching Claude Code's project-dir naming.
 
     Claude Code names project dirs by replacing every non-alphanumeric
     character with ``-``, and decoding that back is lossy (``/a/b-c`` and
-    ``/a/b/c`` both decode to ``/a/b/c``). Mapping both sides through the
-    same encoding makes a requested path match its decoded CC project.
+    ``/a/b/c`` both decode to ``/a/b/c``). Only use this for claude-code
+    entries; other harnesses keep the exact path.
     """
-    raw = str(project)
-    if raw.startswith("/"):
-        raw = os.path.abspath(os.path.expanduser(raw))
-    return re.sub(r"[^A-Za-z0-9]", "-", raw.rstrip("/"))
+    return re.sub(r"[^A-Za-z0-9]", "-", _normalize_project(project))
+
+
+def _project_matches(entry: dict, wanted: set[str]) -> bool:
+    """Whether a discovered entry's project is one of the normalized ``wanted`` paths."""
+    project = entry.get("project")
+    if not project:
+        return False
+    if entry.get("harness") == "claude-code":
+        return _project_key(project) in {_project_key(w) for w in wanted}
+    return _normalize_project(project) in wanted
 
 
 def _count_unsynced(
@@ -2607,10 +2619,8 @@ def sync(
     since_days_effective = since_days if since_days is not None else 36500  # ~100 years
     discovered = _discover_all(since_days=since_days_effective, harness_filter=harness)
     if projects:
-        wanted = {_project_key(p) for p in projects}
-        discovered = [
-            e for e in discovered if e.get("project") and _project_key(e["project"]) in wanted
-        ]
+        wanted = {_normalize_project(p) for p in projects}
+        discovered = [e for e in discovered if _project_matches(e, wanted)]
 
     if not discovered:
         window_desc = f"last {_fmt_since(since_days)}"
