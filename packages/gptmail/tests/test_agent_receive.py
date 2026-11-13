@@ -294,6 +294,27 @@ def test_receive_only_delivery_uses_configured_command(
     assert calls[0]["argv"][-1] == "uv run gptmail agent receive"
 
 
+def test_pending_fleet_skips_receive_only_peers(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``pending --fleet`` must not SSH (or warn) at a shell-less peer."""
+    import json
+
+    import yaml
+
+    (workspace / "messages" / "agents.yaml").write_text(
+        yaml.dump({"carol": {"ssh": "carol@carol", "delivery": "receive-only"}})
+    )
+    calls: list[tuple] = []
+    monkeypatch.setattr(agent_cli, "_remote_pending_rows", lambda *a, **k: calls.append(a) or [])
+
+    result = CliRunner().invoke(agent, ["pending", "--for", "erik", "--fleet", "--json"])
+    assert result.exit_code == 0, result.output
+    assert calls == []
+    assert "missing required key" not in result.output
+    assert json.loads(result.stdout) == []
+
+
 def test_legacy_delivery_still_requires_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

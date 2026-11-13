@@ -888,6 +888,10 @@ def _fleet_pending_rows(
     for agent_name, agent in agents.items():
         if agent_name == self_name:
             continue
+        # Receive-only and pull-only peers expose no outbox to read over SSH:
+        # anything they owe us arrives as a pushed message in our own inbox.
+        if agent.get("delivery") in ("pull-only", "receive-only"):
+            continue
         remote_rows = _remote_pending_rows(
             agent_name,
             agent,
