@@ -422,6 +422,10 @@ class SessionRecord:
     # Callers define kind/id and may include parent_session_id, task, pr, or
     # dispatcher-specific metadata. None means the cause was not recorded.
     dispatch_cause: dict[str, Any] | None = None
+    # Id of the harness-selector decision that chose this session's route, as
+    # written on that decision's log row. Lets a replay join selector decisions
+    # to the sessions they produced without timestamp proximity.
+    selector_decision_id: str | None = None
 
     # Work classification
     category: str | None = None  # inferred from commits/files (what actually happened)

@@ -424,3 +424,37 @@ def test_post_session_reads_dispatch_cause_from_agent_env(tmp_path: Path, monkey
         duration_seconds=10,
     )
     assert result.record.dispatch_cause == {"kind": "agent-env", "id": "run-7"}
+
+
+# --- selector_decision_id (join to the harness-selector decision row) -------
+
+
+def test_post_session_records_selector_decision_id_from_env(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("AGENT_SELECTOR_DECISION_ID", raising=False)
+    monkeypatch.setenv("BOB_SELECTOR_DECISION_ID", "pm-123-1700000000")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store, harness="gptme", model="sonnet", session_id="s1", duration_seconds=10
+    )
+    assert result.record.selector_decision_id == "pm-123-1700000000"
+    reloaded = SessionRecord.from_dict(result.record.to_dict())
+    assert reloaded.selector_decision_id == "pm-123-1700000000"
+
+
+def test_post_session_selector_decision_id_argument_wins_and_default_none(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.delenv("BOB_SELECTOR_DECISION_ID", raising=False)
+    monkeypatch.setenv("AGENT_SELECTOR_DECISION_ID", "from-env")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="sonnet",
+        session_id="s2",
+        selector_decision_id="explicit",
+        duration_seconds=10,
+    )
+    assert result.record.selector_decision_id == "explicit"
+    monkeypatch.delenv("AGENT_SELECTOR_DECISION_ID")
+    assert SessionRecord(session_id="s3").selector_decision_id is None
