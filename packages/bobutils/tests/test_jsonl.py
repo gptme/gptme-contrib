@@ -2,7 +2,10 @@
 found in the #1043 duplicate inventory."""
 
 import gzip
+import json
 import logging
+import os
+from threading import Thread
 
 import pytest
 from bobutils.jsonl import iter_jsonl, load_jsonl
@@ -85,6 +88,89 @@ def test_tail(tmp_path):
     assert load_jsonl(path, tail=3) == [{"n": 7}, {"n": 8}, {"n": 9}]
     assert load_jsonl(path, tail=0) == []
     assert len(load_jsonl(path, tail=100)) == 10
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r", "\r\n"])
+def test_tail_preserves_universal_newlines(tmp_path, newline):
+    path = tmp_path / "ledger.jsonl"
+    path.write_bytes(newline.join(['{"n": 1}', '{"n": 2}', ""]).encode())
+    assert list(iter_jsonl(path)) == [{"n": 1}, {"n": 2}]
+    assert load_jsonl(path, tail=1) == [{"n": 2}]
+    assert load_jsonl(path, tail=10) == [{"n": 1}, {"n": 2}]
+
+
+@pytest.mark.parametrize("whitespace", ["\u00a0", "\u2003", "\u202f", "\u3000"])
+def test_tail_preserves_unicode_whitespace(tmp_path, whitespace):
+    path = tmp_path / "ledger.jsonl"
+    path.write_text(
+        f'{whitespace}{{"n": 1}}{whitespace}\n{whitespace}\n', encoding="utf-8"
+    )
+    assert load_jsonl(path) == [{"n": 1}]
+    assert load_jsonl(path, tail=1) == load_jsonl(path)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires named pipes")
+def test_tail_preserves_fifo_loading(tmp_path):
+    path = tmp_path / "ledger.jsonl"
+    os.mkfifo(path)
+    writer = Thread(
+        target=path.write_text,
+        args=('{"n": 1}\n',),
+        kwargs={"encoding": "utf-8"},
+        daemon=True,
+    )
+    writer.start()
+    try:
+        assert load_jsonl(path, tail=1) == [{"n": 1}]
+    finally:
+        writer.join(timeout=2)
+    assert not writer.is_alive()
+
+
+def test_tail_propagates_encountered_decoding_errors(tmp_path):
+    path = tmp_path / "ledger.jsonl"
+    path.write_bytes(b'{"n":1}\n\xff\n{"n":2}\n')
+    with pytest.raises(UnicodeDecodeError):
+        load_jsonl(path)
+    with pytest.raises(UnicodeDecodeError):
+        load_jsonl(path, tail=10)
+
+
+@pytest.mark.parametrize("newline", [b"\r", b"\r\n"])
+def test_tail_newline_at_block_boundary(tmp_path, newline):
+    path = tmp_path / "ledger.jsonl"
+    # The rightmost 1 MiB block starts immediately after CR (inside CRLF).
+    ending = b'{"n": 2}' + b" " * (1024 * 1024 - len(b'{"n": 2}') - len(newline) + 1)
+    path.write_bytes(b'{"n": 1}' + newline + ending)
+    full = list(iter_jsonl(path))
+    assert full == [{"n": 1}, {"n": 2}]
+    assert load_jsonl(path, tail=1) == full[-1:]
+    assert load_jsonl(path, tail=10) == full
+
+
+@pytest.mark.parametrize("tail", [0, -1])
+@pytest.mark.parametrize("on_invalid", ["raise", "warn"])
+def test_nonpositive_tail_preserves_diagnostics(dirty_file, caplog, tail, on_invalid):
+    if on_invalid == "raise":
+        with pytest.raises(ValueError, match=r"dirty\.jsonl:2: invalid JSON"):
+            load_jsonl(dirty_file, tail=tail, on_invalid=on_invalid)
+    else:
+        with caplog.at_level(logging.WARNING, logger="bobutils.jsonl"):
+            assert load_jsonl(dirty_file, tail=tail, on_invalid=on_invalid) == []
+        assert len(caplog.records) == 3
+        assert "dirty.jsonl:2: invalid JSON" in caplog.records[0].getMessage()
+
+
+def test_tail_reads_backwards_across_blocks_like_full_scan(tmp_path):
+    path = tmp_path / "ledger.jsonl"
+    pad = "é" * 1500  # multibyte rows straddling the 1 MiB block boundaries
+    lines = [json.dumps({"n": i, "pad": pad}, ensure_ascii=False) for i in range(2000)]
+    lines[1990] = "not json"
+    lines[1995] = "[1, 2]"
+    path.write_text("\n".join(lines) + "\n\n", encoding="utf-8")
+    full = list(iter_jsonl(path))
+    for tail in (1, 7, 900, 1997, 5000):
+        assert load_jsonl(path, tail=tail) == full[-tail:]
 
 
 def test_gzip_transparent(tmp_path):
