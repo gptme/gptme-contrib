@@ -66,6 +66,9 @@ _MAILBOX_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 #: A shell-free word: enough for ``--flag=value``, no metacharacters.
 _PLAIN_WORD = re.compile(r"^[-A-Za-z0-9_./@=:]+$")
 
+#: A leading ``NAME=value`` env assignment (e.g. ``AGENT_NAME=bob``).
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=[-A-Za-z0-9_./@:]*$")
+
 
 class ReceiveError(ValueError):
     """A message or invocation the receive-only endpoint refuses."""
@@ -82,6 +85,10 @@ def check_original_command(original: str | None) -> None:
     if not original or not original.strip():
         return
     tokens = original.split()
+    # A leading env assignment is how an operator sets AGENT_NAME for the
+    # addressee check; it is never executed here, so accept a plain one.
+    while tokens and _ENV_ASSIGN.fullmatch(tokens[0]):
+        tokens.pop(0)
     for prefix in _RECEIVE_PREFIXES:
         if tuple(tokens[: len(prefix)]) == prefix:
             # Arguments are ignored (the forced command decides what runs), but
