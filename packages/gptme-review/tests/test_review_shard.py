@@ -424,6 +424,33 @@ def test_shard_context_inventory_keeps_paths_as_untrusted_single_line_data(separ
     assert "spoofed instruction" not in note.splitlines()
 
 
+@pytest.mark.parametrize("header_extra_bytes", [0, 100])
+def test_oversized_header_does_not_force_one_shard_per_line(header_extra_bytes):
+    path = "x" * 300 + ".py"
+    header = f"diff --git a/{path} b/{path}\n--- /dev/null\n+++ b/{path}\n"
+    budget = len(header.encode()) - header_extra_bytes
+    additions = [f"+{i}\n" for i in range(3000)]
+    diff = header + "@@ -0,0 +1,3000 @@\n" + "".join(additions)
+    plan = shard.plan_shards(diff, budget=budget)
+    # An indivisible header cannot fit, but body chunks should still use the
+    # budget rather than multiplying the oversized header once per source line.
+    assert 1 < len(plan) < 300
+    assert all(budget < part.nbytes <= len(header.encode()) + budget for part in plan)
+    rebuilt = []
+    next_line = 1
+    for part in plan:
+        for section in part.sections:
+            hunk = section.text[len(header) :].splitlines(keepends=True)
+            match = shard._HUNK_HEADER_RE.fullmatch(hunk[0].rstrip("\n"))
+            assert match
+            assert int(match[3]) == next_line
+            assert int(match[4] or 1) == len(hunk) - 1
+            next_line += len(hunk) - 1
+            rebuilt.extend(hunk[1:])
+    assert rebuilt == additions
+    assert next_line == 3001
+
+
 @pytest.mark.parametrize("budget", [128, 512, 1000])
 def test_small_budget_still_bounds_splittable_hunks(budget):
     diff = (

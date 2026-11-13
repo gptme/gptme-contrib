@@ -320,7 +320,10 @@ def split_section_by_hunks(section: FileSection, budget: int) -> list[FileSectio
             hunks.append([line])
         else:
             hunks[-1].append(line)
-    room = max(1, budget - _nbytes(header_text))
+    header_bytes = _nbytes(header_text)
+    # An indivisible header may already exhaust the cap. In that case, bound
+    # the body by the budget instead of repeating that header once per line.
+    room = budget - header_bytes if budget > header_bytes else budget
     units: list[list[str]] = []
     for hunk in hunks:
         if _nbytes("".join(hunk)) > room:
