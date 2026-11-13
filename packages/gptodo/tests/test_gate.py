@@ -15,6 +15,7 @@ from gptodo.gate import (
     validate_gate,
 )
 from gptodo.lifecycle import TransitionError, mutate_task
+from gptodo.utils import load_tasks
 
 DECISION = {
     "kind": "decision",
@@ -150,6 +151,11 @@ def test_mutate_task_refuses_new_invalid_gate(tmp_path: Path) -> None:
         ({"gate": dict(DECISION, deadline="next tuesday")}, "gate.deadline must be an ISO"),
         ({"gate": dict(DECISION, deadline=7)}, "gate.deadline must be an ISO"),
         ({"gate": dict(DECISION, on_timeout="ask-again")}, "gate.on_timeout must be one of"),
+        ({"gate": dict(DECISION, on_timeout=["escalate"])}, "gate.on_timeout must be one of"),
+        (
+            {"gate": dict(DECISION, on_timeout={"action": "escalate"})},
+            "gate.on_timeout must be one of",
+        ),
         ({"gate": dict(DECISION, reversible="no")}, "gate.reversible must be true or false"),
         ({"gate": {"kind": "task"}}, "must name the task id"),
         (
@@ -161,6 +167,20 @@ def test_mutate_task_refuses_new_invalid_gate(tmp_path: Path) -> None:
 def test_malformed_gate_fields_are_reported(meta: dict, needle: str) -> None:
     assert any(needle in e for e in validate_gate(meta))
     assert parse_gate(meta) is None
+
+
+@pytest.mark.parametrize("on_timeout", [["escalate"], {"action": "escalate"}])
+def test_malformed_timeout_keeps_task_loadable_and_editable(tmp_path: Path, on_timeout) -> None:
+    path = _write(tmp_path, dict(DECISION, on_timeout=on_timeout))
+    errors: list = []
+    tasks = load_tasks(tmp_path, errors_out=errors)
+    assert errors == []
+    assert len(tasks) == 1
+    assert any("gate.on_timeout must be one of" in issue for issue in tasks[0].issues)
+    mutate_task(path, patch={"priority": "high"})
+    assert frontmatter.load(path).metadata["priority"] == "high"
+    mutate_task(path, patch={"gate": dict(DECISION)})
+    assert validate_gate(frontmatter.load(path).metadata) == []
 
 
 def test_datetime_deadline_object_is_accepted() -> None:

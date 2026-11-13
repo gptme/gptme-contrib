@@ -149,7 +149,9 @@ def validate_gate(metadata: dict[str, Any]) -> list[str]:
             errors.append(f"gate.{field} must be an ISO date or datetime")
 
     on_timeout = raw.get("on_timeout")
-    if on_timeout is not None and on_timeout not in {o.value for o in OnTimeout}:
+    if on_timeout is not None and (
+        not isinstance(on_timeout, str) or on_timeout not in {o.value for o in OnTimeout}
+    ):
         errors.append("gate.on_timeout must be one of: " + ", ".join(o.value for o in OnTimeout))
     reversible = raw.get("reversible")
     if reversible is not None and not isinstance(reversible, bool):
