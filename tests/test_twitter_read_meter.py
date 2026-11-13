@@ -153,6 +153,46 @@ def test_meter_weights_top_level_users(tw, monkeypatch, route):
     assert tw.daily_reads_used() == 2
 
 
+@pytest.mark.parametrize(
+    "username", ["tweets", "mentions", "liked_tweets", "bookmarks"]
+)
+def test_username_lookup_is_not_a_timeline(tw, username):
+    assert (
+        tw.count_billable_reads(
+            {"data": {"id": "1"}}, f"/2/users/by/username/{username}"
+        )
+        == 2
+    )
+
+
+def test_loaded_client_keeps_its_profile_budget(tw, monkeypatch, tmp_path):
+    import json
+
+    monkeypatch.setattr(tw, "_load_environment", lambda: None)
+    monkeypatch.setenv("TWITTER_BEARER_TOKEN", "test-token")
+    monkeypatch.setattr(
+        tw.tweepy.client.BaseClient,
+        "request",
+        lambda *a, **kw: SimpleNamespace(ok=True, json=lambda: {"data": {"id": "1"}}),
+    )
+    first_dir, second_dir = tmp_path / "first", tmp_path / "second"
+    monkeypatch.setenv("TWITTER_ACCOUNT", "first")
+    monkeypatch.setenv("TWITTER_READ_COUNTER_DIR", str(first_dir))
+    monkeypatch.setenv("TWITTER_DAILY_READ_LIMIT", "1")
+    first = tw.load_twitter_client()
+    monkeypatch.setenv("TWITTER_ACCOUNT", "second")
+    monkeypatch.setenv("TWITTER_READ_COUNTER_DIR", str(second_dir))
+    monkeypatch.setenv("TWITTER_DAILY_READ_LIMIT", "10")
+    second = tw.load_twitter_client()
+    first.request("GET", "/2/tweets/1")
+    with pytest.raises(tw.DailyReadLimitReached):
+        first.request("GET", "/2/tweets/1")
+    second.request("GET", "/2/tweets/1")
+    day = tw.datetime.now(tw.timezone.utc).strftime("%Y-%m-%d")
+    assert json.loads((first_dir / f"{day}-first.json").read_text()) == {"reads": 1}
+    assert json.loads((second_dir / f"{day}-second.json").read_text()) == {"reads": 1}
+
+
 def test_read_budget_loads_dotenv_without_network(tw, monkeypatch, tmp_path):
     from click.testing import CliRunner
     from dotenv import load_dotenv

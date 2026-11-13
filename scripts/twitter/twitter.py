@@ -111,6 +111,18 @@ _METER_ACTIVE: ContextVar[bool] = ContextVar("twitter_meter_active", default=Fal
 _AUTH_IDENTITY_READ: ContextVar[bool] = ContextVar(
     "twitter_auth_identity_read", default=False
 )
+_READ_BUDGET: ContextVar[tuple[Path, str, int] | None] = ContextVar(
+    "twitter_read_budget", default=None
+)
+
+
+def _bind_read_budget(client) -> None:
+    """Keep a loaded client's budget paired with its credentials."""
+    client._read_budget = (
+        _read_counter_path().parent,
+        current_account(),
+        daily_read_limit(),
+    )
 
 
 class DailyReadLimitReached(tweepy.TweepyException):
@@ -123,12 +135,19 @@ def _read_counter_path(day: str | None = None) -> Path:
         or Path.home() / ".cache" / "twitter-read-counter"
     )
     day = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    suffix = f"-{current_account()}" if current_account() else ""
+    budget = _READ_BUDGET.get()
+    account = budget[1] if budget is not None else current_account()
+    if budget is not None:
+        base = budget[0]
+    suffix = f"-{account}" if account else ""
     return base / f"{day}{suffix}.json"
 
 
 def daily_read_limit() -> int:
     """Configured daily limit in billable reads; 0 means unlimited."""
+    budget = _READ_BUDGET.get()
+    if budget is not None:
+        return budget[2]
     try:
         return max(0, int(os.getenv(DAILY_READ_LIMIT_ENV, "0")))
     except ValueError:
@@ -152,17 +171,12 @@ def count_billable_reads(payload: object, route: str = "") -> int:
     data = payload.get("data")
     n = len(data) if isinstance(data, list) else (1 if isinstance(data, dict) else 0)
     parts = route.strip("/").split("/")
+    post_timeline = (
+        len(parts) == 4
+        and parts[3] in {"tweets", "mentions", "liked_tweets", "bookmarks"}
+    ) or (len(parts) == 5 and parts[3:] == ["timelines", "reverse_chronological"])
     user_data = (
-        len(parts) >= 2
-        and parts[1] == "users"
-        and parts[-1]
-        not in {
-            "tweets",
-            "mentions",
-            "liked_tweets",
-            "bookmarks",
-            "reverse_chronological",
-        }
+        len(parts) >= 2 and parts[1] == "users" and not post_timeline
     ) or parts[-1] in {"liking_users", "retweeted_by"}
     if user_data:
         n *= 2
@@ -181,6 +195,13 @@ def install_read_meter() -> None:
     original = base.request
 
     def metered(self, method, route, *args, **kwargs):
+        token = _READ_BUDGET.set(getattr(self, "_read_budget", None))
+        try:
+            return request_metered(self, method, route, *args, **kwargs)
+        finally:
+            _READ_BUDGET.reset(token)
+
+    def request_metered(self, method, route, *args, **kwargs):
         # Tweepy retries 429s recursively through self.request. Keep one lock
         # and count only the final response, not each unwinding retry frame.
         if str(method).upper() != "GET" or _METER_ACTIVE.get():
@@ -189,7 +210,9 @@ def install_read_meter() -> None:
         directory.mkdir(parents=True, exist_ok=True)
         # One account lock across UTC days: a retry spanning midnight must
         # serialize with today's reads, not only yesterday's counter writers.
-        lock_path = directory / f".{current_account() or 'default'}.lock"
+        budget = _READ_BUDGET.get()
+        account = budget[1] if budget is not None else current_account()
+        lock_path = directory / f".{account or 'default'}.lock"
         with open(lock_path, "a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             used = daily_reads_used()
@@ -566,6 +589,7 @@ def load_twitter_client(
 
                     # Create client with current token
                     client = tweepy.Client(saved_token, wait_on_rate_limit=True)
+                    _bind_read_budget(client)
                     client._use_user_auth = False  # OAuth 2.0: use bearer token
 
                     # Test the credentials
@@ -762,6 +786,7 @@ def load_twitter_client(
                         ],  # Pass access token directly as first argument
                         wait_on_rate_limit=True,
                     )
+                    _bind_read_budget(client)
                     client._use_user_auth = False  # OAuth 2.0: use bearer token
 
                     # Test the credentials with OAuth 2.0
@@ -839,6 +864,7 @@ def load_twitter_client(
             access_token_secret=access_secret,
             wait_on_rate_limit=True,
         )
+        _bind_read_budget(client)
         client._use_user_auth = True  # OAuth 1.0a: must use user context
 
         # Test the credentials with a simple API call
@@ -867,6 +893,7 @@ def load_twitter_client(
             return_type=tweepy.Response,
             wait_on_rate_limit=True,
         )
+        _bind_read_budget(client)
     return client
 
 
