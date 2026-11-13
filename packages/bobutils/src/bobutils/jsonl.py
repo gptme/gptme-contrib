@@ -98,11 +98,50 @@ def load_jsonl(
     ``tail=N`` returns only the last N valid rows — useful for append-only
     ledgers where only recent entries matter.
     """
-    rows = list(
-        iter_jsonl(
-            path, encoding=encoding, on_invalid=on_invalid, must_exist=must_exist
-        )
+    rows_iter = iter_jsonl(
+        path, encoding=encoding, on_invalid=on_invalid, must_exist=must_exist
     )
+    if tail is not None and tail <= 0:
+        return []
+    path = Path(path)
+    if (
+        tail is not None
+        and on_invalid == "skip"
+        and path.suffix != ".gz"
+        and encoding.lower().replace("_", "-") in ("utf-8", "utf8")
+        and path.exists()
+    ):
+        # Skip mode needs no line numbers, so read backwards and stop after
+        # ``tail`` rows instead of parsing a whole append-only ledger.
+        return _tail_rows_from_end(path, tail)
+    rows = list(rows_iter)
     if tail is not None:
-        return rows[-tail:] if tail > 0 else []
+        return rows[-tail:]
     return rows
+
+
+def _tail_rows_from_end(path: Path, tail: int) -> list[dict[str, Any]]:
+    block_size = 1024 * 1024
+    carry = b""  # leading, possibly partial line of the blocks read so far
+    rows: list[dict[str, Any]] = []  # newest first
+    with path.open("rb") as handle:
+        position = handle.seek(0, 2)
+        while position > 0:
+            size = min(block_size, position)
+            position -= size
+            handle.seek(position)
+            lines = (handle.read(size) + carry).split(b"\n")
+            carry = lines[0] if position > 0 else b""
+            for raw in reversed(lines[1:] if position > 0 else lines):
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
+                    if len(rows) == tail:
+                        return rows[::-1]
+    return rows[::-1]

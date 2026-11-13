@@ -2,6 +2,7 @@
 found in the #1043 duplicate inventory."""
 
 import gzip
+import json
 import logging
 
 import pytest
@@ -85,6 +86,18 @@ def test_tail(tmp_path):
     assert load_jsonl(path, tail=3) == [{"n": 7}, {"n": 8}, {"n": 9}]
     assert load_jsonl(path, tail=0) == []
     assert len(load_jsonl(path, tail=100)) == 10
+
+
+def test_tail_reads_backwards_across_blocks_like_full_scan(tmp_path):
+    path = tmp_path / "ledger.jsonl"
+    pad = "é" * 1500  # multibyte rows straddling the 1 MiB block boundaries
+    lines = [json.dumps({"n": i, "pad": pad}, ensure_ascii=False) for i in range(2000)]
+    lines[1990] = "not json"
+    lines[1995] = "[1, 2]"
+    path.write_text("\n".join(lines) + "\n\n", encoding="utf-8")
+    full = list(iter_jsonl(path))
+    for tail in (1, 7, 900, 1997, 5000):
+        assert load_jsonl(path, tail=tail) == full[-tail:]
 
 
 def test_gzip_transparent(tmp_path):
