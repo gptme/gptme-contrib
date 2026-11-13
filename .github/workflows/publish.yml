@@ -54,7 +54,9 @@ jobs:
 
       - name: Build package
         working-directory: packages/${{ steps.parse.outputs.package }}
-        run: uv build
+        # uv's workspace default is the root dist/, not this package's dist/.
+        # Keep artifacts beside the publish step's working directory.
+        run: uv build --out-dir dist
 
       - name: Publish to PyPI
         working-directory: packages/${{ steps.parse.outputs.package }}
