@@ -13,7 +13,8 @@ Usage:
     uv run python3 skills/home-assistant/scripts/ha.py context             # Context snapshot
     uv run python3 skills/home-assistant/scripts/ha.py --json <subcommand> # JSON output
 
-Credentials: HA_HOST and HA_API_KEY in a .env file anywhere in the CWD→root walk.
+Credentials: HA_HOST and HA_API_KEY in the environment, a .env file anywhere in the
+CWD→root walk, or ~/.config/secrets/ha.env (per-consumer file; HA_SECRETS_DIR overrides the directory).
 """
 
 import argparse
@@ -45,17 +46,41 @@ def _find_env_file() -> Path | None:
         p = parent
 
 
-_env_path = _find_env_file()
-if _env_path:
-    for _line in _env_path.read_text().splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            _v = _v.strip().strip('"').strip("'")
-            os.environ.setdefault(_k.strip(), _v)
+def _per_consumer_env_file() -> Path:
+    """Credentials kept outside the shared .env: ~/.config/secrets/ha.env."""
+    secrets_dir = os.environ.get("HA_SECRETS_DIR") or str(
+        Path.home() / ".config" / "secrets"
+    )
+    return Path(secrets_dir) / "ha.env"
 
-HA_HOST = os.environ.get("HA_HOST", "").rstrip("/")
-HA_API_KEY = os.environ.get("HA_API_KEY", "")
+
+def _load_credentials() -> tuple[str, str]:
+    """Select one source; never pair a private token with another source's host.
+
+    The first source declaring either HA variable owns both, even if incomplete.
+    Partial or empty credentials fail closed in ha_request().
+    """
+    if "HA_HOST" in os.environ or "HA_API_KEY" in os.environ:
+        return os.environ.get("HA_HOST", ""), os.environ.get("HA_API_KEY", "")
+
+    for env_path in (_find_env_file(), _per_consumer_env_file()):
+        if not env_path or not env_path.is_file():
+            continue
+        values: dict[str, str] = {}
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                if key.strip() in ("HA_HOST", "HA_API_KEY"):
+                    # Preserve the original loader's first-declaration precedence.
+                    values.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        if values:
+            return values.get("HA_HOST", ""), values.get("HA_API_KEY", "")
+    return "", ""
+
+
+HA_HOST, HA_API_KEY = _load_credentials()
+HA_HOST = HA_HOST.rstrip("/")
 TIMEOUT = 10
 
 
@@ -96,7 +121,11 @@ def _diagnose_dns(hostname: str) -> None:
 
 def ha_request(path: str, method: str = "GET", body: dict | None = None) -> Any:
     if not HA_HOST or not HA_API_KEY:
-        print("ERROR: HA_HOST and HA_API_KEY must be set in .env", file=sys.stderr)
+        print(
+            "ERROR: HA_HOST and HA_API_KEY must both be set in the same source: "
+            "the environment, a .env file, or the per-consumer ha.env file",
+            file=sys.stderr,
+        )
         sys.exit(1)
     url = f"{HA_HOST}/api/{path.lstrip('/')}"
     data = json.dumps(body).encode() if body else None

@@ -25,11 +25,20 @@ Query a Home Assistant instance for presence, sensor data, calendar events, and 
 
 ## Setup
 
-Credentials in `.env` at your agent workspace root:
-```
+Set both credentials together in the process environment, a `.env` at your agent
+workspace root, or `~/.config/secrets/ha.env` (use mode `600` for credential files).
+`HA_SECRETS_DIR` overrides the per-consumer directory.
+
+```dotenv
 HA_HOST=https://<your-ha-host>
 HA_API_KEY=<long-lived-access-token>
 ```
+
+Lookup order: process environment → first `.env` found walking from the current
+directory to root → per-consumer `ha.env`. The first source declaring either HA
+variable owns both. Partial or empty credentials fail closed; they are never
+completed from another source, so a checkout cannot redirect a private token by
+supplying only `HA_HOST`. Unrelated `.env` settings do not block the fallback.
 
 **Cloud connectivity**: If your HA instance uses Nabu Casa, the host resolves publicly
 (CNAME → `*.ui.nabu.casa`). No `/etc/hosts` entry or VPN needed.
