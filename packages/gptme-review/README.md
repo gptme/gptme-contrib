@@ -2,6 +2,15 @@
 
 Self-hosted PR-review engine, lifecycle tracking and transport admission.
 
+## Request billing evidence
+
+The request usage ledger distinguishes `openrouter_generation` (generation
+metadata), `openrouter_response` (the completion response's billed `usage.cost`)
+and `prompt_estimate` (not billing evidence). Generation metadata takes precedence;
+a failed or lagging lookup must not erase a valid response cost. The ledger keeps
+`generation_id` for later reconciliation. Missing cost remains unknown/estimated,
+not a billed zero. Subscription list-price equivalents are not OpenRouter charges.
+
 ## Large-diff shard planning
 
 `gptme_review.shard` provides the pure planning and result-merging layer used
