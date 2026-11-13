@@ -72,6 +72,7 @@ Other options: `--prompt-file`, `--timeout` (default 1800 s); `--backend` defaul
 |---------|-------------|
 | `run [PROMPT]` | One prompt on any backend, JSON result (see above) |
 | `select [--config PATH] [--state-dir DIR] [--json]` | Print the first viable `backend`/`model` from `harness-quota.toml`, skipping candidates whose binary is missing or that are blocked in the block registry. Exit 1 if none |
+| `select --lane LANE [...]` | One routing decision (backend, model, effort) from the lane policy; see [Lane policy](#lane-policy-select---lane) |
 | `autonomous` | One autonomous session. Prompt from `scripts/runs/autonomous/autonomous-prompt.txt` in the workspace, else a built-in fallback |
 | `monitoring [--org ORG]... [--repo OWNER/REPO]... [--author LOGIN] [--agent-name NAME]` | GitHub project monitoring: find PRs/issues needing action (CI failures, review comments, merge eligibility) and act on them. Defaults to the `claude-code` backend |
 | `run-item --workspace DIR [--work-file F] ...` | Execute a single project-monitoring work item (`--dry-run` prints the execution plan) |
@@ -96,6 +97,116 @@ backend  = "gptme"
 model    = "openrouter/deepseek/deepseek-chat-v3-0324:free"
 priority = 2
 ```
+
+### Lane policy: `select --lane`
+
+With `--lane`, `select` reads a lane policy from the same `harness-quota.toml` and returns one
+decision: backend, model, reasoning effort, scope, the single rule that decided, a decision id and
+the pool reading it used. Effort steps down under weekly pool pressure, a fallback list covers
+blocked or excluded arms, and the command never takes the agent down because of its own failure.
+Without `--lane` the `[[candidates]]` behaviour above is unchanged.
+
+A single-lane agent:
+
+```toml
+[routing]
+schema_version = 1
+
+[pools.claude-max]                       # provider = "claude-usage" (default)
+no_capacity_at = 0.90                    # weekly use at or above this: do not launch
+effort_steps = [{ at = 0.60, down = 1 }, { at = 0.85, to = "low" }]
+pace_guard = 0.10                        # >10 points ahead of even pace: one step down
+
+[lanes.autonomous]
+arm = "claude-code:claude-opus-5-5"      # backend:model, explicit model id
+effort = "high"
+effort_ladder = ["high", "medium", "low"]
+pool = "claude-max"
+fallback = [{ arm = "gptme:gemini/gemini-flash-latest", scope = "lights-on", on = ["auth", "blocked"] }]
+```
+
+```bash
+gptme-runloops select --lane autonomous [--class C] [--work-item ID] \
+    [--exclude BACKEND:MODEL --reason rate_limited|auth|crash]... \
+    [--default-arm BACKEND:MODEL --default-effort E] \
+    [--shadow] [--format json|shell] [--explain] [--validate] \
+    [--config PATH] [--state-dir DIR] [--log PATH]
+```
+
+| Table / key | Meaning |
+|-------------|---------|
+| `routing.schema_version` | Required, must be `1` |
+| `pools.<p>.provider` | Usage reader: `claude-usage` (default) or `none` |
+| `pools.<p>.usage_cache` | `claude-usage`: cache file of `scripts/check-claude-usage.sh` (default `/tmp/claude-usage-cache.json`) |
+| `pools.<p>.usage_command` | `claude-usage`: run this instead (list or string), e.g. `["bash", "/path/check-claude-usage.sh", "--json"]`. It runs on the launch path (a fresh scrape can take ~25 s); reading the cache is the cheap route |
+| `pools.<p>.usage_max_age_s` / `usage_timeout_s` | Older readings count as unknown (default 1800) / command timeout (default 15; a timeout reads as unknown) |
+| `pools.<p>.no_capacity_at` | Weekly use at or above this: rule `no_capacity` unless a fallback applies |
+| `pools.<p>.owner_reserve` | Share kept for the owner; sets the ceiling to `1 - owner_reserve` when `no_capacity_at` is unset |
+| `pools.<p>.effort_steps` | `{at, down = n}` or `{at, to = effort}`; the highest reached step applies (no stacking); `--validate` warns when a later step resolves to a higher effort than an earlier one |
+| `pools.<p>.pace_guard` | More than this ahead of even pace forces at least one step down (max with the step, not sum) |
+| `pools.<p>.usage_unknown` | Effort when usage is unreadable: `base` (default) or an effort on the ladder |
+| `lanes.<l>.arm` | `backend:model`; bare aliases (`opus`, `sonnet`, `haiku`, `fable`) are rejected |
+| `lanes.<l>.effort` / `effort_ladder` | Base effort and its ladder, highest first; omit both for backends without effort |
+| `lanes.<l>.pool` | Pool this lane draws from (optional) |
+| `lanes.<l>.expires` | After this date the row is still used, and decisions carry `policy_expired: true` |
+| `lanes.<l>.scope` | Scope reported for the lane arm (default none) |
+| `lanes.<l>.fallback` | Ordered `{arm, scope, on, effort}`; `on` lists triggers (`rate_limited`, `auth`, `crash`, `blocked`, `missing`, `no_capacity`); omitted `on` matches any |
+| `[lanes.<l>.<class>]` | Per-class overrides; missing keys and missing classes fall back to the lane row |
+
+Rules, first that applies: `excluded_fallback` (lane arm passed in `--exclude`; first fallback whose
+`on` matches the reason), `lane` (lane arm at base effort), `lane_pressure` (lane arm at a
+stepped-down effort), `fallback` (lane arm blocked in the block registry, binary missing, or pool at
+`no_capacity_at`), `no_capacity` (pool at its ceiling and no fallback applies), `no_arm` (lane arm
+excluded, blocked or missing and no fallback applies), `fail_open`. A `--reason` outside the trigger
+vocabulary is treated as `unspecified` (only fallbacks without `on` match it), with a note in `reason`.
+
+| Exit | Rule | Caller should |
+|------|------|---------------|
+| 0 | `lane`, `lane_pressure`, `fallback`, `excluded_fallback`, `fail_open` with `--default-arm` | Run `ROUTE_*` |
+| 76 | `no_capacity` | Skip this run (quota) |
+| 69 | `no_arm` | Run its default and report an outage; not a quota skip |
+| 2 | `fail_open` without `--default-arm` | Run its default |
+| other | (click-level failure, see below) | Run its default |
+
+`--shadow` always exits 0. **Fail open:** an unreadable or invalid config, unknown schema version,
+unknown lane or unexpected exception yields rule `fail_open` for `--default-arm` /
+`--default-effort` (exit 0). A failing, slow or stale usage reading counts as unknown: base effort,
+never `no_capacity`. Errors in one lane's row do not affect other lanes.
+
+The JSON decision has `backend`, `model`, `effort`, `scope`, `rule`, `trigger` (why the lane arm
+was not used: an exclusion reason, `blocked`, `missing` or `no_capacity`; null when it was used),
+`reason`, `lane`, `class`, `work_item`, `decision_id` (uuid4), `policy_version` (12-hex hash of the
+routing tables), `policy_expired`, `shadow`, `pool` (`name`, `used`, `pace_gap`, `age_s`, `source`;
+`pace_gap > 0` means ahead of even pace) and `skipped`. Every decision, shadow ones included, is
+appended to `<state-dir>/routing/decisions.jsonl` (or `--log`); a logging failure is only a
+warning. `--format shell` prints quoted `ROUTE_BACKEND`, `ROUTE_MODEL`, `ROUTE_EFFORT`,
+`ROUTE_SCOPE`, `ROUTE_RULE`, `ROUTE_TRIGGER`, `ROUTE_REASON` and `ROUTE_DECISION_ID` lines for
+`eval`; `--explain` writes a trace to stderr; `--validate` lists errors and warnings and exits 1
+only for errors. Record the decision id with the session (for example in its `dispatch_cause`) to
+link sessions to decisions.
+
+Treat any exit other than 0, 76 and 69 as "run your default": click-level failures (an older
+installed version without `--lane`, or `--config` pointing at a directory) exit 2 with empty stdout
+and bypass both `--default-arm` and `--shadow`. Capture the exit code without tripping `set -e`,
+and clear `ROUTE_*` before `eval` so a loop cannot reuse a previous iteration's values:
+
+```bash
+unset ROUTE_BACKEND ROUTE_MODEL ROUTE_EFFORT ROUTE_SCOPE ROUTE_RULE ROUTE_TRIGGER \
+      ROUTE_REASON ROUTE_DECISION_ID
+rc=0
+out=$(gptme-runloops select --lane autonomous --format shell \
+      --default-arm claude-code:claude-opus-5-5 --default-effort high) || rc=$?
+case "$rc" in
+  0)  eval "$out" ;;                                   # sets ROUTE_* variables
+  76) echo "no capacity, skipping"; exit 0 ;;          # quota skip
+  69) echo "routing: no arm available, running default" >&2 ;;  # outage, not quota
+  *)  echo "routing failed (rc=$rc), running default" >&2 ;;
+esac
+BACKEND="${ROUTE_BACKEND:-claude-code}" MODEL="${ROUTE_MODEL:-claude-opus-5-5}"
+EFFORT="${ROUTE_EFFORT-high}"   # set but empty: the routed backend has no effort setting
+```
+
+Run shadow calls as `gptme-runloops select --lane autonomous --shadow ... >/dev/null || true`.
 
 ## Review artifact output
 
