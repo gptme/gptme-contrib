@@ -259,6 +259,9 @@ What the receiver enforces (see `transport/receive.py`): one bounded message
 (4 MiB by default), valid frontmatter, a plain sender token, a body, an optional
 sender binding and an addressee check, then an atomic no-clobber publication with
 a filename derived from the validated fields — never from a client-supplied path.
+The addressee check compares `To` against the agent name (`AGENT_NAME`, falling
+back to the login name); when those differ, set `AGENT_NAME` in the forced command
+(`command="AGENT_NAME=bob gptmail agent receive",restrict`).
 A client-requested command other than the receive verb is refused, so
 `ssh recipient 'ls'` fails with `receive-only endpoint: refused command 'ls'`
 instead of arriving as an empty message. `gptmail agent receive` is also safe to run
