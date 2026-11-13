@@ -1106,11 +1106,11 @@ class TestSyncTimestamp:
         """
         from datetime import date
 
-        def entry(name: str, project: str | None) -> dict:
+        def entry(name: str, project: str | None, harness: str = "gptme") -> dict:
             d = tmp_path / "logs" / f"2026-03-10-{name}"
             d.mkdir(parents=True)
             return {
-                "harness": "gptme",
+                "harness": harness,
                 "path": d,
                 "model": None,
                 "session_date": date(2026, 3, 10),
@@ -1119,7 +1119,10 @@ class TestSyncTimestamp:
             }
 
         discovered = [
-            entry("ws", "/home/u/my/ws"),
+            entry("ws", "/home/u/my/ws", harness="claude-code"),
+            entry("exact", "/home/u/my-ws"),
+            # different workspace that only collides under CC's lossy encoding
+            entry("other", "/home/u/my/ws"),
             entry("tmp", "/tmp"),
             entry("none", None),
         ]
@@ -1139,8 +1142,18 @@ class TestSyncTimestamp:
             )
         assert result.exit_code == 0, result.output
         names = [r.trajectory_path for r in SessionStore(sessions_dir=store_dir).load_all()]
-        assert len(names) == 1
-        assert names[0].endswith("2026-03-10-ws")
+        assert sorted(n.rsplit("-", 1)[-1] for n in names) == ["exact", "ws"]
+
+    def test_project_filter_normalizes_requested_path(self, tmp_path: Path, monkeypatch):
+        """Relative and ~-prefixed --project values match their absolute form."""
+        from gptme_sessions.cli import _normalize_project, _project_matches
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        wanted = {_normalize_project("."), _normalize_project("~/x")}
+        assert _project_matches({"harness": "gptme", "project": str(tmp_path)}, wanted)
+        assert _project_matches({"harness": "claude-code", "project": str(tmp_path / "x")}, wanted)
+        assert not _project_matches({"harness": "gptme", "project": "/tmp/other"}, wanted)
 
     def test_sync_imports_real_start_time_from_trajectory(self, tmp_path: Path):
         """sync should record the real start time, not a noon-UTC placeholder.
