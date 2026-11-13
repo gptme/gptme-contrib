@@ -116,6 +116,23 @@ def test_push_curl_missing_is_failure(monkeypatch, capsys):
     assert "failed" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("returncode", [0, 3])
+def test_push_diagnostics_never_echo_capability_url(monkeypatch, capsys, returncode):
+    secret_url = "https://kuma.example/api/push/private-capability["
+    monkeypatch.setattr(
+        kuma_push.subprocess,
+        "run",
+        lambda *a, **k: _Completed(
+            returncode=returncode, stdout=secret_url, stderr=f"bad range: {secret_url}"
+        ),
+    )
+    assert not kuma_push.push_url(secret_url)
+    err = capsys.readouterr().err
+    assert "WARN" in err
+    assert "private-capability" not in err
+    assert "kuma.example" not in err
+
+
 def test_push_timeout_does_not_leak_capability_url(monkeypatch, capsys):
     secret_url = "https://kuma.example/api/push/private-capability"
 

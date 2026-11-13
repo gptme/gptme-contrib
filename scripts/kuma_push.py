@@ -283,15 +283,12 @@ def push_url(
         print(f"WARN: Kuma push {name} failed: {type(exc).__name__}", file=sys.stderr)
         return False
     if result.returncode != 0:
-        print(
-            f"WARN: Kuma push {name} curl rc={result.returncode}: "
-            f"{result.stderr.strip()[:200]}",
-            file=sys.stderr,
-        )
+        # curl diagnostics can echo the capability URL; log the exit code only.
+        print(f"WARN: Kuma push {name} curl rc={result.returncode}", file=sys.stderr)
         return False
     if not response_ok(result.stdout):
         print(
-            f"WARN: Kuma push {name} not acknowledged: {result.stdout.strip()[:200]}",
+            f"WARN: Kuma push {name} not acknowledged (expected JSON ok=true)",
             file=sys.stderr,
         )
         return False
