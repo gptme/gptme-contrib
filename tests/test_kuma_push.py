@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import json
 import subprocess
@@ -153,6 +154,29 @@ def test_record_ack_is_atomic_and_never_raises_on_bad_path(tmp_path, capsys):
     bad.mkdir()
     assert kuma_push.record_ack("K", path=bad) is False
     assert "could not record Kuma ack" in capsys.readouterr().err
+
+
+def test_record_ack_serializes_read_merge_replace(tmp_path):
+    target = tmp_path / "ack.json"
+    # Hold the same stable sidecar used by independent timer processes. A writer
+    # must wait before reading, then merge the update made by the lock holder.
+    with target.with_suffix(".json.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        writer = subprocess.Popen(
+            [sys.executable, str(SCRIPT), "record-ack", "B", "--ack-file", str(target)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            with pytest.raises(subprocess.TimeoutExpired):
+                writer.communicate(timeout=0.5)
+            target.write_text(json.dumps({"A": "2026-11-13T00:00:00+00:00"}))
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            writer.communicate(timeout=10)
+    assert writer.returncode == 0
+    assert set(kuma_push.load_acks(target)) == {"A", "B", "_since"}
 
 
 def _ts(**delta):

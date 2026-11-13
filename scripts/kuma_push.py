@@ -39,6 +39,7 @@ pass it to :func:`push_url` directly instead.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import subprocess
@@ -125,17 +126,24 @@ def record_ack(key: str, path: Path | None = None, now: datetime | None = None) 
     """
     path = path or ACK_FILE
     try:
-        acks = load_acks(path)
-        stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
-        # Bootstrap guard: a key that has never been acked is not "dark" until
-        # tracking has been live for one full tolerance window.
-        acks.setdefault("_since", stamp)
-        acks[key] = stamp
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".kuma-ack-")
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(acks, fh, indent=1, sort_keys=True)
-        os.replace(tmp, path)
+        # Lock a stable sidecar, not the ledger inode replaced below. Independent
+        # timers must serialize the entire read/merge/replace to retain every ack.
+        with path.with_suffix(path.suffix + ".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            acks = load_acks(path)
+            stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+            # Bootstrap guard: a key that has never been acked is not "dark" until
+            # tracking has been live for one full tolerance window.
+            acks.setdefault("_since", stamp)
+            acks[key] = stamp
+            fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".kuma-ack-")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(acks, fh, indent=1, sort_keys=True)
+                os.replace(tmp, path)
+            finally:
+                Path(tmp).unlink(missing_ok=True)
     except OSError as exc:
         print(f"WARN: could not record Kuma ack for {key}: {exc}", file=sys.stderr)
         return False
