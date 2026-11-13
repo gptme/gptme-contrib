@@ -776,3 +776,24 @@ def test_dispatch_and_arm_key_agree() -> None:
         assert resolve_cc_version(cc_dispatch_model_id(name)) == resolve_cc_version(
             name
         ), name
+
+
+def test_default_config_path_is_home_and_does_not_import_gptme(tmp_path):
+    """The default lookup must not pay for importing the whole gptme package."""
+    import os
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys; from gptme_usage.harness_models import _resolve_config_path;"
+        " print(_resolve_config_path(None), 'gptme' in sys.modules)"
+    )
+    env = {**os.environ, "HOME": str(tmp_path)}
+    out = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
+    ).stdout.split()
+    assert out == [str(tmp_path / ".config" / "gptme" / "harness-quota.toml"), "False"]

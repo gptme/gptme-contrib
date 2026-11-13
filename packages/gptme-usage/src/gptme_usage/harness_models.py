@@ -109,28 +109,21 @@ class HarnessQuotaConfig:
 
 
 def _resolve_config_path(path: Path | None) -> Path:
-    """Return the harness-quota.toml path, consulting gptme config dir when path is None."""
+    """Return the harness-quota.toml path (``~/.config/gptme`` when path is None).
+
+    This used to ask ``gptme.config.get_config()`` for a ``config_dir``, but that
+    ``Config`` never defined one, so the lookup always fell through to the home
+    path while importing the whole ``gptme`` package (~0.3 s on every call).
+    """
     if path is not None:
         return path
-    config_dir: Path | None = None
-    try:
-        from gptme.config import get_config
-
-        raw = getattr(get_config(), "config_dir", None)
-        if raw is not None:
-            config_dir = Path(str(raw))
-    except Exception:
-        pass
-    if config_dir is None:
-        config_dir = Path.home() / ".config" / "gptme"
-    return config_dir / "harness-quota.toml"
+    return Path.home() / ".config" / "gptme" / "harness-quota.toml"
 
 
 def load_quota_config(path: Path | None = None) -> HarnessQuotaConfig:
     """Load per-agent quota configuration from a TOML file.
 
-    Looks for ``~/.config/gptme/harness-quota.toml`` by default (or the path
-    returned by ``gptme.config.get_config().config_dir``).  Returns an empty
+    Looks for ``~/.config/gptme/harness-quota.toml`` by default.  Returns an empty
     HarnessQuotaConfig when the file is absent, unreadable, or Python < 3.11
     (no stdlib tomllib) and tomli is not installed.
 
