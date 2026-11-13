@@ -140,7 +140,7 @@ def _tail_rows_from_end(path: Path, tail: int) -> list[dict[str, Any]]:
                     continue
                 try:
                     row = json.loads(line.decode("utf-8").strip())
-                except (json.JSONDecodeError, UnicodeDecodeError):
+                except json.JSONDecodeError:
                     continue
                 if isinstance(row, dict):
                     rows.append(row)

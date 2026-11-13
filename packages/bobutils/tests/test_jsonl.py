@@ -107,6 +107,15 @@ def test_tail_preserves_unicode_whitespace(tmp_path, whitespace):
     assert load_jsonl(path, tail=1) == load_jsonl(path)
 
 
+def test_tail_propagates_encountered_decoding_errors(tmp_path):
+    path = tmp_path / "ledger.jsonl"
+    path.write_bytes(b'{"n":1}\n\xff\n{"n":2}\n')
+    with pytest.raises(UnicodeDecodeError):
+        load_jsonl(path)
+    with pytest.raises(UnicodeDecodeError):
+        load_jsonl(path, tail=10)
+
+
 @pytest.mark.parametrize("newline", [b"\r", b"\r\n"])
 def test_tail_newline_at_block_boundary(tmp_path, newline):
     path = tmp_path / "ledger.jsonl"
