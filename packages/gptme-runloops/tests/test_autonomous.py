@@ -365,6 +365,32 @@ def test_parse_cascade_routing_hint_propagates():
     assert intent.get("routing_hint") == "haiku"
 
 
+def test_parse_cascade_frontier_stamps_propagate():
+    """pool/frontier/experiment_cell must flow through to intent for payoff joins."""
+    data = {
+        "tier": 1,
+        "selected": {
+            "id": "pool-task",
+            "category": "strategic",
+            "state": "todo",
+            "selection_mode": "frontier_first",
+            "pool": "frontier",
+            "frontier": True,
+            "experiment_cell": "frontier-first",
+        },
+    }
+    intent = json.loads(_parse(data)[6])
+    assert intent["pool"] == "frontier"
+    assert intent["frontier"] is True
+    assert intent["experiment_cell"] == "frontier-first"
+
+
+def test_parse_cascade_frontier_stamps_absent_when_not_set():
+    data = {"tier": 1, "selected": {"id": "t", "category": "code", "state": "todo"}}
+    intent = json.loads(_parse(data)[6])
+    assert not {"pool", "frontier", "experiment_cell"} & intent.keys()
+
+
 def test_parse_cascade_routing_hint_absent_when_not_set():
     """Omitted routing_hint must stay omitted from the intent.
 
