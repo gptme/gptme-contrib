@@ -1098,6 +1098,50 @@ class TestSyncTimestamp:
         # The timestamp should start with the session date, not today
         assert gptme_records[0].timestamp.startswith("2026-03-10")
 
+    def test_sync_project_filter_keeps_only_matching_projects(self, tmp_path: Path):
+        """--project drops sessions from other project dirs (e.g. headless calls in /tmp).
+
+        The workspace path contains a hyphen, so it also checks matching against
+        Claude Code's lossy decode (``-home-u-my-ws`` -> ``/home/u/my/ws``).
+        """
+        from datetime import date
+
+        def entry(name: str, project: str | None) -> dict:
+            d = tmp_path / "logs" / f"2026-03-10-{name}"
+            d.mkdir(parents=True)
+            return {
+                "harness": "gptme",
+                "path": d,
+                "model": None,
+                "session_date": date(2026, 3, 10),
+                "session_name": name,
+                "project": project,
+            }
+
+        discovered = [
+            entry("ws", "/home/u/my/ws"),
+            entry("tmp", "/tmp"),
+            entry("none", None),
+        ]
+        store_dir = tmp_path / "store"
+        with patch("gptme_sessions.cli._discover_all", return_value=discovered):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "--sessions-dir",
+                    str(store_dir),
+                    "sync",
+                    "--since",
+                    "30d",
+                    "--project",
+                    "/home/u/my-ws/",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        names = [r.trajectory_path for r in SessionStore(sessions_dir=store_dir).load_all()]
+        assert len(names) == 1
+        assert names[0].endswith("2026-03-10-ws")
+
     def test_sync_imports_real_start_time_from_trajectory(self, tmp_path: Path):
         """sync should record the real start time, not a noon-UTC placeholder.
 
