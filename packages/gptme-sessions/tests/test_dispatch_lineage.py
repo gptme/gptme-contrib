@@ -429,6 +429,16 @@ def test_post_session_reads_dispatch_cause_from_agent_env(tmp_path: Path, monkey
 # --- selector_decision_id (join to the harness-selector decision row) -------
 
 
+def test_selector_decision_id_preserves_positional_constructor_order():
+    """The new join key must not displace existing positional category arguments."""
+    record = SessionRecord(
+        *(["positional", "2026-11-13T00:00:00Z"] + [None] * 15 + ["code", "research"])
+    )
+    assert record.category == "code"
+    assert record.recommended_category == "research"
+    assert record.selector_decision_id is None
+
+
 def test_post_session_records_selector_decision_id_from_env(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("AGENT_SELECTOR_DECISION_ID", raising=False)
     monkeypatch.setenv("BOB_SELECTOR_DECISION_ID", "pm-123-1700000000")
