@@ -34,6 +34,16 @@ one. Optional CLI transports use the current user's own installed tools and
 credentials; they never copy credentials from another workspace. Grok's direct
 transport reads the local CLI-owned auth file but does not refresh it.
 
+Each CLI call gets a fresh mode-0700 working directory under the current user's
+home (which must be trusted and writable). Both the subprocess cwd and any CLI
+cwd flag point there. Scratch is not placed under shared `/tmp`: ancestor
+instruction discovery could still load `/tmp/CLAUDE.md` or `/tmp/AGENTS.md` from
+an otherwise private child directory. Claude disables settings sources; Grok's
+prompt file stays inside the private directory. Scratch is removed on success
+and failure; CLI-owned audit trajectories outside it remain enabled. This
+isolates shared-directory injection, not the user's own trusted home/global
+configuration or administrator-managed policy.
+
 List-price equivalents are not billed subscription spend. Pass a price table
 explicitly, or load one with `load_prices(path)`. Without an explicit table/path,
 prices remain unknown; the portable module never guesses a brain config path.

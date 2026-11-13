@@ -14,6 +14,7 @@ import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -289,7 +290,7 @@ def _run_bounded(
     stdin_text: str | None,
     timeout: float,
     env: Mapping[str, str] | None = None,
-    cwd: str = "/tmp",
+    cwd: str,
 ) -> subprocess.CompletedProcess[str]:
     """``subprocess.run`` that kills the whole process group on timeout.
 
@@ -330,25 +331,28 @@ def codex_transport(
 ) -> tuple[str, dict, float | None]:
     """``codex exec`` one-shot over the ChatGPT subscription.
 
-    Read-only sandbox, cwd ``/tmp``: the prompt carries the diff and files, so
+    Read-only sandbox, private cwd: the prompt carries the diff and files, so
     there is nothing to read and nothing to write. Not ``--ephemeral``: the
     session file is the audit trail (same policy as ``claude_transport``).
     """
-    cmd = [
-        _resolve_bin("codex"),
-        "exec",
-        "-m",
-        reviewer.model,
-        "-s",
-        "read-only",
-        "--skip-git-repo-check",
-        "--json",
-        "-C",
-        "/tmp",
-    ]
-    if reviewer.effort:
-        cmd += ["-c", f'model_reasoning_effort="{reviewer.effort}"']
-    proc = _run_bounded([*cmd, "-"], stdin_text=prompt, timeout=timeout)
+    # Keep scratch under the user's home, not /tmp: CLIs may discover project
+    # instructions/settings in ancestors even when the leaf itself is private.
+    with tempfile.TemporaryDirectory(prefix=".gptme-review-", dir=Path.home()) as work:
+        cmd = [
+            _resolve_bin("codex"),
+            "exec",
+            "-m",
+            reviewer.model,
+            "-s",
+            "read-only",
+            "--skip-git-repo-check",
+            "--json",
+            "-C",
+            work,
+        ]
+        if reviewer.effort:
+            cmd += ["-c", f'model_reasoning_effort="{reviewer.effort}"']
+        proc = _run_bounded([*cmd, "-"], stdin_text=prompt, timeout=timeout, cwd=work)
     text = ""
     tokens: dict = {}
     for line in proc.stdout.splitlines():
@@ -396,7 +400,7 @@ def claude_transport(
         "--disable-slash-commands",
         "--strict-mcp-config",
         "--setting-sources",
-        "project",
+        "",
         "--system-prompt",
         "You are a careful senior code reviewer. Follow the output format in the "
         "user message exactly.",
@@ -405,7 +409,10 @@ def claude_transport(
         "--session-id",
         str(uuid.uuid4()),
     ]
-    proc = _run_bounded(cmd, stdin_text=prompt, timeout=timeout, env=_cc_env())
+    with tempfile.TemporaryDirectory(prefix=".gptme-review-", dir=Path.home()) as work:
+        proc = _run_bounded(
+            cmd, stdin_text=prompt, timeout=timeout, env=_cc_env(), cwd=work
+        )
     try:
         data = json.loads(proc.stdout)
     except ValueError:
@@ -449,9 +456,9 @@ def grok_cli_transport(
     with a full 420k-character prompt. The 3-turn and wall-clock caps still
     bound the run; failed/unparseable answers remain degraded-panel failures.
     """
-    path = Path(f"/tmp/ai-review-grok-{uuid.uuid4().hex}.txt")
-    path.write_text(prompt, encoding="utf-8")
-    try:
+    with tempfile.TemporaryDirectory(prefix=".gptme-review-", dir=Path.home()) as work:
+        path = Path(work) / "prompt.txt"
+        path.write_text(prompt, encoding="utf-8")
         cmd = [
             _resolve_bin("grok"),
             "--prompt-file",
@@ -473,7 +480,7 @@ def grok_cli_transport(
             "--permission-mode",
             "dontAsk",
             "--cwd",
-            "/tmp",
+            work,
         ]
         if reviewer.effort:
             cmd += ["--reasoning-effort", reviewer.effort]
@@ -482,9 +489,8 @@ def grok_cli_transport(
             stdin_text=None,
             timeout=timeout,
             env={**os.environ, **GROK_ENV_OVERRIDES},
+            cwd=work,
         )
-    finally:
-        path.unlink(missing_ok=True)
     text = (proc.stdout or "").strip()
     if proc.returncode != 0 or not text:
         raise _transport_error("grok", proc)
@@ -521,10 +527,11 @@ def copilot_transport(
         "json",
         "--reasoning-effort",
         "low",
-        "-C",
-        "/tmp",
     ]
-    proc = _run_bounded(cmd, stdin_text=prompt, timeout=timeout)
+    with tempfile.TemporaryDirectory(prefix=".gptme-review-", dir=Path.home()) as work:
+        proc = _run_bounded(
+            [*cmd, "-C", work], stdin_text=prompt, timeout=timeout, cwd=work
+        )
     text = ""
     usage: dict = {}
     for line in proc.stdout.splitlines():

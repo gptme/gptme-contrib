@@ -310,7 +310,7 @@ class TestTransports:
         text, tokens, cost = panel.claude_transport(CLAUDE_SONNET, "P", 5)
         cmd = seen["cmd"]
         assert cmd[cmd.index("--tools") + 1] == ""
-        assert cmd[cmd.index("--setting-sources") + 1] == "project"
+        assert cmd[cmd.index("--setting-sources") + 1] == ""
         assert "--no-session-persistence" not in cmd
         assert "CLAUDECODE" not in seen["env"]
         assert (text, cost, tokens["input_tokens"], tokens["output_tokens"]) == (
@@ -417,9 +417,21 @@ class TestTransports:
         assert panel._resolve_bin("fakecli") == str(tmp_path / "fakecli")
         assert panel._resolve_bin("nothere") == "nothere"
 
-    def test_run_bounded_kills_on_timeout(self):
+    def test_run_bounded_kills_on_timeout(self, tmp_path):
         with pytest.raises(ReviewError, match="timed out"):
-            panel._run_bounded(["sleep", "30"], stdin_text=None, timeout=0.3)
+            panel._run_bounded(
+                ["sleep", "30"], stdin_text=None, timeout=0.3, cwd=str(tmp_path)
+            )
+
+    def test_run_bounded_uses_explicit_cwd(self, tmp_path):
+        proc = panel._run_bounded(
+            [sys.executable, "-c", "import os; print(os.getcwd())"],
+            stdin_text=None,
+            timeout=5,
+            cwd=str(tmp_path),
+        )
+        assert proc.returncode == 0
+        assert Path(proc.stdout.strip()) == tmp_path
 
 
 class TestGrokDirectTransport:
@@ -888,3 +900,62 @@ def test_consensus_reports_rejected_findings(monkeypatch):
     )
     assert not findings
     assert usage["consensus_rejected"] == 1
+
+
+@pytest.mark.parametrize(
+    "reviewer,transport,cwd_flag",
+    [
+        (CODEX_SOL, panel.codex_transport, "-C"),
+        (CLAUDE_SONNET, panel.claude_transport, None),
+        (GROK_46, panel.grok_cli_transport, "--cwd"),
+        (COPILOT_GEMINI, panel.copilot_transport, "-C"),
+    ],
+)
+@pytest.mark.parametrize("fails", [False, True])
+def test_cli_workdir_is_private_and_removed(
+    monkeypatch, reviewer, transport, cwd_flag, fails
+):
+    """No shared cwd, ancestor config, shared prompt file or leaked scratch on failure."""
+    seen = []
+
+    def fake(cmd, **kw):
+        cwd = Path(kw.get("cwd", "/tmp"))
+        seen.append(cwd)
+        assert cwd != Path("/tmp"), "reviewer must not execute in shared /tmp"
+        # CLIs can walk upward for instructions/settings: a 0700 leaf inside
+        # /tmp still leaves /tmp/CLAUDE.md and /tmp/AGENTS.md in that walk.
+        assert cwd.parent == Path.home()
+        assert cwd.stat().st_mode & 0o777 == 0o700
+        if cwd_flag:
+            assert cmd[cmd.index(cwd_flag) + 1] == str(cwd)
+        if reviewer.transport == "grok":
+            prompt_file = Path(cmd[cmd.index("--prompt-file") + 1])
+            assert prompt_file.parent == cwd
+            assert prompt_file.read_text() == "PROMPT"
+            assert list(cwd.iterdir()) == [prompt_file]
+        else:
+            assert not list(cwd.iterdir())
+        if reviewer.transport == "claude":
+            assert cmd[cmd.index("--setting-sources") + 1] == ""
+        if fails:
+            raise ReviewError("synthetic transport failure")
+        events = [
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}},
+            {"type": "assistant.message", "data": {"content": "ok"}},
+            TestCopilotTransport().checkpoint(),
+        ]
+        output = (
+            json.dumps({"result": "ok"})
+            if reviewer.transport == "claude"
+            else "\n".join(json.dumps(e) for e in events)
+        )
+        return subprocess.CompletedProcess(cmd, 0, output, "")
+
+    monkeypatch.setattr(panel, "_run_bounded", fake)
+    if fails:
+        with pytest.raises(ReviewError, match="synthetic transport failure"):
+            transport(reviewer, "PROMPT", 5)
+    else:
+        transport(reviewer, "PROMPT", 5)
+    assert len(seen) == 1
+    assert not seen[0].exists()
