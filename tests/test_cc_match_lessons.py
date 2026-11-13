@@ -1546,6 +1546,11 @@ def test_format_lessons_default_event_keeps_full_body(hook):
 # --- fixed-prompt repeat window (gptme/gptme-contrib#2170) ---
 
 
+def prompt_repeat_result(hook, *args, **kwargs):
+    with hook.check_prompt_repeat(*args, **kwargs) as result:
+        return result
+
+
 def test_prompt_repeat_window_injects_once_per_window(hook, tmp_path):
     """A fixed launcher prompt injects once per window, not on every run.
 
@@ -1555,8 +1560,8 @@ def test_prompt_repeat_window_injects_once_per_window(hook, tmp_path):
     state_dir = tmp_path / "state"
     workspace = tmp_path / "ws"
     outcomes = [
-        hook.check_prompt_repeat(
-            "fixed launcher prompt", workspace, window=20, state_dir=state_dir
+        prompt_repeat_result(
+            hook, "fixed launcher prompt", workspace, window=20, state_dir=state_dir
         )[0]
         for _ in range(60)
     ]
@@ -1568,8 +1573,12 @@ def test_prompt_repeat_window_distinct_prompts_always_inject(hook, tmp_path):
     """Different prompts never collide inside the window."""
     state_dir = tmp_path / "state"
     outcomes = [
-        hook.check_prompt_repeat(
-            f"prompt number {index}", tmp_path / "ws", window=20, state_dir=state_dir
+        prompt_repeat_result(
+            hook,
+            f"prompt number {index}",
+            tmp_path / "ws",
+            window=20,
+            state_dir=state_dir,
         )[0]
         for index in range(30)
     ]
@@ -1582,8 +1591,8 @@ def test_prompt_repeat_window_zero_disables(hook, tmp_path):
     state_dir = tmp_path / "state"
     for _ in range(3):
         assert (
-            hook.check_prompt_repeat(
-                "same prompt", tmp_path, window=0, state_dir=state_dir
+            prompt_repeat_result(
+                hook, "same prompt", tmp_path, window=0, state_dir=state_dir
             )[0]
             is False
         )
@@ -1595,20 +1604,20 @@ def test_prompt_repeat_window_is_per_workspace(hook, tmp_path):
     workspace_a = tmp_path / "a"
     workspace_b = tmp_path / "b"
     assert (
-        hook.check_prompt_repeat(
-            "same prompt", workspace_a, window=20, state_dir=state_dir
+        prompt_repeat_result(
+            hook, "same prompt", workspace_a, window=20, state_dir=state_dir
         )[0]
         is False
     )
     assert (
-        hook.check_prompt_repeat(
-            "same prompt", workspace_b, window=20, state_dir=state_dir
+        prompt_repeat_result(
+            hook, "same prompt", workspace_b, window=20, state_dir=state_dir
         )[0]
         is False
     )
     assert (
-        hook.check_prompt_repeat(
-            "same prompt", workspace_a, window=20, state_dir=state_dir
+        prompt_repeat_result(
+            hook, "same prompt", workspace_a, window=20, state_dir=state_dir
         )[0]
         is True
     )
@@ -1618,14 +1627,14 @@ def test_prompt_repeat_window_strips_surrounding_whitespace(hook, tmp_path):
     """A trailing newline is transport noise, not a different prompt."""
     state_dir = tmp_path / "state"
     assert (
-        hook.check_prompt_repeat(
-            "same prompt\n", tmp_path, window=20, state_dir=state_dir
+        prompt_repeat_result(
+            hook, "same prompt\n", tmp_path, window=20, state_dir=state_dir
         )[0]
         is False
     )
     assert (
-        hook.check_prompt_repeat(
-            "  same prompt  ", tmp_path, window=20, state_dir=state_dir
+        prompt_repeat_result(
+            hook, "  same prompt  ", tmp_path, window=20, state_dir=state_dir
         )[0]
         is True
     )
@@ -1737,3 +1746,184 @@ def test_main_pretooluse_ignores_prompt_window(hook, tmp_path, monkeypatch):
         hook.main()
 
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    "failure_point", ["scan_lessons", "format_lessons", "_emit_context"]
+)
+def test_failed_prompt_processing_does_not_suppress_retry(
+    hook, tmp_path, monkeypatch, failure_point
+):
+    _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    payload = {"session_id": "retry", "cwd": str(tmp_path), "prompt": "fixed prompt"}
+    monkeypatch.setattr(hook, "_STDIN_CACHE", json.dumps(payload))
+    original = getattr(hook, failure_point)
+
+    def fail(*args, **kwargs):
+        raise TimeoutError("hook budget exhausted")
+
+    monkeypatch.setattr(hook, failure_point, fail)
+    with pytest.raises(TimeoutError):
+        hook.main()
+    monkeypatch.setattr(hook, failure_point, original)
+    with pytest.raises(SystemExit):
+        hook.main()
+    receipts = [
+        json.loads(line)
+        for line in (tmp_path / "cc-session-retry-lessons-receipts.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert receipts[-1]["outcome"] == "emitted"
+
+
+@pytest.mark.parametrize("scope", ["cwd", "repo", "category"])
+def test_main_prompt_repeat_isolates_matching_scope(hook, tmp_path, monkeypatch, scope):
+    _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    payload = {"session_id": "scope", "cwd": str(tmp_path), "prompt": "fixed prompt"}
+    for index in range(2):
+        if scope == "cwd":
+            payload["cwd"] = str(tmp_path / str(index))
+        elif scope == "repo":
+            monkeypatch.setenv("GPTME_CURRENT_REPO", f"org/repo-{index}")
+        else:
+            monkeypatch.setattr(hook, "detect_session_category", lambda: str(index))
+        monkeypatch.setattr(hook, "_STDIN_CACHE", json.dumps(payload))
+        with pytest.raises(SystemExit):
+            hook.main()
+    receipts = [
+        json.loads(line)
+        for line in (tmp_path / "cc-session-scope-lessons-receipts.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert [row["outcome"] for row in receipts] == ["emitted", "emitted"]
+
+
+def test_parallel_prompt_processing_injects_once(hook, tmp_path, monkeypatch):
+    import io
+    import multiprocessing
+    import time
+
+    _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch)
+    ctx = multiprocessing.get_context("fork")
+    ready = ctx.Barrier(4)
+    results = ctx.Queue()
+    scan = hook.scan_lessons
+
+    def slow_scan(dirs):
+        time.sleep(0.1)
+        return scan(dirs)
+
+    monkeypatch.setattr(hook, "scan_lessons", slow_scan)
+
+    def run(index):
+        hook._STDIN_CACHE = json.dumps(
+            {
+                "session_id": f"parallel-{index}",
+                "cwd": str(tmp_path),
+                "prompt": "fixed prompt",
+            }
+        )
+        sys.stdout = io.StringIO()
+        ready.wait(timeout=5)
+        try:
+            hook.main()
+        except SystemExit:
+            pass
+        results.put(json.loads(sys.stdout.getvalue()))
+
+    processes = [ctx.Process(target=run, args=(i,)) for i in range(4)]
+    for process in processes:
+        process.start()
+    try:
+        outputs = [results.get(timeout=10) for _ in processes]
+    finally:
+        for process in processes:
+            process.join(timeout=5)
+            if process.is_alive():
+                process.kill()
+                process.join()
+    assert all(process.exitcode == 0 for process in processes)
+    assert sum("additionalContext" in out["hookSpecificOutput"] for out in outputs) == 1
+    state_files = list((tmp_path / "state").glob("prompt-window-*.json"))
+    assert len(state_files) == 1
+    assert json.loads(state_files[0].read_text())["seq"] == 4
+
+
+def test_prompt_window_state_io_failure_fails_open(hook, tmp_path):
+    state_dir = tmp_path / "not-a-directory"
+    state_dir.write_text("blocked")
+    assert (
+        prompt_repeat_result(hook, "prompt", tmp_path, state_dir=state_dir)[0] is False
+    )
+
+
+def test_prompt_window_lock_timeout_propagates_and_releases(
+    hook, tmp_path, monkeypatch
+):
+    original = hook.fcntl.flock
+
+    def timeout(*args):
+        raise TimeoutError("hook budget exhausted while waiting for lock")
+
+    monkeypatch.setattr(hook.fcntl, "flock", timeout)
+    with pytest.raises(TimeoutError):
+        prompt_repeat_result(hook, "prompt", tmp_path, state_dir=tmp_path)
+    monkeypatch.setattr(hook.fcntl, "flock", original)
+    assert (
+        prompt_repeat_result(hook, "prompt", tmp_path, state_dir=tmp_path)[0] is False
+    )
+
+
+def test_prompt_window_process_death_allows_retry(hook, tmp_path):
+    import multiprocessing
+
+    ctx = multiprocessing.get_context("fork")
+    acquired = ctx.Event()
+    release = ctx.Event()
+
+    def killed_processing():
+        with hook.check_prompt_repeat("prompt", tmp_path, state_dir=tmp_path):
+            acquired.set()
+            release.wait(timeout=10)
+
+    process = ctx.Process(target=killed_processing)
+    process.start()
+    try:
+        assert acquired.wait(timeout=5)
+    finally:
+        process.kill()
+        process.join(timeout=5)
+    assert (
+        prompt_repeat_result(hook, "prompt", tmp_path, state_dir=tmp_path)[0] is False
+    )
+
+
+def test_successful_no_match_is_recorded(hook, tmp_path, monkeypatch):
+    _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setattr(hook, "score_lessons", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        hook,
+        "_STDIN_CACHE",
+        json.dumps(
+            {
+                "session_id": "no-match",
+                "cwd": str(tmp_path),
+                "prompt": "fixed prompt",
+            }
+        ),
+    )
+    for _ in range(2):
+        with pytest.raises(SystemExit):
+            hook.main()
+    receipts = [
+        json.loads(line)
+        for line in (tmp_path / "cc-session-no-match-lessons-receipts.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert [row["reason"] for row in receipts] == ["no_match", "fixed_prompt_repeat"]

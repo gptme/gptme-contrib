@@ -37,6 +37,7 @@ under workspace/state/ and created automatically on first use.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import inspect
 import json
@@ -52,6 +53,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Collection
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -1120,7 +1122,9 @@ def _prompt_window_file(workspace: Path, state_dir: Path | None = None) -> Path:
 def _load_prompt_window(path: Path) -> dict:
     try:
         data = json.loads(path.read_text())
-    except Exception:
+    except TimeoutError:
+        raise
+    except (OSError, ValueError):
         return {"seq": 0, "hashes": {}}
     if not isinstance(data, dict):
         return {"seq": 0, "hashes": {}}
@@ -1140,20 +1144,24 @@ def _save_prompt_window(path: Path, state: dict) -> None:
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(state))
         tmp.replace(path)
-    except Exception:
+    except TimeoutError:
+        raise
+    except OSError:
         pass  # Fail-open: a state error must never change hook output.
 
 
+@contextmanager
 def check_prompt_repeat(
     prompt_text: str,
     workspace: Path,
     *,
     window: int | None = None,
     state_dir: Path | None = None,
-) -> tuple[bool, str]:
-    """Record this prompt and report whether prompt-time matching should skip.
+    scope: tuple = (),
+):
+    """Serialize checking and successful processing of a scoped prompt.
 
-    Returns ``(repeat, prompt_digest)``. ``repeat`` is True when the same prompt
+    Yields ``(repeat, prompt_digest)``. ``repeat`` is True when the same prompt
     was matched within the last ``window`` prompt events for this workspace. The
     caller then emits an empty payload (reason ``fixed_prompt_repeat``) instead of
     re-injecting the same documents that a fixed launcher prompt always matches.
@@ -1162,17 +1170,26 @@ def check_prompt_repeat(
     was, so the entry ages out of the window and the prompt injects again after
     ``window`` events — otherwise a permanently fixed prompt would be recorded
     forever by its own repeats and never inject at all. This is a cooldown, not a
-    permanent block. ``window == 0`` disables the check. Fail-open on any state
-    error: report a non-repeat so the hook behaves as it did before.
+    permanent block. The caller must return normally after emitting its decision;
+    exceptions (including SystemExit) do not commit the position. ``window == 0``
+    disables the check. State I/O errors fail open, but budget timeouts propagate.
     """
     # Surrounding whitespace is transport noise, not user intent: strip so a
     # prompt that differs only by a trailing newline counts as the same prompt.
-    digest = hashlib.sha256(prompt_text.strip().encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(
+        json.dumps([prompt_text.strip(), scope]).encode("utf-8")
+    ).hexdigest()
     size = prompt_repeat_window() if window is None else max(int(window), 0)
     if size == 0:
-        return False, digest
+        yield False, digest
+        return
+    lock = None
     try:
         path = _prompt_window_file(workspace, state_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Stable sidecar: replacing the JSON must not replace the lock inode.
+        lock = path.with_suffix(".lock").open("a")
+        fcntl.flock(lock, fcntl.LOCK_EX)
         state = _load_prompt_window(path)
         seq = int(state.get("seq", 0)) + 1
         hashes: dict[str, int] = {}
@@ -1187,10 +1204,22 @@ def check_prompt_repeat(
         repeat = last is not None and (seq - last) < size
         if not repeat:
             hashes[digest] = seq
+    except TimeoutError:
+        if lock is not None:
+            lock.close()
+        raise
+    except (OSError, ValueError, TypeError):
+        if lock is not None:
+            lock.close()
+        yield False, digest
+        return
+    try:
+        # Hold the lock through matching and emission. Never publish a successful
+        # position on timeout, exception or process death; close releases flock.
+        yield repeat, digest
         _save_prompt_window(path, {"seq": seq, "hashes": hashes})
-        return repeat, digest
-    except Exception:
-        return False, digest
+    finally:
+        lock.close()
 
 
 def get_already_injected(
@@ -1920,24 +1949,65 @@ def main():
         emit_empty(event_type, session_id, "empty_match_text")
         sys.exit(0)
 
+    workspace = get_workspace()
+    session_cat = detect_session_category()
+    current_repo = os.environ.get("GPTME_CURRENT_REPO") or None
+    harness = detect_harness()
+    project_cwd = hook_input.get("cwd")
+    project_workspace = (
+        Path(project_cwd)
+        if isinstance(project_cwd, str) and Path(project_cwd).is_absolute()
+        else Path.cwd()
+    )
+    scope = (str(project_workspace.resolve()), current_repo, session_cat, harness)
+
     # --- Fixed-prompt window (UserPromptSubmit only) ---
     # A launcher that sends the same boilerplate prompt every run would otherwise
     # re-inject the same documents indefinitely, because per-session dedup starts
     # empty on every run. Skipping here leaves tool-time matching intact.
-    if event_type == "UserPromptSubmit":
-        repeated, _prompt_digest = check_prompt_repeat(match_text, get_workspace())
+    window = (
+        check_prompt_repeat(match_text, workspace, scope=scope)
+        if event_type == "UserPromptSubmit"
+        else nullcontext((False, ""))
+    )
+    with window as (repeated, _prompt_digest):
         if repeated:
             emit_empty(event_type, session_id, "fixed_prompt_repeat")
-            sys.exit(0)
+        else:
+            _match_and_emit(
+                hook_input,
+                event_type,
+                session_id,
+                transcript_path,
+                match_text,
+                max_results,
+                workspace,
+                project_workspace,
+                session_cat,
+                current_repo,
+                harness,
+            )
+    sys.exit(0)
 
+
+def _match_and_emit(
+    hook_input,
+    event_type,
+    session_id,
+    transcript_path,
+    match_text,
+    max_results,
+    workspace,
+    project_workspace,
+    session_cat,
+    current_repo,
+    harness,
+):
     # --- Scan and match lessons and keyworded memories ---
-    workspace = get_workspace()
     lesson_dirs = load_lesson_dirs(workspace)
     lessons = scan_lessons(lesson_dirs)
-    lessons = filter_by_harness(lessons, detect_harness())
-    session_cat = detect_session_category()
+    lessons = filter_by_harness(lessons, harness)
     lessons = filter_by_session_category(lessons, session_cat)
-    current_repo = os.environ.get("GPTME_CURRENT_REPO") or None
     lessons = filter_by_repo(lessons, current_repo)
     holdout_lessons = parse_holdout_lessons_env()
 
@@ -1947,12 +2017,6 @@ def main():
     score_kwargs["bm25_min_z"] = 6.0
     raw_matches = score_lessons(
         lessons, match_text, max_results=max_results, **score_kwargs
-    )
-    project_cwd = hook_input.get("cwd")
-    project_workspace = (
-        Path(project_cwd)
-        if isinstance(project_cwd, str) and Path(project_cwd).is_absolute()
-        else Path.cwd()
     )
     raw_matches.extend(
         score_memories(
@@ -1979,7 +2043,7 @@ def main():
         save_session_state(session_id, state)
     if not raw_matches:
         emit_empty(event_type, session_id, "no_match")
-        sys.exit(0)
+        return
 
     # --- Dedup: skip already-injected lessons ---
     already_injected = get_already_injected(session_id, transcript_path)
@@ -2008,7 +2072,7 @@ def main():
 
     if not context:
         emit_empty(event_type, session_id, "all_suppressed")
-        sys.exit(0)
+        return
 
     # --- Update session state ---
     state = load_session_state(session_id)
@@ -2068,7 +2132,6 @@ def main():
     _emit_context(
         event_type, session_id, context, precision_items=precision_items, intent=intent
     )
-    sys.exit(0)
 
 
 def self_check() -> int:

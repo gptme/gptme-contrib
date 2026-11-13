@@ -139,7 +139,9 @@ Environment overrides:
 **No launcher change is required.** Autonomous launchers (Bob's `autonomous-run.sh`,
 `gptme`, Codex, Grok) send a fixed boilerplate prompt on every run, and every run
 is a new session, so per-session dedup can never see the repeat. The hook keeps a
-rolling prompt-hash window per workspace in `/tmp/claude-lesson-match/` instead:
+rolling prompt-hash window per workspace in `/tmp/claude-lesson-match/` instead.
+The hash includes the resolved project `cwd`, `GPTME_CURRENT_REPO`, session
+category and harness, so different matching scopes do not suppress each other:
 
 - the same prompt (whitespace-normalised) matched again within the window skips
   prompt-time matching and receipts `{outcome: empty, bytes: 0,
@@ -149,6 +151,13 @@ rolling prompt-hash window per workspace in `/tmp/claude-lesson-match/` instead:
 - a repeat does **not** refresh the stored position, so the prompt injects again
   after `window` events instead of being blocked forever;
 - `MATCH_LESSONS_PROMPT_REPEAT_WINDOW=0` restores the previous behaviour.
+
+A stable per-workspace `flock` sidecar serializes the check, matching and emission
+with other hook processes. The window is committed only after processing and
+output complete normally (including a successful empty decision). A timeout,
+exception or killed process does not mark the prompt processed; the next call can
+retry. Waiting for the lock shares the hook's existing time budget. State I/O
+errors fail open, leaving normal matching available rather than suppressing it.
 
 The window is per workspace, so several agents sharing `/tmp` do not suppress each
 other. Interactive sessions are affected too: sending the identical prompt twice
