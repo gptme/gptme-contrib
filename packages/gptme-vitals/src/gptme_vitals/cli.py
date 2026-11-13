@@ -191,8 +191,8 @@ def write_envelope_pages(
     public_root: Path,
     *,
     out: Callable[[str], None],
-) -> None:
-    """Give every navigable page with no HTML of its own a generic envelope page.
+) -> int:
+    """Write missing/owned envelope pages; return the number of failed pages.
 
     The nav and portal link each navigable route to ``output_path``; a route
     whose producer never writes that file would serve a directory listing. A page
@@ -201,16 +201,17 @@ def write_envelope_pages(
     """
     by_slug = {e.slug: e for e in envelopes}
     head, toolbar = render_head_assets(), render_theme_toggle()
+    failed = 0
     for route in registry.navigable():
-        target = route.static_target(public_root)
-        # A query string means another page serves this route (a headline view).
-        if target is None or (route.href and urlsplit(route.href).query):
-            continue
-        if target.exists() and ENVELOPE_PAGE_MARKER not in target.read_text(
-            encoding="utf-8", errors="replace"
-        ):
-            continue
         try:
+            target = route.static_target(public_root)
+            # A query string means another page serves this route (a headline view).
+            if target is None or (route.href and urlsplit(route.href).query):
+                continue
+            if target.exists() and ENVELOPE_PAGE_MARKER not in target.read_text(
+                encoding="utf-8", errors="replace"
+            ):
+                continue
             html = render_envelope_page(
                 registry,
                 route.slug,
@@ -220,9 +221,11 @@ def write_envelope_pages(
             )
             write_text(target, html)
         except (OSError, PublishError) as exc:
+            failed += 1
             out(f"FAIL page {route.slug}: {exc}")
         else:
             out(f"ok   page {route.slug} (envelope)")
+    return failed
 
 
 def _publish_and_derive(
@@ -278,7 +281,7 @@ def _publish_and_derive(
     except (OSError, PublishError) as exc:
         out(f"FAIL portal: {exc}")
         return 1
-    write_envelope_pages(registry, envelopes, public_root, out=out)
+    failed += write_envelope_pages(registry, envelopes, public_root, out=out)
     return 1 if failed else 0
 
 

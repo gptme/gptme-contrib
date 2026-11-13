@@ -138,6 +138,49 @@ def test_page_another_producer_wrote_is_left_alone_and_ours_is_refreshed(
     assert generated.read_text() != first and "badge-red" in generated.read_text()
 
 
+@pytest.mark.parametrize("failure", ["write", "publish", "read"])
+def test_envelope_page_failure_exits_nonzero_and_keeps_publishing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from gptme_vitals import cli
+    from gptme_vitals.publish import PublishError
+
+    target = tmp_path / "public/services/index.html"
+    if failure == "read":
+        target.parent.mkdir(parents=True)
+        target.write_text(cli.ENVELOPE_PAGE_MARKER)
+        real_read = Path.read_text
+
+        def fail_read(path: Path, *args: Any, **kwargs: Any) -> str:
+            if path == target:
+                raise PermissionError("fallback read denied")
+            return real_read(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_read)
+    else:
+        real_write = cli.write_text
+
+        def fail_write(path: Path, content: str) -> None:
+            if path == target:
+                if failure == "publish":
+                    raise PublishError("fallback publish denied")
+                raise PermissionError("fallback write denied")
+            real_write(path, content)
+
+        monkeypatch.setattr(cli, "write_text", fail_write)
+
+    code, lines = _run_with(tmp_path, _portal_registry())
+    assert code == 1
+    assert any(line.startswith("FAIL page services:") for line in lines)
+    assert "ok   page sessions (envelope)" in lines
+    assert (tmp_path / "public/sessions/index.html").is_file()
+    assert (tmp_path / "public/services/summary.json").is_file()
+    assert _core(tmp_path)["status"] == "healthy"
+    assert "ok   portal" in lines
+    if failure != "read":
+        assert not target.exists()
+
+
 def test_partial_build_keeps_the_other_pages_in_core(tmp_path: Path) -> None:
     _run(tmp_path, _all(sessions=_emitter("sessions", Status.DOWN)))
     assert _core(tmp_path)["status"] == "down"
