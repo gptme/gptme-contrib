@@ -323,7 +323,9 @@ gate:
   default.
 - The deadline may be pushed later once. The first push records
   `original_deadline` (stamped automatically by `mutate_task`/`gptodo edit`);
-  a second push is refused. Escalate or drop instead.
+  a second push is refused. Bringing the deadline forward (even before the
+  original date) keeps that historical stamp. A deadline cannot be removed
+  while the gate keeps its kind and ref. Escalate or drop instead.
 
 The schema is checked by `gptodo check` and on every write through the shared
 lifecycle. Existing malformed gates do not block unrelated edits, but a write

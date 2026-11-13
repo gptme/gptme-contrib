@@ -189,8 +189,8 @@ def test_mutate_task_refuses_new_invalid_gate(tmp_path: Path) -> None:
         ({"gate": dict(DECISION, reversible="no")}, "gate.reversible must be true or false"),
         ({"gate": {"kind": "task"}}, "must name the task id"),
         (
-            {"gate": dict(DECISION, original_deadline="2026-12-01T00:00:00+00:00")},
-            "original_deadline must be earlier",
+            {"gate": dict(DECISION, original_deadline="not a date")},
+            "gate.original_deadline must be an ISO",
         ),
     ],
 )
@@ -211,6 +211,57 @@ def test_malformed_timeout_keeps_task_loadable_and_editable(tmp_path: Path, on_t
     assert frontmatter.load(path).metadata["priority"] == "high"
     mutate_task(path, patch={"gate": dict(DECISION)})
     assert validate_gate(frontmatter.load(path).metadata) == []
+
+
+@pytest.mark.parametrize("extra", [{1: "unexpected"}, {1: "unexpected", "extra": True}])
+def test_non_string_gate_keys_remain_loadable_and_repairable(tmp_path: Path, extra) -> None:
+    gate = dict(DECISION)
+    gate.update(extra)
+    path = _write(tmp_path, gate)
+    tasks = load_tasks(tmp_path)
+    assert len(tasks) == 1
+    assert any("unknown field" in issue for issue in tasks[0].issues)
+    mutate_task(path, patch={"gate": dict(DECISION)})
+    assert validate_gate(frontmatter.load(path).metadata) == []
+
+
+@pytest.mark.parametrize("null_deadline", [False, True])
+def test_pushed_pr_deadline_cannot_be_removed_to_reset_extension(
+    tmp_path: Path, null_deadline
+) -> None:
+    gate = {"kind": "pr", "ref": "o/r#1", "deadline": "2026-11-20"}
+    path = _write(tmp_path, gate)
+    mutate_task(path, patch={"gate": dict(gate, deadline="2026-12-01")})
+    pushed = frontmatter.load(path).metadata["gate"]
+    removed = {k: v for k, v in pushed.items() if k != "deadline"}
+    if null_deadline:
+        removed["deadline"] = None
+    with pytest.raises(TransitionError, match="deadline.*removed"):
+        mutate_task(path, patch={"gate": removed})
+    assert frontmatter.load(path).metadata["gate"] == pushed
+
+
+def test_missing_deadline_with_existing_push_stamp_cannot_extend(tmp_path: Path) -> None:
+    gate = {"kind": "pr", "ref": "o/r#1", "original_deadline": "2026-11-20"}
+    path = _write(tmp_path, gate)
+    with pytest.raises(TransitionError, match="second push is refused"):
+        mutate_task(path, patch={"gate": dict(gate, deadline="2026-12-20")})
+    assert frontmatter.load(path).metadata["gate"] == gate
+
+
+@pytest.mark.parametrize("deadline", ["2026-11-26T18:00:00+00:00", "2026-11-25"])
+def test_pushed_deadline_can_be_brought_back_to_original_or_earlier(
+    tmp_path: Path, deadline
+) -> None:
+    path = _write(tmp_path, dict(DECISION))
+    mutate_task(path, patch={"gate": dict(DECISION, deadline="2026-12-03")})
+    pushed = frontmatter.load(path).metadata["gate"]
+    mutate_task(path, patch={"gate": dict(pushed, deadline=deadline)})
+    earlier = frontmatter.load(path).metadata["gate"]
+    assert earlier["original_deadline"] == DECISION["deadline"]
+    assert validate_gate({"gate": earlier}) == []
+    with pytest.raises(TransitionError, match="second push is refused"):
+        mutate_task(path, patch={"gate": dict(earlier, deadline="2026-12-10")})
 
 
 def test_datetime_deadline_object_is_accepted() -> None:

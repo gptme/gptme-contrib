@@ -133,7 +133,7 @@ def validate_gate(metadata: dict[str, Any]) -> list[str]:
         return ["gate must be a mapping with at least a kind"]
 
     errors: list[str] = []
-    unknown = sorted(set(raw) - GATE_FIELDS)
+    unknown = sorted(str(key) for key in raw if key not in GATE_FIELDS)
     if unknown:
         errors.append(f"gate has unknown field(s): {', '.join(unknown)}")
 
@@ -196,10 +196,8 @@ def validate_gate(metadata: dict[str, Any]) -> list[str]:
     if kind is GateKind.EVENT and _text(metadata.get("probe")) is None:
         errors.append("gate kind event needs a probe (the only kind with an authored check)")
 
-    deadline = _as_datetime(raw.get("deadline"))
-    original = _as_datetime(raw.get("original_deadline"))
-    if deadline is not None and original is not None and original >= deadline:
-        errors.append("gate.original_deadline must be earlier than gate.deadline")
+    # original_deadline is historical: bringing a deadline forward does not
+    # erase the already-used extension, even before its original date.
     return errors
 
 
@@ -270,9 +268,13 @@ def check_gate_change(prior: dict[str, Any], post: dict[str, Any]) -> list[str]:
         old_original
     ):
         return ["gate.original_deadline is a one-time record and cannot be changed"]
+    if old_deadline is not None and new_deadline is None:
+        return ["gate.deadline cannot be removed while the gate keeps its kind and ref"]
+    original = _as_datetime(old_original)
+    if old_deadline is None and new_deadline is not None and original is not None:
+        return ["gate.deadline was already pushed once; a second push is refused"]
     if old_deadline is None or new_deadline is None or new_deadline <= old_deadline:
         return []
-    original = _as_datetime(old_original)
     if original is not None:
         return [
             f"gate.deadline was already pushed once (original {original.isoformat()}); "
