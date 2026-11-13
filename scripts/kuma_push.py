@@ -92,11 +92,17 @@ def build_push_url(push_url: str, status: str, msg: str) -> str:
     ``quote_via=quote`` keeps the encoding close to what the Kuma docs show
     (spaces become ``%20``) while still escaping every reserved character.
     """
-    separator = "&" if "?" in push_url else "?"
-    query = urllib.parse.urlencode(
-        {"status": status, "msg": msg}, quote_via=urllib.parse.quote
-    )
-    return f"{push_url}{separator}{query}"
+    parts = urllib.parse.urlsplit(push_url)
+    # Kuma's generated URL already includes status/msg. Duplicate parameters
+    # become arrays on the server, so replace them rather than appending.
+    params = [
+        (key, value)
+        for key, value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+        if key not in {"status", "msg"}
+    ]
+    params.extend([("status", status), ("msg", msg)])
+    query = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+    return urllib.parse.urlunsplit(parts._replace(query=query))
 
 
 def response_ok(body: str) -> bool:

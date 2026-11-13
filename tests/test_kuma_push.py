@@ -35,6 +35,17 @@ def test_build_push_url_encodes_spaces():
     assert url.endswith("?status=up&msg=off-hours%20probe%20ok")
 
 
+def test_build_push_url_replaces_kuma_generated_parameters():
+    url = kuma_push.build_push_url(
+        "http://kuma/api/push/abc?status=up&msg=OK&ping=&status=down#fragment",
+        "up",
+        "healthy & ready",
+    )
+    assert url == (
+        "http://kuma/api/push/abc?ping=&status=up&msg=healthy%20%26%20ready#fragment"
+    )
+
+
 def test_build_push_url_respects_existing_query():
     url = kuma_push.build_push_url("http://kuma/api/push/abc?foo=1", "down", "x")
     assert url == "http://kuma/api/push/abc?foo=1&status=down&msg=x"
