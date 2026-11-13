@@ -40,7 +40,10 @@ def dedupe_monitoring_pairs(rows: Iterable[dict], *, keep: str = "controller") -
     children, or a worker whose controller rotated out of the window, stays so
     nothing is lost. Four-character child labels are not unique across history,
     so those pairs are conservatively retained rather than guessing which row
-    belongs to the controller. Order is preserved; non-monitoring rows pass through.
+    belongs to the controller. In worker mode, a multi-child controller stays
+    until all its children are present; this can retain overlapping coverage in
+    a partial window, but does not discard the missing children's coverage.
+    Order is preserved; non-monitoring rows pass through.
     """
     if keep not in ("controller", "worker"):
         raise ValueError(f"keep must be 'controller' or 'worker', got {keep!r}")
@@ -64,7 +67,8 @@ def dedupe_monitoring_pairs(rows: Iterable[dict], *, keep: str = "controller") -
         for r in rows
         if not (
             r.get("execution_role") == "controller"
-            and any(c in present for c in (r.get("child_session_ids") or []))
+            and r.get("child_session_ids")
+            and all(c in present for c in r["child_session_ids"])
         )
     ]
 

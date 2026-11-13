@@ -79,6 +79,14 @@ def test_recurring_label_children_are_preserved_without_unique_identity(keep):
     assert dedupe_monitoring_pairs([controller, unrelated], keep=keep) == [controller, unrelated]
 
 
+def test_partial_multi_child_dispatch_keeps_controller_until_all_children_present():
+    controller, worker = _pm_pair("c1", "w1")
+    controller["child_session_ids"] = ["w1", "w2"]
+    assert dedupe_monitoring_pairs([controller, worker], keep="worker") == [controller, worker]
+    second = {"session_id": "w2", "token_count": 500}
+    assert dedupe_monitoring_pairs([controller, worker, second], keep="worker") == [worker, second]
+
+
 def test_rejects_bad_keep():
     with pytest.raises(ValueError):
         dedupe_monitoring_pairs([], keep="both")
