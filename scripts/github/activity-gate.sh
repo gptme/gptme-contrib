@@ -1219,15 +1219,8 @@ check_master_ci() {
               )
           ]
     ')
-    local fail_count state_file
-    fail_count=$(echo "$failures" | jq 'length')
+    local state_file
     state_file="$STATE_DIR/${repo//\//-}-master-ci.state"
-    if [ "$fail_count" -eq 0 ]; then
-        # Recovered (or the window no longer holds a failure): forget the
-        # signature so a later regression of the same workflow re-emits.
-        rm -f "$state_file"
-        return 0
-    fi
 
     # State-track by failure *signature*: the workflows currently red, not the
     # set of run IDs. The run window is a rolling 3 calendar days in whole
@@ -1250,9 +1243,24 @@ check_master_ci() {
         [ -n "$seen_state" ] || seen_state='{}'
     fi
     newest_failures=$(echo "$failures" | jq -c 'group_by([.name, .event]) | map(sort_by(.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) | last)')
-    # Record the current set before emitting. A shrinking set is stored too, so
-    # a workflow that went green and red again is new on its second failure.
-    echo "$newest_failures" | jq -c 'map({([.name, .event] | tojson): .createdAt}) | add' > "$state_file"
+    # Absence from a bounded/partially cached result is not recovery. Retain
+    # unseen signatures; only a strictly newer success of the same workflow
+    # and event clears one, even when its old failure has left the window.
+    # Keep failure timestamps monotonic across stale observations too.
+    echo "$newest_failures" | jq -c --argjson seen "$seen_state" --argjson runs "$runs" '
+        def ts: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+        . as $failures
+        | ($seen | with_entries(
+            . as $entry
+            | select([$runs[]
+                      | select(.conclusion == "success"
+                          and (([.name, .event] | tojson) == $entry.key)
+                          and ((.createdAt | ts) > ($entry.value | ts)))]
+                     | length == 0)))
+        | reduce $failures[] as $f (.;
+            ([$f.name, $f.event] | tojson) as $key
+            | if .[$key] == null or (($f.createdAt | ts) > (.[$key] | ts))
+              then .[$key] = $f.createdAt else . end)' > "$state_file"
 
     # Emit the newest failing run of each workflow not yet reported.
     echo "$newest_failures" | jq -c --argjson seen "$seen_state" --argjson runs "$runs" '

@@ -456,3 +456,68 @@ def test_new_event_failure_is_not_hidden_by_other_event_state(tmp_path: Path) ->
     ]
     assert _emitted(_run_gate(tmp_path, runs)) == [553]
     assert _run_gate(tmp_path, runs).stdout == ""
+
+
+def test_empty_failure_observation_does_not_clear_open_signal(tmp_path: Path) -> None:
+    failure = _run(561, "schedule", name="Tests", created_at=_ts(7200))
+    assert _emitted(_run_gate(tmp_path, [failure])) == [561]
+
+    # Failure lane is temporarily empty, but a different workflow still returns.
+    unrelated = _run(
+        562, "push", name="Lint", conclusion="success", created_at=_ts(3600)
+    )
+    assert _run_gate(tmp_path, [unrelated]).stdout == ""
+    assert _run_gate(tmp_path, [failure, unrelated]).stdout == ""
+
+
+def test_partial_failure_set_preserves_missing_workflow(tmp_path: Path) -> None:
+    tests = _run(571, "schedule", name="Tests", created_at=_ts(7200))
+    lint = _run(572, "push", name="Lint", created_at=_ts(3600))
+    assert _emitted(_run_gate(tmp_path, [tests, lint])) == [572, 571]
+
+    assert _run_gate(tmp_path, [lint]).stdout == ""
+    assert _run_gate(tmp_path, [tests, lint]).stdout == ""
+
+
+def test_success_without_failure_in_window_clears_only_matching_signal(
+    tmp_path: Path,
+) -> None:
+    tests = _run(581, "push", name="Tests", created_at=_ts(7200))
+    lint = _run(582, "push", name="Lint", created_at=_ts(7200))
+    _run_gate(tmp_path, [tests, lint])
+    success = _run(
+        583, "push", name="Tests", conclusion="success", created_at=_ts(3600)
+    )
+    assert _run_gate(tmp_path, [success]).stdout == ""
+    state = json.loads((tmp_path / "state" / "owner-repo-master-ci.state").read_text())
+    assert json.dumps(["Tests", "push"], separators=(",", ":")) not in state
+    assert json.dumps(["Lint", "push"], separators=(",", ":")) in state
+
+    regression = _run(584, "push", name="Tests", created_at=_ts(60))
+    assert _emitted(_run_gate(tmp_path, [regression, lint])) == [584]
+
+
+def test_wrong_event_or_older_success_does_not_clear_signal(tmp_path: Path) -> None:
+    failure = _run(591, "schedule", name="Tests", created_at=_ts(7200))
+    _run_gate(tmp_path, [failure])
+    wrong_event = _run(
+        592, "push", name="Tests", conclusion="success", created_at=_ts(3600)
+    )
+    older = _run(
+        593, "schedule", name="Tests", conclusion="success", created_at=_ts(10800)
+    )
+    assert _run_gate(tmp_path, [wrong_event, older]).stdout == ""
+    assert _run_gate(tmp_path, [failure]).stdout == ""
+
+
+def test_stale_observation_does_not_rewind_failure_timestamp(tmp_path: Path) -> None:
+    newest = _run(611, "push", name="Tests", created_at=_ts(3600))
+    assert _emitted(_run_gate(tmp_path, [newest])) == [611]
+    stale = _run(610, "push", name="Tests", created_at=_ts(10800))
+    assert _run_gate(tmp_path, [stale]).stdout == ""
+
+    # A cached failure must not make an earlier success look like recovery.
+    earlier_success = _run(
+        612, "push", name="Tests", conclusion="success", created_at=_ts(7200)
+    )
+    assert _run_gate(tmp_path, [newest, earlier_success]).stdout == ""
