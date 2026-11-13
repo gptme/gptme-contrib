@@ -98,6 +98,19 @@ def test_load_session_rows_one_row_per_session(tmp_path):
     assert [r["session_id"] for r in load_session_rows(p)] == ["c1"]
 
 
+def test_load_session_rows_excludes_tagged_duplicates(tmp_path):
+    p = tmp_path / "session-records.jsonl"
+    rows = [
+        {"session_id": "aabbccdd", "token_count": 100},
+        {"session_id": "11223344", "duplicate_of": "aabbccdd", "token_count": 0},
+        {"session_id": "55667788", "duplicate_of": None, "token_count": 20},
+    ]
+    p.write_text("\n".join(json.dumps(r) for r in rows))
+    assert load_session_rows(p) == [rows[0], rows[2]]
+    assert load_session_rows(p, include_duplicates=True) == rows
+    assert read_jsonl_rows(p) == rows
+
+
 def test_load_session_rows_missing_file(tmp_path):
     assert load_session_rows(tmp_path / "nope.jsonl") == []
 

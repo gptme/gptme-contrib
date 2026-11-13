@@ -90,13 +90,20 @@ def read_jsonl_rows(path: str | Path) -> list[dict]:
     return rows
 
 
-def load_session_rows(path: str | Path, *, keep: str = "controller") -> list[dict]:
+def load_session_rows(
+    path: str | Path, *, keep: str = "controller", include_duplicates: bool = False
+) -> list[dict]:
     """Load ``session-records.jsonl`` as one row per session.
 
-    A missing file yields ``[]``. See :func:`dedupe_monitoring_pairs` for
-    ``keep``.
+    Rows tagged with a truthy ``duplicate_of`` by ``gptme-sessions dedup`` are
+    excluded unless ``include_duplicates=True``. Pair collapsing still applies;
+    use :func:`read_jsonl_rows` for read-modify-write cycles that need every row.
+    A missing file yields ``[]``. See :func:`dedupe_monitoring_pairs` for ``keep``.
     """
     p = Path(path)
     if not p.exists():
         return []
-    return dedupe_monitoring_pairs(read_jsonl_rows(p), keep=keep)
+    rows = read_jsonl_rows(p)
+    if not include_duplicates:
+        rows = [row for row in rows if not row.get("duplicate_of")]
+    return dedupe_monitoring_pairs(rows, keep=keep)
