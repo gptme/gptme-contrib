@@ -124,9 +124,9 @@ class TestRecurCliReset:
     def test_recurring_task_reset_emits_valid_frontmatter(self, workspace: Path):
         """Regression: recur reset emits state=waiting with validator-required fields.
 
-        The task frontmatter validator rejects state=waiting without waiting_for
-        and waiting_since. The waiting_for string must be a recurrence gate (not a
-        human blocker) so the auto-releaser still surfaces the task when wait: expires.
+        The recurrence gate is recur: + wait: (wait_kind machine); no generated
+        waiting_for restates the date, so the auto-releaser surfaces the task
+        when wait: expires and nothing has to be kept in sync.
         """
         write_task(workspace, "weekly-review", state="active", recur="7d")
         runner = CliRunner()
@@ -137,10 +137,8 @@ class TestRecurCliReset:
         assert post.metadata["state"] == "waiting"
         assert "wait" in post.metadata
         assert post.metadata.get("wait_kind") == "machine"
-        waiting_for = post.metadata.get("waiting_for")
-        assert isinstance(waiting_for, str)
-        assert "recurrence gate" in waiting_for
-        assert str(post.metadata["wait"]) in waiting_for
+        # recur: + wait: is the gate; no waiting_for restating the date.
+        assert "waiting_for" not in post.metadata
         waiting_since = post.metadata.get("waiting_since")
         assert isinstance(waiting_since, str)
         # Must be a parseable ISO timestamp, not a date-only leftover.

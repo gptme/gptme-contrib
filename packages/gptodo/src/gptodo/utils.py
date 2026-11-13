@@ -683,8 +683,10 @@ def task_has_waiting_blocker(task: "TaskInfo") -> bool:
     #         and no probe field (probe+expired-date tasks still need probe resolution)
     #         and no human waiting_for field (the generated recurrence-gate description
     #         documents the same wait: field and is therefore safe to release).
+    # recur: + wait: with no waiting_for is the recurrence gate gptodo writes.
+    recur_gate = bool(task.metadata.get("recur")) and not waiting_for
     if (
-        task.metadata.get("wait_kind") == "machine"
+        (task.metadata.get("wait_kind") == "machine" or recur_gate)
         and task.wait is not None
         and not task_is_waiting_for_date(task)
         and not task.metadata.get("probe")
