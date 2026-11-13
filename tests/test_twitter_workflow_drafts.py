@@ -95,6 +95,9 @@ def _load_workflow_module() -> tuple[Any, dict[str, Any]]:
     twitter_llm_stub._unescape_literal_newlines = lambda text: text.replace("\\n", "\n")
 
     twitter_api_stub: Any = types.ModuleType("twitter.twitter")
+    twitter_api_stub.DailyReadLimitReached = type(
+        "DailyReadLimitReached", (Exception,), {}
+    )
     twitter_api_stub.cached_get_me = lambda *args, **kwargs: SimpleNamespace(
         data=SimpleNamespace(id=0)
     )
@@ -2146,3 +2149,62 @@ def test_live_duplicate_guard_preserves_search_depth(workflow_module, monkeypatc
     monkeypatch.setattr(workflow_module, "get_conversation_thread", conversation)
     assert workflow_module._find_live_duplicate_reply_ids(object(), "4242") == ["9001"]
     assert calls == [("4242", 3, 100)]
+
+
+@pytest.mark.parametrize("command", ["post", "auto"])
+@pytest.mark.parametrize("blocked_stage", ["identity", "original", "search"])
+def test_budget_exhaustion_defers_reply_without_posting(
+    workflow_module, tmp_path, monkeypatch, command, blocked_stage
+):
+    """A blocked live lookup is unknown, not proof that no reply exists."""
+    _set_status_dirs(workflow_module, tmp_path)
+    approved = workflow_module.APPROVED_DIR / "reply.yml"
+    workflow_module.TweetDraft(
+        text="A useful reply", type="reply", in_reply_to="4242"
+    ).save(approved)
+    posted = []
+    identity_calls = []
+    budget_error = type("DailyReadLimitReached", (Exception,), {})
+    monkeypatch.setattr(
+        workflow_module, "DailyReadLimitReached", budget_error, raising=False
+    )
+
+    def identity(*args, **kwargs):
+        identity_calls.append(1)
+        # auto() also reads identity before starting the posting phase.
+        if blocked_stage == "identity" and (
+            command == "post" or len(identity_calls) > 1
+        ):
+            raise budget_error("daily budget exhausted")
+        return SimpleNamespace(data=SimpleNamespace(id="me", username="bob"))
+
+    class Client:
+        def get_home_timeline(self, **kwargs):
+            return SimpleNamespace(data=None)
+
+        def get_tweet(self, *args, **kwargs):
+            if blocked_stage == "original":
+                raise budget_error("daily budget exhausted")
+            return SimpleNamespace(data=None)
+
+        def search_recent_tweets(self, **kwargs):
+            if blocked_stage == "search":
+                raise budget_error("daily budget exhausted")
+            return SimpleNamespace(data=None)
+
+        def create_tweet(self, **kwargs):
+            posted.append(kwargs)
+            return SimpleNamespace(data={"id": "9001"})
+
+    monkeypatch.setattr(workflow_module, "cached_get_me", identity)
+    monkeypatch.setattr(workflow_module, "load_twitter_client", lambda **kw: Client())
+    monkeypatch.setattr(workflow_module, "_validate_draft_urls", lambda draft: [])
+    monkeypatch.setattr(workflow_module, "_validate_draft_length", lambda draft: [])
+    monkeypatch.setattr(workflow_module, "_git_commit_posted", lambda *a: None)
+    if command == "post":
+        workflow_module.post(False, True, None, 1, False)
+    else:
+        workflow_module.auto(None, False, True, False, 1, 1, True, False)
+    assert posted == []
+    assert approved.exists()  # retryable, not rejected as a known duplicate
+    assert list(workflow_module.REJECTED_DIR.iterdir()) == []

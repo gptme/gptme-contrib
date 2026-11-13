@@ -311,3 +311,66 @@ def test_read_budget_uses_named_profile_configuration(tw, monkeypatch, tmp_path)
     result = CliRunner().invoke(tw.cli, ["--account", "bot", "read-budget"])
     assert result.exit_code == 1, result.output
     assert "4/4 billable reads" in result.output
+
+
+@pytest.mark.parametrize("rollover_stage", ["lock", "retry"])
+def test_midnight_rollover_uses_current_day(tw, monkeypatch, rollover_stage):
+    import json
+    from datetime import datetime, timezone
+
+    import requests
+
+    clock = [datetime(2026, 11, 12, 23, 59, tzinfo=timezone.utc)]
+
+    class Clock:
+        @staticmethod
+        def now(tz):
+            return clock[0]
+
+    monkeypatch.setattr(tw, "datetime", Clock)
+    yesterday = tw._read_counter_path()
+    yesterday.write_text('{"reads":1}')
+    monkeypatch.setenv("TWITTER_DAILY_READ_LIMIT", "1")
+    today = tw._read_counter_path("2026-11-13")
+    original_flock = tw.fcntl.flock
+
+    def flock(fd, operation):
+        original_flock(fd, operation)
+        if rollover_stage == "lock":
+            clock[0] = datetime(2026, 11, 13, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(tw.fcntl, "flock", flock)
+    if rollover_stage == "retry":
+        yesterday.write_text('{"reads":0}')
+    calls = []
+    client = tw.tweepy.Client(bearer_token="x", wait_on_rate_limit=True)
+
+    def transport(*args, **kwargs):
+        calls.append(1)
+        response = requests.Response()
+        response.status_code = (
+            429 if rollover_stage == "retry" and len(calls) == 1 else 200
+        )
+        response.headers["x-rate-limit-reset"] = "0"
+        response._content = b'{"data":[{"id":"1","text":"hello"}]}'
+        return response
+
+    monkeypatch.setattr(client.session, "request", transport)
+    monkeypatch.setattr(tw.time, "time", lambda: 0)
+    monkeypatch.setattr(
+        tw.time,
+        "sleep",
+        lambda _: clock.__setitem__(0, datetime(2026, 11, 13, tzinfo=timezone.utc)),
+    )
+    monkeypatch.setattr(
+        tw.tweepy.client.BaseClient, "request", tw.tweepy.client.BaseClient.request
+    )
+    tw.install_read_meter()
+    client.get_tweets(ids=[1])
+    assert json.loads(today.read_text()) == {"reads": 1}
+    assert json.loads(yesterday.read_text()) == {
+        "reads": 1 if rollover_stage == "lock" else 0
+    }
+    with pytest.raises(tw.DailyReadLimitReached):
+        client.get_tweets(ids=[1])
+    assert len(calls) == (1 if rollover_stage == "lock" else 2)

@@ -91,6 +91,7 @@ from twitter.llm import (
     verify_draft,
 )
 from twitter.twitter import (
+    DailyReadLimitReached,
     _find_placeholder_in_text,
     cached_get_me,
     load_twitter_client,
@@ -536,6 +537,8 @@ def get_conversation_thread(
                     )
                     all_tweets = {}
                     all_users = {}
+            except DailyReadLimitReached:
+                raise
             except Exception as e:
                 console.print(f"[yellow]Error fetching original tweet: {e}")
                 conversation_id = (
@@ -692,6 +695,10 @@ def get_conversation_thread(
 
         return thread_context
 
+    except DailyReadLimitReached:
+        # A denied read is not an empty conversation. Posting safety checks
+        # must distinguish unknown live state from a successful empty lookup.
+        raise
     except Exception as e:
         console.print(f"[yellow]Error retrieving conversation thread: {e}")
         return []
@@ -1262,6 +1269,8 @@ def _find_live_duplicate_reply_ids(client, tweet_id: str) -> list[str]:
             and str(tweet.get("author", "")).lower() == username
         }
         return sorted(duplicate_ids)
+    except DailyReadLimitReached:
+        raise
     except Exception as e:
         logger.warning(
             "Live duplicate reply lookup failed",
@@ -1673,9 +1682,16 @@ def post(
             duplicates = _check_for_duplicate_replies_internal(draft)
             live_duplicate_ids = []
             if "posted" not in duplicates:
-                live_duplicate_ids = _find_live_duplicate_reply_ids(
-                    client, str(draft.in_reply_to)
-                )
+                try:
+                    live_duplicate_ids = _find_live_duplicate_reply_ids(
+                        client, str(draft.in_reply_to)
+                    )
+                except DailyReadLimitReached:
+                    console.print(
+                        "[yellow]Read budget exhausted; deferring reply until "
+                        "the live duplicate check can run.[/yellow]"
+                    )
+                    continue
 
             if "posted" in duplicates or live_duplicate_ids:
                 console.print(
@@ -2814,9 +2830,16 @@ def auto(
                     duplicates = _check_for_duplicate_replies_internal(draft)
                     live_duplicate_ids = []
                     if "posted" not in duplicates:
-                        live_duplicate_ids = _find_live_duplicate_reply_ids(
-                            client, str(draft.in_reply_to)
-                        )
+                        try:
+                            live_duplicate_ids = _find_live_duplicate_reply_ids(
+                                client, str(draft.in_reply_to)
+                            )
+                        except DailyReadLimitReached:
+                            console.print(
+                                "[yellow]Read budget exhausted; deferring reply until "
+                                "the live duplicate check can run.[/yellow]"
+                            )
+                            continue
 
                     if "posted" in duplicates or live_duplicate_ids:
                         console.print(

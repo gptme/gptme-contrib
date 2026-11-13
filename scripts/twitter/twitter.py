@@ -178,15 +178,14 @@ def install_read_meter() -> None:
         # and count only the final response, not each unwinding retry frame.
         if str(method).upper() != "GET" or _METER_ACTIVE.get():
             return original(self, method, route, *args, **kwargs)
-        path = _read_counter_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a+") as counter:
-            fcntl.flock(counter, fcntl.LOCK_EX)
-            counter.seek(0)
-            try:
-                used = int(json.loads(counter.read() or "{}").get("reads", 0))
-            except (ValueError, AttributeError):
-                used = 0
+        directory = _read_counter_path().parent
+        directory.mkdir(parents=True, exist_ok=True)
+        # One account lock across UTC days: a retry spanning midnight must
+        # serialize with today's reads, not only yesterday's counter writers.
+        lock_path = directory / f".{current_account() or 'default'}.lock"
+        with open(lock_path, "a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            used = daily_reads_used()
             limit = daily_read_limit()
             # Identity verification is required to safely permit writes. It
             # remains metered, but cannot trigger an OAuth reauthentication loop.
@@ -203,9 +202,11 @@ def install_read_meter() -> None:
                 _METER_ACTIVE.reset(token)
             if getattr(response, "ok", False):
                 n = count_billable_reads(response.json(), route)
-                counter.seek(0)
-                counter.truncate()
-                counter.write(json.dumps({"reads": used + n}))
+                # Charge the day the response arrived, including after Tweepy
+                # sleeps/retries across midnight. The account lock stays held.
+                path = _read_counter_path()
+                used = daily_reads_used()
+                path.write_text(json.dumps({"reads": used + n}))
             return response
 
     metered._read_meter = True  # type: ignore[attr-defined]
