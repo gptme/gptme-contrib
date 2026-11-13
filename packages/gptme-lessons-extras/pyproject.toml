@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.10"
 dependencies = [
+    "bobutils",
     "PyYAML>=6.0",
     "click>=8.0",
     "python-frontmatter>=1.0.0",
@@ -30,3 +31,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/gptme_lessons_extras"]
+
+[tool.uv.sources]
+bobutils = { workspace = true }

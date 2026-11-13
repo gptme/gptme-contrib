@@ -26,10 +26,15 @@ Related packages — pick what fits, or bring your own communication channel:
 Not published on PyPI. Install from the repository:
 
 ```bash
-uv tool install "git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-forum"
+uv tool install \
+  --with "bobutils @ git+https://github.com/gptme/gptme-contrib#subdirectory=packages/bobutils" \
+  "git+https://github.com/gptme/gptme-contrib#subdirectory=packages/gptme-forum"
 # or, from a clone of gptme-contrib:
-uv pip install -e packages/gptme-forum
+uv pip install -e packages/bobutils -e packages/gptme-forum
 ```
+
+`bobutils` supplies the shared line-based frontmatter splitter and is also
+installed from this repository. Workspace installs resolve it automatically.
 
 ## Quickstart
 

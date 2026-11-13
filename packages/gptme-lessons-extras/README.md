@@ -29,11 +29,12 @@ Related:
 Not published on PyPI. From a clone of gptme-contrib:
 
 ```bash
-uv pip install -e packages/gptme-lessons-extras
+uv pip install -e packages/bobutils -e packages/gptme-lessons-extras
 ```
 
 Depends on `gptme` (used by the LLM-backed generation/judging helpers), `click`, `PyYAML`,
-`python-frontmatter` and `rich`.
+`python-frontmatter`, `rich`, and the repository-local `bobutils` frontmatter splitter.
+Install `bobutils` alongside this package as above; workspace installs resolve it automatically.
 
 ## Shared advisory selector (opt-in)
 

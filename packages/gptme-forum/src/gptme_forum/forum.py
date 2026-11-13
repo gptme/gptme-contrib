@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Iterator
 
 import yaml
+from bobutils.frontmatter import split_frontmatter
 
 # Regex to find @mentions inline in body text
 _MENTION_RE = re.compile(r"@(\w+)")
@@ -70,18 +71,17 @@ def get_agent_name() -> str:
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
     """Split YAML frontmatter from body. Returns (meta, body)."""
-    if not text.startswith("---"):
-        return {}, text
-    end = text.find("\n---", 3)
-    if end == -1:
-        return {}, text
-    raw_yaml = text[3:end].strip()
-    body = text[end + 4 :].lstrip("\n")
     try:
-        meta = yaml.safe_load(raw_yaml) or {}
+        raw_yaml, body = split_frontmatter(text)
+    except ValueError:
+        return {}, text
+    try:
+        meta = yaml.safe_load(raw_yaml)
     except yaml.YAMLError:
         meta = {}
-    return meta, body
+    if not isinstance(meta, dict):
+        meta = {}
+    return meta, body.lstrip("\n")
 
 
 def _render_frontmatter(meta: dict, body: str) -> str:
