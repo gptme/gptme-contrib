@@ -1541,3 +1541,199 @@ def test_format_lessons_default_event_keeps_full_body(hook):
     context = hook.format_lessons([skill], set())
     assert "FULL BODY" in context
     assert "skill pointer" not in context
+
+
+# --- fixed-prompt repeat window (gptme/gptme-contrib#2170) ---
+
+
+def test_prompt_repeat_window_injects_once_per_window(hook, tmp_path):
+    """A fixed launcher prompt injects once per window, not on every run.
+
+    Repeats must not refresh the stored position: if they did, the entry would
+    stay inside the window forever by its own repeats and never inject again.
+    """
+    state_dir = tmp_path / "state"
+    workspace = tmp_path / "ws"
+    outcomes = [
+        hook.check_prompt_repeat(
+            "fixed launcher prompt", workspace, window=20, state_dir=state_dir
+        )[0]
+        for _ in range(60)
+    ]
+    injected = [index for index, repeat in enumerate(outcomes) if not repeat]
+    assert injected == [0, 20, 40]
+
+
+def test_prompt_repeat_window_distinct_prompts_always_inject(hook, tmp_path):
+    """Different prompts never collide inside the window."""
+    state_dir = tmp_path / "state"
+    outcomes = [
+        hook.check_prompt_repeat(
+            f"prompt number {index}", tmp_path / "ws", window=20, state_dir=state_dir
+        )[0]
+        for index in range(30)
+    ]
+    assert outcomes == [False] * 30
+    assert len(set(outcomes)) == 1
+
+
+def test_prompt_repeat_window_zero_disables(hook, tmp_path):
+    """window=0 restores pre-change behaviour (every prompt injects)."""
+    state_dir = tmp_path / "state"
+    for _ in range(3):
+        assert (
+            hook.check_prompt_repeat(
+                "same prompt", tmp_path, window=0, state_dir=state_dir
+            )[0]
+            is False
+        )
+
+
+def test_prompt_repeat_window_is_per_workspace(hook, tmp_path):
+    """A shared /tmp state root must not leak repeats across workspaces."""
+    state_dir = tmp_path / "state"
+    workspace_a = tmp_path / "a"
+    workspace_b = tmp_path / "b"
+    assert (
+        hook.check_prompt_repeat(
+            "same prompt", workspace_a, window=20, state_dir=state_dir
+        )[0]
+        is False
+    )
+    assert (
+        hook.check_prompt_repeat(
+            "same prompt", workspace_b, window=20, state_dir=state_dir
+        )[0]
+        is False
+    )
+    assert (
+        hook.check_prompt_repeat(
+            "same prompt", workspace_a, window=20, state_dir=state_dir
+        )[0]
+        is True
+    )
+
+
+def test_prompt_repeat_window_strips_surrounding_whitespace(hook, tmp_path):
+    """A trailing newline is transport noise, not a different prompt."""
+    state_dir = tmp_path / "state"
+    assert (
+        hook.check_prompt_repeat(
+            "same prompt\n", tmp_path, window=20, state_dir=state_dir
+        )[0]
+        is False
+    )
+    assert (
+        hook.check_prompt_repeat(
+            "  same prompt  ", tmp_path, window=20, state_dir=state_dir
+        )[0]
+        is True
+    )
+
+
+def test_prompt_repeat_window_env_parsing(hook, monkeypatch):
+    """Malformed or missing knob values fall back to the documented default."""
+    monkeypatch.delenv(hook.PROMPT_REPEAT_WINDOW_ENV, raising=False)
+    assert hook.prompt_repeat_window() == 20
+    monkeypatch.setenv(hook.PROMPT_REPEAT_WINDOW_ENV, "0")
+    assert hook.prompt_repeat_window() == 0
+    monkeypatch.setenv(hook.PROMPT_REPEAT_WINDOW_ENV, "5")
+    assert hook.prompt_repeat_window() == 5
+    monkeypatch.setenv(hook.PROMPT_REPEAT_WINDOW_ENV, "-3")
+    assert hook.prompt_repeat_window() == 0
+    monkeypatch.setenv(hook.PROMPT_REPEAT_WINDOW_ENV, "not-a-number")
+    assert hook.prompt_repeat_window() == 20
+
+
+def _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch):
+    """Hermetic wiring for a UserPromptSubmit main() call."""
+    lessons = [
+        {
+            "path": "lessons/sample.md",
+            "title": "sample",
+            "body": "BODY",
+            "description": "d",
+            "score": 1.0,
+        }
+    ]
+    monkeypatch.setattr(hook, "get_workspace", lambda: tmp_path)
+    monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(hook, "load_lesson_dirs", lambda ws: [tmp_path])
+    monkeypatch.setattr(hook, "scan_lessons", lambda dirs: lessons)
+    monkeypatch.setattr(hook, "detect_harness", lambda: "claude-code")
+    monkeypatch.setattr(hook, "detect_session_category", lambda: None)
+    monkeypatch.setattr(hook, "filter_by_harness", lambda items, harness: items)
+    monkeypatch.setattr(hook, "filter_by_session_category", lambda items, cat: items)
+    monkeypatch.setattr(hook, "filter_by_repo", lambda items, repo: items)
+    monkeypatch.setattr(hook, "get_already_injected", lambda sid, tp=None: set())
+    monkeypatch.setattr(hook, "score_lessons", lambda *a, **k: list(lessons))
+    monkeypatch.setattr(hook, "score_memories", lambda *a, **k: [])
+    monkeypatch.setattr(hook, "get_predicted_lessons", lambda *a, **k: [])
+    monkeypatch.setattr(hook, "filter_held_out_lessons", lambda items, holdout: items)
+
+    def passthrough_dropout(matches, predicted, *args, **kwargs):
+        return matches, predicted
+
+    monkeypatch.setattr(hook, "_apply_lesson_dropout_multi", passthrough_dropout)
+    monkeypatch.setattr(hook, "_log_lesson_events", lambda *a, **k: None)
+    monkeypatch.setattr(hook, "extract_tool_sequence", lambda tp: [])
+    monkeypatch.setattr(hook, "log_trajectory_match", lambda *a, **k: None)
+    monkeypatch.setattr(
+        hook, "format_lessons", lambda m, a, p, event_type=None: "INJECTED CONTEXT"
+    )
+    monkeypatch.delenv("BOB_LESSON_PRECISION_DIR", raising=False)
+
+
+def test_main_repeat_prompt_receipts_zero_bytes(hook, tmp_path, monkeypatch):
+    """The repeat run receipts bytes=0/empty/fixed_prompt_repeat; the first injects."""
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch)
+    payload = {
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "repeat-receipt",
+        "cwd": str(tmp_path),
+        "prompt": "identical launcher prompt",
+    }
+    monkeypatch.setattr(hook, "_STDIN_CACHE", json.dumps(payload))
+
+    for _ in range(2):
+        with pytest.raises(SystemExit) as exc_info:
+            hook.main()
+        assert exc_info.value.code == 0
+
+    receipts = [
+        json.loads(line)
+        for line in (tmp_path / "cc-session-repeat-receipt-lessons-receipts.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert [row["outcome"] for row in receipts] == ["emitted", "empty"]
+    assert receipts[0]["bytes"] > 0
+    assert receipts[1]["bytes"] == 0
+    assert receipts[1]["reason"] == "fixed_prompt_repeat"
+
+
+def test_main_pretooluse_ignores_prompt_window(hook, tmp_path, monkeypatch):
+    """PreToolUse matching must not be gated by the prompt-hash window."""
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch)
+    calls = []
+
+    def record_prompt_check(*args, **kwargs):
+        calls.append(args)
+        return False, "digest"
+
+    monkeypatch.setattr(hook, "check_prompt_repeat", record_prompt_check)
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "pretool-window",
+        "cwd": str(tmp_path),
+        "tool_name": "Bash",
+        "tool_input": {"command": "ls"},
+    }
+    monkeypatch.setattr(hook, "_STDIN_CACHE", json.dumps(payload))
+
+    with pytest.raises(SystemExit):
+        hook.main()
+
+    assert calls == []

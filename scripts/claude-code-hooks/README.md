@@ -27,6 +27,9 @@ injects relevant lessons as `additionalContext` based on:
 - Thompson sampling re-ranking (lessons that help more get higher priority)
 - PreToolUse cooldown throttle (15s) to avoid excessive context injection
 - Self-referential match prevention (strips `<system-reminder>` blocks)
+- Fixed-prompt window: an unchanged prompt injects at most once per window
+  (default 20 prompt events), so a launcher's boilerplate cannot pin the same
+  documents into every run — see [Launcher adoption](#launcher-adoption)
 
 ### Installation
 
@@ -123,6 +126,38 @@ Tunable constants (edit at the top of the script):
 | `MAX_PROMPT_LESSONS` | 5 | Max lessons injected per UserPromptSubmit |
 | `MAX_PRETOOL_LESSONS` | 3 | Max lessons injected per PreToolUse |
 | `TS_WEIGHT` | 1.0 | Thompson sampling re-ranking weight |
+
+Environment overrides:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MATCH_LESSONS_PROMPT_REPEAT_WINDOW` | `20` | Prompt events before an unchanged prompt injects again; `0` disables the fixed-prompt window |
+| `MATCH_LESSONS_HOOK_BUDGET` | `8.0` | Internal wall-clock budget in seconds before degrading to empty output |
+
+### Launcher adoption
+
+**No launcher change is required.** Autonomous launchers (Bob's `autonomous-run.sh`,
+`gptme`, Codex, Grok) send a fixed boilerplate prompt on every run, and every run
+is a new session, so per-session dedup can never see the repeat. The hook keeps a
+rolling prompt-hash window per workspace in `/tmp/claude-lesson-match/` instead:
+
+- the same prompt (whitespace-normalised) matched again within the window skips
+  prompt-time matching and receipts `{outcome: empty, bytes: 0,
+  reason: fixed_prompt_repeat}`;
+- `PreToolUse` matching and task-text matching are untouched — the tool channel is
+  where lessons relevant to the work actually come from;
+- a repeat does **not** refresh the stored position, so the prompt injects again
+  after `window` events instead of being blocked forever;
+- `MATCH_LESSONS_PROMPT_REPEAT_WINDOW=0` restores the previous behaviour.
+
+The window is per workspace, so several agents sharing `/tmp` do not suppress each
+other. Interactive sessions are affected too: sending the identical prompt twice
+in a row re-injects only after the window (a deliberate trade for the measured
+saturation — 5 distinct documents, 3 in 14-15 of 20 runs, ~29 KB per run; see
+[gptme/gptme-contrib#2170](https://github.com/gptme/gptme-contrib/issues/2170)).
+If interactive repeats feel suppressed, lower the window rather than disabling the
+mechanism: `MATCH_LESSONS_PROMPT_REPEAT_WINDOW=2` injects at most once every second
+prompt event (`1` is equivalent to disabled).
 
 ### Requirements
 

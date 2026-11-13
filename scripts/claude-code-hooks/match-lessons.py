@@ -37,6 +37,7 @@ under workspace/state/ and created automatically on first use.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import math
@@ -330,6 +331,17 @@ MAX_PROMPT_LESSONS = 5
 HOOK_BUDGET_SECONDS = float(os.environ.get("MATCH_LESSONS_HOOK_BUDGET", "8.0"))
 # State directory for cross-invocation dedup (in /tmp, not workspace)
 STATE_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "claude-lesson-match"
+
+# Fixed-prompt window. An autonomous launcher sends the same boilerplate prompt
+# on every run, and every run is a new session, so per-session dedup can never
+# see the repeat: the same handful of documents gets re-injected on every run
+# (measured 2026-11-13: 5 distinct documents, 3 of them in 14-15 of 20 runs,
+# mean 29 KB per invocation). A prompt hash matched within the last
+# MATCH_LESSONS_PROMPT_REPEAT_WINDOW prompt events for *this workspace* skips
+# prompt-time matching, so an unchanged prompt injects at most once per window;
+# PreToolUse and task-text matching are untouched, and `0` disables the window.
+DEFAULT_PROMPT_REPEAT_WINDOW = 20
+PROMPT_REPEAT_WINDOW_ENV = "MATCH_LESSONS_PROMPT_REPEAT_WINDOW"
 
 # Production advisory-skill defaults after the skill-injection-dial-v1 readout.
 MAX_PROMPT_SKILLS = 2
@@ -1078,6 +1090,109 @@ def save_session_state(session_id: str, state: dict) -> None:
         pass
 
 
+# --- Fixed-prompt repeat window ---
+
+
+def prompt_repeat_window() -> int:
+    """Configured window size in prompt events (0 disables the window)."""
+    raw = os.environ.get(PROMPT_REPEAT_WINDOW_ENV, "").strip()
+    if not raw:
+        return DEFAULT_PROMPT_REPEAT_WINDOW
+    try:
+        return max(int(raw), 0)
+    except ValueError:
+        # A malformed knob must not silently change injection behaviour.
+        return DEFAULT_PROMPT_REPEAT_WINDOW
+
+
+def _prompt_window_file(workspace: Path, state_dir: Path | None = None) -> Path:
+    """Per-workspace prompt-window state file, under the /tmp state root.
+
+    Keyed by workspace because a shared state root serves every agent workspace
+    on the box; a prompt repeat is only meaningful inside one workspace.
+    """
+    root = STATE_DIR if state_dir is None else state_dir
+    resolved = str(Path(workspace).resolve()).encode("utf-8")
+    digest = hashlib.sha256(resolved).hexdigest()[:16]
+    return root / f"prompt-window-{digest}.json"
+
+
+def _load_prompt_window(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return {"seq": 0, "hashes": {}}
+    if not isinstance(data, dict):
+        return {"seq": 0, "hashes": {}}
+    hashes = data.get("hashes")
+    if not isinstance(hashes, dict):
+        hashes = {}
+    try:
+        seq = int(data.get("seq", 0))
+    except (TypeError, ValueError):
+        seq = 0
+    return {"seq": seq, "hashes": hashes}
+
+
+def _save_prompt_window(path: Path, state: dict) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(path)
+    except Exception:
+        pass  # Fail-open: a state error must never change hook output.
+
+
+def check_prompt_repeat(
+    prompt_text: str,
+    workspace: Path,
+    *,
+    window: int | None = None,
+    state_dir: Path | None = None,
+) -> tuple[bool, str]:
+    """Record this prompt and report whether prompt-time matching should skip.
+
+    Returns ``(repeat, prompt_digest)``. ``repeat`` is True when the same prompt
+    was matched within the last ``window`` prompt events for this workspace. The
+    caller then emits an empty payload (reason ``fixed_prompt_repeat``) instead of
+    re-injecting the same documents that a fixed launcher prompt always matches.
+
+    Only a non-repeat refreshes the hash's position. A repeat leaves it where it
+    was, so the entry ages out of the window and the prompt injects again after
+    ``window`` events — otherwise a permanently fixed prompt would be recorded
+    forever by its own repeats and never inject at all. This is a cooldown, not a
+    permanent block. ``window == 0`` disables the check. Fail-open on any state
+    error: report a non-repeat so the hook behaves as it did before.
+    """
+    # Surrounding whitespace is transport noise, not user intent: strip so a
+    # prompt that differs only by a trailing newline counts as the same prompt.
+    digest = hashlib.sha256(prompt_text.strip().encode("utf-8")).hexdigest()
+    size = prompt_repeat_window() if window is None else max(int(window), 0)
+    if size == 0:
+        return False, digest
+    try:
+        path = _prompt_window_file(workspace, state_dir)
+        state = _load_prompt_window(path)
+        seq = int(state.get("seq", 0)) + 1
+        hashes: dict[str, int] = {}
+        for key, value in state["hashes"].items():
+            try:
+                position = int(value)
+            except (TypeError, ValueError):
+                continue
+            if seq - position <= size:
+                hashes[str(key)] = position
+        last = hashes.get(digest)
+        repeat = last is not None and (seq - last) < size
+        if not repeat:
+            hashes[digest] = seq
+        _save_prompt_window(path, {"seq": seq, "hashes": hashes})
+        return repeat, digest
+    except Exception:
+        return False, digest
+
+
 def get_already_injected(
     session_id: str, transcript_path: str | None = None
 ) -> set[str]:
@@ -1804,6 +1919,16 @@ def main():
     if not match_text.strip():
         emit_empty(event_type, session_id, "empty_match_text")
         sys.exit(0)
+
+    # --- Fixed-prompt window (UserPromptSubmit only) ---
+    # A launcher that sends the same boilerplate prompt every run would otherwise
+    # re-inject the same documents indefinitely, because per-session dedup starts
+    # empty on every run. Skipping here leaves tool-time matching intact.
+    if event_type == "UserPromptSubmit":
+        repeated, _prompt_digest = check_prompt_repeat(match_text, get_workspace())
+        if repeated:
+            emit_empty(event_type, session_id, "fixed_prompt_repeat")
+            sys.exit(0)
 
     # --- Scan and match lessons and keyworded memories ---
     workspace = get_workspace()
