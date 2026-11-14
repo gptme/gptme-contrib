@@ -31,12 +31,17 @@ def _version_string() -> str:
         return "0.0.0+dev"
 
 
-def get_workspace_dir() -> Path:
-    """Get the agent workspace directory using `git rev-parse --show-toplevel`."""
+def get_workspace_dir(*, quiet: bool = False) -> Path:
+    """Get the agent workspace directory using `git rev-parse --show-toplevel`.
+
+    ``quiet`` discards git's stderr, for best-effort probes whose failure is
+    expected and handled by the caller.
+    """
     return Path(
         subprocess.check_output(
             ["git", "rev-parse", "--show-toplevel"],
             text=True,
+            stderr=subprocess.DEVNULL if quiet else None,
         ).strip()
     )
 
@@ -64,9 +69,11 @@ def load_env_file(workspace_dir: Path) -> None:
 
 # Load .env file at module initialization. Best-effort: a non-git cwd (pip
 # wheel, bare container, missing git binary) must not make `import gptmail.cli`
-# — and therefore every subcommand — die at import time.
+# — and therefore every subcommand — die at import time. Quiet, so a forced-command
+# receiver whose login home is not a checkout does not print git's "fatal: not a git
+# repository" to the sender.
 try:
-    load_env_file(get_workspace_dir())
+    load_env_file(get_workspace_dir(quiet=True))
 except (subprocess.CalledProcessError, OSError):
     pass
 
