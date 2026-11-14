@@ -23,7 +23,7 @@ from contextvars import copy_context
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import tomllib
 
@@ -791,17 +791,32 @@ class ReviewerResult:
         }
 
 
+class ReviewerRunner(Protocol):
+    """Host runner returning success or failure with the shared result shape."""
+
+    def __call__(
+        self,
+        reviewer: PanelReviewer,
+        prompt: str,
+        *,
+        timeout: float,
+        prices: Mapping[str, Mapping[str, tuple[float, float]]] | None,
+    ) -> ReviewerResult: ...
+
+
 def run_reviewer(
     reviewer: PanelReviewer,
     prompt: str,
     *,
     timeout: float = PANEL_TIMEOUT_S,
     prices: Mapping[str, Mapping[str, tuple[float, float]]] | None = None,
+    transports: Mapping[str, Transport] | None = None,
 ) -> ReviewerResult:
     """Run one reviewer; never raises (a dead reviewer is a result, not a crash)."""
     started = time.monotonic()
     try:
-        text, tokens, reported_cost = TRANSPORTS[reviewer.transport](
+        transport_table = TRANSPORTS if transports is None else transports
+        text, tokens, reported_cost = transport_table[reviewer.transport](
             reviewer, prompt, timeout
         )
         parsed = parse_review(text)
@@ -842,6 +857,7 @@ def panel_review(
     skipped: Mapping[str, str] | None = None,
     prices: Mapping[str, Mapping[str, tuple[float, float]]] | None = None,
     deadline: ReviewDeadline | None = None,
+    runner: ReviewerRunner | None = None,
 ) -> tuple[list[dict], dict]:
     """Run *reviewers* in parallel; return (merged findings, usage).
 
@@ -857,6 +873,7 @@ def panel_review(
             f"{len(reviewers)} agreement"
         )
     prices = prices if prices is not None else load_prices()
+    reviewer_runner = run_reviewer if runner is None else runner
     started = time.monotonic()
     panel_deadline = started + timeout + 30
     if deadline is not None:
@@ -876,9 +893,18 @@ def panel_review(
             )
             return
         lifecycle.stage("subscription_transport", attempt=i + 1)
-        results[i] = run_reviewer(
-            reviewer, prompt, timeout=transport_timeout, prices=prices
-        )
+        runner_started = time.monotonic()
+        try:
+            results[i] = reviewer_runner(
+                reviewer, prompt, timeout=transport_timeout, prices=prices
+            )
+        except Exception as exc:
+            results[i] = ReviewerResult(
+                reviewer,
+                False,
+                wall_s=time.monotonic() - runner_started,
+                error=f"runner raised {type(exc).__name__}: {exc}",
+            )
 
     threads = [
         threading.Thread(
