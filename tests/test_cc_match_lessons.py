@@ -1656,6 +1656,8 @@ def test_prompt_repeat_window_env_parsing(hook, monkeypatch):
 
 def _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch):
     """Hermetic wiring; keep real formatting, emission and session dedup."""
+    # Receipts go to $TMPDIR; never let a test append to production receipts.
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
     monkeypatch.delenv(hook.PROMPT_REPEAT_WINDOW_ENV, raising=False)
     monkeypatch.delenv("HOLDOUT_LESSONS", raising=False)
     monkeypatch.setattr(hook, "_selector_settings", lambda: {})
@@ -2228,3 +2230,173 @@ def test_distinct_prompt_processing_overlaps(hook, tmp_path, different_scope):
             state_dir=tmp_path,
             scope=(str(index),) if different_scope else (),
         )[0]
+
+
+# --- line-level prompt novelty (gptme/gptme-contrib#2170 residual) ---
+
+
+def _launcher_prompt(label: str, session_uuid: str, deadline: str, bullet: str):
+    """Real-shaped autonomous launcher prompt: boilerplate plus per-run ids."""
+    return "\n".join(
+        [
+            "You are Bob, running an autonomous session.",
+            "## Work selection",
+            "Run the cascade selector and pick the highest-value unblocked item.",
+            f"uv run coordination work-claim bob-autonomous-claude-code-{label}"
+            f"-{session_uuid} 'task:<id>' --ttl 60",
+            f"Session ID: {session_uuid}",
+            f"Session label: `{label}`",
+            f"Write your journal to journal/2026-11-14/autonomous-session-{label}.md",
+            f"Soft deadline: {deadline} UTC",
+            f"- {bullet}",
+            "Commit with git-safe-commit and push before the deadline.",
+            "",
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (
+            "claim bob-autonomous-claude-code-4107-abc",
+            "claim bob-autonomous-claude-code-7ccf-abc",
+        ),
+        ("session 883d done", "session 4a1f done"),
+        ("deadline 15:45 UTC", "deadline 09:05:12 UTC"),
+        (
+            "id 6f3a1c2e-1b2c-4d5e-8f90-0123456789ab",
+            "id 00000000-aaaa-4bbb-8ccc-dddddddddddd",
+        ),
+        ("journal/2026-11-14/x-1.md", "journal/2026-11-13/x-2.md"),
+    ],
+)
+def test_normalize_prompt_line_collapses_per_run_ids(hook, first, second):
+    assert hook._normalize_prompt_line(first) == hook._normalize_prompt_line(second)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("fix issue 123", "fix issue 456"),
+        ("see #2170", "see #2171"),
+        ("retry 3 times", "retry 5 times"),
+        ("decade of added beef", "decade of added face"),
+    ],
+)
+def test_normalize_prompt_line_keeps_plain_numbers_and_words(hook, first, second):
+    assert hook._normalize_prompt_line(first) != hook._normalize_prompt_line(second)
+
+
+def test_launcher_prompt_with_varying_ids_is_a_repeat(hook, tmp_path):
+    """Two runs differing only in label, UUID and deadline repeat (#2170 gap)."""
+    first = _launcher_prompt(
+        "7ccf", "6f3a1c2e-1b2c-4d5e-8f90-0123456789ab", "15:45", "Prefer code work."
+    )
+    second = _launcher_prompt(
+        "883d", "00000000-aaaa-4bbb-8ccc-dddddddddddd", "16:30", "Prefer code work."
+    )
+    assert first != second
+    assert not prompt_repeat_result(
+        hook, first, tmp_path, window=20, state_dir=tmp_path
+    )[0]
+    decision = prompt_repeat_result(
+        hook, second, tmp_path, window=20, state_dir=tmp_path
+    )
+    assert decision[0] is True
+    assert decision.lines_novel == 0
+    assert decision.lines_total == 10
+
+
+def test_launcher_prompt_matches_only_novel_lines(hook, tmp_path):
+    """A changed bullet is matched alone; the seen boilerplate is not."""
+    uuid = "6f3a1c2e-1b2c-4d5e-8f90-0123456789ab"
+    first = _launcher_prompt("7ccf", uuid, "15:45", "Prefer code work.")
+    second = _launcher_prompt(
+        "883d", uuid, "16:30", "BOUND WORK ITEM: fix the merge conflict in #42"
+    )
+    whole = prompt_repeat_result(hook, first, tmp_path, window=20, state_dir=tmp_path)
+    assert whole.match_text == first
+    assert (whole.lines_total, whole.lines_novel) == (10, 10)
+    decision = prompt_repeat_result(
+        hook, second, tmp_path, window=20, state_dir=tmp_path
+    )
+    assert decision[0] is False
+    assert decision.match_text == "- BOUND WORK ITEM: fix the merge conflict in #42"
+    assert (decision.lines_total, decision.lines_novel) == (10, 1)
+
+
+def test_boilerplate_lines_age_out_once_per_window(hook, tmp_path):
+    """Seen lines keep their position, so boilerplate is matched 1 in N runs."""
+    boilerplate = "Run the cascade selector and pick work."
+    runs_with_boilerplate = []
+    for index in range(60):
+        prompt = f"{boilerplate}\nunique bullet number {index}"
+        decision = prompt_repeat_result(
+            hook, prompt, tmp_path, window=20, state_dir=tmp_path
+        )
+        assert decision[0] is False  # the unique bullet is always novel
+        if boilerplate in decision.match_text:
+            runs_with_boilerplate.append(index)
+    assert runs_with_boilerplate == [0, 20, 40]
+
+
+def test_prompt_line_state_is_scoped(hook, tmp_path):
+    """A line seen under one matching scope is still novel under another."""
+    assert not prompt_repeat_result(
+        hook, "same line", tmp_path, window=20, state_dir=tmp_path, scope=("a",)
+    )[0]
+    assert not prompt_repeat_result(
+        hook, "same line", tmp_path, window=20, state_dir=tmp_path, scope=("b",)
+    )[0]
+
+
+def test_main_varying_launcher_prompt_share_and_receipts(hook, tmp_path, monkeypatch):
+    """Acceptance: across 20 real-shaped runs whose ids all differ, prompt-time
+    matching on the boilerplate happens once; receipts record line counts."""
+    _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch)
+    queries: list[str] = []
+
+    def score(lessons, text, **kwargs):
+        queries.append(text)
+        return list(lessons) if "cascade selector" in text else []
+
+    monkeypatch.setattr(hook, "score_lessons", score)
+    for index in range(20):
+        prompt = _launcher_prompt(
+            f"{index:04d}",
+            f"{index:08x}-aaaa-4bbb-8ccc-dddddddddddd",
+            f"{index % 24:02d}:{index:02d}",
+            "Prefer code work.",
+        )
+        monkeypatch.setattr(
+            hook,
+            "_STDIN_CACHE",
+            json.dumps(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": f"launcher-{index}",
+                    "cwd": str(tmp_path),
+                    "prompt": prompt,
+                }
+            ),
+        )
+        with pytest.raises(SystemExit):
+            hook.main()
+
+    receipts = [
+        json.loads(
+            (tmp_path / f"cc-session-launcher-{index}-lessons-receipts.jsonl")
+            .read_text()
+            .splitlines()[-1]
+        )
+        for index in range(20)
+    ]
+    assert receipts[0]["outcome"] == "emitted"
+    assert receipts[0]["prompt_lines"] == receipts[0]["prompt_novel_lines"] == 10
+    # The lone all-digit label line stays novel by design (plain numbers are
+    # never normalized), so later runs match only that line and inject nothing.
+    assert sum(row["outcome"] == "emitted" for row in receipts) == 1
+    assert [row["prompt_novel_lines"] for row in receipts[1:]] == [1] * 19
+    assert [row["reason"] for row in receipts[1:]] == ["no_match"] * 19
+    assert all("cascade selector" not in query for query in queries[1:])

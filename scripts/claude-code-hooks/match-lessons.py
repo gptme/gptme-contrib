@@ -129,6 +129,11 @@ def _trivial_user_prompt_event(raw: str) -> str | None:
 # can receipt before loading the remaining wrapper code below.
 RECEIPT_VERSION = 1
 
+# Extra fields merged into every receipt this process writes. ``main`` sets the
+# prompt-window line counts here so a receipt shows whether prompt-time matching
+# ran on the whole prompt or only on its novel lines.
+_RECEIPT_FIELDS: dict = {}
+
 
 def _get_lesson_receipts_file(session_id: str) -> Path:
     """Path of the emission-receipt JSONL: /tmp/cc-session-{id}-lessons-receipts.jsonl."""
@@ -159,6 +164,8 @@ def _write_emission_receipt(
         }
         if reason:
             record["reason"] = reason
+        for key, value in _RECEIPT_FIELDS.items():
+            record.setdefault(key, value)
         with open(_get_lesson_receipts_file(session_id), "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
         return record
@@ -349,6 +356,13 @@ STATE_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "claude-lesson-match"
 # MATCH_LESSONS_PROMPT_REPEAT_WINDOW prompt events for *this workspace* skips
 # prompt-time matching, so an unchanged prompt injects at most once per window;
 # PreToolUse and task-text matching are untouched, and `0` disables the window.
+#
+# Real launcher prompts are not byte-identical: a few lines carry the session
+# label, UUIDs, journal basename or a deadline time (measured 2026-11-14: 22/22
+# distinct hashes over ~329-line prompts differing in 14-28 lines). So the window
+# works per *line*, after normalizing id-like tokens: prompt-time matching sees
+# only lines not already seen within the window, and a prompt whose every line
+# was seen is skipped as ``fixed_prompt_repeat``.
 DEFAULT_PROMPT_REPEAT_WINDOW = 20
 PROMPT_REPEAT_WINDOW_ENV = "MATCH_LESSONS_PROMPT_REPEAT_WINDOW"
 
@@ -1126,23 +1140,105 @@ def _prompt_window_file(workspace: Path, state_dir: Path | None = None) -> Path:
     return root / f"prompt-window-{digest}.json"
 
 
+_UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\b")
+_CLOCK_RE = re.compile(r"(?<!\d)\d{1,2}:\d{2}(?::\d{2})?(?!\d)")
+# Hyphen/underscore/dot/slash-joined identifiers: session labels
+# (``bob-autonomous-claude-code-4107``), journal names (``session-883d.md``),
+# dated paths. Labels are often all digits, so a "mixed hex" rule alone misses
+# them.
+_JOINED_ID_RE = re.compile(r"[A-Za-z0-9]+(?:[-_./][A-Za-z0-9]+)+")
+_JOINED_SEGMENT_RE = re.compile(r"[A-Za-z0-9]*\d[A-Za-z0-9]*")
+# Standalone short hashes (``883d``, ``2f8387ce``): hex with a digit and a letter.
+_MIXED_HEX_RE = re.compile(r"\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{4,}\b")
+
+
+def _normalize_prompt_line(line: str) -> str:
+    """Normalize id-like tokens so per-run launcher values do not look novel.
+
+    Standalone plain numbers are kept: "fix issue 123" and "fix issue 456" must
+    stay distinct. Inside a joined identifier any segment with a digit becomes
+    ``<id>`` (accepting that ``fix-2170`` and ``fix-2171`` then collide).
+    """
+    line = line.strip()
+    line = _UUID_RE.sub("<uuid>", line)
+    line = _CLOCK_RE.sub("<time>", line)
+    line = _JOINED_ID_RE.sub(lambda m: _JOINED_SEGMENT_RE.sub("<id>", m.group(0)), line)
+    return _MIXED_HEX_RE.sub("<hex>", line)
+
+
+def _prompt_line_keys(prompt_text: str, scope: tuple) -> dict[str, list[str]]:
+    """Map each scoped normalized-line digest to its original prompt lines."""
+    keys: dict[str, list[str]] = {}
+    for raw in prompt_text.splitlines():
+        normalized = _normalize_prompt_line(raw)
+        if not normalized:
+            continue
+        key = hashlib.sha256(
+            json.dumps([normalized, scope]).encode("utf-8")
+        ).hexdigest()[:24]
+        keys.setdefault(key, []).append(raw)
+    return keys
+
+
+class PromptWindow(tuple):
+    """``(repeat, prompt_digest)`` plus the text prompt-time matching should use.
+
+    Unpacks as a 2-tuple. ``match_text`` is the novel lines when only some lines
+    were seen within the window, else the whole prompt. ``lines_total`` and
+    ``lines_novel`` count distinct normalized lines.
+    """
+
+    match_text: str
+    lines_total: int
+    lines_novel: int
+
+    def __new__(
+        cls,
+        repeat: bool,
+        digest: str,
+        match_text: str = "",
+        lines_total: int = 0,
+        lines_novel: int = 0,
+    ):
+        obj = super().__new__(cls, (repeat, digest))
+        obj.match_text = match_text
+        obj.lines_total = lines_total
+        obj.lines_novel = lines_novel
+        return obj
+
+
+def _int_positions(raw: object) -> dict[str, int]:
+    positions: dict[str, int] = {}
+    if not isinstance(raw, dict):
+        return positions
+    for key, value in raw.items():
+        try:
+            positions[str(key)] = int(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return positions
+
+
 def _load_prompt_window(path: Path) -> dict:
     try:
         data = json.loads(path.read_text())
     except TimeoutError:
         raise
     except (OSError, ValueError):
-        return {"seq": 0, "hashes": {}}
+        return {"seq": 0, "hashes": {}, "lines": {}}
     if not isinstance(data, dict):
-        return {"seq": 0, "hashes": {}}
+        return {"seq": 0, "hashes": {}, "lines": {}}
     hashes = data.get("hashes")
     if not isinstance(hashes, dict):
         hashes = {}
+    lines = data.get("lines")
+    if not isinstance(lines, dict):
+        lines = {}
     try:
         seq = int(data.get("seq", 0))
     except (TypeError, ValueError, OverflowError):
         seq = 0
-    return {"seq": seq, "hashes": hashes}
+    return {"seq": seq, "hashes": hashes, "lines": lines}
 
 
 def _save_prompt_window(path: Path, state: dict) -> None:
@@ -1161,15 +1257,15 @@ def _advance_prompt_window(path: Path, size: int) -> dict:
     """Read fresh state under the workspace lock and prune expired positions."""
     state = _load_prompt_window(path)
     seq = state["seq"] + 1
-    hashes: dict[str, int] = {}
-    for key, value in state["hashes"].items():
-        try:
-            position = int(value)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if 0 <= seq - position <= size:
-            hashes[str(key)] = position
-    return {"seq": seq, "hashes": hashes}
+
+    def live(raw: object) -> dict[str, int]:
+        return {
+            key: position
+            for key, position in _int_positions(raw).items()
+            if 0 <= seq - position <= size
+        }
+
+    return {"seq": seq, "hashes": live(state["hashes"]), "lines": live(state["lines"])}
 
 
 def _prune_prompt_lock_sidecars(path: Path, keep: Collection[str]) -> None:
@@ -1223,20 +1319,27 @@ def check_prompt_repeat(
 ):
     """Serialize checking and successful processing of a scoped prompt.
 
-    Yields ``(repeat, prompt_digest)``. ``repeat`` is True when the same prompt
-    was matched within the last ``window`` prompt events for this workspace. The
-    caller then emits an empty payload (reason ``fixed_prompt_repeat``) instead of
-    re-injecting the same documents that a fixed launcher prompt always matches.
+    Yields a :class:`PromptWindow`, which unpacks as ``(repeat, prompt_digest)``.
+    Novelty is per line: each non-blank line is normalized
+    (:func:`_normalize_prompt_line`) and checked against the lines recorded in
+    the last ``window`` prompt events for this workspace. ``repeat`` is True
+    when every line was seen; the caller then emits an empty payload (reason
+    ``fixed_prompt_repeat``) instead of re-injecting the same documents that a
+    fixed launcher prompt always matches. When only some lines were seen,
+    ``match_text`` holds just the novel lines, so per-run boilerplate cannot
+    pin the prompt-time cap while event-specific text still drives matching.
 
-    Only a non-repeat refreshes the hash's position. A repeat leaves it where it
-    was, so the entry ages out of the window and the prompt injects again after
-    ``window`` events — otherwise a permanently fixed prompt would be recorded
-    forever by its own repeats and never inject at all. This is a cooldown, not a
+    Only novel lines refresh their position. A seen line keeps its old one, so
+    boilerplate ages out of the window and is matched again after ``window``
+    events — otherwise a permanently fixed prompt would be recorded forever by
+    its own repeats and never inject at all. This is a cooldown, not a
     permanent block. The caller must return normally after emitting its decision;
     exceptions (including SystemExit) do not commit the position. ``window == 0``
     disables the check, as does unavailable POSIX locking. State I/O errors fail
     open, but budget timeouts propagate. Only identical scoped prompts serialize
     processing; the workspace lock covers short state transactions, not matching.
+    Different prompts that share lines and overlap may both treat the shared
+    lines as novel (fail-open: an extra injection, never a lost one).
     The post-output workspace reacquire is bounded: it retries non-blocking
     for a short deadline and skips the commit (fail-open) rather than hanging
     after SIGALRM is disarmed.
@@ -1246,9 +1349,11 @@ def check_prompt_repeat(
     digest = hashlib.sha256(
         json.dumps([prompt_text.strip(), scope]).encode("utf-8")
     ).hexdigest()
+    line_keys = _prompt_line_keys(prompt_text, scope)
+    whole = PromptWindow(False, digest, prompt_text, len(line_keys), len(line_keys))
     size = prompt_repeat_window() if window is None else max(int(window), 0)
     if size == 0 or fcntl is None:
-        yield False, digest
+        yield whole
         return
     prompt_lock = None
     state_lock = None
@@ -1278,8 +1383,19 @@ def check_prompt_repeat(
         state_lock = path.with_suffix(".lock").open("a")
         fcntl.flock(state_lock, fcntl.LOCK_EX)
         state = _advance_prompt_window(path, size)
-        last = state["hashes"].get(digest)
-        repeat = last is not None and (state["seq"] - last) < size
+        novel = [
+            key
+            for key in line_keys
+            if key not in state["lines"] or (state["seq"] - state["lines"][key]) >= size
+        ]
+        repeat = bool(line_keys) and not novel
+        if len(novel) == len(line_keys):
+            decision = whole
+        else:
+            novel_text = "\n".join(line for key in novel for line in line_keys[key])
+            decision = PromptWindow(
+                repeat, digest, novel_text, len(line_keys), len(novel)
+            )
         fcntl.flock(state_lock, fcntl.LOCK_UN)
     except TimeoutError:
         if state_lock is not None:
@@ -1292,12 +1408,12 @@ def check_prompt_repeat(
             state_lock.close()
         if prompt_lock is not None:
             prompt_lock.close()
-        yield False, digest
+        yield whole
         return
     try:
         # Only this scoped prompt stays locked during matching. A timeout,
         # exception or process death publishes no successful position.
-        yield repeat, digest
+        yield decision
         try:
             # Bounded, not blocking: emit helpers have already disarmed
             # SIGALRM, so a plain LOCK_EX here would hang until the harness
@@ -1318,6 +1434,8 @@ def check_prompt_repeat(
             state = _advance_prompt_window(path, size)
             if not repeat:
                 state["hashes"][digest] = state["seq"]
+            for key in novel:
+                state["lines"][key] = state["seq"]
             _save_prompt_window(path, state)
             _prune_prompt_lock_sidecars(path, set(state["hashes"]) | {digest})
         except TimeoutError:
@@ -1983,6 +2101,7 @@ def select_advisory_lessons(matches: list[dict], hook_input: dict) -> list[dict]
 
 
 def main():
+    _RECEIPT_FIELDS.clear()
     # Read hook input from stdin
     try:
         raw_input = _STDIN_CACHE if _STDIN_CACHE is not None else sys.stdin.read()
@@ -2101,9 +2220,15 @@ def main():
     window = (
         check_prompt_repeat(match_text, workspace, scope=scope)
         if event_type == "UserPromptSubmit"
-        else nullcontext((False, ""))
+        else nullcontext(PromptWindow(False, "", match_text))
     )
-    with window as (repeated, _prompt_digest):
+    with window as decision:
+        repeated = decision[0]
+        if event_type == "UserPromptSubmit" and decision.lines_total:
+            _RECEIPT_FIELDS["prompt_lines"] = decision.lines_total
+            _RECEIPT_FIELDS["prompt_novel_lines"] = decision.lines_novel
+        # Only lines not seen within the window drive prompt-time matching.
+        match_text = decision.match_text or match_text
         if repeated:
             emit_empty(event_type, session_id, "fixed_prompt_repeat")
         else:
