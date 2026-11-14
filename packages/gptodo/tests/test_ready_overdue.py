@@ -110,3 +110,26 @@ def test_ready_overdue_no_tasks_json(tmp_path: Path, monkeypatch) -> None:
     result = CliRunner().invoke(cli, ["ready", "--overdue", "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == {"overdue_tasks": [], "count": 0}
+
+
+def test_ready_overdue_sorts_wait_instants(tmp_path: Path, monkeypatch) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    for name, wait in [
+        ("later", "2026-01-03T00:00:00+00:00"),
+        ("earlier", "2026-01-03T01:00:00+02:00"),
+        ("date-only", "2026-01-01"),
+        ("local-naive", "2026-01-01T12:00:00"),
+    ]:
+        write_task(tasks_dir, name, state="waiting", wait=wait, created="2026-01-01T00:00:00")
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    for output in ["--json", "--jsonl"]:
+        result = runner.invoke(cli, ["ready", "--overdue", output])
+        assert result.exit_code == 0, result.output
+        rows = (
+            json.loads(result.stdout)["overdue_tasks"]
+            if output == "--json"
+            else [json.loads(line) for line in result.stdout.splitlines()]
+        )
+        assert [row["id"] for row in rows] == ["date-only", "local-naive", "earlier", "later"]

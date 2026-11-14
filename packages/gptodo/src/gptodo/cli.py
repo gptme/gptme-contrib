@@ -3456,8 +3456,17 @@ def _print_overdue_waiting(all_tasks, output_json, output_jsonl, pool_filter, ex
         if task_wait_gate_passed(task)
         and task_matches_pool_filter(task, pool=pool_filter, exclude_pool=exclude_pool)
     ]
+
+    def _sort_key(task):
+        wait = task.wait
+        assert wait is not None  # Selected by task_wait_gate_passed above.
+        if not isinstance(wait, datetime):
+            wait = datetime.combine(wait, datetime.min.time())
+        # Naive waits and date-only midnight use local time, matching the gate predicate.
+        return (wait.timestamp(), -task.priority_rank, task.created)
+
     # Oldest gate first: the longest-overdue re-check is the most likely to have rotted.
-    overdue_tasks.sort(key=lambda t: (str(t.wait), -t.priority_rank, t.created))
+    overdue_tasks.sort(key=_sort_key)
 
     def _row(task):
         data = task_to_dict(task)
