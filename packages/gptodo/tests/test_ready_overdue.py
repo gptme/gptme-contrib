@@ -102,3 +102,11 @@ def test_ready_overdue_empty(tmp_path: Path, monkeypatch) -> None:
     result = CliRunner().invoke(cli, ["ready", "--overdue", "--json"])
     assert result.exit_code == 0
     assert json.loads(result.output) == {"overdue_tasks": [], "count": 0}
+
+
+def test_ready_overdue_no_tasks_json(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "tasks").mkdir()
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["ready", "--overdue", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"overdue_tasks": [], "count": 0}

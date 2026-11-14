@@ -3601,6 +3601,10 @@ def ready(
 
     # Load all tasks
     all_tasks = load_tasks(tasks_dir)
+    if overdue:
+        _print_overdue_waiting(all_tasks, output_json, output_jsonl, pool_filter, exclude_pool)
+        return
+
     if not all_tasks:
         if output_json:
             print("No tasks found", file=sys.stderr)
@@ -3610,10 +3614,6 @@ def ready(
             print("No tasks found", file=sys.stderr)
             return  # Empty output for JSONL
         console.print("[yellow]No tasks found![/]")
-        return
-
-    if overdue:
-        _print_overdue_waiting(all_tasks, output_json, output_jsonl, pool_filter, exclude_pool)
         return
 
     # Create task lookup dictionary
