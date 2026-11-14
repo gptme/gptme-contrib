@@ -1518,7 +1518,7 @@ provides-extras = ["oauth", "bridge", "secrets", "test"]
 [[package]]
 name = "gptme"
 version = "0.35.1"
-source = { git = "https://github.com/gptme/gptme.git?branch=master#8167ffa67ecbcacbb35d4a110349e8df338c4d1a" }
+source = { git = "https://github.com/gptme/gptme.git?branch=master#a3fe81fb723e9864d5d79f2312d655e96c8cbd60" }
 dependencies = [
     { name = "anthropic" },
     { name = "click" },
