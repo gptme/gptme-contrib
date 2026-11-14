@@ -605,6 +605,10 @@ class SessionRecord:
     # Bounded Git output summary supplied by a caller that owns attribution.
     # Global shared-worktree dirt is intentionally not part of this contract.
     git_summary: dict[str, Any] | None = None
+    # Id of the harness-selector decision that chose this session's route, as
+    # written on that decision's log row. Lets a replay join selector decisions
+    # to the sessions they produced without timestamp proximity.
+    selector_decision_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.session_id:

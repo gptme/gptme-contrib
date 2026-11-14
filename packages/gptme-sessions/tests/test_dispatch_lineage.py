@@ -29,10 +29,12 @@ def _clear_lineage_env(monkeypatch):
         "AGENT_DISPATCH_KIND",
         "AGENT_DISPATCH_ID",
         "AGENT_DISPATCH_CAUSE",
+        "AGENT_SELECTOR_DECISION_ID",
         "BOB_PARENT_SESSION_ID",
         "BOB_DISPATCH_KIND",
         "BOB_DISPATCH_ID",
         "BOB_DISPATCH_CAUSE",
+        "BOB_SELECTOR_DECISION_ID",
         "PM_DISPATCH_ID",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -202,6 +204,7 @@ def test_no_lineage_without_env_or_argument(tmp_path: Path, monkeypatch):
     )
     assert result.record.parent_session_id is None
     assert result.record.dispatch_kind is None
+    assert result.record.selector_decision_id is None
 
 
 def test_stale_env_parent_matching_own_id_is_dropped(tmp_path: Path, monkeypatch):
@@ -424,3 +427,47 @@ def test_post_session_reads_dispatch_cause_from_agent_env(tmp_path: Path, monkey
         duration_seconds=10,
     )
     assert result.record.dispatch_cause == {"kind": "agent-env", "id": "run-7"}
+
+
+# --- selector_decision_id (join to the harness-selector decision row) -------
+
+
+def test_selector_decision_id_preserves_positional_constructor_order():
+    """The new join key must not displace existing positional category arguments."""
+    record = SessionRecord(
+        *(["positional", "2026-11-13T00:00:00Z"] + [None] * 15 + ["code", "research"])
+    )
+    assert record.category == "code"
+    assert record.recommended_category == "research"
+    assert record.selector_decision_id is None
+
+
+def test_post_session_records_selector_decision_id_from_env(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("AGENT_SELECTOR_DECISION_ID", raising=False)
+    monkeypatch.setenv("BOB_SELECTOR_DECISION_ID", "pm-123-1700000000")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store, harness="gptme", model="sonnet", session_id="s1", duration_seconds=10
+    )
+    assert result.record.selector_decision_id == "pm-123-1700000000"
+    reloaded = SessionRecord.from_dict(result.record.to_dict())
+    assert reloaded.selector_decision_id == "pm-123-1700000000"
+
+
+def test_post_session_selector_decision_id_argument_wins_and_default_none(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.delenv("BOB_SELECTOR_DECISION_ID", raising=False)
+    monkeypatch.setenv("AGENT_SELECTOR_DECISION_ID", "from-env")
+    store = SessionStore(sessions_dir=tmp_path)
+    result = post_session(
+        store=store,
+        harness="gptme",
+        model="sonnet",
+        session_id="s2",
+        selector_decision_id="explicit",
+        duration_seconds=10,
+    )
+    assert result.record.selector_decision_id == "explicit"
+    monkeypatch.delenv("AGENT_SELECTOR_DECISION_ID")
+    assert SessionRecord(session_id="s3").selector_decision_id is None

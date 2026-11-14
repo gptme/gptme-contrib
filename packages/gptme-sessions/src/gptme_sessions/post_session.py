@@ -341,6 +341,7 @@ def post_session(
     dispatch_kind: str | None = None,
     dispatch_id: str | None = None,
     dispatch_cause: dict[str, Any] | None = None,
+    selector_decision_id: str | None = None,
     category: str | None = None,
     recommended_category: str | None = None,
     selector_mode: str | None = None,
@@ -410,6 +411,10 @@ def post_session(
         ``AGENT_DISPATCH_ID`` environment variable (legacy alias:
         ``BOB_DISPATCH_ID``), falling back to ``PM_DISPATCH_ID`` for the
         project-monitoring path.
+    selector_decision_id:
+        Id of the harness-selector decision row that chose this session's
+        route.  Defaults to the ``AGENT_SELECTOR_DECISION_ID`` environment
+        variable (legacy alias: ``BOB_SELECTOR_DECISION_ID``).
     dispatch_cause:
         Launcher-captured cause object, with caller-defined ``kind``/``id``
         and optional ``parent_session_id``, ``task``, ``pr``, or other metadata.
@@ -1196,6 +1201,14 @@ def post_session(
                 pass
     if isinstance(resolved_dispatch_cause, dict):
         record_kwargs["dispatch_cause"] = resolved_dispatch_cause
+    resolved_selector_decision_id = (
+        selector_decision_id
+        or os.environ.get("AGENT_SELECTOR_DECISION_ID")
+        or os.environ.get("BOB_SELECTOR_DECISION_ID")
+        or None
+    )
+    if resolved_selector_decision_id is not None:
+        record_kwargs["selector_decision_id"] = resolved_selector_decision_id
     if actual_category is not None:
         record_kwargs["category"] = actual_category
     if recommended_category is not None:
