@@ -29,10 +29,12 @@ def _clear_lineage_env(monkeypatch):
         "AGENT_DISPATCH_KIND",
         "AGENT_DISPATCH_ID",
         "AGENT_DISPATCH_CAUSE",
+        "AGENT_SELECTOR_DECISION_ID",
         "BOB_PARENT_SESSION_ID",
         "BOB_DISPATCH_KIND",
         "BOB_DISPATCH_ID",
         "BOB_DISPATCH_CAUSE",
+        "BOB_SELECTOR_DECISION_ID",
         "PM_DISPATCH_ID",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -202,6 +204,7 @@ def test_no_lineage_without_env_or_argument(tmp_path: Path, monkeypatch):
     )
     assert result.record.parent_session_id is None
     assert result.record.dispatch_kind is None
+    assert result.record.selector_decision_id is None
 
 
 def test_stale_env_parent_matching_own_id_is_dropped(tmp_path: Path, monkeypatch):
