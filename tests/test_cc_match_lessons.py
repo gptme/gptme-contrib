@@ -841,6 +841,80 @@ def test_detect_session_category_none_when_unset(hook, monkeypatch):
     assert hook.detect_session_category() is None
 
 
+def test_trajectory_persistence_injects_when_category_unset(
+    hook, tmp_path, monkeypatch, capsys
+):
+    """Replay the #4868 SendMessage with CASCADE_CATEGORY unset.
+
+    gptme-contrib#2186: ``session_categories: [infrastructure, cleanup]``
+    dropped this alignment lesson whenever the session category was unknown,
+    so the keywords added in #2121 never fired in the original incident.
+    """
+    import io
+    import shutil
+
+    src = (
+        Path(__file__).resolve().parent.parent
+        / "lessons"
+        / "infrastructure"
+        / "trajectory-persistence.md"
+    )
+    lessons_dir = tmp_path / "lessons"
+    lessons_dir.mkdir()
+    shutil.copy(src, lessons_dir / "trajectory-persistence.md")
+    (tmp_path / "gptme.toml").write_text('[lessons]\ndirs = ["lessons"]\n')
+
+    scanned = hook.scan_lessons([lessons_dir])
+    assert scanned, "trajectory-persistence.md must parse as an active lesson"
+    assert scanned[0]["session_categories"] == [], (
+        "trajectory-persistence must stay unrestricted; a session_categories "
+        "gate drops it when CASCADE_CATEGORY is unset (gptme-contrib#2186)"
+    )
+
+    monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(hook, "get_workspace", lambda: tmp_path)
+    # Hermetic: real score_memories reads the workspace and may inject
+    # keyworded memories when gptme is importable.
+    monkeypatch.setattr(hook, "score_memories", lambda *a, **k: [])
+    monkeypatch.setattr(hook, "_log_lesson_events", lambda *a, **k: None)
+    monkeypatch.setattr(hook, "extract_tool_sequence", lambda tp: [])
+    monkeypatch.setattr(hook, "log_trajectory_match", lambda *a, **k: None)
+
+    for var in (
+        "CASCADE_CATEGORY",
+        "CASCADE_EXECUTION_CATEGORY",
+        "GRADE_CATEGORY",
+        "WORKER_CATEGORY",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    hook_input = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "issue-2186-replay",
+        "tool_name": "SendMessage",
+        "tool_input": {
+            "to": "peer",
+            "message": (
+                "add --no-session-persistence to both looks safe ... transcripts"
+            ),
+        },
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(hook_input)))
+
+    with pytest.raises(SystemExit) as excinfo:
+        hook.main()
+    assert excinfo.value.code == 0
+
+    out = capsys.readouterr().out
+    assert out.strip(), (
+        "expected Trajectory Persistence injection, hook emitted empty "
+        "(category gate or keyword miss)"
+    )
+    payload = json.loads(out)
+    context = payload["hookSpecificOutput"]["additionalContext"]
+    assert "Trajectory Persistence" in context
+
+
 # --- BM25 scoring ---
 # Note: tests for _build_bm25_index, _bm25_score, _bm25_min_z, _bm25_zscores
 # belong in gptme-rag tests — those functions moved to gptme_rag.lesson_matcher.
