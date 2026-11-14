@@ -260,6 +260,31 @@ def test_failed_first_push_starts_bootstrap_only_once(tmp_path, monkeypatch):
     assert len(problems) == 1 and "no acknowledged push" in problems[0]
 
 
+@pytest.mark.parametrize("invalid_since", [None, "not-a-timestamp", "", 42])
+@pytest.mark.parametrize("operation", ["start_tracking", "record_ack"])
+def test_invalid_bootstrap_is_repaired_once(tmp_path, invalid_since, operation):
+    target = tmp_path / "ack.json"
+    previous_ack = "2026-11-12T00:00:00+00:00"
+    target.write_text(json.dumps({"_since": invalid_since, "existing": previous_ack}))
+    now = datetime(2026, 11, 14, tzinfo=timezone.utc)
+
+    if operation == "start_tracking":
+        assert kuma_push.start_tracking(target, now)
+    else:
+        assert kuma_push.record_ack("new", target, now)
+    acks = kuma_push.load_acks(target)
+    assert acks["_since"] == now.isoformat(timespec="seconds")
+    assert acks["existing"] == previous_ack
+    assert kuma_push.stale_acks(acks, ["missing"], now, {"missing": 1}) == []
+    later = now + timedelta(hours=4)
+    assert kuma_push.start_tracking(target, later)
+    assert kuma_push.load_acks(target)["_since"] == acks["_since"]
+    problems = kuma_push.stale_acks(
+        kuma_push.load_acks(target), ["missing"], later, {"missing": 1}
+    )
+    assert len(problems) == 1 and "no acknowledged push" in problems[0]
+
+
 def test_missing_bootstrap_is_not_reported_as_healthy():
     problems = kuma_push.stale_acks({}, ["K"], datetime.now(timezone.utc), {"K": 1})
     assert len(problems) == 1 and "tracking not initialized" in problems[0]
