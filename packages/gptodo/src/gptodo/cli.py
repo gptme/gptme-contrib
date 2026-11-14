@@ -141,6 +141,7 @@ from gptodo.utils import (
     resolve_known_frontmatter_fields,
     task_has_waiting_blocker,
     task_is_waiting_for_date,
+    task_wait_gate_passed,
     task_matches_pool_filter,
     task_pool,
     load_cache,
@@ -3447,6 +3448,69 @@ def _get_claimed_task_ids(repo_root: Path) -> set[str]:
     return {r[0][len(prefix) :] if r[0].startswith(prefix) else r[0] for r in rows}
 
 
+def _print_overdue_waiting(all_tasks, output_json, output_jsonl, pool_filter, exclude_pool):
+    """Print tasks still blocked by waiting_for/state: waiting after their wait: passed."""
+    overdue_tasks = [
+        task
+        for task in all_tasks
+        if task_wait_gate_passed(task)
+        and task_matches_pool_filter(task, pool=pool_filter, exclude_pool=exclude_pool)
+    ]
+
+    def _sort_key(task):
+        wait = task.wait
+        assert wait is not None  # Selected by task_wait_gate_passed above.
+        if not isinstance(wait, datetime):
+            wait = datetime.combine(wait, datetime.min.time())
+        # Naive waits and date-only midnight use local time, matching the gate predicate.
+        return (wait.timestamp(), -task.priority_rank, task.created)
+
+    # Oldest gate first: the longest-overdue re-check is the most likely to have rotted.
+    overdue_tasks.sort(key=_sort_key)
+
+    def _row(task):
+        data = task_to_dict(task)
+        data["wait"] = str(task.wait)
+        data["waiting_for"] = str(task.metadata.get("waiting_for") or "")
+        return data
+
+    if output_jsonl:
+        for task in overdue_tasks:
+            print(json.dumps(_row(task)))
+        return
+    if output_json:
+        print(
+            json.dumps(
+                {"overdue_tasks": [_row(t) for t in overdue_tasks], "count": len(overdue_tasks)},
+                indent=2,
+            )
+        )
+        return
+
+    console = Console()
+    if not overdue_tasks:
+        console.print("[green]No blocked tasks past their wait: date.[/]")
+        return
+    table = Table(
+        title=f"[bold yellow]Re-check: wait gate passed[/] ({len(overdue_tasks)} still blocked)"
+    )
+    table.add_column("Task", style="cyan")
+    table.add_column("State", style="blue")
+    table.add_column("Wait", style="yellow", no_wrap=True)
+    table.add_column("Waiting for", style="white")
+    for task in overdue_tasks:
+        table.add_row(
+            task.name,
+            task.state or "",
+            str(task.wait),
+            markup_escape(str(task.metadata.get("waiting_for") or ("state: waiting"))),
+        )
+    console.print(table)
+    console.print(
+        "[dim]Resolve, set a new wait: date, or clear waiting_for to make these ready.[/]"
+    )
+
+
 @cli.command("ready")
 @click.option(
     "--state",
@@ -3510,7 +3574,24 @@ def _get_claimed_task_ids(repo_root: Path) -> set[str]:
         "Reads state/coordination/coord.db; silently degrades if absent."
     ),
 )
-def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool, skip_claimed):
+@click.option(
+    "--overdue",
+    is_flag=True,
+    help=(
+        "List blocked tasks (waiting_for / state: waiting) whose wait: date has "
+        "passed, for re-checking. Does not release them; ignores --state."
+    ),
+)
+def ready(
+    state,
+    output_json,
+    output_jsonl,
+    use_cache,
+    pool_filter,
+    exclude_pool,
+    skip_claimed,
+    overdue=False,
+):
     """List all ready (unblocked) tasks.
 
     Shows tasks that have no dependencies or whose dependencies are all completed.
@@ -3529,6 +3610,13 @@ def ready(state, output_json, output_jsonl, use_cache, pool_filter, exclude_pool
 
     # Load all tasks
     all_tasks = load_tasks(tasks_dir)
+    if overdue:
+        if skip_claimed:
+            claimed = _get_claimed_task_ids(repo_root)
+            all_tasks = [task for task in all_tasks if task.name not in claimed]
+        _print_overdue_waiting(all_tasks, output_json, output_jsonl, pool_filter, exclude_pool)
+        return
+
     if not all_tasks:
         if output_json:
             print("No tasks found", file=sys.stderr)
