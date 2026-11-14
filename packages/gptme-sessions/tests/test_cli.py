@@ -1174,6 +1174,43 @@ class TestSyncTimestamp:
         plain = {_normalize_project("/home/u/repo")}
         assert not _project_matches({"harness": "claude-code", "project": "/home/u/repo/"}, plain)
 
+    def test_project_filter_claude_code_disambiguates_by_recorded_cwd(self, tmp_path: Path):
+        """Sibling workspaces sharing a CC dir key are told apart by the JSONL ``cwd``.
+
+        ``/home/u/my-ws``, ``/home/u/my/ws`` and ``/home/u/my.ws`` all encode to
+        ``-home-u-my-ws``; only the session whose recorded cwd is the requested
+        workspace may match.
+        """
+        from gptme_sessions.cli import _normalize_project, _project_matches
+
+        project_dir = tmp_path / "-home-u-my-ws"
+        project_dir.mkdir()
+
+        def cc_entry(name: str, cwd: str | None) -> dict:
+            path = project_dir / f"{name}.jsonl"
+            lines = [{"type": "summary", "summary": "x"}]
+            if cwd is not None:
+                lines.append({"type": "user", "cwd": cwd, "message": {"role": "user"}})
+            path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+            return {"harness": "claude-code", "project": "/home/u/my/ws", "path": path}
+
+        mine = cc_entry("mine", "/home/u/my-ws")
+        nested = cc_entry("nested", "/home/u/my/ws")
+        dotted = cc_entry("dotted", "/home/u/my.ws")
+        stub = cc_entry("stub", None)
+        # cwd that doesn't encode to the dir name can't attribute the dir
+        moved = cc_entry("moved", "/elsewhere")
+
+        wanted = {_normalize_project("/home/u/my-ws")}
+        assert _project_matches(mine, wanted)
+        assert not _project_matches(nested, wanted)
+        assert not _project_matches(dotted, wanted)
+        assert _project_matches(stub, wanted)  # no cwd: lossy key fallback
+        assert _project_matches(moved, wanted)
+
+        assert _project_matches(nested, {_normalize_project("/home/u/my/ws")})
+        assert not _project_matches(mine, {_normalize_project("/home/u/my/ws")})
+
     def test_sync_imports_real_start_time_from_trajectory(self, tmp_path: Path):
         """sync should record the real start time, not a noon-UTC placeholder.
 
@@ -1248,6 +1285,39 @@ class TestSyncFixTimestamps:
         # Verify the timestamp was corrected
         records = store.load_all()
         assert records[0].timestamp.startswith("2026-03-10")
+
+    def test_fix_timestamps_respects_project(self, tmp_path: Path):
+        """--project limits --fix-timestamps to records whose stored project matches."""
+        store = SessionStore(sessions_dir=tmp_path)
+        for name, project in [("mine", "/home/u/ws"), ("other", "/tmp"), ("none", None)]:
+            store.append(
+                SessionRecord(
+                    harness="gptme",
+                    timestamp="2026-03-20T12:00:00+00:00",  # wrong: sync date
+                    trajectory_path=f"/fake/logs/2026-03-10-{name}/conversation.jsonl",
+                    project=project,
+                )
+            )
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "--sessions-dir",
+                str(tmp_path),
+                "sync",
+                "--fix-timestamps",
+                "--project",
+                "/home/u/ws/",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Fixed 1 timestamp(s) out of 1 record(s) matching --project" in result.output
+
+        by_name = {r.trajectory_path.split("-")[-1].split("/")[0]: r for r in store.load_all()}
+        assert len(by_name) == 3  # untouched records survive the rewrite
+        assert by_name["mine"].timestamp.startswith("2026-03-10")
+        assert by_name["other"].timestamp.startswith("2026-03-20")
+        assert by_name["none"].timestamp.startswith("2026-03-20")
 
     def test_fix_timestamps_restores_real_time_from_trajectory(self, tmp_path: Path):
         """--fix-timestamps restores the real start time (not noon placeholder).

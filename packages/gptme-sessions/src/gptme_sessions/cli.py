@@ -22,6 +22,7 @@ from .discovery import (
     discover_copilot_sessions,
     discover_gptme_sessions,
     discover_pi_sessions,
+    extract_cc_cwd,
     extract_cc_model,
     extract_project,
     extract_session_name,
@@ -490,13 +491,29 @@ def _project_key(project: str | Path) -> str:
 
 
 def _project_matches(entry: dict, wanted: set[str]) -> bool:
-    """Whether a discovered entry's project is one of the normalized ``wanted`` paths."""
+    """Whether a discovered entry's project is one of the normalized ``wanted`` paths.
+
+    Claude Code entries are first matched on the lossy dir-name key. Since
+    sibling workspaces like ``/a/my-ws`` and ``/a/my/ws`` share that key, a
+    key match is then confirmed against the ``cwd`` recorded in the session's
+    JSONL (``entry["path"]``) when it has one consistent with the dir name.
+    Trajectories without a usable ``cwd`` fall back to the key match.
+    """
     project = entry.get("project")
     if not project:
         return False
-    if entry.get("harness") == "claude-code":
-        return _project_key(project) in {_project_key(w) for w in wanted}
-    return _normalize_project(project) in wanted
+    if entry.get("harness") != "claude-code":
+        return _normalize_project(project) in wanted
+    key = _project_key(project)
+    if key not in {_project_key(w) for w in wanted}:
+        return False
+    path = entry.get("path")
+    cwd = extract_cc_cwd(Path(path)) if path else None
+    # A cwd that doesn't encode to the dir name (e.g. the session later moved
+    # elsewhere) says nothing about which workspace the dir belongs to.
+    if cwd and _project_key(_normalize_project(cwd)) == key:
+        return _normalize_project(cwd) in wanted
+    return True
 
 
 def _count_unsynced(
@@ -2530,7 +2547,8 @@ def replay(
     help=(
         "Only import sessions whose project is this path (repeatable). Without it, "
         "sync imports sessions from every project, including headless calls run "
-        "from other directories."
+        "from other directories. With --fix-timestamps, only fixes records whose "
+        "stored project matches."
     ),
 )
 @click.option(
@@ -2576,8 +2594,25 @@ def sync(
         if not existing_records:
             click.echo("No records in store to fix.")
             return
+        # --project scopes which records get fixed by their stored project;
+        # the store is still rewritten as a whole.
+        candidates = existing_records
+        if projects:
+            wanted = {_normalize_project(p) for p in projects}
+            candidates = [
+                rec
+                for rec in existing_records
+                if _project_matches(
+                    {
+                        "harness": rec.harness,
+                        "project": rec.project,
+                        "path": rec.trajectory_path,
+                    },
+                    wanted,
+                )
+            ]
         fixed = 0
-        for rec in existing_records:
+        for rec in candidates:
             if not rec.trajectory_path:
                 continue
             h = rec.harness or "unknown"
@@ -2615,9 +2650,10 @@ def sync(
                 fixed += 1
         if not dry_run and fixed:
             store.rewrite(existing_records)
+        scope = " matching --project" if projects else ""
         click.echo(
             f"{'Would fix' if dry_run else 'Fixed'} {fixed} timestamp(s) "
-            f"out of {len(existing_records)} record(s)."
+            f"out of {len(candidates)} record(s){scope}."
         )
         return
 
