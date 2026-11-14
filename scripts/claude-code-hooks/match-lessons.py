@@ -1172,6 +1172,44 @@ def _advance_prompt_window(path: Path, size: int) -> dict:
     return {"seq": seq, "hashes": hashes}
 
 
+def _prune_prompt_lock_sidecars(path: Path, keep: Collection[str]) -> None:
+    """Unlink expired scoped-prompt lock files that are not currently held.
+
+    JSON expiry only shrinks the hashes map. Each distinct scoped prompt also
+    creates ``path.with_suffix(f".{digest}.lock")``, and those directory entries
+    would otherwise grow with every historical prompt. Unlink only when a
+    non-blocking exclusive lock succeeds, so a live holder keeps its inode.
+    """
+    if fcntl is None:
+        return
+    # path is ``prompt-window-<ws>.json``; sidecars are
+    # ``prompt-window-<ws>.<digest>.lock``. Using ``path.name`` would prefix
+    # with ``.json.`` and never match.
+    prefix = f"{path.stem}."
+    suffix = ".lock"
+    try:
+        entries = list(path.parent.iterdir())
+    except OSError:
+        return
+    for sidecar in entries:
+        name = sidecar.name
+        if not (name.startswith(prefix) and name.endswith(suffix)):
+            continue
+        digest = name[len(prefix) : -len(suffix)]
+        if not digest or digest in keep:
+            continue
+        handle = None
+        try:
+            handle = sidecar.open("a")
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            sidecar.unlink()
+        except OSError:
+            pass
+        finally:
+            if handle is not None:
+                handle.close()
+
+
 @contextmanager
 def check_prompt_repeat(
     prompt_text: str,
@@ -1197,6 +1235,9 @@ def check_prompt_repeat(
     disables the check, as does unavailable POSIX locking. State I/O errors fail
     open, but budget timeouts propagate. Only identical scoped prompts serialize
     processing; the workspace lock covers short state transactions, not matching.
+    The post-output workspace reacquire is bounded: it retries non-blocking
+    for a short deadline and skips the commit (fail-open) rather than hanging
+    after SIGALRM is disarmed.
     """
     # Surrounding whitespace is transport noise, not user intent: strip so a
     # prompt that differs only by a trailing newline counts as the same prompt.
@@ -1240,13 +1281,27 @@ def check_prompt_repeat(
         # exception or process death publishes no successful position.
         yield repeat, digest
         try:
-            fcntl.flock(state_lock, fcntl.LOCK_EX)
+            # Bounded, not blocking: emit helpers have already disarmed
+            # SIGALRM, so a plain LOCK_EX here would hang until the harness
+            # kills us and discards the already-written context. Retry
+            # LOCK_NB until a short deadline; skip the commit if the
+            # workspace lock stays held — extra injection later is fail-open.
+            deadline = time.monotonic() + 0.5
+            while True:
+                try:
+                    fcntl.flock(state_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        return
+                    time.sleep(0.01)
             # Other prompts may have completed while we matched: merge against
             # fresh state rather than overwriting their events or hashes.
             state = _advance_prompt_window(path, size)
             if not repeat:
                 state["hashes"][digest] = state["seq"]
             _save_prompt_window(path, state)
+            _prune_prompt_lock_sidecars(path, set(state["hashes"]) | {digest})
         except TimeoutError:
             raise
         except (OSError, ValueError, TypeError):

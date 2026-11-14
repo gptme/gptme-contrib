@@ -164,6 +164,13 @@ does not mark the prompt processed; the next call can retry. Waiting for a lock
 shares the hook's existing time budget. Once matching
 has completed, the internal alarm is disarmed before writing the final response;
 post-output session/window bookkeeping cannot append a timeout response to it.
+The post-output workspace lock reacquire is bounded (`LOCK_NB` with a 0.5s
+retry): if another process still holds it after that, the commit is skipped
+rather than hanging after the budget is disarmed. Extra injection on the next
+identical prompt is the fail-open path.
+Expired scoped-prompt lock sidecars are unlinked after a successful commit when
+they are not currently held, so inode use tracks the live window rather than
+every historical prompt.
 Session dedup is saved only after successful emission. Authorized selector
 sessions retain the user query even on a suppressed prompt, so subsequent tool
 selection still has the user's intent. State I/O errors fail open, leaving normal

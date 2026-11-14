@@ -1884,6 +1884,45 @@ def test_parallel_prompt_processing_injects_once(hook, tmp_path, monkeypatch):
     assert json.loads(state_files[0].read_text())["seq"] == 4
 
 
+def test_post_output_commit_is_nonblocking_fail_open(hook, tmp_path, monkeypatch):
+    """A held workspace lock after emission must skip the commit, not hang."""
+    original = hook.fcntl.flock
+    nb = hook.fcntl.LOCK_EX | hook.fcntl.LOCK_NB
+
+    def flock(handle, op):
+        if op == nb:
+            raise BlockingIOError("workspace lock held after emission")
+        return original(handle, op)
+
+    monkeypatch.setattr(hook.fcntl, "flock", flock)
+    assert (
+        prompt_repeat_result(hook, "prompt", tmp_path, window=20, state_dir=tmp_path)[0]
+        is False
+    )
+    assert (
+        prompt_repeat_result(hook, "prompt", tmp_path, window=20, state_dir=tmp_path)[0]
+        is False
+    )
+
+
+def test_expired_prompt_lock_sidecars_are_pruned(hook, tmp_path):
+    """JSON expiry also unlinks the matching scoped-prompt lock sidecar."""
+    first = prompt_repeat_result(
+        hook, "prompt-a", tmp_path, window=1, state_dir=tmp_path
+    )[1]
+    path = hook._prompt_window_file(tmp_path, tmp_path)
+    sidecar = path.with_suffix(f".{first}.lock")
+    assert sidecar.exists()
+    # window=1 keeps a hash until seq - position > 1, so two later events
+    # are required before prompt-a falls out of the map.
+    prompt_repeat_result(hook, "prompt-b", tmp_path, window=1, state_dir=tmp_path)
+    assert sidecar.exists()
+    prompt_repeat_result(hook, "prompt-c", tmp_path, window=1, state_dir=tmp_path)
+    assert not sidecar.exists()
+    # The workspace lock itself is not a prompt sidecar and must remain.
+    assert path.with_suffix(".lock").exists()
+
+
 def test_prompt_window_state_io_failure_fails_open(hook, tmp_path):
     state_dir = tmp_path / "not-a-directory"
     state_dir.write_text("blocked")
