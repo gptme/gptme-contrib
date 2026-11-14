@@ -133,3 +133,14 @@ def test_ready_overdue_sorts_wait_instants(tmp_path: Path, monkeypatch) -> None:
             else [json.loads(line) for line in result.stdout.splitlines()]
         )
         assert [row["id"] for row in rows] == ["date-only", "local-naive", "earlier", "later"]
+
+
+def test_ready_overdue_skip_claimed(tmp_path: Path, monkeypatch) -> None:
+    _setup(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("gptodo.cli._get_claimed_task_ids", lambda root: {"human-wait-passed"})
+    result = CliRunner().invoke(cli, ["ready", "--overdue", "--skip-claimed", "--json"])
+    assert result.exit_code == 0, result.output
+    assert [row["id"] for row in json.loads(result.stdout)["overdue_tasks"]] == [
+        "waiting-state-passed"
+    ]

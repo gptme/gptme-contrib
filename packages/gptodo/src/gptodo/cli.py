@@ -3611,6 +3611,9 @@ def ready(
     # Load all tasks
     all_tasks = load_tasks(tasks_dir)
     if overdue:
+        if skip_claimed:
+            claimed = _get_claimed_task_ids(repo_root)
+            all_tasks = [task for task in all_tasks if task.name not in claimed]
         _print_overdue_waiting(all_tasks, output_json, output_jsonl, pool_filter, exclude_pool)
         return
 
