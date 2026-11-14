@@ -31,6 +31,7 @@ There are no top-level re-exports; import from the submodule.
 | `bobutils.slugs` | `slugify(text, *, max_len=None, fallback="item")` | Lowercase hyphenated slug |
 | `bobutils.roots` | `find_repo_root(cwd=None)` | `git rev-parse --show-toplevel`; raises `RuntimeError` on failure |
 | `bobutils.shell` | `run_cmd(cmd, timeout=30, *, cwd=None)` | Returns stripped stdout, or `""` on failure |
+| `bobutils.shell` | `gh_json(args, timeout=60)`, `gh_paginated_list(args, timeout=60)` | `gh_json` runs `gh <args>` and returns parsed JSON, or `None` on timeout, missing `gh`, non-zero exit, empty output or bad JSON. `gh_paginated_list` takes `gh api` args (without `--paginate`/`--slurp`) and returns all pages as one flat list of dicts, `[]` on any failure |
 | `bobutils.safe_write` | `safe_write(path, data, *, mode=0o644)`, `safe_write_bytes(...)` | Atomic write that resolves symlinks first, so a symlinked file is updated in place instead of being replaced by a regular file |
 | `bobutils.markdown` | `escape_table_cell(text)`, `split_table_row_cells(line)` | Escape `\|` in GFM table cells, and split rows using the same rules |
 | `bobutils.public_safe` | `public_safe(text)`, `validate_public_safe(text)`, `PublicSafeViolation` | Replaces private workspace paths and internal host names with placeholders before text is published; the patterns are specific to Bob's deployment |
