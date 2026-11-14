@@ -2009,7 +2009,17 @@ def main():
         if isinstance(project_cwd, str) and Path(project_cwd).is_absolute()
         else Path.cwd()
     )
-    scope = (str(project_workspace.resolve()), current_repo, session_cat, harness)
+    # HOLDOUT_LESSONS changes which documents can be emitted, so it is part of
+    # the matching scope. A holdout run that suppresses every match must not
+    # later skip a non-holdout run of the same prompt as a fixed-prompt repeat.
+    holdout_lessons = parse_holdout_lessons_env()
+    scope = (
+        str(project_workspace.resolve()),
+        current_repo,
+        session_cat,
+        harness,
+        tuple(sorted(holdout_lessons)),
+    )
 
     # --- Fixed-prompt window (UserPromptSubmit only) ---
     # A launcher that sends the same boilerplate prompt every run would otherwise
@@ -2036,6 +2046,7 @@ def main():
                 session_cat,
                 current_repo,
                 harness,
+                holdout_lessons,
             )
     sys.exit(0)
 
@@ -2052,6 +2063,7 @@ def _match_and_emit(
     session_cat,
     current_repo,
     harness,
+    holdout_lessons,
 ):
     # --- Scan and match lessons and keyworded memories ---
     lesson_dirs = load_lesson_dirs(workspace)
@@ -2059,7 +2071,6 @@ def _match_and_emit(
     lessons = filter_by_harness(lessons, harness)
     lessons = filter_by_session_category(lessons, session_cat)
     lessons = filter_by_repo(lessons, current_repo)
-    holdout_lessons = parse_holdout_lessons_env()
 
     score_kwargs: dict = {"skill_bm25_min_z": SKILL_BM25_MIN_Z}
     # Corpus has grown ~2× since z=4.0 was calibrated (450→930 lessons).

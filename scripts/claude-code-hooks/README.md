@@ -141,7 +141,8 @@ Environment overrides:
 is a new session, so per-session dedup can never see the repeat. The hook keeps a
 rolling prompt-hash window per workspace in `/tmp/claude-lesson-match/` instead.
 The hash includes the resolved project `cwd`, `GPTME_CURRENT_REPO`, session
-category and harness, so different matching scopes do not suppress each other:
+category, harness, and parsed `HOLDOUT_LESSONS`, so different matching scopes
+(including experiment holdout arms) do not suppress each other:
 
 - the same prompt (whitespace-normalised) matched again within the window skips
   prompt-time matching and receipts `{outcome: empty, bytes: 0,

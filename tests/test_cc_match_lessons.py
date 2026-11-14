@@ -1679,13 +1679,7 @@ def _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch):
     monkeypatch.setattr(hook, "filter_by_repo", lambda items, repo: items)
     monkeypatch.setattr(hook, "score_lessons", lambda *a, **k: list(lessons))
     monkeypatch.setattr(hook, "score_memories", lambda *a, **k: [])
-    monkeypatch.setattr(hook, "get_predicted_lessons", lambda *a, **k: [])
-    monkeypatch.setattr(hook, "filter_held_out_lessons", lambda items, holdout: items)
-
-    def passthrough_dropout(matches, predicted, *args, **kwargs):
-        return matches, predicted
-
-    monkeypatch.setattr(hook, "_apply_lesson_dropout_multi", passthrough_dropout)
+    monkeypatch.setattr(hook, "_apply_lesson_dropout", lambda matches, *a, **k: matches)
     monkeypatch.setattr(hook, "_log_lesson_events", lambda *a, **k: None)
     monkeypatch.setattr(hook, "extract_tool_sequence", lambda tp: [])
     monkeypatch.setattr(hook, "log_trajectory_match", lambda *a, **k: None)
@@ -1777,7 +1771,7 @@ def test_failed_prompt_processing_does_not_suppress_retry(
     assert receipts[-1]["outcome"] == "emitted"
 
 
-@pytest.mark.parametrize("scope", ["cwd", "repo", "category"])
+@pytest.mark.parametrize("scope", ["cwd", "repo", "category", "holdout"])
 def test_main_prompt_repeat_isolates_matching_scope(hook, tmp_path, monkeypatch, scope):
     _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch)
     monkeypatch.setenv("TMPDIR", str(tmp_path))
@@ -1788,6 +1782,8 @@ def test_main_prompt_repeat_isolates_matching_scope(hook, tmp_path, monkeypatch,
             payload["cwd"] = str(tmp_path / str(index))
         elif scope == "repo":
             monkeypatch.setenv("GPTME_CURRENT_REPO", f"org/repo-{index}")
+        elif scope == "holdout":
+            monkeypatch.setenv("HOLDOUT_LESSONS", f"other-{index}")
         else:
             monkeypatch.setattr(hook, "detect_session_category", lambda: str(index))
         monkeypatch.setattr(hook, "_STDIN_CACHE", json.dumps(payload))
@@ -1800,6 +1796,41 @@ def test_main_prompt_repeat_isolates_matching_scope(hook, tmp_path, monkeypatch,
         for index in range(2)
     ]
     assert [row["outcome"] for row in receipts] == ["emitted", "emitted"]
+
+
+def test_main_holdout_run_does_not_suppress_non_holdout_repeat(
+    hook, tmp_path, monkeypatch
+):
+    """A holdout arm that suppresses every match must not skip the next non-holdout run."""
+    _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    payload = {
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "holdout-arm",
+        "cwd": str(tmp_path),
+        "prompt": "merge conflict",
+    }
+    monkeypatch.setenv("HOLDOUT_LESSONS", "sample")
+    monkeypatch.setattr(hook, "_STDIN_CACHE", json.dumps(payload))
+    with pytest.raises(SystemExit):
+        hook.main()
+
+    monkeypatch.delenv("HOLDOUT_LESSONS", raising=False)
+    payload["session_id"] = "non-holdout-arm"
+    monkeypatch.setattr(hook, "_STDIN_CACHE", json.dumps(payload))
+    with pytest.raises(SystemExit):
+        hook.main()
+
+    holdout_receipt = json.loads(
+        (tmp_path / "cc-session-holdout-arm-lessons-receipts.jsonl").read_text()
+    )
+    live_receipt = json.loads(
+        (tmp_path / "cc-session-non-holdout-arm-lessons-receipts.jsonl").read_text()
+    )
+    assert holdout_receipt["outcome"] == "empty"
+    assert holdout_receipt["reason"] == "all_suppressed"
+    assert live_receipt["outcome"] == "emitted"
+    assert live_receipt["bytes"] > 0
 
 
 def test_parallel_prompt_processing_injects_once(hook, tmp_path, monkeypatch):
