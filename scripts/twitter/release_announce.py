@@ -128,8 +128,13 @@ _DEFINITE_REJECTION_RE = re.compile(
 
 # ``twitter.py`` exits before it builds an API client when its credentials are
 # absent from the environment (a unit that lost its EnvironmentFile, a moved
-# secrets file). No request was sent, so nothing can have been posted.
-_MISSING_CREDENTIALS_RE = re.compile(r"Missing TWITTER_[A-Z0-9_]+ in \.env")
+# secrets file). No request was sent, so nothing can have been posted. Two exit
+# paths: a missing bearer token, and a missing OAuth 1.0a user token after the
+# headless OAuth 2.0 attempt found no saved token ("Missing credentials:
+# TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_SECRET").
+_MISSING_CREDENTIALS_RE = re.compile(
+    r"Missing TWITTER_[A-Z0-9_]+ in \.env|Missing credentials: TWITTER_[A-Z0-9_]+"
+)
 
 
 def _is_post_never_created(output: str) -> bool:

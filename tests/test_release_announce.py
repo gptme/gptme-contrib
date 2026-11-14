@@ -1166,6 +1166,15 @@ SPEND_CAP_403 = (
 )
 
 
+MISSING_USER_AUTH = (
+    "No saved OAuth 2.0 token in headless mode — skipping interactive OAuth 2.0,\n"
+    "falling back to OAuth 1.0a\n"
+    "Debug: Using OAuth 1.0a authentication\n"
+    "This operation requires user authentication.\n"
+    "Missing credentials: TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_SECRET\n"
+)
+
+
 def test_is_post_never_created_predicate():
     """A 4xx means the tweet was never created; a timeout stays ambiguous."""
     assert ra._is_post_never_created(SPEND_CAP_403)
@@ -1176,6 +1185,9 @@ def test_is_post_never_created_predicate():
     assert ra._is_post_never_created(
         "Account profile: @gptmeorg (/x/gptmeorg.env)\nMissing TWITTER_BEARER_TOKEN in .env"
     )
+    # ...or when the headless OAuth 2.0 attempt found no saved token and the
+    # OAuth 1.0a fallback has no user token (gptme v0.36.0 quote, 2026-11-14).
+    assert ra._is_post_never_created(MISSING_USER_AUTH)
     assert not ra._is_post_never_created("tweepy.errors.TwitterServerError: 503 x")
     assert not ra._is_post_never_created("ReadTimeout: HTTPSConnectionPool")
 
@@ -1224,8 +1236,8 @@ def test_main_retries_after_definite_org_tweet_rejection(monkeypatch, tmp_path):
 )
 @pytest.mark.parametrize(
     "error",
-    ["Missing TWITTER_BEARER_TOKEN in .env", SPEND_CAP_403],
-    ids=["missing-credentials", "api-rejection"],
+    ["Missing TWITTER_BEARER_TOKEN in .env", MISSING_USER_AUTH, SPEND_CAP_403],
+    ids=["missing-credentials", "missing-user-auth", "api-rejection"],
 )
 def test_main_retries_known_unsent_step_without_reposting_completed_steps(
     monkeypatch, tmp_path, failed_step, error
