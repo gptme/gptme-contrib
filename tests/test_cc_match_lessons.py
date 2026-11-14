@@ -1586,6 +1586,107 @@ def test_prompt_repeat_window_distinct_prompts_always_inject(hook, tmp_path):
     assert len(set(outcomes)) == 1
 
 
+def _launcher_prompt(
+    label: str, uuid: str, deadline: str, bullet: str, event: str = ""
+) -> str:
+    """Shape of Bob's autonomous launcher prompt: boilerplate with per-run ids."""
+    return "\n".join(
+        [
+            f"<!-- BOB_SESSION_SENTINEL={uuid} session_label={label} -->",
+            "You are Bob, starting an autonomous work session.",
+            "### Step 1: Assess loose ends",
+            f'uv run coordination work-claim "bob-autonomous-claude-code-{label}-{uuid}" "staged-commit:bob-brain" --ttl 15',
+            f"Soft deadline: **{deadline} UTC** (~50 min from start).",
+            f"**Journal file**: Write your journal entry to exactly `autonomous-session-{label}.md`.",
+            "Fix issue 123 in the selector when it reproduces.",
+            bullet,
+            event,
+        ]
+    )
+
+
+def test_prompt_repeat_window_replays_launcher_prompts_as_repeat(hook, tmp_path):
+    """Two launcher prompts that differ only in ids, clock and nothing else repeat.
+
+    Session labels are often all digits (4107) or hex (7ccf); they sit inside
+    joined identifiers and must normalize, or every claim line stays novel.
+    """
+    state_dir = tmp_path / "state"
+    first = _launcher_prompt(
+        "4107", "6107f064-83c9-4fce-baed-5a12c28aa909", "16:21", "- Blog content"
+    )
+    second = _launcher_prompt(
+        "7ccf", "7d269641-5546-41d3-9a44-7427c1fa89cc", "17:05", "- Blog content"
+    )
+    assert first != second
+    one = prompt_repeat_result(
+        hook, first, tmp_path / "ws", window=20, state_dir=state_dir
+    )
+    assert one[0] is False
+    assert one.novel_text == first
+    two = prompt_repeat_result(
+        hook, second, tmp_path / "ws", window=20, state_dir=state_dir
+    )
+    assert two[0] is True
+
+
+def test_prompt_repeat_window_matches_only_novel_lines(hook, tmp_path):
+    """A varying bullet or event preamble is all that prompt-time matching sees."""
+    state_dir = tmp_path / "state"
+    first = _launcher_prompt(
+        "4107", "6107f064-83c9-4fce-baed-5a12c28aa909", "16:21", "- Blog content"
+    )
+    second = _launcher_prompt(
+        "ef3e",
+        "7d269641-5546-41d3-9a44-7427c1fa89cc",
+        "17:05",
+        "- Code quality",
+        event="BOUND WORK ITEM: fix the twitter dispatch read budget",
+    )
+    prompt_repeat_result(hook, first, tmp_path / "ws", window=20, state_dir=state_dir)
+    two = prompt_repeat_result(
+        hook, second, tmp_path / "ws", window=20, state_dir=state_dir
+    )
+    assert two[0] is False
+    assert two.novel_text.splitlines() == [
+        "- Code quality",
+        "BOUND WORK ITEM: fix the twitter dispatch read budget",
+    ]
+
+
+def test_prompt_repeat_window_keeps_standalone_numbers_distinct(hook):
+    """Normalization touches joined identifiers, UUIDs and clocks, not plain numbers."""
+    norm = hook.normalize_prompt_line
+    assert norm("fix issue 123") != norm("fix issue 456")
+    assert norm("see gptme/gptme-contrib#2170") != norm("see gptme/gptme-contrib#2171")
+    assert norm("autonomous-session-4107.md") == norm("autonomous-session-7ccf.md")
+    assert norm("deadline 16:21 UTC") == norm("deadline 09:05 UTC")
+    assert norm("session_label=4107 ts=2026-11-14T15:31:17Z") == norm(
+        "session_label=ef3e ts=2026-11-15T09:02:44Z"
+    )
+
+
+def test_prompt_repeat_window_seen_lines_age_out(hook, tmp_path):
+    """Seen lines keep their position, so boilerplate re-injects once per window."""
+    state_dir = tmp_path / "state"
+    outcomes = [
+        prompt_repeat_result(
+            hook,
+            _launcher_prompt(
+                f"{index:04d}",
+                f"00000000-0000-4000-8000-{index:012d}",
+                "16:21",
+                "- Blog content",
+            ),
+            tmp_path / "ws",
+            window=5,
+            state_dir=state_dir,
+        )[0]
+        for index in range(11)
+    ]
+    assert [index for index, repeat in enumerate(outcomes) if not repeat] == [0, 5, 10]
+
+
 def test_prompt_repeat_window_zero_disables(hook, tmp_path):
     """window=0 restores pre-change behaviour (every prompt injects)."""
     state_dir = tmp_path / "state"
