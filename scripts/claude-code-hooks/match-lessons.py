@@ -1179,6 +1179,8 @@ def _prune_prompt_lock_sidecars(path: Path, keep: Collection[str]) -> None:
     creates ``path.with_suffix(f".{digest}.lock")``, and those directory entries
     would otherwise grow with every historical prompt. Unlink only when a
     non-blocking exclusive lock succeeds, so a live holder keeps its inode.
+    Openers must validate their inode after locking: an opener can still be
+    waiting on the removed inode when another invocation recreates the path.
     """
     if fcntl is None:
         return
@@ -1253,10 +1255,26 @@ def check_prompt_repeat(
     try:
         path = _prompt_window_file(workspace, state_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Stable sidecars: replacing JSON must not replace either lock inode.
         # Always take the scoped prompt lock first, avoiding lock-order cycles.
-        prompt_lock = path.with_suffix(f".{digest}.lock").open("a")
-        fcntl.flock(prompt_lock, fcntl.LOCK_EX)
+        # Pruning may unlink an unlocked inode after we open it but before we
+        # acquire its lock. Retry stale handles; once the current inode is
+        # locked, pruning's non-blocking flock cannot unlink it during matching.
+        prompt_path = path.with_suffix(f".{digest}.lock")
+        while True:
+            prompt_lock = prompt_path.open("a")
+            fcntl.flock(prompt_lock, fcntl.LOCK_EX)
+            held = os.fstat(prompt_lock.fileno())
+            try:
+                current = prompt_path.stat()
+            except FileNotFoundError:
+                current = None
+            if current is not None and (held.st_dev, held.st_ino) == (
+                current.st_dev,
+                current.st_ino,
+            ):
+                break
+            prompt_lock.close()
+            prompt_lock = None
         state_lock = path.with_suffix(".lock").open("a")
         fcntl.flock(state_lock, fcntl.LOCK_EX)
         state = _advance_prompt_window(path, size)
