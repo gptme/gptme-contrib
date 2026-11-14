@@ -23,6 +23,16 @@ HOOK_PATH = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _private_tmpdir(tmp_path, monkeypatch):
+    """Keep per-session receipt and event files out of the real /tmp.
+
+    The hook writes ``$TMPDIR/cc-session-<id>-lessons*.jsonl``; production
+    readers scan that directory, so test sessions must never land there.
+    """
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+
+
 @pytest.fixture
 def hook():
     return load_hook(HOOK_PATH)
