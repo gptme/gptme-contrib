@@ -3503,7 +3503,7 @@ def _print_overdue_waiting(all_tasks, output_json, output_jsonl, pool_filter, ex
             task.name,
             task.state or "",
             str(task.wait),
-            str(task.metadata.get("waiting_for") or ("state: waiting")),
+            markup_escape(str(task.metadata.get("waiting_for") or ("state: waiting"))),
         )
     console.print(table)
     console.print(

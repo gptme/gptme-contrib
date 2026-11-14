@@ -144,3 +144,20 @@ def test_ready_overdue_skip_claimed(tmp_path: Path, monkeypatch) -> None:
     assert [row["id"] for row in json.loads(result.stdout)["overdue_tasks"]] == [
         "waiting-state-passed"
     ]
+
+
+def test_ready_overdue_table_literal_blocker(tmp_path: Path, monkeypatch) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "literal-blocker",
+        state="waiting",
+        wait=PAST,
+        waiting_for="'Confirm [/approval]'",
+        created="2026-01-01T00:00:00",
+    )
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["ready", "--overdue"], terminal_width=140)
+    assert result.exit_code == 0, result.exception
+    assert "Confirm [/approval]" in result.output
