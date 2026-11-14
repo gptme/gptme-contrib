@@ -37,6 +37,7 @@ under workspace/state/ and created automatically on first use.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import math
@@ -51,8 +52,14 @@ import tempfile
 import time
 import uuid
 from collections.abc import Collection
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]  # Unavailable on native Windows.
 
 # Re-exec under the workspace venv BEFORE importing gptme-rag. Claude Code
 # invokes this hook as system `python3`, which does not have gptme-rag.
@@ -174,6 +181,9 @@ def _emit_context(
             "additionalContext": context,
         }
     }
+    # Matching is complete. Do not let SIGALRM interrupt a JSON write or later
+    # bookkeeping and make the timeout handler append a second response.
+    _disarm_hook_budget()
     json.dump(result, sys.stdout)
     sys.stdout.flush()
     receipt = _write_emission_receipt(
@@ -330,6 +340,17 @@ MAX_PROMPT_LESSONS = 5
 HOOK_BUDGET_SECONDS = float(os.environ.get("MATCH_LESSONS_HOOK_BUDGET", "8.0"))
 # State directory for cross-invocation dedup (in /tmp, not workspace)
 STATE_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "claude-lesson-match"
+
+# Fixed-prompt window. An autonomous launcher sends the same boilerplate prompt
+# on every run, and every run is a new session, so per-session dedup can never
+# see the repeat: the same handful of documents gets re-injected on every run
+# (measured 2026-11-13: 5 distinct documents, 3 of them in 14-15 of 20 runs,
+# mean 29 KB per invocation). A prompt hash matched within the last
+# MATCH_LESSONS_PROMPT_REPEAT_WINDOW prompt events for *this workspace* skips
+# prompt-time matching, so an unchanged prompt injects at most once per window;
+# PreToolUse and task-text matching are untouched, and `0` disables the window.
+DEFAULT_PROMPT_REPEAT_WINDOW = 20
+PROMPT_REPEAT_WINDOW_ENV = "MATCH_LESSONS_PROMPT_REPEAT_WINDOW"
 
 # Production advisory-skill defaults after the skill-injection-dial-v1 readout.
 MAX_PROMPT_SKILLS = 2
@@ -1078,6 +1099,218 @@ def save_session_state(session_id: str, state: dict) -> None:
         pass
 
 
+# --- Fixed-prompt repeat window ---
+
+
+def prompt_repeat_window() -> int:
+    """Configured window size in prompt events (0 disables the window)."""
+    raw = os.environ.get(PROMPT_REPEAT_WINDOW_ENV, "").strip()
+    if not raw:
+        return DEFAULT_PROMPT_REPEAT_WINDOW
+    try:
+        return max(int(raw), 0)
+    except ValueError:
+        # A malformed knob must not silently change injection behaviour.
+        return DEFAULT_PROMPT_REPEAT_WINDOW
+
+
+def _prompt_window_file(workspace: Path, state_dir: Path | None = None) -> Path:
+    """Per-workspace prompt-window state file, under the /tmp state root.
+
+    Keyed by workspace because a shared state root serves every agent workspace
+    on the box; a prompt repeat is only meaningful inside one workspace.
+    """
+    root = STATE_DIR if state_dir is None else state_dir
+    resolved = str(Path(workspace).resolve()).encode("utf-8")
+    digest = hashlib.sha256(resolved).hexdigest()[:16]
+    return root / f"prompt-window-{digest}.json"
+
+
+def _load_prompt_window(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text())
+    except TimeoutError:
+        raise
+    except (OSError, ValueError):
+        return {"seq": 0, "hashes": {}}
+    if not isinstance(data, dict):
+        return {"seq": 0, "hashes": {}}
+    hashes = data.get("hashes")
+    if not isinstance(hashes, dict):
+        hashes = {}
+    try:
+        seq = int(data.get("seq", 0))
+    except (TypeError, ValueError, OverflowError):
+        seq = 0
+    return {"seq": seq, "hashes": hashes}
+
+
+def _save_prompt_window(path: Path, state: dict) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(path)
+    except TimeoutError:
+        raise
+    except OSError:
+        pass  # Fail-open: a state error must never change hook output.
+
+
+def _advance_prompt_window(path: Path, size: int) -> dict:
+    """Read fresh state under the workspace lock and prune expired positions."""
+    state = _load_prompt_window(path)
+    seq = state["seq"] + 1
+    hashes: dict[str, int] = {}
+    for key, value in state["hashes"].items():
+        try:
+            position = int(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if 0 <= seq - position <= size:
+            hashes[str(key)] = position
+    return {"seq": seq, "hashes": hashes}
+
+
+def _prune_prompt_lock_sidecars(path: Path, keep: Collection[str]) -> None:
+    """Unlink expired scoped-prompt lock files that are not currently held.
+
+    JSON expiry only shrinks the hashes map. Each distinct scoped prompt also
+    creates ``path.with_suffix(f".{digest}.lock")``, and those directory entries
+    would otherwise grow with every historical prompt. Unlink only when a
+    non-blocking exclusive lock succeeds, so a live holder keeps its inode.
+    """
+    if fcntl is None:
+        return
+    # path is ``prompt-window-<ws>.json``; sidecars are
+    # ``prompt-window-<ws>.<digest>.lock``. Using ``path.name`` would prefix
+    # with ``.json.`` and never match.
+    prefix = f"{path.stem}."
+    suffix = ".lock"
+    try:
+        entries = list(path.parent.iterdir())
+    except OSError:
+        return
+    for sidecar in entries:
+        name = sidecar.name
+        if not (name.startswith(prefix) and name.endswith(suffix)):
+            continue
+        digest = name[len(prefix) : -len(suffix)]
+        if not digest or digest in keep:
+            continue
+        handle = None
+        try:
+            handle = sidecar.open("a")
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            sidecar.unlink()
+        except OSError:
+            pass
+        finally:
+            if handle is not None:
+                handle.close()
+
+
+@contextmanager
+def check_prompt_repeat(
+    prompt_text: str,
+    workspace: Path,
+    *,
+    window: int | None = None,
+    state_dir: Path | None = None,
+    scope: tuple = (),
+):
+    """Serialize checking and successful processing of a scoped prompt.
+
+    Yields ``(repeat, prompt_digest)``. ``repeat`` is True when the same prompt
+    was matched within the last ``window`` prompt events for this workspace. The
+    caller then emits an empty payload (reason ``fixed_prompt_repeat``) instead of
+    re-injecting the same documents that a fixed launcher prompt always matches.
+
+    Only a non-repeat refreshes the hash's position. A repeat leaves it where it
+    was, so the entry ages out of the window and the prompt injects again after
+    ``window`` events — otherwise a permanently fixed prompt would be recorded
+    forever by its own repeats and never inject at all. This is a cooldown, not a
+    permanent block. The caller must return normally after emitting its decision;
+    exceptions (including SystemExit) do not commit the position. ``window == 0``
+    disables the check, as does unavailable POSIX locking. State I/O errors fail
+    open, but budget timeouts propagate. Only identical scoped prompts serialize
+    processing; the workspace lock covers short state transactions, not matching.
+    The post-output workspace reacquire is bounded: it retries non-blocking
+    for a short deadline and skips the commit (fail-open) rather than hanging
+    after SIGALRM is disarmed.
+    """
+    # Surrounding whitespace is transport noise, not user intent: strip so a
+    # prompt that differs only by a trailing newline counts as the same prompt.
+    digest = hashlib.sha256(
+        json.dumps([prompt_text.strip(), scope]).encode("utf-8")
+    ).hexdigest()
+    size = prompt_repeat_window() if window is None else max(int(window), 0)
+    if size == 0 or fcntl is None:
+        yield False, digest
+        return
+    prompt_lock = None
+    state_lock = None
+    try:
+        path = _prompt_window_file(workspace, state_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Stable sidecars: replacing JSON must not replace either lock inode.
+        # Always take the scoped prompt lock first, avoiding lock-order cycles.
+        prompt_lock = path.with_suffix(f".{digest}.lock").open("a")
+        fcntl.flock(prompt_lock, fcntl.LOCK_EX)
+        state_lock = path.with_suffix(".lock").open("a")
+        fcntl.flock(state_lock, fcntl.LOCK_EX)
+        state = _advance_prompt_window(path, size)
+        last = state["hashes"].get(digest)
+        repeat = last is not None and (state["seq"] - last) < size
+        fcntl.flock(state_lock, fcntl.LOCK_UN)
+    except TimeoutError:
+        if state_lock is not None:
+            state_lock.close()
+        if prompt_lock is not None:
+            prompt_lock.close()
+        raise
+    except (OSError, ValueError, TypeError):
+        if state_lock is not None:
+            state_lock.close()
+        if prompt_lock is not None:
+            prompt_lock.close()
+        yield False, digest
+        return
+    try:
+        # Only this scoped prompt stays locked during matching. A timeout,
+        # exception or process death publishes no successful position.
+        yield repeat, digest
+        try:
+            # Bounded, not blocking: emit helpers have already disarmed
+            # SIGALRM, so a plain LOCK_EX here would hang until the harness
+            # kills us and discards the already-written context. Retry
+            # LOCK_NB until a short deadline; skip the commit if the
+            # workspace lock stays held — extra injection later is fail-open.
+            deadline = time.monotonic() + 0.5
+            while True:
+                try:
+                    fcntl.flock(state_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        return
+                    time.sleep(0.01)
+            # Other prompts may have completed while we matched: merge against
+            # fresh state rather than overwriting their events or hashes.
+            state = _advance_prompt_window(path, size)
+            if not repeat:
+                state["hashes"][digest] = state["seq"]
+            _save_prompt_window(path, state)
+            _prune_prompt_lock_sidecars(path, set(state["hashes"]) | {digest})
+        except TimeoutError:
+            raise
+        except (OSError, ValueError, TypeError):
+            pass  # Output already succeeded; state bookkeeping is fail-open.
+    finally:
+        state_lock.close()
+        prompt_lock.close()
+
+
 def get_already_injected(
     session_id: str, transcript_path: str | None = None
 ) -> set[str]:
@@ -1247,6 +1480,7 @@ def emit_empty(
     """
     # For PreToolUse, exit 0 with no output is cleanest — doesn't interfere
     # with permissions. For UserPromptSubmit, we emit the standard structure.
+    _disarm_hook_budget()
     if event_name == "UserPromptSubmit":
         json.dump(
             {"hookSpecificOutput": {"hookEventName": event_name}},
@@ -1760,6 +1994,21 @@ def main():
     if event_type == "UserPromptSubmit":
         match_text = hook_input.get("prompt", "")
         max_results = MAX_PROMPT_LESSONS
+        # Prompt suppression must not suppress the intent used by tool-time
+        # selection. Retain raw queries only for enrolled, authorized treatment.
+        if (
+            isinstance(match_text, str)
+            and match_text.strip()
+            and isinstance(session_id, str)
+            and session_id not in ("", "unknown")
+            and _check_enrollment_admission(
+                os.environ.get("BOB_LESSON_ENROLLMENT_REHEARSAL_DIR", ""),
+                os.environ.get("BOB_SESSION_ID", ""),
+            )
+        ):
+            state = load_session_state(session_id)
+            state["selector_query"] = match_text
+            save_session_state(session_id, state)
 
     elif event_type == "PreToolUse":
         # Throttle: skip if we matched recently
@@ -1805,16 +2054,78 @@ def main():
         emit_empty(event_type, session_id, "empty_match_text")
         sys.exit(0)
 
-    # --- Scan and match lessons and keyworded memories ---
     workspace = get_workspace()
+    session_cat = detect_session_category()
+    current_repo = os.environ.get("GPTME_CURRENT_REPO") or None
+    harness = detect_harness()
+    project_cwd = hook_input.get("cwd")
+    project_workspace = (
+        Path(project_cwd)
+        if isinstance(project_cwd, str) and Path(project_cwd).is_absolute()
+        else Path.cwd()
+    )
+    # HOLDOUT_LESSONS changes which documents can be emitted, so it is part of
+    # the matching scope. A holdout run that suppresses every match must not
+    # later skip a non-holdout run of the same prompt as a fixed-prompt repeat.
+    holdout_lessons = parse_holdout_lessons_env()
+    scope = (
+        str(project_workspace.resolve()),
+        current_repo,
+        session_cat,
+        harness,
+        tuple(sorted(holdout_lessons)),
+    )
+
+    # --- Fixed-prompt window (UserPromptSubmit only) ---
+    # A launcher that sends the same boilerplate prompt every run would otherwise
+    # re-inject the same documents indefinitely, because per-session dedup starts
+    # empty on every run. Skipping here leaves tool-time matching intact.
+    window = (
+        check_prompt_repeat(match_text, workspace, scope=scope)
+        if event_type == "UserPromptSubmit"
+        else nullcontext((False, ""))
+    )
+    with window as (repeated, _prompt_digest):
+        if repeated:
+            emit_empty(event_type, session_id, "fixed_prompt_repeat")
+        else:
+            _match_and_emit(
+                hook_input,
+                event_type,
+                session_id,
+                transcript_path,
+                match_text,
+                max_results,
+                workspace,
+                project_workspace,
+                session_cat,
+                current_repo,
+                harness,
+                holdout_lessons,
+            )
+    sys.exit(0)
+
+
+def _match_and_emit(
+    hook_input,
+    event_type,
+    session_id,
+    transcript_path,
+    match_text,
+    max_results,
+    workspace,
+    project_workspace,
+    session_cat,
+    current_repo,
+    harness,
+    holdout_lessons,
+):
+    # --- Scan and match lessons and keyworded memories ---
     lesson_dirs = load_lesson_dirs(workspace)
     lessons = scan_lessons(lesson_dirs)
-    lessons = filter_by_harness(lessons, detect_harness())
-    session_cat = detect_session_category()
+    lessons = filter_by_harness(lessons, harness)
     lessons = filter_by_session_category(lessons, session_cat)
-    current_repo = os.environ.get("GPTME_CURRENT_REPO") or None
     lessons = filter_by_repo(lessons, current_repo)
-    holdout_lessons = parse_holdout_lessons_env()
 
     score_kwargs: dict = {"skill_bm25_min_z": SKILL_BM25_MIN_Z}
     # Corpus has grown ~2× since z=4.0 was calibrated (450→930 lessons).
@@ -1822,12 +2133,6 @@ def main():
     score_kwargs["bm25_min_z"] = 6.0
     raw_matches = score_lessons(
         lessons, match_text, max_results=max_results, **score_kwargs
-    )
-    project_cwd = hook_input.get("cwd")
-    project_workspace = (
-        Path(project_cwd)
-        if isinstance(project_cwd, str) and Path(project_cwd).is_absolute()
-        else Path.cwd()
     )
     raw_matches.extend(
         score_memories(
@@ -1854,7 +2159,7 @@ def main():
         save_session_state(session_id, state)
     if not raw_matches:
         emit_empty(event_type, session_id, "no_match")
-        sys.exit(0)
+        return
 
     # --- Dedup: skip already-injected lessons ---
     already_injected = get_already_injected(session_id, transcript_path)
@@ -1883,17 +2188,7 @@ def main():
 
     if not context:
         emit_empty(event_type, session_id, "all_suppressed")
-        sys.exit(0)
-
-    # --- Update session state ---
-    state = load_session_state(session_id)
-    newly_injected = [m["path"] for m in matches if m["path"] not in already_injected]
-    existing = set(state.get("injected", []))
-    existing.update(newly_injected)
-    state["injected"] = list(existing)
-    if event_type == "PreToolUse":
-        state["last_pretool"] = time.time()
-    save_session_state(session_id, state)
+        return
 
     # --- Log trajectory data ---
     tool_sequence = extract_tool_sequence(transcript_path)
@@ -1943,7 +2238,16 @@ def main():
     _emit_context(
         event_type, session_id, context, precision_items=precision_items, intent=intent
     )
-    sys.exit(0)
+
+    # Commit dedup only after output succeeds. A pre-emission timeout must leave
+    # the real session state retryable, not merely the workspace prompt window.
+    state = load_session_state(session_id)
+    existing = set(state.get("injected", []))
+    existing.update(m["path"] for m in matches)
+    state["injected"] = list(existing)
+    if event_type == "PreToolUse":
+        state["last_pretool"] = time.time()
+    save_session_state(session_id, state)
 
 
 def self_check() -> int:
