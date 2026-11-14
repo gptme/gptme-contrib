@@ -20,7 +20,13 @@ Already-injected lessons are tracked via a session state file to avoid duplicate
 Register in `.claude/settings.json`. Prefer the workspace venv interpreter
 (this hook re-execs into `.venv/bin/python3` if invoked as system python3):
 
-    python3 $CLAUDE_PROJECT_DIR/.claude/hooks/match-lessons.py
+    "$CLAUDE_PROJECT_DIR/.venv/bin/python3" "$CLAUDE_PROJECT_DIR/.claude/hooks/match-lessons.py"
+
+Install gptme-rag in that venv. Run with --self-check (no stdin required)
+for a non-zero exit if the matcher import or lesson-directory resolution fails.
+Normal hook calls remain fail-open, with dependency_missing receipts on import
+failure rather than reporting an ordinary no_match. Independent keyword-memory
+matching continues, and receipts measure any context it emits.
 
 The hook auto-discovers your workspace root (the directory containing gptme.toml)
 and reads lesson dirs from [lessons] dirs in that config file.
@@ -113,7 +119,7 @@ def _trivial_user_prompt_event(raw: str) -> str | None:
 # text is never logged. Sibling file so legacy per-document consumers of
 # ``cc-session-*-lessons.jsonl`` never see aggregate rows. Emission is not proof
 # the harness delivered the context. Defined before the trivial fast path so it
-# can receipt without the heavy imports below.
+# can receipt before loading the remaining wrapper code below.
 RECEIPT_VERSION = 1
 
 
@@ -171,7 +177,11 @@ def _emit_context(
     json.dump(result, sys.stdout)
     sys.stdout.flush()
     receipt = _write_emission_receipt(
-        session_id, event_type, len(context.encode("utf-8")), "emitted"
+        session_id,
+        event_type,
+        len(context.encode("utf-8")),
+        "emitted",
+        reason="dependency_missing" if not _GPTME_RAG_AVAILABLE else "",
     )
     # Raw text is opt-in, private, and tied to this successful final receipt.
     # Missing enrollment/intent/telemetry is unknown precision, never zero.
@@ -215,16 +225,6 @@ def _session_id_of(raw: str) -> str | None:
     return sid if isinstance(sid, str) and sid else None
 
 
-if __name__ == "__main__":
-    try:
-        _STDIN_CACHE = sys.stdin.read()
-    except OSError:
-        _STDIN_CACHE = ""
-    _trivial_event = _trivial_user_prompt_event(_STDIN_CACHE)
-    if _trivial_event:
-        _emit_empty_fast(_trivial_event, _session_id_of(_STDIN_CACHE))
-        sys.exit(0)
-
 try:
     from gptme_rag.lesson_matcher import (
         BM25_MIN_RAW as _BM25_MIN_RAW,
@@ -244,8 +244,10 @@ try:
     )
 
     _GPTME_RAG_AVAILABLE = True
-except ImportError:  # pragma: no cover — degrade path when venv is missing
+    _GPTME_RAG_IMPORT_ERROR = ""
+except ImportError as exc:
     _GPTME_RAG_AVAILABLE = False
+    _GPTME_RAG_IMPORT_ERROR = str(exc)
     _BM25_MIN_RAW = 40.0
 
     def effective_status(fm: dict[Any, Any]) -> str:
@@ -289,6 +291,29 @@ except ImportError:  # pragma: no cover — degrade path when venv is missing
         skill_bm25_exempt_paths: Collection[str] = (),
     ) -> list[dict[str, Any]]:
         return []
+
+
+def _warn_dependency_missing() -> None:
+    print(
+        "Warning: dependency_missing: cannot import gptme_rag.lesson_matcher "
+        f"with {sys.executable}: {_GPTME_RAG_IMPORT_ERROR}. "
+        "Install gptme-rag in the workspace venv and use its interpreter.",
+        file=sys.stderr,
+    )
+
+
+if __name__ == "__main__" and "--self-check" not in sys.argv[1:]:
+    try:
+        _STDIN_CACHE = sys.stdin.read()
+    except OSError:
+        _STDIN_CACHE = ""
+    # Check dependency health even for probes; otherwise a broken installation
+    # can still emit apparently healthy trivial_probe receipts indefinitely.
+    if _GPTME_RAG_AVAILABLE:
+        _trivial_event = _trivial_user_prompt_event(_STDIN_CACHE)
+        if _trivial_event:
+            _emit_empty_fast(_trivial_event, _session_id_of(_STDIN_CACHE))
+            sys.exit(0)
 
 
 # PreToolUse throttle: minimum seconds between lesson matches
@@ -1450,6 +1475,8 @@ def emit_empty(
         )
         sys.stdout.flush()
     if session_id:
+        if not _GPTME_RAG_AVAILABLE:
+            reason = "dependency_missing"
         _write_emission_receipt(session_id, event_name, 0, "empty", reason)
 
 
@@ -1980,6 +2007,10 @@ def main():
     event_type = hook_input.get("hook_event_name", "UserPromptSubmit")
     session_id = hook_input.get("session_id", "unknown")
     transcript_path = hook_input.get("transcript_path")
+    if not _GPTME_RAG_AVAILABLE:
+        _warn_dependency_missing()
+        # The lesson fallback is empty, but keyword memories use an independent
+        # matcher. Continue through that path and annotate the final receipt.
     # Preserve user intent before all early returns (including no-match).
     private_dir = os.environ.get("BOB_LESSON_PRECISION_DIR", "")
     if private_dir and event_type == "UserPromptSubmit":
@@ -2203,7 +2234,28 @@ def main():
     sys.exit(0)
 
 
+def self_check() -> int:
+    """Validate the actual interpreter and configured directories without stdin."""
+    if not _GPTME_RAG_AVAILABLE:
+        _warn_dependency_missing()
+        return 1
+    try:
+        lesson_dirs = load_lesson_dirs(get_workspace())
+        if not any(path.is_dir() for path in lesson_dirs):
+            print("match-lessons: no lesson directory resolves", file=sys.stderr)
+            return 1
+    except (OSError, ValueError, TypeError) as exc:
+        print(
+            f"match-lessons: cannot resolve lesson directories: {exc}", file=sys.stderr
+        )
+        return 1
+    print("match-lessons: ok (matcher import and lesson directory)")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--self-check" in sys.argv[1:]:
+        sys.exit(self_check())
     try:
         _arm_hook_budget(HOOK_BUDGET_SECONDS)
         main()
