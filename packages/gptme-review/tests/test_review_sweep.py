@@ -513,6 +513,27 @@ def test_duplicate_pair_is_tagged() -> None:
     assert "likely_duplicate_of" not in by_n[1]
 
 
+@pytest.mark.parametrize(
+    "patch",
+    [
+        "",
+        "diff --git a/assets/logo.png b/assets/logo.png\n"
+        "Binary files a/assets/logo.png and b/assets/logo.png differ\n",
+    ],
+    ids=["patch-fetch-failed", "binary-only"],
+)
+def test_no_hunk_evidence_does_not_tag_duplicate(patch: str) -> None:
+    host = FakeHost(
+        [_pr(1, "aaa111"), _pr(2, "bbb222")],
+        files={1: ["assets/logo.png"], 2: ["assets/logo.png"]},
+        patches={1: patch, 2: patch},
+    )
+    found = select_candidates("o/r", _config(), host, NOW, dry_run=True)
+    assert _numbers(found) == [1, 2]
+    assert found is not None
+    assert all("likely_duplicate_of" not in entry for entry in found)
+
+
 def test_cli_help_requires_identity() -> None:
     from gptme_review.sweep import main
 

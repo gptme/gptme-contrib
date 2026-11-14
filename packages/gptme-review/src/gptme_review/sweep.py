@@ -452,10 +452,9 @@ def detect_duplicate_pairs(
     hunks_by_number: dict[int, dict[str, set[int]]] = {}
     for number in {n for pair in candidate_pairs for n in pair}:
         patch = host.fetch_pr_patch(repo, number)
-        hunks = hunks_from_patch(patch)
-        if not hunks:
-            hunks = {path: {0} for path in files_by_number[number]}
-        hunks_by_number[number] = hunks
+        # Missing/binary-only patches supply no overlap evidence. Never invent
+        # a shared hunk from file names alone.
+        hunks_by_number[number] = hunks_from_patch(patch)
     for a, b in candidate_pairs:
         if is_likely_duplicate(
             files_by_number[a],
