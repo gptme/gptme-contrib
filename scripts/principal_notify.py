@@ -368,6 +368,13 @@ def _record_ntfy_ack(
         )
 
 
+class _NtfyNoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Publish only to the configured endpoint. Even a same-origin redirect
+        # can change POST into GET, and cross-origin redirects leak bearer tokens.
+        return None
+
+
 def backend_ntfy(cfg: Config, subject: str, body: str, dedup_key: str, urgency: str):
     """Publish to a self-hosted ntfy server; success requires a server ack.
 
@@ -388,7 +395,8 @@ def backend_ntfy(cfg: Config, subject: str, body: str, dedup_key: str, urgency: 
         request = urllib.request.Request(
             url, data=json.dumps(payload).encode(), headers=headers, method="POST"
         )
-        with urllib.request.urlopen(request, timeout=30) as response:
+        opener = urllib.request.build_opener(_NtfyNoRedirect())
+        with opener.open(request, timeout=30) as response:
             raw = response.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         detail = ""

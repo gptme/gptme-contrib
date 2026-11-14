@@ -169,6 +169,69 @@ def test_from_env_parses_backends(monkeypatch, tmp_path):
 # --- ntfy backend ----------------------------------------------------------
 
 
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("redirect_host", ["127.0.0.1", "localhost"])
+def test_ntfy_rejects_redirects_without_forwarding_credentials(
+    tmp_path, monkeypatch, status, redirect_host
+):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.read_request()
+
+        def do_GET(self):
+            self.read_request()
+
+        def read_request(self):
+            requests.append((self.path, self.headers.get("Authorization")))
+            if self.path == "/publish":
+                self.send_response(status)
+                self.send_header(
+                    "Location",
+                    f"http://{redirect_host}:{server.server_port}/collect?secret",
+                )
+                self.end_headers()
+            else:
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"id":"redirected-message"}')
+
+        def log_message(self, *args):
+            pass
+
+    monkeypatch.setattr(principal_notify.urllib.request, "getproxies", lambda: {})
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            res = notify_principal(
+                "s",
+                "b",
+                cfg=cfg(
+                    tmp_path,
+                    backends=["ntfy"],
+                    env=_ntfy_env(
+                        PRINCIPAL_NOTIFY_NTFY_URL=(
+                            f"http://127.0.0.1:{server.server_port}/publish"
+                        ),
+                        PRINCIPAL_NOTIFY_NTFY_TOKEN="test-bearer",
+                    ),
+                ),
+            )
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+    assert requests == [("/publish", "Bearer test-bearer")]
+    assert not res.operator_notified
+    assert res.local_alert_path.exists()
+    assert res.failures["ntfy"] == f"ntfy HTTP {status}"
+    assert not (tmp_path / "state" / "notify-acks.jsonl").exists()
+
+
 class _FakeResponse:
     def __init__(self, payload: dict):
         self._body = json.dumps(payload).encode()
@@ -203,7 +266,13 @@ def _capture_urlopen(monkeypatch, payload=None, error=None):
             raise error
         return _FakeResponse(payload or {"id": "msg-1", "event": "message"})
 
-    monkeypatch.setattr(principal_notify.urllib.request, "urlopen", fake_urlopen)
+    import types
+
+    monkeypatch.setattr(
+        principal_notify.urllib.request,
+        "build_opener",
+        lambda *handlers: types.SimpleNamespace(open=fake_urlopen),
+    )
     return seen
 
 
@@ -429,11 +498,10 @@ def test_ntfy_malformed_request_is_sanitized(tmp_path, monkeypatch, failure_stag
     def fail(*args, **kwargs):
         raise http.client.InvalidURL(f"URL contains invalid characters: {secret} bad")
 
-    monkeypatch.setattr(
-        principal_notify.urllib.request,
-        "Request" if failure_stage == "request" else "urlopen",
-        fail,
-    )
+    if failure_stage == "request":
+        monkeypatch.setattr(principal_notify.urllib.request, "Request", fail)
+    else:
+        _capture_urlopen(monkeypatch, error=http.client.InvalidURL(f"{secret} bad"))
     res = notify_principal(
         "s", "b", cfg=cfg(tmp_path, backends=["ntfy"], env=_ntfy_env())
     )
