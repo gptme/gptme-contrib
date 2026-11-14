@@ -170,7 +170,9 @@ rather than hanging after the budget is disarmed. Extra injection on the next
 identical prompt is the fail-open path.
 Expired scoped-prompt lock sidecars are unlinked after a successful commit when
 they are not currently held, so inode use tracks the live window rather than
-every historical prompt.
+every historical prompt. After acquiring a scoped lock, an opener checks that
+its device/inode still matches the pathname and retries if pruning removed or
+replaced it. Waiting on an expired inode therefore cannot bypass serialization.
 Session dedup is saved only after successful emission. Authorized selector
 sessions retain the user query even on a suppressed prompt, so subsequent tool
 selection still has the user's intent. State I/O errors fail open, leaving normal

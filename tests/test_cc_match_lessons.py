@@ -1657,6 +1657,7 @@ def test_prompt_repeat_window_env_parsing(hook, monkeypatch):
 def _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch):
     """Hermetic wiring; keep real formatting, emission and session dedup."""
     monkeypatch.delenv(hook.PROMPT_REPEAT_WINDOW_ENV, raising=False)
+    monkeypatch.delenv("HOLDOUT_LESSONS", raising=False)
     monkeypatch.setattr(hook, "_selector_settings", lambda: {})
     monkeypatch.setattr(hook, "_check_enrollment_admission", lambda *a: False)
     lessons = [
@@ -1921,6 +1922,41 @@ def test_expired_prompt_lock_sidecars_are_pruned(hook, tmp_path):
     assert not sidecar.exists()
     # The workspace lock itself is not a prompt sidecar and must remain.
     assert path.with_suffix(".lock").exists()
+
+
+@pytest.mark.parametrize("recreated", [False, True])
+def test_pruned_prompt_sidecar_opener_locks_current_inode(
+    hook, tmp_path, monkeypatch, recreated
+):
+    """An opener racing expiry must not process under an unlinked lock inode."""
+    path = hook._prompt_window_file(tmp_path, tmp_path)
+    original_flock = hook.fcntl.flock
+    pruned = False
+
+    def prune_before_lock(handle, op):
+        nonlocal pruned
+        if not pruned and Path(handle.name) != path.with_suffix(".lock"):
+            pruned = True
+            # This invocation has opened the sidecar but not locked it yet.
+            # A different prompt completes and prunes it under the state lock.
+            with path.with_suffix(".lock").open("a") as state_lock:
+                original_flock(state_lock, hook.fcntl.LOCK_EX)
+                hook._prune_prompt_lock_sidecars(path, set())
+            # Optionally another invocation creates a new inode before we lock.
+            if recreated:
+                Path(handle.name).touch()
+        return original_flock(handle, op)
+
+    monkeypatch.setattr(hook.fcntl, "flock", prune_before_lock)
+    with hook.check_prompt_repeat(
+        "prompt", tmp_path, window=20, state_dir=tmp_path
+    ) as (repeat, digest):
+        assert not repeat
+        assert pruned
+        with path.with_suffix(f".{digest}.lock").open("a") as contender:
+            # Matching must hold the current pathname's lock, not the old inode.
+            with pytest.raises(BlockingIOError):
+                original_flock(contender, hook.fcntl.LOCK_EX | hook.fcntl.LOCK_NB)
 
 
 def test_prompt_window_state_io_failure_fails_open(hook, tmp_path):
