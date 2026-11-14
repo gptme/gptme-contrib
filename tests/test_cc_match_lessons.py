@@ -880,11 +880,15 @@ def test_trajectory_persistence_injects_when_category_unset(
     monkeypatch.setattr(hook, "extract_tool_sequence", lambda tp: [])
     monkeypatch.setattr(hook, "log_trajectory_match", lambda *a, **k: None)
 
+    # Test matching, not the developer's holdout/dropout experiment settings.
     for var in (
         "CASCADE_CATEGORY",
         "CASCADE_EXECUTION_CATEGORY",
         "GRADE_CATEGORY",
         "WORKER_CATEGORY",
+        "HOLDOUT_LESSONS",
+        "LESSON_DROPOUT_EPSILON",
+        "LESSON_DROPOUT_EPSILON_VALIDATED_CORE",
     ):
         monkeypatch.delenv(var, raising=False)
 
