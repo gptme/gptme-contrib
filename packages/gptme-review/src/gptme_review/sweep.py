@@ -126,12 +126,25 @@ def parse_ts(value: str) -> datetime | None:
         return None
 
 
+def _is_reviewer_comment(
+    comment: Mapping[str, object], identity: SweepIdentity
+) -> bool:
+    """Marker namespaces are public; only the configured author owns state."""
+    user = comment.get("user")
+    return (
+        isinstance(user, Mapping)
+        and str(user.get("login") or "").casefold() == identity.login.casefold()
+    )
+
+
 def marker_payload(
     comments: Sequence[Mapping[str, object]], identity: SweepIdentity
 ) -> tuple[dict, dict | None]:
     """``(parsed marker JSON, the comment carrying it)`` — ``({}, None)`` if absent."""
     marker_re = identity.marker_re()
     for comment in comments:
+        if not _is_reviewer_comment(comment, identity):
+            continue
         match = marker_re.search(str(comment.get("body") or ""))
         if match:
             try:
@@ -149,6 +162,8 @@ def marker_state(
     marker_re = identity.marker_re()
     provisional_re = identity.provisional_marker_re()
     for comment in comments:
+        if not _is_reviewer_comment(comment, identity):
+            continue
         body = str(comment.get("body") or "")
         match = marker_re.search(body) or provisional_re.search(body)
         if match:
