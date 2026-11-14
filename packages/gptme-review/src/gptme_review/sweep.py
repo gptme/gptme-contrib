@@ -104,7 +104,8 @@ class SweepHost(Protocol):
     def list_open_prs(self, repo: str) -> list[dict] | None:
         """Open PRs, or None when listing failed (distinct from empty)."""
 
-    def pr_comments(self, repo: str, number: int) -> list[dict]: ...
+    def pr_comments(self, repo: str, number: int) -> list[dict] | None:
+        """Comments, or None on failure; unavailable state must not spend a review."""
 
     def pr_mergeability(self, repo: str, number: int) -> dict: ...
 
@@ -504,6 +505,8 @@ def select_candidates(
                 continue
 
         comments = host.pr_comments(repo, int(pr["number"]))
+        if comments is None:
+            continue
         seen, marker_served_through = marker_state(comments, identity)
         marker, marker_comment = marker_payload(comments, identity)
         requested = pending_review_request(
@@ -630,10 +633,10 @@ def _gh_json(args: list[str], timeout: int = 60) -> object | None:
     return parsed
 
 
-def _gh_paginated_list(args: list[str], timeout: int = 60) -> list[dict]:
+def _gh_paginated_list(args: list[str], timeout: int = 60) -> list[dict] | None:
     parsed = _gh_json([*args, "--paginate", "--slurp"], timeout=timeout)
     if not isinstance(parsed, list):
-        return []
+        return None
     if all(isinstance(page, list) for page in parsed):
         items: list[object] = [item for page in parsed for item in page]
     else:
@@ -662,7 +665,7 @@ class GhCliHost:
         )
         return payload if isinstance(payload, list) else None
 
-    def pr_comments(self, repo: str, number: int) -> list[dict]:
+    def pr_comments(self, repo: str, number: int) -> list[dict] | None:
         return _gh_paginated_list(
             ["api", f"repos/{repo}/issues/{number}/comments"], timeout=60
         )
@@ -801,6 +804,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"repo(s): {', '.join(listing_failures)}",
             file=sys.stderr,
         )
+    if len(listing_failures) == len(args.repos):
+        return 1
     if not pending:
         print("no dispatchable PRs")
         return 0

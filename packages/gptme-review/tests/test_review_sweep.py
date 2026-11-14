@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import subprocess
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -36,7 +37,7 @@ class FakeHost:
     def __init__(
         self,
         prs: list[dict] | None,
-        comments: dict[int, list[dict]] | None = None,
+        comments: dict[int, list[dict] | None] | None = None,
         *,
         outage: bool = False,
         mergeability: dict | None = None,
@@ -56,8 +57,9 @@ class FakeHost:
     def list_open_prs(self, repo: str) -> list[dict] | None:
         return self.prs
 
-    def pr_comments(self, repo: str, number: int) -> list[dict]:
-        return list(self.comments.get(number, []))
+    def pr_comments(self, repo: str, number: int) -> list[dict] | None:
+        comments = self.comments.get(number, [])
+        return list(comments) if comments is not None else None
 
     def pr_mergeability(self, repo: str, number: int) -> dict:
         return dict(self.mergeability)
@@ -154,6 +156,14 @@ def test_malformed_identity_fails_closed() -> None:
 def test_unreviewed_pr_is_a_candidate() -> None:
     host = FakeHost([_pr(1, "abc123def456")])
     assert _numbers(select_candidates("o/r", _config(), host, NOW, dry_run=True)) == [1]
+
+
+def test_failed_comment_read_skips_only_that_pr_without_reactions() -> None:
+    host = FakeHost([_pr(1, "abc123"), _pr(2, "def456")], {1: None, 2: []})
+    found = select_candidates("o/r", _config(), host, NOW, dry_run=False)
+    assert _numbers(found) == [2]
+    assert found is not None and found[0]["never_attempted"] is True
+    assert host.reactions == []
 
 
 def test_pr_reviewed_at_current_head_is_skipped() -> None:
@@ -539,6 +549,76 @@ def test_cli_help_requires_identity() -> None:
 
     with pytest.raises(SystemExit):
         main([])
+
+
+@pytest.mark.parametrize("failure", ["timeout", "http", "invalid-json"])
+def test_gh_host_comment_fetch_failure_is_not_empty(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert args == [
+            "gh",
+            "api",
+            "repos/o/r/issues/1/comments",
+            "--paginate",
+            "--slurp",
+        ]
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(args, 60)
+        if failure == "http":
+            return subprocess.CompletedProcess(args, 1, "", "HTTP 503")
+        return subprocess.CompletedProcess(args, 0, "invalid json", "")
+
+    monkeypatch.setattr("gptme_review.sweep.subprocess.run", run)
+    assert GhCliHost().pr_comments("o/r", 1) is None
+
+
+@pytest.mark.parametrize("pages", [[], [[]], [[{"id": 1}], [{"id": 2}]]])
+def test_gh_host_comment_pages_preserve_empty_and_populated_results(
+    monkeypatch: pytest.MonkeyPatch, pages: list
+) -> None:
+    monkeypatch.setattr("gptme_review.sweep._gh_json", lambda *args, **kwargs: pages)
+    assert GhCliHost().pr_comments("o/r", 1) == [
+        item for page in pages for item in page
+    ]
+
+
+@pytest.mark.parametrize(
+    ("failed_repos", "expected_rc"),
+    [(frozenset({"o/a", "o/b"}), 1), (frozenset({"o/a"}), 0), (frozenset(), 0)],
+)
+def test_cli_listing_outage_exit_status(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failed_repos: frozenset[str],
+    expected_rc: int,
+) -> None:
+    from gptme_review.sweep import main
+
+    monkeypatch.setattr(
+        GhCliHost,
+        "list_open_prs",
+        lambda self, repo: None if repo in failed_repos else [],
+    )
+    rc = main(
+        [
+            "--login",
+            "reviewer-bot",
+            "--marker-namespace",
+            "agent-ai-review",
+            "--repos",
+            "o/a",
+            "o/b",
+            "--dry-run",
+        ]
+    )
+    assert rc == expected_rc
+    captured = capsys.readouterr()
+    assert ("LISTING FAILED" in captured.err) == bool(failed_repos)
+    if expected_rc:
+        assert "no dispatchable PRs" not in captured.out
+    else:
+        assert "no dispatchable PRs" in captured.out
 
 
 def test_default_host_is_review_only_blocker_delegates() -> None:

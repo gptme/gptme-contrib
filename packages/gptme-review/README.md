@@ -75,7 +75,9 @@ comments, mergeability, outage probe, reactions, file/patch fetch). The package
 has no default agent login and does not read a brain checkout.
 
 `select_candidates(repo, config, host, now)` returns the dispatchable PRs, or
-`None` when listing failed (distinct from an empty list). Marker parsing and
+`None` when listing failed (distinct from an empty list). `SweepHost.pr_comments`
+also distinguishes failure (`None`) from an empty comment list: an unreadable PR
+is skipped for that pass, not admitted as never reviewed. Marker parsing and
 `@login review` triggers are identity-scoped, so two reviewers on the same PR
 do not consume each other's markers. Duplicate-PR tagging, consensus-upgrade
 eligibility, and trusted-request opt-in live here.
@@ -89,7 +91,9 @@ python -m gptme_review.sweep --login reviewer-bot --marker-namespace agent-ai-re
 ```
 
 `--login` and `--marker-namespace` are required. This is candidate listing, not
-a production sweep: it does not run reviews.
+a production sweep: it does not run reviews. If every repository listing fails,
+the CLI exits non-zero rather than reporting an empty successful sweep. Partial
+listing failures are reported on stderr while available repositories still run.
 
 ## Large-diff shard planning
 
