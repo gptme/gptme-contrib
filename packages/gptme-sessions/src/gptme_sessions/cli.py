@@ -6,6 +6,7 @@ import csv
 import json
 import logging
 import math
+import os
 import re
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -21,6 +22,7 @@ from .discovery import (
     discover_copilot_sessions,
     discover_gptme_sessions,
     discover_pi_sessions,
+    extract_cc_cwd,
     extract_cc_model,
     extract_project,
     extract_session_name,
@@ -464,6 +466,54 @@ def _discover_all(
     # Sort chronologically across harnesses; entries without a date sort last.
     discovered.sort(key=lambda e: e.get("session_date") or date.max)
     return discovered
+
+
+def _normalize_project(project: str | Path) -> str:
+    """Absolute, user-expanded path without a trailing slash."""
+    return os.path.abspath(os.path.expanduser(str(project))).rstrip("/") or "/"
+
+
+def _project_key(project: str | Path) -> str:
+    """Lossy key matching Claude Code's project-dir naming.
+
+    Claude Code names project dirs by replacing every non-alphanumeric
+    character with ``-``, and decoding that back is lossy (``/a/b-c`` and
+    ``/a/b/c`` both decode to ``/a/b/c``). Only use this for claude-code
+    entries; other harnesses keep the exact path.
+
+    The input is encoded as given, not normalized: a decoded Claude Code
+    path like ``/home/u//repo`` (from ``/home/u/.repo``) must keep its
+    doubled separator, which ``abspath()`` would collapse, and a trailing
+    one (``/home/u/repo-`` decodes to ``/home/u/repo/``). Callers
+    normalize user-supplied paths before passing them here.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", str(project) or "/")
+
+
+def _project_matches(entry: dict, wanted: set[str]) -> bool:
+    """Whether a discovered entry's project is one of the normalized ``wanted`` paths.
+
+    Claude Code entries are first matched on the lossy dir-name key. Since
+    sibling workspaces like ``/a/my-ws`` and ``/a/my/ws`` share that key, a
+    key match is then confirmed against the ``cwd`` recorded in the session's
+    JSONL (``entry["path"]``) when it has one consistent with the dir name.
+    Trajectories without a usable ``cwd`` fall back to the key match.
+    """
+    project = entry.get("project")
+    if not project:
+        return False
+    if entry.get("harness") != "claude-code":
+        return _normalize_project(project) in wanted
+    key = _project_key(project)
+    if key not in {_project_key(w) for w in wanted}:
+        return False
+    path = entry.get("path")
+    cwd = extract_cc_cwd(Path(path)) if path else None
+    # A cwd that doesn't encode to the dir name (e.g. the session later moved
+    # elsewhere) says nothing about which workspace the dir belongs to.
+    if cwd and _project_key(_normalize_project(cwd)) == key:
+        return _normalize_project(cwd) in wanted
+    return True
 
 
 def _count_unsynced(
@@ -2491,6 +2541,17 @@ def replay(
 )
 @click.option("--dry-run", is_flag=True, help="Show what would be imported without writing")
 @click.option(
+    "--project",
+    "projects",
+    multiple=True,
+    help=(
+        "Only import sessions whose project is this path (repeatable). Without it, "
+        "sync imports sessions from every project, including headless calls run "
+        "from other directories. With --fix-timestamps, only fixes records whose "
+        "stored project matches."
+    ),
+)
+@click.option(
     "--fix-timestamps",
     is_flag=True,
     help="Backfill correct timestamps for existing records from their trajectory paths",
@@ -2502,6 +2563,7 @@ def sync(
     since: str,
     with_signals: bool,
     dry_run: bool,
+    projects: tuple[str, ...],
     fix_timestamps: bool,
 ) -> None:
     """Discover trajectory files and import them into the session store.
@@ -2532,8 +2594,25 @@ def sync(
         if not existing_records:
             click.echo("No records in store to fix.")
             return
+        # --project scopes which records get fixed by their stored project;
+        # the store is still rewritten as a whole.
+        candidates = existing_records
+        if projects:
+            wanted = {_normalize_project(p) for p in projects}
+            candidates = [
+                rec
+                for rec in existing_records
+                if _project_matches(
+                    {
+                        "harness": rec.harness,
+                        "project": rec.project,
+                        "path": rec.trajectory_path,
+                    },
+                    wanted,
+                )
+            ]
         fixed = 0
-        for rec in existing_records:
+        for rec in candidates:
             if not rec.trajectory_path:
                 continue
             h = rec.harness or "unknown"
@@ -2571,15 +2650,19 @@ def sync(
                 fixed += 1
         if not dry_run and fixed:
             store.rewrite(existing_records)
+        scope = " matching --project" if projects else ""
         click.echo(
             f"{'Would fix' if dry_run else 'Fixed'} {fixed} timestamp(s) "
-            f"out of {len(existing_records)} record(s)."
+            f"out of {len(candidates)} record(s){scope}."
         )
         return
 
     since_days = _parse_since(since)  # None means "all time"
     since_days_effective = since_days if since_days is not None else 36500  # ~100 years
     discovered = _discover_all(since_days=since_days_effective, harness_filter=harness)
+    if projects:
+        wanted = {_normalize_project(p) for p in projects}
+        discovered = [e for e in discovered if _project_matches(e, wanted)]
 
     if not discovered:
         window_desc = f"last {_fmt_since(since_days)}"
