@@ -8,7 +8,7 @@ Claude Code hook for two events:
 
 Matching (scan, keyword/wildcard, session_categories, BM25) is delegated to
 ``gptme_rag.lesson_matcher``. This file is the harness wrapper: workspace
-discovery, Thompson sampling, co-occurrence prediction, holdout/dropout,
+discovery, Thompson sampling, holdout/dropout,
 session dedup, trajectory logging, and the Claude Code I/O envelope.
 Keyworded memories use the shared ``gptme.memory.match`` API and the same
 injection bounds, without lesson BM25 or skill-name matching.
@@ -31,7 +31,7 @@ matching continues, and receipts measure any context it emits.
 The hook auto-discovers your workspace root (the directory containing gptme.toml)
 and reads lesson dirs from [lessons] dirs in that config file.
 
-State directories (Thompson sampling, predictions, trajectories) are stored
+State directories (Thompson sampling, trajectories) are stored
 under workspace/state/ and created automatically on first use.
 """
 
@@ -324,12 +324,6 @@ TS_WEIGHT = 1.0
 MAX_PRETOOL_LESSONS = 3
 # Maximum lessons to inject per UserPromptSubmit event
 MAX_PROMPT_LESSONS = 5
-# Maximum predicted lessons to inject per event (on top of keyword matches)
-MAX_PREDICTED_LESSONS = 2
-# Minimum lift for a prediction to be injected (from model, but also enforced here)
-MIN_PREDICTION_LIFT = 2.0
-# Minimum TS posterior mean for predicted lessons (deprioritize known-noise lessons)
-MIN_PREDICTION_TS = 0.30
 # Hard internal budget. The harness timeout DISCARDS hook output; we must
 # finish (or degrade to empty) before that happens. 8s leaves headroom under
 # the 10s documented timeout and the 30s currently configured in settings.
@@ -359,29 +353,22 @@ def _bm25_min_z_supported() -> bool:
     )
 
 
-def apply_skill_cap(
-    matches: list[dict], predicted: list[dict], cap: int | None
-) -> tuple[list[dict], list[dict]]:
+def apply_skill_cap(matches: list[dict], cap: int | None) -> list[dict]:
     """Limit new advisory skills, never ordinary lessons, memories or guards."""
     if cap is None:
-        return matches, predicted
+        return matches
     remaining = max(cap, 0)
-
-    def keep(items: list[dict]) -> list[dict]:
-        nonlocal remaining
-        kept = []
-        for item in items:
-            advisory = (
-                item.get("is_skill") and _classify_lesson(item["path"])[0] != "exempt"
-            )
-            if not advisory:
-                kept.append(item)
-            elif remaining:
-                kept.append(item)
-                remaining -= 1
-        return kept
-
-    return keep(matches), keep(predicted)
+    kept = []
+    for item in matches:
+        advisory = (
+            item.get("is_skill") and _classify_lesson(item["path"])[0] != "exempt"
+        )
+        if not advisory:
+            kept.append(item)
+        elif remaining:
+            kept.append(item)
+            remaining -= 1
+    return kept
 
 
 # --- Workspace discovery (all state paths derived from here) ---
@@ -420,11 +407,6 @@ def get_workspace() -> Path:
 def _ts_state_dir() -> Path:
     """Thompson sampling state directory (workspace-relative)."""
     return get_workspace() / "state" / "lesson-thompson"
-
-
-def _prediction_model_file() -> Path:
-    """Prediction model file (workspace-relative)."""
-    return get_workspace() / "state" / "lesson-predictions" / "prediction-model.json"
 
 
 def _trajectory_log_dir() -> Path:
@@ -651,162 +633,6 @@ def load_ts_means(lesson_paths: list[str]) -> dict[str, float]:
         return means
     except Exception:
         return {}
-
-
-# --- Prediction model ---
-
-
-def load_prediction_model() -> dict | None:
-    """Load the co-occurrence prediction model for early lesson injection.
-
-    Returns the model dict or None if not available.
-    Model is built by scripts/build-lesson-predictions.py.
-    """
-    model_file = _prediction_model_file()
-    if not model_file.exists():
-        return None
-    try:
-        data: dict = json.loads(model_file.read_text())
-        if data.get("model_version") != 1:
-            return None
-        return data
-    except Exception:
-        return None
-
-
-def get_predicted_lessons(
-    matched_paths: list[str],
-    already_injected: set[str],
-    all_lessons: list[dict],
-    max_predictions: int = MAX_PREDICTED_LESSONS,
-) -> list[dict]:
-    """Get lessons predicted by co-occurrence with already-matched lessons.
-
-    When lesson A fires via keyword match, this checks the prediction model
-    for lessons B, C that historically co-occur with A at high lift. Returns
-    lesson dicts for predicted lessons that haven't been injected yet.
-
-    Prediction confidence is additionally gated by Thompson sampling posterior
-    means so known-noise lessons get deprioritized/filtered over time.
-    """
-    model = load_prediction_model()
-    if not model:
-        return []
-
-    co_preds = model.get("co_occurrence", {})
-    temporal = model.get("temporal", {})
-    titles = model.get("titles", {})
-
-    # Build reverse lookup: title → ALL model paths (handles duplicate titles
-    # across lessons/ and gptme-contrib/lessons/ — both paths may be co-occurrence
-    # triggers, so we need to check all of them)
-    title_to_model_paths: dict[str, list[str]] = {}
-    for model_path, title in titles.items():
-        title_to_model_paths.setdefault(title, []).append(model_path)
-
-    # Find matching lesson objects from the scanned lessons
-    lesson_by_path: dict[str, dict] = {les["path"]: les for les in all_lessons}
-    lesson_by_title: dict[str, dict] = {
-        les.get("title", ""): les for les in all_lessons if les.get("title")
-    }
-
-    # Collect all predicted paths with their best lift score
-    predicted: dict[str, float] = {}  # path → best lift
-
-    for matched_path in matched_paths:
-        # Try direct path lookup first, then title-based fallback
-        lookup_paths = [matched_path]
-        # Find title for this matched path
-        matched_title = titles.get(matched_path, "")
-        if not matched_title:
-            # Path not in model's titles — try scanning all_lessons for title
-            for les in all_lessons:
-                if les.get("path") == matched_path:
-                    matched_title = les.get("title", "")
-                    break
-        # Add ALL model paths with the same title (handles cross-path duplicates)
-        if matched_title and matched_title in title_to_model_paths:
-            for model_path in title_to_model_paths[matched_title]:
-                if model_path != matched_path:
-                    lookup_paths.append(model_path)
-
-        for lp in lookup_paths:
-            # Check co-occurrence predictions
-            for pred in co_preds.get(lp, []):
-                path = pred["path"]
-                lift = pred.get("lift", 0)
-                if lift >= MIN_PREDICTION_LIFT and path not in already_injected:
-                    if path not in matched_paths:  # Don't predict already-matched
-                        predicted[path] = max(predicted.get(path, 0), lift)
-
-            # Check temporal predictions (early→late)
-            for pred in temporal.get(lp, []):
-                path = pred["path"]
-                lift = pred.get("lift", 0)
-                if lift >= MIN_PREDICTION_LIFT and path not in already_injected:
-                    if path not in matched_paths:
-                        predicted[path] = max(predicted.get(path, 0), lift)
-
-    if not predicted:
-        return []
-
-    # Resolve path/title candidates to scanned lesson paths so we can apply
-    # Thompson means even when model path and runtime lesson path differ.
-    candidate_paths: set[str] = set()
-    path_candidates: dict[str, list[str]] = {}
-    for path in predicted:
-        candidates = [path]
-        pred_title = titles.get(path, "")
-        if pred_title:
-            title_match = lesson_by_title.get(pred_title)
-            if title_match:
-                candidates.append(title_match["path"])
-        # Dedup while preserving order
-        deduped: list[str] = []
-        seen = set()
-        for c in candidates:
-            if c not in seen:
-                seen.add(c)
-                deduped.append(c)
-                candidate_paths.add(c)
-        path_candidates[path] = deduped
-
-    ts_means = load_ts_means(list(candidate_paths))
-
-    # Sort by lift first; TS threshold then filters out low-confidence predictions
-    sorted_preds = sorted(predicted.items(), key=lambda x: -x[1])
-
-    results = []
-    for path, lift in sorted_preds:
-        lesson = lesson_by_path.get(path)
-        # Fallback: find by title if path doesn't match (cross-path dedup)
-        if not lesson:
-            pred_title = titles.get(path, "")
-            if pred_title:
-                lesson = lesson_by_title.get(pred_title)
-        if not lesson:
-            continue
-
-        # Choose best available TS mean across model path + resolved runtime path.
-        # Default 0.5 keeps behavior neutral when no TS state exists.
-        candidates = path_candidates.get(path, [path])
-        ts_mean = max((ts_means.get(c, 0.5) for c in candidates), default=0.5)
-        if ts_mean < MIN_PREDICTION_TS:
-            continue
-
-        results.append(
-            {
-                **lesson,
-                "predicted": True,
-                "prediction_lift": lift,
-                "prediction_ts_mean": ts_mean,
-                "matched_by": [f"predicted (lift={lift:.1f}x, ts={ts_mean:.2f})"],
-            }
-        )
-        if len(results) >= max_predictions:
-            break
-
-    return results
 
 
 def _has_routing_match(matched_by: list) -> bool:
@@ -1078,32 +904,20 @@ def _get_dropout_log_dir(workspace: Path) -> Path:
     return Path(raw) if raw else workspace / "state" / "lesson-dropout"
 
 
-def _assignment_origin(lesson: dict) -> str:
-    """Return the candidate origin for an assignment receipt.
-
-    ``predicted`` is any co-occurrence candidate; everything else is a direct
-    keyword/pattern/semantic match. Origin is recorded at roll time so later
-    formatting cannot erase how the candidate entered the pool.
-    """
-    if lesson.get("predicted") is True:
-        return "predicted"
-    matched_by = lesson.get("matched_by") or []
-    if isinstance(matched_by, list) and any(
-        isinstance(token, str) and token.startswith("predicted") for token in matched_by
-    ):
-        return "predicted"
-    return "keyword"
-
-
 def _assignment_lesson_record(lesson: dict, *, effective_epsilon: float) -> dict:
-    """Compact per-lesson assignment fields shared by both dropout arms."""
-    origin = _assignment_origin(lesson)
+    """Compact per-lesson assignment fields shared by both dropout arms.
+
+    ``origin`` and ``predicted`` are constant now that every candidate is a
+    direct match. They stay in the record so receipts written before the
+    co-occurrence predictor was removed (``origin: "predicted"``) and receipts
+    written after it share one schema.
+    """
     return {
         "path": lesson.get("path", ""),
         "title": lesson.get("title", ""),
         "effective_epsilon": effective_epsilon,
-        "origin": origin,
-        "predicted": origin == "predicted",
+        "origin": "keyword",
+        "predicted": False,
     }
 
 
@@ -1169,46 +983,16 @@ def _log_dropout(
 
 
 def _apply_lesson_dropout(
-    lessons: list[dict], session_id: str, workspace: Path
-) -> list[dict]:
-    """Randomly withhold lessons for causal leave-one-out analysis.
-
-    Controlled by LESSON_DROPOUT_EPSILON (float [0,1]). Default 0 = no-op.
-    Uses class-aware epsilon: validated_core uses LESSON_DROPOUT_EPSILON_VALIDATED_CORE
-    (default 0.05), exempt is never withheld.
-
-    Does NOT log — logging is done by _apply_lesson_dropout_multi which
-    collects withheld lessons from both pools into one unified record.
-    """
-    epsilon = _get_dropout_epsilon()
-    if epsilon <= 0.0 or not lessons:
-        return lessons
-
-    kept: list[dict] = []
-    for lesson in lessons:
-        policy_class, _ = _classify_lesson(lesson.get("path", ""))
-        eff_epsilon = _get_dropout_epsilon_for_class(policy_class, epsilon)
-        if eff_epsilon > 0.0 and random.random() < eff_epsilon:
-            pass  # Withheld — skip
-        else:
-            kept.append(lesson)
-
-    return kept
-
-
-def _apply_lesson_dropout_multi(
     matches: list[dict],
-    predicted: list[dict],
     session_id: str,
     workspace: Path,
     *,
     event_type: str | None = None,
-) -> tuple[list[dict], list[dict]]:
-    """Apply class-aware dropout to both matches and predicted, logging ONE unified record.
+) -> list[dict]:
+    """Apply class-aware dropout to the matches, logging ONE unified record.
 
-    Processes both pools together so that the analysis script receives a
-    single JSONL record per hook invocation containing both assignment arms,
-    not two split records and not a keep arm that waits for formatting.
+    The analysis script receives a single JSONL record per hook invocation
+    containing both assignment arms, not a keep arm that waits for formatting.
 
     Class-aware epsilons (all require global LESSON_DROPOUT_EPSILON > 0 to activate):
     - exempt: 0.0 (never withheld regardless of global epsilon)
@@ -1217,11 +1001,11 @@ def _apply_lesson_dropout_multi(
     """
     epsilon = _get_dropout_epsilon()
 
-    # Always log when epsilon>0, even if both pools are empty, so
+    # Always log when epsilon>0, even if there are no matches, so
     # lesson-loo-analysis.py can distinguish treatment-group sessions
     # (epsilon>0, possibly 0 withheld) from control-group sessions (epsilon=0).
     if epsilon <= 0.0:
-        return matches, predicted
+        return matches
 
     # Guard: if the policy manifest is unavailable or broken, _classify_lesson
     # returns the "*" sentinel (all lessons as "holdout").  Classification is
@@ -1230,27 +1014,22 @@ def _apply_lesson_dropout_multi(
     manifest = _load_policy_manifest()
     if "*" in manifest.get("holdout_population", []):
         _log_dropout(session_id, epsilon, [], workspace, kept=[], event_type=event_type)
-        return matches, predicted
+        return matches
 
     withheld: list[dict] = []
     kept_records: list[dict] = []
     assignment_id = str(uuid.uuid4())
 
-    def _do_dropout(lessons: list[dict]) -> list[dict]:
-        kept: list[dict] = []
-        for lesson in lessons:
-            policy_class, _ = _classify_lesson(lesson.get("path", ""))
-            eff_epsilon = _get_dropout_epsilon_for_class(policy_class, epsilon)
-            entry = _assignment_lesson_record(lesson, effective_epsilon=eff_epsilon)
-            if eff_epsilon > 0.0 and random.random() < eff_epsilon:
-                withheld.append(entry)
-            else:
-                kept_records.append(entry)
-                kept.append(lesson)
-        return kept
-
-    kept_matches = _do_dropout(matches)
-    kept_predicted = _do_dropout(predicted)
+    kept: list[dict] = []
+    for lesson in matches:
+        policy_class, _ = _classify_lesson(lesson.get("path", ""))
+        eff_epsilon = _get_dropout_epsilon_for_class(policy_class, epsilon)
+        entry = _assignment_lesson_record(lesson, effective_epsilon=eff_epsilon)
+        if eff_epsilon > 0.0 and random.random() < eff_epsilon:
+            withheld.append(entry)
+        else:
+            kept_records.append(entry)
+            kept.append(lesson)
 
     _log_dropout(
         session_id,
@@ -1261,7 +1040,7 @@ def _apply_lesson_dropout_multi(
         event_type=event_type,
         assignment_id=assignment_id,
     )
-    return kept_matches, kept_predicted
+    return kept
 
 
 # --- Session state for cross-invocation dedup ---
@@ -1485,7 +1264,7 @@ def _is_skill_path(path: str) -> bool:
     return Path(path).name.lower() == "skill.md"
 
 
-def _render_lesson(m: dict, event_type: str, predicted: bool = False) -> list[str]:
+def _render_lesson(m: dict, event_type: str) -> list[str]:
     """Render one matched lesson as context lines.
 
     On PreToolUse, whole SKILL.md documents are rendered as a compact pointer
@@ -1493,17 +1272,16 @@ def _render_lesson(m: dict, event_type: str, predicted: bool = False) -> list[st
     on a low-confidence trigger. Lessons (small by design, 30-50 lines) and all
     UserPromptSubmit matches keep full-body injection.
     """
-    suffix = " (predicted)" if predicted else ""
     if event_type == "PreToolUse" and _is_skill_path(m["path"]):
         desc = m.get("description", "").strip()
-        lines = [f"### {m['title']}{suffix} (skill pointer)"]
+        lines = [f"### {m['title']} (skill pointer)"]
         lines.append(f"*Source: {m['path']}*")
         if desc:
             lines.append(f"*Description: {desc}*")
         lines.append(f"*Read the full skill at `{m['path']}` when relevant.*")
         return lines
     return [
-        f"### {m['title']}{suffix}",
+        f"### {m['title']}",
         f"*Source: {m['path']}*\n",
         m["body"],
         "",
@@ -1513,23 +1291,15 @@ def _render_lesson(m: dict, event_type: str, predicted: bool = False) -> list[st
 def format_lessons(
     matches: list[dict],
     already_injected: set[str],
-    predicted: list[dict] | None = None,
     event_type: str = "UserPromptSubmit",
 ) -> str:
-    """Format matched + predicted lessons as markdown context."""
+    """Format matched lessons as markdown context."""
     parts: list[str] = []
 
     for m in matches:
         if m["path"] in already_injected:
             continue
         parts.extend(_render_lesson(m, event_type))
-
-    # Add predicted lessons (from co-occurrence model)
-    if predicted:
-        for p in predicted:
-            if p["path"] in already_injected:
-                continue
-            parts.extend(_render_lesson(p, event_type, predicted=True))
 
     if not parts:
         return ""
@@ -1577,10 +1347,11 @@ def log_trajectory_match(
     matched_lessons: list[dict],
     already_injected: set[str],
 ) -> None:
-    """Append a trajectory-match record to the daily log for predict-early analysis.
+    """Append a trajectory-match record to the daily log.
 
     Each record captures: when a lesson was matched, what tool sequence preceded it,
-    and which lesson fired. This builds the dataset for n-gram/co-occurrence analysis.
+    and which lesson fired. Records written before the co-occurrence predictor was
+    removed may carry ``predicted`` / ``prediction_lift`` on a lesson entry.
 
     Log format: one JSON object per line in a daily file.
     """
@@ -1609,14 +1380,6 @@ def log_trajectory_match(
                     "title": m["title"],
                     "score": m.get("score", 0),
                     "matched_by": m.get("matched_by", []),
-                    **(
-                        {
-                            "predicted": True,
-                            "prediction_lift": m.get("prediction_lift", 0),
-                        }
-                        if m.get("predicted")
-                        else {}
-                    ),
                 }
                 for m in newly_matched
             ],
@@ -1644,7 +1407,6 @@ def _log_lesson_events(
     session_id: str,
     event_type: str,
     matches: list[dict],
-    predicted: list[dict],
     already_injected: set[str],
 ) -> None:
     """Log structured lesson injection events for efficacy measurement.
@@ -1652,7 +1414,7 @@ def _log_lesson_events(
     Appends to /tmp/cc-session-{id}-lessons.jsonl with:
     - lesson_name: human-readable lesson title
     - lesson_file: path to .md file
-    - match_type: keyword, pattern, skill_name, descriptor, semantic, or predicted
+    - match_type: keyword, pattern, skill_name, descriptor or semantic
     - injection_point: UserPromptSubmit or PreToolUse (hook name)
     - sequence_order: ordinal position in this injection (1, 2, 3, ...)
     - timestamp_inject: ISO8601 UTC timestamp when lesson was matched
@@ -1691,22 +1453,6 @@ def _log_lesson_events(
                 "lesson_name": lesson.get("title", ""),
                 "lesson_file": lesson.get("path", ""),
                 "match_type": match_type,
-                "injection_point": event_type,
-                "sequence_order": i,
-                "timestamp_inject": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            }
-        )
-
-    # Log predicted lessons
-    for i, lesson in enumerate(predicted, start=len(matches) + 1):
-        if lesson["path"] in already_injected:
-            continue
-
-        events_to_log.append(
-            {
-                "lesson_name": lesson.get("title", ""),
-                "lesson_file": lesson.get("path", ""),
-                "match_type": "predicted",
                 "injection_point": event_type,
                 "sequence_order": i,
                 "timestamp_inject": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1810,9 +1556,7 @@ def _check_enrollment_admission(enrollment_dir: str, run_id: str) -> bool:
         return False
 
 
-def select_advisory_lessons(
-    matches: list[dict], predicted: list[dict], hook_input: dict
-) -> tuple[list[dict], list[dict]]:
+def select_advisory_lessons(matches: list[dict], hook_input: dict) -> list[dict]:
     """Opt-in transport to the shared selector; preserve guards and memories."""
     settings = _selector_settings()
     command_json = settings.get("LESSONS_SELECTOR_COMMAND", "")
@@ -1822,10 +1566,10 @@ def select_advisory_lessons(
         if item.strip()
     }
     if not command_json or not guards or os.name != "posix":
-        return matches, predicted
+        return matches
     session_id = hook_input.get("session_id")
     if not isinstance(session_id, str) or not session_id or session_id == "unknown":
-        return matches, predicted
+        return matches
 
     # Gate: only authorized treatment arms reach the shared service.
     # Controls and rehearsal/unenrolled sessions use the deterministic matcher
@@ -1833,15 +1577,13 @@ def select_advisory_lessons(
     _run_id = os.environ.get("BOB_SESSION_ID", "")
     _enrollment_dir = os.environ.get("BOB_LESSON_ENROLLMENT_REHEARSAL_DIR", "")
     if not _check_enrollment_admission(_enrollment_dir, _run_id):
-        return matches, predicted
+        return matches
 
     advisory = {
-        item["path"]: item
-        for item in matches + predicted
-        if not _selector_exempt(item, guards)
+        item["path"]: item for item in matches if not _selector_exempt(item, guards)
     }
     if not advisory:
-        return matches, predicted
+        return matches
     try:
         command = json.loads(command_json)
         if (
@@ -1849,16 +1591,16 @@ def select_advisory_lessons(
             or not command
             or not all(isinstance(arg, str) and arg for arg in command)
         ):
-            return matches, predicted
+            return matches
         timeout = float(settings.get("LESSONS_SELECTOR_TIMEOUT", "2"))
         if not math.isfinite(timeout) or not 0 < timeout <= min(
             30, HOOK_BUDGET_SECONDS / 2
         ):
-            return matches, predicted
+            return matches
         max_calls = int(settings.get("LESSONS_SELECTOR_MAX_CALLS", "0"))
         model = settings.get("LESSONS_SELECTOR_MODEL")
         if not model or not 0 < max_calls <= 10:
-            return matches, predicted
+            return matches
         state = load_session_state(session_id)
         prompt_event = hook_input.get("hook_event_name") == "UserPromptSubmit"
         query = (
@@ -1867,7 +1609,7 @@ def select_advisory_lessons(
             else state.get("selector_query", "")
         )
         if not isinstance(query, str) or not query.strip():
-            return matches, predicted
+            return matches
         if prompt_event:
             state["selector_query"] = query
             save_session_state(session_id, state)
@@ -1911,7 +1653,7 @@ def select_advisory_lessons(
         }
         payload = json.dumps(request).encode()
         if len(payload) > 1_048_576:
-            return matches, predicted
+            return matches
         # Bound both elapsed time and bytes while draining the CLI output.
         with tempfile.TemporaryFile() as source:
             source.write(payload)
@@ -1954,36 +1696,29 @@ def select_advisory_lessons(
                         pass
                     process.wait()
             if process.returncode:
-                return matches, predicted
+                return matches
             result = json.loads(raw)
         if (
             not isinstance(result, dict)
             or type(result.get("version")) is not int
             or result["version"] != 1
         ):
-            return matches, predicted
+            return matches
         status, ids = result.get("status"), result.get("ids")
         if status not in ("selected", "empty") or not isinstance(ids, list):
-            return matches, predicted
+            return matches
         if any(not isinstance(item, str) or item not in advisory for item in ids):
-            return matches, predicted
+            return matches
         if (status == "empty" and ids) or (status == "selected" and not ids):
-            return matches, predicted
+            return matches
         selected = set(dict.fromkeys(ids))
         if len(selected) != len(ids) or len(selected) > request["max_results"]:
-            return matches, predicted
-        return (
-            [
-                item
-                for item in matches
-                if item["path"] not in advisory or item["path"] in selected
-            ],
-            [
-                item
-                for item in predicted
-                if item["path"] not in advisory or item["path"] in selected
-            ],
-        )
+            return matches
+        return [
+            item
+            for item in matches
+            if item["path"] not in advisory or item["path"] in selected
+        ]
     except (
         OSError,
         ValueError,
@@ -1992,7 +1727,7 @@ def select_advisory_lessons(
         subprocess.TimeoutExpired,
         TimeoutError,
     ):
-        return matches, predicted
+        return matches
 
 
 def main():
@@ -2124,39 +1859,27 @@ def main():
     # --- Dedup: skip already-injected lessons ---
     already_injected = get_already_injected(session_id, transcript_path)
 
-    # --- Prediction: inject co-occurring lessons proactively ---
-    matched_paths = [
-        m["path"] for m in raw_matches if m["path"] not in already_injected
-    ]
-    predicted = get_predicted_lessons(
-        matched_paths, already_injected, lessons, MAX_PREDICTED_LESSONS
-    )
-
     # --- Holdout filtering (A/B testing via HOLDOUT_LESSONS env var) ---
     matches = filter_held_out_lessons(raw_matches, holdout_lessons)
-    predicted = filter_held_out_lessons(predicted, holdout_lessons)
 
-    matches, predicted = select_advisory_lessons(matches, predicted, hook_input)
+    matches = select_advisory_lessons(matches, hook_input)
 
     # --- Randomized dropout for causal LOO (mirrors gptme/lessons/auto_include.py) ---
     # Log both arms here, before format_lessons / already-injected filtering.
-    matches, predicted = _apply_lesson_dropout_multi(
-        matches, predicted, session_id, workspace, event_type=event_type
+    matches = _apply_lesson_dropout(
+        matches, session_id, workspace, event_type=event_type
     )
 
     skill_cap = (
         MAX_PROMPT_SKILLS if event_type == "UserPromptSubmit" else MAX_PRETOOL_SKILLS
     )
     matches = [m for m in matches if m["path"] not in already_injected]
-    predicted = [p for p in predicted if p["path"] not in already_injected]
-    matches, predicted = apply_skill_cap(matches, predicted, skill_cap)
+    matches = apply_skill_cap(matches, skill_cap)
 
     # --- Log structured lesson events for efficacy measurement (Phase 1a) ---
-    _log_lesson_events(session_id, event_type, matches, predicted, already_injected)
+    _log_lesson_events(session_id, event_type, matches, already_injected)
 
-    context = format_lessons(
-        matches, already_injected, predicted, event_type=event_type
-    )
+    context = format_lessons(matches, already_injected, event_type=event_type)
 
     if not context:
         emit_empty(event_type, session_id, "all_suppressed")
@@ -2165,32 +1888,24 @@ def main():
     # --- Update session state ---
     state = load_session_state(session_id)
     newly_injected = [m["path"] for m in matches if m["path"] not in already_injected]
-    predicted_injected = [
-        p["path"] for p in predicted if p["path"] not in already_injected
-    ]
     existing = set(state.get("injected", []))
     existing.update(newly_injected)
-    existing.update(predicted_injected)
     state["injected"] = list(existing)
     if event_type == "PreToolUse":
         state["last_pretool"] = time.time()
     save_session_state(session_id, state)
 
-    # --- Log trajectory data for predict-early analysis ---
+    # --- Log trajectory data ---
     tool_sequence = extract_tool_sequence(transcript_path)
     current_tool = ""
     if event_type == "PreToolUse":
         current_tool = hook_input.get("tool_name", "")
-    # Include predicted lessons in trajectory logging (marked with "predicted" flag)
-    all_logged = matches + [
-        {**p, "predicted": True} for p in predicted if p["path"] not in already_injected
-    ]
     log_trajectory_match(
         session_id,
         event_type,
         tool_sequence,
         current_tool,
-        all_logged,
+        matches,
         already_injected,
     )
 
@@ -2220,12 +1935,9 @@ def main():
             precision_items = [
                 {
                     "item_id": item["path"],
-                    "text": "\n".join(
-                        _render_lesson(item, event_type, predicted=is_predicted)
-                    ),
+                    "text": "\n".join(_render_lesson(item, event_type)),
                 }
-                for items, is_predicted in ((matches, False), (predicted, True))
-                for item in items
+                for item in matches
                 if not _selector_exempt(item, guards)
             ]
     _emit_context(

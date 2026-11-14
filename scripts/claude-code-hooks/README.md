@@ -8,7 +8,7 @@ Claude Code sessions.
 Brings gptme's lesson injection system into Claude Code sessions. Keyword
 matching and BM25 scoring are delegated to `gptme_rag.lesson_matcher`; this
 script is the Claude Code harness wrapper: workspace discovery, Thompson
-sampling, co-occurrence prediction, holdout/dropout, session dedup, and the
+sampling, holdout/dropout, session dedup, and the
 `additionalContext` envelope.
 
 When you open a CC session in a gptme agent workspace, this hook automatically
@@ -25,8 +25,6 @@ injects relevant lessons as `additionalContext` based on:
 - `session_categories` gating (restrict a lesson to specific session types)
 - Per-session deduplication (each lesson injected at most once per session)
 - Thompson sampling re-ranking (lessons that help more get higher priority)
-- Co-occurrence prediction (predicts lessons likely to be needed based on
-  what's already fired — requires a pre-built prediction model)
 - PreToolUse cooldown throttle (15s) to avoid excessive context injection
 - Self-referential match prevention (strips `<system-reminder>` blocks)
 
@@ -100,7 +98,6 @@ containing `gptme.toml`). All state directories are derived from the workspace r
 | Path | Purpose |
 |------|---------|
 | `workspace/state/lesson-thompson/` | Thompson sampling bandit state |
-| `workspace/state/lesson-predictions/` | Co-occurrence prediction model |
 | `workspace/state/lesson-trajectories/` | Trajectory logs for analysis |
 
 These are created automatically on first use. If your workspace has no TS state yet,
@@ -125,7 +122,6 @@ Tunable constants (edit at the top of the script):
 | `PRETOOL_COOLDOWN_SECONDS` | 15 | Minimum seconds between PreToolUse matches |
 | `MAX_PROMPT_LESSONS` | 5 | Max lessons injected per UserPromptSubmit |
 | `MAX_PRETOOL_LESSONS` | 3 | Max lessons injected per PreToolUse |
-| `MAX_PREDICTED_LESSONS` | 2 | Max co-occurrence-predicted lessons per event |
 | `TS_WEIGHT` | 1.0 | Thompson sampling re-ranking weight |
 
 ### Requirements
