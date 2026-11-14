@@ -381,6 +381,41 @@ def extract_cc_model(jsonl_path: Path) -> str | None:
     return None
 
 
+def extract_cc_cwd(jsonl_path: Path) -> str | None:
+    """Return the first ``cwd`` recorded in a Claude Code JSONL file.
+
+    Claude Code stamps each user/assistant line with the session's working
+    directory. Unlike the project-dir name, it is the exact path, so it
+    disambiguates workspaces whose dir names encode identically
+    (``/a/my-ws``, ``/a/my/ws`` and ``/a/my.ws`` all become ``-a-my-ws``).
+
+    Scans up to 50 lines. Returns ``None`` when no line carries a ``cwd``
+    (e.g. stub trajectories from ``claude -p``) or the file can't be read.
+    """
+    try:
+        with open(jsonl_path, encoding="utf-8", errors="replace") as f:
+            # Read at most 512 KiB to avoid blocking on huge single-line files.
+            chunk = f.read(512 * 1024)
+    except OSError as e:
+        logger.debug("Failed to read %s for cwd extraction: %s", jsonl_path, e)
+        return None
+    for i, line in enumerate(chunk.split("\n", 50)):
+        if i >= 50:
+            break
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict):
+            cwd = entry.get("cwd")
+            if isinstance(cwd, str) and cwd:
+                return cwd
+    return None
+
+
 def _model_from_cc_stream_log(log_path: Path) -> str | None:
     """Extract model from a ``claude -p --stream-json`` log's init line.
 
