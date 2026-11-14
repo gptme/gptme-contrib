@@ -201,12 +201,11 @@ def test_skill_cap_preserves_lessons_and_exempt_skills(hook, monkeypatch):
         {"path": "guard", "is_skill": True},
         {"path": "skill-b", "is_skill": True},
     ]
-    predicted = [{"path": "skill-c", "is_skill": True}]
 
-    kept_matches, kept_predicted = hook.apply_skill_cap(matches, predicted, cap=1)
+    kept = hook.apply_skill_cap(matches, cap=1)
 
-    assert [item["path"] for item in kept_matches] == ["lesson", "skill-a", "guard"]
-    assert kept_predicted == []
+    assert [item["path"] for item in kept] == ["lesson", "skill-a", "guard"]
+    assert hook.apply_skill_cap(matches, cap=None) == matches
 
 
 # --- session state ---
@@ -232,8 +231,8 @@ def test_main_applies_skill_cap_after_dropout(hook, tmp_path, monkeypatch):
     """A skill withheld by dropout must not consume the treatment cap budget.
 
     Pre-fix ordering capped first (keeping ``skill-a``), then dropout withheld
-    it, leaving zero skills injected even though ``skill-b``/``skill-c`` could
-    still render. Post-fix, dropout runs first and the cap slot is refilled.
+    it, leaving zero skills injected even though ``skill-b`` could still
+    render. Post-fix, dropout runs first and the cap slot is refilled.
     """
     import io
 
@@ -256,29 +255,21 @@ def test_main_applies_skill_cap_after_dropout(hook, tmp_path, monkeypatch):
     # Keep the test hermetic: real score_memories reads the workspace and may
     # inject memory hits when gptme happens to be importable.
     monkeypatch.setattr(hook, "score_memories", lambda *a, **k: [])
-    monkeypatch.setattr(
-        hook,
-        "get_predicted_lessons",
-        lambda *a, **k: [
-            {"path": "skill-c", "title": "C", "is_skill": True, "score": 1.0}
-        ],
-    )
     monkeypatch.setattr(hook, "filter_held_out_lessons", lambda items, holdout: items)
 
-    def fake_dropout(matches, predicted, sid, ws, **kwargs):
+    def fake_dropout(matches, sid, ws, **kwargs):
         # Simulate class-aware dropout withholding skill-a this invocation.
-        return [m for m in matches if m["path"] != "skill-a"], predicted
+        return [m for m in matches if m["path"] != "skill-a"]
 
-    monkeypatch.setattr(hook, "_apply_lesson_dropout_multi", fake_dropout)
+    monkeypatch.setattr(hook, "_apply_lesson_dropout", fake_dropout)
     monkeypatch.setattr(hook, "_log_lesson_events", lambda *a, **k: None)
     monkeypatch.setattr(hook, "extract_tool_sequence", lambda tp: [])
     monkeypatch.setattr(hook, "log_trajectory_match", lambda *a, **k: None)
 
     captured: dict[str, list[str]] = {}
 
-    def fake_format(matches, already, predicted, event_type):
+    def fake_format(matches, already, event_type):
         captured["matches"] = [m["path"] for m in matches]
-        captured["predicted"] = [p["path"] for p in predicted]
         return "ctx"
 
     monkeypatch.setattr(hook, "format_lessons", fake_format)
@@ -295,7 +286,6 @@ def test_main_applies_skill_cap_after_dropout(hook, tmp_path, monkeypatch):
         hook.main()
 
     assert captured["matches"] == ["skill-b"], captured
-    assert captured["predicted"] == [], captured
 
 
 # --- find_workspace ---
@@ -1342,10 +1332,7 @@ def test_cc_dropout_exempt_lesson_never_withheld(hook, monkeypatch, tmp_path):
 
         _random.seed(42)
         matches = [{"path": str(exempt_path), "title": "Exempt Lesson"}]
-        predicted: list = []
-        kept_m, kept_p = hook._apply_lesson_dropout_multi(
-            matches, predicted, "sess-cc-exempt", tmp_path
-        )
+        kept_m = hook._apply_lesson_dropout(matches, "sess-cc-exempt", tmp_path)
         assert len(kept_m) == 1, "Exempt lesson was withheld — should be kept"
         assert kept_m[0]["path"] == str(exempt_path)
     finally:
@@ -1376,13 +1363,10 @@ def test_cc_dropout_unavailable_manifest_skips_dropout(
     monkeypatch.setenv("LESSON_DROPOUT_LOG_DIR", str(tmp_path / "drop"))
 
     matches = [{"path": str(tmp_path / "lessons" / "broken.md"), "title": "Broken"}]
-    kept_m, kept_p = hook._apply_lesson_dropout_multi(
-        matches, [], f"sess-cc-{failure}", tmp_path
-    )
+    kept_m = hook._apply_lesson_dropout(matches, f"sess-cc-{failure}", tmp_path)
 
     # Both failure modes activate the "*" sentinel → dropout is skipped, all lessons kept.
     assert kept_m == matches, "Lessons should be kept when manifest is unavailable"
-    assert kept_p == []
 
 
 def test_cc_dropout_withheld_has_effective_epsilon(hook, monkeypatch, tmp_path):
@@ -1406,7 +1390,7 @@ def test_cc_dropout_withheld_has_effective_epsilon(hook, monkeypatch, tmp_path):
     _random.seed(0)
     matches = [{"path": "lessons/holdout/my-lesson.md", "title": "Holdout"}]
     try:
-        hook._apply_lesson_dropout_multi(matches, [], "sess-cc-eff-eps", tmp_path)
+        hook._apply_lesson_dropout(matches, "sess-cc-eff-eps", tmp_path)
     finally:
         hook._policy_manifest_cache = None
 
