@@ -16,6 +16,7 @@ from pathlib import Path
 
 import click
 import yaml
+from bobutils.frontmatter import split_frontmatter
 
 from gptme_lessons_extras.network_schema import (
     NetworkMetadata,
@@ -32,20 +33,14 @@ def parse_lesson_frontmatter(content: str) -> tuple[dict | None, str]:
     Returns:
         Tuple of (frontmatter_dict, markdown_content)
     """
-    if not content.startswith("---"):
-        return None, content
-
-    # Find end of frontmatter
-    parts = content.split("---", 2)
-    if len(parts) < 3:
-        return None, content
-
     try:
-        frontmatter = yaml.safe_load(parts[1])
-        markdown = parts[2].strip()
-        return frontmatter, markdown
-    except yaml.YAMLError:
+        raw_yaml, markdown = split_frontmatter(content)
+        frontmatter = yaml.safe_load(raw_yaml)
+    except (ValueError, yaml.YAMLError):
         return None, content
+    if not isinstance(frontmatter, dict):
+        return None, content
+    return frontmatter, markdown.strip()
 
 
 def add_network_metadata(

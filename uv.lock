@@ -2128,6 +2128,7 @@ name = "gptme-forum"
 version = "0.1.0"
 source = { editable = "packages/gptme-forum" }
 dependencies = [
+    { name = "bobutils" },
     { name = "click" },
     { name = "pyyaml" },
 ]
@@ -2139,6 +2140,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "bobutils", editable = "packages/bobutils" },
     { name = "click", specifier = ">=8.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -2279,6 +2281,7 @@ name = "gptme-lessons-extras"
 version = "0.1.0"
 source = { editable = "packages/gptme-lessons-extras" }
 dependencies = [
+    { name = "bobutils" },
     { name = "click" },
     { name = "gptme" },
     { name = "python-frontmatter" },
@@ -2294,6 +2297,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "bobutils", editable = "packages/bobutils" },
     { name = "click", specifier = ">=8.0" },
     { name = "gptme", git = "https://github.com/gptme/gptme.git?branch=master" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
