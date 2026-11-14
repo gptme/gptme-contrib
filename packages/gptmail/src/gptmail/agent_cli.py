@@ -62,6 +62,13 @@ from gptmail.transport.agent import (
     meta_of,
     write_inbox_metadata,
 )
+from gptmail.transport.receive import (
+    MAX_MESSAGE_BYTES,
+    ReceiveError,
+    check_original_command,
+    mailbox_inbox,
+    publish_message,
+)
 
 
 # Inbox messages older than this (days) are assumed handled and no longer
@@ -239,11 +246,54 @@ def _ssh_control_path(ssh_target: str) -> str:
     return os.path.join(ctl_dir, f"ssh-ctl-{os.getuid()}-{ctl_key}")
 
 
-def _ssh_deliver(agents: dict[str, dict[str, str]], *, mailbox: str = "default") -> Deliver:
-    """Build a ``deliver`` hook that SCPs a message into a recipient's inbox.
+#: Default remote command for ``delivery: receive-only`` peers. It must match the
+#: forced command an operator pins in the recipient's ``authorized_keys``; the
+#: receiver only compares it against ``SSH_ORIGINAL_COMMAND``, never runs it here.
+RECEIVE_ONLY_COMMAND = "gptmail agent receive"
 
-    Returns False (so the transport stamps ``delivered: false``) on unknown
-    recipient or any SSH/SCP failure — the same contract agent-msg.py relies on.
+
+def _receive_only_deliver(agent: dict[str, str], ssh_opts: list[str], ssh_target: str) -> Deliver:
+    """Deliver by piping one message into the peer's receive-only endpoint.
+
+    This is a single ``ssh`` call and needs no remote path, ``mkdir``, ``scp``
+    or cleanup command — the shape a forced command with ``restrict`` permits.
+    """
+
+    command = agent.get("receive_command") or RECEIVE_ONLY_COMMAND
+
+    def _deliver(local_path: Path, recipient: str) -> bool:
+        try:
+            with local_path.open("rb") as stdin:
+                result = subprocess.run(
+                    ["ssh", *ssh_opts, ssh_target, command],
+                    stdin=stdin,
+                    check=False,
+                    capture_output=True,
+                    timeout=20,
+                )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            click.echo(f"Error delivering to {recipient}: {e}", err=True)
+            return False
+        if result.returncode != 0:
+            detail = result.stderr.decode(errors="replace").strip()
+            click.echo(
+                f"Error delivering to {recipient}: receive-only endpoint refused "
+                f"(exit {result.returncode}){f': {detail}' if detail else ''}",
+                err=True,
+            )
+            return False
+        return True
+
+    return _deliver
+
+
+def _ssh_deliver(agents: dict[str, dict[str, str]], *, mailbox: str = "default") -> Deliver:
+    """Build a ``deliver`` hook that pushes a message into a recipient's inbox.
+
+    Legacy peers get SCP plus a remote link; ``delivery: receive-only`` peers get
+    one ``ssh`` invocation of :data:`RECEIVE_ONLY_COMMAND` with the message on
+    stdin. Returns False (so the transport stamps ``delivered: false``) on an
+    unknown recipient or any SSH failure — the contract agent-msg.py relies on.
     """
 
     def _deliver(local_path: Path, recipient: str) -> bool:
@@ -260,25 +310,19 @@ def _ssh_deliver(agents: dict[str, dict[str, str]], *, mailbox: str = "default")
         # poll re-compose a fresh, duplicate reply).
         if agent.get("delivery") == "pull-only":
             return True
-        missing = [k for k in ("ssh", "workspace") if not agent.get(k)]
-        if missing:
+        if not agent.get("ssh"):
             click.echo(
-                f"Error: agent '{recipient}' config missing required key(s): {', '.join(missing)}",
+                f"Error: agent '{recipient}' config missing required key(s): ssh",
                 err=True,
             )
             return False
         ssh_target = agent["ssh"]
-        remote_root = f"{agent['workspace']}/messages"
-        if mailbox == "default":
-            remote_inbox = f"{remote_root}/inbox/"
-        else:
-            remote_inbox = f"{remote_root}/mailboxes/{mailbox}/inbox/"
         # ControlMaster reuses one TCP connection (and one PAM/logind session) for
-        # both the mkdir and scp calls instead of opening two separate connections.
-        # Each recipient gets its own ControlPath keyed by user+host to avoid
-        # cross-host master conflicts.  ControlPersist=60 keeps the master alive for
-        # 60 s so burst deliveries to the same host share it; it auto-closes after
-        # that — no persistent background process.
+        # every call in a delivery instead of opening several connections. Each
+        # recipient gets its own ControlPath keyed by user+host to avoid cross-host
+        # master conflicts. ControlPersist=60 keeps the master alive for 60 s so
+        # burst deliveries to the same host share it; it auto-closes after that —
+        # no persistent background process.
         ctl_path = _ssh_control_path(ssh_target)
         ssh_opts = [
             "-o",
@@ -292,6 +336,29 @@ def _ssh_deliver(agents: dict[str, dict[str, str]], *, mailbox: str = "default")
             "-o",
             "ControlPersist=60",
         ]
+        # Receive-only peers expose exactly one command, so delivery is a single
+        # ssh invocation with the message on stdin. No remote path is needed:
+        # the receiver chooses its own inbox, and its key owns the write.
+        if agent.get("delivery") == "receive-only":
+            if mailbox != "default":
+                click.echo(
+                    "Error: receive-only delivery supports the default mailbox only; "
+                    "named mailbox routing requires a separately pinned endpoint.",
+                    err=True,
+                )
+                return False
+            return _receive_only_deliver(agent, ssh_opts, ssh_target)(local_path, recipient)
+        if not agent.get("workspace"):
+            click.echo(
+                f"Error: agent '{recipient}' config missing required key(s): workspace",
+                err=True,
+            )
+            return False
+        remote_root = f"{agent['workspace']}/messages"
+        if mailbox == "default":
+            remote_inbox = f"{remote_root}/inbox/"
+        else:
+            remote_inbox = f"{remote_root}/mailboxes/{mailbox}/inbox/"
         # Stage under a non-message suffix in the same directory. Readers must
         # never see parseable frontmatter before SCP has finished the body.
         remote_temp = f"{remote_inbox}.{uuid.uuid4().hex}.part"
@@ -484,15 +551,17 @@ def _matches_recipient(meta: dict, recipient: str) -> bool:
 def _is_push_reachable(recipient: str, agents: dict[str, dict[str, str]]) -> bool:
     """True if ``recipient`` has a working push transport in the registry.
 
-    Mirrors the ``_ssh_deliver`` contract: a recipient is push-reachable only if
-    it is registered with non-empty ``ssh`` and ``workspace`` keys. Pull-based
+    Mirrors the ``_ssh_deliver`` contract: receive-only peers need ``ssh``;
+    legacy peers need both ``ssh`` and ``workspace``. Pull-based
     recipients (not in the registry, or missing those keys — e.g. Erik, who polls
     the outbox) can never be delivered to, so their replies stay ``delivered:
     false`` permanently rather than as a transient, retryable failure.
     """
     agent = agents.get(recipient.lower())
-    if not agent:
+    if not agent or agent.get("delivery") == "pull-only":
         return False
+    if agent.get("delivery") == "receive-only":
+        return bool(agent.get("ssh"))
     return all(agent.get(k) for k in ("ssh", "workspace"))
 
 
@@ -550,7 +619,7 @@ def _pending_messages(
             continue
         if m.get("replied"):
             continue
-        if f.name in replied_to:
+        if f.name in replied_to or str(m.get("message_id") or "") in replied_to:
             continue
         in_reply_to = m.get("in_reply_to")
         thread_ids = in_reply_to if isinstance(in_reply_to, list) else [in_reply_to]
@@ -828,6 +897,10 @@ def _fleet_pending_rows(
     for agent_name, agent in agents.items():
         if agent_name == self_name:
             continue
+        # Receive-only and pull-only peers expose no outbox to read over SSH:
+        # anything they owe us arrives as a pushed message in our own inbox.
+        if agent.get("delivery") in ("pull-only", "receive-only"):
+            continue
         remote_rows = _remote_pending_rows(
             agent_name,
             agent,
@@ -918,7 +991,10 @@ def _local_thread_messages(
                 if not meta:
                     continue
                 key = _thread_key(path.name)
-                parents.setdefault(key, _parent_keys(meta))
+                links = _parent_keys(meta)
+                parents.setdefault(key, links)
+                if meta.get("message_id"):
+                    parents.setdefault(_thread_key(meta["message_id"]), links)
                 if folder == "inbox":
                     inbox_messages.append((key, meta, path))
     return parents, inbox_messages
@@ -1120,6 +1196,86 @@ def broadcast(subject: str, content: str | None, mailbox: str, no_reply: bool) -
         sys.exit(1)
 
 
+@agent.command(name="receive")
+@click.option(
+    "--workspace",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Recipient workspace root. Pin an absolute path in the forced command.",
+)
+@click.option(
+    "--mailbox",
+    default=None,
+    help="Mailbox to receive into (default: $GPTMAIL_RECEIVE_MAILBOX or 'default').",
+)
+@click.option(
+    "--expect-sender",
+    default=None,
+    help=(
+        "Refuse a message whose From is not this agent. Bind it per key with a "
+        "forced command, e.g. 'gptmail agent receive --expect-sender alice'."
+    ),
+)
+@click.option(
+    "--max-bytes",
+    default=MAX_MESSAGE_BYTES,
+    show_default=True,
+    type=int,
+    help="Refuse a message larger than this many bytes.",
+)
+def receive_cmd(
+    workspace: Path | None, mailbox: str | None, expect_sender: str | None, max_bytes: int
+) -> None:
+    """Receive one message on stdin and publish it to the inbox.
+
+    This is the whole recipient side of the receive-only transport: an operator
+    can pin a sender's key with a forced command, e.g.
+
+    \b
+        command="gptmail agent receive --workspace /srv/bob --expect-sender alice",restrict ssh-ed25519 ... alice
+
+    so the sender never needs a login shell here. The command reads one bounded
+    message, validates its frontmatter, and writes it atomically under
+    ``messages/inbox/``. It never runs anything the sender asked for; a
+    client-requested command other than the receive verb is refused, so
+    ``ssh recipient 'ls'`` fails loudly instead of looking like an empty message.
+
+    Prints the published filename on success. Exit 1 on any refusal.
+    """
+    if max_bytes <= 0:
+        raise click.UsageError("--max-bytes must be positive.")
+    try:
+        check_original_command(os.environ.get("SSH_ORIGINAL_COMMAND"))
+    except ReceiveError as e:
+        raise click.ClickException(str(e)) from None
+
+    mailbox_name = mailbox or os.environ.get("GPTMAIL_RECEIVE_MAILBOX") or "default"
+    bound_sender = expect_sender or os.environ.get("GPTMAIL_SENDER") or None
+
+    data = sys.stdin.buffer.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise click.ClickException(f"refused: message exceeds the {max_bytes}-byte receive limit")
+    try:
+        raw = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise click.ClickException("refused: message is not valid UTF-8") from None
+    if not raw.strip():
+        raise click.ClickException("refused: no message on stdin")
+
+    try:
+        messages = workspace / "messages" if workspace is not None else _messages_dir()
+        inbox = mailbox_inbox(messages, mailbox_name)
+        published = publish_message(
+            raw,
+            inbox,
+            expected_sender=bound_sender,
+            self_name=_self_name(),
+        )
+    except ReceiveError as e:
+        raise click.ClickException(str(e)) from None
+    click.echo(published.name)
+
+
 @agent.command()
 def doctor() -> None:
     """Check that this install can actually deliver messages.
@@ -1270,7 +1426,10 @@ def reply(message_id: str, content: str | None, mailbox: str | None) -> None:
         subject = str(original.get("subject", ""))
         if not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"
-        reply_id = transport.send(recipient, subject, body, reply_to=message_id)
+        # The inbox filename is local; receive-only peers retain the sender's
+        # original ID in frontmatter for reply links across the wire.
+        parent_id = str(original.get("message_id") or message_id)
+        reply_id = transport.send(recipient, subject, body, reply_to=parent_id)
         if _delivery_failed(reply_id, mailbox=mailbox_name):
             click.echo(
                 f"Delivery to {recipient} FAILED — saved to outbox (delivered: false). "
@@ -1470,7 +1629,13 @@ def _fetch_from_agent(
                     err=True,
                 )
             continue
-        if dest.exists():
+        already_received = any(
+            meta.get("message_id") == filename
+            and str(meta.get("from", "")).lower() == agent_name.lower()
+            for path in dest.parent.glob("*.md")
+            if (meta := meta_of(path))
+        )
+        if dest.exists() or already_received:
             # Skip-if-exists is load-bearing: local inbox copies carry
             # read/replied stamps that the sender's outbox never has.
             # Recopying would silently reset tracking (gptme/gptme-contrib#1476).
@@ -1588,8 +1753,10 @@ def pull(
     for agent_name, agent_cfg in agents.items():
         if agent_name == self_name:
             continue
-        # Skip pull-only or incompletely configured agents — they can't be SSHed.
-        if agent_cfg.get("delivery") == "pull-only":
+        # Skip pull-only agents (no inbound SSH) and receive-only peers: the
+        # forced command exposes no shell, so fetching from their outbox is not
+        # possible. Replies from them arrive pushed into our own inbox instead.
+        if agent_cfg.get("delivery") in ("pull-only", "receive-only"):
             continue
         if not all(agent_cfg.get(k) for k in ("ssh", "workspace")):
             continue
@@ -1822,6 +1989,7 @@ def watch(
             )
         else:
             root_mailbox, root_meta = root
+            thread_target = _thread_key(root_meta.get("message_id") or thread)
             if mailbox is None and not all_mailboxes:
                 mailbox = root_mailbox
             root_to = root_meta.get("to")
@@ -1845,20 +2013,24 @@ def watch(
     else:
         watch_agents = {k: v for k, v in agents.items() if k != recipient}
 
-    # Exclude pull-only or incompletely configured agents (no SSH).
+    # Exclude pull-only agents (no inbound SSH), receive-only peers (no shell to
+    # read their outbox) and incompletely configured agents (no SSH).
     skipped = [
         name
         for name, cfg in watch_agents.items()
-        if cfg.get("delivery") == "pull-only" or not all(cfg.get(k) for k in ("ssh", "workspace"))
+        if cfg.get("delivery") in ("pull-only", "receive-only")
+        or not all(cfg.get(k) for k in ("ssh", "workspace"))
     ]
     ssh_agents = {k: v for k, v in watch_agents.items() if k not in skipped}
     if skipped:
         click.echo(f"Note: skipping non-SSH agents: {', '.join(skipped)}", err=True)
 
-    # Thread mode also scans the workspace inbox, including pull --as deliveries
-    # for a --to override. Candidate metadata still filters by recipient below.
-    # No SSH-reachable peer is needed for an already-local or pushed reply.
-    watch_local_inbox = thread_target is not None
+    # Thread mode scans local replies immediately; ordinary watches baseline
+    # the inbox for new pushes from receive-only peers. Neither needs a shell
+    # on those peers. Candidate metadata still filters by recipient below.
+    watch_local_inbox = thread_target is not None or any(
+        cfg.get("delivery") == "receive-only" for cfg in watch_agents.values()
+    )
     if not ssh_agents and not watch_local_inbox:
         click.echo("No SSH-reachable agents to watch.", err=True)
         sys.exit(1)
@@ -1882,8 +2054,13 @@ def watch(
             # A push may arrive while SSH or sleep consumes the remaining budget.
             # Only local files delivered before expiry can satisfy this final scan;
             # late remote rows and pulls must still fail the monotonic deadline.
-            if check_local and thread_target is not None:
-                if _check_thread({}, delivered_before=wall_deadline):
+            if check_local and watch_local_inbox:
+                found = (
+                    _check_thread({}, delivered_before=wall_deadline)
+                    if thread_target is not None
+                    else _check_local_pushes(delivered_before=wall_deadline)
+                )
+                if found:
                     sys.exit(0)
             click.echo(f"Timed out after {timeout} waiting for {target_desc}.", err=True)
             sys.exit(WATCH_TIMEOUT_EXIT)
@@ -1903,6 +2080,34 @@ def watch(
         return rows
 
     reported: set[str] = set()
+    local_baseline: set[str] = set()
+
+    def _check_local_pushes(*, delivered_before: float | None = None) -> bool:
+        """Report arrivals after the ordinary watch's local baseline."""
+        _, messages = _local_thread_messages(mailboxes)
+        for key, meta, path in messages:
+            if delivered_before is not None:
+                try:
+                    if local_delivery_time(path) > delivered_before:
+                        continue
+                except FileNotFoundError:
+                    continue
+            if key in local_baseline:
+                continue
+            local_baseline.add(key)
+            sender = str(meta.get("from", "")).lower()
+            # SSH-polled peers are reported by their remote baseline below,
+            # even if they also SCP-push a local copy during migration.
+            if (
+                sender not in watch_agents
+                or sender in ssh_agents
+                or not _addressed_to(meta, recipient)
+            ):
+                continue
+            click.echo(f"NEW message from {sender}: {meta.get('subject', '')} ({path.name})")
+            if once:
+                return True
+        return False
 
     def _check_thread(
         remote: dict[str, list[dict]], *, delivered_before: float | None = None
@@ -1944,7 +2149,10 @@ def watch(
         for key, meta, sender, is_local in candidates:
             if delivered_before is None:
                 _budget(60, check_local=True)
-            if key in reported or key == thread_target:
+            # Local publication names differ from remote outbox names. Keep the
+            # local handle for output/pulls, but deduplicate on logical identity.
+            report_key = _thread_key(meta.get("message_id") or key)
+            if report_key in reported or report_key == thread_target:
                 continue
             if not _reaches_thread(key, thread_target, parents):
                 continue
@@ -1975,7 +2183,7 @@ def watch(
                     continue
             if delivered_before is None:
                 _budget(60, check_local=True)  # Only timely local delivery survives expiry.
-            reported.add(key)
+            reported.add(report_key)
             now_str = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
             filename = f"{key}.md"
             subject = str(meta.get("subject", "(no subject)"))
@@ -1988,6 +2196,10 @@ def watch(
     # Push delivery is authoritative already; don't let an offline peer hide it.
     if thread_target is not None and _check_thread({}):
         return
+
+    if watch_local_inbox and thread_target is None:
+        _, messages = _local_thread_messages(mailboxes)
+        local_baseline.update(key for key, _, _ in messages)
 
     # Baseline: None = not yet successfully probed; set[str] = known filenames.
     baselines: dict[str, set[str] | None] = {}
@@ -2019,6 +2231,8 @@ def watch(
                     if _check_thread(polled):
                         return
                 continue
+            if watch_local_inbox and _check_local_pushes():
+                return
             for agent_name, agent_cfg in ssh_agents.items():
                 rows = _poll(agent_name, agent_cfg)
                 if rows is None:

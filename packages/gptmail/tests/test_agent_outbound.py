@@ -173,7 +173,10 @@ def test_scanner_checks_exact_published_rendering(
     monkeypatch.setitem(sys.modules, "redact", stub)
     transport = AgentTransport(tmp_path / "messages", "alice", mailbox="ops")
     mid = transport.send("bob", "Unicode ☃ subject", "body\nwith a newline", reply_to="prior.md")
-    assert scanned == [(transport.outbox / mid).read_text()]
+    # Preflight blocks secret-bearing metadata before filename generation;
+    # the final scan covers the added logical ID and exact published bytes.
+    assert len(scanned) == 2
+    assert scanned[-1] == (transport.outbox / mid).read_text()
     assert "mailbox: ops" in scanned[0]
     assert "in_reply_to: prior.md" in scanned[0]
 
