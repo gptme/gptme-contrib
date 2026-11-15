@@ -151,9 +151,10 @@ def _newest_comments(
     """Match the publisher's most-recently-updated marker authority."""
     return sorted(
         comments,
-        key=lambda comment: str(
-            comment.get("updated_at") or comment.get("created_at") or ""
-        ),
+        key=lambda comment: parse_ts(
+            str(comment.get("updated_at") or comment.get("created_at") or "")
+        )
+        or datetime.min.replace(tzinfo=UTC),
         reverse=True,
     )
 

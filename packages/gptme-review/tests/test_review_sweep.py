@@ -1083,3 +1083,31 @@ def test_deleted_file_hunks_do_not_create_false_duplicate_overlap() -> None:
     assert _numbers(found) == [1, 2]
     assert found is not None
     assert all("likely_duplicate_of" not in entry for entry in found)
+
+
+@pytest.mark.parametrize("reverse_input", [False, True])
+@pytest.mark.parametrize(
+    "old_updated", ["2026-08-07T22:00:00+02:00", "2026-08-07T20:00:00"]
+)
+def test_marker_authority_compares_timestamp_instants(
+    reverse_input: bool, old_updated: str
+) -> None:
+    old = _marker_comment("abc123", extra={"engine": "llm", "score": 5, "findings": []})
+    old["updated_at"] = old_updated
+    new = _marker_comment(
+        "abc123",
+        comment_id=2,
+        extra={
+            "engine": "llm",
+            "score": 5,
+            "findings": [],
+            "consensus": {"requested": 2, "answered": 2},
+            "served_through": "2026-08-07T21:30:00Z",
+        },
+    )
+    new["updated_at"] = "2026-08-07T21:30:00Z"
+    comments = [new, old] if reverse_input else [old, new]
+    assert marker_payload(comments, IDENTITY)[1] == new
+    assert marker_state(comments, IDENTITY) == ("abc123", "2026-08-07T21:30:00Z")
+    host = FakeHost([_pr(1, "abc123def456")], {1: comments})
+    assert select_candidates("o/r", _config(), host, NOW, dry_run=True) == []
