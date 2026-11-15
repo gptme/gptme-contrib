@@ -159,10 +159,17 @@ def _update_ledger(key: str | None, path: Path | None, now: datetime | None) -> 
             if key is None and _parse_ts(acks.get("_since")) is not None:
                 return True
             stamp = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
-            # Bootstrap guard: a key that has never been acked is not "dark" until
-            # tracking has been live for one full tolerance window.
+            # Only an empty ledger gets a fresh bootstrap window. An existing
+            # ledger with a corrupt/missing clock cannot prove tracking is new;
+            # use the epoch so never-acked keys remain immediately reportable.
             if _parse_ts(acks.get("_since")) is None:
-                acks["_since"] = stamp
+                acks["_since"] = (
+                    datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat(
+                        timespec="seconds"
+                    )
+                    if acks
+                    else stamp
+                )
             if key is not None:
                 acks[key] = stamp
             fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".kuma-ack-")

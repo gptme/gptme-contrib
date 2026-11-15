@@ -110,10 +110,12 @@ A configured push starts the bootstrap clock **before** the network attempt,
 so a sender that never succeeds still becomes overdue. Repeated failures do
 not reset that clock. Shell senders' ledger checkers must call
 `start_tracking(path=...)` before `load_acks(path)`; it is idempotent and does
-not record an acknowledgement. Initialization repairs a missing or invalid
-bootstrap stamp once while preserving existing acknowledgements and valid clocks.
-Before initialization, a missing or invalid stamp is reported as uninitialized
-tracking, never as healthy.
+not record an acknowledgement. An empty ledger gets a fresh bootstrap window.
+A nonempty ledger with a missing or invalid bootstrap stamp is repaired once to
+1970-01-01 UTC, conservatively making never-acked keys immediately reportable:
+corruption must not grant a dark monitor another silence window. Existing
+acknowledgements and valid bootstrap clocks are preserved. Before initialization,
+a missing or invalid stamp is reported as uninitialized tracking, never as healthy.
 `stale_acks(acks, keys, now, intervals)` reports keys whose last ack is older
 than `3 ×` the expected cadence, plus keys never acked — but only once tracking
 is older than one tolerance window, so enabling the ledger does not page on the
