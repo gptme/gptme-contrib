@@ -489,6 +489,11 @@ def select_candidates(
         return None
 
     identity = config.identity
+    authors = (
+        {author.casefold() for author in config.authors}
+        if config.authors is not None
+        else None
+    )
     out: list[dict] = []
     for pr in prs:
         if pr.get("isDraft"):
@@ -526,10 +531,9 @@ def select_candidates(
             continue
 
         review_can_upgrade = marker.get("engine") in {"llm", "agent", "subscription"}
-        authors = config.authors
         if authors is not None:
             login = ((pr.get("author") or {}).get("login")) or ""
-            if login not in authors and requested is None:
+            if login.casefold() not in authors and requested is None:
                 continue
         updated = parse_ts(str(pr.get("updatedAt") or ""))
         if (
@@ -648,22 +652,43 @@ class GhCliHost:
     """Default host for the dry-run CLI: live ``gh``, no alerts or self-merge."""
 
     def list_open_prs(self, repo: str) -> list[dict] | None:
-        payload = _gh_json(
+        owner, name = repo.split("/", 1)
+        pages = _gh_json(
             [
-                "pr",
-                "list",
-                "--repo",
-                repo,
-                "--state",
-                "open",
-                "--json",
-                "number,headRefOid,isDraft,updatedAt,title,author,"
-                "additions,deletions,changedFiles",
-                "--limit",
-                "50",
+                "api",
+                "graphql",
+                "--paginate",
+                "--slurp",
+                "-f",
+                "query=query($owner: String!, $name: String!, $endCursor: String) {"
+                " repository(owner: $owner, name: $name) {"
+                " pullRequests(states: OPEN, first: 100, after: $endCursor) {"
+                " nodes { number headRefOid isDraft updatedAt title author { login }"
+                " additions deletions changedFiles }"
+                " pageInfo { hasNextPage endCursor } } } }",
+                "-f",
+                f"owner={owner}",
+                "-f",
+                f"name={name}",
             ]
         )
-        return payload if isinstance(payload, list) else None
+        if not isinstance(pages, list) or not pages:
+            return None
+        prs: list[dict] = []
+        for page in pages:
+            # Never turn a partial/failed GraphQL listing into an empty sweep.
+            if not isinstance(page, dict) or page.get("errors"):
+                return None
+            try:
+                nodes = page["data"]["repository"]["pullRequests"]["nodes"]
+            except (KeyError, TypeError):
+                return None
+            if not isinstance(nodes, list) or any(
+                not isinstance(node, dict) for node in nodes
+            ):
+                return None
+            prs.extend(nodes)
+        return prs
 
     def pr_comments(self, repo: str, number: int) -> list[dict] | None:
         return _gh_paginated_list(
@@ -719,13 +744,16 @@ class GhCliHost:
         ]
 
     def fetch_pr_patch(self, repo: str, number: int) -> str:
-        proc = subprocess.run(
-            ["gh", "pr", "diff", str(number), "--repo", repo],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=45,
-        )
+        try:
+            proc = subprocess.run(
+                ["gh", "pr", "diff", str(number), "--repo", repo],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=45,
+            )
+        except subprocess.TimeoutExpired:
+            return ""
         if proc.returncode != 0:
             return ""
         return str(proc.stdout)[:_PATCH_PARSE_CAP]

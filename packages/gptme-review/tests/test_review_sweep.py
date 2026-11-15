@@ -624,3 +624,93 @@ def test_cli_listing_outage_exit_status(
 def test_default_host_is_review_only_blocker_delegates() -> None:
     host = GhCliHost()
     assert host.is_review_only_blocker({}) is False
+
+
+def test_patch_timeout_does_not_abort_candidate_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = GhCliHost()
+    monkeypatch.setattr(
+        host, "list_open_prs", lambda repo: [_pr(1, "aaa"), _pr(2, "bbb")]
+    )
+    monkeypatch.setattr(host, "pr_comments", lambda repo, number: [])
+    monkeypatch.setattr(host, "fetch_pr_files", lambda repo, number: ["src/foo.py"])
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(args, 45)
+
+    monkeypatch.setattr("gptme_review.sweep.subprocess.run", run)
+    found = select_candidates("o/r", _config(), host, NOW, dry_run=True)
+    assert _numbers(found) == [1, 2]
+    assert found is not None
+    assert all("likely_duplicate_of" not in entry for entry in found)
+
+
+def test_author_allowlist_matches_github_login_case_insensitively() -> None:
+    host = FakeHost(
+        [_pr(1, "aaa", author="Reviewer-Bot"), _pr(2, "bbb", author="outsider")]
+    )
+    assert _numbers(select_candidates("o/r", _config(), host, NOW, dry_run=True)) == [1]
+    assert _numbers(
+        select_candidates(
+            "o/r", _config(authors=("REVIEWER-BOT",)), host, NOW, dry_run=True
+        )
+    ) == [1]
+
+
+def test_gh_host_lists_candidates_beyond_first_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = [_pr(n, f"head{n}", draft=True) for n in range(1, 101)]
+    last = [_pr(101, "lasthead")]
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if args[1:3] == ["pr", "list"]:
+            # Model the existing bounded gh-list request.
+            limit = int(args[args.index("--limit") + 1])
+            payload: object = (first + last)[:limit]
+        else:
+            assert args[1:3] == ["api", "graphql"]
+            assert "--paginate" in args and "--slurp" in args
+            assert any("endCursor" in arg and "pageInfo" in arg for arg in args)
+            payload = [
+                {"data": {"repository": {"pullRequests": {"nodes": nodes}}}}
+                for nodes in (first, last)
+            ]
+        return subprocess.CompletedProcess(args, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr("gptme_review.sweep.subprocess.run", run)
+    host = GhCliHost()
+    monkeypatch.setattr(host, "pr_comments", lambda repo, number: [])
+    assert _numbers(select_candidates("o/r", _config(), host, NOW, dry_run=True)) == [
+        101
+    ]
+
+
+@pytest.mark.parametrize(
+    "pages",
+    [
+        None,
+        [],
+        [{"data": {"repository": None}}],
+        [{"data": {"repository": {"pullRequests": {"nodes": None}}}}],
+        [{"data": {"repository": {"pullRequests": {"nodes": [None]}}}}],
+        [
+            {"data": {"repository": {"pullRequests": {"nodes": [_pr(1, "aaa")]}}}},
+            {"errors": [{"message": "unavailable"}]},
+        ],
+    ],
+)
+def test_gh_host_failed_or_partial_listing_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, pages: object
+) -> None:
+    monkeypatch.setattr("gptme_review.sweep._gh_json", lambda *args, **kwargs: pages)
+    assert GhCliHost().list_open_prs("o/r") is None
+
+
+def test_gh_host_successful_empty_listing_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages: list[dict] = [{"data": {"repository": {"pullRequests": {"nodes": []}}}}]
+    monkeypatch.setattr("gptme_review.sweep._gh_json", lambda *args, **kwargs: pages)
+    assert GhCliHost().list_open_prs("o/r") == []
