@@ -260,3 +260,47 @@ def test_skip_accepts_relative_markdown_follow_up(tmp_path, monkeypatch, target)
     result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done"])
     assert result.exit_code == 0, result.output
     assert frontmatter.load(path)["state"] == "done"
+
+
+@pytest.mark.parametrize(
+    ("body", "accounted"),
+    [
+        # A wrapped item's reason on a continuation line still accounts for it.
+        (
+            "- [-] Expose the executed arguments a policy needs,\n"
+            "      only via private helpers. (declined: no named consumer)",
+            True,
+        ),
+        ("- [-] split auth into its own lane\n  owned by tasks/split-auth.md", True),
+        ("> - [-] split auth into its own lane\n>   (declined: superseded)", True),
+        # Text after the item ends does not count: a blank line, a dedent,
+        # or a nested list item starts something else.
+        ("- [-] split auth (deferred)\n\n  declined: superseded", False),
+        ("- [-] split auth (deferred)\ndeclined: superseded", False),
+        ("- [-] split auth (deferred)\n  - [x] sub-item (declined: other)", False),
+        ("- [-] split auth (deferred)\n  - option A (declined: not chosen)", False),
+        ("- [-] split auth (deferred)\n  + option A (declined: not chosen)", False),
+        ("- [-] split auth (deferred)\n  * option A (declined: not chosen)", False),
+        ("- [-] split auth (deferred)\n  1. option A (see tasks/option-a.md)", False),
+        ("- [-] split auth (deferred)\n  1) option A (see tasks/option-a.md)", False),
+        ("- [-] split auth (deferred)\n  -\toption A (declined: not chosen)", False),
+        ("- [-] split auth (deferred)\n  -\n  owned by tasks/option-a.md", False),
+        ("- [-] split auth (deferred)\n  +\n  declined: other", False),
+        ("- [-] split auth (deferred)\n  *\n  declined: other", False),
+        ("- [-] split auth (deferred)\n  1.\n  declined: other", False),
+        ("- [-] split auth (deferred)\n  1)\n  declined: other", False),
+        (
+            "- [-] split auth (deferred)\n  - option A\n    (declined: not chosen)",
+            False,
+        ),
+    ],
+)
+def test_skip_reason_on_continuation_line(tmp_path, monkeypatch, body, accounted):
+    (path,) = make_tasks(tmp_path, monkeypatch, {"task": f"- [x] complete\n{body}"})
+    result = CliRunner().invoke(cli, ["edit", "task", "--set", "state", "done"])
+    if accounted:
+        assert result.exit_code == 0, result.output
+        assert frontmatter.load(path)["state"] == "done"
+    else:
+        assert result.exit_code != 0, result.output
+        assert "no follow-up link or 'declined:'" in result.output

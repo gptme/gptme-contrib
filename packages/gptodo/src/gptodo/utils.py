@@ -1209,27 +1209,50 @@ def skipped_subtask_items(content: str) -> list[tuple[str, bool]]:
     ``[SKIP]`` and the two strikethrough forms), outside fenced code blocks.
     ``accounted_for`` is true when the item links the task or issue that owns
     the dropped work, or records ``declined: <reason>`` (``decided against:``
-    is accepted as the same decision).
+    is accepted as the same decision). A wrapped item's indented continuation
+    lines count as part of it; a blank line, a dedent or a nested list item
+    ends it.
     """
     items: list[tuple[str, bool]] = []
+    # The skipped item being read: (first-line title, its text so far, indent).
+    current: tuple[str, list[str], int] | None = None
+
+    def finish() -> None:
+        nonlocal current
+        if current is not None:
+            title, parts, _ = current
+            text = "\n".join(parts)
+            accounted = bool(_FOLLOW_UP_LINK.search(text) or _DECLINED.search(text))
+            items.append((title, accounted))
+            current = None
+
     fence = ""
     for raw in content.splitlines():
-        line = re.sub(r"^\s*(?:>\s*)?", "", raw)
+        unquoted = re.sub(r"^\s*>", "", raw, count=1)
+        indent = len(unquoted) - len(unquoted.lstrip())
+        line = unquoted.strip()
         if fence:
             if re.fullmatch(rf"{re.escape(fence[0])}{{{len(fence)},}}\s*", line):
                 fence = ""
             continue
         opening = re.match(r"(`{3,}|~{3,})", line)
+        item = re.match(r"(?:-|\d+[.)]) (\[[ x-]\]|\[SKIP\]|✅|🏃)\s*(.*)", line)
+        list_start = re.match(r"(?:[-+*]|\d+[.)])(?:\s|$)", line)
+        if current is not None and line and not opening and not list_start and indent > current[2]:
+            current[1].append(line)
+            continue
+        finish()
         if opening:
             fence = opening.group(1)
             continue
-        item = re.match(r"(?:-|\d+[.)]) (\[[ x-]\]|\[SKIP\])\s*(.*)", line)
         if not item:
             continue
         marker, title = item.groups()
-        if marker in ("[-]", "[SKIP]") or re.match(r"~~.+?~~", title):
-            accounted = bool(_FOLLOW_UP_LINK.search(title) or _DECLINED.search(title))
-            items.append((title.strip(), accounted))
+        if marker in ("[-]", "[SKIP]") or (
+            marker in ("[ ]", "[x]") and re.match(r"~~.+?~~", title)
+        ):
+            current = (title.strip(), [title], indent)
+    finish()
     return items
 
 
