@@ -854,3 +854,66 @@ def test_cli_reaction_mode_is_explicit(
         == 0
     )
     assert seen == [expected_dry_run]
+
+
+@pytest.mark.parametrize("upgrade_repo", [False, True])
+def test_static_findings_do_not_authorize_same_head_upgrade(upgrade_repo: bool) -> None:
+    config = SweepConfig(
+        identity=IDENTITY,
+        authors=None,
+        consensus_upgrade_repos=frozenset({"o/r"}) if upgrade_repo else frozenset(),
+    )
+    host = FakeHost(
+        [_pr(1, "abc123def456")],
+        {
+            1: [
+                _marker_comment(
+                    "abc123",
+                    extra={
+                        "engine": "static",
+                        "score": 4,
+                        "findings": [{"fp": "x", "severity": "P2"}],
+                    },
+                )
+            ]
+        },
+    )
+    assert select_candidates("o/r", config, host, NOW, dry_run=True) == []
+
+
+@pytest.mark.parametrize("reverse_input", [False, True])
+def test_newest_updated_marker_is_authoritative(reverse_input: bool) -> None:
+    old = _marker_comment(
+        "old123", extra={"score": 3, "findings": [{"fp": "x", "severity": "P1"}]}
+    )
+    new = _marker_comment(
+        "abc123",
+        comment_id=2,
+        extra={
+            "score": 5,
+            "findings": [],
+            "engine": "llm",
+            "consensus": {"requested": 2, "answered": 2},
+        },
+    )
+    new["updated_at"] = "2026-08-07T21:30:00+00:00"
+    comments = [new, old] if reverse_input else [old, new]
+    assert marker_state(comments, IDENTITY)[0] == "abc123"
+    assert marker_payload(comments, IDENTITY)[0]["sha"] == "abc123"
+    host = FakeHost([_pr(1, "abc123def456")], {1: comments})
+    assert select_candidates("o/r", _config(), host, NOW, dry_run=True) == []
+
+
+@pytest.mark.parametrize("prefix", ["agent-ai-review", "agent-ai-review-publishing"])
+def test_nested_marker_json_is_not_truncated(prefix: str) -> None:
+    comment = _marker_comment(
+        "abc123",
+        prefix=prefix,
+        extra={
+            "findings": [{"fp": "x", "severity": "P2"}],
+            "consensus": {"requested": 2, "answered": 2},
+        },
+    )
+    assert marker_state([comment], IDENTITY)[0] == "abc123"
+    if prefix == "agent-ai-review":
+        assert marker_payload([comment], IDENTITY)[0]["consensus"]["answered"] == 2

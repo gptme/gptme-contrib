@@ -138,12 +138,25 @@ def _is_reviewer_comment(
     )
 
 
+def _newest_comments(
+    comments: Sequence[Mapping[str, object]],
+) -> list[Mapping[str, object]]:
+    """Match the publisher's most-recently-updated marker authority."""
+    return sorted(
+        comments,
+        key=lambda comment: str(
+            comment.get("updated_at") or comment.get("created_at") or ""
+        ),
+        reverse=True,
+    )
+
+
 def marker_payload(
     comments: Sequence[Mapping[str, object]], identity: SweepIdentity
 ) -> tuple[dict, dict | None]:
     """``(parsed marker JSON, the comment carrying it)`` — ``({}, None)`` if absent."""
     marker_re = identity.marker_re()
-    for comment in comments:
+    for comment in _newest_comments(comments):
         if not _is_reviewer_comment(comment, identity):
             continue
         match = marker_re.search(str(comment.get("body") or ""))
@@ -162,7 +175,7 @@ def marker_state(
     """``(reviewed head SHA, explicit requests served through timestamp)``."""
     marker_re = identity.marker_re()
     provisional_re = identity.provisional_marker_re()
-    for comment in comments:
+    for comment in _newest_comments(comments):
         if not _is_reviewer_comment(comment, identity):
             continue
         body = str(comment.get("body") or "")
@@ -559,6 +572,7 @@ def select_candidates(
             )
         needs_non_blocking_upgrade = (
             not upgrade_allowed
+            and review_can_upgrade
             and bool(marker.get("findings"))
             and needs_consensus_upgrade(marker, head, allow_non_blocking_findings=True)
         )
