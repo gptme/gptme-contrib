@@ -397,6 +397,9 @@ def hunks_from_patch(patch: str) -> dict[str, set[int]]:
     out: dict[str, set[int]] = {}
     current_file: str | None = None
     for line in patch.splitlines():
+        if line.startswith("diff --git ") or line == "+++ /dev/null":
+            current_file = None
+            continue
         match = _DIFF_FILE_RE.match(line)
         if match:
             current_file = match.group(1)

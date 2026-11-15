@@ -1055,3 +1055,31 @@ def test_upgrade_repo_p2_review_waits_until_review_is_last_blocker(
     assert _numbers(found) == ([1] if review_only else [])
     if review_only:
         assert found is not None and found[0]["consensus_upgrade"] is True
+
+
+def test_deleted_file_hunks_do_not_create_false_duplicate_overlap() -> None:
+    patches = {
+        number: (
+            "diff --git a/src/shared.py b/src/shared.py\n"
+            "--- a/src/shared.py\n+++ b/src/shared.py\n"
+            f"@@ -{start},1 +{start},1 @@\n-old\n+new\n"
+            f"diff --git a/src/deleted{number}.py b/src/deleted{number}.py\n"
+            f"deleted file mode 100644\n--- a/src/deleted{number}.py\n"
+            "+++ /dev/null\n@@ -1,5 +0,0 @@\n-deleted\n"
+        )
+        for number, start in ((1, 10), (2, 30))
+    }
+    assert hunks_from_patch(patches[1]) == {"src/shared.py": {10}}
+    assert hunks_from_patch(patches[2]) == {"src/shared.py": {30}}
+    host = FakeHost(
+        [_pr(1, "aaa"), _pr(2, "bbb")],
+        files={
+            1: ["src/shared.py", "src/deleted1.py"],
+            2: ["src/shared.py", "src/deleted2.py"],
+        },
+        patches=patches,
+    )
+    found = select_candidates("o/r", _config(), host, NOW, dry_run=True)
+    assert _numbers(found) == [1, 2]
+    assert found is not None
+    assert all("likely_duplicate_of" not in entry for entry in found)
