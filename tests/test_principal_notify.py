@@ -314,9 +314,9 @@ def test_ntfy_urgency_mapping(tmp_path, monkeypatch, urgency, expected):
 def test_ntfy_missing_topic_fails_closed(tmp_path, monkeypatch):
     # No request may be attempted when the config is incomplete.
     def explode(*a, **k):
-        raise AssertionError("urlopen must not be called")
+        pytest.fail("ntfy opener must not be built before config validation")
 
-    monkeypatch.setattr(principal_notify.urllib.request, "urlopen", explode)
+    monkeypatch.setattr(principal_notify.urllib.request, "build_opener", explode)
     env = _ntfy_env()
     env.pop("PRINCIPAL_NOTIFY_NTFY_TOPIC")
     res = notify_principal("s", "b", cfg=cfg(tmp_path, backends=["ntfy"], env=env))
@@ -455,9 +455,9 @@ def test_ntfy_empty_env_token_overrides_file(tmp_path, monkeypatch):
 
 def test_ntfy_env_file_unreadable_is_a_failure(tmp_path, monkeypatch):
     def explode(*a, **k):
-        raise AssertionError("urlopen must not be called")
+        pytest.fail("ntfy opener must not be built before config validation")
 
-    monkeypatch.setattr(principal_notify.urllib.request, "urlopen", explode)
+    monkeypatch.setattr(principal_notify.urllib.request, "build_opener", explode)
     res = notify_principal(
         "s",
         "b",
