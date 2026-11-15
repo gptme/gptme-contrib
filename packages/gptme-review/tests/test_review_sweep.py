@@ -917,3 +917,141 @@ def test_nested_marker_json_is_not_truncated(prefix: str) -> None:
     assert marker_state([comment], IDENTITY)[0] == "abc123"
     if prefix == "agent-ai-review":
         assert marker_payload([comment], IDENTITY)[0]["consensus"]["answered"] == 2
+
+
+@pytest.mark.parametrize("association", ["OWNER", "MEMBER", "COLLABORATOR", "NONE"])
+def test_quoted_marker_does_not_hide_trusted_review_request(association: str) -> None:
+    request = _marker_comment("abc123", comment_id=9)
+    request.update(
+        body=request["body"] + "\n@reviewer-bot review",
+        user={"login": "maintainer"},
+        author_association=association,
+        created_at="2026-08-07T21:30:00+00:00",
+    )
+    host = FakeHost(
+        [_pr(1, "abc123def456")],
+        {1: [_marker_comment("abc123"), request]},
+    )
+    found = select_candidates("o/r", _config(), host, NOW, dry_run=True)
+    assert _numbers(found) == ([] if association == "NONE" else [1])
+    # The reviewer's own published summary is state, not a new request.
+    request["user"] = {"login": "Reviewer-Bot"}
+    assert pending_review_request([request], None, IDENTITY) is None
+
+
+def test_reaction_timeout_does_not_abort_live_candidate_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = GhCliHost()
+    request = {
+        "id": 9,
+        "body": "@reviewer-bot review",
+        "created_at": "2026-08-07T21:30:00+00:00",
+        "user": {"login": "maintainer"},
+        "author_association": "MEMBER",
+    }
+    monkeypatch.setattr(
+        host, "list_open_prs", lambda repo: [_pr(1, "new"), _pr(2, "bbb")]
+    )
+    monkeypatch.setattr(
+        host,
+        "pr_comments",
+        lambda repo, number: [_marker_comment("old", extra={"score": 3}), request]
+        if number == 1
+        else [],
+    )
+    monkeypatch.setattr(host, "fetch_pr_files", lambda repo, number: [])
+    calls: list[list[str]] = []
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        raise subprocess.TimeoutExpired(args, 45)
+
+    monkeypatch.setattr("gptme_review.sweep.subprocess.run", run)
+    found = select_candidates("o/r", _config(), host, NOW, dry_run=False)
+    assert _numbers(found) == [1, 2]
+    assert len(calls) == 2  # Both fix-iteration and explicit-request reactions failed.
+    assert host.add_reaction("o/r", 9, "eyes") is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "uv.lock",
+        "poetry.lock",
+        "Cargo.lock",
+        "yarn.lock",
+        "Gemfile.lock",
+        "composer.lock",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+    ],
+)
+def test_common_lockfile_overlap_is_not_duplicate_evidence(path: str) -> None:
+    for name in (path, "web/" + path):
+        assert is_benign_file(name)
+        assert not is_likely_duplicate({name}, {name: {10}}, {name}, {name: {10}})
+
+
+@pytest.mark.parametrize(
+    "path", ["package.json", "pnpm.yaml", "cargo.json", "src/lock.py"]
+)
+def test_package_manifests_remain_non_benign(path: str) -> None:
+    assert not is_benign_file(path)
+
+
+@pytest.mark.parametrize("naive_field", ["updatedAt", "created_at", "served_through"])
+def test_naive_host_timestamps_use_utc_without_aborting_selection(
+    naive_field: str,
+) -> None:
+    pr = _pr(1, "abc123def456")
+    marker = _marker_comment(
+        "abc123", extra={"served_through": "2026-08-07T21:00:00+00:00"}
+    )
+    request = {
+        "id": 9,
+        "body": "@reviewer-bot review",
+        "created_at": "2026-08-07T21:30:00+00:00",
+        "user": {"login": "maintainer"},
+        "author_association": "MEMBER",
+    }
+    if naive_field == "updatedAt":
+        pr["updatedAt"] = "2026-08-07T21:00:00"
+        comments: list[dict] = []
+    else:
+        if naive_field == "created_at":
+            request["created_at"] = "2026-08-07T21:30:00"
+        else:
+            marker = _marker_comment(
+                "abc123", extra={"served_through": "2026-08-07T21:00:00"}
+            )
+        comments = [marker, request]
+    host = FakeHost([pr], {1: comments})
+    assert _numbers(select_candidates("o/r", _config(), host, NOW, dry_run=True)) == [1]
+
+
+@pytest.mark.parametrize("review_only", [False, True])
+def test_upgrade_repo_p2_review_waits_until_review_is_last_blocker(
+    review_only: bool,
+) -> None:
+    host = FakeHost(
+        [_pr(1, "abc123def456")],
+        {
+            1: [
+                _marker_comment(
+                    "abc123",
+                    extra={
+                        "engine": "llm",
+                        "score": 4,
+                        "findings": [{"fp": "x", "severity": "P2"}],
+                    },
+                )
+            ]
+        },
+        review_only=review_only,
+    )
+    found = select_candidates("o/r", _config(), host, NOW, dry_run=True)
+    assert _numbers(found) == ([1] if review_only else [])
+    if review_only:
+        assert found is not None and found[0]["consensus_upgrade"] is True

@@ -30,7 +30,10 @@ _NAMESPACE_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 _DIFF_FILE_RE = re.compile(r"^\+\+\+ b/(.+)$")
 _BENIGN_FILE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(^|/)(uv|poetry|cargo|yarn|pnpm|package-lock)\.lock(\.[a-z]+)?$"),
+    re.compile(
+        r"(^|/)(uv|poetry|cargo|Cargo|yarn|pnpm|package-lock)\.lock(\.[a-z]+)?$"
+    ),
+    re.compile(r"(^|/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml)$"),
     re.compile(r"(^|/)Gemfile\.lock$"),
     re.compile(r"(^|/)composer\.lock$"),
     re.compile(r"(^|/)CHANGELOG(\.[a-z]+)?$"),
@@ -121,10 +124,14 @@ class SweepHost(Protocol):
 
 
 def parse_ts(value: str) -> datetime | None:
+    """Parse host timestamps, interpreting offset-free values as UTC."""
     try:
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
     except (ValueError, AttributeError, TypeError):
         return None
+    return (
+        parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+    )
 
 
 def _is_reviewer_comment(
@@ -212,7 +219,7 @@ def pending_review_request(
         body = str(comment.get("body") or "")
         if not trigger_re.search(body):
             continue
-        if marker_re.search(body):
+        if _is_reviewer_comment(comment, identity) and marker_re.search(body):
             continue
         if str(comment.get("author_association") or "") not in trusted_associations:
             continue
@@ -730,21 +737,24 @@ class GhCliHost:
         return False
 
     def add_reaction(self, repo: str, comment_id: int, content: str) -> bool:
-        proc = subprocess.run(
-            [
-                "gh",
-                "api",
-                "-X",
-                "POST",
-                f"repos/{repo}/issues/comments/{comment_id}/reactions",
-                "-f",
-                f"content={content}",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=45,
-        )
+        try:
+            proc = subprocess.run(
+                [
+                    "gh",
+                    "api",
+                    "-X",
+                    "POST",
+                    f"repos/{repo}/issues/comments/{comment_id}/reactions",
+                    "-f",
+                    f"content={content}",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=45,
+            )
+        except subprocess.TimeoutExpired:
+            return False
         return proc.returncode == 0
 
     def fetch_pr_files(self, repo: str, number: int) -> list[str]:
