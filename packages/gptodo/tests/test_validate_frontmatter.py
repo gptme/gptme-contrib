@@ -213,6 +213,26 @@ def test_waiting_since_requires_waiting_for(tmp_path):
     assert "waiting_since requires waiting_for field to be set" in validate_schema(p)
 
 
+def test_recurrence_gate_needs_no_waiting_for(tmp_path):
+    # The done -> waiting recurrence reset writes waiting_since + wait but no
+    # waiting_for; its own output must pass the schema.
+    p = _write_task(
+        tmp_path,
+        "---\nstate: waiting\ncreated: 2026-07-01\nrecur: 1d\nwait: '2026-07-02'\n"
+        "wait_kind: machine\nwaiting_since: '2026-07-01T00:00:00+00:00'\n---\n",
+    )
+    assert "waiting_since requires waiting_for field to be set" not in validate_schema(p)
+
+
+def test_recur_without_wait_still_requires_waiting_for(tmp_path):
+    p = _write_task(
+        tmp_path,
+        "---\nstate: waiting\ncreated: 2026-07-01\nrecur: 1d\n"
+        "waiting_since: '2026-07-01T00:00:00+00:00'\n---\n",
+    )
+    assert "waiting_since requires waiting_for field to be set" in validate_schema(p)
+
+
 def test_missing_state(tmp_path):
     p = _write_task(tmp_path, "---\ncreated: 2026-07-01\n---\n# task\n")
     errors = validate_schema(p)

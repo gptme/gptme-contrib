@@ -89,6 +89,20 @@ class TestRecurCliReset:
         assert "last_completed" not in post.metadata
         assert "wait" in post.metadata
 
+    def test_done_reset_output_passes_schema(self, workspace: Path):
+        # The reset writes waiting_since without waiting_for; the canonical
+        # schema (and the task pre-commit hook delegating to it) must accept it.
+        from gptodo.validate_frontmatter import validate_schema
+
+        path = write_task(
+            workspace, "daily-mining", state="active", created="2026-07-01", recur="1d"
+        )
+        result = CliRunner().invoke(cli, ["edit", "daily-mining", "--set", "state", "done"])
+        assert result.exit_code == 0, result.output
+        post = frontmatter.load(path)
+        assert "waiting_since" in post.metadata and "waiting_for" not in post.metadata
+        assert validate_schema(path) == []
+
     def test_done_sets_wait_to_future_for_recurring(self, workspace: Path):
         write_task(workspace, "weekly-review", state="active", recur="weekly")
         runner = CliRunner()

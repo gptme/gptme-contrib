@@ -289,7 +289,11 @@ def validate_optional_fields(metadata: dict[str, Any], *, type_name: str = "task
             errors.append("waiting_for must be a string, mapping, or list")
         elif not value or (isinstance(value, str) and not value.strip()):
             errors.append("waiting_for cannot be empty")
-    if "waiting_since" in metadata and "waiting_for" not in metadata:
+    # A recurring task between cycles is gated by recur: + wait: alone: the
+    # done -> waiting reset writes waiting_since but deliberately no
+    # waiting_for that would restate the date (lifecycle.py).
+    recurrence_gate = bool(metadata.get("recur")) and bool(metadata.get("wait"))
+    if "waiting_since" in metadata and "waiting_for" not in metadata and not recurrence_gate:
         errors.append("waiting_since requires waiting_for field to be set")
     return errors
 
