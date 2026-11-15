@@ -284,6 +284,11 @@ def test_skip_accepts_relative_markdown_follow_up(tmp_path, monkeypatch, target)
         ("- [-] split auth (deferred)\n  1. option A (see tasks/option-a.md)", False),
         ("- [-] split auth (deferred)\n  1) option A (see tasks/option-a.md)", False),
         ("- [-] split auth (deferred)\n  -\toption A (declined: not chosen)", False),
+        ("- [-] split auth (deferred)\n  -\n  owned by tasks/option-a.md", False),
+        ("- [-] split auth (deferred)\n  +\n  declined: other", False),
+        ("- [-] split auth (deferred)\n  *\n  declined: other", False),
+        ("- [-] split auth (deferred)\n  1.\n  declined: other", False),
+        ("- [-] split auth (deferred)\n  1)\n  declined: other", False),
         (
             "- [-] split auth (deferred)\n  - option A\n    (declined: not chosen)",
             False,

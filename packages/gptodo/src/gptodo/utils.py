@@ -1237,7 +1237,7 @@ def skipped_subtask_items(content: str) -> list[tuple[str, bool]]:
             continue
         opening = re.match(r"(`{3,}|~{3,})", line)
         item = re.match(r"(?:-|\d+[.)]) (\[[ x-]\]|\[SKIP\]|✅|🏃)\s*(.*)", line)
-        list_start = re.match(r"(?:[-+*]|\d+[.)])\s", line)
+        list_start = re.match(r"(?:[-+*]|\d+[.)])(?:\s|$)", line)
         if current is not None and line and not opening and not list_start and indent > current[2]:
             current[1].append(line)
             continue
