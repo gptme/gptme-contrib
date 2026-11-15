@@ -714,3 +714,143 @@ def test_gh_host_successful_empty_listing_is_empty(
     pages: list[dict] = [{"data": {"repository": {"pullRequests": {"nodes": []}}}}]
     monkeypatch.setattr("gptme_review.sweep._gh_json", lambda *args, **kwargs: pages)
     assert GhCliHost().list_open_prs("o/r") == []
+
+
+@pytest.mark.parametrize("engine", ["llm", "agent", "subscription", "static"])
+@pytest.mark.parametrize("upgrade_repo", [False, True])
+def test_clean_same_head_review_only_upgrades_when_policy_allows(
+    engine: str, upgrade_repo: bool
+) -> None:
+    config = SweepConfig(
+        identity=IDENTITY,
+        authors=None,
+        consensus_upgrade_repos=frozenset({"o/r"}) if upgrade_repo else frozenset(),
+    )
+    host = FakeHost(
+        [_pr(1, "abc123def456")],
+        {
+            1: [
+                _marker_comment(
+                    "abc123", extra={"engine": engine, "score": 5, "findings": []}
+                )
+            ]
+        },
+    )
+    found = select_candidates("o/r", config, host, NOW, dry_run=True)
+    expected = [1] if upgrade_repo and engine != "static" else []
+    assert _numbers(found) == expected
+
+
+def test_non_blocking_findings_still_allow_same_head_upgrade() -> None:
+    config = SweepConfig(
+        identity=IDENTITY, authors=None, consensus_upgrade_repos=frozenset()
+    )
+    host = FakeHost(
+        [_pr(1, "abc123def456")],
+        {
+            1: [
+                _marker_comment(
+                    "abc123",
+                    extra={
+                        "engine": "llm",
+                        "score": 4,
+                        "findings": [{"fp": "x", "severity": "P2"}],
+                    },
+                )
+            ]
+        },
+    )
+    found = select_candidates("o/r", config, host, NOW, dry_run=True)
+    assert _numbers(found) == [1]
+    assert found is not None and found[0]["same_head_upgrade"] is True
+
+
+def test_duplicate_overlap_beyond_first_file_page_is_detected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = GhCliHost()
+    monkeypatch.setattr(
+        host, "list_open_prs", lambda repo: [_pr(1, "aaa"), _pr(2, "bbb")]
+    )
+    monkeypatch.setattr(host, "pr_comments", lambda repo, number: [])
+    monkeypatch.setattr(
+        host,
+        "fetch_pr_patch",
+        lambda repo, number: "+++ b/src/shared.py\n@@ -10,1 +10,2 @@\n",
+    )
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        number = int(args[2].split("/")[4])
+        first = [{"filename": f"src/pr{number}_{i}.py"} for i in range(100)]
+        last = [{"filename": "src/shared.py"}]
+        payload = [first, last] if "--paginate" in args and "--slurp" in args else first
+        return subprocess.CompletedProcess(args, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr("gptme_review.sweep.subprocess.run", run)
+    found = select_candidates("o/r", _config(), host, NOW, dry_run=True)
+    assert _numbers(found) == [1, 2]
+    assert found is not None and found[1].get("likely_duplicate_of") == 1
+
+
+@pytest.mark.parametrize(
+    "flags", [["--dry-run", "--live-reactions"], ["--live-reactions", "--dry-run"]]
+)
+def test_cli_rejects_conflicting_reaction_modes_before_github_access(
+    monkeypatch: pytest.MonkeyPatch, flags: list[str]
+) -> None:
+    from gptme_review.sweep import main
+
+    calls: list[str] = []
+
+    def list_prs(self: GhCliHost, repo: str) -> list[dict]:
+        calls.append(repo)
+        return []
+
+    monkeypatch.setattr(GhCliHost, "list_open_prs", list_prs)
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "--login",
+                "reviewer-bot",
+                "--marker-namespace",
+                "agent-ai-review",
+                "--repos",
+                "o/r",
+                *flags,
+            ]
+        )
+    assert exc.value.code == 2
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected_dry_run"),
+    [([], True), (["--dry-run"], True), (["--live-reactions"], False)],
+)
+def test_cli_reaction_mode_is_explicit(
+    monkeypatch: pytest.MonkeyPatch, flags: list[str], expected_dry_run: bool
+) -> None:
+    from gptme_review.sweep import main
+
+    seen: list[bool] = []
+
+    def select(*args: object, dry_run: bool) -> list[dict]:
+        seen.append(dry_run)
+        return []
+
+    monkeypatch.setattr("gptme_review.sweep.select_candidates", select)
+    assert (
+        main(
+            [
+                "--login",
+                "reviewer-bot",
+                "--marker-namespace",
+                "agent-ai-review",
+                "--repos",
+                "o/r",
+                *flags,
+            ]
+        )
+        == 0
+    )
+    assert seen == [expected_dry_run]

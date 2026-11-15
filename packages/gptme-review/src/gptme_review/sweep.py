@@ -557,8 +557,10 @@ def select_candidates(
             consensus_upgrade = host.is_review_only_blocker(
                 host.pr_mergeability(repo, int(pr["number"]))
             )
-        needs_non_blocking_upgrade = not upgrade_allowed and needs_consensus_upgrade(
-            marker, head, allow_non_blocking_findings=True
+        needs_non_blocking_upgrade = (
+            not upgrade_allowed
+            and bool(marker.get("findings"))
+            and needs_consensus_upgrade(marker, head, allow_non_blocking_findings=True)
         )
         if (
             seen
@@ -732,7 +734,7 @@ class GhCliHost:
         return proc.returncode == 0
 
     def fetch_pr_files(self, repo: str, number: int) -> list[str]:
-        payload = _gh_json(
+        payload = _gh_paginated_list(
             ["api", f"repos/{repo}/pulls/{number}/files?per_page=100"], timeout=30
         )
         if not isinstance(payload, list):
@@ -791,15 +793,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Comma/whitespace list of repos allowed a same-head consensus upgrade",
     )
     parser.add_argument("--min-age-secs", type=int, default=DEFAULT_MIN_AGE_SECS)
-    parser.add_argument(
+    reaction_mode = parser.add_mutually_exclusive_group()
+    reaction_mode.add_argument(
         "--dry-run",
+        dest="dry_run",
         action="store_true",
         default=True,
         help="List candidates without reactions (default: on for this CLI)",
     )
-    parser.add_argument(
+    reaction_mode.add_argument(
         "--live-reactions",
-        action="store_true",
+        dest="dry_run",
+        action="store_false",
         help="Allow queued-reaction writes; dry-run stays the default",
     )
     args = parser.parse_args(argv)
@@ -817,7 +822,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     host = GhCliHost()
     now = datetime.now(UTC)
-    dry_run = not args.live_reactions
+    dry_run = args.dry_run
     pending: list[dict] = []
     listing_failures: list[str] = []
     for repo in args.repos:
