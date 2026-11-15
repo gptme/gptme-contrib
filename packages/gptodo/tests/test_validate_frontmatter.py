@@ -213,15 +213,43 @@ def test_waiting_since_requires_waiting_for(tmp_path):
     assert "waiting_since requires waiting_for field to be set" in validate_schema(p)
 
 
-def test_recurrence_gate_needs_no_waiting_for(tmp_path):
+@pytest.mark.parametrize(
+    "wait",
+    ["'2026-07-02'", "2026-07-02", "'2026-07-02T10:00:00+00:00'", "2026-07-02T10:00:00+00:00"],
+)
+def test_recurrence_gate_needs_no_waiting_for(tmp_path, wait):
     # The done -> waiting recurrence reset writes waiting_since + wait but no
     # waiting_for; its own output must pass the schema.
     p = _write_task(
         tmp_path,
-        "---\nstate: waiting\ncreated: 2026-07-01\nrecur: 1d\nwait: '2026-07-02'\n"
+        f"---\nstate: waiting\ncreated: 2026-07-01\nrecur: 1d\nwait: {wait}\n"
         "wait_kind: machine\nwaiting_since: '2026-07-01T00:00:00+00:00'\n---\n",
     )
     assert "waiting_since requires waiting_for field to be set" not in validate_schema(p)
+
+
+@pytest.mark.parametrize(
+    "state,recur,wait",
+    [
+        ("waiting", "1d", "'later'"),
+        ("waiting", "1d", "'   '"),
+        ("waiting", "1d", "42"),
+        ("waiting", "1d", "true"),
+        ("waiting", "1d", "[2026-07-02]"),
+        ("waiting", "'   '", "2026-07-02"),
+        ("waiting", "true", "2026-07-02"),
+        ("active", "1d", "2026-07-02"),
+        ("todo", "1d", "2026-07-02"),
+        ("done", "1d", "2026-07-02"),
+    ],
+)
+def test_invalid_recurrence_gate_still_requires_waiting_for(tmp_path, state, recur, wait):
+    p = _write_task(
+        tmp_path,
+        f"---\nstate: {state}\ncreated: 2026-07-01\nrecur: {recur}\nwait: {wait}\n"
+        "waiting_since: '2026-07-01T00:00:00+00:00'\n---\n",
+    )
+    assert "waiting_since requires waiting_for field to be set" in validate_schema(p)
 
 
 def test_recur_without_wait_still_requires_waiting_for(tmp_path):
