@@ -1111,3 +1111,37 @@ def test_marker_authority_compares_timestamp_instants(
     assert marker_state(comments, IDENTITY) == ("abc123", "2026-08-07T21:30:00Z")
     host = FakeHost([_pr(1, "abc123def456")], {1: comments})
     assert select_candidates("o/r", _config(), host, NOW, dry_run=True) == []
+
+
+@pytest.mark.parametrize("provisional", [False, True])
+@pytest.mark.parametrize(
+    "title", ["Preserve } --> in output", 'Escaped \\" quote and } -->\nnext line']
+)
+def test_marker_terminator_inside_json_string_preserves_reviewed_head(
+    provisional: bool, title: str
+) -> None:
+    prefix = "agent-ai-review-publishing" if provisional else "agent-ai-review"
+    extra = {
+        "engine": "llm",
+        "score": 5,
+        "findings": [],
+        "note": {"title": title},
+        "consensus": {"requested": 2, "answered": 2},
+        "served_through": "2026-08-07T21:00:00Z",
+    }
+    if provisional:
+        extra["publishing_sha"] = "abc123"
+    comment = _marker_comment("abc123", prefix=prefix, extra=extra)
+    assert marker_state([comment], IDENTITY) == ("abc123", "2026-08-07T21:00:00Z")
+    if not provisional:
+        assert marker_payload([comment], IDENTITY)[0]["note"] == {"title": title}
+    host = FakeHost([_pr(1, "abc123def456")], {1: [comment]})
+    assert select_candidates("o/r", _config(), host, NOW, dry_run=True) == []
+
+
+def test_marker_json_does_not_swallow_adjacent_markers() -> None:
+    first = _marker_comment("first", extra={"note": "Preserve } --> in output"})
+    second = _marker_comment("second")
+    first["body"] += "\n" + second["body"]
+    assert marker_state([first], IDENTITY)[0] == "first"
+    assert marker_payload([first], IDENTITY)[0]["sha"] == "first"

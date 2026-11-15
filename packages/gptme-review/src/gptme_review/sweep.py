@@ -29,6 +29,8 @@ _LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
 _NAMESPACE_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 _DIFF_FILE_RE = re.compile(r"^\+\+\+ b/(.+)$")
+# Consume JSON strings whole so their contents cannot terminate the marker.
+_MARKER_JSON_RE = r'(\{(?:[^"]|"(?:\\.|[^"\\])*")*?\})'
 _BENIGN_FILE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"(^|/)(uv|poetry|cargo|Cargo|yarn|pnpm|package-lock)\.lock(\.[a-z]+)?$"
@@ -65,12 +67,12 @@ class SweepIdentity(NamedTuple):
 
     def marker_re(self) -> re.Pattern[str]:
         return re.compile(
-            rf"<!-- {re.escape(self.marker_prefix)} (\{{.*?\}}) -->", re.DOTALL
+            rf"<!-- {re.escape(self.marker_prefix)} {_MARKER_JSON_RE} -->", re.DOTALL
         )
 
     def provisional_marker_re(self) -> re.Pattern[str]:
         return re.compile(
-            rf"<!-- {re.escape(self.marker_prefix)}-publishing (\{{.*?\}}) -->",
+            rf"<!-- {re.escape(self.marker_prefix)}-publishing {_MARKER_JSON_RE} -->",
             re.DOTALL,
         )
 
