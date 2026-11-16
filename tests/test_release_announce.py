@@ -146,7 +146,23 @@ def test_compose_fits_and_headlines():
     text = ra.compose_announcement("v0.33.0", NOTES, "gptme/gptme")
     assert text.startswith("gptme v0.33.0 is out")
     assert len(text) <= ra.MAX_TWEET
-    assert "— add `gptme explain`" in text
+    assert "add `gptme explain`" in text
+    assert "—" not in text, "em dash bullets render wide and read as an AI tell"
+
+
+def test_bullet_emoji_matches_vibe_and_has_default():
+    assert ra.bullet_emoji("add OAuth token refresh") == "🔒"
+    assert ra.bullet_emoji("faster startup via cache") == "⚡"
+    assert ra.bullet_emoji("add Android sync") == "📱"
+    assert ra.bullet_emoji("something entirely unrelated") == "✨"
+
+
+def test_compose_items_use_emoji_not_dashes():
+    body = "* feat: add MCP plugin support\n* feat: speed up cache\n"
+    text = ra.compose_announcement("v1.0.0", body, "gptme/gptme")
+    assert "🔌 add MCP plugin support" in text
+    assert "⚡ speed up cache" in text
+    assert "—" not in text and "–" not in text
 
 
 def test_compose_without_feats_falls_back():
