@@ -630,8 +630,7 @@ def test_sync_uses_completion_and_reopen_lifecycle(tmp_path, monkeypatch, initia
     assert post.metadata["tracking"] == "org/repo#1"
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_sync_closed_issue_does_not_advance_existing_recurrence_gate(tmp_path, monkeypatch, legacy):
+def test_sync_closed_issue_does_not_advance_existing_recurrence_gate(tmp_path, monkeypatch):
     from unittest.mock import patch
 
     path = write_task(
@@ -641,13 +640,8 @@ def test_sync_closed_issue_does_not_advance_existing_recurrence_gate(tmp_path, m
         recur="7d",
         wait="2099-01-01",
         wait_kind="machine",
-        waiting_for="next recurrence gate (wait: 2099-01-01)",
         waiting_since="2026-01-01",
     )
-    if not legacy:
-        post = frontmatter.load(path)
-        post.metadata.pop("waiting_for")
-        path.write_text(frontmatter.dumps(post))
     monkeypatch.chdir(tmp_path)
     before = path.read_bytes()
     with (
@@ -687,7 +681,7 @@ def test_sync_closed_issue_repairs_missing_recurrence_date(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("reverse_order", [False, True])
-def test_removing_recur_keeps_legacy_machine_date_releasable(tmp_path, monkeypatch, reverse_order):
+def test_removing_recur_keeps_machine_date_releasable(tmp_path, monkeypatch, reverse_order):
     from gptodo.utils import task_has_waiting_blocker, task_is_waiting_for_date
 
     path = write_task(
@@ -696,7 +690,6 @@ def test_removing_recur_keeps_legacy_machine_date_releasable(tmp_path, monkeypat
         recur="7d",
         wait="2025-01-01",
         wait_kind="machine",
-        waiting_for="next recurrence gate (wait: 2025-01-01)",
         waiting_since="2025-01-01",
     )
     monkeypatch.chdir(tmp_path)

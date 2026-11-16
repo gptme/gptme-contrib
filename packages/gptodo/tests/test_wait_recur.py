@@ -10,7 +10,6 @@ from click.testing import CliRunner
 from gptodo.cli import cli
 from gptodo.utils import (
     advance_wait,
-    is_generated_recurrence_waiting_for,
     is_task_ready,
     is_valid_recur_value,
     load_tasks,
@@ -317,7 +316,6 @@ def test_expired_recurrence_gate_surfaces_in_ready_and_next(
         recur="7d",
         wait=expired,
         wait_kind="machine",
-        waiting_for=f"'next recurrence gate (wait: {expired})'",
         waiting_since="2026-01-01T00:00:00+00:00",
     )
 
@@ -333,22 +331,39 @@ def test_expired_recurrence_gate_surfaces_in_ready_and_next(
     assert json.loads(next_result.output)["next_task"]["id"] == "weekly-review"
 
 
-def test_stale_recurrence_description_stays_blocked(tmp_path: Path) -> None:
-    """Only the generated description for the current wait: is releasable."""
+@pytest.mark.parametrize(
+    ("wait", "description_wait"),
+    [
+        pytest.param("2020-01-01", "2019-01-01", id="stale-description"),
+        pytest.param("2020-01-01", "2020-01-01", id="exact-date"),
+        pytest.param(
+            "2020-01-01T00:00:00+00:00",
+            "2020-01-01T00:00:00+00:00",
+            id="exact-datetime",
+        ),
+    ],
+)
+def test_recurrence_description_stays_blocked(
+    tmp_path: Path, wait: str, description_wait: str
+) -> None:
+    """Even an exact legacy description blocks an expired recur + wait gate."""
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
     write_task(
         tasks_dir,
         "weekly-review",
         state="waiting",
-        wait="2020-01-01",
+        recur="7d",
+        wait=wait,
         wait_kind="machine",
-        waiting_for="'next recurrence gate (wait: 2019-01-01)'",
+        waiting_for=f"'next recurrence gate (wait: {description_wait})'",
         waiting_since="2026-01-01T00:00:00+00:00",
     )
 
     task = load_tasks(tasks_dir)[0]
+    assert not task_is_waiting_for_date(task)
     assert task_has_waiting_blocker(task)
+    assert not is_task_ready(task, {task.name: task})
 
 
 def test_edit_done_with_subday_recur_stores_datetime(
@@ -640,12 +655,11 @@ def test_recur_reset_clears_stale_probe(tmp_path: Path, monkeypatch: pytest.Monk
     )
 
 
-def test_set_wait_on_legacy_recurrence_gate_drops_waiting_for(
+def test_set_wait_on_recurrence_gate_writes_no_waiting_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """--set wait on a recurrence-gate waiting task must keep waiting_for in sync.
 
-    After a recurring reset the task carries waiting_for="next recurrence gate (wait: <old>)".
     If the user postpones via --set wait <new>, waiting_for must be updated to the new date.
     Without this, task_has_waiting_blocker fails to match the recurrence-gate pattern on
     the new wait value and permanently traps the task even after the new gate expires.
@@ -659,7 +673,6 @@ def test_set_wait_on_legacy_recurrence_gate_drops_waiting_for(
         f"state: waiting\n"
         f"wait_kind: machine\n"
         f"wait: {old_wait}\n"
-        f"waiting_for: 'next recurrence gate (wait: {old_wait})'\n"
         f"waiting_since: 2026-08-01T00:00:00+00:00\n"
         f"created: 2026-01-01\n"
         f"recur: 7d\n"
@@ -684,7 +697,7 @@ def test_set_wait_on_legacy_recurrence_gate_drops_waiting_for(
     assert post.metadata.get("wait_kind") == "machine"
 
 
-def test_set_wait_and_state_waiting_together_drops_legacy_waiting_for(
+def test_set_wait_and_state_waiting_together_writes_no_waiting_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Combined --set wait + --set state waiting must still sync waiting_for.
@@ -704,7 +717,6 @@ def test_set_wait_and_state_waiting_together_drops_legacy_waiting_for(
         f"state: todo\n"
         f"wait_kind: machine\n"
         f"wait: {old_wait}\n"
-        f"waiting_for: 'next recurrence gate (wait: {old_wait})'\n"
         f"waiting_since: 2026-08-01T00:00:00+00:00\n"
         f"created: 2026-01-01\n"
         f"recur: 7d\n"
@@ -743,26 +755,22 @@ def test_set_wait_and_state_waiting_together_drops_legacy_waiting_for(
 
 
 @pytest.mark.parametrize("first_wait", ["2030-06-15", "none"])
-@pytest.mark.parametrize("legacy", [False, True])
 def test_last_set_wait_wins_on_recurrence_gate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_wait: str, legacy: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_wait: str
 ) -> None:
     """Only the final wait assignment determines the recurrence gate.
 
-    Clearing then replacing a date must preserve waiting state and metadata,
-    both for fields-only gates and tasks carrying a legacy generated string.
+    Clearing then replacing a date must preserve waiting state and metadata.
     """
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
     old_wait = "2025-01-01"
     last_wait = "2030-07-01"
-    legacy_field = f"waiting_for: 'next recurrence gate (wait: {old_wait})'\n" if legacy else ""
     (tasks_dir / "recur-gate-task.md").write_text(
         f"---\n"
         f"state: waiting\n"
         f"wait_kind: machine\n"
         f"wait: {old_wait}\n"
-        f"{legacy_field}"
         f"waiting_since: 2026-08-01T00:00:00+00:00\n"
         f"created: 2026-01-01\n"
         f"recur: 7d\n"
@@ -814,13 +822,11 @@ def test_trailing_set_wait_none_releases_recurrence_gate(
     tasks_dir.mkdir()
     old_wait = "2025-01-01"
     new_wait = "2030-06-15"
-    old_wf = f"next recurrence gate (wait: {old_wait})"
     (tasks_dir / "recur-gate-task.md").write_text(
         f"---\n"
         f"state: waiting\n"
         f"wait_kind: machine\n"
         f"wait: {old_wait}\n"
-        f"waiting_for: '{old_wf}'\n"
         f"waiting_since: 2026-08-01T00:00:00+00:00\n"
         f"created: 2026-01-01\n"
         f"recur: 7d\n"
@@ -918,20 +924,17 @@ def test_set_wait_none_does_not_reopen_nonwaiting_state(
 
     The wait-none release used to set state=todo whenever no explicit
     `--set state` was in the same edit, even if the task was already
-    done/cancelled/active and merely carried leftover recurrence-gate
-    metadata (gptme/gptme-contrib#1539 P1 on ecb15242).
+    done/cancelled/active and merely carried a leftover machine date gate
+    (gptme/gptme-contrib#1539 P1 on ecb15242).
     """
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
     old_wait = "2025-01-01"
-    old_wf = f"next recurrence gate (wait: {old_wait})"
     (tasks_dir / "recur-gate-task.md").write_text(
         f"---\n"
         f"state: {start_state}\n"
         f"wait_kind: machine\n"
         f"wait: {old_wait}\n"
-        f"waiting_for: '{old_wf}'\n"
-        f"waiting_since: 2026-08-01T00:00:00+00:00\n"
         f"created: 2026-01-01\n"
         f"---\n"
         f"# recur-gate-task\n"
@@ -1054,11 +1057,7 @@ def test_set_state_todo_on_recurrence_gate_drops_waiting_for(
 def test_set_state_todo_clears_human_waiting_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Releasing to todo clears a human waiting_for too, not just a generated one.
-
-    Matcher exactness for the suffixed string is covered by
-    test_generated_recurrence_waiting_for_is_exact_string.
-    """
+    """Releasing to todo clears a human waiting_for."""
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
     write_task(
@@ -1083,24 +1082,6 @@ def test_set_state_todo_clears_human_waiting_for(
     assert "waiting_for" not in post.metadata
     assert "waiting_since" not in post.metadata
     assert post.metadata["wait"]
-
-
-def test_generated_recurrence_waiting_for_is_exact_string() -> None:
-    assert is_generated_recurrence_waiting_for("next recurrence gate (wait: 2025-01-01)")
-    assert is_generated_recurrence_waiting_for(
-        "next recurrence gate (wait: 2025-01-01T00:00:00+00:00)"
-    )
-    assert not is_generated_recurrence_waiting_for(
-        "next recurrence gate (wait: 2025-01-01) - confirm with Bob"
-    )
-    # Note *inside* the parentheses is also human — `.+` used to match it
-    # (P1 on gptme/gptme-contrib#1539 / e52af179).
-    assert not is_generated_recurrence_waiting_for(
-        "next recurrence gate (wait: 2025-01-01 - confirm with Bob)"
-    )
-    assert not is_generated_recurrence_waiting_for("John to review the PR")
-    assert not is_generated_recurrence_waiting_for("")
-    assert not is_generated_recurrence_waiting_for(None)
 
 
 def test_set_wait_none_with_explicit_waiting_keeps_valid_frontmatter(
@@ -1253,13 +1234,11 @@ def test_set_wait_after_wait_none_staying_waiting_restores_recurrence_gate(
     tasks_dir.mkdir()
     old_wait = "2025-01-01"
     new_wait = "2030-06-15"
-    old_wf = f"next recurrence gate (wait: {old_wait})"
     (tasks_dir / "recur-gate-task.md").write_text(
         f"---\n"
         f"state: waiting\n"
         f"wait_kind: machine\n"
         f"wait: {old_wait}\n"
-        f"waiting_for: '{old_wf}'\n"
         f"waiting_since: 2026-08-01T00:00:00+00:00\n"
         f"created: 2026-01-01\n"
         f"recur: 7d\n"
