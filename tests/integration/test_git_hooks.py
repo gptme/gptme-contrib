@@ -630,6 +630,7 @@ class TestUpstreamOnFork:
         "url",
         [
             "ssh://git@github.com:22/fork/repo.git",
+            "ssh://git@ssh.github.com:443/fork/repo.git",
             "https://github.com/fork/repo.git/",
         ],
     )

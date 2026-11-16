@@ -47,7 +47,9 @@ _repo_slug() {
         url="${url#*://}"
         authority="${url%%/*}"
         host="${authority##*@}"
-        case "$scheme:$host" in
+        case "${scheme,,}:${host,,}" in
+            # GitHub's documented SSH-over-HTTPS-port endpoint is the same host.
+            ssh:ssh.github.com:443) host="github.com" ;;
             ssh:*:22|https:*:443|http:*:80) host="${host%:*}" ;;
         esac
         url="${url#*/}"
