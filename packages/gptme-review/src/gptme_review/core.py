@@ -2922,6 +2922,28 @@ def primary_model_exhausted(
 #: catalog.
 DEEPSEEK_V4_FLASH_0731_PROVIDERS: tuple[str, ...] = ("inceptron",)
 
+#: Hosts that local in-session reviews skip on ``no_train`` calls only.
+#: Trial started 2026-11-16: local no-train 0731 reviews were 66/68 served by
+#: Inceptron at an elapsed p50 of 333 s. With ``no_train`` the block is the
+#: OpenRouter deny set with ``allow_fallbacks: true``, so ignoring Inceptron
+#: there hands the call to another no-train host instead of emptying the route.
+#: Public calls keep the shared pin (``only``/``allow_fallbacks: false``),
+#: which the consensus gate's allowlist is tested against. Keep or revert after
+#: 20 ``ok`` local rows compare served host and elapsed against that baseline.
+LOCAL_NO_TRAIN_SKIP_PROVIDERS: dict[str, tuple[str, ...]] = {
+    "deepseek/deepseek-v4-flash-0731": ("inceptron",),
+}
+
+
+def local_no_train_skips(
+    model: str, *, no_train: bool, usage_ctx: Mapping[str, object] | None
+) -> tuple[str, ...]:
+    """Providers a local in-session ``no_train`` review should ignore up front."""
+    if not no_train or (usage_ctx or {}).get("consumer") != "local":
+        return ()
+    return LOCAL_NO_TRAIN_SKIP_PROVIDERS.get(model.split(":", 1)[0], ())
+
+
 PROVIDER_POLICY: dict[str, dict] = {
     "deepseek/deepseek-v4-flash-0731": {
         # 2026-09-10: OpenRouter REMOVED the official DeepSeek endpoint
@@ -3809,6 +3831,9 @@ def openrouter_review(
     # endpoint the ignore is dropped instead (it would 404 the whole request),
     # so the retry repeats the same call and a transient empty can still recover.
     ignored: list[str] = list(quarantined_provider_names(model))
+    for name in local_no_train_skips(model, no_train=no_train, usage_ctx=_usage_ctx):
+        if name.casefold() not in {n.casefold() for n in ignored}:
+            ignored.append(name)
     downgraded_from: ResponseFormatMode = None
     empty_retries = 0
     provider_reroutes = 0
