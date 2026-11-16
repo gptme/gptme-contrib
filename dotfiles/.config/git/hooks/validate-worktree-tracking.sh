@@ -39,17 +39,25 @@ done
 # Check each live source branch before checkout-based early exits: a push may
 # name a branch other than HEAD, including while master or detached is checked out.
 _repo_slug() {
-    # Reduce ssh/https remote URLs to a comparable host-less owner/repo slug.
-    # Strip URL authority (including an explicit port) separately from SCP hosts.
-    local url="$1"
+    # Compare hosted repository identity across ssh/https transport spellings.
+    # Keep the host: equal owner/repo paths on different hosts are not aliases.
+    local url="$1" host="" scheme="" authority=""
     if [[ "$url" == *://* ]]; then
+        scheme="${url%%://*}"
         url="${url#*://}"
+        authority="${url%%/*}"
+        host="${authority##*@}"
+        case "$scheme:$host" in
+            ssh:*:22|https:*:443|http:*:80) host="${host%:*}" ;;
+        esac
         url="${url#*/}"
     elif [[ "$url" == *:* ]]; then
+        authority="${url%%:*}"
+        host="${authority##*@}"
         url="${url#*:}"
     fi
     url="${url%/}"
-    printf '%s' "${url%.git}" | tr '[:upper:]' '[:lower:]'
+    printf '%s' "${host:+$host/}${url%.git}" | tr '[:upper:]' '[:lower:]'
 }
 dest_url="${2:-}"
 if [ -n "$dest_url" ] && [ "${GIT_ALLOW_PUSH_OFF_UPSTREAM:-}" != "1" ]; then

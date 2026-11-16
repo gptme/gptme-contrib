@@ -643,6 +643,16 @@ class TestUpstreamOnFork:
         )
         assert result.returncode == 0, result.stdout
 
+    def test_blocks_same_path_on_another_host(self, hook_env):
+        self._track_fork(hook_env, "feat-x")
+        result = self._run(
+            hook_env,
+            "other-host",
+            "https://gitlab.com/fork/repo.git",
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+        )
+        assert result.returncode == 1, result.stdout
+
     def test_advice_names_tracked_destination(self, hook_env):
         self._track_fork(hook_env, "pr-local")
         subprocess.run(
