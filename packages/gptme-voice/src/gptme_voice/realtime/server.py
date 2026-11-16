@@ -458,6 +458,23 @@ def _build_fresh_call_greeting_instructions(
     )
 
 
+def _build_callback_greeting_instructions(
+    workspace: str | None, agent_name: str | None = None
+) -> str:
+    """Opening for an inbound missed-call callback, with the agent's identity.
+
+    ``CALLBACK_GREETING`` alone never names the agent, so a realtime model fills
+    the gap with its own product name ("Hi, this is Grok Voice"). Prefix the same
+    self-identity the fresh-call greeting uses. Provider/model questions are still
+    answered truthfully by the main instructions; this only governs the opener.
+    """
+    display = _display_name(agent_name or _detect_agent_name(workspace) or "agent")
+    return (
+        f"You are {display}. Introduce yourself as {display}, never as the voice "
+        "provider or model. " + CALLBACK_GREETING
+    )
+
+
 def _build_standup_instructions_guidance() -> str:
     """Return a guidance block prepended to the main instructions for standup calls.
 
@@ -2860,7 +2877,9 @@ class VoiceServer:
                             bootstrap = SessionBootstrap(
                                 instructions="".join(callback_parts),
                                 should_greet_first=True,
-                                initial_response_instructions=CALLBACK_GREETING,
+                                initial_response_instructions=_build_callback_greeting_instructions(
+                                    self.workspace, self._agent_name
+                                ),
                             )
                         else:
                             bootstrap = await self._build_session_bootstrap(

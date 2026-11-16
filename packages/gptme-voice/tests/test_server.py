@@ -24,6 +24,7 @@ from gptme_voice.realtime.server import (
     VoiceServer,
     _append_transcript_turn,
     _assistant_committed_hangup,
+    _build_callback_greeting_instructions,
     _build_caller_instructions,
     _build_fresh_call_greeting_instructions,
     _build_resume_instructions,
@@ -4461,3 +4462,12 @@ def test_session_bootstrap_anonymous_digest_follows_transport(
 
     assert "DIGEST-MARKER" in asyncio.run(_run(True))
     assert "DIGEST-MARKER" not in asyncio.run(_run(False))
+
+
+def test_callback_greeting_introduces_agent_not_provider():
+    """Inbound callback opener names the agent (2026-11-16: Grok said 'this is Grok Voice')."""
+    greeting = _build_callback_greeting_instructions(None, "bob")
+    assert greeting.startswith("You are Bob. Introduce yourself as Bob")
+    assert "never as the voice provider or model" in greeting
+    assert "tried to reach them earlier" in greeting
+    assert _build_callback_greeting_instructions(None).startswith("You are ")
