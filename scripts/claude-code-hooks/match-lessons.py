@@ -1128,14 +1128,42 @@ def prompt_repeat_window() -> int:
         return DEFAULT_PROMPT_REPEAT_WINDOW
 
 
+def _window_workspace(workspace: Path) -> Path:
+    """Map a linked git worktree to the checkout that owns its repository.
+
+    An agent that runs each session in its own throwaway worktree would
+    otherwise get a fresh, empty prompt window per session, so a repeated
+    launcher prompt could never be recognised (measured 2026-11-16: every
+    worktree-lane window file stopped at ``seq 1``). A linked worktree has a
+    ``.git`` *file* pointing at ``<common>/worktrees/<name>``, whose
+    ``commondir`` file locates the shared git dir. Anything unreadable or not
+    shaped like that keeps the workspace as-is.
+    """
+    try:
+        dot_git = Path(workspace) / ".git"
+        if not dot_git.is_file():
+            return Path(workspace)
+        first = dot_git.read_text(encoding="utf-8").splitlines()[0]
+        if not first.startswith("gitdir:"):
+            return Path(workspace)
+        gitdir = Path(first[len("gitdir:") :].strip())
+        if not gitdir.is_absolute():
+            gitdir = Path(workspace) / gitdir
+        common = (gitdir / (gitdir / "commondir").read_text().strip()).resolve()
+        return common.parent if common.name == ".git" else Path(workspace)
+    except (OSError, IndexError, ValueError):
+        return Path(workspace)
+
+
 def _prompt_window_file(workspace: Path, state_dir: Path | None = None) -> Path:
     """Per-workspace prompt-window state file, under the /tmp state root.
 
     Keyed by workspace because a shared state root serves every agent workspace
-    on the box; a prompt repeat is only meaningful inside one workspace.
+    on the box; a prompt repeat is only meaningful inside one workspace. Linked
+    worktrees of one repository count as the same workspace.
     """
     root = STATE_DIR if state_dir is None else state_dir
-    resolved = str(Path(workspace).resolve()).encode("utf-8")
+    resolved = str(_window_workspace(Path(workspace)).resolve()).encode("utf-8")
     digest = hashlib.sha256(resolved).hexdigest()[:16]
     return root / f"prompt-window-{digest}.json"
 

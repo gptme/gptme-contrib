@@ -2410,3 +2410,45 @@ def test_main_varying_launcher_prompt_share_and_receipts(hook, tmp_path, monkeyp
     assert [row["prompt_novel_lines"] for row in receipts[1:]] == [1] * 19
     assert [row["reason"] for row in receipts[1:]] == ["no_match"] * 19
     assert all("cascade selector" not in query for query in queries[1:])
+
+
+def test_linked_worktrees_share_one_prompt_window(hook, tmp_path):
+    """Per-session worktrees of one repo must not each get an empty window."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git = [
+        "git",
+        "-C",
+        str(repo),
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "commit.gpgsign=false",
+    ]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+    wt_a, wt_b = tmp_path / "wt-a", tmp_path / "wt-b"
+    subprocess.run([*git, "worktree", "add", "-q", "-b", "a", str(wt_a)], check=True)
+    subprocess.run([*git, "worktree", "add", "-q", "-b", "b", str(wt_b)], check=True)
+    state = tmp_path / "state"
+    state.mkdir()
+    main = hook._prompt_window_file(repo, state)
+    assert hook._prompt_window_file(wt_a, state) == main
+    assert hook._prompt_window_file(wt_b, state) == main
+    # An unrelated repository keeps its own window.
+    other = tmp_path / "other"
+    other.mkdir()
+    assert hook._prompt_window_file(other, state) != main
+
+
+def test_window_workspace_ignores_malformed_git_file(hook, tmp_path):
+    (tmp_path / ".git").write_text("not a gitdir pointer\n")
+    assert hook._window_workspace(tmp_path) == tmp_path
+    (tmp_path / ".git").write_text("gitdir: /nonexistent/x/.git/worktrees/y\n")
+    assert hook._window_workspace(tmp_path) == tmp_path
