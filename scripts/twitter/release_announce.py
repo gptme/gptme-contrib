@@ -258,6 +258,42 @@ def product_name(repo: str) -> str:
     return PRODUCT_NAMES.get(name.lower(), name)
 
 
+# Per-item bullet emoji, matched on the feature text (first hit wins). X renders
+# the em dash used as a bullet wider than a normal one and it reads as an AI tell,
+# so each item gets an emoji that matches its vibe instead. Keep each emoji to
+# one codepoint so the prefix uses the same character budget as the old bullet.
+_BULLET_EMOJI: tuple[tuple[str, str], ...] = (
+    (r"\b(?:security|auth|oauth|token|credential|sign(?:ing|ed)?|encrypt\w*)\b", "🔒"),
+    (r"\b(?:perf\w*|fast\w*|speed\w*|latency|cache\w*|optimi[sz]\w*)\b", "⚡"),
+    (r"\b(?:android|ios|mobile|phone|tablet)\b", "📱"),
+    (r"\b(?:windows|macos|linux|installer|install\w*|package|msi|dmg)\b", "📦"),
+    (
+        r"\b(?:ui|tui|gui|webui|dashboard|theme|layout|view|chart|timeline|screen)\b",
+        "💻",
+    ),
+    (r"\b(?:cli|command|terminal|shell|flag)\b", "🐚"),
+    (r"\b(?:mcp|plugin|tool|tools|integration|api|sdk|extension)\b", "🔌"),
+    (
+        r"\b(?:model|llm|provider|openai|anthropic|deepseek|gemini|claude|grok|gpt)\b",
+        "🧠",
+    ),
+    (r"\b(?:agent|agents|subagent|autonomous|session|sessions)\b", "🤖"),
+    (r"\b(?:lesson|skill|skills|memory|knowledge|docs?|documentation)\b", "📚"),
+    (r"\b(?:translat\w*|locale|language|i18n|l10n)\b", "🌍"),
+    (r"\b(?:sync|backup|export|import|upload|download|share)\b", "🔄"),
+    (r"\b(?:test|tests|ci|benchmark|eval\w*)\b", "🧪"),
+)
+_DEFAULT_BULLET_EMOJI = "✨"
+
+
+def bullet_emoji(feature: str) -> str:
+    """Pick an emoji matching the feature's vibe; fall back to a sparkle."""
+    for pattern, emoji in _BULLET_EMOJI:
+        if re.search(pattern, feature, re.IGNORECASE):
+            return emoji
+    return _DEFAULT_BULLET_EMOJI
+
+
 def compose_announcement(tag: str, body: str, repo: str) -> str:
     version = tag.lstrip("v")
     feats = extract_features(body)
@@ -266,7 +302,7 @@ def compose_announcement(tag: str, body: str, repo: str) -> str:
         return f"{header}\n\nRelease notes in the reply."
     lines = [header, ""]
     for f in feats:
-        candidate = lines + [f"— {f}"]
+        candidate = lines + [f"{bullet_emoji(f)} {f}"]
         if len("\n".join(candidate)) > MAX_TWEET:
             break
         lines = candidate
@@ -276,7 +312,7 @@ def compose_announcement(tag: str, body: str, repo: str) -> str:
 def compose_quote(tag: str, repo: str) -> str:
     repo_name = product_name(repo)
     return (
-        f"{repo_name} {tag} is out — release notes below. "
+        f"{repo_name} {tag} is out, release notes below. "
         "Built with gptme, reviewed by agents, shipped by CI."
     )
 
