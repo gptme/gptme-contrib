@@ -11,6 +11,7 @@ Python packages for gptme agents.
 | **credential-slots** | Safe credential-slot rotation for agents running Claude Max / OAuth-backed subscriptions | `uv pip install -e packages/credential-slots` |
 | **gptmail** | Email automation for gptme agents with shared communication utilities | `uv pip install -e packages/gptmail` |
 | **gptme-activity-summary** | Activity summarization for gptme agents — journals, GitHub, sessions, tweets, email | `uv pip install -e packages/gptme-activity-summary` |
+| **gptme-agent-events** | Live, harness-agnostic event stream of what an agent is doing (tool calls, commits, turn ends), with sinks such as sound effects | `uv pip install -e packages/gptme-agent-events` |
 | **gptme-backoff** | Thin retry utilities built on tenacity — exponential backoff, jitter, and convenient async/sync decorators for agent tool calls | `uv pip install -e packages/gptme-backoff` |
 | **gptme-block-registry** | Shared state-dir block-file contract and registry for gptme agent arm dispatch (credential-survival sublayer) | `uv pip install -e packages/gptme-block-registry` |
 | **gptme-bob-status** | Bob-specific StatusProvider for gptme-util status | `uv pip install -e packages/gptme-bob-status` |
@@ -27,11 +28,13 @@ Python packages for gptme agents.
 | **gptme-lessons-mcp** | MCP server that exposes gptme | `uv pip install -e packages/gptme-lessons-mcp` |
 | **gptme-rag** | ChromaDB-based RAG (Retrieval-Augmented Generation) for gptme agents | `uv pip install -e packages/gptme-rag` |
 | **gptme-redact** | Fail-closed secret scanner/redactor for derived agent content (import module `redact`) | `uv pip install -e packages/gptme-redact` |
+| **gptme-review** | Self-hosted AI PR reviewer engine (lifted from ErikBjare/bob) | `uv pip install -e packages/gptme-review` |
 | **gptme-runloops** | Python-based run loop framework for autonomous AI agent operation | `uv pip install -e packages/gptme-runloops` |
 | **gptme-sessions** | Session tracking and analytics for gptme agents | `uv pip install -e packages/gptme-sessions` |
 | **gptme-subscription** | Generic subscription observation, pressure scoring, and capacity-aware routing for agent credential slots | `uv pip install -e packages/gptme-subscription` |
 | **gptme-usage** | Cross-backend usage, cost, and quota surface for gptme agents (model registry, cost math, quota checks) | `uv pip install -e packages/gptme-usage` |
 | **gptme-vision-node** | Vision pipeline for the BobBrain presence node — frame capture, person/motion detection, LLM look tool, and place recognition | `uv pip install -e packages/gptme-vision-node` |
+| **gptme-vitals** | Shared agent-dashboard skeleton for gptme agents: typed page envelope, derived fleet core.json, design base | `uv pip install -e packages/gptme-vitals` |
 | **gptme-voice** | Voice interface for gptme with OpenAI and xAI Grok Realtime APIs | `uv pip install -e packages/gptme-voice` |
 | **gptme-voice-node** | Embedded voice presence node for BobBrain — thin WS client to bob-voice-server | `uv pip install -e packages/gptme-voice-node` |
 | **gptme-whatsapp** | WhatsApp integration for gptme agents via whatsapp-web.js | `uv pip install -e packages/gptme-whatsapp` |

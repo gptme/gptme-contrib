@@ -60,6 +60,13 @@ repos:
     types: [markdown]
     pass_filenames: true
 
+  - id: verify-package-coverage
+    name: Verify packages are listed in the README package tables
+    entry: python3 scripts/verify-package-coverage.py
+    language: system
+    pass_filenames: false
+    files: ^(README\.md|packages/README\.md|packages/[^/]+/pyproject\.toml)$
+
   - id: check-root-structure
     name: Check root directory structure
     description: Ensures no new top-level files or directories are added without updating the allowlist.
