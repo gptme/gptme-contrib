@@ -649,40 +649,22 @@ class TaskInfo:
 # =============================================================================
 
 
-# Exact generated recurrence-gate waiting_for. `.+` would treat a human note
-# inside the parentheses ("... (wait: 2025-01-01 - confirm with Bob)") as a
-# machine gate and silently overwrite it on --set wait (gptme/gptme-contrib#1539).
-# Generated dates are ISO via datetime.isoformat() — no spaces — so \S+ is exact.
-_GENERATED_RECURRENCE_WAITING_FOR = re.compile(r"^next recurrence gate \(wait: \S+\)$")
-
-
-def is_generated_recurrence_waiting_for(waiting_for: object) -> bool:
-    """True when waiting_for is exactly a generated recurrence-gate string."""
-    if not isinstance(waiting_for, str):
-        return False
-    return bool(_GENERATED_RECURRENCE_WAITING_FOR.match(waiting_for.strip()))
-
-
 def task_has_waiting_blocker(task: "TaskInfo") -> bool:
     """Return True when a task is explicitly waiting on an external condition."""
     state = normalize_state(task.state or "", warn=False) if task.state else ""
     waiting_for = str(task.metadata.get("waiting_for") or "").strip()
-    recurrence_gate = task.wait is not None and waiting_for == (
-        f"next recurrence gate (wait: {task.wait.isoformat()})"
-    )
     # A machine time-gate that has already expired is not a blocker — the wait has passed.
     # Guards: task.wait is not None (probe-only tasks with no date stay blocked)
     #         and no probe field (probe+expired-date tasks still need probe resolution)
-    #         and no human waiting_for field (the generated recurrence-gate description
-    #         documents the same wait: field and is therefore safe to release).
+    #         and no waiting_for field (any waiting_for is a human-readable blocker).
     # recur: + wait: with no waiting_for is the recurrence gate gptodo writes.
-    recur_gate = bool(task.metadata.get("recur")) and not waiting_for
+    recur_gate = bool(task.metadata.get("recur"))
     if (
         (task.metadata.get("wait_kind") == "machine" or recur_gate)
         and task.wait is not None
         and not task_is_waiting_for_date(task)
         and not task.metadata.get("probe")
-        and (not waiting_for or recurrence_gate)
+        and not waiting_for
     ):
         return False
     if state == "waiting":

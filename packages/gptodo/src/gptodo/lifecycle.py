@@ -33,7 +33,6 @@ from gptodo.utils import (
     parse_wait,
     validate_task_file,
 )
-from gptodo.utils import is_generated_recurrence_waiting_for
 
 Intent = Literal["normal", "operator_reopen", "sync_reopen", "requeue", "alert_refire"]
 CANONICAL_LIST_FIELDS = {"tags", "depends", "requires", "blocks", "related", "discovered-from"}
@@ -223,23 +222,6 @@ def transform_post(
                     value = normalize_state(value, warn=False)
 
                 post.metadata[field] = value
-    # Recurrence state is ``recur:`` + ``wait:``; gptodo no longer writes a
-    # generated ``waiting_for: next recurrence gate (wait: ...)`` that restates
-    # the date (it needed sync branches on every wait/state edit and trapped
-    # tasks whenever the copies drifted). A legacy generated string is dropped
-    # on any edit, so the fields stay the only source of the gate.
-    if is_generated_recurrence_waiting_for(post.metadata.get("waiting_for", "")):
-        if post.metadata.get("state") != "waiting":
-            # Leftover gate metadata on a todo/done task must not read as a
-            # human blocker.
-            for _field in ("waiting_for", "waiting_since", "wait_kind"):
-                post.metadata.pop(_field, None)
-        elif post.metadata.get("recur") or (
-            post.metadata.get("wait") is not None and post.metadata.get("wait_kind") == "machine"
-        ):
-            # Removing recur leaves a one-off machine date gate. Its generated
-            # description is still redundant, and may now name the old date.
-            post.metadata.pop("waiting_for", None)
     # Gate updates follow the final value, just like the last-assignment-wins
     # apply loop (e.g. --set wait none --set wait NEW preserves the gate).
     wait_changed = any(op == "set" and field == "wait" for op, field, _value in changes)
