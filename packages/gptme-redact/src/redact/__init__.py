@@ -556,18 +556,19 @@ _MIN_SECRET_LEN = 8  # don't redact trivially-short env values (e.g. "true", "1"
 
 # Unquoted secret_assignment values shaped like prose rather than a credential
 # (#2202). Status reports say "drained key: the probe", "token = -$12.34" or
-# "key: <code>name</code>"; the unquoted branch captures the next word as the
+# "key: <code>"; the unquoted branch captures the next word as the
 # value. Such hits are downgraded to HIGH: still masked by ``redact()`` (export
 # redaction keeps preferring a mask to a leaked tail), but below the CRITICAL
 # gate ``guard_outbound`` blocks on. Quoted values are deliberate assignments
 # and stay CRITICAL, and so does tight ``NAME=value`` (env/shell syntax) of any
 # length — ``PASSWORD=hunter2`` and ``TOKEN=x`` still block.
 #
-# Shapes that are never a credential, whatever the separator: a leading markup
-# tag, a value that is WHOLLY a money amount (so a crypt hash like
-# ``$1$salt$...`` stays CRITICAL), or a documentation placeholder (KEY=VALUE).
+# Shapes that are never a credential, whatever the separator: a whole markup
+# tag (not a tag prefix or wrapped content), a value that is WHOLLY a money
+# amount (so a crypt hash like ``$1$salt$...`` stays CRITICAL), or a documentation
+# placeholder (KEY=VALUE).
 _NON_CREDENTIAL_VALUE_RE = re.compile(
-    r"<[/!]?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?>"  # leading HTML/markup tag
+    r"<[/!]?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?>\Z"  # whole HTML/markup tag
     r"|[-+]?[$\u20ac\u00a3]\d[\d,]*(?:\.\d+)?\Z"  # money amount
     r"|(?i:value|x{3,}|\.{3,}|\*{3,}|\u2026)\Z"  # placeholder
 )

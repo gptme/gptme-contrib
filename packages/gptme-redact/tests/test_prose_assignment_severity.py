@@ -13,7 +13,7 @@ from redact import Severity, redact
 PROSE = [
     "Closed 3 positions at 0.06/token = -$12.34 total",
     'thread sseToken through to EventSource ?token= (<a href="https://example.com">#1</a>)',
-    "dropped the assumed data key: <code>sleep_score</code> from the loader",
+    "dropped the assumed data key: <code> from the loader",
     "Adapter output parsing: emit KEY=VALUE output and parse it",
     "Verified the fix against the live drained key: the probe now reports quota",
     "Refunded token = -$1,234.56 to the account",
@@ -49,6 +49,14 @@ def test_prose_assignment_still_masked_and_preview_hidden(text):
         "PASSWORD='abc'",
         "PASSWORD=$1$saltsalt$hashhashhash",  # crypt hash, not a currency amount
         "API_KEY=<abcdefgh",  # '<' without a tag shape is password bytes
+        # Markup must not hide a credential suffix (review ce55fb5132a4).
+        "key: <b>Xj4kL9mNb2vC8wQ1",
+        "API_KEY=<b>Xj4kL9mNb2vC8wQ1",
+        "API_KEY=</b>Xj4kL9mNb2vC8wQ1",
+        "API_KEY=<your-key>Xj4kL9mNb2vC8wQ1",
+        "API_KEY=<code>Xj4kL9mNb2vC8wQ1</code>",
+        # Conservatively block wrapped prose too: the content could be a secret.
+        "dropped the assumed data key: <code>sleep_score</code> from the loader",
         # Tight NAME=value is env/shell syntax: short values still block.
         "PASSWORD=hunter2",
         "TOKEN=x",
