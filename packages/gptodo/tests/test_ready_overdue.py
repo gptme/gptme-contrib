@@ -197,6 +197,41 @@ def test_ready_overdue_lists_past_gate_deadline(tmp_path: Path, monkeypatch) -> 
     assert rows[0]["gate_kind"] is None
 
 
+def test_ready_overdue_uses_earliest_passed_date(tmp_path: Path, monkeypatch) -> None:
+    """Tasks with both passed dates appear once, ordered by the earlier instant."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    for name, wait, deadline in [
+        ("gate-earlier", "2026-01-06T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        ("wait-earlier", "2026-01-02T00:00:00+00:00", "2026-01-04T00:00:00+00:00"),
+        ("middle", "2026-01-03T00:00:00+00:00", "2026-01-05T00:00:00+00:00"),
+    ]:
+        write_task(
+            tasks_dir,
+            name,
+            state="waiting",
+            created="2026-01-01T00:00:00",
+            wait=wait,
+            gate=f"{{kind: time, deadline: {deadline}}}",
+        )
+    monkeypatch.chdir(tmp_path)
+    for output in ["--json", "--jsonl"]:
+        result = CliRunner().invoke(cli, ["ready", "--overdue", output])
+        assert result.exit_code == 0, result.output
+        if output == "--json":
+            payload = json.loads(result.stdout)
+            assert payload["count"] == 3
+            rows = payload["overdue_tasks"]
+        else:
+            rows = [json.loads(line) for line in result.stdout.splitlines()]
+        assert [row["id"] for row in rows] == ["gate-earlier", "wait-earlier", "middle"]
+        assert [row["gated_by"] for row in rows] == ["gate.deadline", "wait", "wait"]
+        assert rows[0]["gate_kind"] == "time"
+        assert rows[0]["gate_deadline"] == "2026-01-01T00:00:00+00:00"
+        assert rows[1]["gate_kind"] is None
+        assert rows[1]["gate_deadline"] is None
+
+
 def test_ready_overdue_table_shows_gate_deadline(tmp_path: Path, monkeypatch) -> None:
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
