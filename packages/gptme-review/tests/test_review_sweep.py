@@ -432,6 +432,29 @@ def test_pending_request_ignores_other_reviewers_trigger() -> None:
     assert pending_review_request(comments, None, OTHER) is not None
 
 
+def test_pending_request_compares_instants_across_offsets() -> None:
+    def request(cid: int, created_at: str) -> dict:
+        return {
+            "id": cid,
+            "body": "@reviewer-bot review",
+            "created_at": created_at,
+            "user": {"login": "maintainer"},
+            "author_association": "MEMBER",
+        }
+
+    # 21:30+02:00 is 19:30Z: lexically larger than 20:00Z, but earlier.
+    earlier = request(1, "2026-08-07T21:30:00+02:00")
+    later = request(2, "2026-08-07T20:00:00Z")
+    for order in ([earlier, later], [later, earlier]):
+        found = pending_review_request(order, None, IDENTITY)
+        assert found is not None and found["id"] == 2
+    undated = request(3, "not-a-timestamp")
+    found = pending_review_request([undated, earlier], None, IDENTITY)
+    assert found is not None and found["id"] == 1
+    found = pending_review_request([undated], None, IDENTITY)
+    assert found is not None and found["id"] == 3
+
+
 def test_p2_only_marker_is_non_blocking() -> None:
     marker = {
         "findings": [{"fp": "a", "severity": "P2"}],

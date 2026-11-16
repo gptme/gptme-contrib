@@ -215,6 +215,7 @@ def pending_review_request(
 ) -> dict | None:
     """Newest unserved ``@<login> review`` from a trusted association."""
     newest: dict | None = None
+    newest_at: datetime | None = None
     served_at = parse_ts(marker_served_through) if marker_served_through else None
     trigger_re = identity.trigger_re()
     marker_re = identity.marker_re()
@@ -226,12 +227,16 @@ def pending_review_request(
             continue
         if str(comment.get("author_association") or "") not in trusted_associations:
             continue
-        created = str(comment.get("created_at") or "")
-        created_at = parse_ts(created)
+        created_at = parse_ts(str(comment.get("created_at") or ""))
         if served_at is not None and created_at is not None and created_at <= served_at:
             continue
-        if newest is None or created > str(newest.get("created_at") or ""):
-            newest = dict(comment)
+        # Compare instants, not strings: "+02:00" and "Z" stamps don't sort
+        # lexically. An unparseable stamp still counts as a request but never
+        # displaces a dated one.
+        if newest is None or (
+            created_at is not None and (newest_at is None or created_at > newest_at)
+        ):
+            newest, newest_at = dict(comment), created_at
     return newest
 
 
