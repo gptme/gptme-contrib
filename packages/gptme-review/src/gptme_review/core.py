@@ -3701,7 +3701,11 @@ def openrouter_completion(
             if blamed is None:
                 raise
             provider_reroutes += 1
-            if _pin_blocks_reroute(model, blamed, ignored):
+            # A no-train route carries no `only` allowlist, so an ignore always
+            # reroutes there. Asking the pin would answer about a route this
+            # call no longer uses (e.g. a pre-ignored sole pin), and the blamed
+            # host would be retried instead of skipped.
+            if not failover_no_train and _pin_blocks_reroute(model, blamed, ignored):
                 failover_no_train = True
                 how = "dropping the pin (data_collection=deny)"
             else:
@@ -3922,7 +3926,11 @@ def openrouter_review(
             blamed = _reroutable_provider(exc, ignored, provider_reroutes)
             if blamed is not None:
                 provider_reroutes += 1
-                if _pin_blocks_reroute(model, blamed, ignored):
+                # Already on the no-train route: no allowlist, so ignore the
+                # blamed host. See the completion-path retry for why.
+                if not (no_train or failover_no_train) and _pin_blocks_reroute(
+                    model, blamed, ignored
+                ):
                     failover_no_train = True
                     how = "dropping the pin (data_collection=deny)"
                 else:

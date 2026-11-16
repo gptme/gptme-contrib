@@ -62,3 +62,39 @@ def test_variant_suffix_does_not_opt_out():
     assert core.local_no_train_skips(
         MODEL + ":nitro", no_train=True, usage_ctx={"consumer": "local"}
     ) == ("inceptron",)
+
+
+def test_named_failure_on_local_no_train_ignores_the_failed_host(monkeypatch):
+    """The pre-ignored sole pin must not turn a Wafer failure into a no-op retry."""
+    sent: list[dict] = []
+
+    def responder(payload, *, api_key, timeout):
+        sent.append(json.loads(json.dumps(payload)))
+        if len(sent) == 1:
+            raise core.ReviewError("HTTP 502 upstream error", provider="Wafer")
+        content = json.dumps({"findings": [], "summary": "ok", "files": []})
+        return {
+            "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            "provider": "DeepInfra",
+        }
+
+    monkeypatch.setattr(core, "_post_openrouter", responder)
+    monkeypatch.setattr(core, "quarantined_provider_names", lambda model=None: [])
+    monkeypatch.setattr(core, "_log_usage_record", lambda *a, **k: None)
+    monkeypatch.setattr(core, "_log_failed_attempt", lambda *a, **k: None)
+    monkeypatch.setattr(core, "dump_parse_failure", lambda *a, **k: None)
+    core.openrouter_review(
+        "review this diff",
+        model=MODEL,
+        api_key="test-key",
+        timeout=5,
+        max_tokens=4096,
+        structured=True,
+        no_train=True,
+        _usage_ctx={"consumer": "local"},
+    )
+    assert len(sent) == 2
+    retry = sent[1]["provider"]
+    assert retry["data_collection"] == "deny"
+    assert [n.casefold() for n in retry["ignore"]] == ["inceptron", "wafer"]
