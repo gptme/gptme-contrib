@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,39 +76,64 @@ def _extract_traj_sha_prefixes(traj_deliverables: list[str]) -> set[str]:
 _SHALESS_PLACEHOLDER_PREFIX = "(commit output truncated) ["
 
 
+def _commit_in_repo(repo: str, sha: str) -> bool:
+    """True if ``sha`` names a commit object in the git repo at ``repo``."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", repo, "cat-file", "-e", f"{sha}^{{commit}}"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
 def _placeholders_superseded_by_trailers(
     traj_deliverables: Sequence[str],
     traj_details: Sequence[Any],
-    n_recovered: int,
+    recovered_shas: Sequence[str],
 ) -> list[str]:
     """SHA-less truncated-commit placeholders that recovered SHAs stand in for.
 
     A commit piped through ``| tail`` leaves the extractor a
     ``(commit output truncated) [id]`` placeholder; the caller's
     Git-Session-Id trailer then recovers that same commit's real SHA. Keeping
-    both lists one commit twice and grades it twice. Retire one placeholder
-    per recovered SHA, oldest first. Skipped when the placeholders come from
-    more than one repo: the trailer SHAs are from the caller's single
-    workspace range, so a placeholder from another repo (e.g. a submodule)
-    may be a separate commit, and an undercount is worse than a duplicate.
+    both lists one commit twice and grades it twice. Each recovered SHA
+    retires at most one placeholder, oldest first, and only one whose
+    recorded repo actually contains that SHA as a commit. A placeholder from
+    another repo (e.g. a submodule commit next to a workspace commit whose
+    output was suppressed) or with no recorded repo is kept: an undercount is
+    worse than a duplicate.
     """
     placeholders = [
         d
         for d in traj_deliverables
         if isinstance(d, str) and d.startswith(_SHALESS_PLACEHOLDER_PREFIX)
     ]
-    if not placeholders or n_recovered <= 0:
+    if not placeholders or not recovered_shas:
         return []
-    repos: set[str] = set()
+    repo_by_value: dict[str, str] = {}
     for raw in traj_details:
-        if isinstance(raw, dict) and raw.get("value") in placeholders:
-            evidence = raw.get("evidence")
-            repo = evidence.get("repo") if isinstance(evidence, dict) else None
-            if isinstance(repo, str) and repo:
-                repos.add(repo)
-    if len(repos) > 1:
-        return []
-    return placeholders[:n_recovered]
+        if not isinstance(raw, dict):
+            continue
+        value = raw.get("value")
+        evidence = raw.get("evidence")
+        repo = evidence.get("repo") if isinstance(evidence, dict) else None
+        if value in placeholders and isinstance(repo, str) and repo:
+            repo_by_value.setdefault(value, repo)
+    unused = list(recovered_shas)
+    retired: list[str] = []
+    for placeholder in placeholders:
+        repo = repo_by_value.get(placeholder)
+        if not repo:
+            continue
+        match = next((sha for sha in unused if _commit_in_repo(repo, sha)), None)
+        if match is not None:
+            unused.remove(match)
+            retired.append(placeholder)
+    return retired
 
 
 def _caller_sha_in_traj(sha: str, traj_sha_prefixes: set[str]) -> bool:
@@ -991,7 +1017,7 @@ def post_session(
     retired_placeholders = _placeholders_superseded_by_trailers(
         traj_deliverables if isinstance(traj_deliverables, list) else [],
         traj_deliverable_details if isinstance(traj_deliverable_details, list) else [],
-        len(trailer_owned_missed),
+        trailer_owned_missed,
     )
     if retired_placeholders:
         deliverables = [d for d in deliverables or [] if d not in retired_placeholders]
