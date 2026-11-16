@@ -712,6 +712,7 @@ def score_lessons(
     use_bm25: bool | None = None,
     bm25_min_z: float | None = None,
     skill_bm25_min_z: float | None = None,
+    routed_skills_only: bool = False,
 ) -> list[dict]:
     """Match lessons via gptme-rag, then apply Bob Thompson-sampling re-rank.
 
@@ -727,6 +728,11 @@ def score_lessons(
     pattern, or skill-name match). Generic descriptor/BM25 overlap alone no
     longer injects it — this fixes marketing-tweet-announce firing on every
     long prompt that mentions tweet/marketing/launch in passing.
+
+    ``routed_skills_only`` applies that rule to every skill (except
+    policy-``exempt`` ones). PreToolUse sets it: over 2026-11-07..13, 93.8% of
+    the 11,120 skill pointers injected on tool events had no routing match,
+    and 2 of 1,356 sampled pointers were followed by a ``Skill()`` call.
     """
     if not _GPTME_RAG_AVAILABLE:
         return []
@@ -759,7 +765,14 @@ def score_lessons(
         r
         for r in results
         if _has_routing_match(r.get("matched_by", []))
-        or not _is_keywords_only_skill(r["path"])
+        or not (
+            (
+                routed_skills_only
+                and r.get("is_skill")
+                and _classify_lesson(r["path"])[0] != "exempt"
+            )
+            or _is_keywords_only_skill(r["path"])
+        )
     ]
     if results:
         ts_means = load_ts_means([r["path"] for r in results])
@@ -2304,6 +2317,9 @@ def _match_and_emit(
     # Corpus has grown ~2× since z=4.0 was calibrated (450→930 lessons).
     # Raise the gate to suppress weak BM25-only matches (precision regression fix).
     score_kwargs["bm25_min_z"] = 6.0
+    # Tool events carry no user intent, so descriptor/BM25 overlap alone
+    # must not inject a skill pointer there; prompt-time matching is unchanged.
+    score_kwargs["routed_skills_only"] = event_type == "PreToolUse"
     raw_matches = score_lessons(
         lessons, match_text, max_results=max_results, **score_kwargs
     )
