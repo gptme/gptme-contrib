@@ -161,3 +161,54 @@ def test_ready_overdue_table_literal_blocker(tmp_path: Path, monkeypatch) -> Non
     result = CliRunner().invoke(cli, ["ready", "--overdue"], terminal_width=140)
     assert result.exit_code == 0, result.exception
     assert "Confirm [/approval]" in result.output
+
+
+def test_ready_overdue_lists_past_gate_deadline(tmp_path: Path, monkeypatch) -> None:
+    """A task gated only by a typed gate.deadline is overdue once it passes."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    base = {"created": "2026-03-28T00:00:00"}
+    write_task(
+        tasks_dir,
+        "gate-passed",
+        state="waiting",
+        gate="{kind: time, deadline: 2026-01-02T00:00:00+00:00}",
+        **base,
+    )
+    write_task(
+        tasks_dir,
+        "gate-future",
+        state="waiting",
+        gate="{kind: time, deadline: 2999-01-01T00:00:00+00:00}",
+        **base,
+    )
+    write_task(tasks_dir, "wait-passed", state="waiting", wait="2026-01-01", **base)
+    write_task(tasks_dir, "wait-later", state="waiting", wait="2026-01-03", **base)
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["ready", "--overdue", "--json"])
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.output)["overdue_tasks"]
+    assert [r["id"] for r in rows] == ["wait-passed", "gate-passed", "wait-later"]
+    gate_row = rows[1]
+    assert gate_row["gated_by"] == "gate.deadline"
+    assert gate_row["gate_kind"] == "time"
+    assert gate_row["gate_deadline"].startswith("2026-01-02")
+    assert rows[0]["gated_by"] == "wait"
+    assert rows[0]["gate_kind"] is None
+
+
+def test_ready_overdue_table_shows_gate_deadline(tmp_path: Path, monkeypatch) -> None:
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    write_task(
+        tasks_dir,
+        "gate-passed",
+        state="waiting",
+        created="2026-03-28T00:00:00",
+        gate="{kind: time, deadline: 2026-01-02T00:00:00+00:00}",
+    )
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["ready", "--overdue"])
+    assert result.exit_code == 0, result.output
+    assert "gate-passed" in result.output
+    assert "gate:time" in result.output

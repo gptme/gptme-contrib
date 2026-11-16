@@ -41,7 +41,7 @@ from typing import (
 
 if TYPE_CHECKING:
     from gptodo.frontmatter_compat import Post as fmPost
-from gptodo.gate import validate_gate
+from gptodo.gate import parse_gate, validate_gate
 
 logger = logging.getLogger(__name__)
 
@@ -706,6 +706,26 @@ def task_wait_gate_passed(task: "TaskInfo") -> bool:
     if state in ("done", "cancelled", "expired", "someday", "draft"):
         return False
     return task_has_waiting_blocker(task) and not task_is_waiting_for_date(task)
+
+
+def task_gate_deadline_passed(task: "TaskInfo", now: datetime | None = None) -> bool:
+    """Return True when a task is still blocked although its typed ``gate.deadline`` passed.
+
+    Same contract as ``task_wait_gate_passed``, for tasks gated by a typed
+    ``gate:`` block instead of (or as well as) ``wait:``. Listing only: the
+    deadline's ``on_timeout`` action belongs to the wait sweep.
+    """
+    gate = parse_gate(task.metadata)
+    if gate is None or gate.deadline is None:
+        return False
+    state = normalize_state(task.state or "", warn=False) if task.state else ""
+    if state in ("done", "cancelled", "expired", "someday", "draft"):
+        return False
+    deadline = gate.deadline
+    current = now or datetime.now(tz=deadline.tzinfo)
+    if deadline.tzinfo is None:
+        current = current.replace(tzinfo=None)
+    return deadline <= current and task_has_waiting_blocker(task)
 
 
 def task_pool(task: "TaskInfo") -> str:
