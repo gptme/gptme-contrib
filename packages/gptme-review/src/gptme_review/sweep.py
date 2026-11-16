@@ -1,12 +1,13 @@
-"""Portable sweep candidate selection and marker policy.
+"""Portable sweep candidate selection, marker policy, and bounded dispatch.
 
 Hosts own GitHub access, mergeability, outage probes, consensus-upgrade
 repos, and reactions. This module decides which open PRs still need a
 review, given an explicit reviewer identity. It has no brain checkout,
 default agent login, or quota collector.
 
-The dispatch loop (subprocess reviewer, alerts, self-merge, REVIEW-key
-budget) stays with the host. ``python -m gptme_review.sweep --dry-run``
+``dispatch_reviews`` schedules host callbacks with bounded concurrency. The
+host owns admission policy, subprocess review execution, accounting, alerts,
+self-merge and REVIEW-key budgets. ``python -m gptme_review.sweep --dry-run``
 lists candidates through a thin ``gh`` host so a second agent can verify
 identity and scope without copying brain scripts.
 """
@@ -18,7 +19,9 @@ import json
 import re
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import NamedTuple, Protocol
@@ -53,6 +56,139 @@ _DUP_JACCARD_FLOOR = 0.3
 _DUP_MIN_SHARED_HUNKS = 2
 _DUP_MIN_SHARED_HUNKS_TIGHT = 1
 _DUP_SMALLER_HUNK_CEILING = 2
+
+
+@dataclass(frozen=True)
+class DispatchAdmission:
+    """A host's decision immediately before a review is submitted.
+
+    No reason means admit. A reason stops the remaining queue unless ``defer``
+    is true: an oversized PR can be skipped while smaller PRs still proceed.
+    """
+
+    reason: str | None = None
+    defer: bool = False
+
+    def __post_init__(self) -> None:
+        if self.defer and not self.reason:
+            raise ValueError("a deferred review needs an admission reason")
+
+
+@dataclass(frozen=True)
+class DispatchResult:
+    """Scheduling accounting, not review success or merge evidence.
+
+    ``attempted`` counts submitted callbacks. The host separately subtracts
+    pre-spend deferrals/superseded heads and classifies review outcomes.
+    Each input entry is either attempted, budget-skipped, size-deferred, or
+    a duplicate. Duplicates are classified before admission, including in a
+    stopped queue's tail; the first entry for each (repo, number) wins.
+    """
+
+    attempted: int
+    budget_skipped: list[dict]
+    size_deferred: list[dict]
+    stop_reason: str | None
+    duplicates: list[dict]
+
+
+class DispatchHost(Protocol):
+    """Explicit boundary between portable scheduling and host policy.
+
+    ``admission`` and ``stop_reason`` run on the scheduler thread; ``run_review``
+    runs on workers. Hosts synchronize mutable accounting shared by those
+    callbacks. Admission owns timing/budget checks (including any first-review
+    exception), and execution owns subprocess timeouts and publication hooks.
+    """
+
+    def admission(
+        self, pr: dict, elapsed: float, already_started: bool
+    ) -> DispatchAdmission: ...
+
+    def run_review(self, pr: dict) -> None: ...
+
+    def stop_reason(self) -> str | None: ...
+
+
+def dispatch_reviews(
+    selected: Sequence[dict],
+    host: DispatchHost,
+    *,
+    workers: int = 1,
+    started: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> DispatchResult:
+    """Dispatch a selected queue with admission before *every* submission.
+
+    ``started`` can include time already spent listing/admitting candidates.
+    Observed stop signals prevent new submissions but drain existing workers.
+    Breakers are polled before and after admission, not atomically with submit;
+    strict spend reservations remain the host execution callback's job. Each
+    (repo, number) is considered once per call, independent of worker timing:
+    the first selected entry wins, even if it is deferred or its head is stale.
+    Later sweeps may retry; the host still checks head freshness at execution.
+    Unexpected callback exceptions propagate after the pool is joined; they
+    are never converted into successful review outcomes.
+
+    This function has no dry-run mode: a dry-run caller must only list its
+    candidates, not call a dispatcher with side-effecting host callbacks.
+    """
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
+    if started is None:
+        started = clock()
+    queue: list[dict] = []
+    duplicates: list[dict] = []
+    seen: set[tuple[str, int]] = set()
+    for pr in selected:
+        key = (pr["repo"], pr["number"])
+        if key in seen:
+            duplicates.append(pr)
+        else:
+            seen.add(key)
+            queue.append(pr)
+    index = attempted = 0
+    size_deferred: list[dict] = []
+    stop_reason: str | None = None
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        in_progress: set[Future[None]] = set()
+        while index < len(queue) or in_progress:
+            while (
+                stop_reason is None
+                and index < len(queue)
+                and len(in_progress) < workers
+            ):
+                stop_reason = host.stop_reason()
+                if stop_reason is not None:
+                    break
+                pr = queue[index]
+                admission = host.admission(pr, clock() - started, attempted > 0)
+                if admission.reason is not None:
+                    if admission.defer:
+                        size_deferred.append(pr)
+                        index += 1
+                        continue
+                    stop_reason = admission.reason
+                    break
+                # Admission may fetch budget state while another worker trips
+                # the breaker. Do not launch on an already-observed stop.
+                stop_reason = host.stop_reason()
+                if stop_reason is not None:
+                    break
+                in_progress.add(executor.submit(host.run_review, pr))
+                attempted += 1
+                index += 1
+            if not in_progress:
+                break
+            done, _ = wait(set(in_progress), return_when=FIRST_COMPLETED)
+            for future in done:
+                in_progress.remove(future)
+                future.result()
+    if stop_reason is None:
+        stop_reason = host.stop_reason()
+    return DispatchResult(
+        attempted, queue[index:], size_deferred, stop_reason, duplicates
+    )
 
 
 class SweepIdentity(NamedTuple):
