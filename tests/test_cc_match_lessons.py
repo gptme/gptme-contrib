@@ -2495,3 +2495,50 @@ def test_window_workspace_ignores_malformed_git_file(hook, tmp_path):
     assert hook._window_workspace(tmp_path) == tmp_path
     (tmp_path / ".git").write_text("gitdir: /nonexistent/x/.git/worktrees/y\n")
     assert hook._window_workspace(tmp_path) == tmp_path
+
+
+# --- PreToolUse: skills need an explicit routing match ---
+
+
+def _scored(path: str, matched_by: list[str], is_skill: bool) -> dict:
+    return {
+        "path": path,
+        "title": Path(path).parent.name,
+        "score": 1.0,
+        "matched_by": matched_by,
+        "is_skill": is_skill,
+    }
+
+
+@pytest.mark.parametrize("routed_skills_only", [False, True])
+def test_routed_skills_only_drops_descriptor_only_skills(
+    hook, monkeypatch, routed_skills_only
+):
+    upstream = [
+        _scored("/w/skills/phone-ocr/SKILL.md", ["description:phone"], True),
+        _scored("/w/skills/end/SKILL.md", ["wrap up"], True),
+        _scored("/w/skills/guard/SKILL.md", ["bm25:0.9"], True),
+        _scored("/w/lessons/tools/foo.md", ["description:foo"], False),
+    ]
+    monkeypatch.setattr(hook, "_GPTME_RAG_AVAILABLE", True)
+    monkeypatch.setattr(
+        hook, "_upstream_score_lessons", lambda *a, **k: [dict(r) for r in upstream]
+    )
+    monkeypatch.setattr(hook, "load_ts_means", lambda paths: {})
+    monkeypatch.setattr(
+        hook,
+        "_classify_lesson",
+        lambda path: ("exempt", 0) if "/guard/" in path else ("normal", 0),
+    )
+
+    kept = {
+        r["path"]
+        for r in hook.score_lessons(
+            [], "x", max_results=10, routed_skills_only=routed_skills_only
+        )
+    }
+
+    assert "/w/skills/end/SKILL.md" in kept  # explicit keyword routing
+    assert "/w/skills/guard/SKILL.md" in kept  # policy-exempt
+    assert "/w/lessons/tools/foo.md" in kept  # lessons are not gated
+    assert ("/w/skills/phone-ocr/SKILL.md" in kept) is (not routed_skills_only)
