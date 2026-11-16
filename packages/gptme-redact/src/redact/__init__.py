@@ -495,6 +495,8 @@ _PATTERNS: list[Pattern] = [
     # redacted (value_only), preserving the key name for debuggability. The name
     # must be a secret keyword or SNAKE_CASE ending in that keyword (so
     # "monkey", "MONKEY_BUSINESS", and prose like "the api key" never match).
+    # Prose of the form "key: <word>" DOES match; unquoted prose-shaped values
+    # are downgraded to HIGH in ``redact`` (see _assignment_severity, #2202).
     Pattern(
         re.compile(
             r"\b(?:[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*_)?"
@@ -502,7 +504,7 @@ _PATTERNS: list[Pattern] = [
             # A closing mapping-key quote followed by ':' permits JSON's
             # multiline whitespace. Line-based assignments keep horizontal
             # padding so an empty value cannot consume the next setting.
-            r"(?:['\"][ \t\r\n]*:[ \t\r\n]*|['\"]?[ \t]*[:=][ \t]*)"
+            r"(?P<sep>['\"][ \t\r\n]*:[ \t\r\n]*|['\"]?[ \t]*[:=][ \t]*)"
             # Quoted values include punctuation/spaces and escaped delimiters.
             # Prefer a complete quoted value, including embedded newlines.
             # Truncated snippets end at a line boundary or EOF instead of a
@@ -551,6 +553,47 @@ _SECRET_ENV_RE = re.compile(
     r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API)", re.IGNORECASE
 )
 _MIN_SECRET_LEN = 8  # don't redact trivially-short env values (e.g. "true", "1")
+
+# Unquoted secret_assignment values shaped like prose rather than a credential
+# (#2202). Status reports say "drained key: the probe", "token = -$12.34" or
+# "key: <code>"; the unquoted branch captures the next word as the
+# value. Such hits are downgraded to HIGH: still masked by ``redact()`` (export
+# redaction keeps preferring a mask to a leaked tail), but below the CRITICAL
+# gate ``guard_outbound`` blocks on. Quoted values are deliberate assignments
+# and stay CRITICAL, and so does tight ``NAME=value`` (env/shell syntax) of any
+# length — ``PASSWORD=hunter2`` and ``TOKEN=x`` still block.
+#
+# Shapes that are never a credential, whatever the separator: a whole markup
+# tag (not a tag prefix or wrapped content), a value that is WHOLLY a money
+# amount (so a crypt hash like ``$1$salt$...`` stays CRITICAL), or a documentation
+# placeholder (KEY=VALUE).
+_NON_CREDENTIAL_VALUE_RE = re.compile(
+    r"<[/!]?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?>\Z"  # whole HTML/markup tag
+    r"|[-+]?[$\u20ac\u00a3]\d[\d,]*(?:\.\d+)?\Z"  # money amount
+    r"|(?i:value|x{3,}|\.{3,}|\*{3,}|\u2026)\Z"  # placeholder
+)
+
+
+def _assignment_severity(match: re.Match[str], severity: Severity) -> Severity:
+    """Downgrade an unquoted, prose-shaped secret_assignment hit to HIGH.
+
+    Prose-shaped means a non-credential value shape, or a short value
+    (below ``_MIN_SECRET_LEN``) after a spaced or ``:`` separator, as in
+    ``key: the`` or ``token= (<a``.
+    """
+    groups = match.re.groupindex
+    if "sep" not in groups or "quote" not in groups:
+        return severity
+    if match.group("quote") is not None:
+        return severity
+    value = match.group("value")
+    prose_separator = match.group("sep").lstrip("'\"") != "="
+    if _NON_CREDENTIAL_VALUE_RE.match(value) or (
+        prose_separator and len(value) < _MIN_SECRET_LEN
+    ):
+        return min(severity, Severity.HIGH)
+    return severity
+
 
 # Known-public literals exempt from layer-2 redaction by default. These are
 # genuinely public (Bob's canonical address appears in README/SOCIAL.md, the
@@ -634,7 +677,7 @@ def _mask_preview(
     """
     if severity >= Severity.CRITICAL:
         return "****"
-    if category in ("private_key",):
+    if category in ("private_key", "secret_assignment"):
         return "****"
     if category.startswith("trufflehog:"):
         return "****"
@@ -732,6 +775,12 @@ def redact(
             )
         else:
             f.count += 1
+            # Aggregate at the highest severity seen: a downgraded (HIGH) hit
+            # recorded first must not hide a later CRITICAL one of the same
+            # category from the fail-closed gate.
+            if severity > f.severity:
+                f.severity = severity
+                f.preview = _mask_preview(category, sample, severity)
 
     # Discover every layer against the original text. Replacing any layer first
     # can destroy the context another detector needs (even an assignment key).
@@ -771,7 +820,10 @@ def redact(
                 # Allowlist exemption never applies to CRITICAL (fail-closed).
                 if value in allow and _p.severity < Severity.CRITICAL:
                     return False
-                spans.append((*m.span("value"), priority, _p.category, _p.severity))
+                severity = _p.severity
+                if _p.category == "secret_assignment":
+                    severity = _assignment_severity(m, severity)
+                spans.append((*m.span("value"), priority, _p.category, severity))
                 return True
             matched = m.group(0)
             if _p.category == "jwt":
