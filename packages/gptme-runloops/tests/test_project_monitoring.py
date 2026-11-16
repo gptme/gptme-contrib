@@ -823,24 +823,33 @@ def test_should_post_comment_concurrent_first_time(workspace):
 
     def call_should_post():
         run = ProjectMonitoringRun(workspace)
-        with patch("gptme_runloops.project_monitoring.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout='{"updatedAt": "2025-11-25T10:00:00Z", "lastCommentAuthor": ""}',
-                stderr="",
-            )
-            # Sync both threads at the gate so they enter should_post_comment
-            # at the same time, maximising the chance of hitting the race.
-            barrier.wait()
-            result = run.should_post_comment("gptme/gptme", 456, "update")
-            results.append(result)
+        # Sync both threads at the gate so they enter should_post_comment
+        # at the same time, maximising the chance of hitting the race.
+        barrier.wait()
+        result = run.should_post_comment("gptme/gptme", 456, "update")
+        results.append(result)
 
-    t1 = threading.Thread(target=call_should_post)
-    t2 = threading.Thread(target=call_should_post)
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
+    # Patch once in the parent: overlapping patches in child threads can
+    # restore another thread's mock instead of the real subprocess.run.
+    import subprocess
+
+    original_run = subprocess.run
+    with patch(
+        "gptme_runloops.project_monitoring.subprocess.run",
+        return_value=MagicMock(
+            returncode=0,
+            stdout='{"updatedAt": "2025-11-25T10:00:00Z", "lastCommentAuthor": ""}',
+            stderr="",
+        ),
+    ):
+        t1 = threading.Thread(target=call_should_post)
+        t2 = threading.Thread(target=call_should_post)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+    assert subprocess.run is original_run
 
     # Exactly one session should have won the race and posted.
     assert (

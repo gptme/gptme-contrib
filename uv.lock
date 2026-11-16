@@ -2460,7 +2460,7 @@ source = { editable = "plugins/gptme-ralph" }
 
 [[package]]
 name = "gptme-redact"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "packages/gptme-redact" }
 
 [package.optional-dependencies]
