@@ -331,23 +331,39 @@ def test_expired_recurrence_gate_surfaces_in_ready_and_next(
     assert json.loads(next_result.output)["next_task"]["id"] == "weekly-review"
 
 
-def test_stale_recurrence_description_stays_blocked(tmp_path: Path) -> None:
-    """A waiting_for string is a human blocker, even one shaped like the retired
-    generated recurrence description; only recur: + wait: gates self-release."""
+@pytest.mark.parametrize(
+    ("wait", "description_wait"),
+    [
+        pytest.param("2020-01-01", "2019-01-01", id="stale-description"),
+        pytest.param("2020-01-01", "2020-01-01", id="exact-date"),
+        pytest.param(
+            "2020-01-01T00:00:00+00:00",
+            "2020-01-01T00:00:00+00:00",
+            id="exact-datetime",
+        ),
+    ],
+)
+def test_recurrence_description_stays_blocked(
+    tmp_path: Path, wait: str, description_wait: str
+) -> None:
+    """Even an exact legacy description blocks an expired recur + wait gate."""
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
     write_task(
         tasks_dir,
         "weekly-review",
         state="waiting",
-        wait="2020-01-01",
+        recur="7d",
+        wait=wait,
         wait_kind="machine",
-        waiting_for="'next recurrence gate (wait: 2019-01-01)'",
+        waiting_for=f"'next recurrence gate (wait: {description_wait})'",
         waiting_since="2026-01-01T00:00:00+00:00",
     )
 
     task = load_tasks(tasks_dir)[0]
+    assert not task_is_waiting_for_date(task)
     assert task_has_waiting_blocker(task)
+    assert not is_task_ready(task, {task.name: task})
 
 
 def test_edit_done_with_subday_recur_stores_datetime(
