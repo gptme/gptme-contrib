@@ -1615,6 +1615,112 @@ def test_post_session_trailer_regrade_never_lowers_grade(tmp_path: Path):
     assert result.record.outcome == "productive"
 
 
+def _tail_piped_commit_signals(*placeholders: tuple[str, str]) -> dict:
+    """Trajectory whose commit output was cut by ``| tail``: SHA-less placeholders only."""
+    from gptme_sessions.signals import grade_signals
+
+    values = [value for value, _ in placeholders]
+    signals = {
+        **_noop_shaped_signals(),
+        "productive": True,
+        "git_commits": values,
+        "deliverables": values,
+        "deliverable_details": [
+            {
+                "value": value,
+                "kind": "commit",
+                "provenance_class": "session_committed",
+                "evidence": {"source": "trajectory", "truncated_output": True, "repo": repo},
+            }
+            for value, repo in placeholders
+        ],
+    }
+    signals["grade"] = grade_signals(signals)
+    return signals
+
+
+def test_trailer_sha_retires_truncated_placeholder(tmp_path: Path):
+    """A ``| tail``-piped commit is one commit: the recovered SHA replaces its placeholder."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+    own_sha = "abc1234567890abcdef1234567890abcdef1234"
+    placeholder = "(commit output truncated) [hDXCevS7]"
+    signals = _tail_piped_commit_signals((placeholder, "/home/agent/ws"))
+
+    with patch.object(_post_session_mod, "extract_from_path", return_value=signals):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="claude-sonnet-5-5",
+            session_id="21e9",
+            duration_seconds=1500,
+            trajectory_path=fake_traj,
+            deliverables=[own_sha],
+            commit_trailers={own_sha: ["21e9"]},
+        )
+
+    assert result.record.deliverables == [own_sha]
+    assert result.grade == signals["grade"]
+    assert result.record.outcome == "productive"
+
+
+def test_trailer_sha_keeps_placeholders_from_several_repos(tmp_path: Path):
+    """Placeholders from two repos may be separate commits: keep them all."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+    own_sha = "abc1234567890abcdef1234567890abcdef1234"
+    ws_placeholder = "(commit output truncated) [aaaaaaaa]"
+    sub_placeholder = "(commit output truncated) [bbbbbbbb]"
+    signals = _tail_piped_commit_signals(
+        (ws_placeholder, "/home/agent/ws"), (sub_placeholder, "/home/agent/ws/submodule")
+    )
+
+    with patch.object(_post_session_mod, "extract_from_path", return_value=signals):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="claude-sonnet-5-5",
+            session_id="21e9",
+            duration_seconds=1500,
+            trajectory_path=fake_traj,
+            deliverables=[own_sha],
+            commit_trailers={own_sha: ["21e9"]},
+        )
+
+    assert ws_placeholder in result.record.deliverables
+    assert sub_placeholder in result.record.deliverables
+    assert own_sha in result.record.deliverables
+
+
+def test_trailer_sha_retires_only_as_many_placeholders_as_recovered(tmp_path: Path):
+    """Two piped commits, one trailer-recovered SHA: one placeholder stays."""
+    store = SessionStore(sessions_dir=tmp_path)
+    fake_traj = tmp_path / "trajectory.jsonl"
+    fake_traj.write_text("")
+    own_sha = "abc1234567890abcdef1234567890abcdef1234"
+    first = "(commit output truncated) [aaaaaaaa]"
+    second = "(commit output truncated) [bbbbbbbb]"
+    signals = _tail_piped_commit_signals((first, "/home/agent/ws"), (second, "/home/agent/ws"))
+
+    with patch.object(_post_session_mod, "extract_from_path", return_value=signals):
+        result = post_session(
+            store=store,
+            harness="claude-code",
+            model="claude-sonnet-5-5",
+            session_id="21e9",
+            duration_seconds=1500,
+            trajectory_path=fake_traj,
+            deliverables=[own_sha],
+            commit_trailers={own_sha: ["21e9"]},
+        )
+
+    commits = [d for d in result.record.deliverables if d.startswith("(commit") or d == own_sha]
+    assert sorted(commits) == sorted([second, own_sha])
+    assert result.grade == signals["grade"]
+
+
 # --- Bookkeeping-only commits grade as file writes ---------------------------
 
 _BK_PREFIXES = ("journal/", "tasks/")

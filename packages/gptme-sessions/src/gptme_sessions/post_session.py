@@ -72,6 +72,44 @@ def _extract_traj_sha_prefixes(traj_deliverables: list[str]) -> set[str]:
     return shas
 
 
+_SHALESS_PLACEHOLDER_PREFIX = "(commit output truncated) ["
+
+
+def _placeholders_superseded_by_trailers(
+    traj_deliverables: Sequence[str],
+    traj_details: Sequence[Any],
+    n_recovered: int,
+) -> list[str]:
+    """SHA-less truncated-commit placeholders that recovered SHAs stand in for.
+
+    A commit piped through ``| tail`` leaves the extractor a
+    ``(commit output truncated) [id]`` placeholder; the caller's
+    Git-Session-Id trailer then recovers that same commit's real SHA. Keeping
+    both lists one commit twice and grades it twice. Retire one placeholder
+    per recovered SHA, oldest first. Skipped when the placeholders come from
+    more than one repo: the trailer SHAs are from the caller's single
+    workspace range, so a placeholder from another repo (e.g. a submodule)
+    may be a separate commit, and an undercount is worse than a duplicate.
+    """
+    placeholders = [
+        d
+        for d in traj_deliverables
+        if isinstance(d, str) and d.startswith(_SHALESS_PLACEHOLDER_PREFIX)
+    ]
+    if not placeholders or n_recovered <= 0:
+        return []
+    repos: set[str] = set()
+    for raw in traj_details:
+        if isinstance(raw, dict) and raw.get("value") in placeholders:
+            evidence = raw.get("evidence")
+            repo = evidence.get("repo") if isinstance(evidence, dict) else None
+            if isinstance(repo, str) and repo:
+                repos.add(repo)
+    if len(repos) > 1:
+        return []
+    return placeholders[:n_recovered]
+
+
 def _caller_sha_in_traj(sha: str, traj_sha_prefixes: set[str]) -> bool:
     """Return True if a full 40-char SHA from the caller appears in trajectory commits."""
     sha_lower = sha.lower().strip()
@@ -949,6 +987,15 @@ def post_session(
             evidence={"source": "caller", "reason": "no_trajectory"},
         )
 
+    trailer_owned_missed = list(dict.fromkeys(trailer_owned_missed))
+    retired_placeholders = _placeholders_superseded_by_trailers(
+        traj_deliverables if isinstance(traj_deliverables, list) else [],
+        traj_deliverable_details if isinstance(traj_deliverable_details, list) else [],
+        len(trailer_owned_missed),
+    )
+    if retired_placeholders:
+        deliverables = [d for d in deliverables or [] if d not in retired_placeholders]
+
     deliverable_details = _merge_deliverable_details(
         deliverables=deliverables or [],
         trajectory_details=traj_deliverable_details
@@ -979,12 +1026,11 @@ def post_session(
 
     # Re-grade with git-proven commits the extractor missed. Commits only add
     # effective work units, so this can raise the grade but never lower it.
-    trailer_owned_missed = list(dict.fromkeys(trailer_owned_missed))
     if trailer_owned_missed and grading_signals is not None and grade is not None:
         with_trailer = dict(grading_signals)
-        with_trailer["git_commits"] = list(grading_signals.get("git_commits") or []) + [
-            f"(trailer-owned) ({sha[:12]})" for sha in trailer_owned_missed
-        ]
+        with_trailer["git_commits"] = [
+            c for c in grading_signals.get("git_commits") or [] if c not in retired_placeholders
+        ] + [f"(trailer-owned) ({sha[:12]})" for sha in trailer_owned_missed]
         adjusted, trailer_bookkeeping = reclassify_bookkeeping_commits(
             with_trailer, commit_files, bookkeeping_path_prefixes
         )
