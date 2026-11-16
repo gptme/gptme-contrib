@@ -41,8 +41,12 @@ def _capture(monkeypatch, *, no_train, ctx):
 def test_local_no_train_review_ignores_inceptron(monkeypatch):
     block = _capture(monkeypatch, no_train=True, ctx={"consumer": "local"})
     assert block["data_collection"] == "deny"
-    assert block["allow_fallbacks"] is True
     assert [n.casefold() for n in block["ignore"]] == ["inceptron"]
+    # An order of only ignored hosts is dropped, so an unnamed failure is not
+    # logged (and quarantined) against Inceptron, which this call never tried.
+    assert "order" not in block
+    assert block["sort"] == "price"
+    assert core._requested_provider(block) is None
 
 
 @pytest.mark.parametrize("ctx", [{"consumer": "sweep"}, {"consumer": "fanout"}, None])

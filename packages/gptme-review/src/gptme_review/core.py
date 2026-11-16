@@ -3129,6 +3129,15 @@ def build_provider_routing(
         block["order"] = prefer_healthy_provider_order(order, ignore)
     if no_train:
         block["data_collection"] = "deny"
+        # An order made only of ignored hosts is a preference for nothing we
+        # will try. Left in place it names an excluded host as the requested
+        # provider, so an unnamed failure is logged (and quarantined) against
+        # a host the call never reached.
+        ignored_hosts = {_fold_provider(name) for name in ignore if name}
+        if "order" in block and all(
+            _fold_provider(name) in ignored_hosts for name in block["order"]
+        ):
+            del block["order"]
         if "order" in block:
             block["allow_fallbacks"] = True
         else:
