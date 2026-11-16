@@ -1,0 +1,57 @@
+# Risk-tiered merge policy for Bob-authored PRs.
+#
+# One file, two readers: the self-merge gate (scripts/github/self-merge-check.py)
+# and Erik's merge scanner (scripts/github/merge-policy.py tier ... --json).
+# Logic: packages/gptme-contrib-lib/src/gptme_contrib_lib/merge_policy.py.
+#
+# Calibration: backtest on Erik's last 1,396 merges of Bob PRs (ErikBjare/bob,
+# knowledge/analysis/2026-11-12-merge-tier-backtest.md). Tier 0 there was 62
+# PRs, 0 Erik CHANGES_REQUESTED, 0 reverts. Erik approved tier 0 only on
+# 2026-11-15 (ErikBjare/bob#1480 row 7) and set the size exemptions the same
+# day. The backtested "small non-sensitive code" tier is NOT approved and is
+# deliberately absent: everything that is not tier 0 is Erik's.
+#
+# A PR's tier is the LOWEST tier whose every constraint it meets.
+# File classes (per changed path, first match wins):
+#   ci         .github/workflows/<name> where <name> matches ci_allowed_name
+#              and the patch does not touch any ci_forbidden_tokens
+#   ci-other   any other .github/ path, or a ci file whose patch is missing
+#   sensitive  is_sensitive_path()
+#   lockfile   is_lockfile()
+#   tests      is_test_file()
+#   spec-doc   repo-root README/ARCHITECTURE/CLAUDE/... (is_spec_like_doc)
+#   docs       other doc files (is_doc_file)
+#   code       everything else
+
+# "CI config" read as workflows that only test or lint. build.yml and docs.yml
+# can publish artifacts or pages, so they stay out. Allowlist, not denylist:
+# a denylist admitted sync-prod-image-pin.yml and promote-to-production.yml.
+ci_allowed_name = "^(tests?|tests?-[a-z0-9-]+|lint|pre-commit|e2e|nodejs|ci|typecheck|checks?|docs-linkcheck|lighthouse|webui|benchmark|codeql|conformance|eval-ci)\\.ya?ml$"
+
+# A ci diff that adds or removes a line containing any of these is ci-other.
+ci_forbidden_tokens = ["permissions:", "secrets.", "pull_request_target", "runs-on"]
+
+# Size budget ignores these classes (Erik, 2026-11-15, ErikBjare/bob#1480).
+# Exempt files still have to be in the tier's allowed classes. Closed set:
+# generated code, locales and vendor/ stay counted until Erik names them.
+size_exempt_classes = ["tests", "lockfile"]
+
+[rollout]
+# Repos where a tier-0 verdict lets the self-merge gate waive its path/category
+# policy. Empty until Erik grants merge rights for a repo; he adds the repo here
+# himself. Outside this list the tier is reported, never acted on.
+repos = []
+
+[[tier]]
+id = 0
+name = "low-risk classes"
+action = "self-merge once CI is green on the head (review gates still apply)"
+classes = ["docs", "tests", "ci"]
+max_lines = 300
+max_files = 10
+
+[[tier]]
+id = 2
+name = "everything else"
+action = "Erik reviews and merges"
+classes = ["*"]
