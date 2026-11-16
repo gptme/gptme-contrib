@@ -260,7 +260,8 @@ def product_name(repo: str) -> str:
 
 # Per-item bullet emoji, matched on the feature text (first hit wins). X renders
 # the em dash used as a bullet wider than a normal one and it reads as an AI tell,
-# so each item gets an emoji that matches its vibe instead.
+# so each item gets an emoji that matches its vibe instead. Keep each emoji to
+# one codepoint so the prefix uses the same character budget as the old bullet.
 _BULLET_EMOJI: tuple[tuple[str, str], ...] = (
     (r"\b(?:security|auth|oauth|token|credential|sign(?:ing|ed)?|encrypt\w*)\b", "🔒"),
     (r"\b(?:perf\w*|fast\w*|speed\w*|latency|cache\w*|optimi[sz]\w*)\b", "⚡"),
@@ -268,9 +269,9 @@ _BULLET_EMOJI: tuple[tuple[str, str], ...] = (
     (r"\b(?:windows|macos|linux|installer|install\w*|package|msi|dmg)\b", "📦"),
     (
         r"\b(?:ui|tui|gui|webui|dashboard|theme|layout|view|chart|timeline|screen)\b",
-        "🖥️",
+        "💻",
     ),
-    (r"\b(?:cli|command|terminal|shell|flag)\b", "⌨️"),
+    (r"\b(?:cli|command|terminal|shell|flag)\b", "🐚"),
     (r"\b(?:mcp|plugin|tool|tools|integration|api|sdk|extension)\b", "🔌"),
     (
         r"\b(?:model|llm|provider|openai|anthropic|deepseek|gemini|claude|grok|gpt)\b",
