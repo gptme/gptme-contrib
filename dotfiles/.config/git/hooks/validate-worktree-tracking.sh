@@ -133,10 +133,12 @@ if [ -n "$upstream_remote" ] && [ "$upstream_remote" != "." ] && [ -n "$upstream
             if [ "$remote_ref" = "$upstream_merge" ]; then
                 echo "🚫 ERROR: Branch '$current_branch' tracks '$upstream' ($upstream_url),"
                 echo "   but this push sends it to '${1:-$dest_url}' ($dest_url)."
-                echo "   A PR whose head is on '$upstream_remote' will not see this commit."
+                echo "   A PR only sees commits pushed to its head repository. Check it first:"
+                echo "     gh pr view --json headRepository,headRepositoryOwner"
                 echo ""
-                echo "   Push to the tracked remote:  git push $upstream_remote $current_branch"
-                echo "   Or, if deliberate:           GIT_ALLOW_PUSH_OFF_UPSTREAM=1 git push ..."
+                echo "   Head is on '$upstream_remote':  git push $upstream_remote $current_branch"
+                echo "   Head is on the destination:  git branch -u ${1:-<remote>}/$current_branch"
+                echo "                                (or GIT_ALLOW_PUSH_OFF_UPSTREAM=1 for a one-off)"
                 echo ""
                 exit 1
             fi
