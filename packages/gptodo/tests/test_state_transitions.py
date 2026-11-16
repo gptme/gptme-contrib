@@ -167,3 +167,17 @@ def test_noop_state_change_does_not_warn(tmp_path: Path, monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert "illegal" not in result.output.lower()
+
+
+def test_observed_deliberate_transitions_are_on_the_table() -> None:
+    """Deliberate edits seen in practice must not need --force or an intent.
+
+    A 30-day census of Bob's task history found these as the bulk of
+    off-table transitions: reviving deferred work onto a real blocker,
+    closing a someday task found already complete, and review sending work
+    back to the queue.
+    """
+    from gptodo.lifecycle import validate_transition
+
+    for old, new in [("someday", "waiting"), ("someday", "done"), ("ready_for_review", "todo")]:
+        assert validate_transition(old, new, strict=True) == new

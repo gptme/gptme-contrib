@@ -105,6 +105,7 @@ VALID_TRANSITIONS: dict[str, list[str]] = {
     "active": ["ready_for_review", "waiting", "draft", "someday", "done", "cancelled"],
     "ready_for_review": [
         "active",
+        "todo",  # Review sends the work back to the queue
         "waiting",
         "someday",
         "done",
@@ -115,6 +116,8 @@ VALID_TRANSITIONS: dict[str, list[str]] = {
     "someday": [
         "backlog",
         "todo",
+        "waiting",  # Revived onto a real blocker
+        "done",  # Found already complete
         "cancelled",
         "expired",
     ],  # Can be revived back to actionable lanes
