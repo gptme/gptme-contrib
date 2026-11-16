@@ -2412,8 +2412,11 @@ def test_main_varying_launcher_prompt_share_and_receipts(hook, tmp_path, monkeyp
     assert all("cascade selector" not in query for query in queries[1:])
 
 
-def test_linked_worktrees_share_one_prompt_window(hook, tmp_path):
-    """Per-session worktrees of one repo must not each get an empty window."""
+@pytest.mark.parametrize("agent_workspace", [False, True])
+def test_linked_worktrees_share_one_prompt_window(
+    hook, tmp_path, monkeypatch, agent_workspace
+):
+    """Real hook calls share repeats across worktrees, not unrelated repos."""
     import subprocess
 
     repo = tmp_path / "repo"
@@ -2445,6 +2448,46 @@ def test_linked_worktrees_share_one_prompt_window(hook, tmp_path):
     other = tmp_path / "other"
     other.mkdir()
     assert hook._prompt_window_file(other, state) != main
+
+    _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch)
+    receipts = []
+    for index, cwd in enumerate((repo, wt_a, wt_b, other)):
+        # Exercise both a fixed agent brain and workspace discovery per checkout.
+        monkeypatch.setattr(
+            hook, "get_workspace", lambda: tmp_path if agent_workspace else cwd
+        )
+        session = f"worktree-{index}"
+        monkeypatch.setattr(
+            hook,
+            "_STDIN_CACHE",
+            json.dumps(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": session,
+                    "cwd": str(cwd),
+                    "prompt": "identical launcher prompt",
+                }
+            ),
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            hook.main()
+        assert exc_info.value.code == 0
+        receipts.append(
+            json.loads(
+                (tmp_path / f"cc-session-{session}-lessons-receipts.jsonl").read_text()
+            )
+        )
+    assert [row["outcome"] for row in receipts] == [
+        "emitted",
+        "empty",
+        "empty",
+        "emitted",
+    ]
+    for row in receipts[1:3]:
+        assert row["reason"] == "fixed_prompt_repeat"
+        assert row["bytes"] == row["prompt_novel_lines"] == 0
+    assert receipts[0]["bytes"] > 0
+    assert receipts[3]["bytes"] > 0
 
 
 def test_window_workspace_ignores_malformed_git_file(hook, tmp_path):

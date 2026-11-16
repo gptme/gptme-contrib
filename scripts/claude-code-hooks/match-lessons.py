@@ -2234,7 +2234,9 @@ def main():
     # later skip a non-holdout run of the same prompt as a fixed-prompt repeat.
     holdout_lessons = parse_holdout_lessons_env()
     scope = (
-        str(project_workspace.resolve()),
+        # Share both the state file and its keys across linked worktrees.
+        # Keep project_workspace unchanged for project-local lesson discovery.
+        str(_window_workspace(project_workspace).resolve()),
         current_repo,
         session_cat,
         harness,
