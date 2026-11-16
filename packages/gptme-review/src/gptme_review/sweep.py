@@ -80,12 +80,16 @@ class DispatchResult:
 
     ``attempted`` counts submitted callbacks. The host separately subtracts
     pre-spend deferrals/superseded heads and classifies review outcomes.
+    Each input entry is either attempted, budget-skipped, size-deferred, or
+    a duplicate. Duplicates are classified before admission, including in a
+    stopped queue's tail; the first entry for each (repo, number) wins.
     """
 
     attempted: int
     budget_skipped: list[dict]
     size_deferred: list[dict]
     stop_reason: str | None
+    duplicates: list[dict]
 
 
 class DispatchHost(Protocol):
@@ -119,8 +123,10 @@ def dispatch_reviews(
     ``started`` can include time already spent listing/admitting candidates.
     Observed stop signals prevent new submissions but drain existing workers.
     Breakers are polled before and after admission, not atomically with submit;
-    strict spend reservations remain the host execution callback's job. A duplicate
-    (repo, number) already in flight is skipped, not launched concurrently.
+    strict spend reservations remain the host execution callback's job. Each
+    (repo, number) is considered once per call, independent of worker timing:
+    the first selected entry wins, even if it is deferred or its head is stale.
+    Later sweeps may retry; the host still checks head freshness at execution.
     Unexpected callback exceptions propagate after the pool is joined; they
     are never converted into successful review outcomes.
 
@@ -131,13 +137,21 @@ def dispatch_reviews(
         raise ValueError("workers must be at least 1")
     if started is None:
         started = clock()
-    queue = list(selected)
+    queue: list[dict] = []
+    duplicates: list[dict] = []
+    seen: set[tuple[str, int]] = set()
+    for pr in selected:
+        key = (pr["repo"], pr["number"])
+        if key in seen:
+            duplicates.append(pr)
+        else:
+            seen.add(key)
+            queue.append(pr)
     index = attempted = 0
     size_deferred: list[dict] = []
     stop_reason: str | None = None
-    in_flight: set[tuple[str, int]] = set()
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        in_progress: dict[Future[None], tuple[str, int]] = {}
+        in_progress: set[Future[None]] = set()
         while index < len(queue) or in_progress:
             while (
                 stop_reason is None
@@ -148,10 +162,6 @@ def dispatch_reviews(
                 if stop_reason is not None:
                     break
                 pr = queue[index]
-                key = (pr["repo"], pr["number"])
-                if key in in_flight:
-                    index += 1
-                    continue
                 admission = host.admission(pr, clock() - started, attempted > 0)
                 if admission.reason is not None:
                     if admission.defer:
@@ -165,19 +175,20 @@ def dispatch_reviews(
                 stop_reason = host.stop_reason()
                 if stop_reason is not None:
                     break
-                in_flight.add(key)
-                in_progress[executor.submit(host.run_review, pr)] = key
+                in_progress.add(executor.submit(host.run_review, pr))
                 attempted += 1
                 index += 1
             if not in_progress:
                 break
             done, _ = wait(set(in_progress), return_when=FIRST_COMPLETED)
             for future in done:
-                in_flight.discard(in_progress.pop(future))
+                in_progress.remove(future)
                 future.result()
     if stop_reason is None:
         stop_reason = host.stop_reason()
-    return DispatchResult(attempted, queue[index:], size_deferred, stop_reason)
+    return DispatchResult(
+        attempted, queue[index:], size_deferred, stop_reason, duplicates
+    )
 
 
 class SweepIdentity(NamedTuple):

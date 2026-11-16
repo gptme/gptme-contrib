@@ -101,10 +101,16 @@ an already-selected queue. Its `DispatchHost` has three callbacks:
   needing strict spend reservations must enforce them in execution too. Hosts
   must synchronize mutable state shared with their workers.
 
-The scheduler bounds concurrency and prevents duplicate `(repo, number)` jobs
-from running simultaneously. Unexpected callback exceptions propagate; they do
-not become clean outcomes. `DispatchResult` reports submitted callbacks and
-size-deferred/budget-skipped candidates, not review successes or merge evidence.
+The scheduler bounds concurrency and considers each `(repo, number)` only once
+per dispatch call, independent of worker timing. The first selected entry wins,
+including when deferred or when later entries list a different head; execution
+still owns head-freshness checks, and a later sweep can retry. Duplicate entries
+are classified before admission, even in a stopped queue's tail, and returned in
+`DispatchResult.duplicates` without invoking host admission/execution for them.
+Unexpected callback exceptions propagate; they do not become clean outcomes.
+`DispatchResult` reports scheduling, not review successes or merge evidence:
+`attempted + len(size_deferred) + len(budget_skipped) + len(duplicates)` equals
+`len(selected)` on a normal return.
 Pass the sweep's original monotonic `started` to charge candidate-listing time,
 and pass a host clock explicitly when maintaining local test/clock seams.
 

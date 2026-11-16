@@ -119,7 +119,71 @@ def test_unexpected_worker_exception_propagates():
         dispatch([pr(1)], BrokenHost())
 
 
-def test_concurrency_is_bounded_and_duplicate_inflight_is_skipped():
+@pytest.mark.parametrize("workers", [1, 2])
+def test_duplicate_is_dispatched_once_per_call(workers):
+    host = Host()
+    first = {**pr(1), "headRefOid": "first-listed-head"}
+    duplicate = {**pr(1), "headRefOid": "second-listed-head"}
+    selected = [first, pr(2), duplicate]
+    result = dispatch(selected, host, workers=workers)
+    assert sorted(host.ran) == [1, 2]
+    assert host.admissions == [(1, False), (2, True)]
+    assert result.attempted == 2
+    assert result.duplicates == [duplicate]
+    assert result.budget_skipped == []
+    assert result.size_deferred == []
+    assert result.stop_reason is None
+    assert len(selected) == result.attempted + len(result.duplicates)
+    # The first entry wins only within this call; a later sweep can retry.
+    again = dispatch([first], Host(), workers=workers)
+    assert again.attempted == 1
+    assert again.duplicates == []
+
+
+def test_duplicate_accounting_includes_stopped_queue_tail():
+    host = Host()
+    host.reason = "budget unavailable"
+    selected = [pr(1), pr(1), pr(2), pr(2)]
+    result = dispatch(selected, host)
+    assert host.admissions == []
+    assert host.ran == []
+    assert result.attempted == 0
+    assert result.budget_skipped == [pr(1), pr(2)]
+    assert result.duplicates == [pr(1), pr(2)]
+    assert len(selected) == len(result.budget_skipped) + len(result.duplicates)
+
+
+def test_duplicate_of_size_deferred_candidate_is_not_readmitted():
+    class SizedHost(Host):
+        def admission(self, candidate, elapsed, started):
+            self.admissions.append((candidate["number"], started))
+            if candidate["number"] == 1:
+                return sweep.DispatchAdmission("too large", defer=True)
+            return sweep.DispatchAdmission()
+
+    host = SizedHost()
+    selected = [pr(1), pr(1), pr(2)]
+    result = dispatch(selected, host)
+    assert host.admissions == [(1, False), (2, False)]
+    assert host.ran == [2]
+    assert result.attempted == 1
+    assert result.size_deferred == [pr(1)]
+    assert result.duplicates == [pr(1)]
+    assert result.budget_skipped == []
+    assert len(selected) == (
+        result.attempted + len(result.size_deferred) + len(result.duplicates)
+    )
+
+
+def test_same_number_in_different_repos_is_not_a_duplicate():
+    host = Host()
+    result = dispatch([pr(1), {**pr(1), "repo": "example/other"}], host)
+    assert host.ran == [1, 1]
+    assert result.attempted == 2
+    assert result.duplicates == []
+
+
+def test_concurrency_is_bounded_and_duplicates_are_reported():
     entered = threading.Event()
     release = threading.Event()
     lock = threading.Lock()
@@ -154,6 +218,7 @@ def test_concurrency_is_bounded_and_duplicate_inflight_is_skipped():
     assert max_active == 2
     assert sorted(host.ran) == [1, 2, 3]
     assert result.attempted == 3
+    assert result.duplicates == [pr(1)]
 
 
 @pytest.mark.parametrize("workers", [0, -1])
