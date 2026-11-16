@@ -63,8 +63,37 @@ seams without mutating the package's globals. An explicit empty mapping disables
 all transports for that call; it does not fall back to the built-in table.
 Omitting these arguments retains the package defaults, resolved at call time.
 
-This is an extraction seam, **not yet a portable sweep CLI**. The original host
-adapter continues to own production execution until it adopts this package.
+The original host adapter continues to own production panel execution until it
+adopts this package.
+
+## Sweep candidate selection
+
+`gptme_review.sweep` decides which open PRs still need a review. The host
+passes an explicit `SweepIdentity` (login + marker namespace), a `SweepConfig`
+(authors, consensus-upgrade repos, min-age), and a `SweepHost` (GitHub listing,
+comments, mergeability, outage probe, reactions, file/patch fetch). The package
+has no default agent login and does not read a brain checkout.
+
+`select_candidates(repo, config, host, now)` returns the dispatchable PRs, or
+`None` when listing failed (distinct from an empty list). `SweepHost.pr_comments`
+also distinguishes failure (`None`) from an empty comment list: an unreadable PR
+is skipped for that pass, not admitted as never reviewed. Marker parsing and
+`@login review` triggers are identity-scoped, so two reviewers on the same PR
+do not consume each other's markers. Duplicate-PR tagging, consensus-upgrade
+eligibility, and trusted-request opt-in live here.
+
+The dispatch loop (subprocess reviewer, alerts, self-merge, REVIEW-key budget)
+stays with the host. A dry-run CLI lists candidates through a thin `gh` host:
+
+```txt
+python -m gptme_review.sweep --login reviewer-bot --marker-namespace agent-ai-review \
+  --repos owner/repo --authors reviewer-bot --dry-run
+```
+
+`--login` and `--marker-namespace` are required. This is candidate listing, not
+a production sweep: it does not run reviews. If every repository listing fails,
+the CLI exits non-zero rather than reporting an empty successful sweep. Partial
+listing failures are reported on stderr while available repositories still run.
 
 ## Large-diff shard planning
 
