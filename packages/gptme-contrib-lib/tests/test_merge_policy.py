@@ -33,7 +33,7 @@ C = Classifier()
 
 @pytest.fixture(scope="module")
 def policy() -> dict:
-    return merge_policy.load_policy()
+    return merge_policy.load_policy(merge_policy.POLICY_PATH)
 
 
 def tier(changes: list[FileChange], policy: dict) -> merge_policy.TierVerdict:
@@ -42,7 +42,7 @@ def tier(changes: list[FileChange], policy: dict) -> merge_policy.TierVerdict:
 
 def test_shipped_policy_is_tier0_plus_catch_all_with_empty_rollout(policy) -> None:
     assert [t["id"] for t in policy["tier"]] == [0, 2]
-    assert policy["tier"][0]["classes"] == ["docs", "tests", "ci"]
+    assert policy["tier"][0]["classes"] == ["docs", "tests"]
     assert policy["size_exempt_classes"] == ["tests", "lockfile"]
     # Rollout waits on Erik's merge-rights grant; he adds repos himself.
     assert merge_policy.rollout_repos(policy) == frozenset()
@@ -90,10 +90,10 @@ CLEAN_CI_PATCH = (
 )
 
 
-def test_allowed_workflow_with_clean_patch_is_ci(policy) -> None:
+def test_allowed_workflow_with_clean_patch_still_requires_human(policy) -> None:
     v = tier([FileChange(".github/workflows/test.yml", 1, 1, CLEAN_CI_PATCH)], policy)
-    assert v.tier == 0
-    assert v.classes == {".github/workflows/test.yml": "ci"}
+    assert v.tier == 2
+    assert v.classes == {".github/workflows/test.yml": "ci-other"}
 
 
 @pytest.mark.parametrize(
@@ -112,10 +112,10 @@ def test_ci_patch_touching_forbidden_tokens_is_ci_other(policy, token_line) -> N
     assert v.tier == 2
 
 
-def test_unchanged_context_lines_do_not_trip_forbidden_tokens(policy) -> None:
+def test_workflow_context_does_not_establish_full_yaml_safety(policy) -> None:
     patch = "@@ -1,3 +1,3 @@\n     runs-on: ubuntu-latest\n-      - run: a\n+      - run: b\n"
     assert (
-        tier([FileChange(".github/workflows/lint.yml", 1, 1, patch)], policy).tier == 0
+        tier([FileChange(".github/workflows/lint.yml", 1, 1, patch)], policy).tier == 2
     )
 
 
@@ -138,3 +138,43 @@ def test_policy_without_catch_all_is_rejected(tmp_path: Path) -> None:
     bad.write_text('[[tier]]\nid = 0\nclasses = ["docs"]\n')
     with pytest.raises(ValueError, match="catch-all"):
         merge_policy.load_policy(bad)
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        "@@ -1,3 +1,3 @@\n permissions:\n-  contents: read\n+  contents: write\n",
+        '@@ -1 +1 @@\n+"permissions": write-all\n',
+        CLEAN_CI_PATCH,
+    ],
+)
+def test_workflows_need_human_review_without_full_yaml_proof(policy, patch) -> None:
+    assert (
+        tier([FileChange(".github/workflows/test.yml", 1, 1, patch)], policy).tier == 2
+    )
+
+
+@pytest.mark.parametrize("altered", ["merge_policy.py", "merge_policy.toml"])
+def test_default_loader_rejects_candidate_policy_changes(monkeypatch, altered) -> None:
+    import subprocess
+
+    def git_show(argv, **kwargs):
+        name = argv[2].rsplit("/", 1)[-1]
+        source = merge_policy.POLICY_PATH.with_name(name)
+        data = source.read_bytes() + (b"\n# changed" if name == altered else b"")
+        return subprocess.CompletedProcess(argv, 0, data)
+
+    monkeypatch.setattr(subprocess, "run", git_show)
+    with pytest.raises(ValueError, match="differs from trusted"):
+        merge_policy.load_policy()
+
+
+def test_default_loader_rejects_missing_trusted_revision(monkeypatch) -> None:
+    import subprocess
+
+    def missing(*args, **kwargs):
+        raise subprocess.CalledProcessError(128, args[0])
+
+    monkeypatch.setattr(subprocess, "run", missing)
+    with pytest.raises(ValueError, match="trusted merge policy unavailable"):
+        merge_policy.load_policy()

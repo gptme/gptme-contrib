@@ -10,7 +10,7 @@ Stdlib only (tomli on 3.10): the gate imports this from a plain script.
 
 from __future__ import annotations
 
-import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -65,7 +65,37 @@ class TierVerdict:
 
 
 def load_policy(path: Path | None = None) -> dict[str, Any]:
-    policy = tomllib.loads((path or POLICY_PATH).read_text())
+    """Load deployed policy, never authorization from a candidate PR checkout.
+
+    The default requires the evaluator and data to match the checkout's trusted
+    origin/master revision. A missing ref/file or local edit fails closed. The
+    gate itself must likewise be run from the trusted deployment, not PR code.
+    An explicit path is for offline calibration/tests, not merge authorization.
+    """
+    if path is None:
+        root = Path(__file__).resolve().parents[4]
+        for source in (Path(__file__).resolve(), POLICY_PATH):
+            try:
+                trusted = subprocess.run(
+                    [
+                        "git",
+                        "show",
+                        f"refs/remotes/origin/master:{source.relative_to(root)}",
+                    ],
+                    cwd=root,
+                    capture_output=True,
+                    check=True,
+                    timeout=10,
+                ).stdout
+            except (subprocess.SubprocessError, OSError) as exc:
+                raise ValueError("trusted merge policy unavailable") from exc
+            if source.read_bytes() != trusted:
+                raise ValueError("merge policy differs from trusted origin/master")
+        # Parse the trusted bytes, not a second potentially changed local read.
+        text = trusted.decode("utf-8")
+    else:
+        text = path.read_text()
+    policy = tomllib.loads(text)
     tiers = policy.get("tier") or []
     if not tiers or "*" not in tiers[-1].get("classes", []):
         raise ValueError("merge policy must end with a catch-all tier")
@@ -76,33 +106,15 @@ def rollout_repos(policy: dict[str, Any]) -> frozenset[str]:
     return frozenset((policy.get("rollout") or {}).get("repos") or [])
 
 
-def _diff_lines(patch: str) -> list[str]:
-    return [
-        line[1:]
-        for line in patch.splitlines()
-        if line[:1] in "+-" and not line.startswith(("+++", "---"))
-    ]
-
-
 def file_class(
     change: FileChange, policy: dict[str, Any], classifier: PathClassifier
 ) -> str:
     path = change.path
     parts = path.replace("\\", "/").removeprefix("./").split("/")
     if ".github" in (part.lower() for part in parts[:-1]):
-        is_workflow = [p.lower() for p in parts[:2]] == [
-            ".github",
-            "workflows",
-        ] and len(parts) == 3
-        allowed = re.compile(policy["ci_allowed_name"], re.IGNORECASE)
-        if not is_workflow or not allowed.search(parts[-1]):
-            return "ci-other"
-        if change.patch is None:
-            return "ci-other"
-        tokens = policy.get("ci_forbidden_tokens") or []
-        if any(tok in line for line in _diff_lines(change.patch) for tok in tokens):
-            return "ci-other"
-        return "ci"
+        # Diff fragments cannot prove YAML parent keys, aliases, permissions or
+        # event safety. Until full base/head YAML is verified, no workflow waiver.
+        return "ci-other"
     if classifier.is_sensitive_path(path):
         return "sensitive"
     if classifier.is_lockfile(path):

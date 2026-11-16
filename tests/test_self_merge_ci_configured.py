@@ -428,6 +428,10 @@ def _evaluate_with(
         return ""
 
     monkeypatch.setattr(smc, "merge_permission", lambda repo: True)
+    # Policy trust verification reads git; isolate it from this CI-only test.
+    monkeypatch.setattr(
+        smc.merge_policy, "load_policy", lambda: {"rollout": {"repos": []}}
+    )
     monkeypatch.setattr(smc, "run_gh", _run_gh)
     # `_fetch_ai_review_marker_checked` goes through `run_gh_checked`, which calls
     # `subprocess.run` directly rather than through `run_gh` — so stubbing `run_gh`

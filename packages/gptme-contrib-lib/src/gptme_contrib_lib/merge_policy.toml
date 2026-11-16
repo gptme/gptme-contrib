@@ -13,9 +13,7 @@
 #
 # A PR's tier is the LOWEST tier whose every constraint it meets.
 # File classes (per changed path, first match wins):
-#   ci         .github/workflows/<name> where <name> matches ci_allowed_name
-#              and the patch does not touch any ci_forbidden_tokens
-#   ci-other   any other .github/ path, or a ci file whose patch is missing
+#   ci-other   every .github/ path; diff fragments cannot establish YAML safety
 #   sensitive  is_sensitive_path()
 #   lockfile   is_lockfile()
 #   tests      is_test_file()
@@ -23,13 +21,9 @@
 #   docs       other doc files (is_doc_file)
 #   code       everything else
 
-# "CI config" read as workflows that only test or lint. build.yml and docs.yml
-# can publish artifacts or pages, so they stay out. Allowlist, not denylist:
-# a denylist admitted sync-prod-image-pin.yml and promote-to-production.yml.
-ci_allowed_name = "^(tests?|tests?-[a-z0-9-]+|lint|pre-commit|e2e|nodejs|ci|typecheck|checks?|docs-linkcheck|lighthouse|webui|benchmark|codeql|conformance|eval-ci)\\.ya?ml$"
-
-# A ci diff that adds or removes a line containing any of these is ci-other.
-ci_forbidden_tokens = ["permissions:", "secrets.", "pull_request_target", "runs-on"]
+# CI is deliberately NOT in tier 0 yet. Permissions can change under an
+# unchanged parent key (and YAML aliases/quoted keys evade token scans).
+# A future workflow waiver needs full base/head YAML proof, not a diff denylist.
 
 # Size budget ignores these classes (Erik, 2026-11-15, ErikBjare/bob#1480).
 # Exempt files still have to be in the tier's allowed classes. Closed set:
@@ -46,7 +40,7 @@ repos = []
 id = 0
 name = "low-risk classes"
 action = "self-merge once CI is green on the head (review gates still apply)"
-classes = ["docs", "tests", "ci"]
+classes = ["docs", "tests"]
 max_lines = 300
 max_files = 10
 

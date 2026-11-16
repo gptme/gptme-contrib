@@ -10,10 +10,11 @@ Usage:
     merge-policy.py tier --stdin [--json]
 
 ``--stdin`` takes a JSON list of
-``{"repo": "...", "number": N, "files": [{"path", "additions", "deletions", "patch"}]}``
+``{"repo": "...", "number": N, "changedFiles": TOTAL, "files": [{"path", "additions", "deletions", "patch"}]}``
 so a scanner that already fetched files in its own batched query needs no
-extra API call. ``patch`` matters only for .github/workflows files; without
-it they classify as ci-other (fail closed).
+extra API call. ``changedFiles`` must be the PR's total changed-file count,
+not the current page length. Missing/mismatched counts and duplicate paths
+produce an error, never a tier. Workflows remain human-review-only.
 
 Exit codes: 0 ok, 2 usage/fetch error.
 """
@@ -68,15 +69,26 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     gate = _gate_module()
-    policy = merge_policy.load_policy()
+    try:
+        policy = merge_policy.load_policy()
+    except (OSError, ValueError) as exc:
+        print(f"cannot load trusted merge policy: {exc}", file=sys.stderr)
+        return 2
     rollout = merge_policy.rollout_repos(policy)
     classifier = gate.path_classifier()
 
     jobs: list[tuple[str, int, list[merge_policy.FileChange] | None]] = []
     if args.stdin:
         for item in json.load(sys.stdin):
+            supplied = _changes(item.get("files") or [])
+            total = item.get("changedFiles")
+            complete = (
+                type(total) is int
+                and total == len(supplied)
+                and len({c.path for c in supplied if c.path}) == total
+            )
             jobs.append(
-                (item["repo"], int(item["number"]), _changes(item.get("files") or []))
+                (item["repo"], int(item["number"]), supplied if complete else None)
             )
     for ref in args.refs:
         m = _REF_RE.match(ref)
@@ -93,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     for repo, number, changes in jobs:
         row: dict[str, Any] = {"repo": repo, "number": number}
         if changes is None:
-            row["error"] = "could not fetch PR files"
+            row["error"] = "could not establish complete PR file inventory"
             failed = True
         else:
             row.update(merge_policy.assign_tier(changes, policy, classifier).as_dict())

@@ -252,6 +252,9 @@ SENSITIVE_PATH_PREFIXES = (
     # Use prefix without extension — catches hyphen/underscore variants and versioned copies
     # e.g. self-merge-check.py, self_merge_check.py, self-merge-check-v2.py all match
     "scripts/github/self-merge-check",
+    # Authorization code and data must never inherit packages/** tooling rights.
+    "packages/gptme-contrib-lib/src/gptme_contrib_lib/merge_policy",
+    "scripts/github/merge-policy",
     "scripts/github/pr-greptile-trigger",
     "scripts/github/greptile-helper",
     # Downstream agent workspaces commonly use these loop-control entrypoints.
@@ -3803,7 +3806,7 @@ def fetch_pr_file_changes(
         return None
     if result.returncode != 0:
         return None
-    return [
+    changes = [
         merge_policy.FileChange(
             path=str(doc.get("path") or ""),
             additions=int(doc.get("additions") or 0),
@@ -3813,6 +3816,35 @@ def fetch_pr_file_changes(
         for doc in _iter_json_documents(result.stdout)
         if isinstance(doc, dict)
     ]
+    # Pagination is necessary but not proof of completeness (GitHub caps files).
+    try:
+        count = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(number),
+                "--repo",
+                repo,
+                "--json",
+                "changedFiles",
+                "--jq",
+                ".changedFiles",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        total = int(count.stdout.strip())
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+    if (
+        count.returncode != 0
+        or total != len(changes)
+        or len({c.path for c in changes if c.path}) != total
+    ):
+        return None
+    return changes
 
 
 def path_classifier() -> merge_policy.PathClassifier:
@@ -3879,6 +3911,16 @@ def evaluate_pr(
         files=files,
         head_sha=pr.get("headRefOid", ""),
     )
+
+    # Independent of category/allowlist/rollout waivers: policy authority changes
+    # always need a human merge from the trusted deployment of this gate.
+    if any(
+        path.lower()
+        .replace("\\", "/")
+        .startswith("packages/gptme-contrib-lib/src/gptme_contrib_lib/merge_policy")
+        for path in files
+    ):
+        result.reasons.append("Merge policy authority changes require human merge")
 
     current_user = get_gh_user()
     if not current_user:
