@@ -505,6 +505,108 @@ class TestUpstreamTracksDefaultBranch:
         assert result.returncode == 0
 
 
+class TestUpstreamOnFork:
+    """A fork-PR branch tracks the fork; pushing it to origin misses the PR.
+
+    gptme/gptme#4946: the branch tracked TimeToBuildBob/<branch>, a follow-up
+    commit was pushed to origin instead, and the PR kept running CI on the old
+    head while a stray branch appeared upstream.
+    """
+
+    FORK_URL = "git@github.com:Fork/repo.git"
+    ORIGIN_URL = "https://github.com/test/repo"
+
+    def _track_fork(self, repo_path: Path, branch: str) -> None:
+        env = _clean_git_env()
+        _checkout_branch(repo_path, branch)
+        for name, url in (("origin", self.ORIGIN_URL), ("fork", self.FORK_URL)):
+            subprocess.run(
+                ["git", "remote", "add", name, url],
+                cwd=repo_path,
+                capture_output=True,
+                env=env,
+            )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "update-ref", f"refs/remotes/fork/{branch}", head],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            env=env,
+        )
+        subprocess.run(
+            ["git", "branch", f"--set-upstream-to=fork/{branch}", branch],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            env=env,
+        )
+
+    def _run(self, repo_path: Path, remote: str, url: str, stdin: str, **env_extra):
+        script = repo_path / ".git" / "hooks" / "validate-worktree-tracking.sh"
+        if not script.exists():
+            pytest.skip("validate-worktree-tracking.sh not found")
+        return subprocess.run(
+            ["bash", str(script), remote, url],
+            cwd=repo_path,
+            input=stdin,
+            text=True,
+            capture_output=True,
+            env={**_clean_git_env(), **env_extra},
+        )
+
+    def test_blocks_tracked_branch_pushed_to_other_repo(self, hook_env):
+        self._track_fork(hook_env, "feat-x")
+        result = self._run(
+            hook_env,
+            "origin",
+            self.ORIGIN_URL,
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+        )
+        assert result.returncode == 1
+        assert "git push fork feat-x" in result.stdout
+
+    def test_allows_push_to_tracked_fork_without_origin_warning(self, hook_env):
+        self._track_fork(hook_env, "feat-x")
+        result = self._run(
+            hook_env,
+            "fork",
+            # Same repository spelled as https: slugs must still match.
+            "https://github.com/fork/repo",
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+        )
+        assert result.returncode == 0, result.stdout
+        assert "origin/feat-x" not in result.stdout
+
+    def test_allows_other_branch_name_to_other_repo(self, hook_env):
+        self._track_fork(hook_env, "feat-x")
+        result = self._run(
+            hook_env,
+            "origin",
+            self.ORIGIN_URL,
+            "refs/heads/feat-x abc123 refs/heads/feat-x-copy 0000",
+        )
+        assert result.returncode == 0
+
+    def test_override_env_allows_off_upstream_push(self, hook_env):
+        self._track_fork(hook_env, "feat-x")
+        result = self._run(
+            hook_env,
+            "origin",
+            self.ORIGIN_URL,
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+            GIT_ALLOW_PUSH_OFF_UPSTREAM="1",
+        )
+        assert result.returncode == 0
+
+
 def test_hooks_exist():
     """Verify that required hook files exist."""
     assert HOOKS_DIR.exists(), f"Hooks directory not found: {HOOKS_DIR}"

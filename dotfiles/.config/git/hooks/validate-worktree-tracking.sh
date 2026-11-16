@@ -103,13 +103,45 @@ if [ -z "$upstream" ]; then
     exit 0
 fi
 
-# Verify upstream is on origin (not a local branch)
-if [[ ! "$upstream" =~ ^origin/ ]]; then
-    echo "⚠️  Warning: Branch '$current_branch' upstream is '$upstream' (not on origin)"
-    echo "   Expected: origin/$current_branch"
-    echo "   Fix with: git branch --set-upstream-to=origin/$current_branch"
+upstream_remote=$(git config --get "branch.$current_branch.remote" 2>/dev/null || echo "")
+upstream_merge=$(git config --get "branch.$current_branch.merge" 2>/dev/null || echo "")
+
+# Warn when the upstream is a local branch rather than a remote one. A fork
+# remote (e.g. a PR whose head lives on the agent's fork) is a valid upstream:
+# telling it to retarget origin sends the commit to the wrong repository.
+if [ "$upstream_remote" = "." ]; then
+    echo "⚠️  Warning: Branch '$current_branch' upstream is '$upstream' (a local branch, not a remote)"
     echo ""
     # Don't fail, just warn - might be intentional
+fi
+
+# Block pushing the tracked branch to a different repository than its upstream.
+# A fork PR's head lives on the fork; pushing the same branch name to origin
+# creates a stray branch there and the PR never sees the commit (its CI keeps
+# running the old head). gptme/gptme#4946 stalled this way on 2026-11-16.
+# The destination remote is $1 (name) / $2 (URL), passed through by pre-push.
+_repo_slug() {
+    # Reduce ssh/https remote URLs to a comparable host-less owner/repo slug.
+    printf '%s' "$1" | sed -E 's#^[a-z+]+://##; s#^[^@/]*@##; s#^[^:/]*[:/]##; s#\.git$##; s#/$##' | tr '[:upper:]' '[:lower:]'
+}
+dest_url="${2:-}"
+if [ -n "$upstream_remote" ] && [ "$upstream_remote" != "." ] && [ -n "$upstream_merge" ] \
+    && [ -n "$dest_url" ] && [ "${GIT_ALLOW_PUSH_OFF_UPSTREAM:-}" != "1" ]; then
+    upstream_url=$(git remote get-url --push "$upstream_remote" 2>/dev/null || echo "")
+    if [ -n "$upstream_url" ] && [ "$(_repo_slug "$upstream_url")" != "$(_repo_slug "$dest_url")" ]; then
+        for remote_ref in "${push_remote_refs[@]}"; do
+            if [ "$remote_ref" = "$upstream_merge" ]; then
+                echo "🚫 ERROR: Branch '$current_branch' tracks '$upstream' ($upstream_url),"
+                echo "   but this push sends it to '${1:-$dest_url}' ($dest_url)."
+                echo "   A PR whose head is on '$upstream_remote' will not see this commit."
+                echo ""
+                echo "   Push to the tracked remote:  git push $upstream_remote $current_branch"
+                echo "   Or, if deliberate:           GIT_ALLOW_PUSH_OFF_UPSTREAM=1 git push ..."
+                echo ""
+                exit 1
+            fi
+        done
+    fi
 fi
 
 # CRITICAL: Block feature branches that track origin/master or origin/main.
