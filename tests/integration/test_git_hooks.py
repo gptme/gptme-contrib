@@ -595,6 +595,72 @@ class TestUpstreamOnFork:
         )
         assert result.returncode == 0
 
+    @pytest.mark.parametrize("checkout", ["master", "other", "--detach"])
+    def test_checks_pushed_branch_not_checkout(self, hook_env, checkout):
+        self._track_fork(hook_env, "feat-x")
+        args = (
+            ["git", "checkout", "--detach"]
+            if checkout == "--detach"
+            else ["git", "checkout", "-B", checkout]
+        )
+        subprocess.run(
+            args, cwd=hook_env, check=True, capture_output=True, env=_clean_git_env()
+        )
+        result = self._run(
+            hook_env,
+            "origin",
+            self.ORIGIN_URL,
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+        )
+        assert result.returncode == 1, result.stdout
+        assert "Branch 'feat-x'" in result.stdout
+
+    def test_mixed_deletion_does_not_use_checkout_tracking(self, hook_env):
+        self._track_fork(hook_env, "feat-x")
+        result = self._run(
+            hook_env,
+            "origin",
+            self.ORIGIN_URL,
+            "(delete) " + "0" * 40 + " refs/heads/feat-x abc123\n"
+            "refs/heads/other abc123 refs/heads/other 0000\n",
+        )
+        assert result.returncode == 0, result.stdout
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "ssh://git@github.com:22/fork/repo.git",
+            "https://github.com/fork/repo.git/",
+        ],
+    )
+    def test_allows_port_and_trailing_slash_aliases(self, hook_env, url):
+        self._track_fork(hook_env, "feat-x")
+        result = self._run(
+            hook_env,
+            "alias",
+            url,
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+        )
+        assert result.returncode == 0, result.stdout
+
+    def test_advice_names_tracked_destination(self, hook_env):
+        self._track_fork(hook_env, "pr-local")
+        subprocess.run(
+            ["git", "config", "branch.pr-local.merge", "refs/heads/pr-head"],
+            cwd=hook_env,
+            check=True,
+            capture_output=True,
+            env=_clean_git_env(),
+        )
+        result = self._run(
+            hook_env,
+            "origin",
+            self.ORIGIN_URL,
+            "refs/heads/pr-local abc123 refs/heads/pr-head 0000",
+        )
+        assert result.returncode == 1, result.stdout
+        assert "git push fork pr-local:refs/heads/pr-head" in result.stdout
+
     def test_override_env_allows_off_upstream_push(self, hook_env):
         self._track_fork(hook_env, "feat-x")
         result = self._run(
