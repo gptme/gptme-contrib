@@ -566,7 +566,8 @@ _MIN_SECRET_LEN = 8  # don't redact trivially-short env values (e.g. "true", "1"
 # Shapes that are never a credential, whatever the separator: a whole markup
 # tag (not a tag prefix or wrapped content), a value that is WHOLLY a money
 # amount (so a crypt hash like ``$1$salt$...`` stays CRITICAL), or a documentation
-# placeholder (KEY=VALUE).
+# placeholder (KEY=VALUE). Inline-code-wrapped values are unwrapped first
+# (_INLINE_CODE_WRAPPER_RE below).
 _NON_CREDENTIAL_VALUE_RE = re.compile(
     r"<[/!]?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?>\Z"  # whole HTML/markup tag
     r"|[-+]?[$\u20ac\u00a3]\d[\d,]*(?:\.\d+)?\Z"  # money amount
@@ -574,12 +575,34 @@ _NON_CREDENTIAL_VALUE_RE = re.compile(
 )
 
 
+# A value wholly wrapped in ONE inline-code span, as rendered status prose
+# writes a code symbol: ``key: <code>sleep_score</code>`` (HTML email) or
+# ``key: `sleep_score``` (Markdown). Trailing sentence punctuation is allowed;
+# anything else after the wrapper (a credential suffix, a second span) is not.
+# The wrapper is transparent: the inner text is judged by the same rules as a
+# bare value, so a wrapped credential shape stays CRITICAL.
+_INLINE_CODE_WRAPPER_RE = re.compile(
+    r"(?:<(?P<tag>code|tt|kbd|samp|var)>(?P<tag_inner>[^<>]+)</(?P=tag)>"
+    r"|`(?P<tick_inner>[^`]+)`)"
+    r"[.,;:!?)]*\Z",
+    re.IGNORECASE,
+)
+# A lowercase snake_case code identifier (``sleep_score``, ``user_profile_index``)
+# inside an inline-code span. Letters only: generated credentials carry digits or
+# mixed case, and a hyphen-joined word run is a diceware passphrase shape, so
+# neither qualifies.
+_CODE_IDENTIFIER_RE = re.compile(r"[a-z]+(?:_[a-z]+)+\Z")
+
+
 def _assignment_severity(match: re.Match[str], severity: Severity) -> Severity:
     """Downgrade an unquoted, prose-shaped secret_assignment hit to HIGH.
 
     Prose-shaped means a non-credential value shape, or a short value
     (below ``_MIN_SECRET_LEN``) after a spaced or ``:`` separator, as in
-    ``key: the`` or ``token= (<a``.
+    ``key: the`` or ``token= (<a``. A value wholly wrapped in an inline-code
+    span is judged by its inner text, and after a spaced or ``:`` separator a
+    wrapped lowercase snake_case identifier (``key: <code>sleep_score</code>``)
+    is prose too. Tight ``NAME=value`` stays CRITICAL either way.
     """
     groups = match.re.groupindex
     if "sep" not in groups or "quote" not in groups:
@@ -592,6 +615,14 @@ def _assignment_severity(match: re.Match[str], severity: Severity) -> Severity:
         prose_separator and len(value) < _MIN_SECRET_LEN
     ):
         return min(severity, Severity.HIGH)
+    wrapped = _INLINE_CODE_WRAPPER_RE.match(value)
+    if wrapped:
+        inner = wrapped.group("tag_inner") or wrapped.group("tick_inner")
+        if _NON_CREDENTIAL_VALUE_RE.match(inner) or (
+            prose_separator
+            and (len(inner) < _MIN_SECRET_LEN or _CODE_IDENTIFIER_RE.match(inner))
+        ):
+            return min(severity, Severity.HIGH)
     return severity
 
 

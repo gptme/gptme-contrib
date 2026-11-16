@@ -19,6 +19,14 @@ PROSE = [
     "Refunded token = -$1,234.56 to the account",
     "Set API_KEY=<your-key> in the environment",
     "export OPENAI_API_KEY=xxxxxxxx before running",
+    # Inline-code-wrapped identifiers and placeholders are prose (#2202 shape 3).
+    "dropped the assumed data key: <code>sleep_score</code> from the loader",
+    "dropped the assumed data key: <code>sleep_score</code>, then reloaded",
+    "the cache key: <tt>user_profile_index</tt> is rebuilt nightly",
+    "renamed the lookup key: `sleep_score` in the loader",
+    "the dedup token: <code>the</code> was too generic",
+    "Set API_KEY=<code>VALUE</code> in the environment",
+    "Set API_KEY=`xxxxxxxx` in the environment",
 ]
 
 
@@ -55,8 +63,20 @@ def test_prose_assignment_still_masked_and_preview_hidden(text):
         "API_KEY=</b>Xj4kL9mNb2vC8wQ1",
         "API_KEY=<your-key>Xj4kL9mNb2vC8wQ1",
         "API_KEY=<code>Xj4kL9mNb2vC8wQ1</code>",
-        # Conservatively block wrapped prose too: the content could be a secret.
-        "dropped the assumed data key: <code>sleep_score</code> from the loader",
+        # Inline-code wrapping is transparent: only clearly non-credential
+        # content is downgraded, so wrapped credential shapes keep blocking.
+        "key: <code>Xj4kL9mNb2vC8wQ1</code>",
+        "key: `Xj4kL9mNb2vC8wQ1`",
+        "password: <code>xmqbtrvlkzphwdsa</code>",  # app-password shape
+        "password: <code>correct-horse-battery-staple</code>",  # diceware
+        "secret: <code>sleep_score2</code>",  # digits: not a plain identifier
+        "key: <code>sleep_score</code>Xj4kL9mNb2vC8wQ1",  # suffix after wrapper
+        "key: <code>abc</code><code>Xj4kL9mNb2vC8wQ1</code>",  # second wrapper
+        "key: <code>sleep_score</tt>",  # mismatched closing tag
+        "key: <b>sleep_score</b>",  # not an inline-code wrapper
+        # Tight NAME=value stays env/shell syntax even when wrapped.
+        "API_KEY=<code>sleep_score</code>",
+        "PASSWORD=`hunter2`",
         # Tight NAME=value is env/shell syntax: short values still block.
         "PASSWORD=hunter2",
         "TOKEN=x",
