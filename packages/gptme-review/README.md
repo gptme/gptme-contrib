@@ -82,8 +82,36 @@ is skipped for that pass, not admitted as never reviewed. Marker parsing and
 do not consume each other's markers. Duplicate-PR tagging, consensus-upgrade
 eligibility, and trusted-request opt-in live here.
 
-The dispatch loop (subprocess reviewer, alerts, self-merge, REVIEW-key budget)
-stays with the host. A dry-run CLI lists candidates through a thin `gh` host:
+### Bounded dispatch
+
+`dispatch_reviews(selected, host, workers=1, started=None, clock=...)` schedules
+an already-selected queue. Its `DispatchHost` has three callbacks:
+
+- `admission(pr, elapsed, already_started)` returns `DispatchAdmission()`,
+  `DispatchAdmission(reason)` to stop, or `DispatchAdmission(reason, defer=True)` to skip one oversized
+  PR without starving smaller PRs. It runs immediately before each submission,
+  even when the worker pool has idle slots. The host owns deadline, shard-wave,
+  credit-reserve and first-review-exception policy.
+- `run_review(pr)` executes on a worker. The host owns command construction,
+  subprocess timeout/cleanup, result classification, durable attempts/failures,
+  alerts, reactions and optional self-merge follow-through.
+- `stop_reason()` returns a breaker reason or `None` on the scheduler thread.
+  Once observed, a stop drains existing workers without new submissions. Breakers
+  are polled before and after admission, not atomically with submission: a host
+  needing strict spend reservations must enforce them in execution too. Hosts
+  must synchronize mutable state shared with their workers.
+
+The scheduler bounds concurrency and prevents duplicate `(repo, number)` jobs
+from running simultaneously. Unexpected callback exceptions propagate; they do
+not become clean outcomes. `DispatchResult` reports submitted callbacks and
+size-deferred/budget-skipped candidates, not review successes or merge evidence.
+Pass the sweep's original monotonic `started` to charge candidate-listing time,
+and pass a host clock explicitly when maintaining local test/clock seams.
+
+This is the first dispatch extraction, not a turnkey production driver. The
+host still owns subprocess review execution, fallback routing, outcome accounting,
+alerts, self-merge and REVIEW-key budget. Dry-run callers must not invoke the
+side-effecting dispatcher. The CLI remains candidate listing only:
 
 ```txt
 python -m gptme_review.sweep --login reviewer-bot --marker-namespace agent-ai-review \
