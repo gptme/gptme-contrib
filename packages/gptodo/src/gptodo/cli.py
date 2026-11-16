@@ -104,6 +104,8 @@ from gptodo.sequence import SequenceStep, shortfall_note, simulate_sequence
 
 # Import unblocking functionality with fan-in support
 
+from gptodo.gate import parse_gate
+
 # Import utilities directly from utils
 # Using absolute imports (not relative) for uv script compatibility
 from gptodo.utils import (
@@ -141,6 +143,7 @@ from gptodo.utils import (
     resolve_known_frontmatter_fields,
     task_has_waiting_blocker,
     task_is_waiting_for_date,
+    task_gate_deadline_passed,
     task_wait_gate_passed,
     task_matches_pool_filter,
     task_pool,
@@ -3448,31 +3451,52 @@ def _get_claimed_task_ids(repo_root: Path) -> set[str]:
     return {r[0][len(prefix) :] if r[0].startswith(prefix) else r[0] for r in rows}
 
 
-def _print_overdue_waiting(all_tasks, output_json, output_jsonl, pool_filter, exclude_pool):
-    """Print tasks still blocked by waiting_for/state: waiting after their wait: passed."""
-    overdue_tasks = [
-        task
-        for task in all_tasks
-        if task_wait_gate_passed(task)
-        and task_matches_pool_filter(task, pool=pool_filter, exclude_pool=exclude_pool)
-    ]
-
-    def _sort_key(task):
+def _overdue_gate(task):
+    """Return ``(instant, field, gate_kind, gate_deadline)`` for the earliest passed gate."""
+    candidates: list[tuple[float, str, str | None, datetime | None]] = []
+    if task_wait_gate_passed(task):
         wait = task.wait
-        assert wait is not None  # Selected by task_wait_gate_passed above.
         if not isinstance(wait, datetime):
             wait = datetime.combine(wait, datetime.min.time())
         # Naive waits and date-only midnight use local time, matching the gate predicate.
-        return (wait.timestamp(), -task.priority_rank, task.created)
+        candidates.append((wait.timestamp(), "wait", None, None))
+    if task_gate_deadline_passed(task):
+        gate = parse_gate(task.metadata)
+        assert gate is not None and gate.deadline is not None  # Checked by the predicate.
+        candidates.append(
+            (gate.deadline.timestamp(), "gate.deadline", gate.kind.value, gate.deadline)
+        )
+    return min(candidates, key=lambda c: c[0]) if candidates else None
+
+
+def _print_overdue_waiting(all_tasks, output_json, output_jsonl, pool_filter, exclude_pool):
+    """Print blocked tasks whose wait: date or typed gate.deadline has passed."""
+    gates = {}
+    for task in all_tasks:
+        if not task_matches_pool_filter(task, pool=pool_filter, exclude_pool=exclude_pool):
+            continue
+        if (overdue := _overdue_gate(task)) is not None:
+            gates[task.name] = overdue
+    overdue_tasks = [task for task in all_tasks if task.name in gates]
 
     # Oldest gate first: the longest-overdue re-check is the most likely to have rotted.
-    overdue_tasks.sort(key=_sort_key)
+    overdue_tasks.sort(key=lambda t: (gates[t.name][0], -t.priority_rank, t.created))
 
     def _row(task):
+        _, gated_by, gate_kind, gate_deadline = gates[task.name]
         data = task_to_dict(task)
-        data["wait"] = str(task.wait)
+        data["wait"] = str(task.wait) if task.wait is not None else None
         data["waiting_for"] = str(task.metadata.get("waiting_for") or "")
+        data["gated_by"] = gated_by
+        data["gate_kind"] = gate_kind
+        data["gate_deadline"] = gate_deadline.isoformat() if gate_deadline else None
         return data
+
+    def _gate_cell(task):
+        _, gated_by, gate_kind, gate_deadline = gates[task.name]
+        if gated_by == "wait":
+            return str(task.wait)
+        return f"{gate_deadline.isoformat()} (gate:{gate_kind})"
 
     if output_jsonl:
         for task in overdue_tasks:
@@ -3489,10 +3513,10 @@ def _print_overdue_waiting(all_tasks, output_json, output_jsonl, pool_filter, ex
 
     console = Console()
     if not overdue_tasks:
-        console.print("[green]No blocked tasks past their wait: date.[/]")
+        console.print("[green]No blocked tasks past their wait: date or gate deadline.[/]")
         return
     table = Table(
-        title=f"[bold yellow]Re-check: wait gate passed[/] ({len(overdue_tasks)} still blocked)"
+        title=f"[bold yellow]Re-check: wait/gate deadline passed[/] ({len(overdue_tasks)} still blocked)"
     )
     table.add_column("Task", style="cyan")
     table.add_column("State", style="blue")
@@ -3502,7 +3526,7 @@ def _print_overdue_waiting(all_tasks, output_json, output_jsonl, pool_filter, ex
         table.add_row(
             task.name,
             task.state or "",
-            str(task.wait),
+            _gate_cell(task),
             markup_escape(str(task.metadata.get("waiting_for") or ("state: waiting"))),
         )
     console.print(table)
@@ -3578,8 +3602,9 @@ def _print_overdue_waiting(all_tasks, output_json, output_jsonl, pool_filter, ex
     "--overdue",
     is_flag=True,
     help=(
-        "List blocked tasks (waiting_for / state: waiting) whose wait: date has "
-        "passed, for re-checking. Does not release them; ignores --state."
+        "List blocked tasks (waiting_for / state: waiting) whose wait: date or "
+        "typed gate.deadline has passed, for re-checking. Does not release them; "
+        "ignores --state."
     ),
 )
 def ready(

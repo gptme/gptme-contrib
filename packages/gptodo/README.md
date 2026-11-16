@@ -133,6 +133,12 @@ optional timezone offset; malformed values are rejected before task creation.
 `--wait` is rejected with `--state ready_for_review`, because review tasks
 bypass wait gates. Use `--state todo` for deferred work instead.
 
+A `wait:` date on a task that is still blocked (`waiting_for` or `state: waiting`)
+is a re-check date, not a release. `gptodo ready --overdue` lists blocked tasks
+whose `wait:` date or typed `gate.deadline` has passed, oldest first, without
+releasing them; `--json`/`--jsonl` rows name the field in `gated_by` and the
+gate's `gate_kind`.
+
 Piped input is **body text**, not frontmatter. A leading `---` key block in
 that input produces a warning but is preserved as body text; set metadata
 with command flags or `gptodo edit --set` instead.
