@@ -444,6 +444,8 @@ All configuration is through environment variables or `<workspace>/.env`.
 | `AGENT_MSG_REPLY_WINDOW_DAYS` | `agent pending` | Reply window in days (default `7`; `0` disables the age cutoff). |
 | `AGENT_MSG_NO_REPLY_SUBJECT_PATTERNS` | `agent pending` | Newline-separated, case-insensitive regexes. Matching subjects never count as pending. |
 
+The same patterns can live in `messages/no-reply-subject-patterns` (one regex per line; lines that are `#` or start with `# ` are comments), merged with the variable. Prefer the file: it is read by every `agent pending` caller, so a dispatcher or unit that does not carry the environment variable cannot disagree with the one that does.
+
 `send` passes `-a gmail` to msmtp when the sender address contains `gmail.com`, and
 uses msmtp's default account otherwise.
 

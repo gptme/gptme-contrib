@@ -562,6 +562,96 @@ def test_no_reply_subject_patterns_support_regex_commas_and_multiple_lines(
     assert "1 message(s) awaiting reply" in result.output
 
 
+def test_no_reply_subject_patterns_file_applies_without_env(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The workspace file is the shared policy: no per-unit env var needed."""
+    monkeypatch.delenv("AGENT_MSG_NO_REPLY_SUBJECT_PATTERNS", raising=False)
+    earnings = _seed_inbox(workspace, subject="EARNINGS - ACME beat")
+    digest = _seed_inbox(workspace, subject="Daily digest")
+    escalation = _seed_inbox(workspace, subject="RISK ALERT - action needed")
+    (workspace / "messages" / "no-reply-subject-patterns").write_text(
+        "# market feed\n^EARNINGS\n\n^Daily digest$\n"
+    )
+
+    result = CliRunner().invoke(agent, ["pending"])
+    assert result.exit_code == 0, result.output
+    assert earnings not in result.output
+    assert digest not in result.output
+    assert escalation in result.output
+
+
+def test_no_reply_subject_patterns_file_merges_with_env(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    earnings = _seed_inbox(workspace, subject="EARNINGS - ACME beat")
+    digest = _seed_inbox(workspace, subject="Daily digest")
+    monkeypatch.setenv("AGENT_MSG_NO_REPLY_SUBJECT_PATTERNS", "^EARNINGS")
+    (workspace / "messages" / "no-reply-subject-patterns").write_text("^Daily digest$\n")
+
+    result = CliRunner().invoke(agent, ["pending"])
+    assert result.exit_code == 0, result.output
+    assert earnings not in result.output
+    assert digest not in result.output
+
+
+def test_no_reply_subject_patterns_file_rejects_invalid_regex(workspace: Path) -> None:
+    _seed_inbox(workspace)
+    (workspace / "messages" / "no-reply-subject-patterns").write_text("[invalid\n")
+    result = CliRunner().invoke(agent, ["pending"])
+    assert result.exit_code != 0
+    assert "Invalid no-reply-subject-patterns regex" in result.output
+
+
+def test_no_reply_subject_patterns_file_keeps_hash_leading_regex(workspace: Path) -> None:
+    """Only "#" / "# ..." lines are comments; "#\\d+" is a real pattern."""
+    ticket = _seed_inbox(workspace, subject="TICKET#42 followup")
+    other = _seed_inbox(workspace, subject="Real question")
+    (workspace / "messages" / "no-reply-subject-patterns").write_text("# ticket feed\n#\\d+\n")
+
+    result = CliRunner().invoke(agent, ["pending"])
+    assert result.exit_code == 0, result.output
+    assert ticket not in result.output
+    assert other in result.output
+
+
+def test_no_reply_subject_patterns_file_reports_undecodable_bytes(workspace: Path) -> None:
+    _seed_inbox(workspace)
+    policy = workspace / "messages" / "no-reply-subject-patterns"
+    policy.write_bytes(b"^caf\xe9\xff\n")
+
+    result = CliRunner().invoke(agent, ["pending"])
+    assert result.exit_code == 1, result.output
+    assert f"Cannot read {policy}" in result.output
+
+
+@pytest.mark.parametrize("command", ["pending", "status"])
+@pytest.mark.parametrize("failure", ["directory", "permission"])
+def test_no_reply_subject_patterns_file_reports_read_errors(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, command: str, failure: str
+) -> None:
+    _seed_inbox(workspace)
+    policy = workspace / "messages" / "no-reply-subject-patterns"
+    if failure == "directory":
+        policy.mkdir()
+    else:
+        policy.write_text("^Daily digest$\n")
+        original_read_text = Path.read_text
+
+        def read_text(path: Path, *args, **kwargs) -> str:
+            if path == policy:
+                raise PermissionError("Permission denied")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read_text)
+
+    result = CliRunner().invoke(agent, [command])
+    assert result.exit_code == 1, result.output
+    assert f"Cannot read {policy}" in result.output
+    expected_error = "Is a directory" if failure == "directory" else "Permission denied"
+    assert expected_error in result.output
+
+
 @pytest.mark.parametrize("command", ["pending", "status"])
 def test_no_reply_subject_filter_rejects_invalid_regex(workspace: Path, command: str) -> None:
     _seed_inbox(workspace)

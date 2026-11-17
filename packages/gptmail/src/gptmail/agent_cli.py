@@ -82,19 +82,49 @@ def _reply_window_days() -> int:
         return 7
 
 
+_NO_REPLY_PATTERNS_FILE = "no-reply-subject-patterns"
+
+
 def _no_reply_subject_patterns() -> list[re.Pattern[str]]:
-    """Configured receiver-side subject patterns excluded from reply SLA."""
-    raw = os.environ.get("AGENT_MSG_NO_REPLY_SUBJECT_PATTERNS", "")
-    patterns: list[re.Pattern[str]] = []
-    for item in raw.splitlines():
-        if not item.strip():
-            continue
+    """Receiver-side subject patterns excluded from reply SLA.
+
+    Sources, merged: ``AGENT_MSG_NO_REPLY_SUBJECT_PATTERNS`` (newline-separated)
+    and ``<messages>/no-reply-subject-patterns`` (one regex per line, ``#``
+    comments). The file lives in the workspace, so every caller of ``pending``
+    sees the same policy; the environment variable only reaches the process
+    tree of the unit that sets it.
+    """
+    sources: list[tuple[str, str]] = [
+        (
+            "AGENT_MSG_NO_REPLY_SUBJECT_PATTERNS",
+            os.environ.get("AGENT_MSG_NO_REPLY_SUBJECT_PATTERNS", ""),
+        )
+    ]
+    try:
+        policy_path = _messages_dir() / _NO_REPLY_PATTERNS_FILE
+    except RuntimeError:
+        pass  # no repo root: env var only
+    else:
         try:
-            patterns.append(re.compile(item.strip(), re.IGNORECASE))
-        except re.error as exc:
-            raise click.ClickException(
-                f"Invalid AGENT_MSG_NO_REPLY_SUBJECT_PATTERNS regex {item.strip()!r}: {exc}"
-            ) from exc
+            sources.append((_NO_REPLY_PATTERNS_FILE, policy_path.read_text(encoding="utf-8")))
+        except FileNotFoundError:
+            pass  # optional policy file
+        except (OSError, UnicodeDecodeError) as exc:
+            raise click.ClickException(f"Cannot read {policy_path}: {exc}") from exc
+    patterns: list[re.Pattern[str]] = []
+    for origin, raw in sources:
+        for item in raw.splitlines():
+            item = item.strip()
+            # "#" alone or "# ..." is a comment; "#\d+" is still a regex.
+            is_comment = origin == _NO_REPLY_PATTERNS_FILE and (
+                item == "#" or item.startswith("# ")
+            )
+            if not item or is_comment:
+                continue
+            try:
+                patterns.append(re.compile(item, re.IGNORECASE))
+            except re.error as exc:
+                raise click.ClickException(f"Invalid {origin} regex {item!r}: {exc}") from exc
     return patterns
 
 
