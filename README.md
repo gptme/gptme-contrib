@@ -79,6 +79,7 @@ Reusable Python packages, installable individually. See [packages/README.md](./p
 | [credential-slots](./packages/credential-slots/) | Safe credential-slot rotation for agents running Claude Max / OAuth-backed subscriptions |
 | [gptmail](./packages/gptmail/) | Email automation for gptme agents with shared communication utilities |
 | [gptme-activity-summary](./packages/gptme-activity-summary/) | Activity summarization for gptme agents — journals, GitHub, sessions, tweets, email |
+| [gptme-agent-events](./packages/gptme-agent-events/) | Live, harness-agnostic event stream of what an agent is doing (tool calls, commits, turn ends), with sinks such as sound effects |
 | [gptme-backoff](./packages/gptme-backoff/) | Thin retry utilities built on tenacity — exponential backoff, jitter, and convenient async/sync decorators for agent tool calls |
 | [gptme-block-registry](./packages/gptme-block-registry/) | Shared state-dir block-file contract and registry for gptme agent arm dispatch (credential-survival sublayer) |
 | [gptme-bob-status](./packages/gptme-bob-status/) | Bob-specific StatusProvider for gptme-util status |
@@ -94,11 +95,14 @@ Reusable Python packages, installable individually. See [packages/README.md](./p
 | [gptme-lessons-extras](./packages/gptme-lessons-extras/) | Lesson format validation and analysis |
 | [gptme-lessons-mcp](./packages/gptme-lessons-mcp/) | MCP server that exposes gptme |
 | [gptme-rag](./packages/gptme-rag/) | ChromaDB-based RAG (Retrieval-Augmented Generation) for gptme agents |
+| [gptme-redact](./packages/gptme-redact/) | Secret-safe export redactor — layered fail-closed redaction for derived agent content |
+| [gptme-review](./packages/gptme-review/) | Self-hosted AI PR reviewer engine (lifted from ErikBjare/bob) |
 | [gptme-runloops](./packages/gptme-runloops/) | Python-based run loop framework for autonomous AI agent operation |
 | [gptme-sessions](./packages/gptme-sessions/) | Session tracking and analytics for gptme agents |
 | [gptme-subscription](./packages/gptme-subscription/) | Generic subscription observation, pressure scoring, and capacity-aware routing for agent credential slots |
 | [gptme-usage](./packages/gptme-usage/) | Cross-backend usage, cost, and quota surface for gptme agents (model registry, cost math, quota checks) |
 | [gptme-vision-node](./packages/gptme-vision-node/) | Vision pipeline for the BobBrain presence node — frame capture, person/motion detection, LLM look tool, and place recognition |
+| [gptme-vitals](./packages/gptme-vitals/) | Shared agent-dashboard skeleton for gptme agents: typed page envelope, derived fleet core.json, design base |
 | [gptme-voice](./packages/gptme-voice/) | Voice interface for gptme with OpenAI and xAI Grok Realtime APIs |
 | [gptme-voice-node](./packages/gptme-voice-node/) | Embedded voice presence node for BobBrain — thin WS client to bob-voice-server |
 | [gptme-whatsapp](./packages/gptme-whatsapp/) | WhatsApp integration for gptme agents via whatsapp-web.js |
@@ -161,7 +165,7 @@ gh repo edit owner/your-repo --add-topic gptme-plugin
 
 ## Dependencies
 
-For a contributor checkout, start with Git, Python, and [pipx](https://pipx.pypa.io/stable/installation/)
+For a contributor checkout, start with Git, Python, and [pipx](https://pipx.pypa.io/stable/how-to/install-pipx.html)
 installed. Individual packages may require a newer Python version than the workspace
 root; uv can download a compatible interpreter. If you already have `uv` on your
 PATH, skip the pipx steps.

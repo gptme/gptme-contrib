@@ -20,19 +20,24 @@ def get_actual_packages():
 
 def get_documented_packages(readme_path):
     """Extract package names from README markdown table."""
-    content = readme_path.read_text()
+    return parse_documented_packages(readme_path.read_text())
+
+
+def parse_documented_packages(content: str) -> list[str]:
+    """Extract package names from README markdown content."""
 
     packages: set[str] = set()
 
-    # Match markdown table links like [package-name](./packages/package-name/)
-    pattern1 = r"\[([^\]]+)\]\(\.?/?packages/([^/]+)/?\)"
+    # Match links to package directories like [name](./packages/name/).
+    # A file link such as ./packages/README.md is not a package.
+    pattern1 = r"\[([^\]]+)\]\(\.?/?packages/([^/)]+)/?\)"
     matches1 = re.findall(pattern1, content)
-    packages.update(m[1] for m in matches1 if m[1] not in ["README"])
+    packages.update(m[1] for m in matches1 if "." not in m[1])
 
-    # Match bold markdown like **package-name** (in table cells)
-    # Look for bold package names followed by pipe or newline
-    pattern2 = r"\|\s*\*\*([a-z0-9_-]+)\*\*"
-    matches2 = re.findall(pattern2, content)
+    # Match a bold package name in a table row's first cell: | **name** |
+    # (bold text in later cells, e.g. "| Parts | **gptme-contrib** |", is not a package)
+    pattern2 = r"^\|\s*\*\*([a-z0-9_-]+)\*\*\s*\|"
+    matches2 = re.findall(pattern2, content, re.MULTILINE)
     packages.update(matches2)
 
     return sorted(packages)
