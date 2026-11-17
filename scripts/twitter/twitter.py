@@ -105,6 +105,9 @@ console = Console(stderr=True)
 # gone. Every GET that goes through tweepy is counted here, per UTC day, and
 # once TWITTER_DAILY_READ_LIMIT is reached further reads raise before any HTTP
 # request is made. Counting is always on; blocking only when the limit is set.
+# X bills the same resource once per UTC day, so a post or user id already seen
+# today adds nothing: re-reading the same mentions every cycle used to spend
+# the whole limit by 02:00 UTC while the real bill was about a quarter of it.
 READ_COUNTER_DIR_ENV = "TWITTER_READ_COUNTER_DIR"
 DAILY_READ_LIMIT_ENV = "TWITTER_DAILY_READ_LIMIT"
 _METER_ACTIVE: ContextVar[bool] = ContextVar("twitter_meter_active", default=False)
@@ -154,11 +157,18 @@ def daily_read_limit() -> int:
         return 0
 
 
-def daily_reads_used() -> int:
+def _read_day_state() -> tuple[int, set[str]]:
+    """Today's billable units and the resource keys already charged today."""
     try:
-        return int(json.loads(_read_counter_path().read_text()).get("reads", 0))
-    except (OSError, ValueError, AttributeError):
-        return 0
+        doc = json.loads(_read_counter_path().read_text())
+        seen = doc.get("seen")
+        return int(doc.get("reads", 0)), set(seen) if isinstance(seen, list) else set()
+    except (OSError, ValueError, AttributeError, TypeError):
+        return 0, set()
+
+
+def daily_reads_used() -> int:
+    return _read_day_state()[0]
 
 
 def count_billable_reads(payload: object, route: str = "") -> int:
@@ -166,10 +176,19 @@ def count_billable_reads(payload: object, route: str = "") -> int:
 
     User timelines return posts despite having a /users/ route prefix.
     """
+    return sum(units for _key, units in billable_resources(payload, route))
+
+
+def billable_resources(
+    payload: object, route: str = ""
+) -> list[tuple[str | None, int]]:
+    """``(resource key, units)`` per returned resource; key is None without an id."""
     if not isinstance(payload, dict):
-        return 0
+        return []
     data = payload.get("data")
-    n = len(data) if isinstance(data, list) else (1 if isinstance(data, dict) else 0)
+    items = (
+        data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+    )
     parts = route.strip("/").split("/")
     post_timeline = (
         len(parts) == 4
@@ -178,13 +197,18 @@ def count_billable_reads(payload: object, route: str = "") -> int:
     user_data = (
         len(parts) >= 2 and parts[1] == "users" and not post_timeline
     ) or parts[-1] in {"liking_users", "retweeted_by"}
-    if user_data:
-        n *= 2
+    kind, units = ("user", 2) if user_data else ("post", 1)
+    out = [(_resource_key(kind, item), units) for item in items]
     includes = payload.get("includes")
     if isinstance(includes, dict):
-        n += len(includes.get("tweets") or [])
-        n += 2 * len(includes.get("users") or [])
-    return n
+        out += [(_resource_key("post", t), 1) for t in includes.get("tweets") or []]
+        out += [(_resource_key("user", u), 2) for u in includes.get("users") or []]
+    return out
+
+
+def _resource_key(kind: str, item: object) -> str | None:
+    rid = item.get("id") if isinstance(item, dict) else None
+    return f"{kind}:{rid}" if rid else None
 
 
 def install_read_meter() -> None:
@@ -231,13 +255,21 @@ def install_read_meter() -> None:
             finally:
                 _METER_ACTIVE.reset(token)
             if getattr(response, "ok", False):
-                n = count_billable_reads(response.json(), route)
+                resources = billable_resources(response.json(), route)
                 # Charge the day the response arrived, including after Tweepy
                 # sleeps/retries across midnight. The account lock stays held.
                 path = _read_counter_path()
-                used = daily_reads_used()
+                used, seen = _read_day_state()
+                n = 0
+                for key, units in resources:
+                    if key is None or key not in seen:
+                        n += units
+                    if key is not None:
+                        seen.add(key)
                 pending = path.with_suffix(".json.tmp")
-                pending.write_text(json.dumps({"reads": used + n}))
+                pending.write_text(
+                    json.dumps({"reads": used + n, "seen": sorted(seen)})
+                )
                 os.replace(pending, path)
             return response
 
