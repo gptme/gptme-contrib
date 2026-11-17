@@ -474,6 +474,7 @@ def run_push_guard(
     worktree_root: Path | None = None,
     brain_root: Path | None = None,
     remote_url: str | None = None,
+    upstream_url: str | None = None,
     session_id: str | None = None,
     agent_id: str | None = None,
     deny: bool | None = None,
@@ -535,6 +536,27 @@ def run_push_guard(
         )
         return 0
 
+    # Fork-based PRs push to the fork while ``worktree-create`` claims the
+    # branch under the base repo's slug. Treat the ``upstream`` remote's slug as
+    # an alias so both keys meet (offline; any failure leaves no alias).
+    alias_slugs: list[str] = []
+    if upstream_url is None:
+        import subprocess
+
+        try:
+            upstream_url = subprocess.run(
+                ["git", "remote", "get-url", "upstream"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+            ).stdout.strip()
+        except Exception:
+            upstream_url = ""
+    upstream_slug = origin_slug(upstream_url or "")
+    if upstream_slug and upstream_slug != slug:
+        alias_slugs.append(upstream_slug)
+
     should_deny = deny if deny is not None else _env_flag(*_PUSH_GUARD_DENY_ENV)
     try:
         from gptme_coordination.db import CoordinationDB, resolve_coordination_db_path
@@ -582,46 +604,50 @@ def run_push_guard(
                         f"informational only); claiming {key}",
                         file=sys.stderr,
                     )
-                existing_before = work.get(key)
-                claim = work.claim(aid, key, ttl_minutes=60)
-                now = datetime.now(UTC).isoformat()
-                if claim:
-                    event = (
-                        "push_renew"
-                        if existing_before and existing_before.claimer == aid
-                        else "push_auto_claim"
+                for claim_key in [
+                    key,
+                    *(f"pr-branch:{a}#{branch}" for a in alias_slugs),
+                ]:
+                    existing_before = work.get(claim_key)
+                    claim = work.claim(aid, claim_key, ttl_minutes=60)
+                    now = datetime.now(UTC).isoformat()
+                    if claim:
+                        event = (
+                            "push_renew"
+                            if existing_before and existing_before.claimer == aid
+                            else "push_auto_claim"
+                        )
+                        append_ledger(
+                            _brain_root,
+                            {
+                                "type": event,
+                                "session_id": sid,
+                                "agent_id": aid,
+                                "key": claim_key,
+                                "at": now,
+                            },
+                        )
+                        continue
+
+                    existing = work.get(claim_key)
+                    holder = (
+                        existing.claimer if existing and existing.claimer else "unknown"
                     )
+                    event = "push_deny" if should_deny else "push_would_deny"
                     append_ledger(
                         _brain_root,
                         {
                             "type": event,
                             "session_id": sid,
                             "agent_id": aid,
-                            "key": key,
+                            "key": claim_key,
+                            "holder": holder,
                             "at": now,
                         },
                     )
-                    continue
-
-                existing = work.get(key)
-                holder = (
-                    existing.claimer if existing and existing.claimer else "unknown"
-                )
-                event = "push_deny" if should_deny else "push_would_deny"
-                append_ledger(
-                    _brain_root,
-                    {
-                        "type": event,
-                        "session_id": sid,
-                        "agent_id": aid,
-                        "key": key,
-                        "holder": holder,
-                        "at": now,
-                    },
-                )
-                print(_push_deny_message(key, holder), file=sys.stderr)
-                if should_deny:
-                    return 1
+                    print(_push_deny_message(claim_key, holder), file=sys.stderr)
+                    if should_deny:
+                        return 1
     except Exception as exc:  # noqa: BLE001 - availability beats push enforcement
         try:
             append_ledger(
