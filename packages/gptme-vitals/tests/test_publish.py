@@ -560,7 +560,8 @@ def test_public_write_creates_all_missing_parents_without_changing_existing_mode
     from gptme_vitals.publish import write_text
 
     existing = tmp_path / "existing"
-    existing.mkdir(mode=0o750)
+    existing.mkdir()
+    existing.chmod(0o750)  # mkdir(mode=) is masked by the ambient umask
     target = existing / "public/nested/index.html"
     previous_umask = os.umask(0o077)
     try:
