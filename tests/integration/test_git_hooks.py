@@ -744,6 +744,30 @@ class TestUpstreamOnFork:
         assert result.returncode == 1, result.stdout
         assert "git push fork pr-local:refs/heads/pr-head" in result.stdout
 
+    def test_blocks_when_tracked_remote_cannot_be_resolved(self, hook_env):
+        self._track_fork(hook_env, "feat-x")
+        # Keep branch tracking intact while removing the remote it names.
+        subprocess.run(
+            ["git", "config", "--remove-section", "remote.fork"],
+            cwd=hook_env,
+            check=True,
+            capture_output=True,
+            env=_clean_git_env(),
+        )
+        for override, expected in (({}, 1), ({"GIT_ALLOW_PUSH_OFF_UPSTREAM": "1"}, 0)):
+            result = self._run(
+                hook_env,
+                "origin",
+                self.ORIGIN_URL,
+                "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+                **override,
+            )
+            assert result.returncode == expected, result.stdout + result.stderr
+            if not override:
+                assert "Cannot resolve push URL" in result.stdout
+                assert "fork" in result.stdout
+                assert "GIT_ALLOW_PUSH_OFF_UPSTREAM=1" in result.stdout
+
     def test_override_env_allows_off_upstream_push(self, hook_env):
         self._track_fork(hook_env, "feat-x")
         result = self._run(
