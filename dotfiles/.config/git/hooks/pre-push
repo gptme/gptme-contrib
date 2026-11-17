@@ -93,11 +93,13 @@ _canonical_remote_url() {
         if [[ "$scp_authority" == *@* ]]; then
             scp_user="${scp_authority%@*}@"
         fi
-        case "${scp_user}${scp_host,,}" in
+        # tr, not ${var,,}: macOS ships bash 3.2, which rejects the bash-4 form.
+        scp_host=$(printf '%s' "$scp_host" | tr '[:upper:]' '[:lower:]')
+        case "${scp_user}${scp_host}" in
             github.com|*@github.com|ssh.github.com|*@ssh.github.com|git@gitlab.com) ;;
             *)
                 scp_path="${scp_path%/}"
-                printf 'scp-home:%s%s/%s\n' "$scp_user" "${scp_host,,}" "${scp_path%.git}"
+                printf 'scp-home:%s%s/%s\n' "$scp_user" "$scp_host" "${scp_path%.git}"
                 return
                 ;;
         esac

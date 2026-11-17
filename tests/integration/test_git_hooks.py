@@ -920,3 +920,19 @@ class TestGitIdentityValidation:
 if __name__ == "__main__":
     # Allow running as standalone script
     pytest.main([__file__, "-v"])
+
+
+def test_hooks_avoid_bash4_case_modification():
+    """macOS ships bash 3.2, which fails ``${var,,}``/``${var^^}`` at runtime
+    with "bad substitution" (``bash -n`` does not catch it)."""
+    import re
+
+    pattern = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*(,,?|\^\^?)\}")
+    offenders = [
+        f"{hook.name}:{lineno}"
+        for hook in sorted(HOOKS_DIR.iterdir())
+        if hook.is_file()
+        for lineno, line in enumerate(hook.read_text().splitlines(), 1)
+        if not line.lstrip().startswith("#") and pattern.search(line)
+    ]
+    assert offenders == []
