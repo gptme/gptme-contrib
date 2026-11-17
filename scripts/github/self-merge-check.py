@@ -3870,12 +3870,20 @@ def merge_policy_tier_waiver(
     (ErikBjare/bob#1480 row 7). Tier 0 only replaces the path/category
     policy; CI, review, thread and author gates are untouched. Outside
     ``[rollout].repos`` nothing is fetched and nothing is waived. Returns the
-    remaining reasons, a warning naming the waiver, and the tier verdict.
+    remaining reasons, a warning (naming the waiver, or saying the policy could
+    not be loaded), and the tier verdict (None when nothing was evaluated).
     """
     try:
         policy = merge_policy.load_policy()
-    except (OSError, ValueError):  # TOMLDecodeError is a ValueError
-        return reasons, None, None
+    except (OSError, ValueError) as exc:  # TOMLDecodeError is a ValueError
+        # Fail closed, but visibly: a gate checkout whose policy lags or differs
+        # from origin/master would otherwise ignore a new rollout repo silently.
+        return (
+            reasons,
+            f"Merge-policy tier not evaluated: {exc} "
+            "(update this gptme-contrib checkout to origin/master)",
+            None,
+        )
     if repo not in merge_policy.rollout_repos(policy):
         return reasons, None, None
     changes = fetch_pr_file_changes(repo, number)
@@ -4387,7 +4395,8 @@ def evaluate_pr(
     )
     if tier_waiver is not None:
         result.warnings.append(tier_waiver)
-        result.category = "merge-policy-tier-0"
+        if result.merge_tier is not None:  # a waiver, not an unavailable policy
+            result.category = "merge-policy-tier-0"
 
     # ErikBjare/bob#1471 phase 2/3: an operator approval of the head, or of an
     # earlier commit followed only by small review fixes, overrides
