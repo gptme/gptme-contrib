@@ -2394,7 +2394,14 @@ def provider_hang_summary(summary: UsageSummary) -> str:
 
 
 def _fold_provider(name: str) -> str:
-    return name.strip().casefold()
+    # OpenRouter reports display names, but unnamed failures use the requested
+    # routing slug. Only alias the qualified routes we use; stripping arbitrary
+    # suffixes would conflate distinct, unqualified endpoints.
+    folded = name.strip().casefold()
+    return {
+        "deepinfra/fp8": "deepinfra",
+        "parasail/fp8": "parasail",
+    }.get(folded, folded)
 
 
 def _aware(ts: datetime) -> datetime:
@@ -2884,8 +2891,8 @@ def _pin_blocks_reroute(model: str, blamed: str, ignored: list[str]) -> bool:
     allowed = (provider_policy(model) or {}).get("only")
     if not allowed:
         return False
-    dead = {name.casefold() for name in (*ignored, blamed)}
-    return not any(name.casefold() not in dead for name in allowed)
+    dead = {_fold_provider(name) for name in (*ignored, blamed)}
+    return not any(_fold_provider(name) not in dead for name in allowed)
 
 
 def primary_model_exhausted(
@@ -2915,10 +2922,10 @@ def primary_model_exhausted(
     if not allowed:
         return False
     quarantined = {
-        name.casefold()
+        _fold_provider(name)
         for name in quarantined_provider_names(model, path=path, now=now)
     }
-    return all(name.casefold() in quarantined for name in allowed)
+    return all(_fold_provider(name) in quarantined for name in allowed)
 
 
 #: Ordered allowlist for ``deepseek-v4-flash-0731``. Shared with
@@ -2936,6 +2943,23 @@ def primary_model_exhausted(
 #: returned 3/3 complete answers at 88-110 s. Two hosts also end the
 #: single-host outage shape the public pin had.
 DEEPSEEK_V4_FLASH_0731_PROVIDERS: tuple[str, ...] = ("wafer", "inceptron")
+
+#: Gate-qualified ordered allowlist for ``deepseek-v4.1-flash-1017``.
+#: Shared with ``consensus-merge-gate._GATE_PROVIDER_ALLOWLIST`` (a test pins
+#: them together) so the gate and the reviewer cannot drift apart.
+#:
+#: Qualification: 2026-11-17 Protocol v2 paired gate eval (22/27 inputs),
+#: host-qualification pass (tool call, cache, no-training guardrail).
+#: ``deepinfra/fp8`` and ``parasail/fp8`` are the two fp8 quantization hosts
+#: that passed. The broader 4-host eval list (cloudflare, inference-net,
+#: deepinfra, parasail) served the ab-1008 bake-off; for the gate we pin
+#: only the proven fp8 pair so the route is deterministic and auditable.
+#: reasoning.effort must be ``"none"`` for this model at the gate's 4K cap;
+#: ``"low"`` exhausts all 4K tokens on internal reasoning.
+DEEPSEEK_V4_FLASH_1017_GATE_PROVIDERS: tuple[str, ...] = (
+    "deepinfra/fp8",
+    "parasail/fp8",
+)
 
 #: Hosts that local in-session reviews skip on ``no_train`` calls only.
 #: Trial started 2026-11-16: local no-train 0731 reviews were 66/68 served by
@@ -3021,10 +3045,15 @@ PROVIDER_POLICY: dict[str, dict] = {
         # Provider order from the ab-1008 protocol: cloudflare first (confirmed
         # serving), then inference-net, deepinfra, parasail. ab-1007 arms C/D
         # truncated at reasoning_effort=medium (98-99% of 32K completion
-        # tokens); ab-1008 uses reasoning_effort=low. Eval context only
-        # (ErikBjare/bob#1400), not in any merge-critical chain.
-        "only": ("cloudflare", "inference-net", "deepinfra", "parasail"),
-        "order": ("cloudflare", "inference-net", "deepinfra", "parasail"),
+        # tokens); ab-1008 uses reasoning_effort=low.
+        #
+        # Gate-qualified hosts: deepinfra/fp8 and parasail/fp8 only
+        # (see DEEPSEEK_V4_FLASH_1017_GATE_PROVIDERS). The gate pins these two
+        # and uses reasoning.effort="none" to avoid exhausting the 4K cap on
+        # internal reasoning. The ``only``/``order`` below match the gate pin
+        # so the mirror test stays green.
+        "only": DEEPSEEK_V4_FLASH_1017_GATE_PROVIDERS,
+        "order": DEEPSEEK_V4_FLASH_1017_GATE_PROVIDERS,
         "allow_fallbacks": False,
         "response_format_mode": "json_object",
     },
@@ -3179,10 +3208,12 @@ def build_provider_routing(
             # the API reports the display name (`"DeepSeek"`) while a policy
             # holds the slug (`"deepseek"`). Matching on the raw strings would
             # miss the conflict and 404 anyway.
-            ignored_folded = {name.casefold() for name in entries}
-            if not any(name.casefold() not in ignored_folded for name in allowed):
-                allowed_folded = {name.casefold() for name in allowed}
-                entries = [n for n in entries if n.casefold() not in allowed_folded]
+            ignored_folded = {_fold_provider(name) for name in entries}
+            if not any(_fold_provider(name) not in ignored_folded for name in allowed):
+                allowed_folded = {_fold_provider(name) for name in allowed}
+                entries = [
+                    n for n in entries if _fold_provider(n) not in allowed_folded
+                ]
         if entries:
             block["ignore"] = entries
     return (block or None), response_format_mode
