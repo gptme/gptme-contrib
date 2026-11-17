@@ -604,6 +604,7 @@ def run_push_guard(
                         f"informational only); claiming {key}",
                         file=sys.stderr,
                     )
+                newly_claimed: list[str] = []
                 for claim_key in [
                     key,
                     *(f"pr-branch:{a}#{branch}" for a in alias_slugs),
@@ -612,11 +613,11 @@ def run_push_guard(
                     claim = work.claim(aid, claim_key, ttl_minutes=60)
                     now = datetime.now(UTC).isoformat()
                     if claim:
-                        event = (
-                            "push_renew"
-                            if existing_before and existing_before.claimer == aid
-                            else "push_auto_claim"
-                        )
+                        if existing_before and existing_before.claimer == aid:
+                            event = "push_renew"
+                        else:
+                            event = "push_auto_claim"
+                            newly_claimed.append(claim_key)
                         append_ledger(
                             _brain_root,
                             {
@@ -647,6 +648,12 @@ def run_push_guard(
                     )
                     print(_push_deny_message(claim_key, holder), file=sys.stderr)
                     if should_deny:
+                        # A refused push must not leave this agent holding the
+                        # sibling keys it claimed earlier in this loop: the
+                        # push never happened, and the leftover claim would
+                        # block the real owner of the fork branch for the TTL.
+                        for acquired in newly_claimed:
+                            work.abandon(aid, acquired, "push denied on alias key")
                         return 1
     except Exception as exc:  # noqa: BLE001 - availability beats push enforcement
         try:
