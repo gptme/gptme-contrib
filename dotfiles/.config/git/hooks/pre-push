@@ -633,8 +633,23 @@ command -v git-lfs >/dev/null 2>&1 && printf '%s\n' "${STDIN_LINES[@]}" | git lf
 # Fall back to that install root, derived textually from the hook's own
 # physical path. Only that exact layout qualifies: a blind walk-up from e.g.
 # <superproject>/.git/modules/<sub>/hooks would land in a cloned working tree.
+#
+# Git runs hooks with its repository-locating environment exported (GIT_DIR,
+# GIT_WORK_TREE, GIT_COMMON_DIR, ...; a linked-worktree push exports an
+# absolute GIT_DIR). `git -C` honours those, so a copied install would be
+# answered with the *pushing* repository's root instead of failing — the
+# fallback below would be skipped and the guard never found. Discovery must see
+# only the hook's own location, so Git's local environment is cleared for this
+# one command. The working-repository operations elsewhere keep it untouched.
 _HOOKS_REAL="$(readlink -f "$SCRIPT_DIR" 2>/dev/null || printf '%s' "$SCRIPT_DIR")"
-_HOOK_REPO="$(git -C "$_HOOKS_REAL" rev-parse --show-toplevel 2>/dev/null || true)"
+_HOOK_DISCOVERY_UNSET=()
+while IFS= read -r _git_local_var; do
+    [ -n "$_git_local_var" ] || continue
+    [ -n "${!_git_local_var:-}" ] || continue
+    _HOOK_DISCOVERY_UNSET+=(-u "$_git_local_var")
+done < <(git rev-parse --local-env-vars 2>/dev/null || true)
+_HOOK_REPO="$(env ${_HOOK_DISCOVERY_UNSET[@]+"${_HOOK_DISCOVERY_UNSET[@]}"} \
+    git -C "$_HOOKS_REAL" rev-parse --show-toplevel 2>/dev/null || true)"
 if [ -z "$_HOOK_REPO" ]; then
     case "$_HOOKS_REAL" in
         */dotfiles/.config/git/hooks)

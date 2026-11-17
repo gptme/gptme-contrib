@@ -149,3 +149,144 @@ def test_guard_gitdir_path_matching_install_suffix_is_never_executed(
     proc = _push(hooks / "pre-push", _repo(tmp_path), marker)
     assert not marker.exists(), proc.stderr
     assert proc.returncode == 0, proc.stderr
+
+
+def _git(repo: Path, *args: str) -> str:
+    """Run git with the launcher's own repository-locating env removed."""
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=_push_env(),
+    ).stdout.strip()
+
+
+def _push_env(**extra: str) -> dict[str, str]:
+    """A clean git environment: the caller's GIT_* must not steer fixtures.
+
+    The inherited-environment bug is reproduced by *git itself* exporting
+    GIT_DIR to the hook, so the fixture environment must start neutral.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(
+        GIT_CONFIG_GLOBAL="/dev/null",
+        GIT_CONFIG_NOSYSTEM="1",
+        GIT_TERMINAL_PROMPT="0",
+    )
+    env.update(extra)
+    return env
+
+
+def _push_from_worktree(
+    tmp_path: Path,
+    hook: Path,
+    marker: Path,
+    guard_exit: str = "0",
+    plant_repo_guard: bool = False,
+):
+    """Push for real, from a linked worktree, to a local bare destination.
+
+    Git runs pre-push with the pushing repository's local environment exported.
+    For a linked worktree that includes an absolute ``GIT_DIR``; the hook must
+    not let that inherited value steer hook-location discovery. The hook set is
+    wired through the pushed repository's own ``core.hooksPath``, so no global
+    install is touched.
+
+    ``plant_repo_guard`` plants an executable guard in the *linked worktree*
+    before the push. The inherited ``GIT_DIR`` points at that worktree's gitdir,
+    so an over-broad discovery resolves the worktree root — planting there is
+    what makes the hostile-repo assertion meaningful.
+    """
+    destination = tmp_path / "destination.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", str(destination)],
+        check=True,
+        env=_push_env(),
+        timeout=60,
+    )
+    repo = tmp_path / "push-repo"
+    subprocess.run(
+        ["git", "init", "-q", "-b", "topic", str(repo)],
+        check=True,
+        env=_push_env(),
+        timeout=60,
+    )
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "remote", "add", "origin", str(destination))
+    (repo / "file.txt").write_text("x\n")
+    _git(repo, "add", "file.txt")
+    _git(repo, "-c", "core.hooksPath=/dev/null", "commit", "-qm", "initial")
+    worktree = tmp_path / "push-worktree"
+    _git(
+        repo,
+        "-c",
+        "core.hooksPath=/dev/null",
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "pushed",
+        str(worktree),
+    )
+    # Repo-local config is shared by the linked worktree.
+    _git(repo, "config", "core.hooksPath", str(hook.parent))
+    if plant_repo_guard:
+        # The pushing cwd/worktree root is what inherited GIT_DIR resolves to.
+        planted = worktree / "scripts" / "hooks" / "worktree-push-guard"
+        planted.parent.mkdir(parents=True)
+        planted.write_text(STUB_GUARD)
+        planted.chmod(0o755)
+    return subprocess.run(
+        ["git", "push", "origin", "HEAD:refs/heads/topic"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=_push_env(GUARD_MARKER=str(marker), GUARD_EXIT=guard_exit),
+    )
+
+
+def test_guard_runs_on_real_push_from_copied_install(tmp_path: Path) -> None:
+    """A real ``git push`` exports GIT_DIR; discovery must still reach the
+    copied install's guard instead of resolving the hooks dir as a repo."""
+    hook = _install(tmp_path)
+    marker = tmp_path / "guard-ran"
+    proc = _push_from_worktree(tmp_path, hook, marker)
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists(), proc.stderr
+
+
+def test_guard_deny_blocks_real_push_from_copied_install(tmp_path: Path) -> None:
+    hook = _install(tmp_path)
+    marker = tmp_path / "guard-ran"
+    proc = _push_from_worktree(tmp_path, hook, marker, guard_exit="1")
+    assert marker.exists(), proc.stderr
+    assert proc.returncode != 0, proc.stderr
+
+
+def test_guard_in_pushed_repo_is_never_executed_on_real_push(tmp_path: Path) -> None:
+    """Inherited GIT_DIR must not point discovery at the pushed repository."""
+    hook = _install(tmp_path)
+    install_marker = tmp_path / "install-guard-ran"
+    install_guard = hook.parents[4] / "scripts" / "hooks" / "worktree-push-guard"
+    install_guard.write_text(
+        STUB_GUARD.replace(
+            'echo ran > "$GUARD_MARKER"', f'echo ran > "{install_marker}"'
+        )
+    )
+    repo_marker = tmp_path / "repo-guard-ran"
+    proc = _push_from_worktree(tmp_path, hook, repo_marker, plant_repo_guard=True)
+    # The hostile guard sits exactly where naive discovery would look: the
+    # linked worktree root, which is what the pushed repository's own gitdir
+    # names as its worktree.
+    worktree = tmp_path / "push-worktree"
+    plant = worktree / "scripts" / "hooks" / "worktree-push-guard"
+    assert _git(worktree, "rev-parse", "--show-toplevel") == str(worktree)
+    assert plant.is_file(), proc.stderr
+    assert plant.stat().st_mode & 0o100, "planted guard is not executable"
+    assert install_marker.exists(), proc.stderr
+    assert not repo_marker.exists(), proc.stderr
+    assert proc.returncode == 0, proc.stderr
