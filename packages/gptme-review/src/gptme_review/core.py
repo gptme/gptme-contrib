@@ -2350,8 +2350,14 @@ def usage_summary(
             pass
     balance_delta = None
     if len(balance_snapshots) >= 2:
+        # ``used`` is the key's lifetime counter; a key rotation resets it to 0.
+        # Sum positive steps so a reset contributes nothing instead of
+        # clamping the whole window to $0 (2026-11-11 rotation: 243.6 -> 0).
         ordered = sorted(balance_snapshots)
-        balance_delta = max(0.0, ordered[-1][1] - ordered[0][1])
+        balance_delta = sum(
+            max(0.0, later[1] - earlier[1])
+            for earlier, later in zip(ordered, ordered[1:], strict=False)
+        )
     providers = {
         max(spellings[fold].items(), key=lambda item: (item[1], item[0]))[0]: counts
         for fold, counts in by_provider.items()
