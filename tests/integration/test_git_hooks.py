@@ -505,6 +505,311 @@ class TestUpstreamTracksDefaultBranch:
         assert result.returncode == 0
 
 
+class TestUpstreamOnFork:
+    """A fork-PR branch tracks the fork; pushing it to origin misses the PR.
+
+    gptme/gptme#4946: the branch tracked TimeToBuildBob/<branch>, a follow-up
+    commit was pushed to origin instead, and the PR kept running CI on the old
+    head while a stray branch appeared upstream.
+    """
+
+    FORK_URL = "git@github.com:Fork/repo.git"
+    ORIGIN_URL = "https://github.com/test/repo"
+
+    def _track_fork(self, repo_path: Path, branch: str) -> None:
+        env = _clean_git_env()
+        _checkout_branch(repo_path, branch)
+        for name, url in (("origin", self.ORIGIN_URL), ("fork", self.FORK_URL)):
+            subprocess.run(
+                ["git", "remote", "add", name, url],
+                cwd=repo_path,
+                capture_output=True,
+                env=env,
+            )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "update-ref", f"refs/remotes/fork/{branch}", head],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            env=env,
+        )
+        subprocess.run(
+            ["git", "branch", f"--set-upstream-to=fork/{branch}", branch],
+            cwd=repo_path,
+            check=True,
+            capture_output=True,
+            env=env,
+        )
+
+    def _run(self, repo_path: Path, remote: str, url: str, stdin: str, **env_extra):
+        script = repo_path / ".git" / "hooks" / "validate-worktree-tracking.sh"
+        if not script.exists():
+            pytest.skip("validate-worktree-tracking.sh not found")
+        return subprocess.run(
+            ["bash", str(script), remote, url],
+            cwd=repo_path,
+            input=stdin,
+            text=True,
+            capture_output=True,
+            env={**_clean_git_env(), **env_extra},
+        )
+
+    def test_blocks_tracked_branch_pushed_to_other_repo(self, hook_env):
+        self._track_fork(hook_env, "feat-x")
+        result = self._run(
+            hook_env,
+            "origin",
+            self.ORIGIN_URL,
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+        )
+        assert result.returncode == 1
+        assert "git push fork feat-x" in result.stdout
+
+    @pytest.mark.parametrize("branch", ["foo.bar", "v1.0", "release/v1.0"])
+    def test_dotted_branch_tracking_is_checked(self, hook_env, branch):
+        self._track_fork(hook_env, branch)
+        remote = subprocess.run(
+            ["git", "config", "--get", f"branch.{branch}.remote"],
+            cwd=hook_env,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=_clean_git_env(),
+        )
+        assert remote.stdout.strip() == "fork"
+        for destination, expected in ((self.ORIGIN_URL, 1), (self.FORK_URL, 0)):
+            result = self._run(
+                hook_env,
+                "destination",
+                destination,
+                f"refs/heads/{branch} abc123 refs/heads/{branch} 0000",
+            )
+            assert result.returncode == expected, result.stdout + result.stderr
+
+    @pytest.mark.parametrize("upstream_is_alias", [False, True])
+    def test_allows_github_scp_ssh_endpoint_alias(self, hook_env, upstream_is_alias):
+        self._track_fork(hook_env, "feat-x")
+        alias = "git@SSH.GITHUB.COM:Fork/repo.git"
+        if upstream_is_alias:
+            subprocess.run(
+                ["git", "remote", "set-url", "fork", alias],
+                cwd=hook_env,
+                check=True,
+                capture_output=True,
+                env=_clean_git_env(),
+            )
+        result = self._run(
+            hook_env,
+            "alias",
+            self.FORK_URL if upstream_is_alias else alias,
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_allows_push_to_tracked_fork_without_origin_warning(self, hook_env):
+        self._track_fork(hook_env, "feat-x")
+        result = self._run(
+            hook_env,
+            "fork",
+            # Same repository spelled as https: slugs must still match.
+            "https://github.com/fork/repo",
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+        )
+        assert result.returncode == 0, result.stdout
+        assert "origin/feat-x" not in result.stdout
+
+    def test_allows_other_branch_name_to_other_repo(self, hook_env):
+        self._track_fork(hook_env, "feat-x")
+        result = self._run(
+            hook_env,
+            "origin",
+            self.ORIGIN_URL,
+            "refs/heads/feat-x abc123 refs/heads/feat-x-copy 0000",
+        )
+        assert result.returncode == 0
+
+    @pytest.mark.parametrize("checkout", ["master", "other", "--detach"])
+    def test_checks_pushed_branch_not_checkout(self, hook_env, checkout):
+        self._track_fork(hook_env, "feat-x")
+        args = (
+            ["git", "checkout", "--detach"]
+            if checkout == "--detach"
+            else ["git", "checkout", "-B", checkout]
+        )
+        subprocess.run(
+            args, cwd=hook_env, check=True, capture_output=True, env=_clean_git_env()
+        )
+        result = self._run(
+            hook_env,
+            "origin",
+            self.ORIGIN_URL,
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+        )
+        assert result.returncode == 1, result.stdout
+        assert "Branch 'feat-x'" in result.stdout
+
+    def test_mixed_deletion_does_not_use_checkout_tracking(self, hook_env):
+        self._track_fork(hook_env, "feat-x")
+        result = self._run(
+            hook_env,
+            "origin",
+            self.ORIGIN_URL,
+            "(delete) " + "0" * 40 + " refs/heads/feat-x abc123\n"
+            "refs/heads/other abc123 refs/heads/other 0000\n",
+        )
+        assert result.returncode == 0, result.stdout
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "ssh://git@github.com:22/fork/repo.git",
+            "ssh://git@ssh.github.com:443/fork/repo.git",
+            "https://github.com/fork/repo.git/",
+        ],
+    )
+    def test_allows_port_and_trailing_slash_aliases(self, hook_env, url):
+        self._track_fork(hook_env, "feat-x")
+        result = self._run(
+            hook_env,
+            "alias",
+            url,
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+        )
+        assert result.returncode == 0, result.stdout
+
+    def test_blocks_same_path_on_another_host(self, hook_env):
+        self._track_fork(hook_env, "feat-x")
+        result = self._run(
+            hook_env,
+            "other-host",
+            "https://gitlab.com/fork/repo.git",
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+        )
+        assert result.returncode == 1, result.stdout
+
+    @pytest.mark.parametrize(
+        ("destination", "expected"),
+        [
+            ("https://GIT.EXAMPLE/Group/Repo.git", 0),
+            ("ssh://git@git.example:22/Group/Repo.git", 0),
+            ("git@git.example:Group/Repo.git", 0),
+            ("https://git.example/group/repo.git", 1),
+            ("ssh://git@git.example/Group/repo.git", 1),
+            ("git@git.example:group/Repo.git", 1),
+            ("ssh://git@git.example:2222/Group/Repo.git", 1),
+        ],
+    )
+    def test_preserves_non_github_path_and_port_identity(
+        self, hook_env, destination, expected
+    ):
+        self._track_fork(hook_env, "feat-x")
+        subprocess.run(
+            ["git", "remote", "set-url", "fork", "https://git.example/Group/Repo.git"],
+            cwd=hook_env,
+            check=True,
+            capture_output=True,
+            env=_clean_git_env(),
+        )
+        result = self._run(
+            hook_env,
+            "alias",
+            destination,
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+        )
+        assert result.returncode == expected, result.stdout + result.stderr
+
+    def test_advice_names_tracked_destination(self, hook_env):
+        self._track_fork(hook_env, "pr-local")
+        subprocess.run(
+            ["git", "config", "branch.pr-local.merge", "refs/heads/pr-head"],
+            cwd=hook_env,
+            check=True,
+            capture_output=True,
+            env=_clean_git_env(),
+        )
+        result = self._run(
+            hook_env,
+            "origin",
+            self.ORIGIN_URL,
+            "refs/heads/pr-local abc123 refs/heads/pr-head 0000",
+        )
+        assert result.returncode == 1, result.stdout
+        assert "git push fork pr-local:refs/heads/pr-head" in result.stdout
+
+    def test_blocks_when_tracked_remote_cannot_be_resolved(self, hook_env):
+        self._track_fork(hook_env, "feat-x")
+        # Keep branch tracking intact while removing the remote it names.
+        subprocess.run(
+            ["git", "config", "--remove-section", "remote.fork"],
+            cwd=hook_env,
+            check=True,
+            capture_output=True,
+            env=_clean_git_env(),
+        )
+        for override, expected in (({}, 1), ({"GIT_ALLOW_PUSH_OFF_UPSTREAM": "1"}, 0)):
+            result = self._run(
+                hook_env,
+                "origin",
+                self.ORIGIN_URL,
+                "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+                **override,
+            )
+            assert result.returncode == expected, result.stdout + result.stderr
+            if not override:
+                assert "Cannot resolve push URL" in result.stdout
+                assert "fork" in result.stdout
+                assert "GIT_ALLOW_PUSH_OFF_UPSTREAM=1" in result.stdout
+
+    def test_override_env_allows_off_upstream_push(self, hook_env):
+        self._track_fork(hook_env, "feat-x")
+        result = self._run(
+            hook_env,
+            "origin",
+            self.ORIGIN_URL,
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+            GIT_ALLOW_PUSH_OFF_UPSTREAM="1",
+        )
+        assert result.returncode == 0
+
+    def test_error_does_not_echo_credentialed_urls(self, hook_env):
+        self._track_fork(hook_env, "feat-x")
+        token = "ghp_notarealtoken_leakcheck_1234567890"
+        subprocess.run(
+            [
+                "git",
+                "remote",
+                "set-url",
+                "--push",
+                "fork",
+                f"https://user:{token}@github.com/Fork/repo.git",
+            ],
+            cwd=hook_env,
+            check=True,
+            capture_output=True,
+            env=_clean_git_env(),
+        )
+        result = self._run(
+            hook_env,
+            "origin",
+            f"https://x-access-token:{token}@github.com/test/repo.git",
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+        )
+        combined = result.stdout + result.stderr
+        assert result.returncode == 1, combined
+        assert token not in combined
+        assert f"user:{token}" not in combined
+        assert "github.com/fork/repo" in combined.lower()
+        assert "github.com/test/repo" in combined.lower()
+
+
 def test_hooks_exist():
     """Verify that required hook files exist."""
     assert HOOKS_DIR.exists(), f"Hooks directory not found: {HOOKS_DIR}"
@@ -741,3 +1046,19 @@ class TestGitIdentityValidation:
 if __name__ == "__main__":
     # Allow running as standalone script
     pytest.main([__file__, "-v"])
+
+
+def test_hooks_avoid_bash4_case_modification():
+    """macOS ships bash 3.2, which fails ``${var,,}``/``${var^^}`` at runtime
+    with "bad substitution" (``bash -n`` does not catch it)."""
+    import re
+
+    pattern = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*(,,?|\^\^?)\}")
+    offenders = [
+        f"{hook.name}:{lineno}"
+        for hook in sorted(HOOKS_DIR.iterdir())
+        if hook.is_file()
+        for lineno, line in enumerate(hook.read_text().splitlines(), 1)
+        if not line.lstrip().startswith("#") and pattern.search(line)
+    ]
+    assert offenders == []
