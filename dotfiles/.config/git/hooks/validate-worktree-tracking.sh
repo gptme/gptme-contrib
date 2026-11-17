@@ -76,9 +76,13 @@ if [ -n "$dest_url" ] && [ "${GIT_ALLOW_PUSH_OFF_UPSTREAM:-}" != "1" ]; then
         fi
         [ "${push_remote_refs[$i]}" = "$upstream_merge" ] || continue
         upstream_url=$(git remote get-url --push "$upstream_remote" 2>/dev/null || true)
-        if [ -n "$upstream_url" ] && [ "$(_repo_slug "$upstream_url")" != "$(_repo_slug "$dest_url")" ]; then
-            echo "🚫 ERROR: Branch '$pushed_branch' tracks '$upstream_remote/${upstream_merge#refs/heads/}' ($upstream_url),"
-            echo "   but this push sends it to '${1:-$dest_url}' ($dest_url)."
+        # Print slugs, never the configured URL: get-url --push can contain
+        # https://user:token@... and this message is the hook's stdout.
+        upstream_id=$(_repo_slug "$upstream_url")
+        dest_id=$(_repo_slug "$dest_url")
+        if [ -n "$upstream_url" ] && [ "$upstream_id" != "$dest_id" ]; then
+            echo "🚫 ERROR: Branch '$pushed_branch' tracks '$upstream_remote/${upstream_merge#refs/heads/}' ($upstream_id),"
+            echo "   but this push sends it to '${1:-remote}' ($dest_id)."
             echo "   A PR only sees commits pushed to its head repository. Check it first:"
             echo "     gh pr view --json headRepository,headRepositoryOwner"
             echo ""

@@ -683,6 +683,36 @@ class TestUpstreamOnFork:
         )
         assert result.returncode == 0
 
+    def test_error_does_not_echo_credentialed_urls(self, hook_env):
+        self._track_fork(hook_env, "feat-x")
+        token = "ghp_notarealtoken_leakcheck_1234567890"
+        subprocess.run(
+            [
+                "git",
+                "remote",
+                "set-url",
+                "--push",
+                "fork",
+                f"https://user:{token}@github.com/Fork/repo.git",
+            ],
+            cwd=hook_env,
+            check=True,
+            capture_output=True,
+            env=_clean_git_env(),
+        )
+        result = self._run(
+            hook_env,
+            "origin",
+            f"https://x-access-token:{token}@github.com/test/repo.git",
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+        )
+        combined = result.stdout + result.stderr
+        assert result.returncode == 1, combined
+        assert token not in combined
+        assert f"user:{token}" not in combined
+        assert "github.com/fork/repo" in combined.lower()
+        assert "github.com/test/repo" in combined.lower()
+
 
 def test_hooks_exist():
     """Verify that required hook files exist."""
