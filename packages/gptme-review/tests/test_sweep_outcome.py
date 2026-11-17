@@ -52,6 +52,22 @@ def test_primary_provider_failure_classes() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "OpenRouter request failed: <urlopen error [Errno 111] Connection refused>",
+        "OpenRouter request failed: timed out",
+        "OpenRouter request failed: IncompleteRead(128 bytes read, 256 more expected)",
+    ],
+)
+def test_primary_provider_connection_failure(reason: str) -> None:
+    assert o.is_primary_provider_failure({"engine": "llm", "reason": reason})
+    assert not o.is_primary_provider_failure({"engine": "agent", "reason": reason})
+    assert not o.is_primary_provider_failure(
+        {"engine": "llm", "reason": reason, "too_large": True}
+    )
+
+
 def test_quota_breaker_needs_zero_successes() -> None:
     n = o.QUOTA_BREAKER_CONSECUTIVE
     assert o.quota_breaker_tripped(n, 0)

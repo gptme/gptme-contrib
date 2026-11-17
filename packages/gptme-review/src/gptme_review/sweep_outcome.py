@@ -55,6 +55,7 @@ PRIMARY_PROVIDER_FAILURE_MARKERS = (
     "openrouter did not respond",
     "openrouter timed out",
     "openrouter http",
+    "openrouter request failed:",
 )
 
 #: Consecutive quota-limited failures that mean the limiter itself is tripped.
