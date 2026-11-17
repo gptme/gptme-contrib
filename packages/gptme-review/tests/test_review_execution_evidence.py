@@ -191,10 +191,27 @@ def test_expired_job_deadline_prevents_any_wire_request(
         "_post_openrouter",
         lambda *a, **kw: pytest.fail("expired deadline reached the wire"),
     )
-    with pytest.raises(core.ReviewError, match="deadline"):
-        core.review(
-            target, config, api_key="test-key", fanout=fanout, deadline=deadline
-        )
+    # The expired wave deadline can raise before its worker finishes logging.
+    # Join this test's workers before monkeypatch restores their dependencies
+    # and the next test redirects the shared usage ledger.
+    threads = []
+    thread_factory = core.threading.Thread
+
+    def tracked_thread(*args, **kwargs):
+        thread = thread_factory(*args, **kwargs)
+        threads.append(thread)
+        return thread
+
+    monkeypatch.setattr(core.threading, "Thread", tracked_thread)
+    try:
+        with pytest.raises(core.ReviewError, match="deadline"):
+            core.review(
+                target, config, api_key="test-key", fanout=fanout, deadline=deadline
+            )
+    finally:
+        for thread in threads:
+            thread.join(timeout=5)
+        assert not any(thread.is_alive() for thread in threads)
 
 
 def test_direct_request_preserves_sensitive_repo_routing(monkeypatch, target, config):
