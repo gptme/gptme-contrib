@@ -603,6 +603,28 @@ def test_no_reply_subject_patterns_file_rejects_invalid_regex(workspace: Path) -
     assert "Invalid no-reply-subject-patterns regex" in result.output
 
 
+def test_no_reply_subject_patterns_file_keeps_hash_leading_regex(workspace: Path) -> None:
+    """Only "#" / "# ..." lines are comments; "#\\d+" is a real pattern."""
+    ticket = _seed_inbox(workspace, subject="TICKET#42 followup")
+    other = _seed_inbox(workspace, subject="Real question")
+    (workspace / "messages" / "no-reply-subject-patterns").write_text("# ticket feed\n#\\d+\n")
+
+    result = CliRunner().invoke(agent, ["pending"])
+    assert result.exit_code == 0, result.output
+    assert ticket not in result.output
+    assert other in result.output
+
+
+def test_no_reply_subject_patterns_file_reports_undecodable_bytes(workspace: Path) -> None:
+    _seed_inbox(workspace)
+    policy = workspace / "messages" / "no-reply-subject-patterns"
+    policy.write_bytes(b"^caf\xe9\xff\n")
+
+    result = CliRunner().invoke(agent, ["pending"])
+    assert result.exit_code == 1, result.output
+    assert f"Cannot read {policy}" in result.output
+
+
 @pytest.mark.parametrize("command", ["pending", "status"])
 @pytest.mark.parametrize("failure", ["directory", "permission"])
 def test_no_reply_subject_patterns_file_reports_read_errors(

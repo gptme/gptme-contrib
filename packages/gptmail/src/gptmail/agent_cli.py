@@ -106,16 +106,20 @@ def _no_reply_subject_patterns() -> list[re.Pattern[str]]:
         pass  # no repo root: env var only
     else:
         try:
-            sources.append((_NO_REPLY_PATTERNS_FILE, policy_path.read_text()))
+            sources.append((_NO_REPLY_PATTERNS_FILE, policy_path.read_text(encoding="utf-8")))
         except FileNotFoundError:
             pass  # optional policy file
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise click.ClickException(f"Cannot read {policy_path}: {exc}") from exc
     patterns: list[re.Pattern[str]] = []
     for origin, raw in sources:
         for item in raw.splitlines():
             item = item.strip()
-            if not item or (origin == _NO_REPLY_PATTERNS_FILE and item.startswith("#")):
+            # "#" alone or "# ..." is a comment; "#\d+" is still a regex.
+            is_comment = origin == _NO_REPLY_PATTERNS_FILE and (
+                item == "#" or item.startswith("# ")
+            )
+            if not item or is_comment:
                 continue
             try:
                 patterns.append(re.compile(item, re.IGNORECASE))
