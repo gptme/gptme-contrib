@@ -101,11 +101,16 @@ def _no_reply_subject_patterns() -> list[re.Pattern[str]]:
         )
     ]
     try:
-        sources.append(
-            (_NO_REPLY_PATTERNS_FILE, (_messages_dir() / _NO_REPLY_PATTERNS_FILE).read_text())
-        )
-    except (OSError, RuntimeError):
-        pass  # no file (or no repo root): env var only
+        policy_path = _messages_dir() / _NO_REPLY_PATTERNS_FILE
+    except RuntimeError:
+        pass  # no repo root: env var only
+    else:
+        try:
+            sources.append((_NO_REPLY_PATTERNS_FILE, policy_path.read_text()))
+        except FileNotFoundError:
+            pass  # optional policy file
+        except OSError as exc:
+            raise click.ClickException(f"Cannot read {policy_path}: {exc}") from exc
     patterns: list[re.Pattern[str]] = []
     for origin, raw in sources:
         for item in raw.splitlines():

@@ -604,6 +604,33 @@ def test_no_reply_subject_patterns_file_rejects_invalid_regex(workspace: Path) -
 
 
 @pytest.mark.parametrize("command", ["pending", "status"])
+@pytest.mark.parametrize("failure", ["directory", "permission"])
+def test_no_reply_subject_patterns_file_reports_read_errors(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, command: str, failure: str
+) -> None:
+    _seed_inbox(workspace)
+    policy = workspace / "messages" / "no-reply-subject-patterns"
+    if failure == "directory":
+        policy.mkdir()
+    else:
+        policy.write_text("^Daily digest$\n")
+        original_read_text = Path.read_text
+
+        def read_text(path: Path, *args, **kwargs) -> str:
+            if path == policy:
+                raise PermissionError("Permission denied")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read_text)
+
+    result = CliRunner().invoke(agent, [command])
+    assert result.exit_code == 1, result.output
+    assert f"Cannot read {policy}" in result.output
+    expected_error = "Is a directory" if failure == "directory" else "Permission denied"
+    assert expected_error in result.output
+
+
+@pytest.mark.parametrize("command", ["pending", "status"])
 def test_no_reply_subject_filter_rejects_invalid_regex(workspace: Path, command: str) -> None:
     _seed_inbox(workspace)
     with pytest.MonkeyPatch.context() as monkeypatch:
