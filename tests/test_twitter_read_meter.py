@@ -73,7 +73,8 @@ def test_meter_counts_gets_and_blocks_at_limit(tw, monkeypatch):
 
     def fake_request(self, method, route, *a, **k):
         calls.append((method, route))
-        return SimpleNamespace(ok=True, json=lambda: {"data": [{"id": "1"}] * 4})
+        page = [{"id": f"{len(calls)}-{i}"} for i in range(4)]
+        return SimpleNamespace(ok=True, json=lambda: {"data": page})
 
     monkeypatch.setattr(tw.tweepy.client.BaseClient, "request", fake_request)
     tw.install_read_meter()
@@ -104,7 +105,7 @@ def test_unlimited_by_default_but_still_counts(tw, monkeypatch):
     for _ in range(5):
         client.request("GET", "/2/users/me")
     assert tw.daily_read_limit() == 0
-    assert tw.daily_reads_used() == 10
+    assert tw.daily_reads_used() == 2  # the same user is billed once per UTC day
 
 
 def test_failed_response_is_not_counted(tw, monkeypatch):
@@ -217,8 +218,8 @@ def test_loaded_client_keeps_its_profile_budget(tw, monkeypatch, tmp_path):
         first.request("GET", "/2/tweets/1")
     second.request("GET", "/2/tweets/1")
     day = tw.datetime.now(tw.timezone.utc).strftime("%Y-%m-%d")
-    assert json.loads((first_dir / f"{day}-first.json").read_text()) == {"reads": 1}
-    assert json.loads((second_dir / f"{day}-second.json").read_text()) == {"reads": 1}
+    assert json.loads((first_dir / f"{day}-first.json").read_text())["reads"] == 1
+    assert json.loads((second_dir / f"{day}-second.json").read_text())["reads"] == 1
 
 
 def test_read_budget_uses_dedicated_env_file_without_network(tw, monkeypatch, tmp_path):
@@ -453,7 +454,7 @@ def test_midnight_rollover_uses_current_day(tw, monkeypatch, rollover_stage):
     )
     tw.install_read_meter()
     client.get_tweets(ids=[1])
-    assert json.loads(today.read_text()) == {"reads": 1}
+    assert json.loads(today.read_text())["reads"] == 1
     assert json.loads(yesterday.read_text()) == {
         "reads": 1 if rollover_stage == "lock" else 0
     }
@@ -478,3 +479,22 @@ def test_failed_counter_replacement_preserves_previous_usage(tw, monkeypatch):
     with pytest.raises(OSError, match="simulated interruption"):
         tw.tweepy.Client(bearer_token="x").request("GET", "/2/tweets/1")
     assert tw.daily_reads_used() == 9
+
+
+def test_same_resources_reread_in_a_day_count_once(tw, monkeypatch):
+    """X bills a resource once per UTC day; re-reading mentions must not re-spend."""
+    mentions = {
+        "data": [{"id": "10"}, {"id": "11"}],
+        "includes": {"users": [{"id": "u1"}], "tweets": [{"id": "9"}]},
+    }
+    pages = [mentions, mentions, {"data": [{"id": "11"}, {"id": "12"}]}]
+    monkeypatch.setattr(
+        tw.tweepy.client.BaseClient,
+        "request",
+        lambda *a, **kw: SimpleNamespace(ok=True, json=lambda page=pages.pop(0): page),
+    )
+    tw.install_read_meter()
+    client = tw.tweepy.Client(bearer_token="x")
+    for _ in range(3):
+        client.request("GET", "/2/users/123/mentions")
+    assert tw.daily_reads_used() == 2 + 2 + 1 + 1  # posts 10, 11, 12, 9 and user u1
