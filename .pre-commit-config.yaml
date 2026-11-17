@@ -46,7 +46,7 @@ repos:
     # Package test conftests map to module `conftest`, colliding with the root
     # conftest.py; a tests/__init__.py would instead clash with a host repo's
     # own `tests` package under pytest.
-    exclude: ^(packages/[^/]+/tests/conftest\.py$|packages/(bobutils|gptme-backoff|gptme-bob-status|gptme-lessons-extras|gptme-runloops|gptme-contrib-lib|gptodo|gptmail|gptme-activity-summary|gptme-voice|gptme-dashboard|gptme-sessions|gptme-daily-briefing|gptme-codegraph|gptme-coordination|gptme-rag|gptme-cc-memory|gptme-vision-node)/|plugins/|dotfiles/\.config/git/hooks/(prepare-)?commit-msg$|scripts/hooks/worktree-(push-)?guard$)
+    exclude: ^(packages/[^/]+/tests/conftest\.py$|packages/(bobutils|gptme-backoff|gptme-bob-status|gptme-lessons-extras|gptme-runloops|gptme-contrib-lib|gptodo|gptmail|gptme-activity-summary|gptme-voice|gptme-dashboard|gptme-sessions|gptme-daily-briefing|gptme-codegraph|gptme-coordination|gptme-rag|gptme-cc-memory|gptme-vision-node|gptme-vitals)/|plugins/|dotfiles/\.config/git/hooks/(prepare-)?commit-msg$|scripts/hooks/worktree-(push-)?guard$)
 - repo: local
   hooks:
   - id: validate-bash-continuation-comment

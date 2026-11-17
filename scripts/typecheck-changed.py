@@ -47,6 +47,7 @@ TYPECHECKED_PACKAGES = {
     "gptme-runloops",
     "gptme-sessions",
     "gptme-vision-node",
+    "gptme-vitals",
     "gptme-voice",
     "gptme-wisdom-mcp",
     "gptodo",
