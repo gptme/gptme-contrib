@@ -42,8 +42,19 @@ def test_local_no_train_review_ignores_inceptron(monkeypatch):
     block = _capture(monkeypatch, no_train=True, ctx={"consumer": "local"})
     assert block["data_collection"] == "deny"
     assert [n.casefold() for n in block["ignore"]] == ["inceptron"]
+    # The pin lists Wafer first, so the order survives and Wafer is the
+    # requested host; Inceptron stays ignored inside the deny set.
+    assert block["order"][0].casefold() == "wafer"
+    assert block["allow_fallbacks"] is True
+    assert "sort" not in block
+    assert (core._requested_provider(block) or "").casefold() == "wafer"
+
+
+def test_order_of_only_ignored_hosts_is_dropped(monkeypatch):
     # An order of only ignored hosts is dropped, so an unnamed failure is not
     # logged (and quarantined) against Inceptron, which this call never tried.
+    monkeypatch.setitem(core.PROVIDER_POLICY[MODEL], "order", ("inceptron",))
+    block = _capture(monkeypatch, no_train=True, ctx={"consumer": "local"})
     assert "order" not in block
     assert block["sort"] == "price"
     assert core._requested_provider(block) is None
