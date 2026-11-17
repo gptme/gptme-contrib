@@ -72,3 +72,29 @@ def test_missing_cost_stays_estimate_not_billed_zero(monkeypatch, tmp_path):
     row = json.loads(ledger.read_text())
     assert row["cost"] > 0
     assert row["cost_method"] == "prompt_estimate"
+
+
+@pytest.mark.parametrize("configured", [True, False])
+def test_usage_row_takes_dry_run_from_the_current_run(
+    monkeypatch, tmp_path, configured
+):
+    from gptme_review import lifecycle
+
+    ledger = tmp_path / "usage.jsonl"
+    monkeypatch.setattr(core, "USAGE_LEDGER", ledger)
+    monkeypatch.setattr(core, "resolve_review_route", lambda: None)
+    monkeypatch.setenv("AI_REVIEW_LIFECYCLE_LEDGER", str(tmp_path / "lifecycle.jsonl"))
+    with lifecycle.lifecycle_context() as run:
+        run.configure({"repo": "o/r", "pr": 1, "dry_run": configured})
+        core._log_usage_record({"prompt_tokens": 10}, consumer="sweep")
+    row = json.loads(ledger.read_text())
+    assert row["dry_run"] is configured
+    assert row["run_id"] == run.run_id
+
+
+def test_usage_row_without_a_run_keeps_dry_run_false(monkeypatch, tmp_path):
+    ledger = tmp_path / "usage.jsonl"
+    monkeypatch.setattr(core, "USAGE_LEDGER", ledger)
+    monkeypatch.setattr(core, "resolve_review_route", lambda: None)
+    core._log_usage_record({"prompt_tokens": 10}, consumer="test")
+    assert json.loads(ledger.read_text())["dry_run"] is False

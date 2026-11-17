@@ -2123,6 +2123,10 @@ def _log_usage_record(
         }:
             fallback_reason = "review-fallback"
     request_run = lifecycle.current_run()
+    # No caller threads ``dry_run`` through; the run's configured flag is the
+    # source of truth, so a --dry-run probe is not logged as production traffic.
+    if not dry_run and request_run is not None:
+        dry_run = request_run.dry_run
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "session_id": os.environ.get("BOB_SESSION_ID")
