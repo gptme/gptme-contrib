@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from gptme_coordination.worktree_guard import (
     legacy_pr_branch_key,
     origin_slug,
@@ -15,6 +16,12 @@ from gptme_coordination.worktree_guard import (
 )
 
 CONTRIB_ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.fixture(autouse=True)
+def _outside_any_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep ``git remote get-url upstream`` from reading this checkout's remotes."""
+    monkeypatch.chdir(tmp_path)
 
 
 def test_legacy_key_unqualifies_repo_qualified_branch_claim() -> None:
@@ -750,3 +757,128 @@ def test_guard_force_via_agent_neutral_flag(tmp_path: Path, monkeypatch) -> None
         .splitlines()
     ]
     assert [row["type"] for row in rows] == ["adopt", "would_deny", "force"]
+
+
+def test_push_guard_aliases_fork_destination_to_upstream_slug(tmp_path: Path) -> None:
+    """A fork push collides with a claim held under the upstream repo slug.
+
+    ``worktree-create`` claims ``pr-branch:<upstream>#branch`` while the pre-push
+    hook keys on the push destination (the fork). Fails on pre-alias code: the
+    two keys never met, so the guard saw no holder.
+    """
+    from gptme_coordination.db import CoordinationDB
+    from gptme_coordination.work import WorkClaimManager
+    from gptme_coordination.worktree_guard import run_push_guard
+
+    db_path = tmp_path / "coord.db"
+    with CoordinationDB(db_path) as db:
+        assert WorkClaimManager(db).claim(
+            "holder-agent", "pr-branch:upstream-org/repo#feat", ttl_minutes=60
+        )
+
+    kwargs = {
+        "worktree_root": tmp_path / "wt",
+        "brain_root": tmp_path / "brain",
+        "remote_url": "git@github.com:fork-user/repo.git",
+        "upstream_url": "git@github.com:upstream-org/repo.git",
+        "session_id": "sess-1",
+        "agent_id": "agent-b",
+        "db_path": db_path,
+    }
+    refspec = ["refs/heads/feat abc123 refs/heads/feat def456"]
+
+    assert run_push_guard(refspec, deny=False, **kwargs) == 0
+    assert run_push_guard(refspec, deny=True, **kwargs) == 1
+
+    ledger = tmp_path / "brain" / "state" / "coordination" / "worktree-guard.jsonl"
+    rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+    denied = [r for r in rows if r["type"] in {"push_would_deny", "push_deny"}]
+    assert {r["key"] for r in denied} == {"pr-branch:upstream-org/repo#feat"}
+    assert {r["holder"] for r in denied} == {"holder-agent"}
+
+
+def test_push_guard_deny_releases_fork_claim_taken_before_alias_denial(
+    tmp_path: Path,
+) -> None:
+    """A denied fork push must not leave a fresh claim on the free fork key."""
+    from gptme_coordination.db import CoordinationDB
+    from gptme_coordination.work import WorkClaimManager
+    from gptme_coordination.worktree_guard import run_push_guard
+
+    db_path = tmp_path / "coord.db"
+    with CoordinationDB(db_path) as db:
+        assert WorkClaimManager(db).claim(
+            "holder-agent", "pr-branch:upstream-org/repo#feat", ttl_minutes=60
+        )
+
+    rc = run_push_guard(
+        ["refs/heads/feat abc123 refs/heads/feat def456"],
+        deny=True,
+        worktree_root=tmp_path / "wt",
+        brain_root=tmp_path / "brain",
+        remote_url="git@github.com:fork-user/repo.git",
+        upstream_url="git@github.com:upstream-org/repo.git",
+        session_id="sess-1",
+        agent_id="agent-b",
+        db_path=db_path,
+    )
+    assert rc == 1
+
+    with CoordinationDB(db_path) as db:
+        work = WorkClaimManager(db)
+        fork = work.get("pr-branch:fork-user/repo#feat")
+        assert fork is None or fork.status != "claimed"
+        upstream = work.get("pr-branch:upstream-org/repo#feat")
+        assert upstream and upstream.claimer == "holder-agent"
+
+
+def test_push_guard_claims_both_keys_for_fork_push(tmp_path: Path) -> None:
+    from gptme_coordination.db import CoordinationDB
+    from gptme_coordination.work import WorkClaimManager
+    from gptme_coordination.worktree_guard import run_push_guard
+
+    db_path = tmp_path / "coord.db"
+    rc = run_push_guard(
+        ["refs/heads/feat abc123 refs/heads/feat def456"],
+        worktree_root=tmp_path / "wt",
+        brain_root=tmp_path / "brain",
+        remote_url="git@github.com:fork-user/repo.git",
+        upstream_url="git@github.com:upstream-org/repo.git",
+        session_id="sess-1",
+        agent_id="agent-b",
+        deny=True,
+        db_path=db_path,
+    )
+    assert rc == 0
+    with CoordinationDB(db_path) as db:
+        work = WorkClaimManager(db)
+        for key in (
+            "pr-branch:fork-user/repo#feat",
+            "pr-branch:upstream-org/repo#feat",
+        ):
+            claim = work.get(key)
+            assert claim is not None and claim.claimer == "agent-b"
+
+
+def test_push_guard_same_upstream_and_destination_is_unchanged(tmp_path: Path) -> None:
+    from gptme_coordination.db import CoordinationDB
+    from gptme_coordination.work import WorkClaimManager
+    from gptme_coordination.worktree_guard import run_push_guard
+
+    db_path = tmp_path / "coord.db"
+    assert (
+        run_push_guard(
+            ["refs/heads/feat abc123 refs/heads/feat def456"],
+            worktree_root=tmp_path / "wt",
+            brain_root=tmp_path / "brain",
+            remote_url="git@github.com:org/repo.git",
+            upstream_url="https://github.com/Org/repo",
+            session_id="sess-1",
+            agent_id="agent-b",
+            deny=True,
+            db_path=db_path,
+        )
+        == 0
+    )
+    with CoordinationDB(db_path) as db:
+        assert WorkClaimManager(db).get("pr-branch:org/repo#feat") is not None
