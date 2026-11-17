@@ -2920,7 +2920,12 @@ def primary_model_exhausted(
 #: (38/38 successful local reviews that requested Together were served by
 #: Inceptron). Together and Fireworks stay out until they reappear in the
 #: catalog.
-DEEPSEEK_V4_FLASH_0731_PROVIDERS: tuple[str, ...] = ("inceptron",)
+#: 2026-11-17: Wafer first, Inceptron kept as the in-list fallback. The local
+#: no-train trial served 16/16 reviews on Wafer at an elapsed p50 of 98 s
+#: (Inceptron 265 s, n=92), and a public-block probe pinned to Wafer alone
+#: returned 3/3 complete answers at 88-110 s. Two hosts also end the
+#: single-host outage shape the public pin had.
+DEEPSEEK_V4_FLASH_0731_PROVIDERS: tuple[str, ...] = ("wafer", "inceptron")
 
 #: Hosts that local in-session reviews skip on ``no_train`` calls only.
 #: Trial started 2026-11-16: local no-train 0731 reviews were 66/68 served by
@@ -2928,8 +2933,8 @@ DEEPSEEK_V4_FLASH_0731_PROVIDERS: tuple[str, ...] = ("inceptron",)
 #: OpenRouter deny set with ``allow_fallbacks: true``, so ignoring Inceptron
 #: there hands the call to another no-train host instead of emptying the route.
 #: Public calls keep the shared pin (``only``/``allow_fallbacks: false``),
-#: which the consensus gate's allowlist is tested against. Keep or revert after
-#: 20 ``ok`` local rows compare served host and elapsed against that baseline.
+#: which the consensus gate's allowlist is tested against. Verdict KEEP
+#: (2026-11-17, 16/16 served by Wafer); the public pin now lists Wafer first.
 LOCAL_NO_TRAIN_SKIP_PROVIDERS: dict[str, tuple[str, ...]] = {
     "deepseek/deepseek-v4-flash-0731": ("inceptron",),
 }
@@ -2955,7 +2960,8 @@ PROVIDER_POLICY: dict[str, dict] = {
         # no-train set was together/fireworks/inceptron (see
         # knowledge/research/2026-09-09-openrouter-subprovider-probe-deepseek-v4-flash-glm-5-3-flash.md).
         # 2026-11-06 catalog: only Inceptron still serves this model, so the
-        # pin is a single-host allowlist with `allow_fallbacks: false`. Baidu
+        # pin was a single-host allowlist with `allow_fallbacks: false`
+        # (2026-11-17: Wafer added first, see the tuple's comment). Baidu
         # is out (not in the probe's clean set). Together/Fireworks return
         # only if they re-list and the catalog fixture is refreshed.
         #
