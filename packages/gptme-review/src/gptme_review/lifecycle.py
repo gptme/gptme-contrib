@@ -201,6 +201,12 @@ class RunLifecycle:
                 self._deadline = time.monotonic() + max(0.0, timeout_s)
             self.stage("configured")
 
+    @property
+    def dry_run(self) -> bool:
+        """Whether the configured run is a dry run (nothing posted)."""
+        with self._lock:
+            return self._config.get("dry_run") is True
+
     def stage(self, name: str, **coordinates) -> None:
         with self._lock:
             if self._finished:
