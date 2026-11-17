@@ -1,0 +1,51 @@
+# Risk-tiered merge policy for Bob-authored PRs.
+#
+# One file, two readers: the self-merge gate (scripts/github/self-merge-check.py)
+# and Erik's merge scanner (scripts/github/merge-policy.py tier ... --json).
+# Logic: packages/gptme-contrib-lib/src/gptme_contrib_lib/merge_policy.py.
+#
+# Calibration: backtest on Erik's last 1,396 merges of Bob PRs (ErikBjare/bob,
+# knowledge/analysis/2026-11-12-merge-tier-backtest.md). Tier 0 there was 62
+# PRs, 0 Erik CHANGES_REQUESTED, 0 reverts. Erik approved tier 0 only on
+# 2026-11-15 (ErikBjare/bob#1480 row 7) and set the size exemptions the same
+# day. The backtested "small non-sensitive code" tier is NOT approved and is
+# deliberately absent: everything that is not tier 0 is Erik's.
+#
+# A PR's tier is the LOWEST tier whose every constraint it meets.
+# File classes (per changed path, first match wins):
+#   ci-other   every .github/ path; diff fragments cannot establish YAML safety
+#   sensitive  is_sensitive_path()
+#   lockfile   is_lockfile()
+#   tests      is_test_file()
+#   spec-doc   repo-root README/ARCHITECTURE/CLAUDE/... (is_spec_like_doc)
+#   docs       other doc files (is_doc_file)
+#   code       everything else
+
+# CI is deliberately NOT in tier 0 yet. Permissions can change under an
+# unchanged parent key (and YAML aliases/quoted keys evade token scans).
+# A future workflow waiver needs full base/head YAML proof, not a diff denylist.
+
+# Size budget ignores these classes (Erik, 2026-11-15, ErikBjare/bob#1480).
+# Exempt files still have to be in the tier's allowed classes. Closed set:
+# generated code, locales and vendor/ stay counted until Erik names them.
+size_exempt_classes = ["tests", "lockfile"]
+
+[rollout]
+# Repos where a tier-0 verdict lets the self-merge gate waive its path/category
+# policy. Empty until Erik grants merge rights for a repo; he adds the repo here
+# himself. Outside this list the tier is reported, never acted on.
+repos = []
+
+[[tier]]
+id = 0
+name = "low-risk classes"
+action = "self-merge once CI is green on the head (review gates still apply)"
+classes = ["docs", "tests"]
+max_lines = 300
+max_files = 10
+
+[[tier]]
+id = 2
+name = "everything else"
+action = "Erik reviews and merges"
+classes = ["*"]

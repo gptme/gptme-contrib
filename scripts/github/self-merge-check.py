@@ -125,6 +125,7 @@ from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from functools import cache
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Iterator, cast
 
 _CONTRIB_LIB_SRC = (
@@ -132,6 +133,7 @@ _CONTRIB_LIB_SRC = (
 )
 sys.path.insert(0, str(_CONTRIB_LIB_SRC))
 from gptme_contrib_lib.ai_review_policy import blocking_shortfall  # type: ignore[import-not-found]  # noqa: E402,I001
+from gptme_contrib_lib import merge_policy  # type: ignore[import-not-found]  # noqa: E402,I001
 
 MAX_GRAPHQL_PAGE_SIZE = 100
 DEFAULT_MIN_GREPTILE_SCORE = 5
@@ -250,6 +252,9 @@ SENSITIVE_PATH_PREFIXES = (
     # Use prefix without extension — catches hyphen/underscore variants and versioned copies
     # e.g. self-merge-check.py, self_merge_check.py, self-merge-check-v2.py all match
     "scripts/github/self-merge-check",
+    # Authorization code and data must never inherit packages/** tooling rights.
+    "packages/gptme-contrib-lib/src/gptme_contrib_lib/merge_policy",
+    "scripts/github/merge-policy",
     "scripts/github/pr-greptile-trigger",
     "scripts/github/greptile-helper",
     # Downstream agent workspaces commonly use these loop-control entrypoints.
@@ -376,6 +381,8 @@ class CheckResult:
     files: list[str] = field(default_factory=list)
     # HEAD commit OID at time of check — callers should re-verify before merging
     head_sha: str = ""
+    # gptme_contrib_lib/merge_policy.toml verdict; only computed for rollout repos.
+    merge_tier: dict[str, Any] | None = None
 
 
 def run_gh(args: list[str], timeout: int = 30) -> str:
@@ -3777,6 +3784,114 @@ def operator_approval_category_waiver(
     return remaining, warning
 
 
+def fetch_pr_file_changes(
+    repo: str, number: int
+) -> list[merge_policy.FileChange] | None:
+    """Per-file line counts and patches for the merge-policy tier, or None on failure."""
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{repo}/pulls/{number}/files",
+                "--paginate",
+                "--jq",
+                ".[] | {path: .filename, additions, deletions, patch}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    changes = [
+        merge_policy.FileChange(
+            path=str(doc.get("path") or ""),
+            additions=int(doc.get("additions") or 0),
+            deletions=int(doc.get("deletions") or 0),
+            patch=doc.get("patch") if isinstance(doc.get("patch"), str) else None,
+        )
+        for doc in _iter_json_documents(result.stdout)
+        if isinstance(doc, dict)
+    ]
+    # Pagination is necessary but not proof of completeness (GitHub caps files).
+    try:
+        count = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(number),
+                "--repo",
+                repo,
+                "--json",
+                "changedFiles",
+                "--jq",
+                ".changedFiles",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        total = int(count.stdout.strip())
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+    if (
+        count.returncode != 0
+        or total != len(changes)
+        or len({c.path for c in changes if c.path}) != total
+    ):
+        return None
+    return changes
+
+
+def path_classifier() -> merge_policy.PathClassifier:
+    """This gate's path predicates, as the merge policy's classifier."""
+    return cast(
+        "merge_policy.PathClassifier",
+        SimpleNamespace(
+            is_sensitive_path=is_sensitive_path,
+            is_lockfile=is_lockfile,
+            is_test_file=is_test_file,
+            is_doc_file=is_doc_file,
+            is_spec_like_doc=is_spec_like_doc,
+        ),
+    )
+
+
+def merge_policy_tier_waiver(
+    reasons: list[str], *, repo: str, number: int, files: list[str]
+) -> tuple[list[str], str | None, dict[str, Any] | None]:
+    """Drop path/category refusals for a tier-0 PR in a policy rollout repo.
+
+    gptme_contrib_lib/merge_policy.toml is the shared, Erik-approved tier definition
+    (ErikBjare/bob#1480 row 7). Tier 0 only replaces the path/category
+    policy; CI, review, thread and author gates are untouched. Outside
+    ``[rollout].repos`` nothing is fetched and nothing is waived. Returns the
+    remaining reasons, a warning naming the waiver, and the tier verdict.
+    """
+    try:
+        policy = merge_policy.load_policy()
+    except (OSError, ValueError):  # TOMLDecodeError is a ValueError
+        return reasons, None, None
+    if repo not in merge_policy.rollout_repos(policy):
+        return reasons, None, None
+    changes = fetch_pr_file_changes(repo, number)
+    if changes is None or {c.path for c in changes} != set(files):
+        return reasons, None, None
+    verdict = merge_policy.assign_tier(changes, policy, path_classifier())
+    if verdict.tier != 0 or not reasons:
+        return reasons, None, verdict.as_dict()
+    warning = (
+        f"Path/category policy waived: merge-policy tier 0 "
+        f"({verdict.counted_lines} counted lines, {verdict.counted_files} counted "
+        f"files; {len(reasons)} reason(s) overridden, gptme_contrib_lib/merge_policy.toml)"
+    )
+    return [], warning, verdict.as_dict()
+
+
 def evaluate_pr(
     repo: str, number: int, *, workspace_repos: list[str] | None
 ) -> CheckResult:
@@ -3796,6 +3911,16 @@ def evaluate_pr(
         files=files,
         head_sha=pr.get("headRefOid", ""),
     )
+
+    # Independent of category/allowlist/rollout waivers: policy authority changes
+    # always need a human merge from the trusted deployment of this gate.
+    if any(
+        path.lower()
+        .replace("\\", "/")
+        .startswith("packages/gptme-contrib-lib/src/gptme_contrib_lib/merge_policy")
+        for path in files
+    ):
+        result.reasons.append("Merge policy authority changes require human merge")
 
     current_user = get_gh_user()
     if not current_user:
@@ -4253,6 +4378,16 @@ def evaluate_pr(
     else:
         category, category_reasons = classify_category(files, repo=repo)
         result.category = category
+
+    # ErikBjare/bob#1480: a tier-0 PR in a rollout repo of gptme_contrib_lib/merge_policy.toml
+    # needs no category. Evaluated before operator approval so the tier is
+    # recorded even when Erik also approved the head.
+    category_reasons, tier_waiver, result.merge_tier = merge_policy_tier_waiver(
+        category_reasons, repo=repo, number=number, files=files
+    )
+    if tier_waiver is not None:
+        result.warnings.append(tier_waiver)
+        result.category = "merge-policy-tier-0"
 
     # ErikBjare/bob#1471 phase 2/3: an operator approval of the head, or of an
     # earlier commit followed only by small review fixes, overrides
