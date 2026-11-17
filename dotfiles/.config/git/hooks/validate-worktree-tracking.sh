@@ -59,8 +59,13 @@ _repo_slug() {
         host="${authority##*@}"
         url="${url#*:}"
     fi
+    host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
     url="${url%/}"
-    printf '%s' "${host:+$host/}${url%.git}" | tr '[:upper:]' '[:lower:]'
+    # GitHub paths are case-insensitive; other hosts (and local paths) may not be.
+    if [ "$host" = "github.com" ]; then
+        url=$(printf '%s' "$url" | tr '[:upper:]' '[:lower:]')
+    fi
+    printf '%s' "${host:+$host/}${url%.git}"
 }
 dest_url="${2:-}"
 if [ -n "$dest_url" ] && [ "${GIT_ALLOW_PUSH_OFF_UPSTREAM:-}" != "1" ]; then

@@ -654,6 +654,37 @@ class TestUpstreamOnFork:
         )
         assert result.returncode == 1, result.stdout
 
+    @pytest.mark.parametrize(
+        ("destination", "expected"),
+        [
+            ("https://GIT.EXAMPLE/Group/Repo.git", 0),
+            ("ssh://git@git.example:22/Group/Repo.git", 0),
+            ("git@git.example:Group/Repo.git", 0),
+            ("https://git.example/group/repo.git", 1),
+            ("ssh://git@git.example/Group/repo.git", 1),
+            ("git@git.example:group/Repo.git", 1),
+            ("ssh://git@git.example:2222/Group/Repo.git", 1),
+        ],
+    )
+    def test_preserves_non_github_path_and_port_identity(
+        self, hook_env, destination, expected
+    ):
+        self._track_fork(hook_env, "feat-x")
+        subprocess.run(
+            ["git", "remote", "set-url", "fork", "https://git.example/Group/Repo.git"],
+            cwd=hook_env,
+            check=True,
+            capture_output=True,
+            env=_clean_git_env(),
+        )
+        result = self._run(
+            hook_env,
+            "alias",
+            destination,
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+        )
+        assert result.returncode == expected, result.stdout + result.stderr
+
     def test_advice_names_tracked_destination(self, hook_env):
         self._track_fork(hook_env, "pr-local")
         subprocess.run(
