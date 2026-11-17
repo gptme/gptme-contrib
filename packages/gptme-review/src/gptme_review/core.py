@@ -2390,7 +2390,14 @@ def provider_hang_summary(summary: UsageSummary) -> str:
 
 
 def _fold_provider(name: str) -> str:
-    return name.strip().casefold()
+    # OpenRouter reports display names, but unnamed failures use the requested
+    # routing slug. Only alias the qualified routes we use; stripping arbitrary
+    # suffixes would conflate distinct, unqualified endpoints.
+    folded = name.strip().casefold()
+    return {
+        "deepinfra/fp8": "deepinfra",
+        "parasail/fp8": "parasail",
+    }.get(folded, folded)
 
 
 def _aware(ts: datetime) -> datetime:
@@ -2880,8 +2887,8 @@ def _pin_blocks_reroute(model: str, blamed: str, ignored: list[str]) -> bool:
     allowed = (provider_policy(model) or {}).get("only")
     if not allowed:
         return False
-    dead = {name.casefold() for name in (*ignored, blamed)}
-    return not any(name.casefold() not in dead for name in allowed)
+    dead = {_fold_provider(name) for name in (*ignored, blamed)}
+    return not any(_fold_provider(name) not in dead for name in allowed)
 
 
 def primary_model_exhausted(
@@ -2911,10 +2918,10 @@ def primary_model_exhausted(
     if not allowed:
         return False
     quarantined = {
-        name.casefold()
+        _fold_provider(name)
         for name in quarantined_provider_names(model, path=path, now=now)
     }
-    return all(name.casefold() in quarantined for name in allowed)
+    return all(_fold_provider(name) in quarantined for name in allowed)
 
 
 #: Ordered allowlist for ``deepseek-v4-flash-0731``. Shared with
@@ -3197,10 +3204,12 @@ def build_provider_routing(
             # the API reports the display name (`"DeepSeek"`) while a policy
             # holds the slug (`"deepseek"`). Matching on the raw strings would
             # miss the conflict and 404 anyway.
-            ignored_folded = {name.casefold() for name in entries}
-            if not any(name.casefold() not in ignored_folded for name in allowed):
-                allowed_folded = {name.casefold() for name in allowed}
-                entries = [n for n in entries if n.casefold() not in allowed_folded]
+            ignored_folded = {_fold_provider(name) for name in entries}
+            if not any(_fold_provider(name) not in ignored_folded for name in allowed):
+                allowed_folded = {_fold_provider(name) for name in allowed}
+                entries = [
+                    n for n in entries if _fold_provider(n) not in allowed_folded
+                ]
         if entries:
             block["ignore"] = entries
     return (block or None), response_format_mode
