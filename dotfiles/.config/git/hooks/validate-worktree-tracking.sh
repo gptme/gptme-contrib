@@ -58,6 +58,10 @@ _repo_slug() {
         authority="${url%%:*}"
         host="${authority##*@}"
         url="${url#*:}"
+        # The scp spelling may select GitHub's alternate endpoint via SSH config.
+        if [ "$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')" = "ssh.github.com" ]; then
+            host="github.com"
+        fi
     fi
     host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
     url="${url%/}"

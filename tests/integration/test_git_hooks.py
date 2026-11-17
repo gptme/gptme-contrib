@@ -573,6 +573,47 @@ class TestUpstreamOnFork:
         assert result.returncode == 1
         assert "git push fork feat-x" in result.stdout
 
+    @pytest.mark.parametrize("branch", ["foo.bar", "v1.0", "release/v1.0"])
+    def test_dotted_branch_tracking_is_checked(self, hook_env, branch):
+        self._track_fork(hook_env, branch)
+        remote = subprocess.run(
+            ["git", "config", "--get", f"branch.{branch}.remote"],
+            cwd=hook_env,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=_clean_git_env(),
+        )
+        assert remote.stdout.strip() == "fork"
+        for destination, expected in ((self.ORIGIN_URL, 1), (self.FORK_URL, 0)):
+            result = self._run(
+                hook_env,
+                "destination",
+                destination,
+                f"refs/heads/{branch} abc123 refs/heads/{branch} 0000",
+            )
+            assert result.returncode == expected, result.stdout + result.stderr
+
+    @pytest.mark.parametrize("upstream_is_alias", [False, True])
+    def test_allows_github_scp_ssh_endpoint_alias(self, hook_env, upstream_is_alias):
+        self._track_fork(hook_env, "feat-x")
+        alias = "git@SSH.GITHUB.COM:Fork/repo.git"
+        if upstream_is_alias:
+            subprocess.run(
+                ["git", "remote", "set-url", "fork", alias],
+                cwd=hook_env,
+                check=True,
+                capture_output=True,
+                env=_clean_git_env(),
+            )
+        result = self._run(
+            hook_env,
+            "alias",
+            self.FORK_URL if upstream_is_alias else alias,
+            "refs/heads/feat-x abc123 refs/heads/feat-x 0000",
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
     def test_allows_push_to_tracked_fork_without_origin_warning(self, hook_env):
         self._track_fork(hook_env, "feat-x")
         result = self._run(
