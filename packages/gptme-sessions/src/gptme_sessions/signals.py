@@ -842,14 +842,17 @@ _GH_WRAPPER_SCRIPTS = frozenset(
 _GH_WRAPPER_SUBCOMMANDS = {"greptile-helper.sh": "trigger"}
 # Wrappers that review and then ``git push`` their trailing arguments.
 _PUSH_WRAPPER_SCRIPTS = frozenset({"pm-review-and-push.py"})
-_CMD_PREFIXES = frozenset({"env", "command", "exec", "nohup", "sudo", "time", "timeout"})
+# ``xargs`` runs its command once per input batch, so it is a prefix too:
+# ``printf '5\n' | xargs -n1 sh -c 'gh pr comment "$1" ...' _`` posts.
+_CMD_PREFIXES = frozenset({"env", "command", "exec", "nohup", "sudo", "time", "timeout", "xargs"})
 # Per-prefix options that take a separate value (``env -u VAR``, ``sudo -u
-# user``, ``timeout -s KILL``), so the value is not mistaken for the program.
-# ``sudo -k`` takes none, unlike ``timeout -k``.
+# user``, ``timeout -s KILL``, ``xargs -I {}``), so the value is not mistaken
+# for the program. ``sudo -k`` takes none, unlike ``timeout -k``.
 _PREFIX_VALUE_OPTS = {
     "env": frozenset({"-u", "-C", "-S"}),
     "sudo": frozenset({"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U"}),
     "timeout": frozenset({"-s", "-k"}),
+    "xargs": frozenset({"-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s"}),
 }
 # Words that open a compound command; the command they guard follows them.
 _SHELL_KEYWORDS = frozenset({"(", "{", "!", "if", "then", "elif", "else", "while", "until", "do"})

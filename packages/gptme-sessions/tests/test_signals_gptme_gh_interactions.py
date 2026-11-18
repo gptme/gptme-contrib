@@ -78,6 +78,9 @@ WRITES = [
     # Commands guarded by a compound-command keyword (Greptile on #2233).
     "if true; then gh pr comment 5 --repo o/r --body hi; fi",
     "for n in 1 2; do gh issue close $n --repo o/r; done",
+    # xargs runs its command, including an inline shell (Greptile on #2233).
+    "printf '5\\n' | xargs -n1 sh -c 'gh pr comment \"$1\" --repo o/r --body hi' _",
+    "printf '5\\n' | xargs -I {} gh pr comment {} --repo o/r --body hi",
 ]
 READS = [
     "gh pr view 4970 --repo gptme/gptme --json state",
@@ -108,6 +111,8 @@ READS = [
     "echo gh pr comment 5",
     "rg gh pr comment .",
     "echo bash -c 'git push --force-with-lease origin HEAD'",
+    "echo xargs -n1 sh -c 'gh pr comment 5 --body hi'",
+    "printf '5\\n' | xargs -n1 sh -n -c 'gh pr comment \"$1\" --body hi' _",
 ]
 
 
