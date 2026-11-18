@@ -52,6 +52,7 @@ files are skipped. Keep ShellCheck enabled alongside it.
 | [agent-write-loss-scan.py](./agent-write-loss-scan.py) | Detect silently-reverted writes in agent sessions (see below) |
 | [check-claude-usage.sh](./check-claude-usage.sh) / [check-codex-usage.sh](./check-codex-usage.sh) / [check-openrouter-usage.sh](./check-openrouter-usage.sh) | Provider usage/quota checks |
 | [check-quota.py](./check-quota.py) | Aggregate quota check across providers |
+| [context-search.py](./context-search.py) | Web search with source URLs and Highlights via Context.dev |
 | [exa.py](./exa.py) | Web search via the Exa API |
 | [fetch-community-plugins.py](./fetch-community-plugins.py) | Discover community plugins via GitHub topics |
 | [fetch-github-trending.py](./fetch-github-trending.py) / [fetch-hn-top.py](./fetch-hn-top.py) | Trending/news feeds for agent context |
@@ -67,6 +68,24 @@ files are skipped. Keep ShellCheck enabled alongside it.
 | [subscription-token-probe.py](./subscription-token-probe.py) | Probe subscription credential health |
 | [vent.py](./vent.py) | Register friction/blockers to the shared friction ledger |
 | [wordcount.py](./wordcount.py) | Word/token counting helper |
+
+## Context.dev search
+
+Set `CONTEXT_DEV_API_KEY` in your environment or the `[env]` section of
+`~/.config/gptme/config.toml`, then run:
+
+```bash
+uv run scripts/context-search.py "What is Model Context Protocol?"
+uv run scripts/context-search.py "Python release notes" --json --results 10
+```
+
+The script sends the query to the fixed Context.dev Search API over HTTPS.
+Account credits apply. Query-relevant Highlights are enabled by default; use
+`--no-highlights` for search snippets only. Results retain source URLs and each
+Highlights outcome, and report incomplete collections as partial. Search snippets
+and Highlights are discovery evidence; read the source page before relying on
+detailed claims. Requests have a 30-second timeout (adjustable with `--timeout`)
+and are not retried automatically.
 
 ## agent-write-loss-scan
 
