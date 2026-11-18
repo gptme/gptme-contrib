@@ -598,7 +598,7 @@ _CODE_IDENTIFIER_RE = re.compile(r"[a-z]+(?:_[a-z]+)+\Z")
 # either side of the closing marker (``**-$1.23.**``). The stripped core only gets the
 # _NON_CREDENTIAL_VALUE_RE shape test (money, whole tag, placeholder), never the
 # short-value rule, so emphasis cannot turn a credential-shaped value into prose.
-_EMPHASIS_EDGE_RE = re.compile(r"\A[*_]{1,3}|[.,;:!?)]*[*_]{1,3}[.,;:!?)]*\Z")
+_EMPHASIS_EDGE_RE = re.compile(r"\A[(\[]*[*_]{1,3}|[.,;:!?)\]]*[*_]{1,3}[.,;:!?)\]]*\Z")
 
 
 def _assignment_severity(match: re.Match[str], severity: Severity) -> Severity:
