@@ -3,7 +3,7 @@
 `filter_suppressed` honoured every rejection forever, so a rework of the exact
 lines a finding was written against still could not re-raise it. The guard is
 deliberately narrow: it only fires for entries recorded at the head the
-(incremental) diff starts from, and only when those lines were added again.
+(incremental) diff starts from, and only when those old-side lines changed.
 Anything it cannot localise keeps suppressing, and a caller that passes no
 `base_head` — every legacy caller — sees unchanged behaviour.
 """
@@ -132,18 +132,103 @@ def test_unanchored_entry_is_re_enabled_when_its_file_changed() -> None:
 
 
 def test_line_shift_alone_does_not_re_enable() -> None:
-    """A moved finding re-raises by matching the entry's own line, not guesswork.
-
-    The entry's recorded line is what the diff is checked against: if the
-    reviewer re-derives the finding at a *different* line, the entry no longer
-    describes that code, and the documented (safe) failure is a repeated
-    comment, not a silenced defect.
-    """
+    """Matching a claim at a different line does not prove its anchor changed."""
     finding = _finding(line=4)
     entry = _entry(finding)
-    entry["line"] = 3  # not in added_lines
+    entry["line"] = 3  # context, not a removed/replaced old-side line
 
     kept, muted = filter_suppressed([finding], [entry], DIFF, base_head=BASE)
 
     assert kept == []
     assert muted == [finding]
+
+
+def test_insertion_before_rewrite_uses_the_dismissals_old_line() -> None:
+    diff = """\
+diff --git a/counter.py b/counter.py
+--- a/counter.py
++++ b/counter.py
+@@ -1 +1,2 @@
++inserted = 1
+ first = 1
+@@ -20 +21 @@
+-x += 2
++x += 1
+"""
+    entry = _entry(_finding(line=20))
+    finding = _finding(line=21)
+
+    kept, muted = filter_suppressed([finding], [entry], diff, base_head=BASE)
+
+    assert kept == [finding]
+    assert muted == []
+
+
+def test_quoted_paths_match_decoded_suppression_anchors() -> None:
+    diff = r"""diff --git "a/\303\251.py" "b/\303\251.py"
+--- "a/\303\251.py"
++++ "b/\303\251.py"
+@@ -4 +4 @@
+-old
++new
+"""
+    finding = _finding(file="é.py")
+
+    assert added_lines(diff) == {"é.py": {4}}
+    kept, muted = filter_suppressed([finding], [_entry(finding)], diff, base_head=BASE)
+    assert kept == [finding]
+    assert muted == []
+
+
+def test_header_like_source_is_not_a_file_header() -> None:
+    diff = """\
+diff --git a/counter.py b/counter.py
+--- a/counter.py
++++ b/counter.py
+@@ -4,2 +4,2 @@
+--- old
++++ new
+-old tail
++new tail
+"""
+    assert added_lines(diff) == {"counter.py": {4, 5}}
+    finding = _finding()
+    kept, muted = filter_suppressed([finding], [_entry(finding)], diff, base_head=BASE)
+    assert kept == [finding]
+    assert muted == []
+
+
+def test_insertion_at_old_anchor_does_not_count_as_rewrite() -> None:
+    diff = """\
+diff --git a/counter.py b/counter.py
+--- a/counter.py
++++ b/counter.py
+@@ -3,2 +3,3 @@
+ keep
++inserted
+ anchor
+"""
+    finding = _finding(line=5)
+    entry = _entry(_finding(line=4))
+    kept, muted = filter_suppressed([finding], [entry], diff, base_head=BASE)
+    assert kept == []
+    assert muted == [finding]
+
+    entry["line"] = None
+    kept, muted = filter_suppressed([finding], [entry], diff, base_head=BASE)
+    assert kept == [finding]
+    assert muted == []
+
+
+def test_deletion_only_re_enables_the_old_anchor() -> None:
+    diff = """\
+diff --git a/counter.py b/counter.py
+--- a/counter.py
++++ b/counter.py
+@@ -4 +3,0 @@
+-x += 2
+"""
+    finding = _finding()
+    kept, muted = filter_suppressed([finding], [_entry(finding)], diff, base_head=BASE)
+    assert kept == [finding]
+    assert muted == []

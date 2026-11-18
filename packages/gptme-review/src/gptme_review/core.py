@@ -1623,31 +1623,53 @@ def added_lines(diff: str) -> dict[str, set[int]]:
     code rewritten?" wants only the ``+`` side. Numbers are post-image
     coordinates, i.e. positions in the file at the diff's head.
     """
+    return _changed_lines(diff, old_side=False)
+
+
+def removed_lines(diff: str) -> dict[str, set[int]]:
+    """Map changed files to deleted/replaced lines in the diff's OLD coordinates.
+
+    Suppression anchors belong to the base head, so additions at the new head
+    cannot be compared to them. An empty set records an insertion-only change.
+    """
+    return _changed_lines(diff, old_side=True)
+
+
+def _changed_lines(diff: str, *, old_side: bool) -> dict[str, set[int]]:
+    # shard imports core, so reuse its Git path decoder after module loading.
+    from .shard import _unquote_path
+
     result: dict[str, set[int]] = {}
     path: str | None = None
     lineno = 0
-    for raw in diff.splitlines():
-        if raw.startswith("+++ "):
-            target = raw[4:].strip().split("\t", 1)[0].strip()
-            path = target.removeprefix("b/")
-            if path == "/dev/null":
-                path = None
-            elif path is not None:
+    old_left = new_left = 0
+    header = "--- " if old_side else "+++ "
+    prefix = "a/" if old_side else "b/"
+    change = "-" if old_side else "+"
+    hunk_re = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+    # Only LF separates Git records; source Unicode separators are content.
+    for raw in diff.split("\n"):
+        if old_left or new_left:
+            if raw.startswith(change) and path is not None:
+                result[path].add(lineno)
+            if raw.startswith((change, " ")):
+                lineno += 1
+            if raw.startswith(("-", " ")):
+                old_left -= 1
+            if raw.startswith(("+", " ")):
+                new_left -= 1
+            continue
+        if raw.startswith("diff --git "):
+            path = None
+        elif raw.startswith(header):
+            target = _unquote_path(raw[4:].split("\t", 1)[0])
+            path = target.removeprefix(prefix) if target != "/dev/null" else None
+            if path is not None:
                 result.setdefault(path, set())
-            continue
-        if path is None:
-            continue
-        m = _HUNK_RE.match(raw)
-        if m:
-            lineno = int(m.group(1))
-            continue
-        if raw.startswith("+"):
-            result[path].add(lineno)
-            lineno += 1
-        elif raw.startswith(("-", "\\")):
-            continue
-        elif raw.startswith(" "):
-            lineno += 1
+        elif m := hunk_re.match(raw):
+            old_left = int(m.group(2)) if m.group(2) is not None else 1
+            new_left = int(m.group(4)) if m.group(4) is not None else 1
+            lineno = int(m.group(1) if old_side else m.group(3))
     return result
 
 
@@ -7432,7 +7454,7 @@ def filter_suppressed(
 
     Two inputs make that decidable:
 
-    * ``diff`` — the diff to reason about, in post-image coordinates.
+    * ``diff`` — the incremental diff; stored anchors use its old-side coordinates.
     * ``base_head`` — the head that diff starts from. Suppression entries
       recorded at that head (``entry["head"]``) are the only ones the diff can
       localise; entries from any other point keep suppressing, because guessing
@@ -7446,13 +7468,13 @@ def filter_suppressed(
     suppression and disable the mechanism entirely.
 
     An entry with no line anchor cannot be localised; it is re-enabled when its
-    file gained added lines, because erring toward noise (one repeated comment)
+    file changed, because erring toward noise (one repeated comment)
     is the safe direction and erring toward silence buries a finding.
     """
     kept: list[dict] = []
     muted: list[dict] = []
 
-    touched = added_lines(diff) if (diff and base_head) else {}
+    touched = removed_lines(diff) if (diff and base_head) else {}
 
     for f in findings:
         suppression = None
@@ -7489,7 +7511,7 @@ def _lines_rewritten_since(
     if not touched or str(entry.get("head") or "") != base_head:
         return False
     lines = touched.get(str(entry.get("file") or ""))
-    if not lines:
+    if lines is None:
         return False
     line = entry.get("line")
     if not isinstance(line, int):
