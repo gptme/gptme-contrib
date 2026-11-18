@@ -122,6 +122,22 @@ def test_late_pass_only_finding_is_advisory() -> None:
     assert "late-pass-only finding(s) advisory" in (result["detail"] or "")
 
 
+@pytest.mark.parametrize("marker_sha", ["123456789abc", ""])
+@pytest.mark.parametrize("severity", ["P0", "P1", None])
+def test_stale_provenance_cannot_exempt_current_findings(
+    marker_sha: str, severity: str | None
+) -> None:
+    """Stale provenance must not turn a hard hold into a Greptile fallback."""
+    marker = _marker(
+        sha=marker_sha,
+        finding_provenance={FP: [{"model": "m", "pass": 2}]},
+    )
+    threads = [_finding_thread(severity)] if severity else []
+    result = _status(marker, threads)
+    assert result["accepted"] is False, result
+    assert result["refusal"] == "disposition_shortfall", result
+
+
 def test_late_pass_corroborated_by_another_pass_blocks() -> None:
     """Two passes raising it is independent evidence, not a single sample."""
     marker = _marker(

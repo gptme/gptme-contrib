@@ -1221,6 +1221,7 @@ def _ai_review_disposition_shortfall(
     marker: dict[str, Any] | None = None,
     score: int | None = None,
     expected_author: str | None = None,
+    head_sha: str = "",
 ) -> str | None:
     """Why the AI-review path should not satisfy the gate, or None if it may.
 
@@ -1289,9 +1290,15 @@ def _ai_review_disposition_shortfall(
         for fp in ((marker or {}).get("auto_resolved") or [])
         if isinstance(fp, str) and fp
     }
-    # Late-pass-only findings do not block on their own. Empty when the marker
-    # publishes no provenance, which keeps the previous behaviour exactly.
-    advisory_fps = _ai_review_advisory_fps(marker)
+    # Only current-head provenance can exempt a finding. A stale marker may
+    # share a fingerprint with a new blocking thread; using its old pass depth
+    # would turn a hard disposition refusal into a substitutable stale review.
+    advisory_fps = (
+        _ai_review_advisory_fps(marker)
+        if head_sha
+        and _sha_matches_head(str((marker or {}).get("sha") or ""), head_sha)
+        else set()
+    )
     # NOT `... or []`: that reads a present-but-empty list as an absent key and
     # silently drops to the weaker score-only guard. Presence is the signal.
     current_findings = (marker or {}).get("findings")
@@ -1781,6 +1788,7 @@ def fetch_ai_review_status(
             marker=marker,
             score=raw_score if type(raw_score) is int else None,
             expected_author=expected_author,
+            head_sha=head_sha,
         )
         if disposition:
             return {
@@ -1858,6 +1866,7 @@ def fetch_ai_review_status(
         marker=marker,
         score=score,
         expected_author=expected_author,
+        head_sha=head_sha,
     )
     if disposition:
         return {
