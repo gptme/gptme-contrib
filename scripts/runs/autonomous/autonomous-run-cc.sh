@@ -183,19 +183,57 @@ log "Starting Claude Code session..."
 unset CLAUDECODE 2>/dev/null || true
 unset CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
 
+# Optional hang watchdog (off by default; AGENT_CLAUDE_WATCHDOG=1 enables it).
+# It runs the session with stream-json output and stops it early when no event
+# arrives for too long (see gptme-claude-watchdog in packages/gptme-runloops).
+# AGENT_CLAUDE_WATCHDOG_CMD overrides the watchdog command.
+WATCHDOG_VERDICT_FILE=""
+case "${AGENT_CLAUDE_WATCHDOG:-}" in
+    1|true|yes)
+        read -r -a WATCHDOG_CMD <<< "${AGENT_CLAUDE_WATCHDOG_CMD:-gptme-claude-watchdog}"
+        if [ "${#WATCHDOG_CMD[@]}" -eq 0 ] || ! command -v "${WATCHDOG_CMD[0]}" >/dev/null 2>&1; then
+            log "ERROR: AGENT_CLAUDE_WATCHDOG is set but '${AGENT_CLAUDE_WATCHDOG_CMD:-gptme-claude-watchdog}' was not found"
+            exit 2
+        fi
+        WATCHDOG_VERDICT_FILE=$(mktemp "${TMPDIR:-/tmp}/${AGENT_NAME,,}-watchdog-XXXXXX")
+        trap 'release_lock; rm -f "$SYSPROMPT_FILE" "$WATCHDOG_VERDICT_FILE"' EXIT INT TERM HUP
+        log "Hang watchdog enabled (${WATCHDOG_CMD[*]})"
+        ;;
+esac
+
 # Run Claude Code
 # IMPORTANT: </dev/null prevents SIGSTOP in non-interactive contexts (tmux, systemd)
 set +e
-timeout "$SCRIPT_TIMEOUT" claude -p \
-    --dangerously-skip-permissions \
-    --model "$MODEL" \
-    --append-system-prompt-file "$SYSPROMPT_FILE" \
-    "$PROMPT" </dev/null
+if [ -n "$WATCHDOG_VERDICT_FILE" ]; then
+    timeout "$SCRIPT_TIMEOUT" "${WATCHDOG_CMD[@]}" \
+        --verdict-file "$WATCHDOG_VERDICT_FILE" -- \
+        claude -p \
+        --dangerously-skip-permissions \
+        --model "$MODEL" \
+        --append-system-prompt-file "$SYSPROMPT_FILE" \
+        --output-format stream-json --verbose \
+        "$PROMPT" </dev/null
+else
+    timeout "$SCRIPT_TIMEOUT" claude -p \
+        --dangerously-skip-permissions \
+        --model "$MODEL" \
+        --append-system-prompt-file "$SYSPROMPT_FILE" \
+        "$PROMPT" </dev/null
+fi
 EXIT_CODE=$?
 set -e
 
 if [ $EXIT_CODE -eq 124 ]; then
     log "Session timed out after ${SCRIPT_TIMEOUT}s"
+fi
+
+if [ -n "$WATCHDOG_VERDICT_FILE" ]; then
+    if [ -s "$WATCHDOG_VERDICT_FILE" ]; then
+        log "Watchdog verdict: $(head -n 1 "$WATCHDOG_VERDICT_FILE")"
+    fi
+    if [ $EXIT_CODE -eq 75 ]; then
+        log "Session outcome: hang (stopped by watchdog)"
+    fi
 fi
 
 # Safety net: push any uncommitted work

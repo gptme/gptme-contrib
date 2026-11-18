@@ -19,6 +19,7 @@ dev = [
 
 [project.scripts]
 gptme-runloops = "gptme_runloops.cli:main"
+gptme-claude-watchdog = "gptme_runloops.claude_watchdog:main"
 run-loops = "gptme_runloops.cli:main"  # deprecated
 
 [build-system]
