@@ -6027,9 +6027,7 @@ def add(
     # block are inert text, not metadata (e.g. a piped `wait:` is silently
     # ignored and the task shows as ready immediately). Refuse when the block
     # carries keys gptodo acts on, before any file is written.
-    inert_keys = sorted(
-        set(_frontmatter_block_keys(body) or ()) & _TASK_METADATA_KEYS
-    )
+    inert_keys = sorted(set(_frontmatter_block_keys(body) or ()) & _TASK_METADATA_KEYS)
     if inert_keys and not allow_frontmatter_body:
         raise click.UsageError(
             "body starts with a '---' block holding task metadata "
