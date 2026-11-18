@@ -168,6 +168,12 @@ def run_fallback(
     ``prs_by_label``. Quota and admission are rechecked before every attempt,
     so a pool that empties mid-loop stops the loop rather than spending
     attempts that cannot be admitted.
+
+    Only attempted rows land in ``result.replaced``. A failure skipped because
+    its head is already reviewed (or by :class:`FallbackSkip`, or left over
+    when the loop stops) stays a failure: the primary run really failed, and
+    keeping it counted keeps a broken primary visible even when an older
+    marker still covers the head. Hosts should not drop those rows.
     """
     result = FallbackResult(
         engine=engine, models=host.available_models(), skipped=len(failures)
