@@ -93,6 +93,12 @@ READS = [
     "git push --dry-run --force-with-lease origin HEAD",
     "git push -n -f origin fix",
     "bash -c 'git push --dry-run -f origin HEAD'",
+    "bash -n -c 'git push --force-with-lease origin HEAD'",
+    "bash -o noexec -c 'scripts/github/ai-review-now.sh o/r 5'",
+    "bash -nc 'gh pr comment 5 --repo o/r --body hi'",
+    # Unquoted gh text that is an argument, not the program run.
+    "echo gh pr comment 5",
+    "rg gh pr comment .",
 ]
 
 

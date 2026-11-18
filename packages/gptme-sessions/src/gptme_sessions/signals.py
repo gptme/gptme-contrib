@@ -818,20 +818,16 @@ def _gh_invocation_matches(pattern: re.Pattern[str], segment: str) -> bool:
 
     The raw-text match also fires on quoted arguments (``grep -R 'gh pr
     comment' .``, ``rg "gh issue close"``), which only search or print the
-    text. Here the pattern must match starting at a ``gh`` shell token, found
-    the same way ``_gh_api_args`` finds ``gh api``: a quoted mention stays one
-    token and never counts. Substitutions are masked; their bodies are
-    checked separately via ``_command_substitutions``.
+    text. Here ``gh`` must be the program the segment runs (``_command_words``):
+    a quoted mention stays one token, and an unquoted ``echo gh pr comment``
+    is an argument of ``echo``, so neither counts. Substitutions are masked;
+    their bodies are checked separately via ``_command_substitutions``.
     """
-    tokens = _shell_tokens(_mask_substitutions(segment))
-    for i, tok in enumerate(tokens):
-        name = re.split(r"[=({!$`]", tok)[-1].rsplit("/", 1)[-1]
-        if name != "gh" or tokens[i + 1 : i + 2] == ["api"]:
-            continue
-        m = pattern.match(" ".join(["gh", *tokens[i + 1 :]]))
-        if m and not _GH_API_MATCH_RE.match(m.group(0)):
-            return True
-    return False
+    words = _command_words(segment)
+    if not words or words[0].rsplit("/", 1)[-1] != "gh" or words[1:2] == ["api"]:
+        return False
+    m = pattern.match(" ".join(["gh", *words[1:]]))
+    return m is not None and not _GH_API_MATCH_RE.match(m.group(0))
 
 
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
@@ -1005,11 +1001,12 @@ def _shell_c_script(segment: str) -> str | None:
     for i, tok in enumerate(tokens):
         if tok.rsplit("/", 1)[-1] not in _SHELLS:
             continue
-        has_c = False
+        has_c = noexec = False
         j = i + 1
         while j < len(tokens):
             opt = tokens[j]
             if opt in ("-o", "+o", "-O", "+O"):
+                noexec = noexec or (opt == "-o" and tokens[j + 1 : j + 2] == ["noexec"])
                 j += 2
                 continue
             if opt.startswith("--"):
@@ -1017,9 +1014,12 @@ def _shell_c_script(segment: str) -> str | None:
                 continue
             if opt[:1] in "-+" and len(opt) > 1:
                 has_c = has_c or (opt[0] == "-" and "c" in opt[1:])
+                noexec = noexec or (opt[0] == "-" and "n" in opt[1:])
                 j += 1
                 continue
             break
+        if noexec:
+            return None  # ``bash -n -c`` / ``-o noexec`` parses the script, never runs it
         if has_c and j < len(tokens):
             return tokens[j]
     return None
