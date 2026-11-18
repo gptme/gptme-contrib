@@ -1186,8 +1186,19 @@ def _ai_review_advisory_fps(marker: dict[str, Any] | None) -> set[str]:
             continue
         if not isinstance(entries, list) or not entries:
             continue
-        passes = [p for p in (_ai_review_pass_of(e) for e in entries) if p is not None]
-        if not passes:
+        # Read every entry before deciding. Dropping an unreadable one instead
+        # of failing closed turns `[{pass: "1"}, {pass: 2}]` into "pass 2 only"
+        # and demotes a finding a pass-1 entry may well have anchored — a
+        # fail-open in the exact direction this rule must not move.
+        passes: list[int] = []
+        unreadable = False
+        for entry in entries:
+            pass_number = _ai_review_pass_of(entry)
+            if pass_number is None:
+                unreadable = True
+                break
+            passes.append(pass_number)
+        if unreadable or not passes:
             continue  # unreadable provenance => keep blocking
         if _AI_REVIEW_FIRST_PASS in passes:
             continue  # pass 1 found it: hold

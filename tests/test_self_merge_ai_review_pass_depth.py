@@ -173,6 +173,28 @@ def test_unreadable_pass_number_fails_closed() -> None:
     assert result["accepted"] is False
 
 
+def test_mixed_readable_and_unreadable_entries_fail_closed() -> None:
+    """One unreadable entry blocks even when the readable ones are all late.
+
+    Dropping the unreadable entry would read ``[{pass: "1"}, {pass: 2}]`` as
+    "pass 2 only" and demote a finding a pass-1 entry may have anchored.
+    """
+    marker = _marker(
+        finding_provenance={
+            FP: [{"model": "m", "pass": "1"}, {"model": "m", "pass": 2}]
+        }
+    )
+    assert smc._ai_review_advisory_fps(marker) == set()
+    assert _status(marker, [_finding_thread("P1")])["accepted"] is False
+
+
+def test_non_dict_provenance_entry_fails_closed() -> None:
+    """A non-dict entry is unreadable too, not an empty observation."""
+    marker = _marker(finding_provenance={FP: ["pass 2", {"model": "m", "pass": 2}]})
+    assert smc._ai_review_advisory_fps(marker) == set()
+    assert _status(marker, [_finding_thread("P1")])["accepted"] is False
+
+
 def test_malformed_provenance_container_fails_closed() -> None:
     """A provenance value that is not a list is unreadable, not empty."""
     marker = _marker(finding_provenance={FP: {"model": "m", "pass": 2}})
