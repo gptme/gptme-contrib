@@ -2542,3 +2542,291 @@ def test_routed_skills_only_drops_descriptor_only_skills(
     assert "/w/skills/guard/SKILL.md" in kept  # policy-exempt
     assert "/w/lessons/tools/foo.md" in kept  # lessons are not gated
     assert ("/w/skills/phone-ocr/SKILL.md" in kept) is (not routed_skills_only)
+
+
+# --- Byte budget ---
+
+
+def _budget_lesson(i: int, body_len: int = 3000) -> dict:
+    return {
+        "path": f"lessons/l{i}.md",
+        "title": f"l{i}",
+        "body": "x" * body_len,
+        "description": "d",
+        "score": 100.0 - i,
+    }
+
+
+def _patch_main_for_budget(hook, tmp_path, monkeypatch, lessons):
+    """Hermetic main(): lesson ``i`` matches when the prompt contains ``k<i>``."""
+    import re
+
+    _patch_main_for_prompt_repeat(hook, tmp_path, monkeypatch)
+    monkeypatch.setenv(hook.PROMPT_REPEAT_WINDOW_ENV, "0")
+    monkeypatch.delenv(hook.EVENT_BYTE_BUDGET_ENV, raising=False)
+    monkeypatch.delenv(hook.SESSION_BYTE_BUDGET_ENV, raising=False)
+    monkeypatch.setattr(hook, "scan_lessons", lambda dirs: lessons)
+
+    def score(items, text, **_kw):
+        wanted = {int(n) for n in re.findall(r"\bk(\d+)\b", text)}
+        return [dict(m) for i, m in enumerate(items) if i in wanted]
+
+    monkeypatch.setattr(hook, "score_lessons", score)
+
+
+def _run_prompt(hook, monkeypatch, capsys, session_id, prompt):
+    monkeypatch.setattr(
+        hook,
+        "_STDIN_CACHE",
+        json.dumps(
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": session_id,
+                "prompt": prompt,
+            }
+        ),
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        hook.main()
+    assert exc_info.value.code == 0
+    out = json.loads(capsys.readouterr().out)
+    return out["hookSpecificOutput"].get("additionalContext", "")
+
+
+def _receipts(tmp_path, session_id):
+    path = tmp_path / f"cc-session-{session_id}-lessons-receipts.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def test_byte_budgets_env(hook, monkeypatch):
+    monkeypatch.delenv(hook.EVENT_BYTE_BUDGET_ENV, raising=False)
+    monkeypatch.delenv(hook.SESSION_BYTE_BUDGET_ENV, raising=False)
+    assert hook.byte_budgets() == (8000, 24000)
+    monkeypatch.setenv(hook.EVENT_BYTE_BUDGET_ENV, "0")
+    monkeypatch.setenv(hook.SESSION_BYTE_BUDGET_ENV, "500")
+    assert hook.byte_budgets() == (0, 500)
+    monkeypatch.setenv(hook.EVENT_BYTE_BUDGET_ENV, "-3")
+    monkeypatch.setenv(hook.SESSION_BYTE_BUDGET_ENV, "lots")
+    assert hook.byte_budgets() == (0, 24000)
+
+
+def test_fit_under_budget_unchanged(hook):
+    matches = [_budget_lesson(0, 100), _budget_lesson(1, 100)]
+    kept, dropped = hook.fit_lessons_to_budget(matches, "UserPromptSubmit", 10_000)
+    assert kept == matches and dropped == []
+
+
+def test_fit_keeps_whole_lessons_first_fit_in_priority_order(hook):
+    big, small_a, small_b = (
+        _budget_lesson(0, 5000),
+        _budget_lesson(1, 100),
+        _budget_lesson(2, 100),
+    )
+    allowed = hook._context_bytes([small_a, small_b], "UserPromptSubmit") + 10
+    kept, dropped = hook.fit_lessons_to_budget(
+        [big, small_a, small_b], "UserPromptSubmit", allowed
+    )
+    assert [m["path"] for m in kept] == [small_a["path"], small_b["path"]]
+    assert dropped == [big]
+    context = hook.format_lessons(kept, set())
+    assert len(context.encode()) <= allowed
+    # Kept lessons are whole: every kept body is present in full.
+    assert context.count("x" * 100) == 2
+
+
+def test_fit_drops_single_lesson_larger_than_budget(hook):
+    lesson = _budget_lesson(0, 5000)
+    assert hook.fit_lessons_to_budget([lesson], "UserPromptSubmit", 200) == (
+        [],
+        [lesson],
+    )
+    assert hook.fit_lessons_to_budget([lesson], "UserPromptSubmit", 0)[0] == []
+
+
+def test_fit_counts_utf8_bytes_not_chars(hook):
+    lesson = _budget_lesson(0, 0)
+    lesson["body"] = "✓" * 10
+    n = hook._context_bytes([lesson], "UserPromptSubmit")
+    assert n > len(hook.format_lessons([lesson], set()))
+    assert hook.fit_lessons_to_budget([lesson], "UserPromptSubmit", n)[0] == [lesson]
+    assert hook.fit_lessons_to_budget([lesson], "UserPromptSubmit", n - 1)[0] == []
+
+
+def test_main_under_budget_unchanged(hook, tmp_path, monkeypatch, capsys):
+    lessons = [_budget_lesson(i, 100) for i in range(3)]
+    _patch_main_for_budget(hook, tmp_path, monkeypatch, lessons)
+    context = _run_prompt(hook, monkeypatch, capsys, "small", "k0 k1 k2")
+    assert context == hook.format_lessons(lessons, set())
+    receipt = _receipts(tmp_path, "small")[-1]
+    assert receipt["budget_dropped"] == 0
+    assert receipt["session_bytes"] == receipt["bytes"] == len(context.encode())
+
+
+def test_main_budget_per_event_and_per_session(hook, tmp_path, monkeypatch, capsys):
+    """Ten matching ~3 KB lessons under 8,000/24,000: both caps hold, and a
+    lesson trimmed from one event is injected by a later one."""
+    lessons = [_budget_lesson(i) for i in range(10)]
+    _patch_main_for_budget(hook, tmp_path, monkeypatch, lessons)
+    prompts = [
+        "k0 k1 k2 k3 k4",
+        "k5 k6 k7 k8 k9",
+        "k2 k3 k4 k7 k8",
+        "k4 k7 k8 k9",
+        "k7 k8 k9",
+    ]
+    contexts = [_run_prompt(hook, monkeypatch, capsys, "budget", p) for p in prompts]
+    receipts = _receipts(tmp_path, "budget")
+
+    sizes = [len(c.encode()) for c in contexts]
+    assert all(size <= 8000 for size in sizes)
+    assert sum(sizes) <= 24000
+    # The first event kept l0 and l1 and dropped l2..l4 for size.
+    assert "### l0\n" in contexts[0] and "### l1\n" in contexts[0]
+    assert "### l2\n" not in contexts[0]
+    assert receipts[0]["budget_dropped"] == 3
+    # A trimmed lesson stays eligible and is injected by a later event.
+    assert "### l2\n" in contexts[2]
+    # session_bytes is the running total of emitted bytes.
+    running = 0
+    for receipt in receipts:
+        running += receipt["bytes"]
+        assert receipt["session_bytes"] == running
+    # Session budget exhausted: the last event injects nothing.
+    assert contexts[-1] == ""
+    assert receipts[-1]["outcome"] == "empty"
+    assert receipts[-1]["reason"] == "byte_budget"
+    assert receipts[-1]["budget_dropped"] == 3
+
+
+def test_main_marks_only_kept_lessons_injected(hook, tmp_path, monkeypatch, capsys):
+    lessons = [_budget_lesson(i) for i in range(5)]
+    _patch_main_for_budget(hook, tmp_path, monkeypatch, lessons)
+    _run_prompt(hook, monkeypatch, capsys, "marks", "k0 k1 k2 k3 k4")
+    state = hook.load_session_state("marks")
+    assert sorted(state["injected"]) == ["lessons/l0.md", "lessons/l1.md"]
+    assert state["budget_bytes"] > 0
+
+
+def test_main_zero_disables_budgets(hook, tmp_path, monkeypatch, capsys):
+    lessons = [_budget_lesson(i) for i in range(5)]
+    _patch_main_for_budget(hook, tmp_path, monkeypatch, lessons)
+    monkeypatch.setenv(hook.EVENT_BYTE_BUDGET_ENV, "0")
+    monkeypatch.setenv(hook.SESSION_BYTE_BUDGET_ENV, "0")
+    context = _run_prompt(hook, monkeypatch, capsys, "off", "k0 k1 k2 k3 k4")
+    assert all(f"### l{i}\n" in context for i in range(5))
+    assert len(context.encode()) > 8000
+    receipt = _receipts(tmp_path, "off")[-1]
+    assert "budget_dropped" not in receipt and "session_bytes" not in receipt
+
+
+def test_main_zero_event_budget_keeps_session_budget(
+    hook, tmp_path, monkeypatch, capsys
+):
+    lessons = [_budget_lesson(i) for i in range(5)]
+    _patch_main_for_budget(hook, tmp_path, monkeypatch, lessons)
+    monkeypatch.setenv(hook.EVENT_BYTE_BUDGET_ENV, "0")
+    monkeypatch.setenv(hook.SESSION_BYTE_BUDGET_ENV, "10000")
+    context = _run_prompt(hook, monkeypatch, capsys, "evoff", "k0 k1 k2 k3 k4")
+    assert 8000 < len(context.encode()) <= 10000
+    assert _run_prompt(hook, monkeypatch, capsys, "evoff", "k3 k4") == ""
+
+
+def test_main_budget_error_fails_open(hook, tmp_path, monkeypatch, capsys):
+    lessons = [_budget_lesson(i) for i in range(5)]
+    _patch_main_for_budget(hook, tmp_path, monkeypatch, lessons)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("accounting broke")
+
+    monkeypatch.setattr(hook, "fit_lessons_to_budget", boom)
+    context = _run_prompt(hook, monkeypatch, capsys, "err", "k0 k1 k2 k3 k4")
+    # Untrimmed injection, exit 0, and the failure is visible in the receipt.
+    assert all(f"### l{i}\n" in context for i in range(5))
+    receipt = _receipts(tmp_path, "err")[-1]
+    assert receipt["outcome"] == "emitted"
+    assert receipt["budget_error"] is True
+
+
+def test_corrupt_budget_counter_resets(hook, tmp_path, monkeypatch):
+    monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "state")
+    monkeypatch.delenv(hook.EVENT_BYTE_BUDGET_ENV, raising=False)
+    monkeypatch.delenv(hook.SESSION_BYTE_BUDGET_ENV, raising=False)
+    hook.save_session_state("corrupt", {"injected": [], "budget_bytes": "junk"})
+    kept, fields = hook.reserve_lesson_budget(
+        "corrupt", [_budget_lesson(0, 10)], "UserPromptSubmit"
+    )
+    assert kept and fields["session_bytes"] > 0
+
+
+def test_session_budgets_are_per_session(hook, tmp_path, monkeypatch):
+    monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "state")
+    lesson = _budget_lesson(0)
+    size = hook._context_bytes([lesson], "UserPromptSubmit")
+    monkeypatch.setenv(hook.EVENT_BYTE_BUDGET_ENV, "0")
+    monkeypatch.setenv(hook.SESSION_BYTE_BUDGET_ENV, str(size * 2 + 50))
+    totals = [
+        hook.reserve_lesson_budget("s1", [lesson], "UserPromptSubmit")[1][
+            "session_bytes"
+        ]
+        for _ in range(3)
+    ]
+    assert totals == [size, 2 * size, 2 * size]
+    assert hook.reserve_lesson_budget("s2", [lesson], "UserPromptSubmit")[0]
+
+
+def test_concurrent_reservations_share_session_budget(hook, tmp_path, monkeypatch):
+    """Parallel hook processes of one session cannot both spend the remainder."""
+    import multiprocessing
+
+    monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "state")
+    lesson = _budget_lesson(0)
+    size = hook._context_bytes([lesson], "PreToolUse")
+    monkeypatch.setenv(hook.EVENT_BYTE_BUDGET_ENV, "0")
+    monkeypatch.setenv(hook.SESSION_BYTE_BUDGET_ENV, str(size * 2 + 50))
+    ctx = multiprocessing.get_context("fork")
+    ready = ctx.Barrier(6)
+    results = ctx.Queue()
+
+    def run():
+        ready.wait(timeout=5)
+        kept, _ = hook.reserve_lesson_budget("shared", [lesson], "PreToolUse")
+        results.put(len(kept))
+
+    processes = [ctx.Process(target=run) for _ in range(6)]
+    for process in processes:
+        process.start()
+    try:
+        kept_counts = [results.get(timeout=10) for _ in processes]
+    finally:
+        for process in processes:
+            process.join(timeout=5)
+            if process.is_alive():
+                process.kill()
+                process.join()
+    assert sum(kept_counts) == 2
+    assert hook.load_session_state("shared")["budget_bytes"] == 2 * size
+
+
+def test_locked_state_update_preserves_budget_counter(hook, tmp_path, monkeypatch):
+    """Other state writers (cooldown, dedup commit) keep the budget counter."""
+    monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "state")
+    hook.save_session_state("keep", {"injected": [], "budget_bytes": 1234})
+    hook.update_session_state("keep", lambda state: state.update(last_pretool=1.0))
+    state = hook.load_session_state("keep")
+    assert state["budget_bytes"] == 1234 and state["last_pretool"] == 1.0
+
+
+def test_stuck_state_lock_degrades_without_hanging(hook, tmp_path, monkeypatch):
+    """A lock held elsewhere delays a state write by a bounded wait, then the
+    write proceeds unlocked (the previous behaviour) rather than hanging."""
+    import time
+
+    monkeypatch.setattr(hook, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(hook, "SESSION_STATE_LOCK_WAIT_SECONDS", 0.05)
+    lock_path = hook._state_file("stuck").with_suffix(".state.lock")
+    with open(lock_path, "a") as holder:
+        hook.fcntl.flock(holder, hook.fcntl.LOCK_EX)
+        start = time.monotonic()
+        hook.update_session_state("stuck", lambda state: state.update(last_pretool=2.0))
+        assert time.monotonic() - start < 1.0
+    assert hook.load_session_state("stuck")["last_pretool"] == 2.0
