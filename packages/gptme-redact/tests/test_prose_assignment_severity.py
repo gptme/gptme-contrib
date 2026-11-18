@@ -27,6 +27,11 @@ PROSE = [
     "the dedup token: <code>the</code> was too generic",
     "Set API_KEY=<code>VALUE</code> in the environment",
     "Set API_KEY=`xxxxxxxx` in the environment",
+    # Money inside Markdown emphasis; the closing marker can sit words later.
+    "Closed 3 positions at 0.08/token = **-$1.23 total**",
+    "Closed 3 positions at 0.08/token = **-$1.23**.",
+    "Closed 3 positions at 0.08/token = **-$1.23.** total",
+    "refund per token: _$4.50_ each",
 ]
 
 
@@ -77,6 +82,11 @@ def test_prose_assignment_still_masked_and_preview_hidden(text):
         # Tight NAME=value stays env/shell syntax even when wrapped.
         "API_KEY=<code>sleep_score</code>",
         "PASSWORD=`hunter2`",
+        # Emphasis only unwraps to the money/tag/placeholder test: a
+        # credential or crypt hash inside emphasis keeps blocking.
+        "the token: **Xj4kL9mNb2vC8wQ1**",
+        "PASSWORD=**$1$saltsalt$hashhashhash**",
+        "API_KEY=**hunter2**",
         # Tight NAME=value is env/shell syntax: short values still block.
         "PASSWORD=hunter2",
         "TOKEN=x",

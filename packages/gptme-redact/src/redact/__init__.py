@@ -592,6 +592,13 @@ _INLINE_CODE_WRAPPER_RE = re.compile(
 # mixed case, and a hyphen-joined word run is a diceware passphrase shape, so
 # neither qualifies.
 _CODE_IDENTIFIER_RE = re.compile(r"[a-z]+(?:_[a-z]+)+\Z")
+# Markdown emphasis markers around a value: ``token = **-$1.23 total**`` captures
+# ``**-$1.23`` (the closing marker sits after the next word), so emphasis is
+# stripped from either end independently, along with sentence punctuation on
+# either side of the closing marker (``**-$1.23.**``). The stripped core only gets the
+# _NON_CREDENTIAL_VALUE_RE shape test (money, whole tag, placeholder), never the
+# short-value rule, so emphasis cannot turn a credential-shaped value into prose.
+_EMPHASIS_EDGE_RE = re.compile(r"\A[*_]{1,3}|[.,;:!?)]*[*_]{1,3}[.,;:!?)]*\Z")
 
 
 def _assignment_severity(match: re.Match[str], severity: Severity) -> Severity:
@@ -614,6 +621,9 @@ def _assignment_severity(match: re.Match[str], severity: Severity) -> Severity:
     if _NON_CREDENTIAL_VALUE_RE.match(value) or (
         prose_separator and len(value) < _MIN_SECRET_LEN
     ):
+        return min(severity, Severity.HIGH)
+    unemphasized = _EMPHASIS_EDGE_RE.sub("", value)
+    if unemphasized != value and _NON_CREDENTIAL_VALUE_RE.match(unemphasized):
         return min(severity, Severity.HIGH)
     wrapped = _INLINE_CODE_WRAPPER_RE.match(value)
     if wrapped:
