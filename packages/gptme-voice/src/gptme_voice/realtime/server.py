@@ -2043,6 +2043,10 @@ class VoiceServer:
                     # Pre-connect cancellation is safe: the peek design means
                     # the resume state has not been consumed yet.
                     task.cancel()
+                    # Finish cleanup before the cold path restores prior-leg
+                    # timings; otherwise the task's finally block can erase them.
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
                     # Defensive: reap anything stored despite the paths above.
                     self._reap_prewarm_entry(from_number)
                     return None

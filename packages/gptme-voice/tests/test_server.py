@@ -4152,6 +4152,62 @@ def test_claim_prewarm_timeout_cancels_inflight_task() -> None:
     asyncio.run(_exercise())
 
 
+def test_cancelled_prewarm_cannot_erase_cold_path_prior_leg_status(tmp_path) -> None:
+    """Cancellation cleanup must finish before the cold path restores timings."""
+
+    async def _exercise() -> None:
+        server = VoiceServer()
+        server.state_dir = tmp_path
+        caller = "+46700000012"
+        server._save_recent_call(
+            RecentCallRecord(
+                caller_id=caller,
+                source="twilio",
+                ended_at=time.time(),
+                transcript=[TranscriptTurn(role="user", text="resume")],
+                metadata={},
+                pending_post_call_unit="fake-post-call",
+                subagent_timings=[
+                    {
+                        "task_id": "task-1",
+                        "returncode": 124,
+                        "timings": {"total_seconds": 61.2},
+                    }
+                ],
+            )
+        )
+        connecting = asyncio.Event()
+
+        class _SlowClient:
+            async def connect(self):
+                connecting.set()
+                await asyncio.Event().wait()
+
+        async def _bootstrap(**kwargs):
+            return SessionBootstrap("You are Bob.")
+
+        async def _disconnect(client):
+            pass
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(server, "_build_session_bootstrap", _bootstrap)
+            mp.setattr(server, "_make_client", lambda *args, **kwargs: _SlowClient())
+            mp.setattr(server, "_disconnect_realtime_client", _disconnect)
+            mp.setattr(server, "_cancel_post_call_schedule", lambda unit: None)
+            server._register_prewarm_task(caller)
+            await connecting.wait()
+            assert await server._claim_prewarm(caller, wait_seconds=0.01) is None
+            # Cancelling the prior post-call schedule yields after timings have
+            # been restored, allowing any unfinished prewarm cleanup to run.
+            await server._consume_recent_call(caller)
+            bridge = GptmeToolBridge(workspace="/fake")
+            server._seed_bridge_from_prior_leg(bridge, caller)
+            status = await bridge.handle_function_call("subagent_status", {})
+            assert status["recent_completions"][0]["task_id"] == "prior:task-1"
+
+    asyncio.run(_exercise())
+
+
 def test_claim_prewarm_ready_session_claimed_without_waiting() -> None:
     async def _exercise() -> None:
         server = VoiceServer()
