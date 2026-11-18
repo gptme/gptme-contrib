@@ -110,6 +110,12 @@ def test_body_looks_like_frontmatter(body: str, expected: bool) -> None:
         "wait: 2099-01-15\nnext_action: |\n  Follow up later",
         "state: waiting\nwaiting_for: Erik",
         "priority: high",
+        "success_criterion: CI passes",
+        "pool: frontier",
+        '"wait": 2099-01-15',
+        "'state' : waiting",
+        "wait : 2099-01-15",
+        "wait: [malformed",
     ],
 )
 def test_metadata_block_body_refused(workspace: Path, block: str) -> None:

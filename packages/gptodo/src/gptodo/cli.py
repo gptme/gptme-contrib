@@ -6027,7 +6027,7 @@ def add(
     # block are inert text, not metadata (e.g. a piped `wait:` is silently
     # ignored and the task shows as ready immediately). Refuse when the block
     # carries keys gptodo acts on, before any file is written.
-    inert_keys = sorted(set(_frontmatter_block_keys(body) or ()) & _TASK_METADATA_KEYS)
+    inert_keys = sorted(set(_frontmatter_block_keys(body) or ()) & KNOWN_FRONTMATTER_FIELDS)
     if inert_keys and not allow_frontmatter_body:
         raise click.UsageError(
             "body starts with a '---' block holding task metadata "
@@ -6081,46 +6081,26 @@ def add(
     print(filepath.stem)
 
 
-# Frontmatter keys gptodo reads or writes. A leading body block holding any
-# of these is a misplaced gate or setting, not prose (`add` refuses it).
-_TASK_METADATA_KEYS = frozenset(
-    {
-        "state",
-        "wait",
-        "wait_kind",
-        "waiting_for",
-        "waiting_since",
-        "priority",
-        "tags",
-        "assigned_to",
-        "task_type",
-        "created",
-        "completed",
-        "recur",
-        "requires",
-        "depends",
-        "blocks",
-        "related",
-        "parent",
-        "project",
-        "next_action",
-        "gate",
-        "probe",
-    }
-)
-
-
 def _frontmatter_block_keys(body: str) -> list[str] | None:
-    """Top-level ``key:`` names in a leading ``---`` block, or None if no closed block."""
+    """Top-level keys in a leading ``---`` block, or None if no closed block."""
+    import yaml
+
     lines = body.splitlines()
     if not lines or lines[0].strip() != "---":
         return None
     keys: list[str] = []
-    for line in lines[1:]:
+    for index, line in enumerate(lines[1:], start=1):
         if line.strip() == "---":
+            try:
+                metadata = yaml.safe_load("\n".join(lines[1:index]))
+            except (yaml.YAMLError, ValueError):
+                # Malformed YAML (including invalid dates) must not hide an
+                # otherwise recognizable inert metadata key.
+                return keys
+            if isinstance(metadata, dict):
+                return [key for key in metadata if isinstance(key, str)]
             return keys
-        # A heuristic, not a YAML validator: comments, lists, and multiline
-        # values must not hide an inert top-level metadata key.
+        # Keep the heuristic as a fallback for malformed blocks.
         m = re.match(r"^([A-Za-z_][\w-]*):", line)
         if m:
             keys.append(m.group(1))
