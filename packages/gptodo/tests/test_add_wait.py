@@ -8,7 +8,7 @@ import frontmatter
 import pytest
 from click.testing import CliRunner
 
-from gptodo.cli import _body_looks_like_frontmatter, cli
+from gptodo.cli import _body_looks_like_frontmatter, _frontmatter_block_keys, cli
 
 
 @pytest.fixture
@@ -108,13 +108,49 @@ def test_body_looks_like_frontmatter(body: str, expected: bool) -> None:
         "wait: 2099-01-15\ntags:\n  - followup",
         "# A deferred task\nwait: 2099-01-15",
         "wait: 2099-01-15\nnext_action: |\n  Follow up later",
+        "state: waiting\nwaiting_for: Erik",
+        "priority: high",
     ],
 )
-def test_frontmatter_like_body_warns(workspace: Path, block: str) -> None:
+def test_metadata_block_body_refused(workspace: Path, block: str) -> None:
     body = f"---\n{block}\n---\nBody"
     result = CliRunner().invoke(cli, ["add", "--body-stdin", "Piped gate"], input=body)
+    assert result.exit_code != 0
+    assert "task metadata" in result.output
+    assert "--allow-frontmatter-body" in result.output
+    assert not (workspace / "tasks" / "piped-gate.md").exists()
+
+
+def test_metadata_block_body_allowed_with_flag(workspace: Path) -> None:
+    body = "---\nwait: 2099-01-15\n---\nBody"
+    result = CliRunner().invoke(
+        cli, ["add", "--body-stdin", "--allow-frontmatter-body", "Piped gate"], input=body
+    )
     assert result.exit_code == 0, result.output
     assert "stored as body text" in result.stderr
     assert "wait" not in _meta(workspace, "piped-gate")
     task = frontmatter.load(workspace / "tasks" / "piped-gate.md")
     assert task.content.endswith(body)
+
+
+def test_unknown_key_block_only_warns(workspace: Path) -> None:
+    body = "---\nNote: prose that happens to look like a key\n---\nBody"
+    result = CliRunner().invoke(cli, ["add", "--body-stdin", "Prose rule"], input=body)
+    assert result.exit_code == 0, result.output
+    assert "stored as body text" in result.stderr
+    task = frontmatter.load(workspace / "tasks" / "prose-rule.md")
+    assert task.content.endswith(body)
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("---\nwait: 2026-12-01\npriority: high\n---", ["wait", "priority"]),
+        ("---\n# c\nwait: x\ntags:\n  - a\n---", ["wait", "tags"]),
+        ("---\n---", []),
+        ("Plain body", None),
+        ("---\nwait: 2026-12-01\nno closing delimiter", None),
+    ],
+)
+def test_frontmatter_block_keys(body: str, expected: list[str] | None) -> None:
+    assert _frontmatter_block_keys(body) == expected
