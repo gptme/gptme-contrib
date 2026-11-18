@@ -18,11 +18,17 @@ Trip conditions (each is checked against the time since the last stdout line):
 * **post_result**: the ``result`` event was seen but the process did not exit
   within ``grace`` seconds.
 * **eof_no_exit**: stdout closed but the process did not exit within
-  ``grace`` seconds.
+  ``grace`` seconds. After a ``result`` event the earlier deadline (result
+  plus ``grace``) still applies; closing stdout does not restart it.
 
 On a trip the session's whole process group gets SIGTERM, then SIGKILL after
-``kill_after`` seconds. The session is started in its own process group so
-tool subprocesses are stopped with it.
+``kill_after`` seconds if any member of the group is still alive (even when
+the session leader itself already exited). The session is started in its own
+process group so tool subprocesses are stopped with it.
+
+Output is relayed by a separate writer thread, so a downstream reader that
+stops reading cannot stall supervision. After the session ends, undelivered
+output is drained for at most ``grace`` seconds.
 
 Exit code contract:
 
@@ -184,6 +190,46 @@ def _relay(raw: bytes, out_fd: int | None) -> None:
             return
 
 
+class _Writer:
+    """Relays output lines from a thread of its own.
+
+    A downstream reader that stops reading blocks only this thread, never the
+    supervision loop.
+    """
+
+    def __init__(self, out_fd: int | None) -> None:
+        self._fd = out_fd
+        self._lines: queue.Queue[bytes | None] = queue.Queue()
+        self._abandoned = threading.Event()
+        self._thread: threading.Thread | None = None
+        if out_fd is not None:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            raw = self._lines.get()
+            # Once abandoned, never write again: the fd may be closed and reused.
+            if raw is None or self._abandoned.is_set():
+                return
+            _relay(raw, self._fd)
+
+    def put(self, raw: bytes) -> None:
+        if self._thread is not None:
+            self._lines.put(raw)
+
+    def close(self, timeout: float) -> bool:
+        """Finish relaying; give up after ``timeout`` seconds. True if drained."""
+        if self._thread is None:
+            return True
+        self._lines.put(None)
+        self._thread.join(timeout=timeout)
+        if self._thread.is_alive():
+            self._abandoned.set()
+            return False
+        return True
+
+
 def _signal_group(proc: subprocess.Popen[bytes], sig: int) -> None:
     try:
         os.killpg(proc.pid, sig)
@@ -191,21 +237,34 @@ def _signal_group(proc: subprocess.Popen[bytes], sig: int) -> None:
         pass
 
 
-def terminate_group(proc: subprocess.Popen[bytes], kill_after: float) -> bool:
-    """SIGTERM the process group, then SIGKILL it if the leader is still alive.
+def _group_alive(proc: subprocess.Popen[bytes]) -> bool:
+    """True while any process is left in the session's process group."""
+    proc.poll()  # reap the leader, so a zombie leader does not count
+    try:
+        os.killpg(proc.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # pragma: no cover - a member we cannot signal
+        return True
+    return True
 
+
+def terminate_group(proc: subprocess.Popen[bytes], kill_after: float) -> bool:
+    """SIGTERM the process group, then SIGKILL it if any member is still alive.
+
+    The leader exiting is not enough: a tool process that ignores SIGTERM
+    keeps the group alive and gets SIGKILL after ``kill_after`` seconds.
     Returns True when SIGKILL was needed.
     """
-    if proc.poll() is not None:
-        # The leader is gone; still stop anything left in its group.
-        _signal_group(proc, signal.SIGTERM)
-        return False
     _signal_group(proc, signal.SIGTERM)
-    try:
-        proc.wait(timeout=kill_after)
+    deadline = time.monotonic() + kill_after
+    while _group_alive(proc):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.05, remaining))
+    else:
         return False
-    except subprocess.TimeoutExpired:
-        pass
     _signal_group(proc, signal.SIGKILL)
     try:
         proc.wait(timeout=5)
@@ -293,6 +352,7 @@ def run_watchdog(
             except (ValueError, OSError):
                 pass
 
+    writer = _Writer(out_fd)
     state = StreamState()
     last_line = time.monotonic()
     result_at: float | None = None
@@ -313,9 +373,16 @@ def run_watchdog(
                 # pipe open.
                 break
             if eof_at is not None:
-                if now - eof_at >= config.grace:
+                # After a result the earlier result deadline still applies.
+                since = result_at if result_at is not None else eof_at
+                if now - since >= config.grace:
                     trip = "post_result" if state.result_seen else "eof_no_exit"
-                    reason = f"stdout closed but process still running after {config.grace:g}s"
+                    what = (
+                        "'result' event seen"
+                        if result_at is not None
+                        else "stdout closed"
+                    )
+                    reason = f"{what} but process still running after {config.grace:g}s"
                     break
                 time.sleep(min(config.poll, 0.1))
                 continue
@@ -358,7 +425,7 @@ def run_watchdog(
                 eof_at = time.monotonic()
                 continue
             last_line = time.monotonic()
-            _relay(raw, out_fd)
+            writer.put(raw)
             was_result = state.result_seen
             state.observe(raw, last_line)
             if state.result_seen and not was_result:
@@ -394,8 +461,13 @@ def run_watchdog(
             break
         if raw is None:
             continue
-        _relay(raw, out_fd)
+        writer.put(raw)
         state.observe(raw, time.monotonic())
+    if not writer.close(timeout=config.grace):
+        _log(
+            f"downstream reader stalled; gave up relaying output after {config.grace:g}s",
+            err,
+        )
 
     child_rc = proc.returncode
     if interrupted_by is not None:

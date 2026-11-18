@@ -34,9 +34,18 @@ MODULE_PATH = Path(claude_watchdog.__file__)
 # Replays a plan of steps: {"emit": event} prints one stream-json line,
 # {"sleep": s} pauses, {"ignore_term": true} ignores SIGTERM,
 # {"grandchild": pidfile} starts a long sleeper in the same process group,
+# {"stubborn_grandchild": pidfile} starts one that ignores SIGTERM,
+# {"bulk": n} prints n 1 KiB lines, {"close_stdout": true} closes stdout,
 # {"exit": code} exits.
-DUMMY_SESSION = r"""
-import json, signal, subprocess, sys, time
+STUBBORN = (
+    "import os, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    "open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(60)"
+)
+DUMMY_SESSION = (
+    "STUBBORN = "
+    + repr(STUBBORN)
+    + r"""
+import json, os, signal, subprocess, sys, time
 for step in json.loads(sys.argv[1]):
     if "emit" in step:
         sys.stdout.write(json.dumps(step["emit"]) + "\n")
@@ -55,9 +64,25 @@ for step in json.loads(sys.argv[1]):
         )
         with open(step["grandchild"], "w") as f:
             f.write(str(p.pid))
+    elif "stubborn_grandchild" in step:
+        subprocess.Popen(
+            [sys.executable, "-c", STUBBORN, step["stubborn_grandchild"]],
+            stdout=subprocess.DEVNULL,
+        )
+        while not os.path.exists(step["stubborn_grandchild"]):
+            time.sleep(0.01)
+        time.sleep(0.05)
+    elif "bulk" in step:
+        for _ in range(step["bulk"]):
+            sys.stdout.write("x" * 1023 + "\n")
+        sys.stdout.flush()
+    elif "close_stdout" in step:
+        sys.stdout.close()
+        os.close(1)
     elif "exit" in step:
         sys.exit(step["exit"])
 """
+)
 
 FAST = WatchdogConfig(
     idle_free=0.4, idle_tooled=2.0, grace=0.4, kill_after=0.5, poll=0.05
@@ -330,6 +355,74 @@ def test_trip_stops_the_whole_process_group(
     assert code == EXIT_HANG
     assert verdict["escalated_to_sigkill"] is False
     assert wait_dead(int(pidfile.read_text())), "tool subprocess survived"
+
+
+def test_sigterm_resistant_tool_is_killed_after_leader_exits(
+    session_script: Path, tmp_path: Path
+) -> None:
+    # The leader exits on SIGTERM at once; a tool process in its group ignores it.
+    pidfile = tmp_path / "stubborn.pid"
+    plan = [{"stubborn_grandchild": str(pidfile)}, {"emit": init()}, {"sleep": 30}]
+    code, verdict, _, _ = run(session_script, tmp_path, plan)
+
+    assert code == EXIT_HANG
+    assert verdict["escalated_to_sigkill"] is True
+    assert wait_dead(int(pidfile.read_text())), "SIGTERM-resistant tool survived"
+
+
+def test_eof_after_result_keeps_the_result_deadline(
+    session_script: Path, tmp_path: Path
+) -> None:
+    # Closing stdout just before the grace ends must not start a new grace period.
+    config = WatchdogConfig(
+        idle_free=30.0, idle_tooled=30.0, grace=2.0, kill_after=0.5, poll=0.05
+    )
+    plan = [
+        {"emit": init()},
+        {"emit": result()},
+        {"sleep": 1.8},
+        {"close_stdout": True},
+        {"sleep": 30},
+    ]
+    code, verdict, _, elapsed = run(session_script, tmp_path, plan, config)
+
+    assert code == 0
+    assert verdict["trip"] == "post_result"
+    # Result deadline at ~2.0s; a restarted grace would end at ~3.8s.
+    assert elapsed < 3.0, elapsed
+
+
+def test_stalled_downstream_reader_does_not_stop_supervision(
+    session_script: Path, tmp_path: Path
+) -> None:
+    import threading
+
+    # A pipe nobody reads: far more output than the pipe buffer holds.
+    read_fd, write_fd = os.pipe()
+    plan = [{"emit": init()}, {"bulk": 512}, {"sleep": 30}]
+    box: dict[str, Any] = {}
+
+    def target() -> None:
+        with os.fdopen(write_fd, "wb", closefd=False) as out:
+            box["result"] = run_watchdog(
+                [sys.executable, str(session_script), json.dumps(plan)],
+                FAST,
+                out=out,
+                err=io.StringIO(),
+            )
+
+    thread = threading.Thread(target=target, daemon=True)
+    try:
+        thread.start()
+        thread.join(timeout=10)
+        assert not thread.is_alive(), "watchdog blocked on a full output pipe"
+        code, verdict = box["result"]
+        assert code == EXIT_HANG
+        assert verdict["trip"] == "idle"
+    finally:
+        os.close(read_fd)  # unblocks any writer still stuck on the pipe
+        thread.join(timeout=10)
+        os.close(write_fd)
 
 
 # --- command line -------------------------------------------------------------
