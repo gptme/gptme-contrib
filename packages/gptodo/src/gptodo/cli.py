@@ -6090,7 +6090,8 @@ def _frontmatter_block_keys(body: str) -> list[str] | None:
         return None
     keys: list[str] = []
     for index, line in enumerate(lines[1:], start=1):
-        if line.strip() == "---":
+        # Indented markers can be content inside YAML block scalars.
+        if line.rstrip() == "---":
             try:
                 metadata = yaml.safe_load("\n".join(lines[1:index]))
             except (yaml.YAMLError, ValueError):

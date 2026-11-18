@@ -112,6 +112,8 @@ def test_body_looks_like_frontmatter(body: str, expected: bool) -> None:
         "priority: high",
         "success_criterion: CI passes",
         "pool: frontier",
+        "project: myproj",
+        "Note: |\n  ---\nwait: 2099-01-15",
         '"wait": 2099-01-15',
         "'state' : waiting",
         "wait : 2099-01-15",
@@ -153,6 +155,7 @@ def test_unknown_key_block_only_warns(workspace: Path) -> None:
     [
         ("---\nwait: 2026-12-01\npriority: high\n---", ["wait", "priority"]),
         ("---\n# c\nwait: x\ntags:\n  - a\n---", ["wait", "tags"]),
+        ("---\nNote: |\n  ---\nwait: 2099-01-15\n---", ["Note", "wait"]),
         ("---\n---", []),
         ("Plain body", None),
         ("---\nwait: 2026-12-01\nno closing delimiter", None),
