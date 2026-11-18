@@ -55,6 +55,17 @@ WRITES = [
     "GH_TOKEN=x timeout 30 gh pr review 5 --repo o/r --approve",
     "cd /tmp/w && gh issue close 3 --repo o/r",
     "/usr/bin/gh pr edit 3 --repo o/r --title t",
+    "gh api -X PATCH repos/o/r/issues/comments/123 -F body=@/tmp/status.md",
+    # Agent wrapper scripts that post to GitHub without a visible gh call.
+    "cat /tmp/b.md | scripts/github/comment-from-stdin.sh gptme/gptme 4967 --no-anti-spam",
+    "python3 scripts/github/reply-to-thread.py o/r#5 123 --body-file /tmp/x",
+    "uv run --no-sync python3 /abs/scripts/github/reply-to-thread.py o/r#5 1",
+    "bash scripts/github/ai-review-now.sh gptme/gptme-cloud 1228",
+    "bash /abs/scripts/github/greptile-helper.sh trigger gptme/gptme 4977",
+    # Rebase of a PR branch: a force push, no new commit of the agent's own.
+    "cd /tmp/w && git push --force-with-lease origin HEAD",
+    "timeout 60 git -C /tmp/w push -f origin fix",
+    "git push origin +HEAD:fix",
 ]
 READS = [
     "gh pr view 4970 --repo gptme/gptme --json state",
@@ -65,6 +76,13 @@ READS = [
     'rg "gh issue close" scripts/',
     "echo 'gh pr merge 5' | wc -l",
     'gh pr view 5 --repo o/r --json body | grep "gh pr comment"',
+    "gh api repos/o/r/issues/comments/123",
+    "grep -n reply-to-thread.py scripts/",
+    "cat scripts/github/comment-from-stdin.sh",
+    "bash scripts/github/greptile-helper.sh status gptme/gptme 4977",
+    # A plain push is already credited through its commits.
+    "git push origin master",
+    "rg 'git push --force-with-lease' lessons/",
 ]
 
 
@@ -94,3 +112,23 @@ def test_gptme_and_cc_agree(command):
         extract_signals(_gptme("shell", command))["gh_interactions"]
         == extract_signals_cc(_cc(command))["gh_interactions"]
     )
+
+
+def test_rebase_through_push_wrapper_counts():
+    """Reduced from gptme PM session 88f01948 (2026-11-17, aw-watcher-web#272).
+
+    It rebased the PR branch and pushed through the review-then-push wrapper
+    with an explicit lease, then reported the new head. Before this fix the
+    session had 0 commits and 0 gh_interactions and was graded noop.
+    """
+    command = (
+        "cd /tmp/worktrees/aw-watcher-web-feat && /home/bob/bob/.venv/bin/python3 "
+        "/home/bob/bob/scripts/github/pm-review-and-push.py --checkout "
+        "/tmp/worktrees/aw-watcher-web-feat --review-timeout 300 -- "
+        "--force-with-lease=refs/heads/feat/x:b47fea53187558d6478ef90fe3a31ffb4d4e162c "
+        "bob HEAD:refs/heads/feat/x"
+    )
+    signals = extract_signals(_gptme("shell", command))
+    assert signals["gh_interactions"] == 1
+    assert is_productive(signals)
+    assert extract_signals_cc(_cc(command))["gh_interactions"] == 1

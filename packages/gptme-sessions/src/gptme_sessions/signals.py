@@ -306,7 +306,7 @@ _GH_INTERACTION_RE = re.compile(
     r"gh\s+(?:"
     r"pr\s+(?:review|comment|close|reopen|merge|edit)"
     r"|issue\s+(?:comment|close|reopen|edit|create)"
-    r"|api\s+(?:\S+\s+)*?repos/[^\s]+/(?:pulls|issues)/\d+/(?:comments|reviews)"
+    r"|api\s+(?:\S+\s+)*?repos/[^\s]+/(?:pulls|issues)/(?:\d+/)?(?:comments|reviews)"
     r")"
 )
 
@@ -835,6 +835,90 @@ def _gh_invocation_matches(pattern: re.Pattern[str], segment: str) -> bool:
 
 
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+
+# Agent wrapper scripts whose invocation posts to GitHub: a PR/issue comment,
+# a review-thread reply, a workpad upsert, or a fresh review request. They
+# wrap ``gh api`` internally, so the trajectory never shows the ``gh`` call.
+_GH_WRAPPER_SCRIPTS = frozenset(
+    {"comment-from-stdin.sh", "reply-to-thread.py", "find-or-create-workpad.sh", "ai-review-now.sh"}
+)
+# Wrappers that write only for one subcommand (``status`` is a read).
+_GH_WRAPPER_SUBCOMMANDS = {"greptile-helper.sh": "trigger"}
+# Wrappers that review and then ``git push`` their trailing arguments.
+_PUSH_WRAPPER_SCRIPTS = frozenset({"pm-review-and-push.py"})
+_CMD_PREFIXES = frozenset({"env", "command", "exec", "nohup", "sudo", "time", "timeout"})
+_INTERPRETERS = frozenset({"python", "python3", *_SHELLS})
+_UV_VALUE_OPTS = frozenset({"--package", "--with", "--project", "--directory", "--python"})
+
+
+def _command_words(segment: str) -> list[str]:
+    """Words of the command a segment runs, from its program name onwards.
+
+    Skips assignments (``GH_TOKEN=x``), grouping, common prefixes (``timeout
+    30``, ``env``) and interpreters with their options (``python3``, ``bash``,
+    ``uv run --no-sync``), so ``uv run python3 scripts/x.py`` yields
+    ``["scripts/x.py", ...]``. Quoted text stays one word, so a script name
+    mentioned in ``grep 'x.py'`` is an argument, never the program.
+    """
+    words = _shell_tokens(_mask_substitutions(segment))
+    i = 0
+    while i < len(words):
+        word = words[i]
+        name = word.rsplit("/", 1)[-1]
+        if word in ("(", "{", "!") or re.match(r"^\w+=", word):
+            i += 1
+        elif name in _CMD_PREFIXES:
+            i += 1
+            while i < len(words) and (words[i].startswith("-") or words[i][:1].isdigit()):
+                i += 1
+        elif name == "uv" and words[i + 1 : i + 2] == ["run"]:
+            i += 2
+            while i < len(words) and words[i].startswith("-"):
+                i += 2 if words[i] in _UV_VALUE_OPTS else 1
+        elif name in _INTERPRETERS and i + 1 < len(words):
+            i += 1
+            while i < len(words) and words[i].startswith("-"):
+                i += 1
+        else:
+            return words[i:]
+    return []
+
+
+def _github_side_write(cmd: str) -> bool:
+    """Whether a shell command changes GitHub-side state without a local commit.
+
+    Counts ``gh`` write commands (``_GH_INTERACTION_RE``), the agent wrapper
+    scripts above, and force pushes (direct or through a push wrapper), which
+    is how a PR branch is rebased:
+    the rebase creates no new commit of the agent's own, so without this a
+    rebase-only maintenance session grades as a noop. A plain push is not
+    counted; its commits already are.
+    """
+    if _gh_cmd_matches(_GH_INTERACTION_RE, cmd):
+        return True
+    cmd = _strip_heredoc_bodies(cmd)
+    if any(_github_side_write(sub) for sub in _command_substitutions(cmd)):
+        return True
+    for segment in _split_shell_segments(cmd):
+        words = _command_words(segment)
+        if not words:
+            continue
+        name = words[0].rsplit("/", 1)[-1]
+        if name in _GH_WRAPPER_SCRIPTS:
+            return True
+        if name in _GH_WRAPPER_SUBCOMMANDS and _GH_WRAPPER_SUBCOMMANDS[name] in words[1:3]:
+            return True
+        if name == "git" and "push" in words:
+            push_args = words[words.index("push") + 1 :]
+        elif name in _PUSH_WRAPPER_SCRIPTS:
+            push_args = words[1:]
+        else:
+            continue
+        if any(
+            w in ("-f", "--force") or w.startswith(("--force-with-lease", "+")) for w in push_args
+        ):
+            return True
+    return False
 
 
 def _shell_reads_stdin(segment: str) -> bool:
@@ -1515,7 +1599,7 @@ def extract_signals(msgs: list[dict]) -> dict:
                                 command = "gh " + command
                             if _has_pr_create_command(command):
                                 pr_create_calls[_call_id] = tool
-                            if _gh_cmd_matches(_GH_INTERACTION_RE, command):
+                            if _github_side_write(command):
                                 gh_interactions += 1
                             if tool == "shell" and _COMMIT_CMD_RE.search(command):
                                 commit_cmd_calls[_call_id] = command
@@ -2013,7 +2097,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     bash_input = item.get("input", {})
                     cmd = bash_input.get("command", "")
                     command_cwd = bash_input.get("cwd") or bash_input.get("workdir") or session_cwd
-                    if _gh_cmd_matches(_GH_INTERACTION_RE, cmd):
+                    if _github_side_write(cmd):
                         gh_interactions += 1
 
                     # Commit commands: remember them so a truncated result (output
