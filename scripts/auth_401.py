@@ -72,11 +72,19 @@ fails with an auth-looking error can mean two different things:
 `classify_stream_json(lines)` / `classify_stream_json_log(path)` tell these apart
 with two rules. A real credential death fails on the *first* API call of a
 session (nothing works), so the failure is `edge_403` if either an earlier
-assistant turn in the same log succeeded (the credential demonstrably worked
-this session) or the error text is an edge/WAF page (`cloudflare`, `attention
-required`, HTML). If the credential really dies mid-session, the next session
-fails on its first call and is classified `oauth_dead`: the page is delayed by
-one launch, not lost. A log with no auth signal is `none`.
+assistant turn in the same session succeeded (the credential demonstrably
+worked this session) or the error text is an edge/WAF page (`cloudflare`,
+`attention required`, HTML). If the credential really dies mid-session, the next
+session fails on its first call and is classified `oauth_dead`: the page is
+delayed by one launch, not lost. A log with no auth signal is `none`.
+
+Only the last session in the log counts: each `system`/`init` event starts a
+new session, so turns from an earlier session appended to the same log never
+mark the current one as working. An organization that disabled subscription
+access (`"error": "oauth_org_not_allowed"` or the API code
+`oauth_not_allowed_for_organization`) is `oauth_dead` wherever it appears: those
+structured codes cannot come from an edge page, and retrying does not fix them.
+A bare 403 without them is not enough.
 
 Public API:
   - `is_transient_401(text)`
@@ -220,6 +228,10 @@ STREAM_JSON_EXIT_CODES = {OAUTH_DEAD: 0, NO_AUTH_FAILURE: 1, EDGE_403: 2}
 # than an API auth response.
 EDGE_BLOCK_MARKERS = ("cloudflare", "attention required", "<html", "<!doctype")
 
+# Structured codes for an organization that disabled subscription access.
+ORG_REFUSAL_ERRORS = frozenset({"oauth_org_not_allowed"})
+ORG_REFUSAL_API_CODES = frozenset({"oauth_not_allowed_for_organization"})
+
 
 def _stream_event_text(ev: dict) -> str:
     """Human-readable text of one event: ``result`` plus message text blocks."""
@@ -234,6 +246,14 @@ def _stream_event_text(ev: dict) -> str:
         elif isinstance(content, str):
             parts.append(content)
     return " ".join(parts)
+
+
+def _is_org_refusal(ev: dict) -> bool:
+    """True iff this event carries the organization-disabled OAuth error codes."""
+    if ev.get("error") in ORG_REFUSAL_ERRORS:
+        return True
+    code = ev.get("apiErrorCode", ev.get("api_error_code"))
+    return isinstance(code, str) and code in ORG_REFUSAL_API_CODES
 
 
 def _is_stream_auth_signal(ev: dict) -> bool:
@@ -259,14 +279,19 @@ def classify_stream_json(lines: Iterable[str]) -> str:
     skipped, so a truncated log (a hard kill mid-line) is classified on what it
     did write.
 
-    - ``none``: no auth-failure event in the log.
+    Only the last session counts: a ``system``/``init`` event starts a new
+    session and resets what was seen before it.
+
+    - ``none``: no auth-failure event in the session.
     - ``edge_403``: an auth failure, but either an assistant turn succeeded
       before it (the credential worked this session) or its text is an edge/WAF
       page. Retry later; do not page and do not count it toward an auth breaker.
     - ``oauth_dead``: an auth failure before any successful turn, with no edge
-      markers. The credential is dead; stop launching and page.
+      markers, or an organization-disabled OAuth error anywhere in the session.
+      The credential is dead; stop launching and page.
     """
     saw_success = False
+    org_refused = False
     auth_texts: list[str] = []
     for raw in lines:
         line = raw.strip()
@@ -278,6 +303,14 @@ def classify_stream_json(lines: Iterable[str]) -> str:
             continue
         if not isinstance(ev, dict):
             continue
+        if ev.get("type") == "system" and ev.get("subtype") == "init":
+            saw_success = org_refused = False
+            auth_texts = []
+            continue
+        if _is_org_refusal(ev):
+            org_refused = True
+            auth_texts.append(_stream_event_text(ev).lower())
+            continue
         if _is_stream_auth_signal(ev):
             auth_texts.append(_stream_event_text(ev).lower())
             continue
@@ -285,6 +318,8 @@ def classify_stream_json(lines: Iterable[str]) -> str:
             saw_success = True
     if not auth_texts:
         return NO_AUTH_FAILURE
+    if org_refused:
+        return OAUTH_DEAD
     if saw_success:
         return EDGE_403
     if any(m in t for t in auth_texts for m in EDGE_BLOCK_MARKERS):

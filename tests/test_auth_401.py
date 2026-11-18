@@ -472,3 +472,55 @@ def test_cli_classify_stream_json_missing_file_is_none(tmp_path):
     )
     assert r.returncode == 1
     assert r.stdout.strip() == "none"
+
+
+# Same shape as the organization-disabled fixture in
+# packages/gptme-sessions/tests/test_failure_capture.py.
+ORG_REFUSED = {
+    "type": "assistant",
+    "message": {
+        "role": "assistant",
+        "model": "<synthetic>",
+        "content": [
+            {
+                "type": "text",
+                "text": "Your organization has disabled Claude subscription access for Claude Code",
+            }
+        ],
+    },
+    "error": "oauth_org_not_allowed",
+    "isApiErrorMessage": True,
+    "apiErrorStatus": 403,
+    "apiErrorCode": "oauth_not_allowed_for_organization",
+}
+
+
+def test_stream_json_org_refusal_on_first_call_is_oauth_dead():
+    assert mod.classify_stream_json(_lines(INIT, ORG_REFUSED)) == "oauth_dead"
+
+
+def test_stream_json_org_refusal_api_code_alone_is_oauth_dead():
+    ev = {k: v for k, v in ORG_REFUSED.items() if k != "error"}
+    assert mod.classify_stream_json(_lines(INIT, ev)) == "oauth_dead"
+
+
+def test_stream_json_org_refusal_after_success_is_still_oauth_dead():
+    # The structured code cannot come from an edge page; retrying will not help.
+    events = (INIT, OK_TURN, TOOL_RESULT, ORG_REFUSED)
+    assert mod.classify_stream_json(_lines(*events)) == "oauth_dead"
+
+
+def test_stream_json_bare_403_is_not_org_refusal():
+    ev = {"type": "assistant", "apiErrorStatus": 403, "message": {"content": []}}
+    assert mod.classify_stream_json(_lines(INIT, ev)) == "none"
+
+
+def test_stream_json_success_in_an_earlier_session_does_not_count():
+    # Two sessions appended to one log: the second dies on its first call.
+    events = (INIT, OK_TURN, TOOL_RESULT, CLEAN_RESULT, INIT, OAUTH_ERR, OAUTH_RESULT)
+    assert mod.classify_stream_json(_lines(*events)) == "oauth_dead"
+
+
+def test_stream_json_only_the_last_session_is_classified():
+    events = (INIT, OAUTH_ERR, OAUTH_RESULT, INIT, OK_TURN, CLEAN_RESULT)
+    assert mod.classify_stream_json(_lines(*events)) == "none"
