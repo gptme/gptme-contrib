@@ -1615,6 +1615,42 @@ def commentable_lines(diff: str) -> dict[str, set[int]]:
     return result
 
 
+def added_lines(diff: str) -> dict[str, set[int]]:
+    """Map each changed file to the NEW-side line numbers the diff *adds*.
+
+    Narrower than :func:`commentable_lines`, which also lists the context lines
+    around each hunk: context lines did not change, so a caller asking "was this
+    code rewritten?" wants only the ``+`` side. Numbers are post-image
+    coordinates, i.e. positions in the file at the diff's head.
+    """
+    result: dict[str, set[int]] = {}
+    path: str | None = None
+    lineno = 0
+    for raw in diff.splitlines():
+        if raw.startswith("+++ "):
+            target = raw[4:].strip().split("\t", 1)[0].strip()
+            path = target.removeprefix("b/")
+            if path == "/dev/null":
+                path = None
+            elif path is not None:
+                result.setdefault(path, set())
+            continue
+        if path is None:
+            continue
+        m = _HUNK_RE.match(raw)
+        if m:
+            lineno = int(m.group(1))
+            continue
+        if raw.startswith("+"):
+            result[path].add(lineno)
+            lineno += 1
+        elif raw.startswith(("-", "\\")):
+            continue
+        elif raw.startswith(" "):
+            lineno += 1
+    return result
+
+
 def rank_changed_paths_by_hunks(diff: str) -> list[str]:
     """Changed post-image paths ordered by diff-hunk count, then diff order."""
     order: list[str] = []
@@ -7332,6 +7368,8 @@ def filter_suppressed(
     findings: Sequence[dict],
     suppressed: Sequence[Mapping[str, object]],
     diff: str = "",
+    *,
+    base_head: str = "",
 ) -> tuple[list[dict], list[dict]]:
     """Drop findings whose argument has already been settled and rejected.
 
@@ -7385,12 +7423,36 @@ def filter_suppressed(
     24 Greptile follow-ups, 21 concede or confirm, 6 are explicit retractions,
     and 3 convert a successful rebuttal into a standing suppression rule.
 
-    The ``diff`` parameter is accepted for API compatibility but is no longer
-    used: resolution-based dismissals are never honored regardless of whether
-    the file changed.
+    **The diff guard.** A rejection settles the argument about the code it was
+    about. When that code is rewritten, the argument no longer applies: the
+    reviewer is looking at something new, and re-raising the same claim about
+    different code is exactly what "an unfixed defect recurring is correct
+    behaviour" demands. Dismissals therefore stop suppressing once those lines
+    change.
+
+    Two inputs make that decidable:
+
+    * ``diff`` — the diff to reason about, in post-image coordinates.
+    * ``base_head`` — the head that diff starts from. Suppression entries
+      recorded at that head (``entry["head"]``) are the only ones the diff can
+      localise; entries from any other point keep suppressing, because guessing
+      which of their lines moved is how a real finding gets buried.
+
+    With ``base_head`` empty — the default, and what every caller that has no
+    incremental diff passes — behaviour is unchanged: no guard, dismissals hold.
+    A caller must opt in by passing the *incremental* diff for
+    ``base_head...head``, not the whole PR diff: the PR diff always contains the
+    lines the finding was written against, so it would re-enable every
+    suppression and disable the mechanism entirely.
+
+    An entry with no line anchor cannot be localised; it is re-enabled when its
+    file gained added lines, because erring toward noise (one repeated comment)
+    is the safe direction and erring toward silence buries a finding.
     """
     kept: list[dict] = []
     muted: list[dict] = []
+
+    touched = added_lines(diff) if (diff and base_head) else {}
 
     for f in findings:
         suppression = None
@@ -7402,12 +7464,38 @@ def filter_suppressed(
         # Resolution is a claim, not evidence — never suppress why="resolved"
         # entries. A fixed defect disappears naturally; if the LLM re-derives
         # it, the defect persists regardless of what the thread says.
-        if suppression and suppression.get("why") != "resolved":
-            muted.append(f)
-        else:
+        if not suppression or suppression.get("why") == "resolved":
             kept.append(f)
+            continue
+
+        if _lines_rewritten_since(suppression, touched, base_head):
+            kept.append(f)
+            continue
+
+        muted.append(f)
 
     return kept, muted
+
+
+def _lines_rewritten_since(
+    entry: Mapping[str, object], touched: Mapping[str, set[int]], base_head: str
+) -> bool:
+    """Whether the code a dismissal was about was rewritten since it was made.
+
+    Only entries stamped with the diff's own base head are decidable: the diff
+    says what changed after that head, and nothing about entries recorded
+    before it (they moved by an unknown amount in between).
+    """
+    if not touched or str(entry.get("head") or "") != base_head:
+        return False
+    lines = touched.get(str(entry.get("file") or ""))
+    if not lines:
+        return False
+    line = entry.get("line")
+    if not isinstance(line, int):
+        # No anchor: the claim cannot be placed, and the file did change.
+        return True
+    return line in lines
 
 
 #: Usage keys that are per-wave snapshots, not quantities to sum across waves.
