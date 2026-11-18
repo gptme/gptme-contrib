@@ -74,6 +74,10 @@ WRITES = [
     "env -u VIRTUAL_ENV gh pr comment 5 --repo o/r --body hi",
     "sudo -u bob gh pr comment 5 --repo o/r --body hi",
     "timeout -s KILL 5 gh issue close 3 --repo o/r",
+    "sudo -k gh pr comment 5 --repo o/r --body hi",
+    # Commands guarded by a compound-command keyword (Greptile on #2233).
+    "if true; then gh pr comment 5 --repo o/r --body hi; fi",
+    "for n in 1 2; do gh issue close $n --repo o/r; done",
 ]
 READS = [
     "gh pr view 4970 --repo gptme/gptme --json state",
@@ -103,6 +107,7 @@ READS = [
     # Unquoted gh text that is an argument, not the program run.
     "echo gh pr comment 5",
     "rg gh pr comment .",
+    "echo bash -c 'git push --force-with-lease origin HEAD'",
 ]
 
 

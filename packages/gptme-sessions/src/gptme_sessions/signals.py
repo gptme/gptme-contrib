@@ -843,38 +843,49 @@ _GH_WRAPPER_SUBCOMMANDS = {"greptile-helper.sh": "trigger"}
 # Wrappers that review and then ``git push`` their trailing arguments.
 _PUSH_WRAPPER_SCRIPTS = frozenset({"pm-review-and-push.py"})
 _CMD_PREFIXES = frozenset({"env", "command", "exec", "nohup", "sudo", "time", "timeout"})
-# Prefix options that take a separate value (``env -u VAR``, ``sudo -u user``,
-# ``timeout -s KILL``), so the value is not mistaken for the program.
-_PREFIX_VALUE_OPTS = frozenset({"-u", "-g", "-s", "-k", "-C", "-D"})
+# Per-prefix options that take a separate value (``env -u VAR``, ``sudo -u
+# user``, ``timeout -s KILL``), so the value is not mistaken for the program.
+# ``sudo -k`` takes none, unlike ``timeout -k``.
+_PREFIX_VALUE_OPTS = {
+    "env": frozenset({"-u", "-C", "-S"}),
+    "sudo": frozenset({"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U"}),
+    "timeout": frozenset({"-s", "-k"}),
+}
+# Words that open a compound command; the command they guard follows them.
+_SHELL_KEYWORDS = frozenset({"(", "{", "!", "if", "then", "elif", "else", "while", "until", "do"})
 _INTERPRETERS = frozenset({"python", "python3", *_SHELLS})
 _UV_VALUE_OPTS = frozenset({"--package", "--with", "--project", "--directory", "--python"})
 
 
-def _command_words(segment: str) -> list[str]:
+def _command_words(segment: str, keep_interpreter: bool = False) -> list[str]:
     """Words of the command a segment runs, from its program name onwards.
 
     Skips assignments (``GH_TOKEN=x``), grouping, common prefixes (``timeout
     30``, ``env``) and interpreters with their options (``python3``, ``bash``,
     ``uv run --no-sync``), so ``uv run python3 scripts/x.py`` yields
     ``["scripts/x.py", ...]``. Quoted text stays one word, so a script name
-    mentioned in ``grep 'x.py'`` is an argument, never the program.
+    mentioned in ``grep 'x.py'`` is an argument, never the program. With
+    ``keep_interpreter`` the words start at the interpreter instead.
     """
     words = _shell_tokens(_mask_substitutions(segment))
     i = 0
     while i < len(words):
         word = words[i]
         name = word.rsplit("/", 1)[-1]
-        if word in ("(", "{", "!") or re.match(r"^\w+=", word):
+        if word in _SHELL_KEYWORDS or re.match(r"^\w+=", word):
             i += 1
         elif name in _CMD_PREFIXES:
+            value_opts = _PREFIX_VALUE_OPTS.get(name, frozenset())
             i += 1
             while i < len(words) and (words[i].startswith("-") or words[i][:1].isdigit()):
-                i += 2 if words[i] in _PREFIX_VALUE_OPTS else 1
+                i += 2 if words[i] in value_opts else 1
         elif name == "uv" and words[i + 1 : i + 2] == ["run"]:
             i += 2
             while i < len(words) and words[i].startswith("-"):
                 i += 2 if words[i] in _UV_VALUE_OPTS else 1
         elif name in _INTERPRETERS and i + 1 < len(words):
+            if keep_interpreter:
+                return words[i:]
             i += 1
             while i < len(words) and words[i][:1] in ("-", "+"):
                 opt = words[i]
@@ -995,17 +1006,16 @@ def _shell_c_script(segment: str) -> str | None:
 
     Shell tokenization keeps the quoted script in one token, so its ``gh api``
     is invisible to ``_gh_api_args``; bash still runs it, so the caller checks
-    it as a command of its own. The shell is located among the tokens like
-    ``gh api`` is (``timeout 5 bash -c``, ``env X=1 sh -c``) and ``-c`` may be
-    clustered (``-lc``, ``-ec``). Without ``-c`` the first operand is a script
-    file, which we cannot see, so None.
+    it as a command of its own. The shell must be the program the segment
+    runs (``timeout 5 bash -c``, ``env X=1 sh -c``), so ``echo bash -c '...'``
+    only prints the script. ``-c`` may be clustered (``-lc``, ``-ec``).
+    Without ``-c`` the first operand is a script file, which we cannot see,
+    so None.
     """
-    tokens = _shell_tokens(segment)
-    for i, tok in enumerate(tokens):
-        if tok.rsplit("/", 1)[-1] not in _SHELLS:
-            continue
+    tokens = _command_words(segment, keep_interpreter=True)
+    if tokens and tokens[0].rsplit("/", 1)[-1] in _SHELLS:
         has_c = noexec = False
-        j = i + 1
+        j = 1
         while j < len(tokens):
             opt = tokens[j]
             if opt in ("-o", "+o", "-O", "+O"):
