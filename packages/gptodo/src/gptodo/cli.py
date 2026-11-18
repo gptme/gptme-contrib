@@ -327,7 +327,8 @@ def show(task_id, render=False):
     if task is None:
         # Fall back to full task load for numeric IDs or unknown names.
         tasks = load_tasks(tasks_dir)
-        if not tasks:
+        # A name can still match an archived task when no live task is left.
+        if not tasks and task_id.isdigit():
             console.print("[red]No tasks found[/]")
             sys.exit(1)
 
@@ -4657,7 +4658,7 @@ def archive_cmd(
         tasks_dir, repo_root, older_than_days=days, states=selected_states, limit=limit
     )
     if not dry_run:
-        apply_archive(plan, tasks_dir)
+        apply_archive(plan, tasks_dir, repo_root=repo_root)
 
     records: List[Dict[str, Any]]
     if dry_run:

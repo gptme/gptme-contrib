@@ -444,3 +444,127 @@ def test_human_output_dry_run(acceptance_repo: Path, monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert "Would archive 2 task(s)" in result.output
     assert "Dry-run" in result.output
+
+
+# ---------- Review follow-ups -------------------------------------------------------
+
+
+def test_show_finds_archived_task_when_no_live_task_is_left(repo: Path, monkeypatch) -> None:
+    _write(repo / "tasks", "only", "done", f"completed: '{_ago(30)}'")
+    _archive_json(repo, monkeypatch)
+    assert not list((repo / "tasks").glob("*.md"))
+
+    show = _run(repo, monkeypatch, "show", "only")
+    assert show.exit_code == 0, show.output
+    assert "tasks/archive/only.md" in show.output
+
+
+def test_root_based_link_between_moved_tasks_is_rewritten(repo: Path, monkeypatch) -> None:
+    tasks = repo / "tasks"
+    _write(tasks, "target", "done", f"completed: '{_ago(30)}'")
+    _write(
+        tasks,
+        "referrer",
+        "done",
+        f"completed: '{_ago(30)}'",
+        body="[t](tasks/target.md) [r](tasks/live.md)\n",
+    )
+    _write(tasks, "live", "todo")
+    _commit_all(repo)
+
+    data = _archive_json(repo, monkeypatch)
+    assert sorted(r["id"] for r in data["archived"]) == ["referrer", "target"]
+    text = (tasks / "archive" / "referrer.md").read_text()
+    # Still written from the root; the unmoved target needs no change.
+    assert "[t](tasks/archive/target.md)" in text
+    assert "[r](tasks/live.md)" in text
+    check = _run(repo, monkeypatch, "check")
+    assert check.exit_code == 0, check.output
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'See [notes](old-notes.md "Notes").\n',
+        "See [notes][n].\n\n[n]: old-notes.md\n",
+        '[notes][n]\n\n[n]: <old-notes.md> "Notes"\n',
+    ],
+    ids=["inline-title", "reference", "reference-angle-title"],
+)
+def test_titled_and_reference_links_pin_their_target(repo: Path, monkeypatch, body: str) -> None:
+    tasks = repo / "tasks"
+    _write(tasks, "hub", "todo", body=body)
+    _write(tasks, "old-notes", "done", f"completed: '{_ago(30)}'")
+
+    data = _archive_json(repo, monkeypatch)
+    assert data["archived"] == []
+    assert "linked from hub" in data["skipped"][0]["reason"]
+
+
+def test_titled_and_reference_links_are_rebased(repo: Path, monkeypatch) -> None:
+    tasks = repo / "tasks"
+    _write(tasks, "live", "todo")
+    body = '[a](live.md "Live task") [b][ref]\n\n[ref]: live.md#top "Ref"\n[c]: <live.md>\n'
+    _write(tasks, "mover", "done", f"completed: '{_ago(30)}'", body=body)
+
+    _archive_json(repo, monkeypatch)
+    text = (tasks / "archive" / "mover.md").read_text()
+    assert '[a](../live.md "Live task")' in text
+    assert '[ref]: ../live.md#top "Ref"' in text
+    assert "[c]: <../live.md>" in text
+
+
+def test_selected_task_that_does_not_move_keeps_its_link_target(repo: Path, monkeypatch) -> None:
+    """A referrer that cannot move after planning must not strand a moved target."""
+    from gptodo.archive import apply_archive, plan_archive
+
+    tasks = repo / "tasks"
+    # target is older, so it moves before the referrer is re-checked.
+    _write(tasks, "target", "done", f"completed: '{_ago(50)}'")
+    referrer = _write(
+        tasks, "referrer", "done", f"completed: '{_ago(40)}'", body="[t](target.md)\n"
+    )
+    _commit_all(repo)
+
+    plan = plan_archive(tasks, repo)
+    assert [c.task.name for c in plan.selected] == ["target", "referrer"]
+    # Another session reopens the referrer between planning and moving.
+    referrer.write_text(referrer.read_text().replace("state: done", "state: active"))
+    apply_archive(plan, tasks)
+
+    assert plan.moved == []
+    assert (tasks / "target.md").exists()
+    assert not (tasks / "archive" / "target.md").exists()
+    errors = {e["id"]: e["error"] for e in plan.errors}
+    assert "changed since planning" in errors["referrer"]
+    assert "moved back" in errors["target"] and "linked from referrer" in errors["target"]
+    # The rename was undone in the index too.
+    assert "target" not in _git(repo, "status", "--porcelain")
+    monkeypatch.chdir(repo)
+    check = CliRunner().invoke(cli, ["check"])
+    assert check.exit_code == 0, check.output
+
+
+def test_failed_link_rewrite_keeps_the_task_and_is_reported(repo: Path, monkeypatch) -> None:
+    tasks = repo / "tasks"
+    _write(tasks, "live", "todo")
+    mover = _write(tasks, "mover", "done", f"completed: '{_ago(30)}'", body="[l](live.md)\n")
+    original = mover.read_text()
+
+    real_replace = os.replace
+
+    def failing_replace(src, dst, *args, **kwargs):
+        if Path(dst).name == "mover.md":
+            raise OSError(28, "No space left on device")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    result = _run(repo, monkeypatch, "archive", "--json")
+    assert result.exit_code == 1, result.output
+    data = json.loads(result.output)
+    assert [r["id"] for r in data["archived"]] == ["mover"]
+    assert data["archived"][0]["links_rebased"] is False
+    assert data["errors"] and "links not rebased" in data["errors"][0]["error"]
+    # The moved file is intact and no temporary file is left behind.
+    assert (tasks / "archive" / "mover.md").read_text() == original
+    assert sorted(p.name for p in (tasks / "archive").iterdir()) == ["mover.md"]

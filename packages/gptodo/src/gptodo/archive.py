@@ -28,9 +28,14 @@ Rules (all fail closed, i.e. a task that does not clearly qualify stays put):
   ``tasks/archive/`` is refused and reported.
 * Moves use ``git mv`` when the file is tracked in a git work tree, a plain
   rename otherwise. Nothing is committed.
-* Relative Markdown links inside a moved file are rebased so they still
-  resolve from ``tasks/archive/``. Links in other files are not rewritten;
-  a task linked from a remaining task is not moved instead.
+* Relative Markdown links inside a moved file (inline links, with or
+  without a title, and reference definitions) are rebased so they still
+  resolve from ``tasks/archive/``; links written from the repository root
+  are kept root-based. Links in other files are not rewritten; a task linked
+  from a remaining task is not moved instead. If a selected task ends up not
+  moving, moved tasks it still needs are moved back.
+* Rewrites go through a temporary file that replaces the task only once it
+  is fully written.
 """
 
 from __future__ import annotations
@@ -38,10 +43,11 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple
 
 from gptodo.utils import EXCLUDED_TASK_DIRS, TaskInfo, load_tasks
 
@@ -49,9 +55,11 @@ ARCHIVE_STATES: List[str] = ["done", "cancelled", "expired"]
 ARCHIVE_DEFAULT_DAYS: int = 7
 _TERMINAL = set(ARCHIVE_STATES)
 
-# Same shape as the link checkers (gptodo check and the markdown-link hook):
-# images are included so a moved image reference keeps resolving too.
-_LINK_RE = re.compile(r"(\[[^\]]*\]\()([^)]+)(\))")
+# Inline links ``[text](dest "title")`` (images included, so a moved image
+# reference keeps resolving too) and reference definitions ``[label]: dest``.
+# Group 1 is the part that holds the destination and an optional title.
+_INLINE_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+_REF_DEF_RE = re.compile(r"^[ ]{0,3}\[[^\]\n]+\]:[ \t]*(\S[^\n]*)$", re.MULTILINE)
 _FENCE_RE = re.compile(r"^(`{3,}|~{3,}).*?\n.*?^\1[ \t]*$", re.MULTILINE | re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 _URL_PREFIXES = ("http://", "https://", "ftp://", "mailto:", "#")
@@ -167,6 +175,33 @@ def _as_str_list(value: Any) -> List[str]:
     return []
 
 
+def _dest_span(inner: str) -> Optional[Tuple[int, int]]:
+    """Span of the destination in a link's ``dest "title"`` part (without ``<>``)."""
+    lead = len(inner) - len(inner.lstrip())
+    rest = inner[lead:]
+    if not rest:
+        return None
+    if rest.startswith("<"):
+        end = rest.find(">")
+        return (lead + 1, lead + end) if end > 1 else None
+    return lead, lead + len(rest.split(None, 1)[0])
+
+
+def _link_dests(text: str) -> Iterator[Tuple[int, int]]:
+    """Spans of link destinations in ``text`` (inline links and reference definitions)."""
+    spans: List[Tuple[int, int]] = []
+    for regex in (_INLINE_LINK_RE, _REF_DEF_RE):
+        for match in regex.finditer(text):
+            span = _dest_span(match.group(1))
+            if span is not None:
+                spans.append((match.start(1) + span[0], match.start(1) + span[1]))
+    last_end = -1
+    for start, end in sorted(spans):
+        if start >= last_end:  # overlapping matches: keep the first
+            yield start, end
+            last_end = end
+
+
 def _strip_code(text: str) -> str:
     text = _FENCE_RE.sub("", text)
     return _INLINE_CODE_RE.sub("", text)
@@ -179,8 +214,9 @@ def _link_targets(path: Path, repo_root: Path) -> Set[Path]:
     except OSError:
         return set()
     targets: Set[Path] = set()
-    for match in _LINK_RE.finditer(_strip_code(text)):
-        target = match.group(2).strip()
+    stripped = _strip_code(text)
+    for start, end in _link_dests(stripped):
+        target = stripped[start:end]
         if target.startswith(_URL_PREFIXES):
             continue
         file_target = target.split("#")[0].split("?")[0]
@@ -258,40 +294,65 @@ def _archive_names(archive_dir: Path) -> Set[str]:
     }
 
 
-def rebase_links(text: str, old_dir: Path, new_dir: Path, move_map: Dict[Path, Path]) -> str:
+def rebase_links(
+    text: str,
+    old_dir: Path,
+    new_dir: Path,
+    move_map: Dict[Path, Path],
+    repo_root: Optional[Path] = None,
+) -> str:
     """Rewrite relative links so they resolve from ``new_dir`` as they did from ``old_dir``.
 
-    Only links whose target existed relative to ``old_dir`` are touched; links
-    inside code, absolute paths and URLs are left alone. A target that is
-    moved in the same run is pointed at its new location.
+    Links are resolved the way ``gptodo check`` does: from ``old_dir`` first,
+    then from ``repo_root``. A directory-relative link is rewritten relative
+    to ``new_dir``; a root-based one is left alone unless its target moved in
+    the same run, in which case it points at the new location, still from the
+    root. Links to missing files, links inside code, absolute paths and URLs
+    are left alone.
     """
 
-    def fix(segment: str) -> str:
-        def repl(match: re.Match[str]) -> str:
-            target = match.group(2)
-            if target.strip() != target or target.startswith((*_URL_PREFIXES, "/")):
-                return match.group(0)
-            cut = len(target)
-            for sep in ("#", "?"):
-                idx = target.find(sep)
-                if idx != -1:
-                    cut = min(cut, idx)
-            file_part, suffix = target[:cut], target[cut:]
-            if not file_part:
-                return match.group(0)
-            old_target = (old_dir / file_part).resolve()
-            # A co-moved file is already gone from old_dir when this runs.
-            if not (old_target.exists() or old_target in move_map):
-                return match.group(0)
-            new_target = move_map.get(old_target, old_target)
-            rel = os.path.relpath(new_target, new_dir.resolve()).replace(os.sep, "/")
-            if file_part.endswith("/") and not rel.endswith("/"):
-                rel += "/"
-            if rel == file_part:
-                return match.group(0)
-            return f"{match.group(1)}{rel}{suffix}{match.group(3)}"
+    def new_dest(target: str) -> Optional[str]:
+        if target.startswith((*_URL_PREFIXES, "/")):
+            return None
+        cut = len(target)
+        for sep in ("#", "?"):
+            idx = target.find(sep)
+            if idx != -1:
+                cut = min(cut, idx)
+        file_part, suffix = target[:cut], target[cut:]
+        if not file_part:
+            return None
+        old_target = (old_dir / file_part).resolve()
+        # A co-moved file is already gone from old_dir when this runs.
+        if old_target.exists() or old_target in move_map:
+            base = new_dir.resolve()
+        elif repo_root is not None:
+            old_target = (repo_root / file_part).resolve()
+            if old_target not in move_map:
+                return None  # still resolves from the root after the move
+            base = repo_root.resolve()
+        else:
+            return None
+        new_target = move_map.get(old_target, old_target)
+        rel = os.path.relpath(new_target, base).replace(os.sep, "/")
+        if file_part.endswith("/") and not rel.endswith("/"):
+            rel += "/"
+        if rel == file_part:
+            return None
+        return rel + suffix
 
-        return _LINK_RE.sub(repl, segment)
+    def fix(segment: str) -> str:
+        out: List[str] = []
+        pos = 0
+        for start, end in _link_dests(segment):
+            replacement = new_dest(segment[start:end])
+            if replacement is None:
+                continue
+            out.append(segment[pos:start])
+            out.append(replacement)
+            pos = end
+        out.append(segment[pos:])
+        return "".join(out)
 
     # Rewrite only outside fenced blocks and inline code spans.
     out: List[str] = []
@@ -399,52 +460,77 @@ def _tracked_names(tasks_dir: Path) -> Optional[Set[str]]:
     return {p for p in out.split("\0") if p and "/" not in p}
 
 
-def apply_archive(plan: ArchivePlan, tasks_dir: Path) -> None:
+def _move(src: Path, dest: Path, tasks_dir: Path, use_git: bool) -> Optional[str]:
+    """Move one task file; return an error message, or None on success."""
+    if use_git:
+        result = subprocess.run(
+            ["git", "mv", "--", str(src.relative_to(tasks_dir)), str(dest.relative_to(tasks_dir))],
+            cwd=tasks_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return f"git mv failed: {result.stderr.strip()}" if result.returncode != 0 else None
+    try:
+        os.rename(src, dest)
+    except OSError as exc:
+        return str(exc)
+    return None
+
+
+def _replace_text(path: Path, text: str) -> None:
+    """Write ``text`` to a temporary file next to ``path``, then replace ``path``.
+
+    A failed write leaves the original file untouched.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(tmp, path.stat().st_mode & 0o7777)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def apply_archive(plan: ArchivePlan, tasks_dir: Path, *, repo_root: Optional[Path] = None) -> None:
     """Move the planned tasks. Appends to ``plan.moved`` and ``plan.errors``.
 
-    All moves happen first; links inside the moved files are rebased
-    afterwards against the set of moves that actually succeeded.
+    All moves happen first. A selected task that did not move stays in
+    ``tasks/``, so a moved task it still needs there (link, ``parent``,
+    ``spawned_from``, ``spawned_tasks``) is moved back, until nothing that
+    stayed needs a moved task. Links inside the moved files are rebased
+    afterwards against the moves that remain.
     """
     if not plan.selected:
         return
+    repo_root = repo_root if repo_root is not None else tasks_dir.parent
     archive_dir = tasks_dir / "archive"
     archive_dir.mkdir(exist_ok=True)
     tracked = _tracked_names(tasks_dir)
 
-    moved: List[Tuple[Path, Path, Dict[str, Any]]] = []
+    moved: Dict[str, Tuple[ArchiveCandidate, Path, Dict[str, Any]]] = {}
+    stayed: List[TaskInfo] = []
     for cand in plan.selected:
         src = cand.task.path
         dest = archive_dir / src.name
         # Re-check on disk right before moving: another session may have
         # reopened the task or created the destination since planning.
         fresh = load_tasks(tasks_dir, single_file=src) if src.exists() else []
+        error = None
         if not fresh or fresh[0].state != cand.task.state:
-            plan.errors.append({"id": cand.task.id, "error": "changed since planning; not moved"})
-            continue
-        if dest.exists():
-            plan.errors.append({"id": cand.task.id, "error": f"{dest.name} exists in archive/"})
-            continue
-
+            error = "changed since planning; not moved"
+        elif dest.exists():
+            error = f"{dest.name} exists in archive/"
         use_git = tracked is not None and src.name in tracked
-        if use_git:
-            result = subprocess.run(
-                ["git", "mv", "--", src.name, f"archive/{src.name}"],
-                cwd=tasks_dir,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if result.returncode != 0:
-                plan.errors.append(
-                    {"id": cand.task.id, "error": f"git mv failed: {result.stderr.strip()}"}
-                )
-                continue
-        else:
-            try:
-                os.rename(src, dest)
-            except OSError as exc:
-                plan.errors.append({"id": cand.task.id, "error": str(exc)})
-                continue
+        if error is None:
+            error = _move(src, dest, tasks_dir, use_git)
+        if error is not None:
+            plan.errors.append({"id": cand.task.id, "error": error})
+            stayed.extend(fresh)
+            continue
         record: Dict[str, Any] = {
             "id": cand.task.id,
             "state": cand.task.state,
@@ -455,20 +541,48 @@ def apply_archive(plan: ArchivePlan, tasks_dir: Path) -> None:
             "method": "git mv" if use_git else "rename",
             "links_rebased": False,
         }
-        moved.append((src, dest, record))
-        plan.moved.append(record)
+        moved[cand.task.name] = (cand, dest, record)
 
-    move_map = {src.resolve(): dest.resolve() for src, dest, _ in moved}
-    for src, dest, record in moved:
+    # Keep the planning guarantee for tasks that were meant to move but did not.
+    stuck: Set[str] = set()
+    while stayed:
+        movable = {name: entry[0] for name, entry in moved.items() if name not in stuck}
+        reasons = _pin_reasons(stayed, movable, repo_root, {})
+        if not reasons:
+            break
+        stayed = []
+        for name, reason in sorted(reasons.items()):
+            cand, dest, record = moved[name]
+            src = cand.task.path
+            error = _move(dest, src, tasks_dir, record["method"] == "git mv")
+            if error is not None:
+                stuck.add(name)
+                plan.errors.append(
+                    {
+                        "id": cand.task.id,
+                        "error": f"moved, but needed in place ({reason}); "
+                        f"moving it back failed: {error}",
+                    }
+                )
+                continue
+            del moved[name]
+            plan.errors.append(
+                {"id": cand.task.id, "error": f"moved back, needed in place: {reason}"}
+            )
+            stayed.extend(load_tasks(tasks_dir, single_file=src))
+
+    move_map = {cand.task.path.resolve(): dest.resolve() for cand, dest, _ in moved.values()}
+    for cand, dest, record in moved.values():
+        plan.moved.append(record)
         try:
             text = dest.read_text(encoding="utf-8")
+            new_text = rebase_links(text, cand.task.path.parent, archive_dir, move_map, repo_root)
+            if new_text == text:
+                continue
+            _replace_text(dest, new_text)
         except OSError as exc:
             plan.errors.append({"id": record["id"], "error": f"moved, links not rebased: {exc}"})
             continue
-        new_text = rebase_links(text, src.parent, archive_dir, move_map)
-        if new_text == text:
-            continue
-        dest.write_text(new_text, encoding="utf-8")
         record["links_rebased"] = True
         if record["method"] == "git mv":
-            _git(tasks_dir, "add", "--", f"archive/{src.name}")
+            _git(tasks_dir, "add", "--", record["to"])
