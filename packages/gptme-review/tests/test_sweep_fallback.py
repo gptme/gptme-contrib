@@ -117,6 +117,15 @@ def test_partial_success_retries_only_provider_failures() -> None:
     ) == ("provider_outage", [PROVIDER])
 
 
+def test_partial_success_with_too_large_pr_still_retries_provider_failures() -> None:
+    too_large = {**PROVIDER, "pr": "o/r#9", "too_large": True}
+    assert select_fallback_failures(
+        failure_class=None,
+        review_failures=[PROVIDER, too_large, LOCAL],
+        too_large_failures=1,
+    ) == ("provider_outage", [PROVIDER])
+
+
 def test_partial_success_without_provider_failure_retries_nothing() -> None:
     assert select_fallback_failures(
         failure_class=None, review_failures=[LOCAL], too_large_failures=0

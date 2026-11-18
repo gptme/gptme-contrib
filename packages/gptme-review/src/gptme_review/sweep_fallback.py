@@ -59,7 +59,9 @@ def select_fallback_failures(
       every failure.
     * A run that did not fail wholesale retries only failures that identify the
       primary provider; the class becomes ``provider_outage`` when there are any.
-      Concurrency can mask a provider outage behind partial success.
+      Concurrency can mask a provider outage behind partial success. A
+      co-occurring too-large PR does not block this: the provider filter
+      already excludes too-large rows, so they stay failed either way.
     * Anything else (mixed PR-local failures) retries nothing: that is not a
       transport outage, so the fallback stays fail-closed.
     """
@@ -67,7 +69,7 @@ def select_fallback_failures(
         failure_class == "systemic" and not too_large_failures
     ):
         return failure_class, list(review_failures)
-    if failure_class is None and not too_large_failures:
+    if failure_class is None:
         provider = [f for f in review_failures if is_primary_provider_failure(f)]
         return ("provider_outage" if provider else None), provider
     return failure_class, []
