@@ -843,6 +843,9 @@ _GH_WRAPPER_SUBCOMMANDS = {"greptile-helper.sh": "trigger"}
 # Wrappers that review and then ``git push`` their trailing arguments.
 _PUSH_WRAPPER_SCRIPTS = frozenset({"pm-review-and-push.py"})
 _CMD_PREFIXES = frozenset({"env", "command", "exec", "nohup", "sudo", "time", "timeout"})
+# Prefix options that take a separate value (``env -u VAR``, ``sudo -u user``,
+# ``timeout -s KILL``), so the value is not mistaken for the program.
+_PREFIX_VALUE_OPTS = frozenset({"-u", "-g", "-s", "-k", "-C", "-D"})
 _INTERPRETERS = frozenset({"python", "python3", *_SHELLS})
 _UV_VALUE_OPTS = frozenset({"--package", "--with", "--project", "--directory", "--python"})
 
@@ -866,7 +869,7 @@ def _command_words(segment: str) -> list[str]:
         elif name in _CMD_PREFIXES:
             i += 1
             while i < len(words) and (words[i].startswith("-") or words[i][:1].isdigit()):
-                i += 1
+                i += 2 if words[i] in _PREFIX_VALUE_OPTS else 1
         elif name == "uv" and words[i + 1 : i + 2] == ["run"]:
             i += 2
             while i < len(words) and words[i].startswith("-"):

@@ -70,6 +70,10 @@ WRITES = [
     "bash -c 'git push --force-with-lease origin HEAD'",
     "timeout 60 bash -lc 'scripts/github/comment-from-stdin.sh o/r 5 < /tmp/b.md'",
     "bash -o pipefail scripts/github/ai-review-now.sh o/r 5",
+    # Prefix options whose value is a separate word.
+    "env -u VIRTUAL_ENV gh pr comment 5 --repo o/r --body hi",
+    "sudo -u bob gh pr comment 5 --repo o/r --body hi",
+    "timeout -s KILL 5 gh issue close 3 --repo o/r",
 ]
 READS = [
     "gh pr view 4970 --repo gptme/gptme --json state",
