@@ -306,7 +306,7 @@ _GH_INTERACTION_RE = re.compile(
     r"gh\s+(?:"
     r"pr\s+(?:review|comment|close|reopen|merge|edit)"
     r"|issue\s+(?:comment|close|reopen|edit|create)"
-    r"|api\s+(?:\S+\s+)*?repos/[^\s]+/(?:pulls|issues)/\d+/(?:comments|reviews)"
+    r"|api\s+(?:\S+\s+)*?repos/[^\s]+/(?:pulls|issues)/(?:\d+/)?(?:comments|reviews)"
     r")"
 )
 
@@ -776,9 +776,10 @@ def _strip_heredoc_bodies(cmd: str) -> str:
 def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
     """Match a gh write-command pattern, ignoring read-only ``gh api`` calls.
 
-    Non-api matches (``gh pr comment`` etc.) count as before, even when the
-    same segment also runs a ``gh api`` read (e.g. ``--body-file <(gh api
-    ...)``). An api match counts only if the ``gh api`` invocation writes.
+    Non-api matches (``gh pr comment`` etc.) count when they start at an
+    unquoted ``gh`` token, even when the same segment also runs a ``gh api``
+    read (e.g. ``--body-file <(gh api ...)``); a quoted mention such as
+    ``grep 'gh pr comment'`` does not. An api match counts only if the ``gh api`` invocation writes.
     Executable command substitutions are checked as commands of their own,
     so a write inside ``x="$(gh api ...)"`` counts even though shell
     tokenization keeps the quoted substitution in one token.
@@ -794,7 +795,7 @@ def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
         matches = list(pattern.finditer(segment))
         if not matches:
             continue
-        if any(not _GH_API_MATCH_RE.match(m.group(0)) for m in matches):
+        if _gh_invocation_matches(pattern, segment):
             return True
         # No tokenized ``gh api`` invocation means the match was quoted text
         # (``printf 'gh api ...'``), not a command, so it never counts.
@@ -811,7 +812,140 @@ def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
 
 _GH_API_MATCH_RE = re.compile(r"gh\s+api\b")
 
+
+def _gh_invocation_matches(pattern: re.Pattern[str], segment: str) -> bool:
+    """Whether an unquoted, non-api ``gh`` invocation in the segment matches.
+
+    The raw-text match also fires on quoted arguments (``grep -R 'gh pr
+    comment' .``, ``rg "gh issue close"``), which only search or print the
+    text. Here ``gh`` must be the program the segment runs (``_command_words``):
+    a quoted mention stays one token, and an unquoted ``echo gh pr comment``
+    is an argument of ``echo``, so neither counts. Substitutions are masked;
+    their bodies are checked separately via ``_command_substitutions``.
+    """
+    words = _command_words(segment)
+    if not words or words[0].rsplit("/", 1)[-1] != "gh" or words[1:2] == ["api"]:
+        return False
+    m = pattern.match(" ".join(["gh", *words[1:]]))
+    return m is not None and not _GH_API_MATCH_RE.match(m.group(0))
+
+
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+
+# Agent wrapper scripts whose invocation posts to GitHub: a PR/issue comment,
+# a review-thread reply, a workpad upsert, or a fresh review request. They
+# wrap ``gh api`` internally, so the trajectory never shows the ``gh`` call.
+_GH_WRAPPER_SCRIPTS = frozenset(
+    {"comment-from-stdin.sh", "reply-to-thread.py", "find-or-create-workpad.sh", "ai-review-now.sh"}
+)
+# Wrappers that write only for one subcommand (``status`` is a read).
+_GH_WRAPPER_SUBCOMMANDS = {"greptile-helper.sh": "trigger"}
+# Wrappers that review and then ``git push`` their trailing arguments.
+_PUSH_WRAPPER_SCRIPTS = frozenset({"pm-review-and-push.py"})
+# ``xargs`` runs its command once per input batch, so it is a prefix too:
+# ``printf '5\n' | xargs -n1 sh -c 'gh pr comment "$1" ...' _`` posts.
+_CMD_PREFIXES = frozenset({"env", "command", "exec", "nohup", "sudo", "time", "timeout", "xargs"})
+# Per-prefix options that take a separate value (``env -u VAR``, ``sudo -u
+# user``, ``timeout -s KILL``, ``xargs -I {}``), so the value is not mistaken
+# for the program. ``sudo -k`` takes none, unlike ``timeout -k``.
+_PREFIX_VALUE_OPTS = {
+    "env": frozenset({"-u", "-C", "-S"}),
+    "sudo": frozenset({"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U"}),
+    "timeout": frozenset({"-s", "-k"}),
+    "xargs": frozenset({"-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s"}),
+}
+# Words that open a compound command; the command they guard follows them.
+_SHELL_KEYWORDS = frozenset({"(", "{", "!", "if", "then", "elif", "else", "while", "until", "do"})
+_INTERPRETERS = frozenset({"python", "python3", *_SHELLS})
+_UV_VALUE_OPTS = frozenset({"--package", "--with", "--project", "--directory", "--python"})
+
+
+def _command_words(segment: str, keep_interpreter: bool = False) -> list[str]:
+    """Words of the command a segment runs, from its program name onwards.
+
+    Skips assignments (``GH_TOKEN=x``), grouping, common prefixes (``timeout
+    30``, ``env``) and interpreters with their options (``python3``, ``bash``,
+    ``uv run --no-sync``), so ``uv run python3 scripts/x.py`` yields
+    ``["scripts/x.py", ...]``. Quoted text stays one word, so a script name
+    mentioned in ``grep 'x.py'`` is an argument, never the program. With
+    ``keep_interpreter`` the words start at the interpreter instead.
+    """
+    words = _shell_tokens(_mask_substitutions(segment))
+    i = 0
+    while i < len(words):
+        word = words[i]
+        name = word.rsplit("/", 1)[-1]
+        if word in _SHELL_KEYWORDS or re.match(r"^\w+=", word):
+            i += 1
+        elif name in _CMD_PREFIXES:
+            value_opts = _PREFIX_VALUE_OPTS.get(name, frozenset())
+            i += 1
+            while i < len(words) and (words[i].startswith("-") or words[i][:1].isdigit()):
+                i += 2 if words[i] in value_opts else 1
+        elif name == "uv" and words[i + 1 : i + 2] == ["run"]:
+            i += 2
+            while i < len(words) and words[i].startswith("-"):
+                i += 2 if words[i] in _UV_VALUE_OPTS else 1
+        elif name in _INTERPRETERS and i + 1 < len(words):
+            if keep_interpreter:
+                return words[i:]
+            i += 1
+            while i < len(words) and words[i][:1] in ("-", "+"):
+                opt = words[i]
+                if name in _SHELLS and opt in ("-o", "+o", "-O", "+O"):
+                    # ``bash -o noexec`` only parses; other options take a value.
+                    if opt == "-o" and words[i + 1 : i + 2] == ["noexec"]:
+                        return []
+                    i += 2
+                    continue
+                if name in _SHELLS and opt[0] == "-" and not opt.startswith("--") and "n" in opt:
+                    return []  # ``bash -n`` checks syntax without running anything
+                i += 1
+        else:
+            return words[i:]
+    return []
+
+
+def _github_side_write(cmd: str) -> bool:
+    """Whether a shell command changes GitHub-side state without a local commit.
+
+    Counts ``gh`` write commands (``_GH_INTERACTION_RE``), the agent wrapper
+    scripts above, and force pushes (direct or through a push wrapper), which
+    is how a PR branch is rebased:
+    the rebase creates no new commit of the agent's own, so without this a
+    rebase-only maintenance session grades as a noop. A plain push is not
+    counted; its commits already are.
+    """
+    if _gh_cmd_matches(_GH_INTERACTION_RE, cmd):
+        return True
+    cmd = _strip_heredoc_bodies(cmd)
+    if any(_github_side_write(sub) for sub in _command_substitutions(cmd)):
+        return True
+    for segment in _split_shell_segments(cmd):
+        script = _shell_c_script(segment)
+        if script is not None and _github_side_write(script):
+            return True
+        words = _command_words(segment)
+        if not words:
+            continue
+        name = words[0].rsplit("/", 1)[-1]
+        if name in _GH_WRAPPER_SCRIPTS:
+            return True
+        if name in _GH_WRAPPER_SUBCOMMANDS and _GH_WRAPPER_SUBCOMMANDS[name] in words[1:3]:
+            return True
+        if name == "git" and "push" in words:
+            push_args = words[words.index("push") + 1 :]
+        elif name in _PUSH_WRAPPER_SCRIPTS:
+            push_args = words[1:]
+        else:
+            continue
+        if any(w in ("-n", "--dry-run") for w in push_args):
+            continue  # a dry run changes nothing on the remote
+        if any(
+            w in ("-f", "--force") or w.startswith(("--force-with-lease", "+")) for w in push_args
+        ):
+            return True
+    return False
 
 
 def _shell_reads_stdin(segment: str) -> bool:
@@ -875,20 +1009,20 @@ def _shell_c_script(segment: str) -> str | None:
 
     Shell tokenization keeps the quoted script in one token, so its ``gh api``
     is invisible to ``_gh_api_args``; bash still runs it, so the caller checks
-    it as a command of its own. The shell is located among the tokens like
-    ``gh api`` is (``timeout 5 bash -c``, ``env X=1 sh -c``) and ``-c`` may be
-    clustered (``-lc``, ``-ec``). Without ``-c`` the first operand is a script
-    file, which we cannot see, so None.
+    it as a command of its own. The shell must be the program the segment
+    runs (``timeout 5 bash -c``, ``env X=1 sh -c``), so ``echo bash -c '...'``
+    only prints the script. ``-c`` may be clustered (``-lc``, ``-ec``).
+    Without ``-c`` the first operand is a script file, which we cannot see,
+    so None.
     """
-    tokens = _shell_tokens(segment)
-    for i, tok in enumerate(tokens):
-        if tok.rsplit("/", 1)[-1] not in _SHELLS:
-            continue
-        has_c = False
-        j = i + 1
+    tokens = _command_words(segment, keep_interpreter=True)
+    if tokens and tokens[0].rsplit("/", 1)[-1] in _SHELLS:
+        has_c = noexec = False
+        j = 1
         while j < len(tokens):
             opt = tokens[j]
             if opt in ("-o", "+o", "-O", "+O"):
+                noexec = noexec or (opt == "-o" and tokens[j + 1 : j + 2] == ["noexec"])
                 j += 2
                 continue
             if opt.startswith("--"):
@@ -896,9 +1030,12 @@ def _shell_c_script(segment: str) -> str | None:
                 continue
             if opt[:1] in "-+" and len(opt) > 1:
                 has_c = has_c or (opt[0] == "-" and "c" in opt[1:])
+                noexec = noexec or (opt[0] == "-" and "n" in opt[1:])
                 j += 1
                 continue
             break
+        if noexec:
+            return None  # ``bash -n -c`` / ``-o noexec`` parses the script, never runs it
         if has_c and j < len(tokens):
             return tokens[j]
     return None
@@ -1446,6 +1583,9 @@ def extract_signals(msgs: list[dict]) -> dict:
     # call_id -> full command for shell calls that are commit commands. Used to
     # widen the commit-output scan window for those calls only (see below).
     commit_cmd_calls: dict[str, str] = {}
+    # GitHub write commands (PR comments/reviews, issue closes, api writes).
+    # Same rule as extract_signals_cc, so both harnesses grade alike.
+    gh_interactions = 0
 
     # Track recent (tool, path) pairs for retry detection
     recent_sigs: list[str] = []
@@ -1489,6 +1629,8 @@ def extract_signals(msgs: list[dict]) -> dict:
                                 command = "gh " + command
                             if _has_pr_create_command(command):
                                 pr_create_calls[_call_id] = tool
+                            if _github_side_write(command):
+                                gh_interactions += 1
                             if tool == "shell" and _COMMIT_CMD_RE.search(command):
                                 commit_cmd_calls[_call_id] = command
                 tool_calls[tool] = tool_calls.get(tool, 0) + 1
@@ -1613,6 +1755,7 @@ def extract_signals(msgs: list[dict]) -> dict:
         "deliverable_details": deliverable_details,
         "summarizer_fired": summarizer_fired,
         "prs_submitted": prs_submitted,
+        "gh_interactions": gh_interactions,
         "reasoning_effort": _dominant_value(reasoning_efforts),
     }
 
@@ -1984,7 +2127,7 @@ def extract_signals_cc(msgs: list[dict]) -> dict:
                     bash_input = item.get("input", {})
                     cmd = bash_input.get("command", "")
                     command_cwd = bash_input.get("cwd") or bash_input.get("workdir") or session_cwd
-                    if _gh_cmd_matches(_GH_INTERACTION_RE, cmd):
+                    if _github_side_write(cmd):
                         gh_interactions += 1
 
                     # Commit commands: remember them so a truncated result (output
