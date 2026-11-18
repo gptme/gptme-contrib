@@ -877,7 +877,16 @@ def _command_words(segment: str) -> list[str]:
                 i += 2 if words[i] in _UV_VALUE_OPTS else 1
         elif name in _INTERPRETERS and i + 1 < len(words):
             i += 1
-            while i < len(words) and words[i].startswith("-"):
+            while i < len(words) and words[i][:1] in ("-", "+"):
+                opt = words[i]
+                if name in _SHELLS and opt in ("-o", "+o", "-O", "+O"):
+                    # ``bash -o noexec`` only parses; other options take a value.
+                    if opt == "-o" and words[i + 1 : i + 2] == ["noexec"]:
+                        return []
+                    i += 2
+                    continue
+                if name in _SHELLS and opt[0] == "-" and not opt.startswith("--") and "n" in opt:
+                    return []  # ``bash -n`` checks syntax without running anything
                 i += 1
         else:
             return words[i:]
@@ -900,6 +909,9 @@ def _github_side_write(cmd: str) -> bool:
     if any(_github_side_write(sub) for sub in _command_substitutions(cmd)):
         return True
     for segment in _split_shell_segments(cmd):
+        script = _shell_c_script(segment)
+        if script is not None and _github_side_write(script):
+            return True
         words = _command_words(segment)
         if not words:
             continue
@@ -914,6 +926,8 @@ def _github_side_write(cmd: str) -> bool:
             push_args = words[1:]
         else:
             continue
+        if any(w in ("-n", "--dry-run") for w in push_args):
+            continue  # a dry run changes nothing on the remote
         if any(
             w in ("-f", "--force") or w.startswith(("--force-with-lease", "+")) for w in push_args
         ):

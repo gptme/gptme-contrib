@@ -66,6 +66,10 @@ WRITES = [
     "cd /tmp/w && git push --force-with-lease origin HEAD",
     "timeout 60 git -C /tmp/w push -f origin fix",
     "git push origin +HEAD:fix",
+    # Inline shell scripts run their commands (Greptile on #2233).
+    "bash -c 'git push --force-with-lease origin HEAD'",
+    "timeout 60 bash -lc 'scripts/github/comment-from-stdin.sh o/r 5 < /tmp/b.md'",
+    "bash -o pipefail scripts/github/ai-review-now.sh o/r 5",
 ]
 READS = [
     "gh pr view 4970 --repo gptme/gptme --json state",
@@ -83,6 +87,12 @@ READS = [
     # A plain push is already credited through its commits.
     "git push origin master",
     "rg 'git push --force-with-lease' lessons/",
+    # Syntax checks and dry runs change nothing (Greptile on #2233).
+    "bash -n scripts/github/comment-from-stdin.sh",
+    "bash -o noexec scripts/github/ai-review-now.sh o/r 5",
+    "git push --dry-run --force-with-lease origin HEAD",
+    "git push -n -f origin fix",
+    "bash -c 'git push --dry-run -f origin HEAD'",
 ]
 
 
