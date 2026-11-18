@@ -2094,6 +2094,97 @@ def test_peek_recent_call_does_not_stash_timings() -> None:
         assert caller not in server._prior_subagent_status
 
 
+def test_expired_prewarm_drops_stashed_prior_leg_status() -> None:
+    """Unused prewarm consume must not leak prior_leg into a later fresh call."""
+
+    async def _exercise() -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server = VoiceServer()
+            server.state_dir = Path(tmpdir)
+            server.resume_window_seconds = 300
+            server._prewarm_ttl_seconds = 1
+            caller = "+46700000012"
+            server._save_recent_call(
+                RecentCallRecord(
+                    caller_id=caller,
+                    source="twilio",
+                    ended_at=1_000.0,
+                    transcript=[TranscriptTurn(role="user", text="resume")],
+                    metadata={},
+                    subagent_timings=[
+                        {
+                            "task_id": "task-1",
+                            "returncode": 124,
+                            "timings": {"total_seconds": 61.2},
+                        }
+                    ],
+                )
+            )
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
+                await server._consume_recent_call(caller)
+            assert caller in server._prior_subagent_status
+            server._prewarm_sessions[caller] = (
+                _FakeRealtimeClient(),
+                time.monotonic() - 5,
+            )
+            server._evict_stale_prewarms()
+            await asyncio.sleep(0)
+            assert caller not in server._prior_subagent_status
+            assert caller not in server._prewarm_sessions
+            bridge = GptmeToolBridge(workspace="/fake")
+            server._seed_bridge_from_prior_leg(bridge, caller)
+            status = await bridge.handle_function_call("subagent_status", {})
+            assert status["recent_completions"] == []
+
+    asyncio.run(_exercise())
+
+
+def test_reap_prewarm_drops_stashed_prior_leg_status() -> None:
+    async def _exercise() -> None:
+        server = VoiceServer()
+        caller = "+46700000012"
+        server._prior_subagent_status[caller] = [
+            {"task_id": "task-1", "returncode": 0, "timings": {"total_seconds": 1.0}}
+        ]
+        server._prewarm_sessions[caller] = (_FakeRealtimeClient(), time.monotonic())
+        server._reap_prewarm_entry(caller)
+        await asyncio.sleep(0)
+        assert caller not in server._prior_subagent_status
+        assert caller not in server._prewarm_sessions
+
+    asyncio.run(_exercise())
+
+
+def test_stale_claim_keeps_prior_leg_for_same_inbound() -> None:
+    """Inbound that misses TTL still seeds from the stash on the cold path."""
+
+    async def _exercise() -> None:
+        server = VoiceServer()
+        server._prewarm_ttl_seconds = 1
+        caller = "+46700000012"
+        server._prior_subagent_status[caller] = [
+            {
+                "task_id": "task-1",
+                "returncode": 124,
+                "timings": {"total_seconds": 61.2},
+            }
+        ]
+        server._prewarm_sessions[caller] = (
+            _FakeRealtimeClient(),
+            time.monotonic() - 5,
+        )
+        claimed = await server._claim_prewarm(caller)
+        assert claimed is None
+        assert caller in server._prior_subagent_status
+        bridge = GptmeToolBridge(workspace="/fake")
+        server._seed_bridge_from_prior_leg(bridge, caller)
+        status = await bridge.handle_function_call("subagent_status", {})
+        assert status["recent_completions"][0]["task_id"] == "prior:task-1"
+
+    asyncio.run(_exercise())
+
+
 def test_recent_call_is_ignored_outside_resume_window() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         server = VoiceServer()

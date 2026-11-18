@@ -998,7 +998,9 @@ class VoiceServer:
         # Caller-scoped prior-leg subagent timings, filled when a resume
         # record is consumed and taken when that caller's ToolBridge is built.
         # Keyed by caller_id so a reconnect can inspect the previous task
-        # without leaking another caller's completions.
+        # without leaking another caller's completions. A pre-warm that
+        # consumes resume and then expires unused must drop this stash —
+        # otherwise a later fresh call reports old tasks as prior_leg.
         self._prior_subagent_status: dict[str, list[dict[str, object]]] = {}
         # Pre-warmed realtime connections: from_number -> (client, created_at)
         # Keyed by from_number, claimed and discarded when the Twilio stream starts.
@@ -1861,6 +1863,10 @@ class VoiceServer:
             ),
         )
 
+    def _drop_prior_subagent_status(self, caller_id: str) -> None:
+        """Forget stashed prior-leg timings for *caller_id*."""
+        self._prior_subagent_status.pop(caller_id, None)
+
     def _evict_stale_prewarms(self) -> None:
         """Discard pre-warm entries that exceeded TTL without being claimed."""
         now = time.monotonic()
@@ -1870,9 +1876,8 @@ class VoiceServer:
             if now - created_at > self._prewarm_ttl_seconds
         ]
         for num in stale:
-            client, _ = self._prewarm_sessions.pop(num)
             logger.info("Evicting stale pre-warm for %s", num)
-            asyncio.create_task(self._disconnect_realtime_client(client))
+            self._reap_prewarm_entry(num)
 
     async def _prewarm_for_inbound(self, from_number: str) -> None:
         """Pre-connect to the realtime API while Twilio is setting up the media stream.
@@ -1885,6 +1890,7 @@ class VoiceServer:
         """
         self._evict_stale_prewarms()
         client: OpenAIRealtimeClient | None = None
+        stored = False
         try:
             # Peek at the resume record (consume_recent=False) so the on-disk
             # state file is NOT deleted until connect() succeeds.  If connect()
@@ -1916,6 +1922,7 @@ class VoiceServer:
             # cold-path fallback won't re-inject the same transcript.
             await self._consume_recent_call(from_number)
             self._prewarm_sessions[from_number] = (client, time.monotonic())
+            stored = True
             # Guarantee eviction even if no further call ever arrives
             # (_evict_stale_prewarms otherwise only runs on the next inbound).
             asyncio.get_running_loop().call_later(
@@ -1938,6 +1945,10 @@ class VoiceServer:
                 asyncio.create_task(self._disconnect_realtime_client(client))
         finally:
             self._prewarm_connected.discard(from_number)
+            # Consume-then-fail (or cancel after unlink) would otherwise leave
+            # prior_leg timings for a later fresh call that is not a resume.
+            if not stored:
+                self._drop_prior_subagent_status(from_number)
 
     def _register_prewarm_task(self, from_number: str) -> None:
         """Start a pre-warm task for from_number and track it for claiming."""
@@ -2057,6 +2068,9 @@ class VoiceServer:
         if entry is not None:
             client, _ = entry
             asyncio.create_task(self._disconnect_realtime_client(client))
+        # The unused connection owned this caller's prior-leg stash. Drop it
+        # so a later inbound does not report those tasks as prior_leg.
+        self._drop_prior_subagent_status(from_number)
 
     async def _build_session_instructions(
         self,
