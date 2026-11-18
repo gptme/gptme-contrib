@@ -177,6 +177,7 @@ def test_run_process_group_returns_output() -> None:
     assert done.stdout.strip() == "ok"
 
 
+# None checks the real group kill; injected errors regress the procfs reap race.
 @pytest.mark.parametrize(
     "stat_read_error", [None, FileNotFoundError, ProcessLookupError]
 )
@@ -215,3 +216,6 @@ def test_run_process_group_kills_descendants_on_timeout(
         time.sleep(0.05)
     else:
         pytest.fail("grandchild survived the group kill")
+    if stat_read_error is not None:
+        stat_file.assert_called_once_with(f"/proc/{child}/stat")
+        stat_file.return_value.read.assert_called_once_with()
