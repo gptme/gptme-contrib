@@ -148,6 +148,39 @@ Override with `--map tool:shell=sawing`, or silence with `--map tool:read=`.
 Tool sounds are throttled during bursts (`--min-gap`, default 0.15 s);
 milestones are never dropped for spacing.
 
+## Publishing a public status feed
+
+`publish` keeps one row per agent up to date in gptme.ai's `agent_status`
+table (the "what are the agents doing" feed). Only public-safe facts leave the
+host:
+
+- `state` (working/idle) and the latest `activity` class, never task text,
+  commands, paths or output;
+- the latest commit, push or PR **only if its repository is public on
+  GitHub** (looked up via the GitHub API and cached; unknown counts as private);
+- commits elsewhere only as a count over the last hour.
+
+Milestones are written at once; other changes at most every 20 s per agent,
+plus a heartbeat every 4 min while working. After 5 quiet minutes the agent is
+published as idle.
+
+```bash
+# One host publishing for several agents, pulling their streams over ssh:
+{ gptme-agent-events tail --agent bob &
+  ssh alice@alice '~/.local/bin/gptme-agent-events tail --agent alice --no-git' &
+  ssh gordon '~/.local/bin/gptme-agent-events tail --agent gordon --no-git' & } \
+  | gptme-agent-events publish --agent bob --agent alice --agent gordon \
+      --supabase-url "$GPTME_FEED_SUPABASE_URL" --anon-key "$GPTME_FEED_ANON_KEY" \
+      --token-cmd "my-gptme-ai-token"
+
+# See what would be written:
+gptme-agent-events tail | gptme-agent-events publish --agent bob --dry-run
+```
+
+`--token-cmd` prints an access token for the account that owns the agents in
+`public_agents`; it is re-run when the token expires. `GITHUB_TOKEN`, if set,
+raises the GitHub API rate limit for visibility lookups.
+
 ## Library use
 
 ```python
