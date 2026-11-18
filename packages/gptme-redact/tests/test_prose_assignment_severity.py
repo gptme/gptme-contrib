@@ -30,6 +30,7 @@ PROSE = [
     # Money inside Markdown emphasis; the closing marker can sit words later.
     "Closed 3 positions at 0.08/token = **-$1.23 total**",
     "Closed 3 positions at 0.08/token = **-$1.23**.",
+    "Closed 3 positions at 0.08/token = **-$1.23.** total",
     "refund per token: _$4.50_ each",
 ]
 

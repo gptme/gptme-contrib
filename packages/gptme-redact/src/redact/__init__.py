@@ -594,10 +594,11 @@ _INLINE_CODE_WRAPPER_RE = re.compile(
 _CODE_IDENTIFIER_RE = re.compile(r"[a-z]+(?:_[a-z]+)+\Z")
 # Markdown emphasis markers around a value: ``token = **-$1.23 total**`` captures
 # ``**-$1.23`` (the closing marker sits after the next word), so emphasis is
-# stripped from either end independently. The stripped core only gets the
+# stripped from either end independently, along with sentence punctuation on
+# either side of the closing marker (``**-$1.23.**``). The stripped core only gets the
 # _NON_CREDENTIAL_VALUE_RE shape test (money, whole tag, placeholder), never the
 # short-value rule, so emphasis cannot turn a credential-shaped value into prose.
-_EMPHASIS_EDGE_RE = re.compile(r"\A[*_]{1,3}|[*_]{1,3}[.,;:!?)]*\Z")
+_EMPHASIS_EDGE_RE = re.compile(r"\A[*_]{1,3}|[.,;:!?)]*[*_]{1,3}[.,;:!?)]*\Z")
 
 
 def _assignment_severity(match: re.Match[str], severity: Severity) -> Severity:
