@@ -1446,6 +1446,9 @@ def extract_signals(msgs: list[dict]) -> dict:
     # call_id -> full command for shell calls that are commit commands. Used to
     # widen the commit-output scan window for those calls only (see below).
     commit_cmd_calls: dict[str, str] = {}
+    # GitHub write commands (PR comments/reviews, issue closes, api writes).
+    # Same rule as extract_signals_cc, so both harnesses grade alike.
+    gh_interactions = 0
 
     # Track recent (tool, path) pairs for retry detection
     recent_sigs: list[str] = []
@@ -1489,6 +1492,8 @@ def extract_signals(msgs: list[dict]) -> dict:
                                 command = "gh " + command
                             if _has_pr_create_command(command):
                                 pr_create_calls[_call_id] = tool
+                            if _gh_cmd_matches(_GH_INTERACTION_RE, command):
+                                gh_interactions += 1
                             if tool == "shell" and _COMMIT_CMD_RE.search(command):
                                 commit_cmd_calls[_call_id] = command
                 tool_calls[tool] = tool_calls.get(tool, 0) + 1
@@ -1613,6 +1618,7 @@ def extract_signals(msgs: list[dict]) -> dict:
         "deliverable_details": deliverable_details,
         "summarizer_fired": summarizer_fired,
         "prs_submitted": prs_submitted,
+        "gh_interactions": gh_interactions,
         "reasoning_effort": _dominant_value(reasoning_efforts),
     }
 
