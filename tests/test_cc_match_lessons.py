@@ -2830,3 +2830,48 @@ def test_stuck_state_lock_degrades_without_hanging(hook, tmp_path, monkeypatch):
         hook.update_session_state("stuck", lambda state: state.update(last_pretool=2.0))
         assert time.monotonic() - start < 1.0
     assert hook.load_session_state("stuck")["last_pretool"] == 2.0
+
+
+@pytest.mark.parametrize("broken", ["save", "load"])
+def test_budget_state_io_failure_fails_open(
+    hook, tmp_path, monkeypatch, capsys, broken
+):
+    """A counter that cannot be read or written must not trim against a wrong
+    total or report a successful-looking session_bytes."""
+    lessons = [_budget_lesson(i) for i in range(5)]
+    _patch_main_for_budget(hook, tmp_path, monkeypatch, lessons)
+    original_save, original_load = hook.save_session_state, hook.load_session_state
+
+    def save(session_id, state, *, strict=False):
+        if strict and broken == "save":
+            raise OSError("disk full")
+        original_save(session_id, state, strict=strict)
+
+    def load(session_id, *, strict=False):
+        if strict and broken == "load":
+            raise ValueError("corrupt state file")
+        return original_load(session_id, strict=strict)
+
+    monkeypatch.setattr(hook, "save_session_state", save)
+    monkeypatch.setattr(hook, "load_session_state", load)
+    context = _run_prompt(hook, monkeypatch, capsys, f"io-{broken}", "k0 k1 k2 k3 k4")
+    assert all(f"### l{i}\n" in context for i in range(5))
+    receipt = _receipts(tmp_path, f"io-{broken}")[-1]
+    assert receipt["budget_error"] is True
+    assert "session_bytes" not in receipt
+
+
+def test_session_state_writers_all_go_through_lock():
+    """Every session-state write is a locked update (or the strict budget
+    reservation, which already holds the lock), so no writer can overwrite
+    a concurrent budget_bytes update with a stale copy."""
+    source = HOOK_PATH.read_text()
+    calls = [
+        line.strip()
+        for line in source.splitlines()
+        if "save_session_state(" in line and not line.lstrip().startswith("def ")
+    ]
+    assert calls == [
+        "save_session_state(session_id, state)",
+        "save_session_state(session_id, state, strict=True)",
+    ]

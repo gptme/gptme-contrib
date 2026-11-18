@@ -1118,8 +1118,13 @@ def _state_file(session_id: str) -> Path:
     return STATE_DIR / f"{safe_id}.json"
 
 
-def load_session_state(session_id: str) -> dict:
-    """Load session state (injected lessons, last pretool time)."""
+def load_session_state(session_id: str, *, strict: bool = False) -> dict:
+    """Load session state (injected lessons, last pretool time).
+
+    A missing file is a fresh session. Other failures return the fresh state,
+    or raise with ``strict`` (used by byte-budget accounting, which must not
+    mistake an unreadable counter for zero).
+    """
     try:
         sf = _state_file(session_id)
         if sf.exists():
@@ -1127,19 +1132,24 @@ def load_session_state(session_id: str) -> dict:
             if isinstance(data, dict):
                 return data
     except Exception:
-        pass
+        if strict:
+            raise
     return {"injected": [], "last_pretool": 0}
 
 
-def save_session_state(session_id: str, state: dict) -> None:
-    """Save session state atomically (write-then-rename for POSIX safety)."""
+def save_session_state(session_id: str, state: dict, *, strict: bool = False) -> None:
+    """Save session state atomically (write-then-rename for POSIX safety).
+
+    Failures are swallowed unless ``strict``.
+    """
     try:
         sf = _state_file(session_id)
         tmp = sf.with_suffix(".tmp")
         tmp.write_text(json.dumps(state))
         tmp.replace(sf)  # atomic on POSIX; avoids partial reads under concurrent hooks
     except Exception:
-        pass
+        if strict:
+            raise
 
 
 # Longest wait for the per-session state lock. Holders only read and write a
@@ -1849,8 +1859,11 @@ def reserve_lesson_budget(
     event_budget, session_budget = byte_budgets()
     if not matches or (event_budget == 0 and session_budget == 0):
         return matches, {}
+    # Strict I/O: an unreadable or unwritable counter raises, so the caller
+    # falls back to untrimmed injection and marks the receipt, instead of
+    # trimming against (or failing to record) a wrong session total.
     with _session_state_lock(session_id):
-        state = load_session_state(session_id)
+        state = load_session_state(session_id, strict=True)
         try:
             used = max(int(state.get("budget_bytes", 0)), 0)
         except (TypeError, ValueError):
@@ -1864,7 +1877,7 @@ def reserve_lesson_budget(
         if kept:
             used += _context_bytes(kept, event_type)
             state["budget_bytes"] = used
-            save_session_state(session_id, state)
+            save_session_state(session_id, state, strict=True)
     return kept, {"budget_dropped": len(dropped), "session_bytes": used}
 
 
@@ -2172,8 +2185,9 @@ def select_advisory_lessons(matches: list[dict], hook_input: dict) -> list[dict]
         if not isinstance(query, str) or not query.strip():
             return matches
         if prompt_event:
-            state["selector_query"] = query
-            save_session_state(session_id, state)
+            update_session_state(
+                session_id, lambda state: state.update(selector_query=query)
+            )
         request = {
             "version": 1,
             "runtime": "claude-code",
