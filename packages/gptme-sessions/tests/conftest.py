@@ -17,6 +17,19 @@ def isolate_native_pi_sessions(
 
 
 @pytest.fixture(autouse=True)
+def isolate_extra_claude_project_roots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never let CLI tests scan a host's archived Claude Code transcripts.
+
+    ``discover_cc_sessions`` adds every root in ``GPTME_CC_EXTRA_PROJECTS_DIRS``
+    to the one under ``CLAUDE_HOME``. A test that points ``CLAUDE_HOME`` at a
+    fixture still inherited the host archive. On a host whose archive held 58k
+    transcripts, ``sync --since all`` read every one of them and the test hung.
+    Tests that exercise extra roots set the variable explicitly.
+    """
+    monkeypatch.delenv("GPTME_CC_EXTRA_PROJECTS_DIRS", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def isolate_ambient_claude_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep a launcher's ``CC_SESSION_ID`` out of fixture transcript ownership.
 
