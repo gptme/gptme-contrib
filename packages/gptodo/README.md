@@ -26,6 +26,7 @@ are stable; the sub-agent and worktree commands are more experimental.
 - [Machine-readable output](#machine-readable-output)
 - [Sequential planning (`next --limit`)](#sequential-planning-next---limit)
 - [Auto-expire](#auto-expire)
+- [Archiving finished tasks](#archiving-finished-tasks)
 - [Frontmatter schema and `lint`](#frontmatter-schema-and-lint)
 - [Configuration](#configuration)
 - [Development](#development)
@@ -371,6 +372,7 @@ Every command has `--help`. The top-level options are `-v/--verbose` and
 | `claim <id> [--agent NAME]` | Set `active`, `assigned_to` and `assigned_at`. Running it again with the same owner does nothing. |
 | `subtask <parent> -n a -n b [--mode parallel\|sequential\|fan-out-fan-in]` | Split a task into child task files (`spawned_from` / `spawned_tasks`). |
 | `expire [--days N] [--state S] [--dry-run] [--json]` | Auto-expire long-quiet tasks (see below). |
+| `archive [--older-than N] [--state S] [--limit N] [--dry-run] [--json]` | Move old done/cancelled/expired tasks to `tasks/archive/` (see below). |
 
 **Integrity**
 
@@ -407,7 +409,7 @@ Every command has `--help`. The top-level options are `-v/--verbose` and
 
 Scripts should parse `--json` rather than the rendered output, because the emoji and
 formatting may change. Most commands accept `--json`, including `status`, `list`, `ready`,
-`next`, `stale`, `plan`, `fetch`, `sync`, `import`, `expire`, `lint`, `transitions` and
+`next`, `stale`, `plan`, `fetch`, `sync`, `import`, `expire`, `archive`, `lint`, `transitions` and
 `edit`. `list`, `ready` and `stale` also accept `--jsonl` (one task per line).
 
 ```bash
@@ -553,6 +555,45 @@ It skips:
 Age is measured from `created`, not file mtime, so edits from lint or reformatting don't
 make a task look active.
 
+## Archiving finished tasks
+
+Finished tasks pile up in `tasks/` and slow down every scan. `gptodo archive` moves
+terminal tasks (`done`, `cancelled`, `expired`) that finished at least `--older-than` days
+ago (default 7, or `GPTODO_ARCHIVE_DAYS`) into `tasks/archive/`. Tracked files are moved
+with `git mv`, others with a plain rename. Nothing is committed.
+
+```bash
+gptodo archive --dry-run                          # preview
+gptodo archive                                    # move everything eligible
+gptodo archive --older-than 30 --state done --limit 200
+gptodo archive --json
+```
+
+Age is measured in UTC from `completed`, which gptodo stamps when a task becomes `done` or
+`cancelled` (`expired_at` for expired tasks). Date-only and naive values count as UTC; a
+value that doesn't parse keeps the task in place. Older tasks without that field use their
+last change instead: the latest of the `modified` field, file mtime and last git commit.
+Creation age is never used. A fresh clone resets mtimes, so such tasks wait a full window.
+
+Archived tasks keep working as dependencies: `check`, `ready`, `next`, `explain`,
+`checker` and auto-unblock resolve `tasks/archive/**` by name, and `show <name>` falls back
+to the archive. They no longer appear in `status`, `list` or `ready`.
+
+A task stays in place when:
+
+- it isn't in a selected terminal state, or it has `recur:`
+- a non-terminal task lists it in `spawned_tasks`, or names it as `parent` or
+  `spawned_from` (fan-in completion only looks at live tasks)
+- a task that stays in `tasks/` links to its file (`check` would report a broken link)
+- a file with the same name already exists anywhere under `tasks/archive/` (never
+  overwritten; reported under "Kept in place")
+
+`requires`/`depends` don't keep a task in place, since they resolve from the archive.
+Relative links inside a moved file are rebased so they still resolve from
+`tasks/archive/`. Links in other files are not rewritten. Running it again only picks up
+newly eligible tasks. `--json` reports `archived`, `skipped` (with reasons) and `errors`;
+the exit code is 1 if any move failed.
+
 ## Frontmatter schema and `lint`
 
 The supported fields are listed in `KNOWN_FRONTMATTER_FIELDS` in
@@ -615,6 +656,7 @@ export GPTODO_EXTRA_FRONTMATTER_FIELDS="review_owner,premise_check"
 | `GPTODO_AGENT_NAME` | Default owner for `claim` and `add`. Without it, gptodo uses `[agent].name` from `gptme.toml`, then `agent`. |
 | `GPTODO_STRICT_TRANSITIONS=1` | Refuse illegal state transitions instead of warning. |
 | `GPTODO_EXPIRE_DAYS` | Default `--days` for `expire`. |
+| `GPTODO_ARCHIVE_DAYS` | Default `--older-than` for `archive`. |
 | `GPTODO_EXTRA_FRONTMATTER_FIELDS` | Extra allowed frontmatter fields, comma- or space-separated. |
 | `HOOK_TASK_DONE` | Executable run when a task is marked `done`. |
 | `GITHUB_USERNAME` | Assignee boost for `generate-queue`. |

@@ -17,6 +17,7 @@ from typing import Callable, TypedDict
 
 from .utils import (
     TaskInfo,
+    build_dependency_universe,
     load_tasks,
 )
 
@@ -299,7 +300,10 @@ def run_checker(
 
     # Check 2: Dependency resolution
     if config.verify_dependencies:
-        dep_check = check_dependency_resolution(task, all_tasks)
+        # Archived prerequisites still resolve (same lookup as ready/next).
+        dep_check = check_dependency_resolution(
+            task, build_dependency_universe(all_tasks, tasks_dir)
+        )
         checks.append(dep_check)
         if not dep_check["passed"]:
             all_passed = False
