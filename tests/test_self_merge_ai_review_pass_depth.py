@@ -84,6 +84,11 @@ def _finding_thread(severity: str, *, resolved: bool = False, total: int = 1) ->
     }
 
 
+@pytest.fixture(autouse=True)
+def _enable_ai_review(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SELF_MERGE_ACCEPT_AI_REVIEW", "1")
+
+
 def _status(marker: dict[str, Any], threads: list[dict[str, Any]]) -> dict[str, Any]:
     """The gate's AI-review leg with no network: marker and threads injected."""
     result: dict[str, Any] = smc.fetch_ai_review_status(
@@ -171,6 +176,21 @@ def test_unreadable_pass_number_fails_closed() -> None:
     marker = _marker(finding_provenance={FP: [{"model": "m", "pass": "2"}]})
     result = _status(marker, [_finding_thread("P1")])
     assert result["accepted"] is False
+
+
+@pytest.mark.parametrize("pass_number", [0, -1])
+def test_nonpositive_pass_number_fails_closed(pass_number: int) -> None:
+    marker = _marker(finding_provenance={FP: [{"model": "m", "pass": pass_number}]})
+    result = _status(marker, [_finding_thread("P1")])
+    assert result["accepted"] is False, result
+    assert result["refusal"] == "disposition_shortfall"
+
+
+def test_unreadable_severity_with_advisory_provenance_fails_closed() -> None:
+    marker = _marker(finding_provenance={FP: [{"model": "m", "pass": 2}]})
+    result = _status(marker, [_finding_thread("unknown")])
+    assert result["accepted"] is False, result
+    assert result["refusal"] == "disposition_shortfall"
 
 
 def test_mixed_readable_and_unreadable_entries_fail_closed() -> None:

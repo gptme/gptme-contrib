@@ -1159,8 +1159,8 @@ def _ai_review_pass_of(entry: Any) -> int | None:
         return None
     value = entry.get("pass")
     # `type(...) is int` not `isinstance`: bool is an int subclass, and `True`
-    # is not a pass number.
-    return value if type(value) is int else None
+    # is not a pass number. Passes are numbered from 1, never zero or negative.
+    return value if type(value) is int and value >= _AI_REVIEW_FIRST_PASS else None
 
 
 def _ai_review_advisory_fps(marker: dict[str, Any] | None) -> set[str]:
@@ -1333,7 +1333,7 @@ def _ai_review_disposition_shortfall(
         if severity is not None and severity not in AI_REVIEW_BLOCKING_SEVERITIES:
             continue  # surviving P2s never block
         fp = _ai_review_fp_from_body(body)
-        if fp and fp in advisory_fps:
+        if severity is not None and fp and fp in advisory_fps:
             # Advisory, not a merge blocker: only a late pass raised it and
             # nothing corroborated it. Skipping the row means neither this
             # thread nor its marker entry can demand a disposition, so the
