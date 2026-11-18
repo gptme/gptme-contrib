@@ -52,11 +52,19 @@ WRITES = [
     "gh pr review 12 --repo o/r --approve --body ok",
     "gh issue close 201 --repo ActivityWatch/aw-core --comment done",
     "gh api -X POST repos/o/r/pulls/1/comments/99/replies -f body=fixed",
+    "GH_TOKEN=x timeout 30 gh pr review 5 --repo o/r --approve",
+    "cd /tmp/w && gh issue close 3 --repo o/r",
+    "/usr/bin/gh pr edit 3 --repo o/r --title t",
 ]
 READS = [
     "gh pr view 4970 --repo gptme/gptme --json state",
     "gh api repos/o/r/issues/1/comments",
     "gh pr checks 12 --repo o/r",
+    # Quoted mentions only search or print the command text (Greptile on #2233).
+    "grep -R 'gh pr comment' .",
+    'rg "gh issue close" scripts/',
+    "echo 'gh pr merge 5' | wc -l",
+    'gh pr view 5 --repo o/r --json body | grep "gh pr comment"',
 ]
 
 

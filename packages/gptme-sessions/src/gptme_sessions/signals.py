@@ -776,9 +776,10 @@ def _strip_heredoc_bodies(cmd: str) -> str:
 def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
     """Match a gh write-command pattern, ignoring read-only ``gh api`` calls.
 
-    Non-api matches (``gh pr comment`` etc.) count as before, even when the
-    same segment also runs a ``gh api`` read (e.g. ``--body-file <(gh api
-    ...)``). An api match counts only if the ``gh api`` invocation writes.
+    Non-api matches (``gh pr comment`` etc.) count when they start at an
+    unquoted ``gh`` token, even when the same segment also runs a ``gh api``
+    read (e.g. ``--body-file <(gh api ...)``); a quoted mention such as
+    ``grep 'gh pr comment'`` does not. An api match counts only if the ``gh api`` invocation writes.
     Executable command substitutions are checked as commands of their own,
     so a write inside ``x="$(gh api ...)"`` counts even though shell
     tokenization keeps the quoted substitution in one token.
@@ -794,7 +795,7 @@ def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
         matches = list(pattern.finditer(segment))
         if not matches:
             continue
-        if any(not _GH_API_MATCH_RE.match(m.group(0)) for m in matches):
+        if _gh_invocation_matches(pattern, segment):
             return True
         # No tokenized ``gh api`` invocation means the match was quoted text
         # (``printf 'gh api ...'``), not a command, so it never counts.
@@ -810,6 +811,28 @@ def _gh_cmd_matches(pattern: re.Pattern[str], cmd: str) -> bool:
 
 
 _GH_API_MATCH_RE = re.compile(r"gh\s+api\b")
+
+
+def _gh_invocation_matches(pattern: re.Pattern[str], segment: str) -> bool:
+    """Whether an unquoted, non-api ``gh`` invocation in the segment matches.
+
+    The raw-text match also fires on quoted arguments (``grep -R 'gh pr
+    comment' .``, ``rg "gh issue close"``), which only search or print the
+    text. Here the pattern must match starting at a ``gh`` shell token, found
+    the same way ``_gh_api_args`` finds ``gh api``: a quoted mention stays one
+    token and never counts. Substitutions are masked; their bodies are
+    checked separately via ``_command_substitutions``.
+    """
+    tokens = _shell_tokens(_mask_substitutions(segment))
+    for i, tok in enumerate(tokens):
+        name = re.split(r"[=({!$`]", tok)[-1].rsplit("/", 1)[-1]
+        if name != "gh" or tokens[i + 1 : i + 2] == ["api"]:
+            continue
+        m = pattern.match(" ".join(["gh", *tokens[i + 1 :]]))
+        if m and not _GH_API_MATCH_RE.match(m.group(0)):
+            return True
+    return False
+
 
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 
