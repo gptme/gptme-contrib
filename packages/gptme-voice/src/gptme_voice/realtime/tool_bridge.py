@@ -24,7 +24,16 @@ from collections import deque
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable, Sequence, TypeVar
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Sequence, TypeVar
+
+from .subagent_progress import (
+    MAX_PROGRESS_LINES,
+    append_progress,
+    bound_progress,
+    classify_lifecycle,
+    is_meaningful_progress,
+    seed_completions_from_timings,
+)
 
 if TYPE_CHECKING:
     from ..body import BodyAdapter
@@ -231,6 +240,11 @@ class PendingTask:
     process_started_at: float | None = None
     first_output_at: float | None = None
     last_output_at: float | None = None
+    first_meaningful_at: float | None = None
+    last_meaningful_at: float | None = None
+    progress: deque[str] = field(
+        default_factory=lambda: deque(maxlen=MAX_PROGRESS_LINES)
+    )
     completed_at: float | None = None
     returncode: int | None = None
 
@@ -587,6 +601,28 @@ class GptmeToolBridge:
             copies.append(copy)
         return copies
 
+    def seed_prior_leg_status(self, timings: Sequence[Mapping[str, Any]]) -> None:
+        """Hydrate recent_completions from this caller's previous-leg timings.
+
+        Used on resume so subagent_status can report the prior task instead of
+        an empty list. Other callers' timings must not be passed in.
+        """
+        for item in seed_completions_from_timings(timings):
+            self._recent_completions.append(item)
+
+    def _record_progress(
+        self, entry: PendingTask, line: str, emitted_at: float
+    ) -> None:
+        entry.last_output = line
+        entry.last_output_at = emitted_at
+        if entry.first_output_at is None:
+            entry.first_output_at = emitted_at
+        if is_meaningful_progress(line):
+            append_progress(entry.progress, line)
+            if entry.first_meaningful_at is None:
+                entry.first_meaningful_at = emitted_at
+            entry.last_meaningful_at = emitted_at
+
     def _dispatch_cue(
         self, callback: Callable[[], Awaitable[None]], *, cue_name: str
     ) -> None:
@@ -618,10 +654,7 @@ class GptmeToolBridge:
 
         def _on_progress(line: str, emitted_at: float) -> None:
             if pending is not None:
-                pending.last_output = line
-                pending.last_output_at = emitted_at
-                if pending.first_output_at is None:
-                    pending.first_output_at = emitted_at
+                self._record_progress(pending, line, emitted_at)
 
         def _on_completed(returncode: int, completed_at: float) -> None:
             if pending is not None:
@@ -980,6 +1013,7 @@ class GptmeToolBridge:
             if entry.mode == "fast"
             else _SMART_MODE_BUDGET_SECONDS
         )
+        now = time.monotonic()
         result: dict = {
             "task_id": task_id,
             "task": description,
@@ -988,6 +1022,11 @@ class GptmeToolBridge:
             "budget_seconds": budget,
             "remaining_seconds": round(max(0.0, budget - elapsed), 1),
             "stage": self._pending_stage(entry),
+            "lifecycle": classify_lifecycle(
+                first_meaningful_at=entry.first_meaningful_at,
+                last_meaningful_at=entry.last_meaningful_at,
+                now=now,
+            ),
         }
         if entry.model:
             result["model"] = entry.model
@@ -996,6 +1035,13 @@ class GptmeToolBridge:
             result["timings"] = timings
         if entry.last_output:
             result["last_output"] = entry.last_output[:200]
+        progress = bound_progress(list(entry.progress))
+        if progress:
+            result["progress"] = progress
+        if entry.last_meaningful_at is not None:
+            result["last_progress_age_seconds"] = self._round_seconds(
+                now - entry.last_meaningful_at
+            )
         return result
 
     async def _cancel_task(self, task_id: str, entry: PendingTask) -> dict:

@@ -205,7 +205,9 @@ def _load_project_instructions(
         "so they do not hit the subagent timeout.\n\n"
         "SUBAGENT STATUS AND CANCEL:\n"
         "- If the caller asks what the subagent is doing, call the subagent_status tool "
-        "to list pending tasks — do not use a fresh subagent dispatch for this.\n"
+        "to list pending tasks — do not use a fresh subagent dispatch for this. "
+        "Report lifecycle (startup/working/silent), not first stdout; one sentence, "
+        "no progress dump. After reconnect, source=prior_leg is this caller's last task.\n"
         "- If the caller asks to cancel the subagent, call the subagent_cancel tool. "
         "Pass task_id for a specific task, or omit task_id to cancel all pending tasks.\n"
         "- Never cancel a lookup only because it seems slow or the caller doubts it will "
@@ -570,10 +572,16 @@ class OpenAIRealtimeClient:
                 "type": "function",
                 "name": "subagent_status",
                 "description": (
-                    "Check which subagent tasks are still running. Use this when "
-                    "the caller asks what the subagent is doing, or before deciding "
-                    "to cancel. Returns each pending task's id, a short preview of "
-                    "the task, the mode, and elapsed seconds."
+                    "Check which subagent tasks are still running and what bounded "
+                    "child stdout they have produced. Use this when the caller asks "
+                    "what the subagent is doing, or before deciding to cancel. "
+                    "Each pending task includes lifecycle (startup|working|silent), "
+                    "a short progress transcript of retained child output (not "
+                    "private reasoning), last_output, timings, and remaining budget. "
+                    "First process output is not a successful answer. "
+                    "recent_completions includes this call's finished tasks and, "
+                    "after a reconnect, this caller's prior-leg tasks "
+                    "(source=prior_leg)."
                 ),
                 "parameters": {
                     "type": "object",

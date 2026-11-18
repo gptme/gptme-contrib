@@ -995,6 +995,11 @@ class VoiceServer:
         # last-writer cannot drop a sibling archive path.
         self._pending_call_groups: dict[str, str] = {}
         self._call_end_locks: dict[str, asyncio.Lock] = {}
+        # Caller-scoped prior-leg subagent timings, filled when a resume
+        # record is consumed and taken when that caller's ToolBridge is built.
+        # Keyed by caller_id so a reconnect can inspect the previous task
+        # without leaking another caller's completions.
+        self._prior_subagent_status: dict[str, list[dict[str, object]]] = {}
         # Pre-warmed realtime connections: from_number -> (client, created_at)
         # Keyed by from_number, claimed and discarded when the Twilio stream starts.
         self._prewarm_sessions: dict[str, tuple[OpenAIRealtimeClient, float]] = {}
@@ -2093,6 +2098,18 @@ class VoiceServer:
         if not consume:
             return recent_call
 
+        if recent_call.subagent_timings:
+            copied: list[dict[str, object]] = []
+            for item in recent_call.subagent_timings:
+                if not isinstance(item, dict):
+                    continue
+                copy = dict(item)
+                inner = copy.get("timings")
+                if isinstance(inner, dict):
+                    copy["timings"] = dict(inner)
+                copied.append(copy)
+            self._prior_subagent_status[caller_id] = copied
+
         pending_unit = (
             self._pending_post_calls.pop(caller_id, None)
             or recent_call.pending_post_call_unit
@@ -2139,6 +2156,15 @@ class VoiceServer:
             int(age_seconds),
         )
         return recent_call
+
+    def _seed_bridge_from_prior_leg(
+        self, bridge: GptmeToolBridge, caller_id: str | None
+    ) -> None:
+        if not caller_id:
+            return
+        prior = self._prior_subagent_status.pop(caller_id, [])
+        if prior:
+            bridge.seed_prior_leg_status(prior)
 
     async def _run_post_call_command(
         self,
@@ -2932,6 +2958,7 @@ class VoiceServer:
                         body_adapter=body_adapter,
                         rag=rag_for_ws,
                     )
+                    self._seed_bridge_from_prior_leg(tool_bridge, caller_id)
                     realtime_client.on_function_call = tool_bridge.handle_function_call
                     # A rejected session.update must end the call instead of leaving
                     # the caller with an unconfigured (or silent) provider session.
@@ -3234,6 +3261,7 @@ class VoiceServer:
                 vision_bridge=vision_bridge,
                 rag=rag_for_ws,
             )
+            self._seed_bridge_from_prior_leg(tool_bridge, caller_id)
             realtime_client.on_function_call = tool_bridge.handle_function_call
             # A rejected session.update must end the call instead of leaving
             # the caller with an unconfigured (or silent) provider session.
@@ -3362,6 +3390,7 @@ class VoiceServer:
                 body_adapter=body_adapter,
                 rag=rag_for_ws,
             )
+            self._seed_bridge_from_prior_leg(tool_bridge, caller_id)
             realtime_client.on_function_call = tool_bridge.handle_function_call
             # A rejected session.update must end the call instead of leaving
             # the caller with an unconfigured (or silent) provider session.

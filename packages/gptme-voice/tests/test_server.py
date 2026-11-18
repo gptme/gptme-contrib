@@ -40,6 +40,7 @@ from gptme_voice.realtime.server import (
     _websocket_has_vision,
 )
 from gptme_voice.realtime.sounds import PCM_CUES, SAMPLE_RATE
+from gptme_voice.realtime.tool_bridge import GptmeToolBridge
 from gptme_voice.realtime.twilio_integration import (
     sign_stream_params,
     verify_stream_params,
@@ -2014,6 +2015,83 @@ def test_build_session_bootstrap_skips_greeting_for_recent_resume() -> None:
         assert bootstrap.should_greet_first is False
         assert "reconnected after a brief disconnect" in bootstrap.instructions
         assert "Resume this call" in bootstrap.instructions
+
+
+def test_consume_recent_call_stashes_timings_per_caller() -> None:
+    """Resume hydrates this caller's prior-leg status and not another caller's."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server = VoiceServer()
+        server.state_dir = Path(tmpdir)
+        server.resume_window_seconds = 300
+        caller = "+46700000012"
+        other = "+46700000099"
+        record = RecentCallRecord(
+            caller_id=caller,
+            source="twilio",
+            ended_at=1_000.0,
+            transcript=[TranscriptTurn(role="user", text="Resume this call")],
+            metadata={"from_number": caller},
+            subagent_timings=[
+                {
+                    "task_id": "task-1",
+                    "task_preview": "Return nothing.",
+                    "returncode": 124,
+                    "timings": {"total_seconds": 61.2},
+                }
+            ],
+        )
+        server._save_recent_call(record)
+        server._save_recent_call(
+            RecentCallRecord(
+                caller_id=other,
+                source="twilio",
+                ended_at=1_000.0,
+                transcript=[TranscriptTurn(role="user", text="other")],
+                metadata={},
+            )
+        )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
+            asyncio.run(server._consume_recent_call(caller))
+
+        bridge_a = GptmeToolBridge(workspace="/fake")
+        bridge_b = GptmeToolBridge(workspace="/fake")
+        server._seed_bridge_from_prior_leg(bridge_a, caller)
+        server._seed_bridge_from_prior_leg(bridge_b, other)
+        status_a = asyncio.run(bridge_a.handle_function_call("subagent_status", {}))
+        status_b = asyncio.run(bridge_b.handle_function_call("subagent_status", {}))
+        assert status_a["recent_completions"][0]["task_id"] == "prior:task-1"
+        assert status_a["recent_completions"][0]["status"] == "timed_out"
+        assert status_b["recent_completions"] == []
+
+
+def test_peek_recent_call_does_not_stash_timings() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server = VoiceServer()
+        server.state_dir = Path(tmpdir)
+        server.resume_window_seconds = 300
+        caller = "+46700000012"
+        server._save_recent_call(
+            RecentCallRecord(
+                caller_id=caller,
+                source="twilio",
+                ended_at=1_000.0,
+                transcript=[TranscriptTurn(role="user", text="peek")],
+                metadata={},
+                subagent_timings=[
+                    {
+                        "task_id": "task-1",
+                        "returncode": 0,
+                        "timings": {"total_seconds": 1.0},
+                    }
+                ],
+            )
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("gptme_voice.realtime.server.time.time", lambda: 1_100.0)
+            asyncio.run(server._consume_recent_call(caller, consume=False))
+        assert caller not in server._prior_subagent_status
 
 
 def test_recent_call_is_ignored_outside_resume_window() -> None:
