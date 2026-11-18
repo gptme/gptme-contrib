@@ -7,6 +7,7 @@ import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import mock_open
 
 import pytest
 from gptme_review import sweep_outcome as o
@@ -176,7 +177,15 @@ def test_run_process_group_returns_output() -> None:
     assert done.stdout.strip() == "ok"
 
 
-def test_run_process_group_kills_descendants_on_timeout(tmp_path: Path) -> None:
+# None checks the real group kill; injected errors regress the procfs reap race.
+@pytest.mark.parametrize(
+    "stat_read_error", [None, FileNotFoundError, ProcessLookupError]
+)
+def test_run_process_group_kills_descendants_on_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stat_read_error: type[OSError] | None,
+) -> None:
     pid_file = tmp_path / "child.pid"
     script = (
         "import subprocess, sys, time;"
@@ -190,14 +199,23 @@ def test_run_process_group_kills_descendants_on_timeout(tmp_path: Path) -> None:
     assert b"started" in (excinfo.value.output or b"")
 
     child = int(pid_file.read_text())
+    if stat_read_error is not None:
+        # A reaped process may disappear after open() but before read().
+        stat_file = mock_open()
+        stat_file.return_value.read.side_effect = stat_read_error()
+        monkeypatch.setattr(sys.modules[__name__], "open", stat_file, raising=False)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         try:
             with open(f"/proc/{child}/stat") as fh:
                 if fh.read().split()[2] == "Z":
                     break
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
+            # procfs can report ENOENT at open() or ESRCH at read() after reap.
             break
         time.sleep(0.05)
     else:
         pytest.fail("grandchild survived the group kill")
+    if stat_read_error is not None:
+        stat_file.assert_called_once_with(f"/proc/{child}/stat")
+        stat_file.return_value.read.assert_called_once_with()
