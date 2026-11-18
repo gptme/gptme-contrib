@@ -66,17 +66,22 @@ class XAIRealtimeClient(OpenAIRealtimeClient):
         if cfg.model == _OPENAI_DEFAULT_MODEL:
             cfg = dataclasses.replace(cfg, model=_DEFAULT_XAI_MODEL)
 
-        # VAD tuning for Grok interruption (from task #651 / Erik feedback)
-        # Lower threshold = more sensitive to speech, easier to interrupt
-        # Keep end-of-turn silence conservative so noisy lines do not chop up speech
-        # Prefix padding reduced to minimize lag
-        if cfg.vad_threshold >= 0.65:  # only override default/high values
-            cfg = dataclasses.replace(
-                cfg,
-                vad_threshold=0.55,
-                vad_silence_duration_ms=500,
-                vad_prefix_padding_ms=150,
-            )
+        # Grok VAD tuning (task #651): substitute legacy 0.55/500/150 only where
+        # a field still equals its SessionConfig default (default sentinel), so
+        # explicit non-default values survive. Field-wise: an explicit low
+        # threshold with an untouched prefix still picks up the Grok prefix 150.
+        cfg_defaults = SessionConfig()
+        vad_overrides: dict[str, Any] = {
+            name: grok_value
+            for name, grok_value in {
+                "vad_threshold": 0.55,
+                "vad_silence_duration_ms": 500,
+                "vad_prefix_padding_ms": 150,
+            }.items()
+            if getattr(cfg, name) == getattr(cfg_defaults, name)
+        }
+        if vad_overrides:
+            cfg = dataclasses.replace(cfg, **vad_overrides)
 
         super().__init__(api_key=resolved_key, session_config=cfg, **kwargs)
 

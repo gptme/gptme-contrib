@@ -248,3 +248,92 @@ def test_xai_error_keeps_historical_log_only_behaviour() -> None:
             await client.disconnect()
 
     asyncio.run(_exercise())
+
+
+@pytest.mark.parametrize("threshold", [0.65, 0.8, 0.85, 0.6])
+def test_xai_client_preserves_explicit_vad_threshold(threshold: float) -> None:
+    """Explicit non-default thresholds must survive construction and wire-up.
+
+    The legacy Grok tuning used a ``>= 0.65`` blanket override that replaced
+    every explicit threshold at or above that cutoff. Non-default profiles
+    must pass through untouched.
+    """
+    client = XAIRealtimeClient(
+        api_key="test-key",
+        session_config=SessionConfig(vad_threshold=threshold),
+    )
+
+    assert client.session_config.vad_threshold == threshold
+    params = client._build_session_params("You are Bob.", [])
+    assert params["turn_detection"]["threshold"] == threshold
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "wire_key"),
+    [
+        ("vad_silence_duration_ms", 800, "silence_duration_ms"),
+        ("vad_prefix_padding_ms", 250, "prefix_padding_ms"),
+    ],
+)
+def test_xai_client_preserves_explicit_vad_auxiliary(
+    field: str, value: int, wire_key: str
+) -> None:
+    """Explicit silence/prefix survive independently of the threshold default.
+
+    An explicit auxiliary value must not be clobbered just because the
+    threshold still holds its shared default.
+    """
+    client = XAIRealtimeClient(
+        api_key="test-key",
+        session_config=SessionConfig(**{field: value}),
+    )
+
+    assert getattr(client.session_config, field) == value
+    # The untouched threshold still falls back to the legacy Grok default.
+    assert client.session_config.vad_threshold == 0.55
+    params = client._build_session_params("You are Bob.", [])
+    assert params["turn_detection"][wire_key] == value
+
+
+def test_xai_client_preserves_full_explicit_vad_profile() -> None:
+    """All three explicit VAD fields survive together and serialize unchanged."""
+    client = XAIRealtimeClient(
+        api_key="test-key",
+        session_config=SessionConfig(
+            vad_threshold=0.85,
+            vad_silence_duration_ms=800,
+            vad_prefix_padding_ms=250,
+        ),
+    )
+
+    assert client.session_config.vad_threshold == 0.85
+    assert client.session_config.vad_silence_duration_ms == 800
+    assert client.session_config.vad_prefix_padding_ms == 250
+    params = client._build_session_params("You are Bob.", [])
+    assert params["turn_detection"] == {
+        "type": "server_vad",
+        "threshold": 0.85,
+        "silence_duration_ms": 800,
+        "prefix_padding_ms": 250,
+    }
+
+
+def test_xai_client_low_threshold_keeps_grok_prefix_default() -> None:
+    """Field-wise default semantics: an explicit sub-cutoff threshold with an
+    untouched prefix still picks up the Grok prefix default (150).
+
+    The old ``>= 0.65`` blanket override applied Grok values to all three
+    fields together; the field-wise repair applies each default independently.
+    """
+    client = XAIRealtimeClient(
+        api_key="test-key",
+        session_config=SessionConfig(vad_threshold=0.6),
+    )
+
+    params = client._build_session_params("You are Bob.", [])
+    assert params["turn_detection"] == {
+        "type": "server_vad",
+        "threshold": 0.6,
+        "silence_duration_ms": 500,
+        "prefix_padding_ms": 150,
+    }
