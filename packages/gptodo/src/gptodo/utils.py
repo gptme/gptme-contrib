@@ -185,6 +185,7 @@ KNOWN_FRONTMATTER_FIELDS: set[str] = {
     "related",
     "discovered-from",
     "parent",
+    "project",  # Grouping/filtering in `gptodo browse --project`.
     # Progress + outputs
     "progress",
     "completed",

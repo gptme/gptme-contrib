@@ -5903,6 +5903,12 @@ def list_all_locks(cleanup: bool, output_json: bool):
     is_flag=True,
     help="Read the complete body from stdin until EOF (including slow producers).",
 )
+@click.option(
+    "--allow-frontmatter-body",
+    is_flag=True,
+    help="Store a body that opens with a '---' block of task metadata keys as plain text "
+    "instead of refusing it.",
+)
 def add(
     title: str,
     priority: str,
@@ -5913,6 +5919,7 @@ def add(
     waiting_for: str | None,
     wait_value: str | None,
     body_stdin: bool,
+    allow_frontmatter_body: bool,
 ):
     """Create a new task from title and optional stdin body.
 
@@ -6016,10 +6023,21 @@ def add(
             frontmatter_data["tags"] = tag_list
 
     body = sys.stdin.read().strip() if body_stdin else _read_piped_body(sys.stdin)
+    # The body goes below gptodo's own frontmatter, so keys in a leading `---`
+    # block are inert text, not metadata (e.g. a piped `wait:` is silently
+    # ignored and the task shows as ready immediately). Refuse when the block
+    # carries keys gptodo acts on, before any file is written.
+    inert_keys = sorted(set(_frontmatter_block_keys(body) or ()) & KNOWN_FRONTMATTER_FIELDS)
+    if inert_keys and not allow_frontmatter_body:
+        raise click.UsageError(
+            "body starts with a '---' block holding task metadata "
+            f"({', '.join(inert_keys)}); it would be stored as inert body text. "
+            "Pass these as flags (--state, --wait, --priority, --tags, "
+            "--waiting-for, --assigned-to), set them afterwards with "
+            "`gptodo edit --set`, or pass --allow-frontmatter-body to keep the "
+            "block as text."
+        )
     if _body_looks_like_frontmatter(body):
-        # The body goes below gptodo's own frontmatter, so keys in a leading
-        # `---` block are inert text, not metadata (e.g. a piped `wait:` is
-        # silently ignored and the task shows as ready immediately).
         click.echo(
             "Warning: body starts with a '---' key block; it is stored as body text, "
             "not frontmatter. Use flags (e.g. --wait, --state) or `gptodo edit --set`.",
@@ -6063,20 +6081,36 @@ def add(
     print(filepath.stem)
 
 
-def _body_looks_like_frontmatter(body: str) -> bool:
-    """True when a body opens with a delimited block containing a ``key:`` line."""
+def _frontmatter_block_keys(body: str) -> list[str] | None:
+    """Top-level keys in a leading ``---`` block, or None if no closed block."""
+    import yaml
+
     lines = body.splitlines()
     if not lines or lines[0].strip() != "---":
-        return False
-    has_key = False
-    for line in lines[1:]:
-        if line.strip() == "---":
-            return has_key
-        # This is a warning heuristic, not a YAML validator: comments, lists,
-        # and multiline values must not hide an inert top-level metadata key.
-        if re.match(r"^[A-Za-z_][\w-]*:", line):
-            has_key = True
-    return False
+        return None
+    keys: list[str] = []
+    for index, line in enumerate(lines[1:], start=1):
+        # Indented markers can be content inside YAML block scalars.
+        if line.rstrip() == "---":
+            try:
+                metadata = yaml.safe_load("\n".join(lines[1:index]))
+            except (yaml.YAMLError, ValueError):
+                # Malformed YAML (including invalid dates) must not hide an
+                # otherwise recognizable inert metadata key.
+                return keys
+            if isinstance(metadata, dict):
+                return [key for key in metadata if isinstance(key, str)]
+            return keys
+        # Keep the heuristic as a fallback for malformed blocks.
+        m = re.match(r"^([A-Za-z_][\w-]*):", line)
+        if m:
+            keys.append(m.group(1))
+    return None
+
+
+def _body_looks_like_frontmatter(body: str) -> bool:
+    """True when a body opens with a delimited block containing a ``key:`` line."""
+    return bool(_frontmatter_block_keys(body))
 
 
 def _read_piped_body(stream: Any, timeout: float = 0.5) -> str:
