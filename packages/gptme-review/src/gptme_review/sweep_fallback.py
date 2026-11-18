@@ -1,9 +1,9 @@
 """Portable fallback-engine orchestration for a review sweep.
 
 After ``gptme_review.sweep.dispatch_reviews`` has run every selected PR on the
-primary engine, a sweep host may retry some failures on a fallback engine (Bob
-retries OpenRouter failures on subscription reviewers). Two decisions here are
-policy every host should share:
+primary engine, a sweep host may retry some failures on a fallback engine (for
+example, OpenRouter failures retried on subscription reviewers). Two decisions
+here are policy every host should share:
 
 * :func:`select_fallback_failures` — which primary failures are a transport
   problem worth retrying, and which are PR-local failures that must stay failed;
