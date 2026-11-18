@@ -25,10 +25,37 @@ PR = {"repo": "o/r", "number": 7, "headRefOid": "abc"}
         "Insufficient Balance",
         "API rate limit exceeded for installation",
         "Key limit exceeded (daily limit)",
+        # The account-wide cap, as OpenRouter words it (HTTP 403, see #2244 note).
+        'OpenRouter HTTP 403: {"error":{"message":"Workspace daily budget of $10.00 '
+        'exceeded.","code":403,"metadata":{"limit_source":"openrouter_workspace_budget"}}}',
     ],
 )
 def test_quota_limited(text: str) -> None:
     assert o.is_quota_limited(text)
+
+
+def test_workspace_budget_exhaustion_is_not_a_systemic_collapse() -> None:
+    """An account-wide daily cap is transient, so the sweep must not exit 1.
+
+    A real run on 2026-11-18 burned 20 review attempts against the workspace
+    budget and reported every one as a systemic failure, leaving the unit in
+    ``failed`` state for a quota event that resets at midnight.
+    """
+    text = (
+        'ReviewError: OpenRouter HTTP 403: {"error":{"message":"Workspace daily '
+        'budget of $10.00 exceeded. Contact your org admin.","code":403,'
+        '"metadata":{"limit_source":"openrouter_workspace_budget"}}}'
+    )
+    assert o.is_quota_limited(text) is True
+    assert (
+        o.classify_all_failed_run(
+            attempted=20,
+            failures=20,
+            rate_limit_failures=20,
+            too_large_failures=0,
+        )
+        == "rate_limited"
+    )
 
 
 @pytest.mark.parametrize("text", ["", "HTTP 500 internal error", "http 4290 bytes"])
