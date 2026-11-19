@@ -356,7 +356,10 @@ def _fileop_operands(unq: str) -> list[str] | None:
             if token.startswith("<<"):
                 skip_delimiter = token in ("<<", "<<-")
                 continue
-            if "''" in token:
+            # Only literal operands can prove an absolute scratch target.
+            # Expansions/globs may introduce traversal or follow paths outside
+            # scratch; escaped characters can hide a literal '..' component.
+            if "''" in token or any(char in token for char in "$`\\{}*?[]"):
                 return None
             if token.startswith("-"):
                 if token not in _FILEOP_SAFE_OPTIONS:

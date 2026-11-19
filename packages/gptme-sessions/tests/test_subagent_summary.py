@@ -180,6 +180,28 @@ def test_cmd_mutation_scratch_proof_keeps_unknown_writes_acting(command: str) ->
     assert cmd_mutation(command)[0] == "acting"
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "touch /tmp/$TARGET",
+        "touch /tmp/${TARGET}",
+        "touch /tmp/`printf ../../home/alice/repo/x`",
+        "touch /tmp/{x,../home/alice/repo/x}",
+        r"touch /tmp/\.\./home/alice/repo/x",
+        "touch /tmp/*/x",
+        "touch /tmp/[ab]/x",
+        "touch /tmp/?/x",
+        "> main.go mkdir -p /tmp/x",
+        "> 'main.go' mkdir -p /tmp/x",
+        "mkdir -p /tmp/x > main.go",
+        "mkdir -p /tmp/x; echo hi > main.go",
+    ],
+)
+def test_cmd_mutation_scratch_proof_rejects_expansions_and_repo_redirects(command: str) -> None:
+    assert cmd_mutation(command)[0] == "acting"
+    assert classify_agent({"shell": 1}, [command], [])[0] == "acting"
+
+
 @pytest.mark.parametrize("marker", ["<< EOF", "<< 'EOF'", "<<- EOF", "<<EOF"])
 def test_cmd_mutation_scratch_heredoc_delimiter_is_not_a_target(marker: str) -> None:
     assert cmd_mutation(f"cat > /tmp/out {marker}\nhi\nEOF")[0] == "scratch"
