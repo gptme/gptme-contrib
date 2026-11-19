@@ -24,7 +24,7 @@ def find_dependent_tasks(
 
     A task depends on the completed task if:
     - `requires` contains the completed task ID
-    - `depends` contains the completed task ID (deprecated alias)
+    - `depends` contains the completed task ID (accepted alias)
     - `waiting_for` contains the completed task ID (string, dict, or list format)
 
     Args:
@@ -46,7 +46,7 @@ def find_dependent_tasks(
             dependent_tasks.append(task)
             continue
 
-        # Check depends (deprecated alias)
+        # Check depends (accepted alias)
         if completed_task_id in task.depends:
             dependent_tasks.append(task)
             continue

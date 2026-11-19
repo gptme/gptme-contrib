@@ -179,7 +179,7 @@ KNOWN_FRONTMATTER_FIELDS: set[str] = {
     # written by `gptodo edit --set state waiting` alongside `waiting_since`.
     "first_waiting_since",
     "waiting_spell_count",
-    "depends",  # deprecated alias for requires, but still accepted
+    "depends",  # first-class dependency field (requires is an accepted alias)
     "requires",
     "blocks",  # deprecated (inverse semantics), still accepted
     "related",
@@ -554,7 +554,7 @@ class TaskInfo:
         modified: Last modification timestamp
         priority: Task priority (high, medium, low)
         tags: List of tags
-        depends: List of task dependencies (deprecated, use requires instead)
+        depends: List of task dependencies (first-class; requires is an accepted alias)
         requires: List of required task IDs or URLs (canonical for depends)
         related: List of related task IDs or URLs
         parent: Parent task ID or URL (for subtasks)
@@ -571,7 +571,7 @@ class TaskInfo:
     modified: datetime
     priority: str | None
     tags: List[str]
-    depends: List[str]  # Deprecated, use requires instead
+    depends: List[str]  # First-class dependency field; requires is an accepted alias
     requires: List[str]  # Required dependencies (task IDs or URLs)
     related: List[str]  # Related items (informational)
     parent: str | None  # Parent task ID
@@ -1517,7 +1517,7 @@ def load_tasks(
 
             # Create TaskInfo object
             # Get relationship fields (new typed dependencies)
-            # requires is canonical, depends is deprecated alias, blocks is NOT merged (different semantics)
+            # depends and requires are both accepted dependency fields (merged); blocks is NOT merged (different semantics)
             depends_list = _as_list(metadata.get("depends"), dep_field=True)
             requires_list = _as_list(metadata.get("requires"), dep_field=True)
 
@@ -1537,7 +1537,7 @@ def load_tasks(
                     stacklevel=2,
                 )
 
-            # Merge depends into requires (depends is deprecated alias with same semantics)
+            # Merge depends into requires (both are accepted dependency fields with the same semantics)
             # blocks is NOT merged because it has inverse semantics (this task blocks X, not X blocks this)
             # Priority: requires > depends (blocks is separate)
             effective_requires = requires_list if requires_list else depends_list
@@ -1560,7 +1560,7 @@ def load_tasks(
                 modified=modified,
                 priority=metadata.get("priority"),
                 tags=_as_list(metadata.get("tags")),
-                depends=depends_list,  # Deprecated, use requires instead
+                depends=depends_list,  # First-class dependency field; requires is an accepted alias
                 requires=effective_requires,  # Canonical required deps
                 related=_as_list(metadata.get("related")),
                 parent=metadata.get("parent"),
@@ -1622,7 +1622,7 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
     - related: list of related items
     - parent: parent task ID
     - discovered_from: list of tasks this was discovered from
-    - depends: list of dependencies (deprecated, same as requires)
+    - depends: list of dependencies (first-class; requires is an accepted alias)
     - subtasks: {completed: int, total: int, skipped: int}
     - task_type: project | action
     - next_action: immediate concrete next step
@@ -1654,7 +1654,7 @@ def task_to_dict(task: TaskInfo) -> Dict[str, Any]:
         "related": task.related,
         "parent": task.parent,
         "discovered_from": task.discovered_from,
-        "depends": task.depends,  # Deprecated, kept for compatibility
+        "depends": task.depends,  # First-class dependency field; requires is an accepted alias
         "subtasks": {
             "completed": task.subtasks.completed,
             "total": task.subtasks.total,
@@ -1852,7 +1852,7 @@ def is_task_ready(
     - All URL-based requires are CLOSED (if cache provided)
 
     Uses task.requires (canonical) which includes both explicit requires
-    and deprecated depends/blocks entries.
+    and depends/blocks entries.
 
     Args:
         task: Task to check
@@ -1869,7 +1869,7 @@ def is_task_ready(
     if task_is_waiting_for_date(task):
         return False
 
-    # Use requires (canonical field, includes deprecated depends/blocks)
+    # Use requires (includes depends/blocks)
     requires = task.requires
     if not requires:
         return True
