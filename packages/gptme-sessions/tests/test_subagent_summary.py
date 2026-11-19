@@ -186,15 +186,27 @@ def test_cmd_mutation_scratch_heredoc_delimiter_is_not_a_target(marker: str) -> 
 
 
 @pytest.mark.parametrize(
-    "consumer", ["cat > /tmp/test_boundary.py", "cat > /tmp/python.py", "python3 -", "python -"]
+    "consumer",
+    [
+        "cat > /tmp/test_boundary.py",
+        "cat > /tmp/python.py",
+        "tee /tmp/test_boundary.py",
+        "python3 -",
+        "python -",
+        "uv run --script -",
+        "pypy3 -",
+        "/opt/custom-python-runner -",
+        "cat | /opt/custom-python-runner -",
+    ],
 )
 @pytest.mark.parametrize("marker", ["<<'PY'", "<< PY"])
 def test_cmd_mutation_saved_python_is_data_but_stdin_python_executes(
     consumer: str, marker: str
 ) -> None:
     command = f"{consumer} {marker}\nPath('main.go').write_text('x')\nPY"
-    expected = "scratch" if consumer.startswith("cat ") else "acting"
+    expected = "scratch" if consumer.startswith(("cat >", "tee ")) else "acting"
     assert cmd_mutation(command)[0] == expected
+    assert classify_agent({"shell": 1}, [command], [])[0] == expected
 
 
 def test_cmd_mutation_relative_fileop_still_acting() -> None:

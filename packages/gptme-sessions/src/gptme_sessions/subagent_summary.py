@@ -115,11 +115,11 @@ _FILEOP_SAFE_OPTIONS = {
     "--force",
 }
 _HEREDOC_RE = re.compile(r"(?<!<)<<(-?)\s*([\"']?)([A-Za-z_]\w*)\2(?=\s|[;&|<>()]|$)")
-# A heredoc body fed to a shell is still shell; any other body is stdin data.
+# Shell consumers retain shell evidence. For Python evidence, erase bodies
+# only for simple known data consumers: unknown executables may run stdin
+# (uv run --script -, pypy3, or a wrapper with an arbitrary name).
 _SHELL_CONSUMER_RE = re.compile(r"\b(?:ba|z|da|k|a)?sh\b|\bssh\b|\beval\b|\bsource\b")
-_PYTHON_CONSUMER_RE = re.compile(
-    r"(?<![\w./-])(?:[^\s;|&<>]*/)?python(?:\d+(?:\.\d+)*)?(?=\s|[;&|<>()]|$)"
-)
+_DATA_CONSUMER_RE = re.compile(r"\s*(?:cat|tee)\s+[^;&|()]*")
 # Even backslash pairs leave the expansion active; an odd backslash escapes it.
 _HEREDOC_SUBSTITUTION_RE = re.compile(r"(?<!\\)(?:\\\\)*(\$\(|`)")
 
@@ -203,8 +203,9 @@ def _strip_heredoc_bodies(cmd: str, *, keep_python: bool = False) -> str:
     ``python3 - <<'PY' ... PY`` passes program text on stdin, so a ``>`` in the
     Python source (``s.startswith(('>', 'E '))``) is not a shell redirect.
     Bodies fed to a shell (``bash <<EOF``, ``ssh host <<EOF``) are kept.
-    ``keep_python`` also retains interpreter stdin for Python write detection,
-    without exposing Python comparison operators to shell redirect detection.
+    ``keep_python`` retains stdin for Python write detection unless the header
+    is a simple known data consumer, without exposing Python comparison
+    operators to shell redirect detection.
     Unquoted data heredocs still execute command substitutions. Keep those
     separately from the literal text, whose quotes do not suppress expansion.
     This is a best-effort classifier, not a full shell parser.
@@ -245,7 +246,7 @@ def _strip_heredoc_bodies(cmd: str, *, keep_python: bool = False) -> str:
         if (
             not heredocs
             or _SHELL_CONSUMER_RE.search(header)
-            or (keep_python and _PYTHON_CONSUMER_RE.search(header[:comment]))
+            or (keep_python and not _DATA_CONSUMER_RE.fullmatch(header[:comment]))
             or header[:comment].rstrip().endswith("|")
         ):
             continue
