@@ -101,9 +101,19 @@ _QUOTED_TARGET_RE = re.compile(r"(?<![0-9&<>=!])>{1,2}\s*[\"']([^\"'\n]+)[\"']")
 # Everything after a fileop match up to the next shell separator is that
 # command's operand list.
 _FILEOP_SEGMENT_END_RE = re.compile(r"[;&|\n)]")
-# Options and redirection/heredoc markers are not operands; quoted strings are
-# already elided to ``''`` by the caller, so they are skipped too.
-_FILEOP_OPERAND_SKIP_RE = re.compile(r"^(?:-|<<|<|>{1,2}$|'')")
+# Only known argument-free flags may disappear from a scratch-only proof.
+# Unknown options can carry destinations, including short forms like -tDIR.
+_FILEOP_SAFE_OPTIONS = {
+    "-p",
+    "-r",
+    "-R",
+    "-f",
+    "-rf",
+    "-fr",
+    "--parents",
+    "--recursive",
+    "--force",
+}
 _HEREDOC_RE = re.compile(r"(?<!<)<<(-?)\s*([\"']?)([A-Za-z_]\w*)\2(?=\s|[;&|<>()]|$)")
 # A heredoc body fed to a shell is still shell; any other body is stdin data.
 _SHELL_CONSUMER_RE = re.compile(r"\b(?:ba|z|da|k|a)?sh\b|\bssh\b|\beval\b|\bsource\b")
@@ -320,21 +330,37 @@ def empty_summary() -> dict[str, Any]:
     return s
 
 
-def _fileop_operands(unq: str) -> list[str]:
-    """Path operands of every shell fileop in ``unq`` (quotes already elided).
+def _fileop_operands(unq: str) -> list[str] | None:
+    """Return known path operands, or None when a scratch proof is unsafe.
 
-    Used to decide whether a fileop can *prove* scratch-only intent: an empty
-    list means the operands are unknown, so the caller stays conservative.
+    Quotes have already been elided: their contents may name a target, so
+    never silently discard them. Unknown options may also carry destinations.
+    Heredoc delimiters, unlike paths, are skipped with their marker.
     """
     operands: list[str] = []
     for m in _FILEOPS_RE.finditer(unq):
         tail = _FILEOP_SEGMENT_END_RE.split(unq[m.end() :], 1)[0]
+        segment_operands: list[str] = []
+        skip_delimiter = False
         for token in tail.split():
-            if _FILEOP_OPERAND_SKIP_RE.match(token):
+            if skip_delimiter:
+                skip_delimiter = False
                 continue
-            operand = token.strip("'\"")
-            if operand:
-                operands.append(operand)
+            if token.startswith("<<"):
+                skip_delimiter = token in ("<<", "<<-")
+                continue
+            if "''" in token:
+                return None
+            if token.startswith("-"):
+                if token not in _FILEOP_SAFE_OPTIONS:
+                    return None
+                continue
+            if token in (">", ">>", "<"):
+                continue
+            segment_operands.append(token)
+        if not segment_operands or skip_delimiter:
+            return None
+        operands.extend(segment_operands)
     return operands
 
 
@@ -365,10 +391,16 @@ def cmd_mutation(cmd: str, cwd_scratch: bool = False) -> tuple[str | None, str |
     # A fileop whose every named operand is in scratch space is provably
     # scratch-only, even when the shell never ``cd``'d there: ``mkdir -p
     # /tmp/x`` and ``cat > /tmp/x/f.py`` write inside scratch by absolute path.
-    # Unknown/relative operands stay on the conservative path below.
-    fileop_operands = _fileop_operands(unq) if sh else []
-    scratch_fileop = bool(fileop_operands) and all(
-        _SCRATCH_PATH_RE.match(o) for o in fileop_operands
+    # Unknown/relative operands, parent traversal and independent Python writes
+    # cannot use the shell-only exemption.
+    fileop_operands = _fileop_operands(unq) if sh and not py else None
+    scratch_fileop = (
+        fileop_operands is not None
+        and bool(fileop_operands)
+        and all(
+            _SCRATCH_PATH_RE.match(o) and o != "/tmp/worktrees" and ".." not in o.split("/")
+            for o in fileop_operands
+        )
     )
     if sh:
         repo_hit = _ABS_REPO_PATH_RE.search(body) or (

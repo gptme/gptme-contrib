@@ -162,6 +162,29 @@ def test_cmd_mutation_scratch_fileop_with_repo_read_is_scratch() -> None:
     assert label == "scratch"
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf /tmp/x 'main.go'",
+        "mkdir -p /tmp/x && rm 'journal/a.md'",
+        "rm -rf /tmp/x journal/''a.md",
+        "cp --target-directory=packages/gptme-sessions /tmp/a.py",
+        "cp -tpackages/gptme-sessions /tmp/a.py",
+        "rm -- /tmp/x -rf",
+        'mkdir -p /tmp/x; python3 -c \'open("main.go", "w").write("x")\'',
+        "touch /tmp/../home/alice/repo/x",
+        "touch /tmp/worktrees",
+    ],
+)
+def test_cmd_mutation_scratch_proof_keeps_unknown_writes_acting(command: str) -> None:
+    assert cmd_mutation(command)[0] == "acting"
+
+
+@pytest.mark.parametrize("marker", ["<< EOF", "<< 'EOF'", "<<- EOF", "<<EOF"])
+def test_cmd_mutation_scratch_heredoc_delimiter_is_not_a_target(marker: str) -> None:
+    assert cmd_mutation(f"cat > /tmp/out {marker}\nhi\nEOF")[0] == "scratch"
+
+
 def test_cmd_mutation_relative_fileop_still_acting() -> None:
     # A repo-root cwd is the common case, so relative operands keep the bias.
     assert cmd_mutation("mkdir -p state/x")[0] == "acting"
