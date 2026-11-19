@@ -135,6 +135,45 @@ def test_cmd_mutation_scratch_vs_repo_redirects() -> None:
     assert label == "scratch"
 
 
+def test_cmd_mutation_absolute_scratch_fileop_is_scratch() -> None:
+    # Production false positive (2026-11-18, scratch-only verifier child in a PM
+    # session): absolute scratch operands were labelled acting unless the shell
+    # had already `cd`'d into scratch.
+    assert (
+        cmd_mutation("mkdir -p /tmp/bob-scratch/review-2240/verifier; sed -n '1,3p' x.go")[0]
+        == "scratch"
+    )
+    assert (
+        cmd_mutation(
+            "cat > /tmp/bob-scratch/review-2240/verifier/test_boundary.py <<'PY'\nprint(1)\nPY"
+        )[0]
+        == "scratch"
+    )
+    assert cmd_mutation("rm -rf /tmp/bob-scratch/review-2240/verifier")[0] == "scratch"
+
+
+def test_cmd_mutation_scratch_fileop_with_repo_read_is_scratch() -> None:
+    # The production command shape: write in scratch, read a repo file on the
+    # same line. The repo path is a read, not a fileop target.
+    label, _ = cmd_mutation(
+        "mkdir -p /tmp/bob-scratch/review-2240/verifier; "
+        "sed -n '310,348p' /home/bob/bob/packages/gptme-cloud/x.py"
+    )
+    assert label == "scratch"
+
+
+def test_cmd_mutation_relative_fileop_still_acting() -> None:
+    # A repo-root cwd is the common case, so relative operands keep the bias.
+    assert cmd_mutation("mkdir -p state/x")[0] == "acting"
+    assert cmd_mutation("cat > journal/a.md")[0] == "acting"
+    assert cmd_mutation("sed -i 's/a/b/' main.go")[0] == "acting"
+
+
+def test_cmd_mutation_mixed_scratch_and_relative_fileop_is_acting() -> None:
+    assert cmd_mutation("mkdir -p /tmp/x && rm journal/a.md")[0] == "acting"
+    assert cmd_mutation("cp /tmp/x/a.py packages/gptme-sessions/x.py")[0] == "acting"
+
+
 def test_cmd_mutation_ignores_redirect_chars_in_data_heredoc() -> None:
     # Production false positive (2026-11-09, read-only verifier child): Python
     # source on stdin contained ``('>','E ')`` and read as ``> ','``.

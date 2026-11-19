@@ -98,6 +98,12 @@ _NONSCRATCH_PATH_RE = re.compile(
     r"|packages/|gptme-contrib/)"
 )
 _QUOTED_TARGET_RE = re.compile(r"(?<![0-9&<>=!])>{1,2}\s*[\"']([^\"'\n]+)[\"']")
+# Everything after a fileop match up to the next shell separator is that
+# command's operand list.
+_FILEOP_SEGMENT_END_RE = re.compile(r"[;&|\n)]")
+# Options and redirection/heredoc markers are not operands; quoted strings are
+# already elided to ``''`` by the caller, so they are skipped too.
+_FILEOP_OPERAND_SKIP_RE = re.compile(r"^(?:-|<<|<|>{1,2}$|'')")
 _HEREDOC_RE = re.compile(r"(?<!<)<<(-?)\s*([\"']?)([A-Za-z_]\w*)\2(?=\s|[;&|<>()]|$)")
 # A heredoc body fed to a shell is still shell; any other body is stdin data.
 _SHELL_CONSUMER_RE = re.compile(r"\b(?:ba|z|da|k|a)?sh\b|\bssh\b|\beval\b|\bsource\b")
@@ -314,6 +320,24 @@ def empty_summary() -> dict[str, Any]:
     return s
 
 
+def _fileop_operands(unq: str) -> list[str]:
+    """Path operands of every shell fileop in ``unq`` (quotes already elided).
+
+    Used to decide whether a fileop can *prove* scratch-only intent: an empty
+    list means the operands are unknown, so the caller stays conservative.
+    """
+    operands: list[str] = []
+    for m in _FILEOPS_RE.finditer(unq):
+        tail = _FILEOP_SEGMENT_END_RE.split(unq[m.end() :], 1)[0]
+        for token in tail.split():
+            if _FILEOP_OPERAND_SKIP_RE.match(token):
+                continue
+            operand = token.strip("'\"")
+            if operand:
+                operands.append(operand)
+    return operands
+
+
 def cmd_mutation(cmd: str, cwd_scratch: bool = False) -> tuple[str | None, str | None]:
     """Return ``(label, evidence)`` — label in ``{'acting','scratch',None}``.
 
@@ -338,16 +362,26 @@ def cmd_mutation(cmd: str, cwd_scratch: bool = False) -> tuple[str | None, str |
     if not targets and not fm:
         return None, None
     body = _PRELUDE_RE.sub("", cmd)
+    # A fileop whose every named operand is in scratch space is provably
+    # scratch-only, even when the shell never ``cd``'d there: ``mkdir -p
+    # /tmp/x`` and ``cat > /tmp/x/f.py`` write inside scratch by absolute path.
+    # Unknown/relative operands stay on the conservative path below.
+    fileop_operands = _fileop_operands(unq) if sh else []
+    scratch_fileop = bool(fileop_operands) and all(
+        _SCRATCH_PATH_RE.match(o) for o in fileop_operands
+    )
     if sh:
         repo_hit = _ABS_REPO_PATH_RE.search(body) or (
             None if in_scratch else _NONSCRATCH_PATH_RE.search(_PRELUDE_RE.sub("", unq))
         )
     else:
         repo_hit = _ABS_REPO_PATH_RE.search(body)
-    if fm and (repo_hit or not in_scratch):
+    if fm and not scratch_fileop and (repo_hit or not in_scratch):
         # Same bias as the redirect path below: outside known scratch space a
         # relative-path fileop (rm foo, mv a b) is counted as acting rather
-        # than scratch — a repo-root cwd is the common case.
+        # than scratch — a repo-root cwd is the common case. A scratch-only
+        # fileop is exempt: absolute repo paths elsewhere in the same line are
+        # reads, and the relative-path bias cannot apply to absolute operands.
         evidence_source = unq if sh else cmd
         return "acting", evidence_source[max(0, fm.start() - 20) : fm.end() + 60]
     for t in targets:
