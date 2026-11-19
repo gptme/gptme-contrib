@@ -264,7 +264,7 @@ class QueueGenerator:
                         title = line[2:].strip()
                         break
 
-                # Read dependency fields (requires is canonical, depends is deprecated alias)
+                # Read dependency fields (depends and requires are both accepted)
                 requires_list = post.metadata.get("requires", []) or post.metadata.get(
                     "depends", []
                 )

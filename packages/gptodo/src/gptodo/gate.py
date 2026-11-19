@@ -178,7 +178,7 @@ def validate_gate(metadata: dict[str, Any]) -> list[str]:
             errors.append("gate.reversible is required for kind decision")
     if kind is GateKind.TASK and ref is not None:
         # Match load_tasks: only lists are dependencies, and nonempty requires
-        # takes precedence over the deprecated depends alias (not their union).
+        # takes precedence over the depends alias (not their union).
         requires = metadata.get("requires")
         depends = metadata.get("depends")
         requires = requires if isinstance(requires, list) else []

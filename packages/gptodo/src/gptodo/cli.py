@@ -243,7 +243,7 @@ def cli(verbose, tasks_dir):
         verified: string (what was measured, where, the value, the date)
         tracking_issue: string (human URL of the live coordination issue/PR)
         upstream_coordination_id: string (machine claim key, e.g. github:OWNER/REPO#NUM)
-        depends: list (deprecated, use requires)
+        depends: list (dependencies; requires is an accepted alias)
         requires: list (dependency references)
         tags: list
         tracking: list (external issue/PR URLs)
@@ -2704,7 +2704,7 @@ def edit(
         "coordination_family": {"type": "string"},  # Tasks that must not run concurrently
         # List fields handled separately via --add/--remove
         "tags": {"type": "list"},
-        "depends": {"type": "list"},  # Deprecated, use requires instead
+        "depends": {"type": "list"},  # First-class dependency field; requires is an accepted alias
         "blocks": {"type": "list"},  # Deprecated, use requires instead (note: different semantics)
         "requires": {"type": "list"},  # Required dependencies (canonical)
         "related": {"type": "list"},  # Related items (informational)

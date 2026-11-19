@@ -184,7 +184,8 @@ Behaviour attached to particular fields:
 
 - **Blocked work.** `requires:` lists task IDs or issue URLs. A task whose dependencies are
   not resolved has the virtual effective state `blocked` (see `gptodo effective <id>`).
-  `depends:` and `blocks:` are deprecated aliases.
+  `depends:` is a first-class dependency field (`requires:` is an accepted alias);
+  `blocks:` is a deprecated inverse-semantics alias.
 - **Hidden until a date.** `wait: 2026-02-01` (a date or datetime) keeps a task out of
   `ready`/`next` until that time.
 - **External blockers.** `waiting_for:` takes free text or structured conditions that
