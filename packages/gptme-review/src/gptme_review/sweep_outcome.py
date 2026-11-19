@@ -36,6 +36,12 @@ QUOTA_LIMIT_MARKERS = (
     "scraping github",
     "key limit exceeded",
     "daily limit",
+    # OpenRouter's account-wide cap is worded differently from its per-key cap:
+    # "Workspace daily budget of $10.00 exceeded" (HTTP 403). Without this the
+    # openrouter_workspace_budget refusal reads as a systemic reviewer collapse
+    # and the sweep unit exits 1 for a quota event that resets on a clock.
+    "workspace daily budget",
+    "openrouter_workspace_budget",
     "insufficient credits",
     "insufficient balance",
     "openrouter_credits",
