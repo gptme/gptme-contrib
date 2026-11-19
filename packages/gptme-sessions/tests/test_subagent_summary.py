@@ -185,6 +185,18 @@ def test_cmd_mutation_scratch_heredoc_delimiter_is_not_a_target(marker: str) -> 
     assert cmd_mutation(f"cat > /tmp/out {marker}\nhi\nEOF")[0] == "scratch"
 
 
+@pytest.mark.parametrize(
+    "consumer", ["cat > /tmp/test_boundary.py", "cat > /tmp/python.py", "python3 -", "python -"]
+)
+@pytest.mark.parametrize("marker", ["<<'PY'", "<< PY"])
+def test_cmd_mutation_saved_python_is_data_but_stdin_python_executes(
+    consumer: str, marker: str
+) -> None:
+    command = f"{consumer} {marker}\nPath('main.go').write_text('x')\nPY"
+    expected = "scratch" if consumer.startswith("cat ") else "acting"
+    assert cmd_mutation(command)[0] == expected
+
+
 def test_cmd_mutation_relative_fileop_still_acting() -> None:
     # A repo-root cwd is the common case, so relative operands keep the bias.
     assert cmd_mutation("mkdir -p state/x")[0] == "acting"
