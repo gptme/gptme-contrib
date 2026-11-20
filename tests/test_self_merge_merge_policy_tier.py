@@ -104,12 +104,20 @@ def test_fetch_failure_or_file_mismatch_fails_closed(fetched) -> None:
     assert remaining == [CATEGORY] and warning is None
 
 
-def test_unreadable_policy_fails_closed() -> None:
-    with patch.object(mp, "load_policy", side_effect=OSError("gone")):
+@pytest.mark.parametrize(
+    "error",
+    [OSError("gone"), ValueError("merge policy differs from trusted origin/master")],
+)
+def test_unreadable_policy_fails_closed_visibly(error) -> None:
+    # A lagging gate checkout must not ignore a new rollout repo silently.
+    with patch.object(mp, "load_policy", side_effect=error):
         remaining, warning, verdict = smc.merge_policy_tier_waiver(
             [CATEGORY], repo=REPO, number=1, files=["docs/a.md"]
         )
-    assert (remaining, warning, verdict) == ([CATEGORY], None, None)
+    assert (remaining, verdict) == ([CATEGORY], None)
+    assert warning is not None
+    assert warning.startswith("Merge-policy tier not evaluated:")
+    assert str(error) in warning
 
 
 def test_gate_classifier_uses_gate_predicates() -> None:
