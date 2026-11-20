@@ -185,6 +185,8 @@ def test_failed_write_is_retried():
     pub.handle(ev("tool", tool_class="read"))
     assert pub.tick() == 0
     ok["value"] = True
+    assert pub.tick() == 0
+    clock.t += 20
     assert pub.tick() == 1
     assert len(attempts) == 2
 
@@ -238,3 +240,30 @@ def test_token_failure_is_retryable_without_disclosing_command(monkeypatch, caps
     stderr = capsys.readouterr().err
     assert "CalledProcessError" in stderr
     assert "secret" not in stderr
+
+
+def test_failed_urgent_write_is_spaced_and_keeps_latest_row():
+    clock = Clock()
+    attempts: list[dict] = []
+
+    def fail(row):
+        attempts.append(row)
+        return False
+
+    pub = Publisher(
+        {"bob": "bob"},
+        fail,
+        visibility=FakeVisibility({"gptme/gptme"}),
+        clock=clock,
+    )
+    pub.handle(ev("commit", detail={"repo": "gptme/gptme", "sha": "abc1234"}))
+    pub.tick()
+    for _ in range(100):
+        pub.tick()
+    assert len(attempts) == 1
+    pub.handle(ev("tool", tool_class="write"))
+    clock.t += 20
+    pub.tick()
+    assert len(attempts) == 2
+    assert attempts[-1]["activity"] == "write"
+    assert attempts[-1]["milestone_url"].endswith("/abc1234")

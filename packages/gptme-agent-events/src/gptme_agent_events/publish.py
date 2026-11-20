@@ -86,6 +86,7 @@ class AgentState:
     private_commits: deque = field(default_factory=deque)  # timestamps
     published: dict | None = None  # last row sent
     last_write: float = 0.0
+    retry_at: float = 0.0
     urgent: bool = False
 
 
@@ -184,6 +185,8 @@ class Publisher:
         now = self.clock()
         written = 0
         for feed_id, st in self.state.items():
+            if now < st.retry_at:
+                continue
             row = self.row(feed_id, st, now)
             changed = row != st.published
             if not changed and not (
@@ -200,7 +203,10 @@ class Publisher:
                 row = self.row(feed_id, st, now)
             if self.write(row):
                 st.published, st.last_write, st.urgent = row, now, False
+                st.retry_at = 0.0
                 written += 1
+            else:
+                st.retry_at = now + max(self.min_interval, 1.0)
         return written
 
 
