@@ -57,10 +57,41 @@ behind the worker size gate a 403 that instantly killed a tiny run is an
 auth/entitlement death regardless of agent; the split only matters for the
 prose-safe envelope matcher.
 
+## Credential death vs edge block (stream-json session logs)
+
+A headless Claude Code session (`claude -p --output-format stream-json`) that
+fails with an auth-looking error can mean two different things:
+
+  - **`oauth_dead`**: the credential is dead. Every further launch fails until a
+    human logs in again, so stop launching and page someone.
+  - **`edge_403`**: an edge/proxy (for example a Cloudflare "403 Attention
+    Required!" interstitial) rejected one request while the credential is fine.
+    The CLI still labels this `"error": "authentication_failed"`, so a marker
+    match alone pages a human for nothing. Retry later; do not page.
+
+`classify_stream_json(lines)` / `classify_stream_json_log(path)` tell these apart
+with two rules. A real credential death fails on the *first* API call of a
+session (nothing works), so the failure is `edge_403` if either an earlier
+assistant turn in the same session succeeded (the credential demonstrably
+worked this session) or the error text is an edge/WAF page (`cloudflare`,
+`attention required`, HTML). If the credential really dies mid-session, the next
+session fails on its first call and is classified `oauth_dead`: the page is
+delayed by one launch, not lost. A log with no auth signal is `none`.
+
+Only the last session in the log counts: each `system`/`init` event starts a
+new session, so turns from an earlier session appended to the same log never
+mark the current one as working. An organization that disabled subscription
+access (`"error": "oauth_org_not_allowed"` or the API code
+`oauth_not_allowed_for_organization`) is `oauth_dead` wherever it appears: those
+structured codes cannot come from an edge page, and retrying does not fix them.
+A bare 403 without them is not enough.
+
 Public API:
   - `is_transient_401(text)`
   - `is_trajectory_auth_death(text, include_403=False)`
   - `is_auth_death(output_file, max_bytes)`
+  - `classify_stream_json(lines)` / `classify_stream_json_log(path)`
+    -> `"oauth_dead" | "edge_403" | "none"`
 
 CLI (for bash surfaces — operator loops, spawn scripts, autonomous runners):
   - `--classify-stdin`            read stdin; exit 0 iff a 401 signature present
@@ -69,15 +100,21 @@ CLI (for bash surfaces — operator loops, spawn scripts, autonomous runners):
   - `--include-403`               (with --classify-trajectory) fold 403 envelope
                                   into auth-death (Alice's org-disabled policy)
   - `--max-bytes N`               override the size floor for --classify-file
+  - `--classify-stream-json PATH` three-way verdict for a stream-json session
+                                  log; prints the verdict on stdout and exits
+                                  0 = oauth_dead, 2 = edge_403, 1 = none
 
 Exit 0 = transient-401/auth-death detected; exit 1 = not (or unreadable).
+`--classify-stream-json` adds exit 2 for an edge block that must not page.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
 # Auth-failure markers emitted by the Claude Code / run.sh path on a dead auth
@@ -177,6 +214,136 @@ def is_auth_death(output_file: Path, max_bytes: int = DEFAULT_MAX_BYTES) -> bool
     return is_transient_401(text)
 
 
+# --- stream-json session logs: credential death vs edge block ---
+
+OAUTH_DEAD = "oauth_dead"
+EDGE_403 = "edge_403"
+NO_AUTH_FAILURE = "none"
+
+#: CLI exit codes for ``--classify-stream-json`` (0 keeps the module-wide
+#: "exit 0 = auth death" contract; 2 is the edge block that must not page).
+STREAM_JSON_EXIT_CODES = {OAUTH_DEAD: 0, NO_AUTH_FAILURE: 1, EDGE_403: 2}
+
+# Substrings (lowercased) that mark the error text as an edge/WAF page rather
+# than an API auth response.
+EDGE_BLOCK_MARKERS = ("cloudflare", "attention required", "<html", "<!doctype")
+
+# Reuse the canonical auth signatures, but a bare 403 may be quota rather than
+# credential death. Keep the original stream-specific authenticate/OAuth forms.
+_STREAM_AUTH_RE = re.compile(
+    "|".join(p for p in AUTH_DEATH_PATTERNS if p != r"\b403\b"), re.IGNORECASE
+)
+
+# Structured codes for an organization that disabled subscription access.
+ORG_REFUSAL_ERRORS = frozenset({"oauth_org_not_allowed"})
+ORG_REFUSAL_API_CODES = frozenset({"oauth_not_allowed_for_organization"})
+
+
+def _stream_event_text(ev: dict) -> str:
+    """Human-readable text of one event: ``result`` plus message text blocks."""
+    parts = [str(ev.get("result") or "")]
+    msg = ev.get("message")
+    if isinstance(msg, dict):
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(str(block.get("text") or ""))
+        elif isinstance(content, str):
+            parts.append(content)
+    return " ".join(parts)
+
+
+def _is_org_refusal(ev: dict) -> bool:
+    """True iff this event carries the organization-disabled OAuth error codes."""
+    if ev.get("error") in ORG_REFUSAL_ERRORS:
+        return True
+    code = ev.get("apiErrorCode", ev.get("api_error_code"))
+    return isinstance(code, str) and code in ORG_REFUSAL_API_CODES
+
+
+def _is_stream_auth_signal(ev: dict) -> bool:
+    """True iff this stream-json event reports an authentication failure.
+
+    Keys on structured fields only (never on tool output), so a session that
+    merely *discusses* 401s is not an auth failure.
+    """
+    if ev.get("error") == "authentication_failed":
+        return True
+    if ev.get("type") == "result" and (
+        ev.get("terminal_reason") == "api_error" or ev.get("is_error") is True
+    ):
+        msg = str(ev.get("result") or "").lower()
+        return (
+            bool(_STREAM_AUTH_RE.search(msg)) or "authenticate" in msg or "oauth" in msg
+        )
+    return False
+
+
+def classify_stream_json(lines: Iterable[str]) -> str:
+    """Classify a stream-json session log as ``oauth_dead``, ``edge_403`` or ``none``.
+
+    ``lines`` are the raw log lines. Blank, non-JSON and non-object lines are
+    skipped, so a truncated log (a hard kill mid-line) is classified on what it
+    did write.
+
+    Only the last session counts: a ``system``/``init`` event starts a new
+    session and resets what was seen before it.
+
+    - ``none``: no auth-failure event in the session.
+    - ``edge_403``: an auth failure, but either an assistant turn succeeded
+      before it (the credential worked this session) or its text is an edge/WAF
+      page. Retry later; do not page and do not count it toward an auth breaker.
+    - ``oauth_dead``: an auth failure before any successful turn, with no edge
+      markers, or an organization-disabled OAuth error anywhere in the session.
+      The credential is dead; stop launching and page.
+    """
+    saw_success = False
+    org_refused = False
+    auth_texts: list[str] = []
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("type") == "system" and ev.get("subtype") == "init":
+            saw_success = org_refused = False
+            auth_texts = []
+            continue
+        if _is_org_refusal(ev):
+            org_refused = True
+            auth_texts.append(_stream_event_text(ev).lower())
+            continue
+        if _is_stream_auth_signal(ev):
+            auth_texts.append(_stream_event_text(ev).lower())
+            continue
+        if ev.get("type") == "assistant" and not ev.get("error") and not auth_texts:
+            saw_success = True
+    if not auth_texts:
+        return NO_AUTH_FAILURE
+    if org_refused:
+        return OAUTH_DEAD
+    if saw_success:
+        return EDGE_403
+    if any(m in t for t in auth_texts for m in EDGE_BLOCK_MARKERS):
+        return EDGE_403
+    return OAUTH_DEAD
+
+
+def classify_stream_json_log(path: str | Path) -> str:
+    """:func:`classify_stream_json` over a log file; ``none`` if unreadable."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return classify_stream_json(fh)
+    except (OSError, ValueError):
+        return NO_AUTH_FAILURE
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Transient-401 / auth-death classifier"
@@ -198,6 +365,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Prose-safe auth-death check on a full session trajectory "
         "(matches the JSON error envelope only; exit 0 iff auth death)",
     )
+    group.add_argument(
+        "--classify-stream-json",
+        metavar="PATH",
+        help="Three-way verdict for a stream-json session log: prints "
+        "oauth_dead/edge_403/none; exit 0 = oauth_dead, 2 = edge_403, 1 = none",
+    )
     parser.add_argument(
         "--include-403",
         action="store_true",
@@ -217,6 +390,11 @@ def main(argv: list[str] | None = None) -> int:
             print("transient-401", file=sys.stderr)
             return 0
         return 1
+
+    if args.classify_stream_json:
+        verdict = classify_stream_json_log(args.classify_stream_json)
+        print(verdict)
+        return STREAM_JSON_EXIT_CODES[verdict]
 
     if args.classify_trajectory:
         try:
