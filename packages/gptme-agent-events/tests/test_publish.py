@@ -347,3 +347,38 @@ def test_cli_tolerates_structurally_incomplete_events():
     result = CliRunner().invoke(main, ["publish", "--agent", "bob", "--dry-run"], input=lines)
     assert result.exit_code == 0, result.output
     assert json.loads(result.output.splitlines()[-1])["activity"] == "read"
+
+
+def test_idle_agent_clears_revoked_milestone_without_a_new_event():
+    """An idle row never becomes due again, so revocation needs its own timer."""
+    pub, rows, clock, vis = make()
+    pub.handle(ev("commit", detail={"repo": "gptme/gptme", "sha": "abc1234"}))
+    pub.tick()
+    assert rows[-1]["milestone_url"].endswith("/abc1234")
+    clock.t += 301  # quiet past idle_after: the row flips to idle and settles
+    pub.tick()
+    assert rows[-1]["state"] == "idle"
+    published = len(rows)
+    vis.public.clear()
+    clock.t += 240  # heartbeat interval elapses with no event at all
+    assert pub.tick() == 1
+    assert len(rows) == published + 1
+    assert rows[-1]["state"] == "idle"
+    assert all(
+        rows[-1][key] is None
+        for key in ("milestone_kind", "milestone_repo", "milestone_url", "milestone_at")
+    )
+    clock.t += 60
+    assert pub.tick() == 0  # and it goes quiet again once cleared
+
+
+def test_new_milestone_is_rechecked_even_within_the_same_clock_tick():
+    """A timer recheck in this tick must not authorize a milestone that just arrived."""
+    pub, rows, _clock, vis = make()
+    pub.handle(ev("commit", detail={"repo": "gptme/gptme", "sha": "abc1234"}))
+    pub.tick()
+    pub.handle(ev("commit", detail={"repo": "gptme/gptme", "sha": "deadbeef"}))
+    vis.public.clear()
+    pub.tick()  # same clock value: the periodic recheck already ran this tick
+    assert rows[-1]["milestone_repo"] is None
+    assert "deadbeef" not in json.dumps(rows)

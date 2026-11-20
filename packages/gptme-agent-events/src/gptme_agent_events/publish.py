@@ -83,6 +83,7 @@ class AgentState:
     activity: str | None = None
     sessions: dict[str, float] = field(default_factory=dict)  # session -> last seen
     milestone: dict | None = None
+    milestone_checked: float = float("-inf")  # last positive-visibility recheck
     private_commits: deque = field(default_factory=deque)  # timestamps
     published: dict | None = None  # last row sent
     last_write: float = 0.0
@@ -153,6 +154,7 @@ class Publisher:
                 else f"https://github.com/{repo}/"
             )
         st.milestone = {"kind": ev.kind, "repo": repo, "url": url, "at": now}
+        st.milestone_checked = float("-inf")  # a new milestone is never cached-positive
         st.urgent = True
 
     # -- output ---------------------------------------------------------------
@@ -187,6 +189,14 @@ class Publisher:
         for feed_id, st in self.state.items():
             if now < st.retry_at:
                 continue
+            # Reauthorize retained details on a timer, not only when a row is
+            # due: an idle agent's row stops changing, so without this a
+            # revoked milestone would stay published until the next event.
+            if st.milestone and now - st.milestone_checked >= self.heartbeat:
+                st.milestone_checked = now
+                if not self.visibility.is_public(st.milestone["repo"], recheck=True):
+                    st.milestone = None
+                    st.urgent = True
             row = self.row(feed_id, st, now)
             changed = row != st.published
             if not changed and not (
@@ -202,7 +212,13 @@ class Publisher:
                 continue
             # Reauthorize retained details before each outgoing row, including
             # heartbeat/idle writes. Cached positives never authorize disclosure.
-            if st.milestone and not self.visibility.is_public(st.milestone["repo"], recheck=True):
+            # Skipped when the timer above already rechecked this tick.
+            if (
+                st.milestone
+                and st.milestone_checked < now
+                and not self.visibility.is_public(st.milestone["repo"], recheck=True)
+            ):
+                st.milestone_checked = now
                 st.milestone = None
                 row = self.row(feed_id, st, now)
             if self.write(row):

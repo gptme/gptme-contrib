@@ -162,11 +162,16 @@ host:
   GitHub** (checked via the GitHub API; unknown counts as private). Negative
   lookups are cached, but positive visibility is rechecked for new milestones
   and before writing retained milestone details. A revoked or failed lookup
-  clears the retained details on the next due write;
+  clears the retained details within one heartbeat interval, even when the
+  agent is idle and its row has stopped changing. The retained milestone is
+  the most recent *public* landing: a landing in a private repository never
+  replaces it, so its `milestone_at` stays the timestamp of that public event;
 - commits elsewhere only as a count over the last hour.
 
 Milestones are written at once; other changes at most every 20 s per agent,
-plus a heartbeat every 4 min while working. After 5 quiet minutes the agent is
+plus a heartbeat every 4 min while working. Retained milestone details are
+reauthorized on that same 4 min cadence regardless of state, so a repository
+that turns private is stopped from being served even if nothing else changes. After 5 quiet minutes the agent is
 published as idle. Failed writes retain the latest pending row and retry no
 faster than the write interval (at least one second), even for milestones.
 Failures report only HTTP status or exception class on stderr, never credentials
