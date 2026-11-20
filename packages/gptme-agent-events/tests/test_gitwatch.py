@@ -384,3 +384,63 @@ def test_git_reflog_rewrite_changing_old_sha_does_not_replay(repo, monkeypatch):
     assert len(w.poll()) == 3
     git("reflog", "delete", "--rewrite", "HEAD@{1}", cwd=repo)
     assert w.poll() == []
+
+
+def test_push_uses_destination_not_public_origin(repo, tmp_path):
+    remote = tmp_path / "private.git"
+    git("init", "-q", "--bare", str(remote), cwd=tmp_path)
+    git("remote", "add", "backup", str(remote), cwd=repo)
+    w = GitWatcher()
+    w.watch(str(repo))
+    commit(repo, "private destination", "s")
+    git("push", "-q", "backup", "main", cwd=repo)
+    push = next(e for e in w.poll() if e.kind == "push")
+    assert not push.detail.get("repo")
+    assert push.detail["ref"] == "backup/main"
+
+
+@pytest.mark.parametrize(
+    ("destination", "expected_repo"),
+    [
+        ("ssh://git@internal-github.com/gptme/gptme.git", None),
+        ("https://internal-github.com/gptme/gptme.git", None),
+        ("git@internal-github.com:gptme/gptme.git", None),
+        ("https://github.com.evil.example/gptme/gptme.git", None),
+        ("/private/github.com/gptme/gptme.git", None),
+        ("https://github.com/gptme/gptme.git", "gptme/gptme"),
+        ("ssh://git@github.com/gptme/gptme.git", "gptme/gptme"),
+        ("git@github.com:gptme/gptme.git", "gptme/gptme"),
+        ("https://github.com:2222/gptme/gptme.git", None),
+        ("ssh://git@github.com:2222/gptme/gptme.git", None),
+        ("https://github.com:bad/gptme/gptme.git", None),
+        ("https://github.com:443/gptme/gptme.git", "gptme/gptme"),
+        ("ssh://git@github.com:22/gptme/gptme.git", "gptme/gptme"),
+    ],
+)
+def test_only_exact_github_hosts_authorize_repository_details(
+    repo, tmp_path, destination, expected_repo
+):
+    from gptme_agent_events.extractors import github_slug
+
+    remote = tmp_path / "private.git"
+    git("init", "-q", "--bare", str(remote), cwd=tmp_path)
+    git("remote", "add", "backup", str(remote), cwd=repo)
+    w = GitWatcher()
+    w.watch(str(repo))
+    commit(repo, "private destination", "s")
+    git("push", "-q", "backup", "main", cwd=repo)
+    # Change metadata after the local push: never contact any test URL.
+    git("remote", "set-url", "backup", destination, cwd=repo)
+    push = next(e for e in w.poll() if e.kind == "push")
+    # The reflog proves a push happened, not its historical destination URL.
+    # Even a now-public remote must not authorize this earlier private push.
+    assert push.detail.get("repo") is None
+
+    git("remote", "set-url", "origin", destination, cwd=repo)
+    _github_slug.cache_clear()
+    assert github_slug(str(repo)) == expected_repo
+    watcher = GitWatcher()
+    watcher.watch(str(repo))
+    commit(repo, "origin provenance", "s")
+    commits = [e for e in watcher.poll() if e.kind == "commit"]
+    assert commits[-1].detail.get("repo") == expected_repo

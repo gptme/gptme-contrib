@@ -114,8 +114,13 @@ Events never contain prompts, replies, shell commands or tool output. Commands
 are inspected in memory to classify them and then dropped. The stream is meant
 to stay private (stdout, ssh). Any sink that publishes beyond the agent's own
 host must drop `detail.cwd`, `detail.dir` and `detail.path`, and only forward
-`repo`/`sha`/`url`/`ref` for public repos. The repo slug is resolved on the agent's host from the checkout's
-`origin` remote.
+`repo`/`sha`/`url`/`ref` for public repos. Commit slugs come from the checkout's
+`origin`, parsed with an exact GitHub host and scheme-default port. Pushes
+remain unlinked: reflogs record the remote name, not the URL used at push time,
+so even a currently public remote cannot authorize historical push details.
+Shell-only pushes also do not carry an authorized repo, and landings never
+inherit the session cwd's repo. Push events still reach private sinks such as
+sound; they do not replace the public feed's latest authorized milestone.
 
 ## Sounds
 
@@ -147,6 +152,51 @@ gptme ships with:
 Override with `--map tool:shell=sawing`, or silence with `--map tool:read=`.
 Tool sounds are throttled during bursts (`--min-gap`, default 0.15 s);
 milestones are never dropped for spacing.
+
+## Publishing a public status feed
+
+`publish` keeps one row per agent up to date in gptme.ai's `agent_status`
+table (the "what are the agents doing" feed). Only public-safe facts leave the
+host:
+
+- `state` (working/idle) and the latest `activity` class, never task text,
+  commands, paths or output;
+- the latest commit, push or PR **only if its repository is public on
+  GitHub** (checked via the GitHub API; unknown counts as private). Negative
+  lookups are cached, but positive visibility is rechecked for new milestones
+  and before writing retained milestone details. A revoked or failed lookup
+  clears the retained details within one heartbeat interval, even when the
+  agent is idle and its row has stopped changing. The retained milestone is
+  the most recent *public* landing: a landing in a private repository never
+  replaces it, so its `milestone_at` stays the timestamp of that public event;
+- commits elsewhere only as a count over the last hour.
+
+Milestones are written at once; other changes at most every 20 s per agent,
+plus a heartbeat every 4 min while working. Retained milestone details are
+reauthorized on that same 4 min cadence regardless of state, so a repository
+that turns private is stopped from being served even if nothing else changes. After 5 quiet minutes the agent is
+published as idle. Failed writes retain the latest pending row and retry no
+faster than the write interval (at least one second), even for milestones.
+Failures report only HTTP status or exception class on stderr, never credentials
+or token-command output. End-of-input flushes debounced changes once; it does
+not override failed-write backoff or wait for recovery.
+
+```bash
+# One host publishing for several agents, pulling their streams over ssh:
+{ gptme-agent-events tail --agent bob &
+  ssh alice@alice '~/.local/bin/gptme-agent-events tail --agent alice --no-git' &
+  ssh gordon '~/.local/bin/gptme-agent-events tail --agent gordon --no-git' & } \
+  | gptme-agent-events publish --agent bob --agent alice --agent gordon \
+      --supabase-url "$GPTME_FEED_SUPABASE_URL" --anon-key "$GPTME_FEED_ANON_KEY" \
+      --token-cmd "my-gptme-ai-token"
+
+# See what would be written:
+gptme-agent-events tail | gptme-agent-events publish --agent bob --dry-run
+```
+
+`--token-cmd` prints an access token for the account that owns the agents in
+`public_agents`; it is re-run when the token expires. `GITHUB_TOKEN`, if set,
+raises the GitHub API rate limit for visibility lookups.
 
 ## Library use
 

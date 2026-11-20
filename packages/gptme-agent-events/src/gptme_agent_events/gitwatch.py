@@ -37,9 +37,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .event import AgentEvent, normalize_ts
+from .remote import github_remote_slug
 
 _REFLOG_RE = re.compile(r"^([0-9a-f]{40}) ([0-9a-f]{40}) .*? (\d+) ([+-]\d{2})(\d{2})\t(.*)$")
-_GITHUB_REMOTE_RE = re.compile(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$")
 
 
 def _git(args: list[str], timeout: float = 5) -> str | None:
@@ -99,8 +99,7 @@ class GitWatcher:
         common = self.common_dir(directory)
         if common is not None and common not in self._repos:
             url = _git(["--git-dir", str(common), "config", "--get", "remote.origin.url"])
-            m = _GITHUB_REMOTE_RE.search(url or "")
-            self._repos[common] = (m.group(1) if m else None, self.clock())
+            self._repos[common] = (github_remote_slug(url or ""), self.clock())
         return common
 
     def watches(self, directory: str) -> bool:
@@ -252,11 +251,16 @@ class GitWatcher:
                     else:
                         continue
                     detail: dict[str, str] = {"sha": new[:12], "source": "git", "dir": str(common)}
-                    if slug:
-                        detail["repo"] = slug
+                    event_slug = slug
                     if is_remote:
                         ref = log.relative_to(common / "logs" / "refs" / "remotes")
                         detail["ref"] = str(ref)
+                        # Reflogs record the remote name, not its historical URL.
+                        # Current config cannot authorize public push details: a
+                        # private destination may have been replaced since the push.
+                        event_slug = None
+                    if event_slug:
+                        detail["repo"] = event_slug
                     events.append(
                         AgentEvent(
                             kind=kind,

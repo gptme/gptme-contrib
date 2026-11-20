@@ -262,7 +262,8 @@ class TestLandingDetail:
             "repo": "gptme/gptme",
             "sha": "1a2b3c4d",
         }
-        assert push.detail["repo"] == "gptme/gptme" and "sha" not in push.detail
+        # Shell-only push evidence does not establish its destination.
+        assert "repo" not in push.detail and "sha" not in push.detail
 
     def test_cc_commit_uses_record_cwd(self, repo):
         ex = ClaudeCodeExtractor("s")
@@ -344,3 +345,17 @@ def test_github_slug_retries_missing_remote(tmp_path):
         check=True,
     )
     assert github_slug(str(tmp_path)) == "o/new"
+
+
+def test_unknown_landing_never_inherits_public_cwd(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "gptme_agent_events.extractors.github_slug",
+        lambda directory: "o/public" if directory == "/public" else None,
+    )
+    ex = ClaudeCodeExtractor("s")
+    ex.cwd = "/public"
+    (event,) = ex._landed(
+        "t", "Bash", ["commit"], f"git -C {tmp_path} commit -m x", "/public", "[main abc1234] x"
+    )
+    assert not event.detail.get("repo")
+    assert event.detail["sha"] == "abc1234"

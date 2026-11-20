@@ -191,5 +191,94 @@ def sound(
         pass
 
 
+@main.command()
+@click.option(
+    "--agent",
+    "agents",
+    multiple=True,
+    required=True,
+    metavar="NAME[=FEED_ID]",
+    help="Publish this stream agent (as FEED_ID, default NAME). Repeatable; others are ignored.",
+)
+@click.option("--supabase-url", envvar="GPTME_FEED_SUPABASE_URL", help="Supabase project URL.")
+@click.option("--anon-key", envvar="GPTME_FEED_ANON_KEY", help="Supabase anon (public) key.")
+@click.option(
+    "--token-cmd",
+    envvar="GPTME_FEED_TOKEN_CMD",
+    help="Command that prints an access token for the account that owns the agents.",
+)
+@click.option("--min-interval", default=20.0, show_default=True, help="Seconds between writes.")
+@click.option("--heartbeat", default=240.0, show_default=True, help="Refresh while working (s).")
+@click.option("--idle-after", default=300.0, show_default=True, help="Quiet seconds before idle.")
+@click.option("--dry-run", is_flag=True, help="Print rows as JSON instead of writing them.")
+def publish(
+    agents: tuple[str, ...],
+    supabase_url: str | None,
+    anon_key: str | None,
+    token_cmd: str | None,
+    min_interval: float,
+    heartbeat: float,
+    idle_after: float,
+    dry_run: bool,
+) -> None:
+    """Keep each agent's public status row up to date from events on stdin.
+
+    Only public-safe facts are written: working/idle, the activity class, the
+    latest milestone in a public GitHub repo, and a count of other commits.
+    """
+    import queue
+    import threading
+
+    from .publish import Publisher, SupabaseWriter
+
+    mapping = {}
+    for spec in agents:
+        name, _, feed_id = spec.partition("=")
+        mapping[name] = feed_id or name
+
+    if dry_run:
+
+        def write(row: dict) -> bool:
+            click.echo(json.dumps(row))
+            sys.stdout.flush()
+            return True
+
+    else:
+        if not (supabase_url and anon_key and token_cmd):
+            raise click.UsageError("--supabase-url, --anon-key and --token-cmd are required")
+        write = SupabaseWriter(supabase_url, anon_key, token_cmd)
+
+    pub = Publisher(
+        mapping, write, min_interval=min_interval, heartbeat=heartbeat, idle_after=idle_after
+    )
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def reader() -> None:
+        for line in sys.stdin:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=reader, daemon=True).start()
+    try:
+        while True:
+            try:
+                line = lines.get(timeout=1.0)
+            except queue.Empty:
+                line = ""
+            if line is None:
+                pub.tick(flush=True)
+                return
+            if line.strip():
+                try:
+                    data = json.loads(line)
+                except ValueError:
+                    data = None
+                if isinstance(data, dict):
+                    pub.handle(AgentEvent.from_dict(data))
+            pub.tick()
+    except KeyboardInterrupt:
+        pass
+
+
 if __name__ == "__main__":
     main()

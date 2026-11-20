@@ -22,10 +22,10 @@ from gptme_sessions.shell_parse import command_repo_dir
 
 from .classify import classify_tool, landing_kinds
 from .event import AgentEvent, normalize_ts
+from .remote import github_remote_slug
 
 _COMMIT_LINE_RE = re.compile(r"^\[[^\]\n]*?\b([0-9a-f]{7,40})\]", re.MULTILINE)
 _PR_URL_RE = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/\d+")
-_GITHUB_REMOTE_RE = re.compile(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$")
 
 
 def github_slug(directory: str) -> str | None:
@@ -51,10 +51,10 @@ def _github_slug(directory: str) -> str:
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError) as exc:
         raise LookupError(directory) from exc
-    m = _GITHUB_REMOTE_RE.search(url)
-    if not m:
+    slug = github_remote_slug(url)
+    if not slug:
         raise LookupError(directory)
-    return m.group(1)
+    return slug
 
 
 # Preserve the cache invalidation hook used by callers and tests.
@@ -72,7 +72,9 @@ def landing_detail(kind: str, command: str | None, cwd: str | None, output: str)
     directory = command_repo_dir(command or "", cwd)
     if directory:
         detail["dir"] = directory  # private: where the commit/push ran
-    slug = github_slug(directory) if directory else None
+    # Only git's remote-tracking reflog identifies a push destination reliably.
+    # Shell-only pushes remain unlinked rather than assuming origin.
+    slug = github_slug(directory) if directory and kind == "commit" else None
     if slug:
         detail["repo"] = slug
     if kind == "commit":
@@ -117,7 +119,7 @@ class Extractor:
             # Where the agent is working: private cwd, plus the repo it belongs to.
             context: dict[str, str] = {"cwd": self.cwd}
             slug = github_slug(self.cwd)
-            if slug:
+            if slug and kind not in ("commit", "push", "pr_open"):
                 context["repo"] = slug
             kw["detail"] = {**context, **(kw.get("detail") or {})}
         return AgentEvent(
