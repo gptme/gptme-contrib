@@ -15,6 +15,11 @@ injection bounds, without lesson BM25 or skill-name matching.
 
 Already-injected lessons are tracked via a session state file to avoid duplicates.
 
+Injected lesson text is bounded by byte budgets: MATCH_LESSONS_EVENT_BYTES
+(default 8000 per event) and MATCH_LESSONS_SESSION_BYTES (default 24000 per
+session); 0 disables either. Whole lessons are kept in priority order; lessons
+that do not fit are skipped and stay eligible for later events.
+
 ## Installation
 
 Register in `.claude/settings.json`. Prefer the workspace venv interpreter
@@ -365,6 +370,17 @@ STATE_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "claude-lesson-match"
 # was seen is skipped as ``fixed_prompt_repeat``.
 DEFAULT_PROMPT_REPEAT_WINDOW = 20
 PROMPT_REPEAT_WINDOW_ENV = "MATCH_LESSONS_PROMPT_REPEAT_WINDOW"
+
+# Byte budgets for injected lesson text. The lesson caps above bound the
+# *count* of documents but not their size; workspaces with large lesson corpora
+# were measured injecting 40-75 KB of lessons per session. Budgets count UTF-8
+# bytes of the final ``additionalContext`` string. Whole lessons are kept
+# first-fit in priority order and never cut; a lesson that does not fit is not
+# marked injected, so a later event may still inject it. ``0`` disables a budget.
+DEFAULT_EVENT_BYTE_BUDGET = 8000
+DEFAULT_SESSION_BYTE_BUDGET = 24000
+EVENT_BYTE_BUDGET_ENV = "MATCH_LESSONS_EVENT_BYTES"
+SESSION_BYTE_BUDGET_ENV = "MATCH_LESSONS_SESSION_BYTES"
 
 # Production advisory-skill defaults after the skill-injection-dial-v1 readout.
 MAX_PROMPT_SKILLS = 2
@@ -1102,8 +1118,13 @@ def _state_file(session_id: str) -> Path:
     return STATE_DIR / f"{safe_id}.json"
 
 
-def load_session_state(session_id: str) -> dict:
-    """Load session state (injected lessons, last pretool time)."""
+def load_session_state(session_id: str, *, strict: bool = False) -> dict:
+    """Load session state (injected lessons, last pretool time).
+
+    A missing file is a fresh session. Other failures return the fresh state,
+    or raise with ``strict`` (used by byte-budget accounting, which must not
+    mistake an unreadable counter for zero).
+    """
     try:
         sf = _state_file(session_id)
         if sf.exists():
@@ -1111,19 +1132,78 @@ def load_session_state(session_id: str) -> dict:
             if isinstance(data, dict):
                 return data
     except Exception:
-        pass
+        if strict:
+            raise
     return {"injected": [], "last_pretool": 0}
 
 
-def save_session_state(session_id: str, state: dict) -> None:
-    """Save session state atomically (write-then-rename for POSIX safety)."""
+def save_session_state(session_id: str, state: dict, *, strict: bool = False) -> None:
+    """Save session state atomically (write-then-rename for POSIX safety).
+
+    Failures are swallowed unless ``strict``.
+    """
     try:
         sf = _state_file(session_id)
         tmp = sf.with_suffix(".tmp")
         tmp.write_text(json.dumps(state))
         tmp.replace(sf)  # atomic on POSIX; avoids partial reads under concurrent hooks
     except Exception:
-        pass
+        if strict:
+            raise
+
+
+# Longest wait for the per-session state lock. Holders only read and write a
+# small JSON file, so this is reached only if a holder is stuck. The wait is
+# bounded because the post-emission commit runs after the SIGALRM budget is
+# disarmed and must never hang.
+SESSION_STATE_LOCK_WAIT_SECONDS = 2.0
+
+
+@contextmanager
+def _session_state_lock(session_id: str):
+    """Hold an exclusive per-session lock (best-effort, fail-open).
+
+    Hooks for parallel tool calls run concurrently in one session. The state
+    file is replaced atomically, but a load-modify-save is not, so writers take
+    this sidecar lock to avoid losing each other's updates (notably the byte
+    budget counter). Without ``fcntl``, on any lock error, or after
+    ``SESSION_STATE_LOCK_WAIT_SECONDS`` it degrades to the previous unlocked
+    behaviour; the hook's own timeout still propagates.
+    """
+    handle = None
+    if fcntl is not None:
+        try:
+            handle = open(_state_file(session_id).with_suffix(".state.lock"), "a")
+            deadline = time.monotonic() + SESSION_STATE_LOCK_WAIT_SECONDS
+            while True:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.01)
+        except TimeoutError:
+            if handle is not None:
+                handle.close()
+            raise
+        except Exception:
+            if handle is not None:
+                handle.close()
+            handle = None
+    try:
+        yield
+    finally:
+        if handle is not None:
+            handle.close()  # Closing the descriptor releases the flock.
+
+
+def update_session_state(session_id: str, mutate) -> None:
+    """Locked load-modify-save of the session state (load/save stay fail-open)."""
+    with _session_state_lock(session_id):
+        state = load_session_state(session_id)
+        mutate(state)
+        save_session_state(session_id, state)
 
 
 # --- Fixed-prompt repeat window ---
@@ -1718,6 +1798,93 @@ def format_lessons(
     return "## Matched Lessons (auto-injected)\n\n" + "\n".join(parts)
 
 
+# --- Byte budget ---
+
+
+def _budget_from_env(name: str, default: int) -> int:
+    """Read one byte budget; ``0`` disables it, malformed values keep the default."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(int(raw), 0)
+    except ValueError:
+        return default
+
+
+def byte_budgets() -> tuple[int, int]:
+    """Configured (per-event, per-session) byte budgets; ``0`` means unlimited."""
+    return (
+        _budget_from_env(EVENT_BYTE_BUDGET_ENV, DEFAULT_EVENT_BYTE_BUDGET),
+        _budget_from_env(SESSION_BYTE_BUDGET_ENV, DEFAULT_SESSION_BYTE_BUDGET),
+    )
+
+
+def _context_bytes(matches: list[dict], event_type: str) -> int:
+    return len(format_lessons(matches, set(), event_type=event_type).encode("utf-8"))
+
+
+def fit_lessons_to_budget(
+    matches: list[dict], event_type: str, allowed: int
+) -> tuple[list[dict], list[dict]]:
+    """Keep whole lessons, first-fit in priority order, within ``allowed`` bytes.
+
+    Returns ``(kept, dropped)``. The size measured is the formatted context
+    including its heading, i.e. exactly what would be emitted. A lesson that
+    does not fit is skipped and later, smaller ones may still fit. A single
+    lesson larger than ``allowed`` is dropped, never truncated, so an event
+    whose every lesson is too large injects nothing.
+    """
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    for m in matches:
+        if _context_bytes([*kept, m], event_type) <= allowed:
+            kept.append(m)
+        else:
+            dropped.append(m)
+    return kept, dropped
+
+
+def reserve_lesson_budget(
+    session_id: str, matches: list[dict], event_type: str
+) -> tuple[list[dict], dict]:
+    """Trim ``matches`` to the event and remaining session budget, and debit it.
+
+    Returns ``(kept, receipt_fields)``. The session total lives in the
+    session state file (``budget_bytes``) and is read-modify-written under the
+    session lock, so concurrent hook processes of one session do not both
+    spend the same remainder. The lock is best-effort: if it cannot be taken
+    within ``SESSION_STATE_LOCK_WAIT_SECONDS`` the update proceeds unlocked.
+    Bytes are debited before emission, so a failed emission over-counts. An
+    unreadable or unwritable counter raises instead; the caller then injects
+    untrimmed with ``budget_error``, so those bytes are not counted and a
+    persistently unwritable state file leaves the budget unenforced.
+    """
+    event_budget, session_budget = byte_budgets()
+    if not matches or (event_budget == 0 and session_budget == 0):
+        return matches, {}
+    # Strict I/O: an unreadable or unwritable counter raises, so the caller
+    # falls back to untrimmed injection and marks the receipt, instead of
+    # trimming against (or failing to record) a wrong session total.
+    with _session_state_lock(session_id):
+        state = load_session_state(session_id, strict=True)
+        try:
+            used = max(int(state.get("budget_bytes", 0)), 0)
+        except (TypeError, ValueError):
+            used = 0
+        limits = []
+        if event_budget:
+            limits.append(event_budget)
+        if session_budget:
+            limits.append(max(session_budget - used, 0))
+        kept, dropped = fit_lessons_to_budget(matches, event_type, min(limits))
+        if kept:
+            used += _context_bytes(kept, event_type)
+            state["budget_bytes"] = used
+            save_session_state(session_id, state, strict=True)
+    return kept, {"budget_dropped": len(dropped), "session_bytes": used}
+
+
 def extract_tool_sequence(
     transcript_path: str | None, max_tools: int = 50
 ) -> list[str]:
@@ -2022,8 +2189,9 @@ def select_advisory_lessons(matches: list[dict], hook_input: dict) -> list[dict]
         if not isinstance(query, str) or not query.strip():
             return matches
         if prompt_event:
-            state["selector_query"] = query
-            save_session_state(session_id, state)
+            update_session_state(
+                session_id, lambda state: state.update(selector_query=query)
+            )
         request = {
             "version": 1,
             "runtime": "claude-code",
@@ -2184,9 +2352,9 @@ def main():
                 os.environ.get("BOB_SESSION_ID", ""),
             )
         ):
-            state = load_session_state(session_id)
-            state["selector_query"] = match_text
-            save_session_state(session_id, state)
+            update_session_state(
+                session_id, lambda state: state.update(selector_query=match_text)
+            )
 
     elif event_type == "PreToolUse":
         # Throttle: skip if we matched recently
@@ -2343,9 +2511,9 @@ def _match_and_emit(
         # (otherwise the cooldown never fires and every tool call re-scans at
         # full price). Arming after the work — not before it — means a hook
         # timeout cannot suppress the next invocation for the cooldown window.
-        state = load_session_state(session_id)
-        state["last_pretool"] = time.time()
-        save_session_state(session_id, state)
+        update_session_state(
+            session_id, lambda state: state.update(last_pretool=time.time())
+        )
     if not raw_matches:
         emit_empty(event_type, session_id, "no_match")
         return
@@ -2369,6 +2537,23 @@ def _match_and_emit(
     )
     matches = [m for m in matches if m["path"] not in already_injected]
     matches = apply_skill_cap(matches, skill_cap)
+
+    # --- Byte budget: keep whole lessons in priority order, before logging and
+    # before dedup is committed, so a trimmed lesson stays eligible later ---
+    if matches:
+        try:
+            matches, budget_fields = reserve_lesson_budget(
+                session_id, matches, event_type
+            )
+        except TimeoutError:
+            raise
+        except Exception:
+            # Fail open: a budget accounting error must never block injection.
+            budget_fields = {"budget_error": True}
+        _RECEIPT_FIELDS.update(budget_fields)
+        if not matches:
+            emit_empty(event_type, session_id, "byte_budget")
+            return
 
     # --- Log structured lesson events for efficacy measurement (Phase 1a) ---
     _log_lesson_events(session_id, event_type, matches, already_injected)
@@ -2430,13 +2615,15 @@ def _match_and_emit(
 
     # Commit dedup only after output succeeds. A pre-emission timeout must leave
     # the real session state retryable, not merely the workspace prompt window.
-    state = load_session_state(session_id)
-    existing = set(state.get("injected", []))
-    existing.update(m["path"] for m in matches)
-    state["injected"] = list(existing)
-    if event_type == "PreToolUse":
-        state["last_pretool"] = time.time()
-    save_session_state(session_id, state)
+    # Only lessons that were actually emitted are marked injected.
+    def _commit(state: dict) -> None:
+        existing = set(state.get("injected", []))
+        existing.update(m["path"] for m in matches)
+        state["injected"] = list(existing)
+        if event_type == "PreToolUse":
+            state["last_pretool"] = time.time()
+
+    update_session_state(session_id, _commit)
 
 
 def self_check() -> int:

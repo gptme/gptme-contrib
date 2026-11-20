@@ -31,6 +31,8 @@ injects relevant lessons as `additionalContext` based on:
   the last 20 prompt events (per-run ids normalized), so a launcher's boilerplate
   cannot pin the same documents into every run — see
   [Launcher adoption](#launcher-adoption)
+- Byte budgets: at most 8,000 bytes of lesson text per event and 24,000 per
+  session by default; see [Byte budget](#byte-budget)
 
 ### Installation
 
@@ -134,6 +136,37 @@ Environment overrides:
 |----------|---------|-------------|
 | `MATCH_LESSONS_PROMPT_REPEAT_WINDOW` | `20` | Prompt events before a seen prompt line is matched again; `0` disables the fixed-prompt window |
 | `MATCH_LESSONS_HOOK_BUDGET` | `8.0` | Internal wall-clock budget in seconds before degrading to empty output |
+| `MATCH_LESSONS_EVENT_BYTES` | `8000` | Max bytes of injected lesson text per hook event; `0` disables |
+| `MATCH_LESSONS_SESSION_BYTES` | `24000` | Max bytes of injected lesson text per session; `0` disables |
+
+### Byte budget
+
+The count caps above bound how many documents are injected, not how large they
+are. The byte budgets bound the UTF-8 size of the emitted `additionalContext`
+(heading included):
+
+- Lessons are kept whole, first-fit in the hook's priority order. A lesson that
+  does not fit is skipped for this event and a later, smaller one may still fit.
+  A lesson is never truncated.
+- A single lesson larger than the per-event budget (or the remaining session
+  budget) is dropped. If nothing fits, the event injects nothing and its receipt
+  has `reason: "byte_budget"`.
+- Skipped lessons are **not** marked injected, so a later event can still inject
+  them while session budget remains.
+- The session total is kept in the per-session state file (`budget_bytes`) and
+  updated under a per-session file lock, so parallel tool-call hooks of one
+  session do not both spend the same remainder. The lock is best-effort: a
+  holder stuck for more than 2 seconds lets the update proceed unlocked rather
+  than hang the hook.
+- Receipts (`cc-session-<id>-lessons-receipts.jsonl`) of events that ran the
+  budget carry `budget_dropped` (lessons skipped for size) and `session_bytes`
+  (session total after this event).
+- Fail-open: if budget accounting raises, the event injects untrimmed and its
+  receipt carries `budget_error: true`. Those bytes are not added to the
+  session total, so a state file that stays unwritable leaves the budget
+  unenforced rather than blocking injection.
+
+Set both variables to `0` to restore the previous, unbounded behaviour.
 
 ### Launcher adoption
 
