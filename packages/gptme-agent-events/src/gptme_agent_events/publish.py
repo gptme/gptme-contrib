@@ -24,6 +24,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -224,24 +225,28 @@ class SupabaseWriter:
 
     def __call__(self, row: dict) -> bool:
         for attempt in (0, 1):
-            req = urllib.request.Request(
-                self.endpoint,
-                data=json.dumps(row).encode(),
-                method="POST",
-                headers={
-                    "apikey": self.anon_key,
-                    "Authorization": f"Bearer {self._get_token(refresh=attempt == 1)}",
-                    "Content-Type": "application/json",
-                    "Prefer": "resolution=merge-duplicates,return=minimal",
-                },
-            )
             try:
+                req = urllib.request.Request(
+                    self.endpoint,
+                    data=json.dumps(row).encode(),
+                    method="POST",
+                    headers={
+                        "apikey": self.anon_key,
+                        "Authorization": f"Bearer {self._get_token(refresh=attempt == 1)}",
+                        "Content-Type": "application/json",
+                        "Prefer": "resolution=merge-duplicates,return=minimal",
+                    },
+                )
                 with urllib.request.urlopen(req, timeout=15):
                     return True
             except urllib.error.HTTPError as e:
                 if e.code == 401 and attempt == 0:
+                    self._token = None
                     continue  # expired token: refresh once
+                print(f"agent-status write failed: HTTP {e.code}", file=sys.stderr)
                 return False
-            except (urllib.error.URLError, OSError, subprocess.SubprocessError):
+            except (OSError, subprocess.SubprocessError, ValueError) as e:
+                # Exception messages can include credentials, commands or response bodies.
+                print(f"agent-status write failed: {type(e).__name__}", file=sys.stderr)
                 return False
         return False

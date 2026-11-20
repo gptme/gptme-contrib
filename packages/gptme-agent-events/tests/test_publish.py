@@ -222,3 +222,19 @@ def test_new_milestone_rechecks_positive_and_clears_revoked_details():
     assert rows[-1]["milestone_repo"] is None
     assert rows[-1]["private_commits_1h"] == 1
     assert "deadbeef" not in json.dumps(rows)
+
+
+def test_token_failure_is_retryable_without_disclosing_command(monkeypatch, capsys):
+    import subprocess
+
+    from gptme_agent_events.publish import SupabaseWriter
+
+    def fail(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, "secret-token-command", output="secret-token")
+
+    monkeypatch.setattr(subprocess, "run", fail)
+    writer = SupabaseWriter("https://example.com", "anon", "secret-token-command")
+    assert writer({}) is False
+    stderr = capsys.readouterr().err
+    assert "CalledProcessError" in stderr
+    assert "secret" not in stderr
