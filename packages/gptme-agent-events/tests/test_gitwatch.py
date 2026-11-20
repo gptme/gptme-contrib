@@ -384,3 +384,16 @@ def test_git_reflog_rewrite_changing_old_sha_does_not_replay(repo, monkeypatch):
     assert len(w.poll()) == 3
     git("reflog", "delete", "--rewrite", "HEAD@{1}", cwd=repo)
     assert w.poll() == []
+
+
+def test_push_uses_destination_not_public_origin(repo, tmp_path):
+    remote = tmp_path / "private.git"
+    git("init", "-q", "--bare", str(remote), cwd=tmp_path)
+    git("remote", "add", "backup", str(remote), cwd=repo)
+    w = GitWatcher()
+    w.watch(str(repo))
+    commit(repo, "private destination", "s")
+    git("push", "-q", "backup", "main", cwd=repo)
+    push = next(e for e in w.poll() if e.kind == "push")
+    assert not push.detail.get("repo")
+    assert push.detail["ref"] == "backup/main"

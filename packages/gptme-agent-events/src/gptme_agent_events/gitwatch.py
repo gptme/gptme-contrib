@@ -252,11 +252,31 @@ class GitWatcher:
                     else:
                         continue
                     detail: dict[str, str] = {"sha": new[:12], "source": "git", "dir": str(common)}
-                    if slug:
-                        detail["repo"] = slug
+                    event_slug = slug
                     if is_remote:
                         ref = log.relative_to(common / "logs" / "refs" / "remotes")
                         detail["ref"] = str(ref)
+                        # A public origin does not authorize a different push destination.
+                        urls = _git(
+                            [
+                                "--git-dir",
+                                str(common),
+                                "remote",
+                                "get-url",
+                                "--push",
+                                "--all",
+                                ref.parts[0],
+                            ]
+                        )
+                        destinations = (urls or "").splitlines()
+                        match = (
+                            _GITHUB_REMOTE_RE.search(destinations[0])
+                            if len(destinations) == 1
+                            else None
+                        )
+                        event_slug = match.group(1) if match else None
+                    if event_slug:
+                        detail["repo"] = event_slug
                     events.append(
                         AgentEvent(
                             kind=kind,
