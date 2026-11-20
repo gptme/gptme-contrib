@@ -266,7 +266,7 @@ def publish(
             except queue.Empty:
                 line = ""
             if line is None:
-                pub.tick()
+                pub.tick(flush=True)
                 return
             if line.strip():
                 try:

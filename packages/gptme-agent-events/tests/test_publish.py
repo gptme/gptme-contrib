@@ -267,3 +267,11 @@ def test_failed_urgent_write_is_spaced_and_keeps_latest_row():
     assert len(attempts) == 2
     assert attempts[-1]["activity"] == "write"
     assert attempts[-1]["milestone_url"].endswith("/abc1234")
+
+
+def test_cli_eof_flushes_latest_debounced_activity():
+    lines = "\n".join(ev("tool", tool_class=c).to_json() for c in ("read", "write"))
+    result = CliRunner().invoke(main, ["publish", "--agent", "bob", "--dry-run"], input=lines)
+    assert result.exit_code == 0, result.output
+    rows = [json.loads(line) for line in result.output.splitlines()]
+    assert rows[-1]["activity"] == "write"

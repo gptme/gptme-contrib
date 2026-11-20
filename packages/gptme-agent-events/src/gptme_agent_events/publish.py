@@ -180,8 +180,8 @@ class Publisher:
             "active_sessions": len(st.sessions) if working else 0,
         }
 
-    def tick(self) -> int:
-        """Write rows that are due; returns how many were written."""
+    def tick(self, *, flush: bool = False) -> int:
+        """Write due rows; flush bypasses debounce, but never failed-write backoff."""
         now = self.clock()
         written = 0
         for feed_id, st in self.state.items():
@@ -194,7 +194,11 @@ class Publisher:
             ):
                 continue
             idle_flip = st.published is not None and st.published["state"] != row["state"]
-            if changed and not (st.urgent or idle_flip) and now - st.last_write < self.min_interval:
+            if (
+                changed
+                and not (flush or st.urgent or idle_flip)
+                and now - st.last_write < self.min_interval
+            ):
                 continue
             # Reauthorize retained details before each outgoing row, including
             # heartbeat/idle writes. Cached positives never authorize disclosure.
