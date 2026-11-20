@@ -72,7 +72,9 @@ def landing_detail(kind: str, command: str | None, cwd: str | None, output: str)
     directory = command_repo_dir(command or "", cwd)
     if directory:
         detail["dir"] = directory  # private: where the commit/push ran
-    slug = github_slug(directory) if directory else None
+    # Only git's remote-tracking reflog identifies a push destination reliably.
+    # Shell-only pushes remain unlinked rather than assuming origin.
+    slug = github_slug(directory) if directory and kind == "commit" else None
     if slug:
         detail["repo"] = slug
     if kind == "commit":
@@ -117,7 +119,7 @@ class Extractor:
             # Where the agent is working: private cwd, plus the repo it belongs to.
             context: dict[str, str] = {"cwd": self.cwd}
             slug = github_slug(self.cwd)
-            if slug:
+            if slug and kind not in ("commit", "push", "pr_open"):
                 context["repo"] = slug
             kw["detail"] = {**context, **(kw.get("detail") or {})}
         return AgentEvent(
