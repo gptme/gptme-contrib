@@ -321,6 +321,15 @@ class LessonValidator:
                 # Structural categorisation (e.g. metadata.tags) — not a score,
                 # not operational state; safe to keep in frontmatter.
                 "metadata",
+                # Admission evidence — write-once provenance for *why* the lesson
+                # exists, not a score or operational state. Bob's
+                # scripts/lesson-admission-evidence-audit.py and
+                # validate_lesson_admission_evidence.py require one of these, so
+                # warning them away makes two validators give opposite advice.
+                "verified_by",
+                "human_reviewed",
+                "provenance",
+                "admission",
             }
             # Skill files use different frontmatter fields (name, description, license, etc.)
             extra_fields = set(frontmatter.keys()) - allowed_fields

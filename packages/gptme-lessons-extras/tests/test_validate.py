@@ -138,6 +138,28 @@ def test_metadata_field_not_warned():
         ), "metadata field is structural categorisation and should not warn"
 
 
+def test_admission_evidence_fields_not_warned():
+    """Admission-evidence fields are write-once provenance, not scores or state."""
+    cases = [
+        ("verified_by", "verified_by: tests/test_validate.py"),
+        ("human_reviewed", "human_reviewed: true"),
+        ("provenance", "provenance: {source_sessions: [abc123]}"),
+        ("admission", "admission: execution-gated"),
+    ]
+    for field, extra in cases:
+        content = _MINIMAL_LESSON.format(extra=extra)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write_lesson(Path(tmp), content)
+            validator = LessonValidator(path)
+            validator.validate()
+            field_warnings = [w for w in validator.warnings if field in w]
+            assert len(field_warnings) == 0, (
+                f"{field} is admission evidence required by "
+                "validate_lesson_admission_evidence and read by Bob's admission "
+                "audit; warning it away makes the two validators contradict"
+            )
+
+
 # ---------------------------------------------------------------------------
 # version field tests (Issue #614)
 # ---------------------------------------------------------------------------
