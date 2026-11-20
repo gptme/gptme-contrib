@@ -9,10 +9,13 @@ from __future__ import annotations
 import io
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
+import threading
 import time
+import types
 from pathlib import Path
 from typing import Any
 
@@ -395,8 +398,6 @@ def test_eof_after_result_keeps_the_result_deadline(
 def test_stalled_downstream_reader_does_not_stop_supervision(
     session_script: Path, tmp_path: Path
 ) -> None:
-    import threading
-
     # A pipe nobody reads: far more output than the pipe buffer holds.
     read_fd, write_fd = os.pipe()
     plan = [{"emit": init()}, {"bulk": 512}, {"sleep": 30}]
@@ -423,6 +424,77 @@ def test_stalled_downstream_reader_does_not_stop_supervision(
         os.close(read_fd)  # unblocks any writer still stuck on the pipe
         thread.join(timeout=10)
         os.close(write_fd)
+
+
+class _LateQueue:
+    """Line queue that hands an item out only once it is ``lag`` seconds old.
+
+    Simulates output that is already buffered while the supervision loop has
+    not consumed it yet (a ``get`` that timed out just before a line landed).
+    """
+
+    def __init__(self, lag: float) -> None:
+        self._lag = lag
+        self._items: list[tuple[float, Any]] = []
+        self._lock = threading.Lock()
+
+    def put(self, item: Any) -> None:
+        with self._lock:
+            self._items.append((time.monotonic(), item))
+
+    def empty(self) -> bool:
+        with self._lock:
+            return not self._items
+
+    def get_nowait(self) -> Any:
+        with self._lock:
+            if not self._items:
+                raise queue.Empty
+            return self._items.pop(0)[1]
+
+    def get(self, block: bool = True, timeout: float | None = None) -> Any:
+        deadline = time.monotonic() + (timeout or 0.0)
+        while True:
+            with self._lock:
+                if self._items and time.monotonic() - self._items[0][0] >= self._lag:
+                    return self._items.pop(0)[1]
+            if time.monotonic() >= deadline:
+                raise queue.Empty
+            time.sleep(0.005)
+
+
+def test_buffered_unread_output_blocks_idle_trip(
+    session_script: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Lines reach the watchdog's queue every 0.2 s, but each one is consumed
+    # only after it has waited longer than idle_free. The session is never
+    # silent, so unread output in the queue must hold off the idle trip.
+    config = WatchdogConfig(
+        idle_free=1.0, idle_tooled=5.0, grace=1.0, kill_after=0.5, poll=0.05
+    )
+    made: list[Any] = []
+
+    def make_queue() -> Any:
+        q: Any = _LateQueue(lag=1.5) if not made else queue.Queue()
+        made.append(q)
+        return q
+
+    monkeypatch.setattr(
+        claude_watchdog,
+        "queue",
+        types.SimpleNamespace(Queue=make_queue, Empty=queue.Empty),
+    )
+    plan: list[dict[str, Any]] = [{"emit": init()}]
+    for i in range(12):
+        plan += [{"sleep": 0.2}, {"emit": text(f"step {i}")}]
+    plan += [{"emit": result()}, {"exit": 0}]
+
+    code, verdict, out, _ = run(session_script, tmp_path, plan, config)
+
+    assert isinstance(made[0], _LateQueue)
+    assert verdict["trip"] is None, verdict["reason"]
+    assert code == 0
+    assert len(out.decode().splitlines()) == 14
 
 
 # --- command line -------------------------------------------------------------

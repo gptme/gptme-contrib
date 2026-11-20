@@ -393,7 +393,9 @@ def run_watchdog(
             idle_seconds = now - last_line
             pending = bool(state.pending_tools)
             limit = config.idle_tooled if pending else config.idle_free
-            if result_at is None and idle_seconds >= limit:
+            # Output already buffered but not yet consumed is not silence:
+            # relay it first instead of tripping on a stale last_line.
+            if result_at is None and idle_seconds >= limit and lines.empty():
                 pending_at_trip = state.pending_summary(now)
                 if pending:
                     trip = "tool_pending"
