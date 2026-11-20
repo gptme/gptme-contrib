@@ -209,3 +209,16 @@ def test_cli_requires_backend_settings():
     result = CliRunner().invoke(main, ["publish", "--agent", "bob"], input="", env={})
     assert result.exit_code != 0
     assert "--token-cmd" in result.output
+
+
+def test_new_milestone_rechecks_positive_and_clears_revoked_details():
+    pub, rows, clock, vis = make()
+    pub.handle(ev("commit", detail={"repo": "gptme/gptme", "sha": "abc1234"}))
+    pub.tick()
+    vis.public.clear()
+    clock.t += 1
+    pub.handle(ev("commit", detail={"repo": "gptme/gptme", "sha": "deadbeef"}))
+    pub.tick()
+    assert rows[-1]["milestone_repo"] is None
+    assert rows[-1]["private_commits_1h"] == 1
+    assert "deadbeef" not in json.dumps(rows)

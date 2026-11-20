@@ -64,12 +64,12 @@ class RepoVisibility:
         except (urllib.error.URLError, OSError, ValueError):
             return False  # 404 (private or missing), rate limit, network: fail closed
 
-    def is_public(self, slug: str | None) -> bool:
+    def is_public(self, slug: str | None, *, recheck: bool = False) -> bool:
         if not slug or "/" not in slug:
             return False
         hit = self._cache.get(slug)
         now = self.clock()
-        if hit and now - hit[1] < self.ttl:
+        if hit and now - hit[1] < self.ttl and not (recheck and hit[0]):
             return hit[0]
         public = self.lookup(slug)
         self._cache[slug] = (public, now)
@@ -130,7 +130,10 @@ class Publisher:
 
     def _landing(self, st: AgentState, ev: AgentEvent, now: float) -> None:
         repo = ev.detail.get("repo")
-        if not self.visibility.is_public(repo if isinstance(repo, str) else None):
+        if not self.visibility.is_public(repo if isinstance(repo, str) else None, recheck=True):
+            if st.milestone and st.milestone["repo"] == repo:
+                st.milestone = None
+                st.urgent = True  # revoke already-published details without debounce
             if ev.kind == "commit":
                 st.private_commits.append(now)
             return
@@ -159,6 +162,9 @@ class Publisher:
             if now - seen > self.session_window:
                 del st.sessions[session]
         working = now - st.last_event < self.idle_after
+        if st.milestone and not self.visibility.is_public(st.milestone["repo"]):
+            st.milestone = None
+            st.urgent = True
         m = st.milestone
         return {
             "agent_id": feed_id,
@@ -186,6 +192,11 @@ class Publisher:
             idle_flip = st.published is not None and st.published["state"] != row["state"]
             if changed and not (st.urgent or idle_flip) and now - st.last_write < self.min_interval:
                 continue
+            # Reauthorize retained details before each outgoing row, including
+            # heartbeat/idle writes. Cached positives never authorize disclosure.
+            if st.milestone and not self.visibility.is_public(st.milestone["repo"], recheck=True):
+                st.milestone = None
+                row = self.row(feed_id, st, now)
             if self.write(row):
                 st.published, st.last_write, st.urgent = row, now, False
                 written += 1
