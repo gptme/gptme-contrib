@@ -228,6 +228,12 @@ STREAM_JSON_EXIT_CODES = {OAUTH_DEAD: 0, NO_AUTH_FAILURE: 1, EDGE_403: 2}
 # than an API auth response.
 EDGE_BLOCK_MARKERS = ("cloudflare", "attention required", "<html", "<!doctype")
 
+# Reuse the canonical auth signatures, but a bare 403 may be quota rather than
+# credential death. Keep the original stream-specific authenticate/OAuth forms.
+_STREAM_AUTH_RE = re.compile(
+    "|".join(p for p in AUTH_DEATH_PATTERNS if p != r"\b403\b"), re.IGNORECASE
+)
+
 # Structured codes for an organization that disabled subscription access.
 ORG_REFUSAL_ERRORS = frozenset({"oauth_org_not_allowed"})
 ORG_REFUSAL_API_CODES = frozenset({"oauth_not_allowed_for_organization"})
@@ -268,7 +274,9 @@ def _is_stream_auth_signal(ev: dict) -> bool:
         ev.get("terminal_reason") == "api_error" or ev.get("is_error") is True
     ):
         msg = str(ev.get("result") or "").lower()
-        return "authenticate" in msg or "oauth" in msg
+        return (
+            bool(_STREAM_AUTH_RE.search(msg)) or "authenticate" in msg or "oauth" in msg
+        )
     return False
 
 

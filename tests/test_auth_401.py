@@ -359,6 +359,56 @@ def test_stream_json_is_error_result_with_auth_text_is_oauth_dead():
     assert mod.classify_stream_json(_lines(INIT, ev)) == "oauth_dead"
 
 
+@pytest.mark.parametrize(
+    "envelope", [{"terminal_reason": "api_error"}, {"is_error": True}]
+)
+@pytest.mark.parametrize(
+    "text",
+    [
+        "API Error: 401 Unauthorized",
+        "Invalid bearer token",
+        "authentication_error: token expired",
+        "Error: Invalid API key",
+        "Please run /login",
+    ],
+)
+def test_stream_json_result_only_auth_signatures(envelope, text):
+    ev = {"type": "result", "result": text, **envelope}
+    assert mod.classify_stream_json(_lines(INIT, ev)) == "oauth_dead"
+    assert mod.classify_stream_json(_lines(INIT, OK_TURN, ev)) == "edge_403"
+
+
+@pytest.mark.parametrize(
+    "envelope", [{"terminal_reason": "api_error"}, {"is_error": True}]
+)
+@pytest.mark.parametrize(
+    "text", ["API Error: 403 Forbidden", "rate limit exceeded (429)", "read timed out"]
+)
+def test_stream_json_result_only_non_auth_errors_are_none(envelope, text):
+    ev = {"type": "result", "result": text, **envelope}
+    assert mod.classify_stream_json(_lines(INIT, ev)) == "none"
+
+
+@pytest.mark.parametrize(
+    "ev",
+    [
+        {"type": "result", "is_error": False, "result": "Fixed 401 Unauthorized"},
+        {"type": "user", "is_error": True, "result": "401 Unauthorized"},
+    ],
+)
+def test_stream_json_result_auth_matching_requires_error_envelope(ev):
+    assert mod.classify_stream_json(_lines(INIT, ev)) == "none"
+
+
+def test_stream_json_result_only_edge_auth_error_is_edge():
+    ev = {
+        "type": "result",
+        "is_error": True,
+        "result": "401 Unauthorized | Cloudflare Attention Required!",
+    }
+    assert mod.classify_stream_json(_lines(INIT, ev)) == "edge_403"
+
+
 def test_stream_json_403_after_successful_turns_is_edge():
     events = (INIT, OK_TURN, TOOL_RESULT, OK_TURN, TOOL_RESULT, EDGE_ERR, EDGE_RESULT)
     assert mod.classify_stream_json(_lines(*events)) == "edge_403"
@@ -449,6 +499,11 @@ def test_classify_stream_json_log_missing_file_is_none(tmp_path):
     [
         ((INIT, OK_TURN, EDGE_ERR), "edge_403", 2),
         ((INIT, OAUTH_ERR), "oauth_dead", 0),
+        (
+            (INIT, {"type": "result", "is_error": True, "result": "401 Unauthorized"}),
+            "oauth_dead",
+            0,
+        ),
         ((INIT, OK_TURN), "none", 1),
     ],
 )
