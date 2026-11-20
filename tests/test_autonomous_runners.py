@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -98,7 +100,16 @@ def _prepare_cc_runner(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
     _write_executable(
         workspace / "bin" / "claude",
         """#!/bin/sh
-if [ "${CLAUDE_MODE:-exit}" = "hold" ]; then
+if [ -n "${CLAUDE_ARGS_LOG:-}" ]; then
+    printf '%s\n' "$@" > "$CLAUDE_ARGS_LOG"
+fi
+if [ "${CLAUDE_MODE:-exit}" = "result-then-hang" ]; then
+    printf '%s\n' '{"type":"result","subtype":"success","is_error":false}'
+    sleep 30
+elif [ "${CLAUDE_MODE:-exit}" = "silent" ]; then
+    printf '%s\n' '{"type":"system","subtype":"init"}'
+    sleep 30
+elif [ "${CLAUDE_MODE:-exit}" = "hold" ]; then
     : > "$CLAUDE_STARTED_FILE"
     while [ ! -f "$CLAUDE_RELEASE_FILE" ]; do
         sleep 0.02
@@ -146,6 +157,118 @@ def test_cc_failure_paths_still_push_and_log_completion(
     assert "push origin master" in git_log.read_text().splitlines()
     assert expected_log in result.stdout
     assert f"finished (exit: {expected_exit})" in result.stdout
+
+
+WATCHDOG_MODULE = (
+    ROOT
+    / "packages"
+    / "gptme-runloops"
+    / "src"
+    / "gptme_runloops"
+    / "claude_watchdog.py"
+)
+
+
+def _enable_watchdog(env: dict[str, str]) -> None:
+    env.update(
+        {
+            "AGENT_CLAUDE_WATCHDOG": "1",
+            "AGENT_CLAUDE_WATCHDOG_CMD": f"{sys.executable} {WATCHDOG_MODULE}",
+            "AGENT_CLAUDE_WATCHDOG_IDLE_FREE": "0.5",
+            "AGENT_CLAUDE_WATCHDOG_GRACE": "0.5",
+            "AGENT_CLAUDE_WATCHDOG_KILL_AFTER": "1",
+            "AGENT_CLAUDE_WATCHDOG_POLL": "0.05",
+        }
+    )
+
+
+def test_cc_runner_without_watchdog_keeps_claude_args(tmp_path: Path) -> None:
+    runner, _, env = _prepare_cc_runner(tmp_path)
+    args_log = tmp_path / "claude-args.log"
+    env["CLAUDE_ARGS_LOG"] = str(args_log)
+    env.pop("AGENT_CLAUDE_WATCHDOG", None)
+
+    result = subprocess.run(
+        [str(runner)],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stdout
+    args = args_log.read_text().splitlines()
+    assert args[:2] == ["-p", "--dangerously-skip-permissions"]
+    assert "--output-format" not in args
+    assert "watchdog" not in result.stdout.lower()
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_exit", "expected_outcome", "expected_log"),
+    [
+        ("result-then-hang", 0, "ok", None),
+        ("silent", 75, "hang", "Session outcome: hang (stopped by watchdog)"),
+    ],
+)
+def test_cc_runner_watchdog_records_verdict(
+    tmp_path: Path,
+    mode: str,
+    expected_exit: int,
+    expected_outcome: str,
+    expected_log: str | None,
+) -> None:
+    runner, git_log, env = _prepare_cc_runner(tmp_path)
+    args_log = tmp_path / "claude-args.log"
+    env.update({"CLAUDE_MODE": mode, "CLAUDE_ARGS_LOG": str(args_log)})
+    _enable_watchdog(env)
+
+    start = time.monotonic()
+    result = subprocess.run(
+        [str(runner)],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=20,
+    )
+
+    assert time.monotonic() - start < 10, "fake session was not stopped early"
+    assert result.returncode == expected_exit, result.stdout
+    assert "Hang watchdog enabled" in result.stdout
+    assert "--output-format\nstream-json\n--verbose" in args_log.read_text()
+    verdict_lines = [
+        line for line in result.stdout.splitlines() if "Watchdog verdict: " in line
+    ]
+    assert len(verdict_lines) == 1, result.stdout
+    verdict = json.loads(verdict_lines[0].split("Watchdog verdict: ", 1)[1])
+    assert verdict["outcome"] == expected_outcome
+    if expected_log:
+        assert expected_log in result.stdout
+    assert "push origin master" in git_log.read_text().splitlines()
+    assert f"finished (exit: {expected_exit})" in result.stdout
+
+
+def test_cc_runner_watchdog_missing_command_fails_loudly(tmp_path: Path) -> None:
+    runner, _, env = _prepare_cc_runner(tmp_path)
+    env.update(
+        {
+            "AGENT_CLAUDE_WATCHDOG": "1",
+            "AGENT_CLAUDE_WATCHDOG_CMD": "no-such-watchdog-command",
+        }
+    )
+
+    result = subprocess.run(
+        [str(runner)],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=10,
+    )
+
+    assert result.returncode == 2, result.stdout
+    assert "no-such-watchdog-command' was not found" in result.stdout
 
 
 def test_cc_runner_lock_excludes_overlapping_processes(tmp_path: Path) -> None:

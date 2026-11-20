@@ -445,6 +445,49 @@ Without a delivery hook, historical compatibility behavior is unchanged; no
 new claim of observed delivery is implied. Review-only suppressed work retains
 its separate non-promotion contract above.
 
+## Hang watchdog for `claude -p`
+
+Headless `claude -p --output-format stream-json` sessions can hang: the process
+stays alive but emits no events, or never exits after its final `result` event.
+`gptme-claude-watchdog` wraps the session, relays its stdout unchanged and stops
+it early:
+
+```bash
+gptme-claude-watchdog --verdict-file verdict.jsonl -- \
+    claude -p "$PROMPT" --output-format stream-json --verbose
+```
+
+| Trip | When | Exit |
+|------|------|------|
+| `idle` | no event for `--idle-free` s (default 120) and no tool call pending | 75 |
+| `tool_pending` | no event for `--idle-tooled` s (default 1800) while a tool call is pending | 75 |
+| `post_result` | `result` seen, process still running after `--grace` s (default 30) | 0, or 1 if the result was an error |
+| `eof_no_exit` | stdout closed, process still running after `--grace` s | 75 |
+
+Tool calls are tracked by id (`tool_use` → matching `tool_result`), so a
+subagent's inner tool results cannot clear the parent's pending call. On a trip
+the session's process group gets SIGTERM, then SIGKILL after `--kill-after` s
+(default 5). Otherwise the exit code is the session's own; if the watchdog itself
+receives SIGTERM/SIGINT/SIGHUP it stops the session and exits `128 + signal`.
+Defaults can also be set with `AGENT_CLAUDE_WATCHDOG_IDLE_FREE`, `_IDLE_TOOLED`,
+`_GRACE` and `_KILL_AFTER`.
+
+Every run ends with one JSON verdict line (appended to `--verdict-file`, and on
+stderr after `[claude-watchdog] verdict`), with `outcome` (`ok`, `error`, `hang`
+or `interrupted`), `trip`, `reason`, `exit_code` and any pending tool calls.
+
+The module is stdlib-only, so it also runs without installing the package:
+`python3 .../gptme_runloops/claude_watchdog.py -- claude -p ...`.
+
+**In the shared runner.** `scripts/runs/autonomous/autonomous-run-cc.sh` uses the
+watchdog only when `AGENT_CLAUDE_WATCHDOG=1` (or `true`/`yes`). It then runs the
+session with `--output-format stream-json --verbose` under the watchdog (still
+inside the outer `timeout`), logs the verdict as `Watchdog verdict: {...}`, and
+logs `Session outcome: hang` and exits 75 when the watchdog stopped a hung
+session. `AGENT_CLAUDE_WATCHDOG_CMD` overrides the command (default
+`gptme-claude-watchdog`); the run fails with exit 2 if it is not found. With the
+variable unset, the runner behaves as before.
+
 ## Development
 
 ```bash
