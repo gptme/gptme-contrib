@@ -410,6 +410,11 @@ def test_push_uses_destination_not_public_origin(repo, tmp_path):
         ("https://github.com/gptme/gptme.git", "gptme/gptme"),
         ("ssh://git@github.com/gptme/gptme.git", "gptme/gptme"),
         ("git@github.com:gptme/gptme.git", "gptme/gptme"),
+        ("https://github.com:2222/gptme/gptme.git", None),
+        ("ssh://git@github.com:2222/gptme/gptme.git", None),
+        ("https://github.com:bad/gptme/gptme.git", None),
+        ("https://github.com:443/gptme/gptme.git", "gptme/gptme"),
+        ("ssh://git@github.com:22/gptme/gptme.git", "gptme/gptme"),
     ],
 )
 def test_only_exact_github_hosts_authorize_repository_details(
@@ -427,7 +432,9 @@ def test_only_exact_github_hosts_authorize_repository_details(
     # Change metadata after the local push: never contact any test URL.
     git("remote", "set-url", "backup", destination, cwd=repo)
     push = next(e for e in w.poll() if e.kind == "push")
-    assert push.detail.get("repo") == expected_repo
+    # The reflog proves a push happened, not its historical destination URL.
+    # Even a now-public remote must not authorize this earlier private push.
+    assert push.detail.get("repo") is None
 
     git("remote", "set-url", "origin", destination, cwd=repo)
     _github_slug.cache_clear()

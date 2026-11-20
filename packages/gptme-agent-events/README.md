@@ -115,9 +115,12 @@ are inspected in memory to classify them and then dropped. The stream is meant
 to stay private (stdout, ssh). Any sink that publishes beyond the agent's own
 host must drop `detail.cwd`, `detail.dir` and `detail.path`, and only forward
 `repo`/`sha`/`url`/`ref` for public repos. Commit slugs come from the checkout's
-`origin`; git-watched pushes use the actual remote's single push URL. Unknown
-or multiple push destinations remain unlinked. Shell-only pushes do not carry
-an authorized repo, and landings never inherit the session cwd's repo.
+`origin`, parsed with an exact GitHub host and scheme-default port. Pushes
+remain unlinked: reflogs record the remote name, not the URL used at push time,
+so even a currently public remote cannot authorize historical push details.
+Shell-only pushes also do not carry an authorized repo, and landings never
+inherit the session cwd's repo. Push events still reach private sinks such as
+sound; they do not replace the public feed's latest authorized milestone.
 
 ## Sounds
 

@@ -17,6 +17,8 @@ def github_remote_slug(remote: str) -> str | None:
             if (
                 url.scheme not in ("https", "http", "ssh", "git")
                 or url.hostname != "github.com"
+                or url.port
+                not in (None, {"https": 443, "http": 80, "ssh": 22, "git": 9418}[url.scheme])
                 or url.query
                 or url.fragment
             ):

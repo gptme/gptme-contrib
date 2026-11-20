@@ -255,22 +255,10 @@ class GitWatcher:
                     if is_remote:
                         ref = log.relative_to(common / "logs" / "refs" / "remotes")
                         detail["ref"] = str(ref)
-                        # A public origin does not authorize a different push destination.
-                        urls = _git(
-                            [
-                                "--git-dir",
-                                str(common),
-                                "remote",
-                                "get-url",
-                                "--push",
-                                "--all",
-                                ref.parts[0],
-                            ]
-                        )
-                        destinations = (urls or "").splitlines()
-                        event_slug = (
-                            github_remote_slug(destinations[0]) if len(destinations) == 1 else None
-                        )
+                        # Reflogs record the remote name, not its historical URL.
+                        # Current config cannot authorize public push details: a
+                        # private destination may have been replaced since the push.
+                        event_slug = None
                     if event_slug:
                         detail["repo"] = event_slug
                     events.append(
