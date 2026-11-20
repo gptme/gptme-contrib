@@ -155,12 +155,16 @@ are. The byte budgets bound the UTF-8 size of the emitted `additionalContext`
   them while session budget remains.
 - The session total is kept in the per-session state file (`budget_bytes`) and
   updated under a per-session file lock, so parallel tool-call hooks of one
-  session cannot both spend the same remainder.
+  session do not both spend the same remainder. The lock is best-effort: a
+  holder stuck for more than 2 seconds lets the update proceed unlocked rather
+  than hang the hook.
 - Receipts (`cc-session-<id>-lessons-receipts.jsonl`) of events that ran the
   budget carry `budget_dropped` (lessons skipped for size) and `session_bytes`
   (session total after this event).
 - Fail-open: if budget accounting raises, the event injects untrimmed and its
-  receipt carries `budget_error: true`.
+  receipt carries `budget_error: true`. Those bytes are not added to the
+  session total, so a state file that stays unwritable leaves the budget
+  unenforced rather than blocking injection.
 
 Set both variables to `0` to restore the previous, unbounded behaviour.
 

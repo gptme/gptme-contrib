@@ -1852,9 +1852,13 @@ def reserve_lesson_budget(
 
     Returns ``(kept, receipt_fields)``. The session total lives in the
     session state file (``budget_bytes``) and is read-modify-written under the
-    session lock, so concurrent hook processes of one session cannot both
-    spend the same remainder. Bytes are debited before emission: if emission
-    then fails the session is over-counted, never under-counted.
+    session lock, so concurrent hook processes of one session do not both
+    spend the same remainder. The lock is best-effort: if it cannot be taken
+    within ``SESSION_STATE_LOCK_WAIT_SECONDS`` the update proceeds unlocked.
+    Bytes are debited before emission, so a failed emission over-counts. An
+    unreadable or unwritable counter raises instead; the caller then injects
+    untrimmed with ``budget_error``, so those bytes are not counted and a
+    persistently unwritable state file leaves the budget unenforced.
     """
     event_budget, session_budget = byte_budgets()
     if not matches or (event_budget == 0 and session_budget == 0):
