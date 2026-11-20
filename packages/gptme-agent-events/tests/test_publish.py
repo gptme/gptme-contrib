@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from email.message import Message
 
 from click.testing import CliRunner
 
@@ -275,3 +276,74 @@ def test_cli_eof_flushes_latest_debounced_activity():
     assert result.exit_code == 0, result.output
     rows = [json.loads(line) for line in result.output.splitlines()]
     assert rows[-1]["activity"] == "write"
+
+
+def test_retained_milestone_is_cleared_on_heartbeat_after_revocation():
+    pub, rows, clock, vis = make()
+    pub.handle(ev("commit", detail={"repo": "gptme/gptme", "sha": "abc1234"}))
+    pub.tick()
+    vis.public.clear()
+    clock.t += 240
+    assert pub.tick() == 1
+    assert all(
+        rows[-1][key] is None
+        for key in ("milestone_kind", "milestone_repo", "milestone_url", "milestone_at")
+    )
+
+
+def test_writer_scheduled_and_401_refresh_failures_recover(monkeypatch, capsys):
+    import subprocess
+    import urllib.error
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from gptme_agent_events.publish import SupabaseWriter
+
+    writer = SupabaseWriter("https://example.com", "anon", "token-helper")
+    writer._token = "expired-secret"
+    writer._token_at = 0  # scheduled refresh is due
+
+    def fail(*args, **kwargs):
+        raise subprocess.TimeoutExpired("secret-command", 60, output="secret-output")
+
+    monkeypatch.setattr(subprocess, "run", fail)
+    assert writer({}) is False
+    # A 401 invalidates the cached token even if its immediate refresh fails.
+    writer._token_at = 1e20
+
+    def unauthorized(*args, **kwargs):
+        raise urllib.error.HTTPError("https://example.com", 401, "secret", Message(), None)
+
+    monkeypatch.setattr("urllib.request.urlopen", unauthorized)
+    assert writer({}) is False
+    assert writer._token is None
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout="fresh-token"))
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **kw: nullcontext())
+    assert writer({}) is True
+    stderr = capsys.readouterr().err
+    assert "TimeoutExpired" in stderr and "secret" not in stderr
+
+
+def test_http_failure_diagnostic_contains_only_status(monkeypatch, capsys):
+    import urllib.error
+
+    from gptme_agent_events.publish import SupabaseWriter
+
+    writer = SupabaseWriter("https://example.com", "secret-key", "unused")
+    writer._token, writer._token_at = "secret-token", 1e20
+
+    def forbidden(*args, **kwargs):
+        raise urllib.error.HTTPError("https://example.com", 403, "secret-body", Message(), None)
+
+    monkeypatch.setattr("urllib.request.urlopen", forbidden)
+    assert writer({}) is False
+    assert capsys.readouterr().err == "agent-status write failed: HTTP 403\n"
+
+
+def test_cli_tolerates_structurally_incomplete_events():
+    lines = "\n".join(
+        ["{}", '{"kind":"unknown","detail":[]}', ev("tool", tool_class="read").to_json()]
+    )
+    result = CliRunner().invoke(main, ["publish", "--agent", "bob", "--dry-run"], input=lines)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output.splitlines()[-1])["activity"] == "read"

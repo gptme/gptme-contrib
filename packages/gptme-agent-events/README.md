@@ -114,8 +114,10 @@ Events never contain prompts, replies, shell commands or tool output. Commands
 are inspected in memory to classify them and then dropped. The stream is meant
 to stay private (stdout, ssh). Any sink that publishes beyond the agent's own
 host must drop `detail.cwd`, `detail.dir` and `detail.path`, and only forward
-`repo`/`sha`/`url`/`ref` for public repos. The repo slug is resolved on the agent's host from the checkout's
-`origin` remote.
+`repo`/`sha`/`url`/`ref` for public repos. Commit slugs come from the checkout's
+`origin`; git-watched pushes use the actual remote's single push URL. Unknown
+or multiple push destinations remain unlinked. Shell-only pushes do not carry
+an authorized repo, and landings never inherit the session cwd's repo.
 
 ## Sounds
 
@@ -157,12 +159,19 @@ host:
 - `state` (working/idle) and the latest `activity` class, never task text,
   commands, paths or output;
 - the latest commit, push or PR **only if its repository is public on
-  GitHub** (looked up via the GitHub API and cached; unknown counts as private);
+  GitHub** (checked via the GitHub API; unknown counts as private). Negative
+  lookups are cached, but positive visibility is rechecked for new milestones
+  and before writing retained milestone details. A revoked or failed lookup
+  clears the retained details on the next due write;
 - commits elsewhere only as a count over the last hour.
 
 Milestones are written at once; other changes at most every 20 s per agent,
 plus a heartbeat every 4 min while working. After 5 quiet minutes the agent is
-published as idle.
+published as idle. Failed writes retain the latest pending row and retry no
+faster than the write interval (at least one second), even for milestones.
+Failures report only HTTP status or exception class on stderr, never credentials
+or token-command output. End-of-input flushes debounced changes once; it does
+not override failed-write backoff or wait for recovery.
 
 ```bash
 # One host publishing for several agents, pulling their streams over ssh:
