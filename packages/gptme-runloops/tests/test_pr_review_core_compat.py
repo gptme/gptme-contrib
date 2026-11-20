@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from gptme_runloops.pr_review.core_compat import (
@@ -262,11 +262,21 @@ class TestToCoreDict_Hosted:
         assert d["reviewed_at"] == _NOW.isoformat()
         assert d["review_duration_s"] == 30.0
 
-    def test_naive_aware_mix_omits_duration(self):
+    def test_naive_timestamps_are_taken_as_utc(self):
         art = _hosted_artifact()
         art.started_at = datetime(2026, 10, 16, 11, 59, 30)
+        art.completed_at = datetime(2026, 10, 16, 12, 0, 0)
         d = to_core_dict(art)
-        assert "review_duration_s" not in d
+        assert d["review_duration_s"] == 30.0
+        assert d["reviewed_at"] == _NOW.isoformat()
+        assert d["reviewed_at"].endswith("+00:00")
+
+    def test_reviewed_at_is_normalized_to_utc(self):
+        art = _hosted_artifact()
+        art.completed_at = datetime(
+            2026, 10, 16, 14, 0, 0, tzinfo=timezone(timedelta(hours=2))
+        )
+        d = to_core_dict(art)
         assert d["reviewed_at"] == _NOW.isoformat()
 
     def test_merge_safety_safe(self):
