@@ -183,6 +183,12 @@ def test_core_schema_and_reader_roundtrip(artifact, tmp_path, local):
     assert loaded.open_findings[0].severity == core.FindingSeverity.ERROR
     assert loaded.open_findings[0].independence_key == "stable-id"
     assert loaded.target_kind == ("local" if local else "hosted")
+    if hasattr(loaded, "head"):  # core with production identity fields
+        assert loaded.base == artifact.target.base_sha
+        assert loaded.head == ("" if local else artifact.target.head_sha)
+        assert loaded.model == artifact.model
+        assert loaded.reviewed_at == artifact.completed_at.isoformat()
+        assert loaded.open_findings[0].quote == artifact.findings[0].evidence
     reread = core.ReviewArtifact.from_json(loaded.to_json())
     assert reread.to_dict() == loaded.to_dict()
     validator.validate(reread.to_dict())

@@ -86,9 +86,10 @@ def finding_to_core_dict(finding: ReviewFinding) -> dict:
     - ``file_path`` → ``file``
     - ``line_range`` → ``line`` (first integer from the range string)
     - ``title`` / ``description`` / ``evidence`` → ``body`` (joined)
+    - ``evidence`` → ``quote`` and ``fix_hint`` → ``suggestion`` (when set)
 
     Non-gate fields dropped: ``confidence``, ``validated_by``,
-    ``validation_note``, ``published``, ``line_side``, ``fix_hint``.
+    ``validation_note``, ``published``, ``line_side``.
     """
     severity_raw = (
         finding.severity.value
@@ -119,6 +120,10 @@ def finding_to_core_dict(finding: ReviewFinding) -> dict:
         d["independence_key"] = finding.id
     if finding.category:
         d["category"] = finding.category
+    if finding.evidence and finding.evidence.strip():
+        d["quote"] = finding.evidence
+    if finding.fix_hint and finding.fix_hint.strip():
+        d["suggestion"] = finding.fix_hint
     return d
 
 
@@ -135,6 +140,10 @@ def to_core_dict(artifact: ReviewArtifact) -> dict:
     - ``target`` (hosted) → ``pr: {owner, repo, number}`` + ``target_kind: "hosted"``
     - ``target`` (local) → ``pr: {owner, repo, number: 0}`` (repo_name split)
       + ``target_kind: "local"`` + ``diff_fingerprint`` from the local target
+    - ``target.base_sha`` / ``target.head_sha`` → ``base`` / ``head`` (the
+      stale-head identity; a working-tree target has no head)
+    - ``model`` → ``model``; ``completed_at`` → ``reviewed_at`` (ISO 8601);
+      ``completed_at - started_at`` → ``review_duration_s``
     - ``merge_safety`` → ``merge_safety`` (same vocabulary)
     - ``findings`` → converted via :func:`finding_to_core_dict`
     """
@@ -154,6 +163,8 @@ def to_core_dict(artifact: ReviewArtifact) -> dict:
         pr_number = target.pr_number
         target_kind = "hosted"
         diff_fingerprint = ""
+        base_sha: str | None = target.base_sha
+        head_sha: str | None = target.head_sha
     elif isinstance(target, LocalReviewTarget):
         if "/" in target.repo_name:
             pr_owner, pr_repo = target.repo_name.split("/", 1)
@@ -163,6 +174,8 @@ def to_core_dict(artifact: ReviewArtifact) -> dict:
         pr_number = 0
         target_kind = "local"
         diff_fingerprint = target.diff_fingerprint
+        base_sha = target.base_sha
+        head_sha = target.head_sha
     else:
         # Unknown target type — best-effort extraction
         pr_owner = ""
@@ -170,6 +183,8 @@ def to_core_dict(artifact: ReviewArtifact) -> dict:
         pr_number = getattr(target, "pr_number", 0)
         target_kind = getattr(target, "kind", "unknown")
         diff_fingerprint = getattr(target, "diff_fingerprint", "")
+        base_sha = getattr(target, "base_sha", None)
+        head_sha = getattr(target, "head_sha", None)
 
     findings_dicts = [finding_to_core_dict(f) for f in artifact.findings]
 
@@ -189,6 +204,19 @@ def to_core_dict(artifact: ReviewArtifact) -> dict:
         d["target_kind"] = target_kind
     if diff_fingerprint:
         d["diff_fingerprint"] = diff_fingerprint
+    if base_sha:
+        d["base"] = base_sha
+    if head_sha:
+        d["head"] = head_sha
+    if artifact.model:
+        d["model"] = artifact.model
+    d["reviewed_at"] = artifact.completed_at.isoformat()
+    try:
+        elapsed = (artifact.completed_at - artifact.started_at).total_seconds()
+    except TypeError:  # naive/aware mix: keep the artifact, omit the duration
+        elapsed = None
+    if elapsed is not None:
+        d["review_duration_s"] = max(0.0, elapsed)
     return d
 
 

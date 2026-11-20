@@ -216,20 +216,21 @@ and with `--output`. Consumers can load it directly with
 for these new outputs. Local reviews use PR number zero. Unsafe or unknown
 merge verdicts still exit nonzero, even when the artifact was written successfully.
 
-The internal Python `pr_review.schema.ReviewArtifact` remains a v1 Pydantic model
-for the verifier and publisher during migration. Its `model_dump_json()` still
-serializes that internal shape; use `pr_review.core_compat.artifact_json()` or
-`save_artifact()` for the public wire format. Consumers previously using
-`schema.ReviewArtifact.model_validate_json()` on CLI output must migrate to the
-core reader (or read the v2 dictionary).
+The internal Python `pr_review.schema.ReviewArtifact` is a v1 Pydantic model and
+stays one: this package deliberately has no `gptme` dependency, so it cannot
+import core's dataclass, and the public contract is the v2 wire format, not the
+in-memory type. Its `model_dump_json()` still serializes the internal shape; use
+`pr_review.core_compat.artifact_json()` or `save_artifact()` for the public wire
+format. Consumers previously using `schema.ReviewArtifact.model_validate_json()`
+on CLI output must migrate to the core reader (or read the v2 dictionary).
 
 V2 output retains actionable severity, finding identity (`independence_key`),
-category, open/dropped status, merge safety, target kind, and diff fingerprint.
-Run-local metadata such as summary, model, confidence, and timestamps is not in
-this wire format; the returned Python object still carries it. A confirmed
-*defect* stays `status: "open"`; core's `"confirmed"` means a verified *fix*.
-This output migration does not yet replace internal models or remove legacy
-readers and conversion tables.
+category, open/dropped status, merge safety, target kind, diff fingerprint,
+the reviewed `base`/`head` SHAs (a working-tree review has no head), `model`,
+`reviewed_at`, `review_duration_s`, and per-finding evidence (`quote`) and fix
+hint (`suggestion`). Summary, prompt version and confidence are not in the wire
+format; the returned Python object still carries them. A confirmed *defect*
+stays `status: "open"`; core's `"confirmed"` means a verified *fix*.
 
 ## Python API
 
