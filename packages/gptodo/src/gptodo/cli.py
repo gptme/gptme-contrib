@@ -4627,7 +4627,8 @@ def archive_cmd(
       - a task that a task staying in tasks/ links to (it would be a broken link)
       - a task whose name already exists under tasks/archive/ (never overwritten)
 
-    Relative links inside a moved file are rebased so they still resolve.
+    Relative links inside a moved file are rebased so they still resolve, and
+    links in already-archived files that point at a moved task are repointed.
 
     Examples:
         gptodo archive --dry-run              # preview
@@ -4685,6 +4686,7 @@ def archive_cmd(
                     "eligible": plan.total_eligible,
                     "skipped": plan.skipped,
                     "errors": plan.errors,
+                    "relinked": plan.relinked,
                     "older_than_days": days,
                     "states": selected_states,
                     "limit": limit,
@@ -4718,6 +4720,10 @@ def archive_cmd(
         console.print(f"\n[yellow]Kept in place ({len(plan.skipped)}):[/]")
         for item in plan.skipped:
             console.print(f"  • {markup_escape(item['id'])}: {markup_escape(item['reason'])}")
+    if plan.relinked:
+        console.print(
+            f"\n[dim]Repointed links to moved tasks in {len(plan.relinked)} archived file(s).[/]"
+        )
     if plan.errors:
         console.print(f"\n[red]Errors ({len(plan.errors)}):[/]")
         for item in plan.errors:

@@ -422,6 +422,7 @@ def test_json_contract(repo: Path, monkeypatch) -> None:
         "eligible",
         "skipped",
         "errors",
+        "relinked",
         "older_than_days",
         "states",
         "limit",
@@ -568,3 +569,66 @@ def test_failed_link_rewrite_keeps_the_task_and_is_reported(repo: Path, monkeypa
     # The moved file is intact and no temporary file is left behind.
     assert (tasks / "archive" / "mover.md").read_text() == original
     assert sorted(p.name for p in (tasks / "archive").iterdir()) == ["mover.md"]
+
+
+def test_code_formatted_link_label_is_rebased(repo: Path, monkeypatch) -> None:
+    tasks = repo / "tasks"
+    _write(tasks, "live", "todo")
+    body = "See [`live`](live.md) and [plain](live.md); `[x](live.md)` is code.\n"
+    _write(tasks, "mover", "done", f"completed: '{_ago(30)}'", body=body)
+    _commit_all(repo)
+
+    data = _archive_json(repo, monkeypatch)
+    assert [r["id"] for r in data["archived"]] == ["mover"]
+    text = (tasks / "archive" / "mover.md").read_text()
+    assert "See [`live`](../live.md) and [plain](../live.md);" in text
+    assert "`[x](live.md)` is code." in text
+    monkeypatch.chdir(repo)
+    check = CliRunner().invoke(cli, ["check"])
+    assert check.exit_code == 0, check.output
+
+
+def test_link_inside_code_does_not_pin(repo: Path, monkeypatch) -> None:
+    tasks = repo / "tasks"
+    _write(tasks, "old", "done", f"completed: '{_ago(30)}'")
+    _write(tasks, "hub", "active", body="`[o](old.md)`\n```\n[o](old.md)\n```\n")
+    data = _archive_json(repo, monkeypatch)
+    assert [r["id"] for r in data["archived"]] == ["old"]
+
+
+def test_successive_runs_keep_links_from_archived_referrers(repo: Path, monkeypatch) -> None:
+    """Run 1 archives a referrer; run 2 archives its target and repoints the link."""
+    tasks = repo / "tasks"
+    (repo / "knowledge").mkdir()
+    (repo / "knowledge" / "x.md").write_text("# x\n")
+    _write(tasks, "target", "done", f"completed: '{_ago(2)}'")
+    body = "[t](target.md) [root](tasks/target.md) [other](../knowledge/x.md)\n"
+    _write(tasks, "referrer", "done", f"completed: '{_ago(30)}'", body=body)
+    _commit_all(repo)
+    monkeypatch.chdir(repo)
+
+    data = _archive_json(repo, monkeypatch)
+    assert [r["id"] for r in data["archived"]] == ["referrer"]
+    assert data["relinked"] == []
+    archived = tasks / "archive" / "referrer.md"
+    assert "[t](../target.md) [root](tasks/target.md)" in archived.read_text()
+    assert CliRunner().invoke(cli, ["check"]).exit_code == 0
+    _git(repo, "commit", "--quiet", "-m", "run 1")
+
+    # The target ages past the window.
+    _write(tasks, "target", "done", f"completed: '{_ago(30)}'")
+    _git(repo, "add", "tasks")
+    _git(repo, "commit", "--quiet", "-m", "age")
+    data = _archive_json(repo, monkeypatch)
+    assert [r["id"] for r in data["archived"]] == ["target"]
+    assert data["relinked"] == ["archive/referrer.md"]
+    assert data["errors"] == []
+    text = archived.read_text()
+    assert "[t](target.md) [root](tasks/archive/target.md)" in text
+    # The link that run 1 rebased is left exactly as it was.
+    assert "[other](../../knowledge/x.md)" in text
+    # The repointed referrer is staged with the move.
+    assert _git(repo, "diff", "--name-only").strip() == ""
+    assert "M  tasks/archive/referrer.md" in _git(repo, "status", "--porcelain")
+    check = CliRunner().invoke(cli, ["check"])
+    assert check.exit_code == 0, check.output

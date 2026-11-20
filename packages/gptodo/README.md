@@ -590,9 +590,10 @@ A task stays in place when:
 
 `requires`/`depends` don't keep a task in place, since they resolve from the archive.
 Relative links inside a moved file are rebased so they still resolve from
-`tasks/archive/`. Links in other files are not rewritten. Running it again only picks up
-newly eligible tasks. `--json` reports `archived`, `skipped` (with reasons) and `errors`;
-the exit code is 1 if any move failed.
+`tasks/archive/`, and links in files already under `tasks/archive/` that point at a task
+moved now are repointed (and staged if tracked). Links in other files are not rewritten.
+Running it again only picks up newly eligible tasks. `--json` reports `archived`,
+`skipped` (with reasons), `relinked` and `errors`; the exit code is 1 if any move failed.
 
 ## Frontmatter schema and `lint`
 

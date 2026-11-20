@@ -31,9 +31,10 @@ Rules (all fail closed, i.e. a task that does not clearly qualify stays put):
 * Relative Markdown links inside a moved file (inline links, with or
   without a title, and reference definitions) are rebased so they still
   resolve from ``tasks/archive/``; links written from the repository root
-  are kept root-based. Links in other files are not rewritten; a task linked
-  from a remaining task is not moved instead. If a selected task ends up not
-  moving, moved tasks it still needs are moved back.
+  are kept root-based. Links in files already under ``tasks/archive/`` that
+  point at a task moved now are repointed. Links in other files are not
+  rewritten; a task linked from a remaining task is not moved instead. If a
+  selected task ends up not moving, moved tasks it still needs are moved back.
 * Rewrites go through a temporary file that replaces the task only once it
   is fully written.
 """
@@ -63,6 +64,10 @@ _REF_DEF_RE = re.compile(r"^[ ]{0,3}\[[^\]\n]+\]:[ \t]*(\S[^\n]*)$", re.MULTILIN
 _FENCE_RE = re.compile(r"^(`{3,}|~{3,}).*?\n.*?^\1[ \t]*$", re.MULTILINE | re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 _URL_PREFIXES = ("http://", "https://", "ftp://", "mailto:", "#")
+# Code is blanked with this character (newlines kept) so positions still line
+# up with the original text. Links are found in the blanked copy: a code span
+# in a link's label does not hide the link, a link inside code is not a link.
+_CODE_MASK = "\0"
 
 
 @dataclass
@@ -81,6 +86,9 @@ class ArchivePlan:
     skipped: List[Dict[str, str]] = field(default_factory=list)
     moved: List[Dict[str, Any]] = field(default_factory=list)
     errors: List[Dict[str, str]] = field(default_factory=list)
+    # Files already under tasks/archive/ whose links were repointed at a task
+    # moved in this run (paths relative to tasks/).
+    relinked: List[str] = field(default_factory=list)
     total_eligible: int = 0
 
 
@@ -187,24 +195,35 @@ def _dest_span(inner: str) -> Optional[Tuple[int, int]]:
     return lead, lead + len(rest.split(None, 1)[0])
 
 
+def _mask_code(text: str) -> str:
+    """``text`` with fenced blocks and inline code spans blanked, same length."""
+
+    def blank(match: re.Match[str]) -> str:
+        return re.sub(r"[^\n]", _CODE_MASK, match.group(0))
+
+    return _INLINE_CODE_RE.sub(blank, _FENCE_RE.sub(blank, text))
+
+
 def _link_dests(text: str) -> Iterator[Tuple[int, int]]:
-    """Spans of link destinations in ``text`` (inline links and reference definitions)."""
+    """Spans of link destinations in ``text`` (inline links and reference definitions).
+
+    Links inside code are skipped; code inside a link's label is not a problem.
+    """
+    masked = _mask_code(text)
     spans: List[Tuple[int, int]] = []
     for regex in (_INLINE_LINK_RE, _REF_DEF_RE):
-        for match in regex.finditer(text):
+        for match in regex.finditer(masked):
             span = _dest_span(match.group(1))
-            if span is not None:
-                spans.append((match.start(1) + span[0], match.start(1) + span[1]))
+            if span is None:
+                continue
+            start, end = match.start(1) + span[0], match.start(1) + span[1]
+            if _CODE_MASK not in masked[start:end]:
+                spans.append((start, end))
     last_end = -1
     for start, end in sorted(spans):
         if start >= last_end:  # overlapping matches: keep the first
             yield start, end
             last_end = end
-
-
-def _strip_code(text: str) -> str:
-    text = _FENCE_RE.sub("", text)
-    return _INLINE_CODE_RE.sub("", text)
 
 
 def _link_targets(path: Path, repo_root: Path) -> Set[Path]:
@@ -214,9 +233,8 @@ def _link_targets(path: Path, repo_root: Path) -> Set[Path]:
     except OSError:
         return set()
     targets: Set[Path] = set()
-    stripped = _strip_code(text)
-    for start, end in _link_dests(stripped):
-        target = stripped[start:end]
+    for start, end in _link_dests(text):
+        target = text[start:end]
         if target.startswith(_URL_PREFIXES):
             continue
         file_target = target.split("#")[0].split("?")[0]
@@ -326,6 +344,8 @@ def rebase_links(
         # A co-moved file is already gone from old_dir when this runs.
         if old_target.exists() or old_target in move_map:
             base = new_dir.resolve()
+            if old_target not in move_map and base == old_dir.resolve():
+                return None  # neither end moved: leave the link as written
         elif repo_root is not None:
             old_target = (repo_root / file_part).resolve()
             if old_target not in move_map:
@@ -341,38 +361,16 @@ def rebase_links(
             return None
         return rel + suffix
 
-    def fix(segment: str) -> str:
-        out: List[str] = []
-        pos = 0
-        for start, end in _link_dests(segment):
-            replacement = new_dest(segment[start:end])
-            if replacement is None:
-                continue
-            out.append(segment[pos:start])
-            out.append(replacement)
-            pos = end
-        out.append(segment[pos:])
-        return "".join(out)
-
-    # Rewrite only outside fenced blocks and inline code spans.
     out: List[str] = []
     pos = 0
-    for block in _FENCE_RE.finditer(text):
-        out.append(_rewrite_outside_inline(text[pos : block.start()], fix))
-        out.append(block.group(0))
-        pos = block.end()
-    out.append(_rewrite_outside_inline(text[pos:], fix))
-    return "".join(out)
-
-
-def _rewrite_outside_inline(segment: str, fix: Any) -> str:
-    out: List[str] = []
-    pos = 0
-    for code in _INLINE_CODE_RE.finditer(segment):
-        out.append(fix(segment[pos : code.start()]))
-        out.append(code.group(0))
-        pos = code.end()
-    out.append(fix(segment[pos:]))
+    for start, end in _link_dests(text):
+        replacement = new_dest(text[start:end])
+        if replacement is None:
+            continue
+        out.append(text[pos:start])
+        out.append(replacement)
+        pos = end
+    out.append(text[pos:])
     return "".join(out)
 
 
@@ -586,3 +584,46 @@ def apply_archive(plan: ArchivePlan, tasks_dir: Path, *, repo_root: Optional[Pat
         record["links_rebased"] = True
         if record["method"] == "git mv":
             _git(tasks_dir, "add", "--", record["to"])
+
+    _relink_archived(plan, tasks_dir, archive_dir, move_map, repo_root)
+
+
+def _relink_archived(
+    plan: ArchivePlan,
+    tasks_dir: Path,
+    archive_dir: Path,
+    move_map: Dict[Path, Path],
+    repo_root: Path,
+) -> None:
+    """Repoint links in earlier-archived files at the tasks moved in this run.
+
+    An archived task can link to a task that was still live when it moved (its
+    link was rebased to ``../target.md``). When the target moves later, that
+    link would break; this rewrites it to the target's new place.
+    """
+    if not move_map:
+        return
+    moved_now = set(move_map.values())
+    names = {path.name for path in move_map}
+    for path in sorted(archive_dir.glob("**/*.md")):
+        rel = path.relative_to(tasks_dir).as_posix()
+        if path.resolve() in moved_now or any(
+            d in path.relative_to(archive_dir).parts for d in EXCLUDED_TASK_DIRS
+        ):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+            if not any(name in text for name in names):
+                continue
+            new_text = rebase_links(text, path.parent, path.parent, move_map, repo_root)
+            if new_text == text:
+                continue
+            _replace_text(path, new_text)
+        except OSError as exc:
+            plan.errors.append(
+                {"id": path.stem, "error": f"links to moved tasks not updated in {rel}: {exc}"}
+            )
+            continue
+        plan.relinked.append(rel)
+        if _git(tasks_dir, "ls-files", "--error-unmatch", "--", rel) is not None:
+            _git(tasks_dir, "add", "--", rel)
