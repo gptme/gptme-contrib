@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from gptme_runloops.pr_review.core_compat import (
@@ -213,6 +213,16 @@ class TestFindingToCoreDict:
         assert "fix_hint" not in d
         assert "line_side" not in d
 
+    def test_evidence_and_fix_hint_map_to_core_fields(self):
+        d = finding_to_core_dict(_finding(fix_hint="Guard with `or ''`."))
+        assert d["quote"] == "line 42: d.get('key').lower()"
+        assert d["suggestion"] == "Guard with `or ''`."
+
+    def test_empty_evidence_and_fix_hint_omitted(self):
+        d = finding_to_core_dict(_finding(evidence="  ", fix_hint=""))
+        assert "quote" not in d
+        assert "suggestion" not in d
+
 
 # ---------------------------------------------------------------------------
 # to_core_dict — hosted target
@@ -237,6 +247,37 @@ class TestToCoreDict_Hosted:
     def test_no_diff_fingerprint_for_hosted(self):
         d = to_core_dict(_hosted_artifact())
         assert "diff_fingerprint" not in d or d.get("diff_fingerprint") == ""
+
+    def test_head_and_base_identity(self):
+        """The reviewed head is the stale-head guard; it must reach the wire."""
+        d = to_core_dict(_hosted_artifact())
+        assert d["head"] == _HEAD
+        assert d["base"] == _BASE
+
+    def test_run_provenance(self):
+        art = _hosted_artifact()
+        art.started_at = datetime(2026, 10, 16, 11, 59, 30, tzinfo=UTC)
+        d = to_core_dict(art)
+        assert d["model"] == "gpt-4o"
+        assert d["reviewed_at"] == _NOW.isoformat()
+        assert d["review_duration_s"] == 30.0
+
+    def test_naive_timestamps_are_taken_as_utc(self):
+        art = _hosted_artifact()
+        art.started_at = datetime(2026, 10, 16, 11, 59, 30)
+        art.completed_at = datetime(2026, 10, 16, 12, 0, 0)
+        d = to_core_dict(art)
+        assert d["review_duration_s"] == 30.0
+        assert d["reviewed_at"] == _NOW.isoformat()
+        assert d["reviewed_at"].endswith("+00:00")
+
+    def test_reviewed_at_is_normalized_to_utc(self):
+        art = _hosted_artifact()
+        art.completed_at = datetime(
+            2026, 10, 16, 14, 0, 0, tzinfo=timezone(timedelta(hours=2))
+        )
+        d = to_core_dict(art)
+        assert d["reviewed_at"] == _NOW.isoformat()
 
     def test_merge_safety_safe(self):
         d = to_core_dict(_hosted_artifact(merge_safety=MergeSafety.safe))
@@ -301,6 +342,11 @@ class TestToCoreDict_Local:
     def test_target_kind_local(self):
         d = to_core_dict(_local_artifact())
         assert d["target_kind"] == "local"
+
+    def test_working_tree_has_base_but_no_head(self):
+        d = to_core_dict(_local_artifact())
+        assert d["base"] == _BASE
+        assert "head" not in d
 
     def test_diff_fingerprint_preserved(self):
         d = to_core_dict(_local_artifact())
