@@ -34,10 +34,26 @@ def test_markers_use_the_bound_identity(alice_io):
 
 
 def test_find_marker_comment_reads_through_the_bound_io(alice_io):
+    me = {"login": "Alice-Agent"}  # GitHub logins compare case-insensitively
     comments = [
-        {"id": 1, "body": "<!-- alice-ai-review {} -->", "updated_at": "2026-01-01"},
-        {"id": 2, "body": "<!-- alice-ai-review {} -->", "updated_at": "2026-02-01"},
-        {"id": 3, "body": "<!-- bob-ai-review {} -->", "updated_at": "2026-03-01"},
+        {
+            "id": 1,
+            "body": "<!-- alice-ai-review {} -->",
+            "updated_at": "2026-01-01",
+            "user": me,
+        },
+        {
+            "id": 2,
+            "body": "<!-- alice-ai-review {} -->",
+            "updated_at": "2026-02-01",
+            "user": me,
+        },
+        {
+            "id": 3,
+            "body": "<!-- bob-ai-review {} -->",
+            "updated_at": "2026-03-01",
+            "user": me,
+        },
     ]
     calls: list[list[str]] = []
 
@@ -52,8 +68,29 @@ def test_find_marker_comment_reads_through_the_bound_io(alice_io):
     assert calls == [["gh", "api", "--method", "DELETE", "repos/o/r/issues/comments/1"]]
 
 
+def test_copied_marker_from_another_author_is_ignored_not_deleted(alice_io):
+    real = {
+        "id": 1,
+        "body": "<!-- alice-ai-review {} -->",
+        "updated_at": "2026-01-01",
+        "user": {"login": "alice-agent"},
+    }
+    copied = {
+        "id": 2,
+        "body": "<!-- alice-ai-review {} -->",
+        "updated_at": "2026-02-01",
+        "user": {"login": "mallory"},
+    }
+    calls: list[list[str]] = []
+    alice_io.gh_paginated_list = lambda args: [real, copied]
+    alice_io.run = lambda cmd, **kw: calls.append(cmd)
+    keeper = writer.bind_io(alice_io).find_marker_comment("o/r", 7)
+    assert keeper is not None and keeper["id"] == 1
+    assert calls == []
+
+
 def test_two_hosts_resolve_independently_and_at_call_time():
-    a = SimpleNamespace(MARKER_NAMESPACE="a", MARKER_PREFIX="<!-- a")
+    a = SimpleNamespace(MARKER_NAMESPACE="a", MARKER_PREFIX="<!-- a")  # no I/O needed
     b = SimpleNamespace(MARKER_NAMESPACE="b", MARKER_PREFIX="<!-- b")
     wa, wb = writer.bind_io(a), writer.bind_io(b)
     assert wa.marker_body("x", {}).endswith("<!-- a {} -->")

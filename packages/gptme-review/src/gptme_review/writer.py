@@ -6,7 +6,8 @@ unchanged.
 
 **I/O and identity resolve at call time through** ``_io``. A host calls
 :func:`bind_io` with a namespace providing ``MARKER_NAMESPACE``,
-``MARKER_PREFIX``, ``PROVISIONAL_MARKER_PREFIX`` and the I/O seams (``run``,
+``MARKER_PREFIX``, ``PROVISIONAL_MARKER_PREFIX``, ``REVIEWER_IDENTITY`` (an
+object with ``login``) and the I/O seams (``run``,
 ``gh_paginated_list``; ``_find_all_marker_comments`` / ``_delete_marker_comment``
 optionally override the writer's own) and uses the functions it returns. Bob
 binds a view of his script module, so existing
@@ -40,7 +41,7 @@ from gptme_review.core import (
     normalize_severity,
     suppression_entry,
 )
-from gptme_review.sweep import SweepIdentity
+from gptme_review.sweep import SweepIdentity, _is_reviewer_comment
 
 
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -106,6 +107,7 @@ def default_io(identity: SweepIdentity) -> SimpleNamespace:
     """A peer host's namespace: this module's I/O plus *identity*'s markers."""
     ns = identity.marker_prefix
     return SimpleNamespace(
+        REVIEWER_IDENTITY=identity,
         run=run,
         gh_paginated_list=gh_paginated_list,
         MARKER_NAMESPACE=ns,
@@ -120,7 +122,11 @@ def _find_all_marker_comments(repo: str, number: int) -> list[dict]:
     return [
         c
         for c in comments
-        if isinstance(c, dict) and _io.MARKER_PREFIX in (c.get("body") or "")
+        if isinstance(c, dict)
+        and _io.MARKER_PREFIX in (c.get("body") or "")
+        # Marker namespaces are public: anyone can paste one. Only the
+        # reviewer's own comments carry state, and only those may be deleted.
+        and _is_reviewer_comment(c, _io.REVIEWER_IDENTITY)
     ]
 
 
