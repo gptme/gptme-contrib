@@ -1143,12 +1143,85 @@ def _ai_review_fp_from_body(body: str) -> str | None:
     return m.group(1) if m else None
 
 
+#: Pass depth is a confidence signal nothing in the gate used to read. Measured
+#: on gptme/gptme findings posted since 2026-10-19 (n=650 distinct): the
+#: retraction/rejection rate is **6.4%** for pass-1 findings (40/622), **16.7%**
+#: for pass 2 (7/42) and **20.5%** for pass 3 (8/39). A finding that only a late
+#: pass raised, with no second pass or model corroborating it, is therefore more
+#: likely to be withdrawn than acted on — and blocking a merge on it alone spends
+#: a whole review round on a false positive.
+_AI_REVIEW_FIRST_PASS = 1
+
+
+def _ai_review_pass_of(entry: Any) -> int | None:
+    """The pass number in one ``finding_provenance`` entry, or None if unreadable."""
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get("pass")
+    # `type(...) is int` not `isinstance`: bool is an int subclass, and `True`
+    # is not a pass number. Passes are numbered from 1, never zero or negative.
+    return value if type(value) is int and value >= _AI_REVIEW_FIRST_PASS else None
+
+
+def _ai_review_advisory_fps(marker: dict[str, Any] | None) -> set[str]:
+    """Fingerprints that must not block a merge on their own.
+
+    The rule: hold on any pass-1 finding, and on a late-pass finding that a
+    second pass or a second model independently raised. What is left — a finding
+    only one late pass ever reported — is advisory.
+
+    Fails closed at every unreadable input. An absent or malformed
+    ``finding_provenance`` block keeps the previous behaviour (every P0/P1
+    blocks), because the alternative is to silently stop requiring dispositions
+    for a finding whose provenance we simply could not parse. That block is
+    written by the reviewer from the ``bob-ai-review-fp`` provenance it already
+    computes, so this reads existing detection rather than adding any.
+    """
+    provenance = (marker or {}).get("finding_provenance")
+    if not isinstance(provenance, dict):
+        return set()
+    advisory: set[str] = set()
+    for fp, entries in provenance.items():
+        if not isinstance(fp, str) or not fp:
+            continue
+        if not isinstance(entries, list) or not entries:
+            continue
+        # Read every entry before deciding. Dropping an unreadable one instead
+        # of failing closed turns `[{pass: "1"}, {pass: 2}]` into "pass 2 only"
+        # and demotes a finding a pass-1 entry may well have anchored — a
+        # fail-open in the exact direction this rule must not move.
+        passes: list[int] = []
+        unreadable = False
+        for entry in entries:
+            pass_number = _ai_review_pass_of(entry)
+            if pass_number is None:
+                unreadable = True
+                break
+            passes.append(pass_number)
+        if unreadable or not passes:
+            continue  # unreadable provenance => keep blocking
+        if _AI_REVIEW_FIRST_PASS in passes:
+            continue  # pass 1 found it: hold
+        models = {
+            str(e.get("model"))
+            for e in entries
+            if isinstance(e, dict) and e.get("model")
+        }
+        # Corroboration is another pass or another reviewer. One late pass alone
+        # is the sampling event, not evidence.
+        if len(set(passes)) >= 2 or len(models) >= 2:
+            continue
+        advisory.add(fp)
+    return advisory
+
+
 def _ai_review_disposition_shortfall(
     review_data: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None,
     *,
     marker: dict[str, Any] | None = None,
     score: int | None = None,
     expected_author: str | None = None,
+    head_sha: str = "",
 ) -> str | None:
     """Why the AI-review path should not satisfy the gate, or None if it may.
 
@@ -1217,6 +1290,15 @@ def _ai_review_disposition_shortfall(
         for fp in ((marker or {}).get("auto_resolved") or [])
         if isinstance(fp, str) and fp
     }
+    # Only current-head provenance can exempt a finding. A stale marker may
+    # share a fingerprint with a new blocking thread; using its old pass depth
+    # would turn a hard disposition refusal into a substitutable stale review.
+    advisory_fps = (
+        _ai_review_advisory_fps(marker)
+        if head_sha
+        and _sha_matches_head(str((marker or {}).get("sha") or ""), head_sha)
+        else set()
+    )
     # NOT `... or []`: that reads a present-but-empty list as an absent key and
     # silently drops to the weaker score-only guard. Presence is the signal.
     current_findings = (marker or {}).get("findings")
@@ -1258,6 +1340,12 @@ def _ai_review_disposition_shortfall(
         if severity is not None and severity not in AI_REVIEW_BLOCKING_SEVERITIES:
             continue  # surviving P2s never block
         fp = _ai_review_fp_from_body(body)
+        if severity is not None and fp and fp in advisory_fps:
+            # Advisory, not a merge blocker: only a late pass raised it and
+            # nothing corroborated it. Skipping the row means neither this
+            # thread nor its marker entry can demand a disposition, so the
+            # finding is reported in the accept detail instead of blocking.
+            continue
         total = comments.get("totalCount")
         replied = isinstance(total, int) and total >= 2
         policy_rows.append(
@@ -1335,10 +1423,14 @@ def _ai_review_disposition_shortfall(
         blocking_findings, malformed = _blocking_findings(current_findings)
         if malformed:
             return "marker publishes a findings entry we cannot read"
+        # The score-accounting check below still counts every published entry;
+        # only the *demand for a disposition* skips advisory findings, so a
+        # marker that scores 3/5 on a late-pass P1 is not read as
+        # self-contradictory.
         missing = [
             (fp, severity)
             for fp, severity in blocking_findings
-            if (fp, severity) not in disposed_fps
+            if (fp, severity) not in disposed_fps and fp not in advisory_fps
         ]
         if missing:
             counts: dict[str, int] = {"P0": 0, "P1": 0}
@@ -1696,6 +1788,7 @@ def fetch_ai_review_status(
             marker=marker,
             score=raw_score if type(raw_score) is int else None,
             expected_author=expected_author,
+            head_sha=head_sha,
         )
         if disposition:
             return {
@@ -1773,6 +1866,7 @@ def fetch_ai_review_status(
         marker=marker,
         score=score,
         expected_author=expected_author,
+        head_sha=head_sha,
     )
     if disposition:
         return {
@@ -1789,12 +1883,18 @@ def fetch_ai_review_status(
             "refusal": "consensus_shortfall",
         }
 
+    advisory = len(_ai_review_advisory_fps(marker))
+    detail = (
+        f"AI review {score}/5 at current head {str(marker.get('sha'))[:12]}, "
+        "findings disposed"
+    )
+    if advisory:
+        # Surface the demotion where operators read the merge decision: an
+        # advisory finding is still visible, it just is not a blocker.
+        detail += f"; {advisory} late-pass-only finding(s) advisory"
     return {
         "accepted": True,
-        "detail": (
-            f"AI review {score}/5 at current head {str(marker.get('sha'))[:12]}, "
-            "findings disposed"
-        ),
+        "detail": detail,
         "refusal": None,
     }
 
