@@ -995,6 +995,13 @@ class VoiceServer:
         # last-writer cannot drop a sibling archive path.
         self._pending_call_groups: dict[str, str] = {}
         self._call_end_locks: dict[str, asyncio.Lock] = {}
+        # Caller-scoped prior-leg subagent timings, filled when a resume
+        # record is consumed and taken when that caller's ToolBridge is built.
+        # Keyed by caller_id so a reconnect can inspect the previous task
+        # without leaking another caller's completions. A pre-warm that
+        # consumes resume and then expires unused must drop this stash —
+        # otherwise a later fresh call reports old tasks as prior_leg.
+        self._prior_subagent_status: dict[str, list[dict[str, object]]] = {}
         # Pre-warmed realtime connections: from_number -> (client, created_at)
         # Keyed by from_number, claimed and discarded when the Twilio stream starts.
         self._prewarm_sessions: dict[str, tuple[OpenAIRealtimeClient, float]] = {}
@@ -1856,6 +1863,10 @@ class VoiceServer:
             ),
         )
 
+    def _drop_prior_subagent_status(self, caller_id: str) -> None:
+        """Forget stashed prior-leg timings for *caller_id*."""
+        self._prior_subagent_status.pop(caller_id, None)
+
     def _evict_stale_prewarms(self) -> None:
         """Discard pre-warm entries that exceeded TTL without being claimed."""
         now = time.monotonic()
@@ -1865,9 +1876,8 @@ class VoiceServer:
             if now - created_at > self._prewarm_ttl_seconds
         ]
         for num in stale:
-            client, _ = self._prewarm_sessions.pop(num)
             logger.info("Evicting stale pre-warm for %s", num)
-            asyncio.create_task(self._disconnect_realtime_client(client))
+            self._reap_prewarm_entry(num)
 
     async def _prewarm_for_inbound(self, from_number: str) -> None:
         """Pre-connect to the realtime API while Twilio is setting up the media stream.
@@ -1880,6 +1890,7 @@ class VoiceServer:
         """
         self._evict_stale_prewarms()
         client: OpenAIRealtimeClient | None = None
+        stored = False
         try:
             # Peek at the resume record (consume_recent=False) so the on-disk
             # state file is NOT deleted until connect() succeeds.  If connect()
@@ -1911,6 +1922,7 @@ class VoiceServer:
             # cold-path fallback won't re-inject the same transcript.
             await self._consume_recent_call(from_number)
             self._prewarm_sessions[from_number] = (client, time.monotonic())
+            stored = True
             # Guarantee eviction even if no further call ever arrives
             # (_evict_stale_prewarms otherwise only runs on the next inbound).
             asyncio.get_running_loop().call_later(
@@ -1933,6 +1945,10 @@ class VoiceServer:
                 asyncio.create_task(self._disconnect_realtime_client(client))
         finally:
             self._prewarm_connected.discard(from_number)
+            # Consume-then-fail (or cancel after unlink) would otherwise leave
+            # prior_leg timings for a later fresh call that is not a resume.
+            if not stored:
+                self._drop_prior_subagent_status(from_number)
 
     def _register_prewarm_task(self, from_number: str) -> None:
         """Start a pre-warm task for from_number and track it for claiming."""
@@ -2027,6 +2043,10 @@ class VoiceServer:
                     # Pre-connect cancellation is safe: the peek design means
                     # the resume state has not been consumed yet.
                     task.cancel()
+                    # Finish cleanup before the cold path restores prior-leg
+                    # timings; otherwise the task's finally block can erase them.
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
                     # Defensive: reap anything stored despite the paths above.
                     self._reap_prewarm_entry(from_number)
                     return None
@@ -2052,6 +2072,9 @@ class VoiceServer:
         if entry is not None:
             client, _ = entry
             asyncio.create_task(self._disconnect_realtime_client(client))
+        # The unused connection owned this caller's prior-leg stash. Drop it
+        # so a later inbound does not report those tasks as prior_leg.
+        self._drop_prior_subagent_status(from_number)
 
     async def _build_session_instructions(
         self,
@@ -2092,6 +2115,18 @@ class VoiceServer:
 
         if not consume:
             return recent_call
+
+        if recent_call.subagent_timings:
+            copied: list[dict[str, object]] = []
+            for item in recent_call.subagent_timings:
+                if not isinstance(item, dict):
+                    continue
+                copy = dict(item)
+                inner = copy.get("timings")
+                if isinstance(inner, dict):
+                    copy["timings"] = dict(inner)
+                copied.append(copy)
+            self._prior_subagent_status[caller_id] = copied
 
         pending_unit = (
             self._pending_post_calls.pop(caller_id, None)
@@ -2139,6 +2174,15 @@ class VoiceServer:
             int(age_seconds),
         )
         return recent_call
+
+    def _seed_bridge_from_prior_leg(
+        self, bridge: GptmeToolBridge, caller_id: str | None
+    ) -> None:
+        if not caller_id:
+            return
+        prior = self._prior_subagent_status.pop(caller_id, [])
+        if prior:
+            bridge.seed_prior_leg_status(prior)
 
     async def _run_post_call_command(
         self,
@@ -2932,6 +2976,7 @@ class VoiceServer:
                         body_adapter=body_adapter,
                         rag=rag_for_ws,
                     )
+                    self._seed_bridge_from_prior_leg(tool_bridge, caller_id)
                     realtime_client.on_function_call = tool_bridge.handle_function_call
                     # A rejected session.update must end the call instead of leaving
                     # the caller with an unconfigured (or silent) provider session.
@@ -3234,6 +3279,7 @@ class VoiceServer:
                 vision_bridge=vision_bridge,
                 rag=rag_for_ws,
             )
+            self._seed_bridge_from_prior_leg(tool_bridge, caller_id)
             realtime_client.on_function_call = tool_bridge.handle_function_call
             # A rejected session.update must end the call instead of leaving
             # the caller with an unconfigured (or silent) provider session.
@@ -3362,6 +3408,7 @@ class VoiceServer:
                 body_adapter=body_adapter,
                 rag=rag_for_ws,
             )
+            self._seed_bridge_from_prior_leg(tool_bridge, caller_id)
             realtime_client.on_function_call = tool_bridge.handle_function_call
             # A rejected session.update must end the call instead of leaving
             # the caller with an unconfigured (or silent) provider session.

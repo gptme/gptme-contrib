@@ -524,6 +524,8 @@ def test_subagent_status_shows_last_output() -> None:
             assert entry["model"] == bridge.model_fast
             assert entry.get("last_output") is not None
             assert "Found 3 active tasks" in entry["last_output"]
+            assert entry["lifecycle"] == "startup"
+            assert "progress" not in entry
             assert entry.get("timings") is not None
             assert entry["timings"]["spawn_to_first_output_seconds"] >= 0
             assert entry["timings"]["output_elapsed_seconds"] >= 0
@@ -1811,6 +1813,93 @@ def test_subagent_status_reports_remaining_budget() -> None:
         pending = status["pending"][0]
         assert pending["budget_seconds"] == _FAST_MODE_SUBPROCESS_TIMEOUT_SECONDS - 10
         assert 0 < pending["remaining_seconds"] <= pending["budget_seconds"]
+
+    asyncio.run(_exercise())
+
+
+def test_subagent_status_progress_marks_working_lifecycle() -> None:
+    """Meaningful child stdout is retained as progress; log noise is not."""
+
+    async def _exercise() -> None:
+        class _SlowProcessWithOutput(_FakeProcess):
+            async def wait(self) -> int:
+                await asyncio.sleep(5)
+                return 0
+
+        async def _fake_create_subprocess_exec(*_args, **_kwargs):
+            return _SlowProcessWithOutput(
+                returncode=0,
+                stdout="[INFO] starting\nAssistant: looking at the journal\n",
+            )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(tool_bridge, "_spawn_subagent", _fake_create_subprocess_exec)
+            bridge = GptmeToolBridge(workspace="/fake/workspace", timeout=10)
+            dispatch = await bridge.handle_function_call(
+                "subagent", {"task": "check journal", "mode": "fast"}
+            )
+            for _ in range(10):
+                await asyncio.sleep(0)
+            status = await bridge.handle_function_call("subagent_status", {})
+            entry = status["pending"][0]
+            assert entry["lifecycle"] == "working"
+            assert entry["progress"] == ["Assistant: looking at the journal"]
+            await bridge.handle_function_call(
+                "subagent_cancel", {"task_id": dispatch["task_id"]}
+            )
+
+    asyncio.run(_exercise())
+
+
+def test_subagent_status_silent_after_stale_progress() -> None:
+    async def _exercise() -> None:
+        bridge = GptmeToolBridge(workspace="/fake/workspace")
+        dummy = asyncio.create_task(asyncio.sleep(30))
+        try:
+            now = time.monotonic()
+            entry = tool_bridge.PendingTask(
+                task=dummy,
+                description="return nothing",
+                mode="fast",
+                started_at=now - 40,
+                process_started_at=now - 39,
+                first_output_at=now - 38,
+                last_output="[INFO] starting",
+                last_output_at=now - 38,
+                first_meaningful_at=now - 30,
+                last_meaningful_at=now - 20,
+            )
+            entry.progress.append("Assistant: still thinking")
+            described = bridge._describe_pending("task-1", entry)
+            assert described["lifecycle"] == "silent"
+            assert described["stage"] == "running"
+            assert described["progress"] == ["Assistant: still thinking"]
+            assert described["last_progress_age_seconds"] >= 19
+        finally:
+            dummy.cancel()
+
+    asyncio.run(_exercise())
+
+
+def test_seed_prior_leg_status_isolated_per_bridge() -> None:
+    async def _exercise() -> None:
+        timings = [
+            {
+                "task_id": "task-1",
+                "task_preview": "Return nothing.",
+                "returncode": 124,
+                "timings": {"total_seconds": 61.2},
+            }
+        ]
+        caller_a = GptmeToolBridge(workspace="/fake/workspace")
+        caller_b = GptmeToolBridge(workspace="/fake/workspace")
+        caller_a.seed_prior_leg_status(timings)
+        status_a = await caller_a.handle_function_call("subagent_status", {})
+        status_b = await caller_b.handle_function_call("subagent_status", {})
+        assert status_a["recent_completions"][0]["source"] == "prior_leg"
+        assert status_a["recent_completions"][0]["status"] == "timed_out"
+        assert status_a["recent_completions"][0]["task_id"] == "prior:task-1"
+        assert status_b["recent_completions"] == []
 
     asyncio.run(_exercise())
 
