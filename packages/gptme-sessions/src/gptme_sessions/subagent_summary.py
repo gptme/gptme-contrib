@@ -98,9 +98,28 @@ _NONSCRATCH_PATH_RE = re.compile(
     r"|packages/|gptme-contrib/)"
 )
 _QUOTED_TARGET_RE = re.compile(r"(?<![0-9&<>=!])>{1,2}\s*[\"']([^\"'\n]+)[\"']")
+# Everything after a fileop match up to the next shell separator is that
+# command's operand list.
+_FILEOP_SEGMENT_END_RE = re.compile(r"[;&|\n)]")
+# Only known argument-free flags may disappear from a scratch-only proof.
+# Unknown options can carry destinations, including short forms like -tDIR.
+_FILEOP_SAFE_OPTIONS = {
+    "-p",
+    "-r",
+    "-R",
+    "-f",
+    "-rf",
+    "-fr",
+    "--parents",
+    "--recursive",
+    "--force",
+}
 _HEREDOC_RE = re.compile(r"(?<!<)<<(-?)\s*([\"']?)([A-Za-z_]\w*)\2(?=\s|[;&|<>()]|$)")
-# A heredoc body fed to a shell is still shell; any other body is stdin data.
+# Shell consumers retain shell evidence. For Python evidence, erase bodies
+# only for simple known data consumers: unknown executables may run stdin
+# (uv run --script -, pypy3, or a wrapper with an arbitrary name).
 _SHELL_CONSUMER_RE = re.compile(r"\b(?:ba|z|da|k|a)?sh\b|\bssh\b|\beval\b|\bsource\b")
+_DATA_CONSUMER_RE = re.compile(r"\s*(?:cat|tee)\s+[^;&|()]*")
 # Even backslash pairs leave the expansion active; an odd backslash escapes it.
 _HEREDOC_SUBSTITUTION_RE = re.compile(r"(?<!\\)(?:\\\\)*(\$\(|`)")
 
@@ -178,12 +197,15 @@ def _heredoc_substitutions(body: str) -> Iterable[str]:
         pos = i + 1
 
 
-def _strip_heredoc_bodies(cmd: str) -> str:
+def _strip_heredoc_bodies(cmd: str, *, keep_python: bool = False) -> str:
     """Drop heredoc bodies that are data, not shell, from ``cmd``.
 
     ``python3 - <<'PY' ... PY`` passes program text on stdin, so a ``>`` in the
     Python source (``s.startswith(('>', 'E '))``) is not a shell redirect.
     Bodies fed to a shell (``bash <<EOF``, ``ssh host <<EOF``) are kept.
+    ``keep_python`` retains stdin for Python write detection unless the header
+    is a simple known data consumer, without exposing Python comparison
+    operators to shell redirect detection.
     Unquoted data heredocs still execute command substitutions. Keep those
     separately from the literal text, whose quotes do not suppress expansion.
     This is a best-effort classifier, not a full shell parser.
@@ -224,6 +246,7 @@ def _strip_heredoc_bodies(cmd: str) -> str:
         if (
             not heredocs
             or _SHELL_CONSUMER_RE.search(header)
+            or (keep_python and not _DATA_CONSUMER_RE.fullmatch(header[:comment]))
             or header[:comment].rstrip().endswith("|")
         ):
             continue
@@ -314,6 +337,43 @@ def empty_summary() -> dict[str, Any]:
     return s
 
 
+def _fileop_operands(unq: str) -> list[str] | None:
+    """Return known path operands, or None when a scratch proof is unsafe.
+
+    Quotes have already been elided: their contents may name a target, so
+    never silently discard them. Unknown options may also carry destinations.
+    Heredoc delimiters, unlike paths, are skipped with their marker.
+    """
+    operands: list[str] = []
+    for m in _FILEOPS_RE.finditer(unq):
+        tail = _FILEOP_SEGMENT_END_RE.split(unq[m.end() :], 1)[0]
+        segment_operands: list[str] = []
+        skip_delimiter = False
+        for token in tail.split():
+            if skip_delimiter:
+                skip_delimiter = False
+                continue
+            if token.startswith("<<"):
+                skip_delimiter = token in ("<<", "<<-")
+                continue
+            # Only literal operands can prove an absolute scratch target.
+            # Expansions/globs may introduce traversal or follow paths outside
+            # scratch; escaped characters can hide a literal '..' component.
+            if "''" in token or any(char in token for char in "$`\\{}*?[]"):
+                return None
+            if token.startswith("-"):
+                if token not in _FILEOP_SAFE_OPTIONS:
+                    return None
+                continue
+            if token in (">", ">>", "<"):
+                continue
+            segment_operands.append(token)
+        if not segment_operands or skip_delimiter:
+            return None
+        operands.extend(segment_operands)
+    return operands
+
+
 def cmd_mutation(cmd: str, cwd_scratch: bool = False) -> tuple[str | None, str | None]:
     """Return ``(label, evidence)`` — label in ``{'acting','scratch',None}``.
 
@@ -332,22 +392,38 @@ def cmd_mutation(cmd: str, cwd_scratch: bool = False) -> tuple[str | None, str |
         if t and not t.startswith("/dev/"):
             targets.append(t)
     sh = _FILEOPS_RE.search(unq)
-    py = _PY_WRITE_RE.search(cmd)
+    py = _PY_WRITE_RE.search(_strip_heredoc_bodies(cmd, keep_python=True))
     fm = sh or py
     in_scratch = bool(_CD_SCRATCH_RE.search(cmd)) or (cwd_scratch and not _CD_ANY_RE.search(cmd))
     if not targets and not fm:
         return None, None
     body = _PRELUDE_RE.sub("", cmd)
+    # A fileop whose every named operand is in scratch space is provably
+    # scratch-only, even when the shell never ``cd``'d there: ``mkdir -p
+    # /tmp/x`` and ``cat > /tmp/x/f.py`` write inside scratch by absolute path.
+    # Unknown/relative operands, parent traversal and independent Python writes
+    # cannot use the shell-only exemption.
+    fileop_operands = _fileop_operands(unq) if sh and not py else None
+    scratch_fileop = (
+        fileop_operands is not None
+        and bool(fileop_operands)
+        and all(
+            _SCRATCH_PATH_RE.match(o) and o != "/tmp/worktrees" and ".." not in o.split("/")
+            for o in fileop_operands
+        )
+    )
     if sh:
         repo_hit = _ABS_REPO_PATH_RE.search(body) or (
             None if in_scratch else _NONSCRATCH_PATH_RE.search(_PRELUDE_RE.sub("", unq))
         )
     else:
         repo_hit = _ABS_REPO_PATH_RE.search(body)
-    if fm and (repo_hit or not in_scratch):
+    if fm and not scratch_fileop and (repo_hit or not in_scratch):
         # Same bias as the redirect path below: outside known scratch space a
         # relative-path fileop (rm foo, mv a b) is counted as acting rather
-        # than scratch — a repo-root cwd is the common case.
+        # than scratch — a repo-root cwd is the common case. A scratch-only
+        # fileop is exempt: absolute repo paths elsewhere in the same line are
+        # reads, and the relative-path bias cannot apply to absolute operands.
         evidence_source = unq if sh else cmd
         return "acting", evidence_source[max(0, fm.start() - 20) : fm.end() + 60]
     for t in targets:
