@@ -12,7 +12,7 @@ from typing import Dict, List, Tuple
 
 from gptodo.frontmatter_compat import frontmatter
 
-from gptodo.utils import TaskInfo, load_tasks
+from gptodo.utils import TaskInfo, build_dependency_universe, load_tasks
 from gptodo.waiting import WaitType, parse_waiting_for
 
 
@@ -91,10 +91,11 @@ def auto_unblock_tasks(
     """
     unblocked: List[Tuple[str, str]] = []
 
-    # Build task lookup dict
+    # Build task lookup dict. Archived prerequisites resolve too, so a task
+    # whose other dependency was archived is not reported as still blocked.
     tasks_by_id = {t.id: t for t in all_tasks}
     tasks_by_name = {t.name: t for t in all_tasks}
-    all_tasks_dict = {**tasks_by_id, **tasks_by_name}
+    all_tasks_dict = build_dependency_universe({**tasks_by_id, **tasks_by_name}, tasks_dir)
 
     for completed_id in completed_task_ids:
         # Find tasks that depend on this completed task

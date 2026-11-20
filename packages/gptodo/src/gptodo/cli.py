@@ -327,7 +327,8 @@ def show(task_id, render=False):
     if task is None:
         # Fall back to full task load for numeric IDs or unknown names.
         tasks = load_tasks(tasks_dir)
-        if not tasks:
+        # A name can still match an archived task when no live task is left.
+        if not tasks and task_id.isdigit():
             console.print("[red]No tasks found[/]")
             sys.exit(1)
 
@@ -343,6 +344,13 @@ def show(task_id, render=False):
             matching = [t for t in tasks if t.name == task_name]
             if matching:
                 task = matching[0]
+
+    if task is None and not task_id.isdigit():
+        # Archived tasks (tasks/archive/**) are shown by name, after live ones.
+        task_name = Path(task_id[:-3] if task_id.endswith(".md") else task_id).name
+        task = build_dependency_universe({}, tasks_dir).get(task_name)
+        if task is not None:
+            task = (load_tasks(task.path.parent, single_file=task.path) or [task])[0]
 
     if not task:
         console.print(f"[red]Error: Task {task_id} not found[/]")
@@ -626,6 +634,8 @@ def explain_readiness(task_id: str) -> None:
     # 4 & 5. Dependencies (task-based and URL-based)
 
     requires = task.requires or []
+    # Same lookup as ready/next: archived prerequisites still resolve.
+    dep_universe = build_dependency_universe(all_tasks, tasks_dir)
     if not requires:
         check("dependencies", True, "none")
     else:
@@ -647,7 +657,7 @@ def explain_readiness(task_id: str) -> None:
                 else:
                     uncached_urls.append(req)
             else:
-                dep_task = all_tasks.get(req)
+                dep_task = dep_universe.get(req)
                 if dep_task is None:
                     missing.append(req)
                 elif dep_task.state not in ("done", "cancelled"):
@@ -4553,6 +4563,179 @@ def expire(days: int, states: tuple[str, ...], dry_run: bool, output_json: bool)
         console.print(
             "\n[dim]Revive with: [bold]gptodo edit <task> --set state <backlog|todo>[/].[/]"
         )
+
+
+@cli.command("archive")
+@click.option(
+    "--older-than",
+    "--min-age-days",
+    "older_than",
+    default=None,
+    type=int,
+    envvar="GPTODO_ARCHIVE_DAYS",
+    help=(
+        "Archive tasks that became terminal at least this many days ago "
+        "(UTC; default 7, or GPTODO_ARCHIVE_DAYS)."
+    ),
+)
+@click.option(
+    "--state",
+    "states",
+    multiple=True,
+    type=click.Choice(["done", "cancelled", "expired"]),
+    help="Restrict to these terminal state(s). Repeatable. Default: done, cancelled, expired.",
+)
+@click.option(
+    "--limit",
+    default=0,
+    type=int,
+    help="Move at most N tasks, oldest first (0 = no limit).",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show which tasks would be archived without moving files.",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Emit machine-readable JSON (stable contract for scripts).",
+)
+def archive_cmd(
+    older_than: int | None,
+    states: tuple[str, ...],
+    limit: int,
+    dry_run: bool,
+    output_json: bool,
+):
+    """Move old terminal tasks from tasks/ to tasks/archive/.
+
+    Picks tasks in done/cancelled/expired whose terminal timestamp is older
+    than --older-than days: `completed` (or `expired_at` for expired tasks),
+    compared in UTC. Tasks without it use their last change (latest of the
+    `modified` field, file mtime and last git commit), never `created`.
+
+    Archived tasks still resolve as dependencies for check/ready/next/explain,
+    and drop out of status/list. Uses `git mv` for tracked files; nothing is
+    committed.
+
+    Never moved:
+      - non-terminal tasks, and tasks with `recur:`
+      - a task listed in a non-terminal task's `spawned_tasks`, or named as
+        its `parent`/`spawned_from`
+      - a task that a task staying in tasks/ links to (it would be a broken link)
+      - a task whose name already exists under tasks/archive/ (never overwritten)
+
+    Relative links inside a moved file are rebased so they still resolve, and
+    links in already-archived files that point at a moved task are repointed.
+
+    Examples:
+        gptodo archive --dry-run              # preview
+        gptodo archive                        # move everything eligible
+        gptodo archive --older-than 30 --state done --limit 100
+        gptodo archive --json
+    """
+    from gptodo.archive import ARCHIVE_DEFAULT_DAYS, ARCHIVE_STATES, apply_archive, plan_archive
+
+    days = ARCHIVE_DEFAULT_DAYS if older_than is None else older_than
+    error = None
+    if days < 0:
+        error = "--older-than must be zero or a positive integer"
+    elif limit < 0:
+        error = "--limit must be zero or a positive integer"
+    if error:
+        if output_json:
+            print(json.dumps({"error": error}, indent=2))
+        else:
+            console.print(f"[red]Error: {error}[/]")
+        raise SystemExit(1)
+
+    selected_states = list(states) if states else list(ARCHIVE_STATES)
+    repo_root = find_repo_root(Path.cwd())
+    tasks_dir = repo_root / "tasks"
+
+    plan = plan_archive(
+        tasks_dir, repo_root, older_than_days=days, states=selected_states, limit=limit
+    )
+    if not dry_run:
+        apply_archive(plan, tasks_dir, repo_root=repo_root)
+
+    records: List[Dict[str, Any]]
+    if dry_run:
+        records = [
+            {
+                "id": c.task.id,
+                "state": c.task.state,
+                "from": c.task.path.name,
+                "to": f"archive/{c.task.path.name}",
+                "age_days": round(c.age_days, 1),
+                "age_source": c.age_source,
+            }
+            for c in plan.selected
+        ]
+    else:
+        records = plan.moved
+
+    if output_json:
+        print(
+            json.dumps(
+                {
+                    "archived": records,
+                    "count": len(records),
+                    "eligible": plan.total_eligible,
+                    "skipped": plan.skipped,
+                    "errors": plan.errors,
+                    "relinked": plan.relinked,
+                    "older_than_days": days,
+                    "states": selected_states,
+                    "limit": limit,
+                    "dry_run": dry_run,
+                },
+                indent=2,
+            )
+        )
+        if plan.errors:
+            raise SystemExit(1)
+        return
+
+    scope = f"older than {days} days, states: {', '.join(selected_states)}"
+    if records:
+        verb = "Would archive" if dry_run else "Archived"
+        console.print(f"\n[bold]{verb} {len(records)} task(s)[/] ({scope}):\n")
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Task", style="cyan")
+        table.add_column("State", style="yellow")
+        table.add_column("Age (days)", justify="right")
+        table.add_column("Age from", style="dim")
+        for rec in records:
+            table.add_row(rec["id"], rec["state"], f"{rec['age_days']:.1f}", rec["age_source"])
+        console.print(table)
+    else:
+        console.print(f"[green]Nothing to archive[/] ({scope}).")
+
+    if limit and plan.total_eligible > len(records):
+        console.print(f"[dim]{plan.total_eligible} eligible; --limit {limit} applied.[/]")
+    if plan.skipped:
+        console.print(f"\n[yellow]Kept in place ({len(plan.skipped)}):[/]")
+        for item in plan.skipped:
+            console.print(f"  • {markup_escape(item['id'])}: {markup_escape(item['reason'])}")
+    if plan.relinked:
+        console.print(
+            f"\n[dim]Repointed links to moved tasks in {len(plan.relinked)} archived file(s).[/]"
+        )
+    if plan.errors:
+        console.print(f"\n[red]Errors ({len(plan.errors)}):[/]")
+        for item in plan.errors:
+            console.print(f"  • {markup_escape(item['id'])}: {markup_escape(item['error'])}")
+    if dry_run:
+        console.print("\n[dim]Dry-run: no files moved. Re-run without --dry-run to apply.[/]")
+    elif records:
+        console.print(
+            "\n[dim]Moves are staged where git tracked the file; nothing was committed.[/]"
+        )
+    if plan.errors:
+        raise SystemExit(1)
 
 
 @cli.command("sync")
