@@ -2260,6 +2260,19 @@ def test_scan_tasks_gptodo_path_dashes_inside_value(tmp_path: Path):
     assert "state: active" not in tasks[0]["body"]
 
 
+def test_scan_tasks_gptodo_path_horizontal_rule_in_body(tmp_path: Path):
+    """A `---` horizontal rule in the body must not change the extracted title."""
+    pytest.importorskip("gptodo")
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "ruled.md").write_text(
+        "---\nstate: active\n---\n# Ruled Task\n\nIntro.\n\n---\n\nAfter the rule.\n"
+    )
+    tasks = scan_tasks(tmp_path)
+    assert len(tasks) == 1
+    assert tasks[0]["title"] == "Ruled Task"
+
+
 def test_generate_html_includes_tasks(workspace: Path, tmp_path: Path):
     """Generated HTML includes task section when tasks exist."""
     tasks_dir = workspace / "tasks"
