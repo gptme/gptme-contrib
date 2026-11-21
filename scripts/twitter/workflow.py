@@ -270,6 +270,8 @@ class TweetDraft:
         quality_score: int | None = None,
         thread: List[str] | None = None,
         quote_tweet_id: str | None = None,
+        posted_id: str | None = None,
+        posted_at: datetime | None = None,
     ):
         self.text = text
         self.type = type  # tweet, reply, thread, quote
@@ -281,6 +283,8 @@ class TweetDraft:
         self.quality_score = quality_score  # 0-3 star rating (matches blog post system)
         self.thread = thread or []  # List of follow-up tweet texts
         self.quote_tweet_id = quote_tweet_id  # id of the tweet this draft quotes
+        self.posted_id = posted_id  # id returned by create_tweet, set on posting
+        self.posted_at = posted_at  # when the post succeeded
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for storage"""
@@ -306,6 +310,11 @@ class TweetDraft:
         # Only include quote_tweet_id if it's set
         if self.quote_tweet_id:
             result["quote_tweet_id"] = self.quote_tweet_id
+        # Persist posting evidence so engagement can be joined back to a post.
+        if self.posted_id:
+            result["posted_id"] = self.posted_id
+        if self.posted_at:
+            result["posted_at"] = self.posted_at.isoformat()
         return result
 
     @classmethod
@@ -352,6 +361,12 @@ class TweetDraft:
             quality_score=data.get("quality_score"),  # Optional, backward compatible
             thread=fixed_thread,
             quote_tweet_id=data.get("quote_tweet_id", data.get("quote")),
+            posted_id=data.get("posted_id"),
+            posted_at=(
+                datetime.fromisoformat(data["posted_at"])
+                if isinstance(data.get("posted_at"), str) and data["posted_at"]
+                else data.get("posted_at") or None
+            ),
         )
         created_at = data.get("created_at", data.get("created"))
         if created_at is None:
@@ -740,6 +755,18 @@ def move_draft(path: Path, new_status: str) -> Path:
     path.unlink()
 
     return new_path
+
+
+def _mark_posted(draft: TweetDraft, path: Path, tweet_id: str) -> Path:
+    """Record the posted tweet id/time and move the draft to the posted dir.
+
+    ``move_draft`` re-loads the draft from disk, so the metadata has to be
+    written to the source path first or it is silently discarded.
+    """
+    draft.posted_id = tweet_id
+    draft.posted_at = datetime.now()
+    draft.save(path)
+    return move_draft(path, "posted")
 
 
 _PERMANENT_REPLY_FAILURE_MARKERS = (
@@ -1780,7 +1807,7 @@ def post(
                     # Post thread follow-ups if present
                     _post_tweet_with_thread(client, draft, tweet_id)
 
-                    move_draft(path, "posted")
+                    _mark_posted(draft, path, tweet_id)
                     posts_this_run += 1
                 else:
                     console.print("[red]Error: No response data from tweet creation")
@@ -2317,6 +2344,8 @@ def process_timeline_tweets(
                             )
                             if post_response.data:
                                 tweet_id = post_response.data["id"]
+                                draft.posted_id = tweet_id
+                                draft.posted_at = datetime.now()
                                 console.print(f"[green]✓ Auto-posted tweet: {tweet_id}")
 
                                 # Post thread follow-ups if present
@@ -2896,7 +2925,7 @@ def auto(
                         # Post thread follow-ups if present
                         _post_tweet_with_thread(client, draft, tweet_id)
 
-                        move_draft(path, "posted")
+                        _mark_posted(draft, path, tweet_id)
                         posts_this_cycle += 1
                     else:
                         console.print(

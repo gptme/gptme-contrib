@@ -261,6 +261,48 @@ def test_move_draft_preserves_markdown_round_trip(
     assert moved.text == "Keep this markdown body intact."
 
 
+def test_mark_posted_persists_posted_id_and_timestamp(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    draft_path = workflow_module.NEW_DIR / "posted-draft.yml"
+    draft = workflow_module.TweetDraft(text="Ship it")
+    draft.save(draft_path)
+
+    moved_path = workflow_module._mark_posted(draft, draft_path, "1234567890")
+    moved = workflow_module.TweetDraft.load(moved_path)
+
+    assert moved_path == workflow_module.POSTED_DIR / "posted-draft.yml"
+    assert moved.posted_id == "1234567890"
+    assert moved.posted_at is not None
+    assert not draft_path.exists()
+
+
+def test_tweet_draft_round_trips_posting_evidence(workflow_module: Any) -> None:
+    draft = workflow_module.TweetDraft(
+        text="Grounded post",
+        posted_id="987654321",
+        posted_at=datetime(2026, 11, 21, 9, 30, tzinfo=timezone.utc),
+    )
+
+    restored = workflow_module.TweetDraft.from_dict(draft.to_dict())
+
+    assert restored.posted_id == "987654321"
+    assert restored.posted_at == datetime(2026, 11, 21, 9, 30, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("posted_at", [None, ""])
+def test_tweet_draft_loads_unset_posting_timestamp(
+    workflow_module: Any, posted_at: str | None
+) -> None:
+    draft = workflow_module.TweetDraft.from_dict(
+        {"text": "Not posted yet", "posted_at": posted_at}
+    )
+
+    assert draft.posted_at is None
+    assert "posted_at" not in draft.to_dict()
+
+
 def test_duplicate_reply_detection_reads_markdown_drafts(
     workflow_module: Any, tmp_path: Path
 ) -> None:
@@ -807,8 +849,12 @@ def test_trusted_user_autopost_quarantines_permanent_reply_failure(
     assert "Permanent Twitter reply failure" in rejected.reject_reason
 
 
-def test_trusted_user_autopost_keeps_transient_failure_retryable(
-    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("post_succeeds", [False, True])
+def test_trusted_user_autopost_persists_posting_outcome(
+    workflow_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    post_succeeds: bool,
 ) -> None:
     _set_status_dirs(workflow_module, tmp_path)
 
@@ -841,6 +887,8 @@ def test_trusted_user_autopost_keeps_transient_failure_retryable(
 
     class PostingClient:
         def create_tweet(self, *args: Any, **kwargs: Any) -> Any:
+            if post_succeeds:
+                return SimpleNamespace(data={"id": "9001"})
             raise RuntimeError("503 Service Unavailable")
 
     monkeypatch.setattr(
@@ -872,6 +920,7 @@ def test_trusted_user_autopost_keeps_transient_failure_retryable(
     monkeypatch.setattr(
         workflow_module, "load_twitter_client", lambda *a, **k: PostingClient()
     )
+    monkeypatch.setattr(workflow_module, "_git_commit_posted", lambda *a: None)
 
     drafts_generated = workflow_module.process_timeline_tweets(
         [tweet],
@@ -883,10 +932,23 @@ def test_trusted_user_autopost_keeps_transient_failure_retryable(
         max_drafts=10,
     )
 
-    assert drafts_generated == 1
+    assert drafts_generated == (0 if post_succeeds else 1)
     new_paths = list(workflow_module.NEW_DIR.glob("*.yml"))
-    assert len(new_paths) == 1
-    assert workflow_module.TweetDraft.load(new_paths[0]).text == "A useful reply"
+    posted_paths = list(workflow_module.POSTED_DIR.glob("*.yml"))
+    if post_succeeds:
+        assert new_paths == []
+        assert len(posted_paths) == 1
+        saved = workflow_module.TweetDraft.load(posted_paths[0])
+        assert saved.posted_id == "9001"
+        assert isinstance(saved.posted_at, datetime)
+        assert saved.posted_at.date() == datetime.now().date()
+    else:
+        assert posted_paths == []
+        assert len(new_paths) == 1
+        saved = workflow_module.TweetDraft.load(new_paths[0])
+        assert saved.posted_id is None
+        assert saved.posted_at is None
+    assert saved.text == "A useful reply"
     assert list(workflow_module.REJECTED_DIR.glob("*.yml")) == []
 
 
