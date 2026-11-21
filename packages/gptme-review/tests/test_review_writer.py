@@ -221,6 +221,40 @@ def test_submodule_only_diff_is_pure():
     assert writer.is_submodule_only_diff("") is False
 
 
+@pytest.mark.parametrize(
+    "diff",
+    [
+        _SUBMODULE_DIFF.replace("160000", "100644"),
+        _SUBMODULE_DIFF.replace("index 1111111..2222222 160000\n", ""),
+        _SUBMODULE_DIFF + "diff --git a/a.png b/a.png\nBinary files differ\n",
+        _SUBMODULE_DIFF
+        + "diff --git a/a b/b\nsimilarity index 100%\nrename from a\nrename to b\n",
+        _SUBMODULE_DIFF + "diff --git a/a b/a\nold mode 100644\nnew mode 100755\n",
+        _SUBMODULE_DIFF.replace(
+            "+Subproject commit", "+source mentions Subproject commit"
+        ),
+    ],
+)
+def test_submodule_detection_requires_gitlink_metadata_in_every_section(diff):
+    assert writer.is_submodule_only_diff(diff) is False
+
+
+@pytest.mark.parametrize("adding", [True, False])
+def test_submodule_addition_and_deletion_are_pointer_only(adding):
+    diff = (
+        "diff --git a/sub b/sub\n"
+        + ("new file mode 160000\n" if adding else "deleted file mode 160000\n")
+        + "index 0000000..1111111\n"
+        + ("--- /dev/null\n+++ b/sub\n" if adding else "--- a/sub\n+++ /dev/null\n")
+        + "@@ -0,0 +1 @@\n"
+        + ("+" if adding else "-")
+        + "Subproject commit "
+        + "1" * 40
+        + "\n"
+    )
+    assert writer.is_submodule_only_diff(diff) is True
+
+
 def test_generated_files_are_elided_unless_the_diff_is_only_them():
     mixed = _CODE_DIFF + _LOCK_DIFF
     touched, reviewable, _, elided = writer.extract_touched_files_and_reviewable_diff(

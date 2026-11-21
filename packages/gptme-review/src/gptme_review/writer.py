@@ -56,7 +56,7 @@ from gptme_review.core import (
     partition_posting_findings,
     suppression_entry,
 )
-from gptme_review.shard import sharding_note
+from gptme_review.shard import sharding_note, split_file_sections
 from gptme_review.sweep import SweepIdentity, _is_reviewer_comment
 
 
@@ -1969,14 +1969,37 @@ def is_submodule_only_diff(diff: str) -> bool:
     `-Subproject commit <old>` / `+Subproject commit <new>` — so a clean verdict
     on it would assert more than was checked.
     """
-    changed = [
-        ln
-        for ln in (diff or "").splitlines()
-        if (ln.startswith(("+", "-")) and not ln.startswith(("+++", "---")))
-    ]
-    if not changed:
+    sections = split_file_sections(diff)
+    if not sections:
         return False
-    return all("Subproject commit" in ln for ln in changed)
+    for section in sections:
+        lines = section.text.splitlines()
+        header = lines[
+            : next((i for i, ln in enumerate(lines) if ln.startswith("@@")), len(lines))
+        ]
+        modes = []
+        for ln in header:
+            if ln.startswith(
+                ("old mode ", "new mode ", "new file mode ", "deleted file mode ")
+            ):
+                modes.append(ln.rsplit(" ", 1)[-1])
+            elif re.fullmatch(r"index [0-9a-f]+\.\.[0-9a-f]+ [0-7]{6}", ln):
+                modes.append(ln.rsplit(" ", 1)[-1])
+        changed = [
+            ln
+            for ln in lines
+            if ln.startswith(("+", "-")) and not ln.startswith(("+++", "---"))
+        ]
+        # Every section needs positive gitlink evidence, including sections
+        # with no text hunks (binary changes, pure renames and mode changes).
+        if not modes or set(modes) != {"160000"} or not changed:
+            return False
+        if not all(
+            re.fullmatch(r"[+-]Subproject commit [0-9a-f]{40,64}(?:-dirty)?", ln)
+            for ln in changed
+        ):
+            return False
+    return True
 
 
 #: Paths whose diff is machine output rather than something anyone reviews.
