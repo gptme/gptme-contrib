@@ -7,7 +7,12 @@ import pytest
 from click.testing import CliRunner
 
 import gptmail.cli as gptmail_cli
-from gptmail.lib import AgentEmail, UnrepliedEmail, inbound_recipient_role
+from gptmail.lib import (
+    AgentEmail,
+    UnrepliedEmail,
+    inbound_recipient_role,
+    quarantined_recipient_hit,
+)
 
 
 @pytest.fixture
@@ -606,3 +611,73 @@ def test_private_reply_targets_sender_only(tmp_path: Path, monkeypatch: pytest.M
     body = draft.split("\n\n", 1)[1].lower()
     assert "blind copy" not in body
     assert "bcc'd" not in body and "bccd" not in body
+
+
+# -- Recipient-scoped quarantine -------------------------------------------
+
+
+def test_quarantined_recipient_hit_is_noop_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EMAIL_QUARANTINE_RECIPIENTS", raising=False)
+    headers = {"To": "Bob+canary@example.com"}
+    assert quarantined_recipient_hit(headers) is None
+
+
+def test_quarantined_recipient_hit_matches_raw_plus_tag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plus-tags identify the route, so the bare address must not match."""
+    monkeypatch.setenv("EMAIL_QUARANTINE_RECIPIENTS", "bob+canary@example.com")
+    assert (
+        quarantined_recipient_hit({"To": "Bob <Bob+Canary@Example.com>"})
+        == "bob+canary@example.com"
+    )
+    assert quarantined_recipient_hit({"To": "Bob <bob@example.com>"}) is None
+
+
+def test_quarantined_recipient_hit_checks_envelope_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EMAIL_QUARANTINE_RECIPIENTS", "bob+canary@example.com")
+    assert (
+        quarantined_recipient_hit({"Delivered-To": "bob+canary@example.com"})
+        == "bob+canary@example.com"
+    )
+
+
+def test_quarantined_message_is_not_an_unreplied_candidate(
+    agent: AgentEmail,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Quarantine outranks sender trust: allowlisting is not ingestion consent.
+
+    A managed leak-canary alert carries a bearer management URL in its body, so
+    it must not surface as an auto-reply candidate even when its sender is on
+    EMAIL_ALLOWLIST. The inbound forwarder sends the operator a header-only
+    notice instead.
+    """
+    monkeypatch.setenv("EMAIL_QUARANTINE_RECIPIENTS", "test+canary@example.com")
+    inbox = agent.email_dir / "inbox"
+    date = datetime(2026, 5, 16, 9, 0, tzinfo=timezone.utc)
+
+    _write_email(
+        inbox / "canary.md",
+        message_id="<canary@example.com>",
+        subject="Canary triggered",
+        sender="friend@example.com",
+        recipient="test+canary@example.com",
+        date=date,
+    )
+    _write_email(
+        inbox / "ordinary.md",
+        message_id="<ordinary@example.com>",
+        subject="Ordinary",
+        sender="friend@example.com",
+        recipient="test@example.com",
+        date=date,
+    )
+
+    unreplied = agent.get_unreplied_emails()
+
+    assert [entry.message_id for entry in unreplied] == ["<ordinary@example.com>"]
