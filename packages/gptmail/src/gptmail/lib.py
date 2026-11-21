@@ -225,8 +225,37 @@ def fix_list_spacing(markdown_text: str) -> str:
     lines = markdown_text.split("\n")
     result = []
     prev_was_list = False
+    in_fence = False
+    in_ordered_list = False
 
     for i, line in enumerate(lines):
+        if re.match(r"^\s*(```|~~~)", line):
+            in_fence = not in_fence
+        if in_fence or line.lstrip().startswith(("```", "~~~")):
+            result.append(line)
+            prev_was_list = False
+            continue
+
+        # A hard-wrapped line that happens to start with "2023. " is not a
+        # list item. Python-Markdown would still parse it as one, swallowing
+        # the number (a sentence ending "11.4 in\n  2023. It was ..." rendered
+        # as "11.4 in" plus a new bullet "It was ..."). CommonMark only lets
+        # "1." interrupt a paragraph; do the same by escaping the dot unless
+        # it is "1." or we are already inside an ordered list.
+        ordinal = re.match(r"^(\s*)(\d+)\.(\s+)", line)
+        prev_nonblank = i > 0 and lines[i - 1].strip() != ""
+        if ordinal and prev_nonblank and ordinal.group(2) != "1" and not in_ordered_list:
+            line = (
+                f"{ordinal.group(1)}{ordinal.group(2)}\\.{ordinal.group(3)}{line[ordinal.end() :]}"
+            )
+
+        if re.match(r"^\s*\d+\.\s+", line):
+            in_ordered_list = True
+        elif re.match(r"^\s*[-*+]\s+", line):
+            in_ordered_list = False
+        elif not prev_nonblank and line.strip() and not line[:1].isspace():
+            in_ordered_list = False  # new unindented paragraph ends the list
+
         # Check if this line is a list item
         is_list_item = bool(
             re.match(r"^\s*[-*+]\s+", line)  # Unordered list
@@ -242,7 +271,13 @@ def fix_list_spacing(markdown_text: str) -> str:
             result.append("")  # Add blank line before first list item
 
         result.append(line)
-        prev_was_list = is_list_item
+        # An indented line right after a list item is that item's wrapped
+        # continuation; the list is still going. Without this, every wrapped
+        # bullet got a blank line before the next one, making the list loose.
+        is_continuation = (
+            prev_was_list and not prev_is_blank and line[:1].isspace() and line.strip() != ""
+        )
+        prev_was_list = is_list_item or is_continuation
 
     return "\n".join(result)
 
