@@ -261,6 +261,36 @@ def test_move_draft_preserves_markdown_round_trip(
     assert moved.text == "Keep this markdown body intact."
 
 
+def test_mark_posted_persists_posted_id_and_timestamp(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    draft_path = workflow_module.NEW_DIR / "posted-draft.yml"
+    draft = workflow_module.TweetDraft(text="Ship it")
+    draft.save(draft_path)
+
+    moved_path = workflow_module._mark_posted(draft, draft_path, "1234567890")
+    moved = workflow_module.TweetDraft.load(moved_path)
+
+    assert moved_path == workflow_module.POSTED_DIR / "posted-draft.yml"
+    assert moved.posted_id == "1234567890"
+    assert moved.posted_at is not None
+    assert not draft_path.exists()
+
+
+def test_tweet_draft_round_trips_posting_evidence(workflow_module: Any) -> None:
+    draft = workflow_module.TweetDraft(
+        text="Grounded post",
+        posted_id="987654321",
+        posted_at=datetime(2026, 11, 21, 9, 30, tzinfo=timezone.utc),
+    )
+
+    restored = workflow_module.TweetDraft.from_dict(draft.to_dict())
+
+    assert restored.posted_id == "987654321"
+    assert restored.posted_at == datetime(2026, 11, 21, 9, 30, tzinfo=timezone.utc)
+
+
 def test_duplicate_reply_detection_reads_markdown_drafts(
     workflow_module: Any, tmp_path: Path
 ) -> None:
