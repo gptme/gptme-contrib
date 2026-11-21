@@ -105,3 +105,15 @@ def test_sub_bullet_inside_ordered_item_keeps_numbering():
 def test_top_level_bullet_ends_ordered_context():
     out = fix_list_spacing("1. One\n- Bullet\n2023. It was a good year.\n")
     assert "2023\\. It was" in out
+
+
+def test_wrapped_year_after_code_block_following_list_is_kept():
+    # An unindented fence ends the ordered list; the year after it is prose.
+    src = "1. One\n2. Two\n```\ncode\n```\nStrain was 11.4 in\n2023. Then it fell.\n"
+    html = render(src)
+    assert "2023. Then it fell" in html
+
+
+def test_fence_inside_ordered_item_keeps_numbering():
+    src = "1. First\n   ```\n   code\n   ```\n2. Second\n"
+    assert "2\\." not in fix_list_spacing(src)

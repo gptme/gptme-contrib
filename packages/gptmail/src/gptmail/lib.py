@@ -237,6 +237,10 @@ def fix_list_spacing(markdown_text: str) -> str:
                 fence = marker.group(1)  # type: ignore[union-attr]
             elif marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence):
                 fence = ""
+            # An unindented fence is top-level code, which ends any ordered
+            # list; a fence indented under an item belongs to that item.
+            if not line[:1].isspace():
+                in_ordered_item = False
             result.append(line)
             prev_was_list = False
             continue
