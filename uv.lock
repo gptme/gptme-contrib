@@ -2100,6 +2100,7 @@ name = "gptme-dashboard"
 version = "0.1.0"
 source = { editable = "packages/gptme-dashboard" }
 dependencies = [
+    { name = "bobutils" },
     { name = "click" },
     { name = "jinja2" },
     { name = "markdown-it-py" },
@@ -2134,6 +2135,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "bobutils", editable = "packages/bobutils" },
     { name = "click", specifier = ">=8.0" },
     { name = "flask", marker = "extra == 'serve'", specifier = ">=3.0" },
     { name = "gptme-dashboard", extras = ["serve"], marker = "extra == 'test'" },

@@ -244,6 +244,24 @@ def test_parse_frontmatter_no_frontmatter(tmp_path: Path):
     assert "Just a Title" in body
 
 
+def test_parse_frontmatter_dashes_inside_value(tmp_path: Path):
+    """A `---` inside a frontmatter value must not end the block."""
+    f = tmp_path / "test.md"
+    f.write_text("---\ntitle: a---b\nstatus: active\n---\n# Body\n")
+    fm, body = parse_frontmatter(f)
+    assert fm == {"title": "a---b", "status": "active"}
+    assert body == "# Body"
+
+
+def test_parse_frontmatter_unclosed_returns_text(tmp_path: Path):
+    """An unclosed frontmatter block yields no metadata and the raw text."""
+    f = tmp_path / "test.md"
+    f.write_text("---\nstatus: active\n# no closing fence\n")
+    fm, body = parse_frontmatter(f)
+    assert fm == {}
+    assert "no closing fence" in body
+
+
 def test_parse_frontmatter_keywords_as_list(tmp_path: Path):
     """Test that keyword lists are parsed correctly (not silently dropped)."""
     f = tmp_path / "lesson.md"
