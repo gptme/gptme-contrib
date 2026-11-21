@@ -920,6 +920,7 @@ def test_trusted_user_autopost_persists_posting_outcome(
     monkeypatch.setattr(
         workflow_module, "load_twitter_client", lambda *a, **k: PostingClient()
     )
+    monkeypatch.setattr(workflow_module, "_git_commit_posted", lambda *a: None)
 
     drafts_generated = workflow_module.process_timeline_tweets(
         [tweet],
