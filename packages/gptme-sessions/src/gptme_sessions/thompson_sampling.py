@@ -32,12 +32,15 @@ CLI:
     python3 -m gptme_sessions.thompson_sampling dashboard
 """
 
+import contextlib
+import fcntl
 import json
 import random
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
 
 import click
 
@@ -397,6 +400,29 @@ class Bandit:
         self.state_file = self.state_dir / state_file
         self.state = self._load_state()
 
+    @contextlib.contextmanager
+    def _state_lock(self) -> Iterator[None]:
+        """Serialize read-modify-write cycles across processes.
+
+        Several processes may share one bandit state file (session-end
+        updaters, timers, CLI calls).  Loading at construction and saving
+        later is a lost-update race: two instances that both loaded the same
+        snapshot will clobber each other's arm updates on save.  Mutating
+        methods must hold this flock *and* re-load the state from disk before
+        applying their mutation (see ``update()``/``decay()``/``prune()``).
+
+        ``save()`` must not take this lock: it runs inside the critical
+        section and a second flock on the same file would deadlock.
+        """
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = self.state_file.with_name(self.state_file.name + ".lock")
+        with open(lock_path, "a", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+
     def _load_state(self) -> BanditState:
         """Load bandit state from disk."""
         if self.state_file.exists():
@@ -477,12 +503,14 @@ class Bandit:
             decay_rate: If set, apply exponential decay before updating.
             per_arm_rewards: Optional per-arm rewards for salience-weighted credit.
         """
-        if decay_rate is not None:
-            self.state.apply_decay(decay_rate)
-        result = self.state.update_session(
-            active_arms, outcome, context=context, per_arm_rewards=per_arm_rewards
-        )
-        self.save()
+        with self._state_lock():
+            self.state = self._load_state()
+            if decay_rate is not None:
+                self.state.apply_decay(decay_rate)
+            result = self.state.update_session(
+                active_arms, outcome, context=context, per_arm_rewards=per_arm_rewards
+            )
+            self.save()
         return result
 
     def decay(self, gamma: float) -> int:
@@ -494,8 +522,10 @@ class Bandit:
         Returns:
             Number of arms decayed.
         """
-        count = self.state.apply_decay(gamma)
-        self.save()
+        with self._state_lock():
+            self.state = self._load_state()
+            count = self.state.apply_decay(gamma)
+            self.save()
         return count
 
     def prune(self, min_selections: int = 0, max_age_days: int = 90) -> int:
@@ -508,8 +538,10 @@ class Bandit:
         Returns:
             Number of arms pruned.
         """
-        count = self.state.prune_stale(min_selections=min_selections, max_age_days=max_age_days)
-        self.save()
+        with self._state_lock():
+            self.state = self._load_state()
+            count = self.state.prune_stale(min_selections=min_selections, max_age_days=max_age_days)
+            self.save()
         return count
 
     def status_report(self) -> str:

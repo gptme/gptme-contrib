@@ -1,6 +1,7 @@
 """Tests for Thompson sampling bandit engine."""
 
 import json
+import multiprocessing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -519,3 +520,154 @@ def test_bandit_state_prune_stale_min_selections_boundary():
     assert pruned == 1, f"Expected 1 pruned, got {pruned}"
     assert "exact-threshold" not in state.arms, "Arm with exactly min_selections should be pruned"
     assert "above-threshold" in state.arms, "Arm above threshold should survive"
+
+
+# ── cross-process mutation locking ───────────────────────────────────────────
+
+# The package uses POSIX flock; fork also avoids re-importing pytest's
+# importlib-loaded module under an unresolvable synthetic name.
+_MP_CTX = multiprocessing.get_context("fork")
+
+
+def _update_worker(
+    state_dir: str,
+    arm_id: str,
+    updates: int,
+    start_event: "multiprocessing.synchronize.Event",
+) -> None:
+    """Load a Bandit instance, wait for the starting gun, then update."""
+    bandit = Bandit(state_dir=Path(state_dir))
+    assert start_event.wait(timeout=15), "parent never released workers"
+    for _ in range(updates):
+        bandit.update([arm_id], outcome=1.0)
+
+
+def _locked_update_worker(
+    state_dir: str,
+    arm_id: str,
+    ready_event: "multiprocessing.synchronize.Event",
+    done_event: "multiprocessing.synchronize.Event",
+) -> None:
+    bandit = Bandit(state_dir=Path(state_dir))
+    ready_event.set()
+    bandit.update([arm_id], outcome=1.0)
+    done_event.set()
+
+
+def test_update_reloads_stale_instance_state(tmp_path: Path):
+    """A Bandit loaded before another instance's update must not clobber it."""
+    writer = Bandit(state_dir=tmp_path)
+    writer.update(["first"], outcome=1.0)
+
+    # Snapshot that predates the next writer's update.
+    stale = Bandit(state_dir=tmp_path)
+    writer.update(["second"], outcome=1.0)
+
+    stale.update(["third"], outcome=1.0)
+
+    reloaded = Bandit(state_dir=tmp_path)
+    assert {"first", "second", "third"} <= set(reloaded.state.arms)
+    assert reloaded.state.arms["second"].alpha == pytest.approx(2.0)
+
+
+def test_decay_reloads_stale_instance_state(tmp_path: Path):
+    """Decay from a stale instance must preserve unseen updates and decay them."""
+    writer = Bandit(state_dir=tmp_path)
+    stale = Bandit(state_dir=tmp_path)  # snapshot before the update
+    writer.update(["fresh"], outcome=1.0)
+
+    stale.decay(gamma=0.5)
+
+    reloaded = Bandit(state_dir=tmp_path)
+    assert "fresh" in reloaded.state.arms
+    # alpha = 1 + 0.5 * (2 - 1) = 1.5; the update was seen and decayed.
+    assert reloaded.state.arms["fresh"].alpha == pytest.approx(1.5)
+
+
+def test_prune_reloads_stale_instance_state(tmp_path: Path):
+    """Prune from a stale instance must not delete arms it never loaded."""
+    writer = Bandit(state_dir=tmp_path)
+    stale = Bandit(state_dir=tmp_path)  # snapshot before the update
+    writer.update(["fresh"], outcome=1.0)
+
+    stale.prune(min_selections=0)
+
+    reloaded = Bandit(state_dir=tmp_path)
+    assert "fresh" in reloaded.state.arms
+    assert reloaded.state.arms["fresh"].alpha == pytest.approx(2.0)
+
+
+def test_bandit_state_lock_file_is_sidecar(tmp_path: Path):
+    """Mutation creates a permanent sidecar lock next to the state file."""
+    bandit = Bandit(state_dir=tmp_path)
+    bandit.update(["code"], outcome=1.0)
+
+    # The sentinel must remain so every caller flocks the same inode.
+    assert (tmp_path / "bandit-state.json.lock").exists()
+
+
+def test_state_lock_blocks_other_process_until_release(tmp_path: Path):
+    """A ready child cannot finish its mutation until the parent releases flock."""
+    bandit = Bandit(state_dir=tmp_path)
+    ready = _MP_CTX.Event()
+    done = _MP_CTX.Event()
+    child = _MP_CTX.Process(
+        target=_locked_update_worker,
+        args=(str(tmp_path), "child", ready, done),
+        daemon=True,
+    )
+    try:
+        with bandit._state_lock():
+            child.start()
+            assert ready.wait(timeout=15), "child did not reach update"
+            assert not done.wait(timeout=0.2), "child updated while parent held flock"
+        assert done.wait(timeout=15), "child did not finish after lock release"
+        child.join(timeout=15)
+        assert not child.is_alive()
+        assert child.exitcode == 0
+        assert "child" in Bandit(state_dir=tmp_path).state.arms
+    finally:
+        if child.pid is not None:
+            child.join(timeout=5)
+            if child.is_alive():
+                child.terminate()
+                child.join(timeout=5)
+
+
+def test_concurrent_processes_do_not_lose_updates(tmp_path: Path):
+    """Two processes updating distinct arms must both persist all updates."""
+    updates_per_process = 15
+    start_event = _MP_CTX.Event()
+    processes = [
+        _MP_CTX.Process(
+            target=_update_worker,
+            args=(str(tmp_path), arm, updates_per_process, start_event),
+            daemon=True,
+        )
+        for arm in ("proc-a", "proc-b")
+    ]
+    try:
+        for process in processes:
+            process.start()
+        start_event.set()
+        for process in processes:
+            process.join(timeout=60)
+            assert not process.is_alive(), "worker did not finish"
+            assert process.exitcode == 0
+
+        reloaded = Bandit(state_dir=tmp_path)
+        assert reloaded.state.total_sessions == 2 * updates_per_process
+        for arm in ("proc-a", "proc-b"):
+            assert arm in reloaded.state.arms
+            assert reloaded.state.arms[arm].total_selections == updates_per_process
+            assert reloaded.state.arms[arm].alpha == pytest.approx(1.0 + updates_per_process)
+    finally:
+        # Never let a failed assertion leak workers into the rest of the suite.
+        start_event.set()
+        for process in processes:
+            if process.pid is None:
+                continue
+            process.join(timeout=5)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
