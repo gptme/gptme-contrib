@@ -526,7 +526,11 @@ def test_bandit_state_prune_stale_min_selections_boundary():
 
 # The package uses POSIX flock; fork also avoids re-importing pytest's
 # importlib-loaded module under an unresolvable synthetic name.
-_MP_CTX = multiprocessing.get_context("fork")
+_MP_CTX = (
+    multiprocessing.get_context("fork")
+    if "fork" in multiprocessing.get_all_start_methods()
+    else None
+)
 
 
 def _update_worker(
@@ -606,6 +610,7 @@ def test_bandit_state_lock_file_is_sidecar(tmp_path: Path):
     assert (tmp_path / "bandit-state.json.lock").exists()
 
 
+@pytest.mark.skipif(_MP_CTX is None, reason="requires POSIX fork/flock")
 def test_state_lock_blocks_other_process_until_release(tmp_path: Path):
     """A ready child cannot finish its mutation until the parent releases flock."""
     bandit = Bandit(state_dir=tmp_path)
@@ -634,6 +639,7 @@ def test_state_lock_blocks_other_process_until_release(tmp_path: Path):
                 child.join(timeout=5)
 
 
+@pytest.mark.skipif(_MP_CTX is None, reason="requires POSIX fork/flock")
 def test_concurrent_processes_do_not_lose_updates(tmp_path: Path):
     """Two processes updating distinct arms must both persist all updates."""
     updates_per_process = 15

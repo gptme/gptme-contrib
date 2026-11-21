@@ -33,7 +33,6 @@ CLI:
 """
 
 import contextlib
-import fcntl
 import json
 import random
 import sys
@@ -414,6 +413,10 @@ class Bandit:
         ``save()`` must not take this lock: it runs inside the critical
         section and a second flock on the same file would deadlock.
         """
+        # Keep read-only imports usable without POSIX support, but never silently
+        # run a persisted mutation without the promised cross-process lock.
+        import fcntl
+
         self.state_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self.state_file.with_name(self.state_file.name + ".lock")
         with open(lock_path, "a", encoding="utf-8") as lock_file:
