@@ -2,7 +2,7 @@
 
 Shared building blocks for agent communication channels: rate limiting, file locks,
 reply/conversation tracking, cross-platform message headers, OAuth and token helpers,
-retry with backoff, and structured logging and metrics.
+and structured logging and metrics.
 
 These utilities ship inside the [`gptmail`](../../../README.md) package. gptmail itself
 uses them (`AgentEmail` uses the rate limiter, file locks and `ConversationTracker`;
@@ -20,7 +20,6 @@ communication_utils/
 ├── auth/                       # TokenManager, TokenInfo, OAuthManager, token refresh/storage,
 │                               #   CallbackServer (needs gptmail[oauth])
 ├── monitoring/                 # get_logger, configure_logging, MetricsCollector
-├── error_handling/             # retry, RetryConfig, exponential_backoff, error classes
 └── outbound_redact.py          # secret gate; optional by default, required by AgentTransport and direct Twitter publication
 ```
 
@@ -108,23 +107,6 @@ metrics = MetricsCollector()
 op = metrics.start_operation("send", "discord")
 op.complete(success=True)
 print(metrics.get_stats(platform="discord")["success_rate"])
-```
-
-### Retry
-
-```python
-from gptmail.communication_utils.error_handling import RateLimitError, RetryConfig, retry
-from gptmail.communication_utils.error_handling.retry import retry_with_rate_limit
-
-@retry(max_attempts=3, initial_delay=1.0)
-def call_api(): ...
-
-@retry(config=RetryConfig(max_attempts=5, max_delay=60.0, jitter=True))
-def call_slow_api(): ...
-
-@retry_with_rate_limit(max_attempts=5)   # honours RateLimitError.retry_after
-def call_limited_api():
-    raise RateLimitError("twitter", retry_after=60)
 ```
 
 ## Contributing
