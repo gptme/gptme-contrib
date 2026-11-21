@@ -262,6 +262,33 @@ def test_parse_frontmatter_unclosed_returns_text(tmp_path: Path):
     assert "no closing fence" in body
 
 
+def test_parse_frontmatter_bom_and_crlf(tmp_path: Path):
+    """A UTF-8 BOM and CRLF line endings still parse as frontmatter."""
+    f = tmp_path / "test.md"
+    f.write_bytes("\ufeff---\r\nstatus: active\r\n---\r\n# Body\r\n".encode())
+    fm, body = parse_frontmatter(f)
+    assert fm == {"status": "active"}
+    assert body == "# Body"
+
+
+def test_parse_frontmatter_invalid_yaml_keeps_body(tmp_path: Path):
+    """Invalid YAML yields no metadata but the body after the fence survives."""
+    f = tmp_path / "test.md"
+    f.write_text("---\nkey: [unclosed\n---\n# Body\n")
+    fm, body = parse_frontmatter(f)
+    assert fm == {}
+    assert body == "# Body"
+
+
+def test_parse_frontmatter_empty_block(tmp_path: Path):
+    """An empty frontmatter block yields no metadata and the body."""
+    f = tmp_path / "test.md"
+    f.write_text("---\n---\n# Body\n")
+    fm, body = parse_frontmatter(f)
+    assert fm == {}
+    assert body == "# Body"
+
+
 def test_parse_frontmatter_keywords_as_list(tmp_path: Path):
     """Test that keyword lists are parsed correctly (not silently dropped)."""
     f = tmp_path / "lesson.md"
