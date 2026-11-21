@@ -599,6 +599,25 @@ _CODE_IDENTIFIER_RE = re.compile(r"[a-z]+(?:_[a-z]+)+\Z")
 # _NON_CREDENTIAL_VALUE_RE shape test (money, whole tag, placeholder), never the
 # short-value rule, so emphasis cannot turn a credential-shaped value into prose.
 _EMPHASIS_EDGE_RE = re.compile(r"\A[*_]{1,3}|[.,;:!?)]*[*_]{1,3}[.,;:!?)]*\Z")
+# After a spaced or ``:`` separator, two more value shapes are prose:
+# - a status word, as in ``ANTHROPIC_API_KEY: confirmed safe`` or
+#   ``API_KEY: missing.`` A secret that is literally one of these words is not
+#   worth fail-closing every status report for.
+# - the name of another secret-bearing variable, as in
+#   ``Key: OPENROUTER_API_KEY_REVIEW is not set``. Upper SNAKE_CASE that
+#   contains a secret keyword segment refers to a credential; it is not one.
+# Tight ``NAME=value`` keeps blocking for both (``PASSWORD=confirmed``).
+_STATUS_WORD_RE = re.compile(
+    r"(?i:confirmed|configured|unconfigured|verified|unverified|missing|present"
+    r"|provided|required|optional|redacted|rotated|revoked|expired|invalid"
+    r"|enabled|disabled|removed|deleted|unset|unchanged|available|unavailable)"
+    r"[.,;:!?)]*\Z"
+)
+_SECRET_NAME_VALUE_RE = re.compile(
+    r"(?:(?:[A-Z][A-Z0-9]*_)+(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)S?"
+    r"|(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)S?(?=_))"
+    r"(?:_[A-Z0-9]+)*[.,;:!?)]*\Z"
+)
 
 
 def _assignment_severity(match: re.Match[str], severity: Severity) -> Severity:
@@ -609,7 +628,9 @@ def _assignment_severity(match: re.Match[str], severity: Severity) -> Severity:
     ``key: the`` or ``token= (<a``. A value wholly wrapped in an inline-code
     span is judged by its inner text, and after a spaced or ``:`` separator a
     wrapped lowercase snake_case identifier (``key: <code>sleep_score</code>``)
-    is prose too. Tight ``NAME=value`` stays CRITICAL either way.
+    is prose too, as is a bare status word (``key: confirmed``) or the name of
+    another secret variable (``Key: OPENROUTER_API_KEY is not set``). Tight
+    ``NAME=value`` stays CRITICAL either way.
     """
     groups = match.re.groupindex
     if "sep" not in groups or "quote" not in groups:
@@ -619,7 +640,12 @@ def _assignment_severity(match: re.Match[str], severity: Severity) -> Severity:
     value = match.group("value")
     prose_separator = match.group("sep").lstrip("'\"") != "="
     if _NON_CREDENTIAL_VALUE_RE.match(value) or (
-        prose_separator and len(value) < _MIN_SECRET_LEN
+        prose_separator
+        and (
+            len(value) < _MIN_SECRET_LEN
+            or _STATUS_WORD_RE.match(value)
+            or _SECRET_NAME_VALUE_RE.match(value)
+        )
     ):
         return min(severity, Severity.HIGH)
     unemphasized = _EMPHASIS_EDGE_RE.sub("", value)

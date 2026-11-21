@@ -32,6 +32,15 @@ PROSE = [
     "Closed 3 positions at 0.08/token = **-$1.23**.",
     "Closed 3 positions at 0.08/token = **-$1.23.** total",
     "refund per token: _$4.50_ each",
+    # A status word after a spaced/colon separator.
+    "ANTHROPIC_API_KEY: confirmed safe. Loop already unsets it",
+    "API_KEY: missing.",
+    "the token: Unavailable, retry later",
+    # The value names another secret variable; it refers to one, it isn't one.
+    "- Key: OPENROUTER_API_KEY_REVIEW is not set on the host",
+    "token: GITHUB_TOKEN, scoped to the repo",
+    "password: DB_PASSWORD.",
+    "key: KEY_NAME_FOR_REVIEW stays unset",
 ]
 
 
@@ -93,6 +102,17 @@ def test_prose_assignment_still_masked_and_preview_hidden(text):
         "DATABASE_PASSWORD=x",
         # Long values after a spaced/colon separator are not prose-shaped.
         "the token: Xj4kL9mNb2vC8wQ1",
+        # Status words and variable names only count after a spaced or colon
+        # separator, and only as the whole value.
+        "PASSWORD=confirmed",
+        "API_KEY=OPENROUTER_API_KEY",
+        "password: confirmedXj4kL9mN",
+        "password: xmqbtrvlkzphwdsa",
+        # Lower or mixed case, or no keyword segment, is not a variable name.
+        "key: openrouter_api_key_Xj4kL9",
+        "token: GHP_Xj4kL9MNB2VC8WQ1",
+        "secret: ABCDEFGHIJ_KLMNOP",
+        "key: KEYXj4kL9mNb2vC8wQ1",
     ],
 )
 def test_real_assignments_still_critical(text):
