@@ -136,6 +136,21 @@ def test_tilde_fence_inside_ordered_item_keeps_list_tight() -> None:
     assert "<li>\n<p>" not in render(src)
 
 
+def test_blank_line_inside_indented_fence_keeps_list_tight() -> None:
+    # A blank line inside the code block is not a blank line in the list: it
+    # must not end the list (the next item's ordinal would get escaped) and no
+    # blank line may be inserted before the next item. Python-Markdown itself
+    # cannot parse a blank line inside an indented fence in a list item, so
+    # this asserts on our output, not the rendered HTML.
+    src = "1. First\n   ```\n   code line 1\n\n   code line 2\n   ```\n2. Second\n"
+    assert fix_list_spacing(src) == src
+
+
+def test_blank_line_inside_unindented_fence_still_ends_list() -> None:
+    src = "1. One\n2. Two\n```\ncode\n\nmore\n```\nStrain was 11.4 in\n2023. Then it fell.\n"
+    assert "2023\\. Then" in fix_list_spacing(src)
+
+
 def test_fence_inside_unordered_item_keeps_list_tight() -> None:
     src = "- First\n  ```\n  code\n  ```\n- Second\n"
     out = fix_list_spacing(src)

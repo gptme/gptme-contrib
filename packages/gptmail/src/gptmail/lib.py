@@ -231,6 +231,7 @@ def fix_list_spacing(markdown_text: str) -> str:
     result = []
     prev_was_list = False
     fence = ""  # opening fence marker while inside a code block
+    fence_indented = False  # opener was indented, so it belongs to an item
     in_ordered_item = False  # previous line is an ordered item or its wrap
 
     for i, line in enumerate(lines):
@@ -241,6 +242,7 @@ def fix_list_spacing(markdown_text: str) -> str:
             # "``` python" line inside a ``` block is code.
             if not fence:
                 fence = marker.group(1)  # type: ignore[union-attr]
+                fence_indented = bool(line[:1].isspace())
             elif (
                 marker
                 and marker.group(1)[0] == fence[0]
@@ -248,13 +250,15 @@ def fix_list_spacing(markdown_text: str) -> str:
                 and not marker.group(2).strip()
             ):
                 fence = ""
-            # An unindented fence is top-level code, which ends any list; a
-            # fence indented under an item belongs to that item, so it keeps
-            # the list context. Resetting it there inserted a blank line before
-            # the next item, which made the list loose (#2264).
-            if not line[:1].isspace():
-                in_ordered_item = False
-                prev_was_list = False
+                # An unindented fence is top-level code, which ends any list;
+                # a fence indented under an item belongs to that item, so the
+                # list context survives it. Blank and code lines *inside* the
+                # block must not touch the list state either — an indented
+                # block containing a blank line otherwise ended the list and
+                # got the next item's ordinal escaped (#2264).
+                if not fence_indented:
+                    in_ordered_item = False
+                    prev_was_list = False
             result.append(line)
             continue
 
