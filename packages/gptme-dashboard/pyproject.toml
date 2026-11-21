@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 keywords = ["dashboard", "gptme", "ai-agents", "static-site"]
 dependencies = [
+    "bobutils",
     "click>=8.0",
     "jinja2>=3.0",
     "markdown-it-py>=3.0",
@@ -22,6 +23,9 @@ dependencies = [
 Homepage = "https://github.com/gptme/gptme-contrib"
 Repository = "https://github.com/gptme/gptme-contrib"
 Issues = "https://github.com/gptme/gptme-contrib/issues"
+
+[tool.uv.sources]
+bobutils = { workspace = true }
 
 [project.optional-dependencies]
 sessions = [

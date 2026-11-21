@@ -26,6 +26,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import yaml  # type: ignore[import-untyped]
+from bobutils.frontmatter import split_frontmatter
 from jinja2 import Environment, FileSystemLoader
 from markdown_it import MarkdownIt
 from pygments import highlight  # type: ignore[import-untyped]
@@ -334,24 +335,23 @@ def journal_page_path(date: str, name: str) -> str:
 
 
 def parse_frontmatter(path: Path) -> tuple[dict, str]:
-    """Parse YAML frontmatter from a markdown file."""
+    """Parse YAML frontmatter from a markdown file.
+
+    The closing fence is a line that is exactly ``---``; a ``---`` inside a
+    frontmatter value must not end the block.
+    """
     text = path.read_text(errors="replace")
-    if not text.startswith("---"):
+    try:
+        fm_text, body = split_frontmatter(text)
+    except ValueError:
         return {}, text
-
-    end = text.find("---", 3)
-    if end == -1:
-        return {}, text
-
-    fm_text = text[3:end].strip()
-    body = text[end + 3 :].strip()
 
     try:
         fm = yaml.safe_load(fm_text) or {}
     except yaml.YAMLError:
         fm = {}
 
-    return fm, body
+    return fm, body.strip()
 
 
 def extract_title(body: str, fallback: str) -> str:
@@ -822,8 +822,10 @@ def scan_tasks(workspace: Path) -> list[dict]:
             # Title lives in the markdown body, not in TaskInfo.
             # Read the file once to avoid a second parse_frontmatter call.
             content = t.path.read_text(errors="replace")
-            parts = content.split("---", 2)
-            body = parts[2] if len(parts) >= 3 else ""
+            try:
+                body = split_frontmatter(content)[1]
+            except ValueError:
+                body = ""
             title = extract_title(body, t.name.replace("-", " ").title())
             raw_tags = t.tags or []
             if isinstance(raw_tags, str):

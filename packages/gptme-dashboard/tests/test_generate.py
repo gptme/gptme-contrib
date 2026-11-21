@@ -244,6 +244,51 @@ def test_parse_frontmatter_no_frontmatter(tmp_path: Path):
     assert "Just a Title" in body
 
 
+def test_parse_frontmatter_dashes_inside_value(tmp_path: Path):
+    """A `---` inside a frontmatter value must not end the block."""
+    f = tmp_path / "test.md"
+    f.write_text("---\ntitle: a---b\nstatus: active\n---\n# Body\n")
+    fm, body = parse_frontmatter(f)
+    assert fm == {"title": "a---b", "status": "active"}
+    assert body == "# Body"
+
+
+def test_parse_frontmatter_unclosed_returns_text(tmp_path: Path):
+    """An unclosed frontmatter block yields no metadata and the raw text."""
+    f = tmp_path / "test.md"
+    f.write_text("---\nstatus: active\n# no closing fence\n")
+    fm, body = parse_frontmatter(f)
+    assert fm == {}
+    assert "no closing fence" in body
+
+
+def test_parse_frontmatter_bom_and_crlf(tmp_path: Path):
+    """A UTF-8 BOM and CRLF line endings still parse as frontmatter."""
+    f = tmp_path / "test.md"
+    f.write_bytes("\ufeff---\r\nstatus: active\r\n---\r\n# Body\r\n".encode())
+    fm, body = parse_frontmatter(f)
+    assert fm == {"status": "active"}
+    assert body == "# Body"
+
+
+def test_parse_frontmatter_invalid_yaml_keeps_body(tmp_path: Path):
+    """Invalid YAML yields no metadata but the body after the fence survives."""
+    f = tmp_path / "test.md"
+    f.write_text("---\nkey: [unclosed\n---\n# Body\n")
+    fm, body = parse_frontmatter(f)
+    assert fm == {}
+    assert body == "# Body"
+
+
+def test_parse_frontmatter_empty_block(tmp_path: Path):
+    """An empty frontmatter block yields no metadata and the body."""
+    f = tmp_path / "test.md"
+    f.write_text("---\n---\n# Body\n")
+    fm, body = parse_frontmatter(f)
+    assert fm == {}
+    assert body == "# Body"
+
+
 def test_parse_frontmatter_keywords_as_list(tmp_path: Path):
     """Test that keyword lists are parsed correctly (not silently dropped)."""
     f = tmp_path / "lesson.md"
@@ -2199,6 +2244,33 @@ def test_scan_tasks_gptodo_path(tmp_path: Path):
     assert t["tags"] == ["feature"]
     assert t["assigned_to"] == "bob"
     assert t["path"] == "tasks/my-task.md"
+
+
+def test_scan_tasks_gptodo_path_dashes_inside_value(tmp_path: Path):
+    """A `---` inside a frontmatter value must not leak into the gptodo-path body."""
+    pytest.importorskip("gptodo")
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "dashy.md").write_text(
+        "---\nnext_action: a---b\nstate: active\n---\n# Dashy Task\n\nBody text.\n"
+    )
+    tasks = scan_tasks(tmp_path)
+    assert len(tasks) == 1
+    assert tasks[0]["title"] == "Dashy Task"
+    assert "state: active" not in tasks[0]["body"]
+
+
+def test_scan_tasks_gptodo_path_horizontal_rule_in_body(tmp_path: Path):
+    """A `---` horizontal rule in the body must not change the extracted title."""
+    pytest.importorskip("gptodo")
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "ruled.md").write_text(
+        "---\nstate: active\n---\n# Ruled Task\n\nIntro.\n\n---\n\nAfter the rule.\n"
+    )
+    tasks = scan_tasks(tmp_path)
+    assert len(tasks) == 1
+    assert tasks[0]["title"] == "Ruled Task"
 
 
 def test_generate_html_includes_tasks(workspace: Path, tmp_path: Path):
