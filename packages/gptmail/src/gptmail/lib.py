@@ -258,9 +258,10 @@ def fix_list_spacing(markdown_text: str) -> str:
 
         if re.match(r"^\s*\d+\.\s+", line):
             in_ordered_item = True
-        elif not line.strip() or re.match(r"^\s*[-*+]\s+", line):
+        elif not line.strip() or re.match(r"^[-*+]\s+", line):
             in_ordered_item = False
-        # else: a wrapped (or lazy) continuation keeps the current state
+        # else: a wrapped (or lazy) continuation, or an indented sub-bullet
+        # of the current item, keeps the current state
 
         # Check if this line is a list item
         is_list_item = bool(

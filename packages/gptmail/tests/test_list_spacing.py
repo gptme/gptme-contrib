@@ -90,3 +90,18 @@ def test_no_number_is_dropped_after_loose_item_paragraph():
     # than a new item, but the number must survive.
     html = render("1. a\n\n    para\n2. b\n")
     assert "2. b" in html or 'start="2"' in html or html.count("<li>") == 2
+
+
+def test_sub_bullet_inside_ordered_item_keeps_numbering():
+    # An indented sub-bullet must not end the ordered context and get "2." escaped.
+    for indent in ("   ", "    "):
+        src = f"1. First\n{indent}- sub\n2. Second\n"
+        assert "2\\." not in fix_list_spacing(src)
+        html = render(src)
+        assert html.count("<ol>") == 1
+        assert "<li>Second</li>" in html
+
+
+def test_top_level_bullet_ends_ordered_context():
+    out = fix_list_spacing("1. One\n- Bullet\n2023. It was a good year.\n")
+    assert "2023\\. It was" in out
