@@ -2212,8 +2212,8 @@ def suppression_note(suppressed: list[dict] | None) -> str:
         return ""
     n = len(policy)
     return (
-        f"> ℹ️ {n} finding{'' if n == 1 else 's'} on files this PR did not "
-        "touch — not reported here."
+        f"> ℹ️ {n} finding{'' if n == 1 else 's'} not anchored to a file "
+        "this PR changed — not reported here."
     )
 
 

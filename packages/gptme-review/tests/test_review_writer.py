@@ -329,6 +329,16 @@ def test_drop_out_of_scope_splits_on_touched_files():
     assert out == [findings[1], findings[2]]
 
 
+@pytest.mark.parametrize("paths", [["old.py"], [""], ["old.py", ""]])
+def test_suppression_note_covers_unanchored_and_untouched_findings(paths):
+    suppressed = [{"file": path, "suppressed_reason": "out_of_scope"} for path in paths]
+    note = writer.suppression_note(suppressed)
+    assert f"{len(paths)} finding" in note
+    assert "not anchored to a file this PR changed" in note
+    assert "on files this PR did not touch" not in note
+    assert writer.suppression_note([{"suppressed_reason": "consensus_rejected"}]) == ""
+
+
 def test_head_path_exists_uses_bound_run_and_encodes_the_path(alice_io):
     seen: list[str] = []
 
