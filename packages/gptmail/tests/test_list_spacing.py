@@ -42,19 +42,9 @@ def test_ordered_list_with_wrapped_items_keeps_numbering():
     assert html.count("<li>") == 3
 
 
-def test_unordered_list_after_paragraph_gets_blank_line():
-    assert fix_list_spacing("Intro\n- a\n- b") == "Intro\n\n- a\n- b"
-
-
 def test_code_fence_contents_untouched():
     src = "Text\n```\nline\n2023. not touched\n```\n"
     assert fix_list_spacing(src) == src
-
-
-def test_wrapped_bullets_stay_tight():
-    src = "Intro.\n\n- First bullet that\n  wraps.\n- Second.\n"
-    assert fix_list_spacing(src) == src
-    assert "<p>" not in render(src).split("</p>", 1)[1]
 
 
 def test_other_fence_marker_inside_code_block_is_code():
@@ -126,3 +116,38 @@ def test_wrapped_year_after_code_block_following_list_is_kept():
 def test_fence_inside_ordered_item_keeps_numbering():
     src = "1. First\n   ```\n   code\n   ```\n2. Second\n"
     assert "2\\." not in fix_list_spacing(src)
+
+
+def test_fence_inside_ordered_item_keeps_list_tight() -> None:
+    # gptme/gptme-contrib#2264: an indented fence used to reset list context,
+    # so a blank line was inserted before "2. Second" and Python-Markdown
+    # wrapped every <li> in <p>.
+    src = "1. First\n   ```\n   code\n   ```\n2. Second\n"
+    out = fix_list_spacing(src)
+    assert "\n\n2. Second" not in out
+    html = render(src)
+    assert "<li>\n<p>" not in html
+    assert html.count("<li>") == 2
+
+
+def test_tilde_fence_inside_ordered_item_keeps_list_tight() -> None:
+    src = "1. First\n   ~~~\n   code\n   ~~~\n2. Second\n"
+    assert "\n\n2. Second" not in fix_list_spacing(src)
+    assert "<li>\n<p>" not in render(src)
+
+
+def test_fence_inside_unordered_item_keeps_list_tight() -> None:
+    src = "- First\n  ```\n  code\n  ```\n- Second\n"
+    out = fix_list_spacing(src)
+    assert "\n\n- Second" not in out
+    assert "<li>\n<p>" not in render(src)
+
+
+def test_unordered_list_after_paragraph_gets_blank_line() -> None:
+    assert fix_list_spacing("Intro\n- a\n- b") == "Intro\n\n- a\n- b"
+
+
+def test_wrapped_bullets_stay_tight() -> None:
+    src = "Intro.\n\n- First bullet that\n  wraps.\n- Second.\n"
+    assert fix_list_spacing(src) == src
+    assert "<li>\n<p>" not in render(src)
