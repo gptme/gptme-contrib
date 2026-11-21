@@ -1,6 +1,6 @@
-"""Per-PR review writer: marker, publish, thread and disposition helpers.
+"""Per-PR review writer: marker, publish, thread, disposition and render helpers.
 
-Writer-port slices 2a and 2b (Bob's knowledge/technical-designs/2026-11-20-ai-review-writer-port.md).
+Writer-port slices 2a–2c (Bob's knowledge/technical-designs/2026-11-20-ai-review-writer-port.md).
 Code moved as-is from Bob's ``scripts/github/ai-review.py``; review behaviour is
 unchanged.
 
@@ -9,7 +9,7 @@ unchanged.
 ``MARKER_PREFIX``, ``PROVISIONAL_MARKER_PREFIX``, ``REVIEWER_IDENTITY`` (an
 object with ``login``) and the I/O seams (``run``, ``gh_json``,
 ``gh_paginated_list``; ``_find_all_marker_comments`` / ``_delete_marker_comment``
-/ ``fetch_review_comments`` optionally override the writer's own) and uses the functions it returns. Bob
+/ ``fetch_review_comments`` / ``head_path_exists`` optionally override the writer's own) and uses the functions it returns. Bob
 binds a view of his script module, so existing
 ``monkeypatch.setattr(script, "run", ...)`` seams still reach calls made inside
 these helpers. A peer binds :func:`default_io` built from its own
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import fnmatch
 import json
 import os
 import re
@@ -33,19 +34,29 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import FunctionType, SimpleNamespace
 from typing import Protocol
+from urllib.parse import quote
 
 from bobutils.shell import gh_json, gh_paginated_list
 
 from gptme_review.core import (
     ReviewDeadline,
+    agreement_dissent,
     blocking_shortfall,
+    confidence_rationale,
+    confidence_score,
+    consensus_degraded,
+    consensus_lost_jobs,
+    consensus_lost_passes,
     filter_suppressed,
     is_summary_only_finding,
     matches_entry,
+    merge_verdict,
     normalize_finding_class,
     normalize_severity,
+    partition_posting_findings,
     suppression_entry,
 )
+from gptme_review.shard import sharding_note
 from gptme_review.sweep import SweepIdentity, _is_reviewer_comment
 
 
@@ -1811,3 +1822,1038 @@ def build_disposition_rows(
         )
         rows.append(row)
     return rows
+
+
+# --- writer-port slice 2c: diff shaping, notes and render ---------------
+
+SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2}
+SEVERITY_ICON = {"P0": "🛑", "P1": "❌", "P2": "⚠️"}
+SEVERITY_LABEL = {"P0": "critical", "P1": "high", "P2": "medium"}
+
+#: Rows in the per-file change table before it is truncated. Greptile's own
+#: tables run to a handful of files; a 200-file refactor does not become more
+#: glanceable by listing all 200, and the overflow is named rather than hidden.
+MAX_FILE_ROWS = 40
+#: Undescribed paths listed by name before collapsing to a count.
+MAX_UNDESCRIBED_NAMED = 12
+
+_CODE_SPAN_RE = re.compile(r"`[^`]*`")
+
+
+def md_text(text: str, *, escape_pipes: bool = False) -> str:
+    """Make model prose safe to drop into a comment without losing characters.
+
+    The angle brackets are the load-bearing part. GitHub renders raw HTML
+    inside Markdown, so a description that faithfully mentions `<think>` would
+    render as *nothing* — silently deleting the exact characters this reviewer
+    has a documented history of dropping (gptme/gptme#3486). Escaping them
+    means an accurate description stays accurate on screen, and an inaccurate
+    one stays visibly inaccurate instead of being papered over.
+
+    Escaping happens only OUTSIDE code spans: inside a span Markdown already
+    renders `<` literally, and `&lt;` there would show as the entity text.
+    Pipes are escaped everywhere (including in code spans, which GFM allows)
+    because a bare `|` splits a table cell.
+    """
+    chunks: list[tuple[bool, str]] = []
+    pos = 0
+    for m in _CODE_SPAN_RE.finditer(text):
+        chunks.append((False, text[pos : m.start()]))
+        chunks.append((True, m.group(0)))
+        pos = m.end()
+    chunks.append((False, text[pos:]))
+
+    out: list[str] = []
+    for is_code, chunk in chunks:
+        if not is_code:
+            chunk = chunk.replace("<", "&lt;").replace(">", "&gt;")
+        if escape_pipes:
+            chunk = chunk.replace("|", "\\|")
+        out.append(chunk)
+    return "".join(out)
+
+
+#: Public, linkable explanation of what this comment is and how to drive it.
+#: ErikBjare/bob#1122 was the old link; that repo is private, so it told an
+#: outside maintainer nothing.
+REVIEWER_DOC_URL = (
+    "https://github.com/gptme/gptme-contrib/blob/master/docs/ai-reviewer.md"
+)
+
+
+def _summary_files(change_summary: dict | None) -> tuple[str, list[dict]]:
+    cs = change_summary or {}
+    return (
+        str(cs.get("summary") or "").strip(),
+        [f for f in (cs.get("files") or []) if isinstance(f, dict)],
+    )
+
+
+def render_change_prose(change_summary: dict | None) -> list[str]:
+    """The lede: what this PR does, before anything about what is wrong with it.
+
+    Greptile leads with the description and that ordering is right — a reader
+    triaging a queue needs "what is this change" before "what is the score",
+    and on a zero-finding review the description is the entire message.
+
+    The per-file breakdown does NOT live here; it is reference material and
+    sits below the findings (`render_files_changed`).
+    """
+    summary, files = _summary_files(change_summary)
+    if not summary:
+        return []
+    # The caveat rides with the prose when there is prose; otherwise
+    # render_files_changed carries it, so it is never dropped.
+    return [md_text(summary), ""]
+
+
+def render_files_changed(
+    change_summary: dict | None, undescribed: list[str] | None = None
+) -> list[str]:
+    """Per-file breakdown, collapsed: reference material, not the headline.
+
+    Rendered as a **list, not a table** — a deliberate divergence from Greptile,
+    which uses a two-column table on all 200 corpus PRs. Column 1 holds an
+    unbreakable long path and column 2 holds prose that wraps to several lines,
+    so on a phone the table either squeezes the description into a sliver or
+    forces horizontal scroll (Erik, 2026-08-08). A list reflows. Do not
+    "restore parity" by reverting this; readability beat benchmark fidelity on
+    purpose.
+
+    Collapsed rather than cut: it is how a reader checks what the reviewer
+    actually read, which is worth keeping and not worth the vertical space in
+    the default view (Erik, 2026-08-10).
+
+    Deliberately no mermaid diagram: the benchmark over 200 Greptile reviews
+    put diagrams (on ~60% of PRs) at the highest token cost per unit of
+    decision value in the whole output.
+    """
+    summary, files = _summary_files(change_summary)
+    if not files:
+        return []
+
+    lines = [
+        f"<details><summary><b>Files changed ({len(files)})</b> — "
+        "the diff as I read it</summary>",
+        "",
+    ]
+    for row in files[:MAX_FILE_ROWS]:
+        path = str(row.get("path") or "").strip()
+        desc = " ".join(str(row.get("description") or "").split())
+        # No pipe escaping: nothing here is a table cell any more, and a
+        # `\|` would render as a literal backslash in flowing prose.
+        lines.append(f"- `{md_text(path)}` — {md_text(desc) or '_(no description)_'}")
+    if len(files) > MAX_FILE_ROWS:
+        lines.append(f"- _{len(files) - MAX_FILE_ROWS} more changed file(s) not shown_")
+    lines.append("")
+
+    # Naming the gap matters: silence here would read as "the reviewer covered
+    # everything", which is the assurance this section exists to avoid faking.
+    if undescribed:
+        named = ", ".join(f"`{p}`" for p in undescribed[:MAX_UNDESCRIBED_NAMED])
+        extra = (
+            f" (+{len(undescribed) - MAX_UNDESCRIBED_NAMED} more)"
+            if len(undescribed) > MAX_UNDESCRIBED_NAMED
+            else ""
+        )
+        lines += [f"<sub>Also changed, not described above: {named}{extra}</sub>", ""]
+
+    lines += ["</details>", ""]
+    return lines
+
+
+def is_submodule_only_diff(diff: str) -> bool:
+    """True when the diff changes nothing but submodule pointers.
+
+    Such a diff carries no source for the reviewer to reason about — only
+    `-Subproject commit <old>` / `+Subproject commit <new>` — so a clean verdict
+    on it would assert more than was checked.
+    """
+    changed = [
+        ln
+        for ln in (diff or "").splitlines()
+        if (ln.startswith(("+", "-")) and not ln.startswith(("+++", "---")))
+    ]
+    if not changed:
+        return False
+    return all("Subproject commit" in ln for ln in changed)
+
+
+#: Paths whose diff is machine output rather than something anyone reviews.
+#: Matched with :func:`fnmatch.fnmatch` against the FULL path and against the
+#: basename, so `uv.lock` catches `subdir/uv.lock` and `*.min.js` catches any
+#: directory. Extending this tuple is the intended way to fix the next
+#: "unreviewable because of a generated file" report — keep it here.
+#:
+#: Deliberately not `str.endswith`: that matched `my-uv.lock` and `vendor.min.js`
+#: alike but could never express `*.min.css`, and a substring rule on paths is
+#: the kind that quietly grows false positives.
+GENERATED_FILE_PATTERNS: tuple[str, ...] = (
+    "uv.lock",
+    "poetry.lock",
+    "Pipfile.lock",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "Cargo.lock",
+    "composer.lock",
+    "Gemfile.lock",
+    "go.sum",
+    "flake.lock",
+    "*.min.js",
+    "*.min.css",
+)
+
+
+def _is_generated_file(path: str) -> bool:
+    """True if the file is machine-generated and should be excluded from review."""
+    name = path.rsplit("/", 1)[-1]
+    return any(
+        fnmatch.fnmatch(path, pat) or fnmatch.fnmatch(name, pat)
+        for pat in GENERATED_FILE_PATTERNS
+    )
+
+
+def extract_touched_files_and_reviewable_diff(
+    diff: str,
+) -> tuple[set[str], str, int, list[dict]]:
+    """Split a diff into what gets reviewed and what gets excluded.
+
+    Returns:
+        - set of reviewable file paths touched by the PR (generated files are
+          omitted unless the diff contains nothing else and is kept whole)
+        - diff text with generated file changes removed
+        - size in bytes of the reviewable diff
+        - one record per excluded file: ``path``, ``added``, ``removed``,
+          ``bytes`` — the input to :func:`elision_note`, which is what puts the
+          exclusion in front of a human. Excluding a file from review without
+          saying so makes the review claim coverage it does not have, which is
+          worse than the size-gate bug this exclusion exists to fix.
+
+    A diff of *nothing but* generated files is returned UNCHANGED, with no
+    exclusions. Excluding everything leaves an empty diff; an empty diff finds
+    nothing; zero findings scores 5/5; and 5/5 is exactly what the self-merge
+    gate reads as ready-to-merge. The honest outcome for a lockfile-only PR is
+    the one it had before: reviewed if it fits, `diff_too_large` if it does not.
+    """
+    touched: set[str] = set()
+    sections: list[tuple[list[str], str | None]] = []
+    current_section: list[str] = []
+    current_path: str | None = None
+    current_preimage_path: str | None = None
+
+    for line in (diff or "").splitlines(keepends=True):
+        if line.startswith("diff --git"):
+            if current_section:
+                sections.append((current_section, current_path))
+            current_section = [line]
+            current_path = None
+            current_preimage_path = None
+            continue
+
+        current_section.append(line)
+        if line.startswith("--- "):
+            target = line[4:].rstrip("\r\n").split("\t", 1)[0]
+            if target != "/dev/null":
+                current_preimage_path = target.removeprefix("a/")
+        elif line.startswith("+++ "):
+            # Unlike a ``diff --git`` header, an image marker has only one
+            # path. This stays unambiguous when the path itself contains the
+            # header-like substring `` b/``. Git may append a tab-separated
+            # timestamp in non-native diff dialects. Pure deletions identify
+            # their path through the pre-image marker instead.
+            target = line[4:].rstrip("\r\n").split("\t", 1)[0]
+            current_path = (
+                current_preimage_path
+                if target == "/dev/null"
+                else target.removeprefix("b/")
+            )
+
+    if current_section:
+        sections.append((current_section, current_path))
+
+    reviewable_lines: list[str] = []
+    excluded: dict[str, list[str]] = {}
+    for lines, path in sections:
+        if path is None:
+            # Keep malformed preambles reviewable rather than guessing a path
+            # and risking a fail-open exclusion.
+            reviewable_lines.extend(lines)
+            continue
+        if _is_generated_file(path):
+            excluded.setdefault(path, []).extend(lines)
+        else:
+            touched.add(path)
+            reviewable_lines.extend(lines)
+
+    # Nothing reviewable would survive: keep the diff whole. See docstring.
+    if excluded and not reviewable_lines:
+        return set(excluded), diff, len(diff.encode("utf-8", errors="replace")), []
+
+    reviewable_diff = "".join(reviewable_lines)
+    reviewable_bytes = len(reviewable_diff.encode("utf-8", errors="replace"))
+
+    elided = [
+        {
+            "path": path,
+            "bytes": len("".join(lines).encode("utf-8", errors="replace")),
+            **_count_changed_lines(lines),
+        }
+        for path, lines in excluded.items()
+    ]
+    return touched, reviewable_diff, reviewable_bytes, elided
+
+
+def _count_changed_lines(lines: list[str]) -> dict[str, int]:
+    """Added/removed line counts for one file's diff section."""
+    added = removed = 0
+    for raw in lines:
+        if raw.startswith(("+++", "---")):
+            continue
+        if raw.startswith("+"):
+            added += 1
+        elif raw.startswith("-"):
+            removed += 1
+    return {"added": added, "removed": removed}
+
+
+def preload_coverage_note(coverage: Mapping[str, int] | None) -> str:
+    """One-line disclosure when changed-file preload coverage is incomplete."""
+    if not coverage:
+        return ""
+    total = int(coverage.get("files_in_diff", 0))
+    incomplete = int(coverage.get("files_truncated", 0))
+    if total <= 0 or incomplete <= 0:
+        return ""
+    return (
+        f"> ⚠️ **{incomplete} of {total} changed files were not fully read.** "
+        "Claims that an identifier is never assigned, used, or called are "
+        "discarded unless verification names only fully preloaded files. This "
+        "coverage describes the bounded context preload; the diff was reviewed."
+    )
+
+
+def elision_note(elided_files: list[dict] | None) -> str:
+    """State, in the posted review, which files were excluded. "" when none.
+
+    Non-negotiable disclosure. The reviewer's output feeds a self-merge gate
+    that reads zero findings as ready-to-merge, so a review that quietly
+    skipped a changed file launders an unexamined change through a green check.
+    Naming the file and its size costs one line and makes the gap auditable.
+
+    Rendered next to the score rather than in the footer: the score is the
+    artefact that gets acted on.
+    """
+    if not elided_files:
+        return ""
+    parts = [
+        (
+            f"``{rec.get('path', '?')}`` "
+            f"(+{rec.get('added', 0)}/-{rec.get('removed', 0)} lines, "
+            f"{int(rec.get('bytes', 0)) // 1024}KB)"
+        )
+        for rec in elided_files
+    ]
+    n = len(parts)
+    return (
+        f"> ⚠️ **{n} generated file{'' if n == 1 else 's'} excluded and NOT "
+        f"reviewed:** {', '.join(parts)}. Machine-generated output is removed "
+        "from the diff before review — from what the model sees and from the "
+        f"size gate alike — so nothing below says anything about "
+        f"{'it' if n == 1 else 'them'}."
+    )
+
+
+#: Why a finding was dropped by POLICY, and how to say so. Keyed by the
+#: `suppressed_reason` stamped on the finding at the drop site.
+#:
+#: Only policy drops belong here. A finding removed because it was never valid
+#: — self-disclaiming, misquoted, consensus-rejected — is not suppressed
+#: evidence, and a human's own dismissal (the suppression ledger) is a settled
+#: argument, not a filter acting on the reader's behalf.
+#:
+#: The round cap is deliberately ABSENT: it no longer drops findings — it
+#: downgrades them to informational via :func:`apply_round_cap`, so they are
+#: reported rather than suppressed (contrib#1434).
+SUPPRESSION_REASONS: dict[str, str] = {
+    # Phrased as a noun clause, not a sentence with a subject: these strings are
+    # interpolated after counts that may be 1 or many, and "they fall in files…"
+    # over a single finding is the kind of small wrongness that makes a reader
+    # stop trusting the rest of the comment.
+    # Covers BOTH shapes `drop_out_of_scope_findings` produces: a finding in a
+    # file the PR never touched, and a finding carrying no `file` at all (a
+    # PR-level observation, which cannot be shown in scope either). Saying only
+    # "in files this PR did not touch" would be false of the second.
+    "out_of_scope": (
+        "not anchored to a file this PR changed — pre-existing code, or an "
+        "observation about the PR as a whole"
+    ),
+}
+
+
+def suppression_note(suppressed: list[dict] | None) -> str:
+    """State, in one quiet line, which findings policy dropped. "" when none.
+
+    Same mechanism and same reason as :func:`elision_note`, one level up: that
+    one says which *files* went unread, this one says which *findings* were
+    found and then withheld. A body reading "No findings on this head" while
+    a P2 was dropped is a score that lies to the merge gate — and unlike the
+    size gate it replaced, it fails OPEN.
+
+    This is a single factual line, not the multi-paragraph essay about the
+    reviewer's own filter that used to print here (contrib#1434). The counts
+    are also the raw material for filing these as issues later, which is what
+    should happen to an out-of-scope finding.
+    """
+    if not suppressed:
+        return ""
+    # Only policy drops are disclosed. A finding that was never valid (self-
+    # disclaiming, misquoted, consensus-rejected) or a human's own dismissal is
+    # not withheld evidence, so it must not read as one here.
+    policy = [
+        f for f in suppressed if f.get("suppressed_reason") in SUPPRESSION_REASONS
+    ]
+    if not policy:
+        return ""
+    n = len(policy)
+    return (
+        f"> ℹ️ {n} finding{'' if n == 1 else 's'} on files this PR did not "
+        "touch — not reported here."
+    )
+
+
+def _consensus_rejected(consensus: dict | None) -> int:
+    """Findings the consensus filter dropped on this run."""
+    if not consensus:
+        return 0
+    rejected = consensus.get("rejected")
+    return rejected if isinstance(rejected, int) else 0
+
+
+def drop_out_of_scope_findings(
+    findings: list[dict], touched_files: set[str]
+) -> tuple[list[dict], list[dict]]:
+    """Filter findings to only those in files the PR touched.
+
+    A finding on a pre-existing code path (file not in touched_files) is noted
+    but not a blocker. This prevents review feedback on stale code from forcing
+    a re-review cycle on an unrelated PR.
+
+    Returns:
+        - in_scope findings (files the PR touched)
+        - out_of_scope findings (pre-existing code)
+    """
+    in_scope = []
+    out_of_scope = []
+
+    for finding in findings:
+        file_path = finding.get("file", "")
+        if file_path in touched_files:
+            in_scope.append(finding)
+        else:
+            out_of_scope.append(finding)
+
+    return in_scope, out_of_scope
+
+
+def head_path_exists(repo: str, ref: str, path: str) -> bool | None:
+    """Whether ``path`` exists at ``ref``; ``None`` means the probe failed.
+
+    Only an explicit GitHub 404 is absence. Authentication, rate-limit, and
+    transport failures keep the finding visible rather than laundering an
+    unverified path into a mechanical drop.
+    """
+    proc = _io.run(
+        [
+            "gh",
+            "api",
+            "--silent",
+            "--method",
+            "GET",
+            f"repos/{repo}/contents/{quote(path, safe='/')}",
+            "-f",
+            f"ref={ref}",
+        ]
+    )
+    if proc.returncode == 0:
+        return True
+    if "HTTP 404" in (proc.stderr or ""):
+        return False
+    return None
+
+
+def drop_nonexistent_head_findings(
+    findings: list[dict],
+    *,
+    repo: str,
+    ref: str,
+    known_existing_paths: Collection[str] = (),
+) -> tuple[list[dict], list[dict]]:
+    """Drop cited paths proven absent from the reviewed head.
+
+    PR-level findings carry an empty path and stay. Results are cached per path
+    because several findings can cite the same file.
+    """
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    statuses: dict[str, bool | None] = {
+        str(path): True for path in known_existing_paths
+    }
+    for finding in findings:
+        path = str(finding.get("file") or "")
+        if not path:
+            kept.append(finding)
+            continue
+        if path not in statuses:
+            statuses[path] = _io.head_path_exists(repo, ref, path)
+        (dropped if statuses[path] is False else kept).append(finding)
+    return kept, dropped
+
+
+def apply_round_cap(
+    findings: list[dict], review_round_count: int, max_rounds: int = 5
+) -> int:
+    """Downgrade P2+ findings to informational once the round cap is reached.
+
+    The hard round cap stops endless re-review cycles: after ``max_rounds``
+    rounds on one PR, P2+ findings no longer *block* the merge. That is a
+    merge-gating fact, and the self-merge gate already owns it
+    (``AI_REVIEW_BLOCKING_SEVERITIES = {P0, P1}``, contrib#1405) — so the
+    reviewer must NOT suppress the findings, only stop escalating them. A P2
+    that no longer blocks is still worth reading.
+
+    Mutates ``findings`` in place: each P2+ finding gets ``non_blocking=True``
+    so it is reported as an informational note rather than dropped into the
+    suppression ledger (the old behaviour, which made the findings vanish and
+    the body read as a false clean — contrib#1416 — or print an essay about
+    its own filter — contrib#1434).
+
+    Returns the number of findings downgraded (0 when the cap is not reached
+    or there is nothing to downgrade).
+    """
+    if review_round_count <= max_rounds or not findings:
+        return 0
+    capped = [f for f in findings if f.get("severity") not in ("P0", "P1")]
+    for f in capped:
+        f["non_blocking"] = True
+        f["non_blocking_reason"] = "round_cap"
+    return len(capped)
+
+
+def non_blocking_note(findings: list[dict], reason: str) -> str:
+    """Brief note for the informational findings section.
+
+    Returns an empty string for unknown reasons or empty finding lists so
+    callers can safely append it without producing blank lines.
+    """
+    if not findings or reason != "out_of_scope":
+        return ""
+    if all(not f.get("file") for f in findings):
+        return (
+            "_Each item here is an observation about the PR as a whole — "
+            "informational only, not scored._"
+        )
+    return (
+        "_These findings are not anchored to a file this PR changed — "
+        "informational only, not scored._"
+    )
+
+
+def consensus_note(consensus: dict | None) -> str:
+    """One quiet line saying how the run fell short of the consensus asked for.
+
+    Empty string when it did not. Both kinds of shortfall get a clause, and
+    they are genuinely different failures: losing whole *passes* lowers the
+    agreement threshold that can be applied at all, while losing *aspect jobs*
+    leaves the threshold intact but starves it of evidence — the second is the
+    one the pass count used to hide completely.
+    """
+    if not consensus or not consensus_degraded(consensus):
+        return ""
+    clauses: list[str] = []
+    if consensus_lost_passes(consensus):
+        applied = consensus["min_agreement"]
+        answered = consensus["answered"]
+        clauses.append(
+            f"{answered} of {consensus['requested']} passes answered, so "
+            f"findings were filtered at {applied}-of-{answered} agreement "
+            f"rather than {consensus['min_agreement_requested']}-of-"
+            f"{consensus['requested']} — less filtered than usual"
+        )
+    if consensus_lost_jobs(consensus):
+        clauses.append(
+            f"{consensus['jobs_answered']} of {consensus['jobs_requested']} "
+            "fan-out jobs answered, so the findings above were filtered "
+            "against less evidence than the threshold assumes"
+        )
+    return (
+        "<sub>ℹ️ Consensus was degraded on this run: " + "; ".join(clauses) + ".</sub>"
+    )
+
+
+def render(
+    findings: list[dict],
+    *,
+    model: str,
+    engine: str,
+    elapsed: float,
+    head_sha: str,
+    full_sha: str,
+    repo_slug: str,
+    anchored: set[int],
+    history: list[dict],
+    submodule_only: bool = False,
+    change_summary: dict | None = None,
+    undescribed: list[str] | None = None,
+    consensus: dict | None = None,
+    elided_files: list[dict] | None = None,
+    preload_coverage: Mapping[str, int] | None = None,
+    suppressed_findings: list[dict] | None = None,
+    informational_findings: list[dict] | None = None,
+    advisory_findings: list[dict] | None = None,
+    non_coverage: str = "",
+    sharding: Mapping[str, object] | None = None,
+) -> str:
+    findings, classified_advisories = partition_posting_findings(findings)
+    advisory_findings = [*classified_advisories, *(advisory_findings or [])]
+    ordered = sorted(
+        findings, key=lambda f: SEVERITY_ORDER.get(str(f.get("severity", "P2")), 9)
+    )
+
+    # Section order follows Greptile's, which reads better than what this used
+    # to do (Erik, 2026-08-10): description → score with findings → files
+    # changed → a small-text footer. No `<hr>` rules anywhere — headings
+    # already separate the sections, and the rules only added vertical noise.
+    lines = ["## 🤖 AI code review", ""]
+    pointer_bump_only = submodule_only and not ordered
+
+    # 1. What the PR does. Above the verdict deliberately: a reader wants "what
+    #    is this change" before "what is wrong with it", and a zero-finding
+    #    review is precisely when the description carries the whole message.
+    #
+    #    Suppressed entirely on a pointer bump: all that diff contains is
+    #    `-Subproject commit <old>` / `+Subproject commit <new>`, so anything
+    #    written about it describes commits that are not in front of us. A
+    #    fluent paragraph about a pointer bump is the same false assurance the
+    #    "not reviewed" branch below exists to refuse.
+    if not pointer_bump_only:
+        lines += render_change_prose(change_summary)
+
+    # 2. The verdict, with its label folded into the heading rather than
+    #    repeated as a sentence under it. It is the one line a human triaging a
+    #    queue — or PM's re-review loop deciding whether to iterate again —
+    #    actually needs. `None` is the abstain case and renders as N/A rather
+    #    than as a number: see `confidence_score`.
+    n_suppressed = len(suppressed_findings or [])
+    n_informational = len(informational_findings or [])
+    score = confidence_score(
+        findings,
+        submodule_only=submodule_only,
+        suppressed=n_suppressed,
+        informational=n_informational,
+        non_coverage=non_coverage,
+    )
+    lines += [
+        f"### {merge_verdict(score, findings)}",
+        "",
+        f"Confidence {score}/5" if score else "Confidence N/A",
+        "",
+    ]
+    # The rationale sentence earns its line only when there is no score to
+    # explain itself: "4/5 — P2 findings only" followed by "No P0/P1 on this
+    # head, but 1 P2 issue outstanding" and then a findings headline saying it
+    # a third time was three lines for one fact (Erik, 2026-08-20).
+    if score is None:
+        lines += [
+            confidence_rationale(
+                score,
+                findings,
+                suppressed=n_suppressed,
+                informational=n_informational,
+                submodule_only=submodule_only,
+                non_coverage=non_coverage,
+            ),
+            "",
+        ]
+
+    # Say when the score above did not get the consensus it asked for. We tell
+    # readers consensus is what makes these scores stable; on a degraded run
+    # that property does not hold, and without this line a 3/5 filtered by one
+    # surviving pass is indistinguishable from a 3/5 that three passes agreed
+    # on. Deliberately quiet — one <sub> line, no warning icon shouting at a
+    # reader about a run that is still worth reading, just less filtered.
+    #
+    # Suppressed ONLY on a submodule pointer bump, where nothing was reviewed
+    # and "less filtered than usual" describes filtering that never happened.
+    #
+    # It is emphatically NOT suppressed on an ordinary review that found
+    # nothing. That case looks the most reassuring and is the most dangerous:
+    # zero findings scores 5/5, 5/5 is what the self-merge gate reads as
+    # ready-to-merge, and a degraded run reaches zero findings by losing its
+    # evidence rather than by the code being clean. Suppressing the note there
+    # is how a starved review launders itself into a merge. An earlier revision
+    # gated on `ordered or _consensus_rejected(consensus)` and did exactly that.
+    note = "" if submodule_only else consensus_note(consensus)
+    if note:
+        lines += [note, ""]
+
+    # How the diff was read when it did not fit one prompt. See sharding_note().
+    shards = sharding_note(sharding)
+    if shards:
+        lines += [shards, ""]
+
+    # What was NOT read, immediately under the score. See elision_note().
+    elision = elision_note(elided_files)
+    if elision:
+        lines += [elision, ""]
+    coverage_note = preload_coverage_note(preload_coverage)
+    if coverage_note:
+        lines += [coverage_note, ""]
+
+    # What was found and then withheld. See suppression_note(): this is the
+    # difference between "nothing to report" and "everything was filtered",
+    # which the body used to render identically.
+    suppression = suppression_note(suppressed_findings)
+    if suppression:
+        lines += [suppression, ""]
+
+    # NO "Files Needing Attention" section. It listed the paths carrying
+    # findings — which is a strict subset of the per-file breakdown below, and
+    # every one of those paths already appears on the finding that names it.
+    # Three renderings of the same fact is not emphasis, it is padding (Erik,
+    # 2026-08-10). `files_needing_attention()` stays in the library; nothing
+    # here calls it.
+
+    # Defined at render scope, not inside the has-findings branch below:
+    # section 3b (out-of-scope findings) calls it on a run where `ordered`
+    # is empty, and while that branch was unreachable the nesting was
+    # invisible — the informational section only ever rendered because an
+    # empty-`ordered` run still fell into the counting branch that defined
+    # `emit`. Fixing that fall-through turned the latent scoping bug into
+    # an UnboundLocalError, which is how it was found.
+    def emit(f: dict, *, permalink: bool) -> None:
+        sev = str(f.get("severity", "P2"))
+        icon = SEVERITY_ICON.get(sev, "•")
+        label = f"{sev} {SEVERITY_LABEL.get(sev, '')}".strip()
+        if f.get("security"):
+            label += " · 🔒 security"
+        if f.get("non_blocking"):
+            label += " · ℹ️ non-blocking"
+        loc = "_PR-level_"
+        if f.get("file") and f.get("line"):
+            loc = f"`{f['file']}:{f['line']}`"
+            if permalink and repo_slug:
+                url = (
+                    f"https://github.com/{repo_slug}/blob/"
+                    f"{full_sha}/{f['file']}#L{f['line']}"
+                )
+                loc = f"[`{f['file']}:{f['line']}`]({url})"
+        elif f.get("file"):
+            loc = f"`{f['file']}`"
+        # A bold line, not an `###` heading. Each finding used to open a
+        # section heading, which on a 6-finding review turned the comment
+        # into a table of contents for itself — and rendered as headings
+        # *inside* a collapsed <details>, which is worse.
+        lines.append(f"**{icon} {label}** — {loc}")
+        lines.append("")
+        # Escaped for the same reason the change description is: a finding
+        # that says "the regex only matches <thinking>…</thinking>" renders
+        # as "the regex only matches …" once GitHub eats the tags — which
+        # deletes precisely the evidence a reader needs to spot that the
+        # finding misread the source. Seen on gptme/gptme#3486, the PR that
+        # produced three false P1-security findings from dropped brackets.
+        # A comment whose description preserves brackets while its findings
+        # silently lose them is worse than either alone.
+        body = md_text(str(f.get("body") or "").strip())
+        lines.append(body or "_(no detail)_")
+        lines.append("")
+        if f.get("suggestion"):
+            # NOT escaped: a fenced block is already literal, and `&lt;` in
+            # a ```suggestion block would be committed verbatim by anyone
+            # who clicks "Apply".
+            lines.extend(["```suggestion", str(f["suggestion"]).rstrip(), "```", ""])
+        if f.get("verification"):
+            lines.extend(
+                [
+                    (
+                        "<sub>**How this was verified:** "
+                        f"{md_text(str(f['verification']).strip())}</sub>"
+                    ),
+                    "",
+                ]
+            )
+        # Agreement is signal, not bookkeeping: 3/3 survived every
+        # independent sample, 2/3 survived the minimum. Showing it lets a
+        # reader weight a finding without knowing how the filter works.
+        agreement, total = f.get("agreement"), f.get("passes")
+        if isinstance(agreement, int) and isinstance(total, int) and total > 1:
+            consensus_line = (
+                f"<sub>Consensus: {agreement}/{total} passes agreed"
+                f"{agreement_dissent(f)}</sub>"
+            )
+            # Also show distinct-key consensus when available (measuring whether
+            # consensus reflects independent sources vs. resampled passes of the
+            # same model+aspect). See ai-reviewer-consensus-independence-key task.
+            distinct_agreement = f.get("distinct_key_agreement")
+            if isinstance(distinct_agreement, int):
+                keys = f.get("distinct_keys", [])
+                if isinstance(keys, list) and keys:
+                    key_labels = ", ".join(
+                        f"<code>{k.split(':')[1]}</code>"
+                        if ":" in k
+                        else f"<code>{k}</code>"
+                        for k in keys
+                    )
+                    consensus_line += (
+                        f" <br/><span style='color:gray;font-size:0.85em'>"
+                        f"Distinct keys: {distinct_agreement} "
+                        f"({key_labels})</span>"
+                    )
+            lines.extend([consensus_line, ""])
+
+    # 3. The findings themselves.
+    if pointer_bump_only:
+        # A clean pass here would be a false clean, which is just a hallucinated
+        # finding pointed the other way. All the reviewer saw was
+        # `-Subproject commit <old>` / `+Subproject commit <new>`; whether the
+        # bump is safe lives in the submodule's commit range, which is not in
+        # this diff at all. Say that instead of implying assurance we do not
+        # have. Seen on gptme-cloud#850: an 8-second "the diff looks correct"
+        # on a one-line pointer change.
+        lines += [
+            "ℹ️ **Submodule pointer change only — not reviewed.**",
+            "",
+            (
+                "This diff moves a submodule SHA and contains no source "
+                "changes, so there is nothing here for me to assess. Whether "
+                "the bump is safe depends on the submodule's commit range, "
+                "which this diff does not include. Treat this as *not "
+                "reviewed*, not as approved."
+            ),
+            "",
+        ]
+    elif not ordered and n_suppressed:
+        # Every in-scope finding this pass raised was suppressed by policy.
+        # No findings section, and no "clean" ✅ — the score above already says
+        # N/A and the suppression note names the drop. A note ABOUT the absence
+        # ("No findings reported — but not because none were found") is exactly
+        # the meta-essay contrib#1434 flagged; silence carries no false signal.
+        pass
+    elif not ordered:
+        # `informational_findings` can be non-empty here. They are out-of-scope
+        # by construction, so they never enter `ordered`, the score, or the
+        # marker — but they ARE printed below, so "No findings." would be a
+        # lie the reader can see through. Falling into the counting branch
+        # instead is worse: it renders "**0 findings** ·  — no P0/P1 on this
+        # head; the P2s here keep the score at 4/5", a sentence with an empty
+        # severity split that describes P2s nobody raised.
+        if informational_findings:
+            lines += [
+                "✅ **No findings in this PR's changed files.** What follows is "
+                "outside them — not about this change, and not scored.",
+                "",
+            ]
+        elif advisory_findings:
+            lines += [
+                "✅ **No thread-worthy findings.** Advisory notes follow; they "
+                "are retained without opening review threads.",
+                "",
+            ]
+        else:
+            lines += [
+                "✅ **No findings.** The diff looks correct to me on this pass.",
+                "",
+            ]
+    else:
+        counts: dict[str, int] = {}
+        for f in ordered:
+            sev = str(f.get("severity", "P2"))
+            counts[sev] = counts.get(sev, 0) + 1
+        summary = " · ".join(
+            f"{SEVERITY_ICON.get(s, '•')} {counts[s]} {s}"
+            for s in sorted(counts, key=lambda x: SEVERITY_ORDER.get(x, 9))
+        )
+        n_sec = sum(1 for f in ordered if f.get("security"))
+        if n_sec:
+            summary += f" · 🔒 {n_sec} security"
+        high = sum(
+            1
+            for f in ordered
+            if not f.get("non_blocking")
+            and str(f.get("severity", "P2")) in ("P0", "P1")
+        )
+        n_nonblocking = sum(1 for f in ordered if f.get("non_blocking"))
+        # State what was found, never whether it may be merged (Erik,
+        # 2026-08-11). "None blocking, so the findings below are advisory" was
+        # a verdict the reviewer has no standing to give. Naming the score
+        # consequence keeps the severity split honest without deciding the
+        # merge.
+        #
+        # What this line must NOT say any more: that a P2 "blocks just as hard
+        # as a P1". That was true of a score-based gate and stopped being true
+        # the same day it was written — contrib#1405 (`f440b61d`, 2026-08-11)
+        # made the self-merge gate disposition-based, with
+        # AI_REVIEW_BLOCKING_SEVERITIES = {P0, P1} and "surviving P2s never
+        # block". A 4/5 is now an acceptable head. Telling an author their P2
+        # is merge-blocking manufactures the fix round + CI run + re-review
+        # that P2 exists to avoid, which is the whole cost the test-coverage
+        # rule in `build_review_prompt` is calibrated against.
+        #
+        # A round-cap downgraded finding (`non_blocking`) is informational: it
+        # is still reported below, but it does not keep the score under 5/5 and
+        # must not be described as blocking.
+        #
+        # No P0/P1-restating clause here any more: the severity breakdown
+        # above (e.g. "❌ 1 P1") already says exactly that, and appending
+        # "— N at P0/P1" repeated the same count a second time on the same
+        # line (gptme-contrib#1621, Erik 2026-09-07 — "shouldn't repeat like
+        # that, messy to scan"). The one thing this line still adds beyond the
+        # breakdown is the round-cap case, which the breakdown cannot say.
+        if n_nonblocking and not high:
+            verdict = " — non-blocking (round cap reached)"
+        else:
+            verdict = ""
+        # One line, not three: count, severity split, and the resulting state
+        # all belong on the same glance. `<b>`, not `**`: this headline is
+        # reused verbatim as an HTML `<summary>` below, and GitHub does not
+        # run markdown inside inline HTML on the same line.
+        n = len(ordered)
+        headline = f"<b>{n} finding{'' if n == 1 else 's'}</b> · {summary}{verdict}"
+
+        inline_findings = [f for f in ordered if id(f) in anchored]
+        outside = [f for f in ordered if id(f) not in anchored]
+
+        # The headline IS the <details> title when every finding is inline
+        # (the common case). A second "N findings posted inline on the diff"
+        # title under it said the same thing twice (Erik, 2026-08-20).
+        if inline_findings and not outside:
+            lines += [f"<details><summary>{headline}</summary>", ""]
+            for f in inline_findings:
+                emit(f, permalink=False)
+            lines += ["</details>", ""]
+        else:
+            lines += [headline, ""]
+            if inline_findings:
+                n_in = len(inline_findings)
+                lines += [f"<details><summary><b>{n_in} inline</b></summary>", ""]
+                for f in inline_findings:
+                    emit(f, permalink=False)
+                lines += ["</details>", ""]
+
+        # "Comments outside diff": GitHub only accepts an inline comment on a
+        # line that is part of the diff. Anything else would be silently lost,
+        # so it is surfaced here in full, with a permalink to the exact line.
+        if outside:
+            if inline_findings:
+                lines += [
+                    "### Comments outside the diff",
+                    "",
+                    (
+                        "<sub>These could not be anchored to a line GitHub "
+                        "accepts, so they appear only here.</sub>"
+                    ),
+                    "",
+                ]
+            else:
+                lines += ["### Findings", ""]
+            for f in outside:
+                emit(f, permalink=True)
+
+    # 3b. Findings that are real but are not about this change: they land in
+    #     files the PR never touched, so they must not move the score and must
+    #     not enter the marker's `findings` (a P1 there makes the merge gate
+    #     demand a disposed thread for a defect this author did not introduce).
+    #
+    #     They are still shown IN FULL. The previous behaviour published a
+    #     count and a policy explanation with the finding bodies deleted, which
+    #     is the one outcome that helps nobody: the reader cannot act on it, and
+    #     cannot file it as an issue either. Collapsed, so a noisy pass costs a
+    #     line rather than a screen.
+    if informational_findings and not pointer_bump_only:
+        n_info = len(informational_findings)
+        lines += [
+            (
+                f"<details><summary><b>{n_info} out-of-scope finding"
+                f"{'' if n_info == 1 else 's'} (outside this PR's changed "
+                "files)</b></summary>"
+            ),
+            "",
+            non_blocking_note(informational_findings, "out_of_scope"),
+            "",
+        ]
+        for f in sorted(
+            informational_findings,
+            key=lambda f: SEVERITY_ORDER.get(str(f.get("severity", "P2")), 9),
+        ):
+            emit(f, permalink=True)
+        lines += ["</details>", ""]
+
+    # 3c. P2 claims whose class predicts advice rather than a fix. They remain
+    #     visible in one collapsed summary section and in marker evidence, but
+    #     never become inline threads or affect the score/header count.
+    if advisory_findings and not pointer_bump_only:
+        n_adv = len(advisory_findings)
+        lines += [
+            (
+                f"<details><summary><b>{n_adv} advisory finding"
+                f"{'' if n_adv == 1 else 's'} (summary-only, not scored)"
+                "</b></summary>"
+            ),
+            "",
+            (
+                "_These P2 guard, heuristic, trade-off, or documentation claims "
+                "are retained for judgment without opening review threads._"
+            ),
+            "",
+        ]
+        for f in advisory_findings:
+            emit(f, permalink=False)
+        lines += ["</details>", ""]
+
+    # 4. The per-file breakdown, below the findings: reference material for
+    #    checking what the reviewer read, not the headline.
+    if not pointer_bump_only:
+        lines += render_files_changed(change_summary, undescribed)
+
+    if history:
+        lines += ["<details><summary>Previous review passes</summary>", ""]
+        # This one stays a table: four short, uniform columns with no wrapping
+        # prose, which is the case tables are actually good at. Entries written
+        # before scoring existed have no `score` key and show `?`.
+        lines += [
+            "| commit | score | findings | engine | when |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for h in history[-10:]:
+            past = h.get("score")
+            lines.append(
+                f"| `{h.get('sha', '?')}` | {f'{past}/5' if past else '?'} "
+                f"| {h.get('findings', '?')} "
+                f"| {h.get('engine', '?')} | {h.get('at', '?')} |"
+            )
+        lines += ["", "</details>", ""]
+
+    # 5. Footer, small text, no rule above it. One line of provenance with a
+    #    link to the public reviewer doc; the maintainer triggers live behind
+    #    a <details> so they are discoverable without being read every time
+    #    (Erik, 2026-08-20: the always-visible paragraph was noise).
+    #    Both trigger paths skip comments authored by the reviewer itself, so
+    #    naming them here cannot self-trigger.
+    lines += [
+        (
+            f"<sub>Reviewed `{head_sha}` · `{model}` · `{engine}` engine · "
+            f"{elapsed:.0f}s · [about this reviewer]({REVIEWER_DOC_URL})</sub>"
+        ),
+        "",
+        "<details><summary><sub>Maintainer commands</sub></summary>",
+        "",
+        (
+            f"<sub>`@{_io.REVIEWER_IDENTITY.login} review` (own line) — fresh review · "
+            f"`@{_io.REVIEWER_IDENTITY.login} fix` — a worker acts on the findings. "
+            "Once per comment; 👀 = received.</sub>"
+        ),
+        "",
+        "</details>",
+    ]
+    return "\n".join(lines)

@@ -168,3 +168,152 @@ def test_host_seams_reach_calls_inside_the_writer(alice_io):
     assert calls[0][1]["BOB_GRAPHQL_MUTATION_REPO"] == "o/r"
     assert w.dismissed_findings("o/r", 7, threads=[]) == []
     assert ("comments", "o/r", 7) in calls
+
+
+# --- writer-port slice 2c: diff shaping, notes and render ---------------------
+
+_SUBMODULE_DIFF = (
+    "diff --git a/gptme-contrib b/gptme-contrib\n"
+    "index 1111111..2222222 160000\n"
+    "--- a/gptme-contrib\n"
+    "+++ b/gptme-contrib\n"
+    "@@ -1 +1 @@\n"
+    "-Subproject commit 1111111111111111111111111111111111111111\n"
+    "+Subproject commit 2222222222222222222222222222222222222222\n"
+)
+_LOCK_DIFF = (
+    "diff --git a/uv.lock b/uv.lock\n"
+    "--- a/uv.lock\n"
+    "+++ b/uv.lock\n"
+    "@@ -1 +1 @@\n"
+    "-old\n"
+    "+new\n"
+)
+_CODE_DIFF = (
+    "diff --git a/src/a.py b/src/a.py\n"
+    "--- a/src/a.py\n"
+    "+++ b/src/a.py\n"
+    "@@ -1 +1 @@\n"
+    "-old\n"
+    "+new\n"
+)
+
+
+def _render(w, findings=None, **kwargs):
+    defaults = dict(
+        model="m",
+        engine="llm",
+        elapsed=1.0,
+        head_sha="abc1234",
+        full_sha="abc1234deadbeef",
+        repo_slug="o/r",
+        anchored=set(),
+        history=[],
+    )
+    defaults.update(kwargs)
+    return w.render(findings or [], **defaults)
+
+
+def test_submodule_only_diff_is_pure():
+    assert writer.is_submodule_only_diff(_SUBMODULE_DIFF) is True
+    assert writer.is_submodule_only_diff(_CODE_DIFF) is False
+    assert writer.is_submodule_only_diff(_SUBMODULE_DIFF + _CODE_DIFF) is False
+    assert writer.is_submodule_only_diff("") is False
+
+
+def test_generated_files_are_elided_unless_the_diff_is_only_them():
+    mixed = _CODE_DIFF + _LOCK_DIFF
+    touched, reviewable, _, elided = writer.extract_touched_files_and_reviewable_diff(
+        mixed
+    )
+    assert touched == {"src/a.py"}
+    assert "uv.lock" not in reviewable
+    assert [e["path"] for e in elided] == ["uv.lock"]
+    # lockfile-only stays whole so a 5/5 cannot launder an unexamined change
+    touched, reviewable, _, elided = writer.extract_touched_files_and_reviewable_diff(
+        _LOCK_DIFF
+    )
+    assert elided == []
+    assert "uv.lock" in reviewable
+    assert touched == {"uv.lock"}
+
+
+def test_elision_note_names_the_skipped_file():
+    assert writer.elision_note(None) == ""
+    note = writer.elision_note(
+        [{"path": "uv.lock", "added": 1, "removed": 1, "bytes": 2048}]
+    )
+    assert "uv.lock" in note and "NOT reviewed" in note
+
+
+def test_drop_out_of_scope_splits_on_touched_files():
+    findings = [
+        {"file": "src/a.py", "body": "in"},
+        {"file": "src/old.py", "body": "out"},
+        {"file": "", "body": "pr-level"},
+    ]
+    in_scope, out = writer.drop_out_of_scope_findings(findings, {"src/a.py"})
+    assert in_scope == [findings[0]]
+    assert out == [findings[1], findings[2]]
+
+
+def test_head_path_exists_uses_bound_run_and_encodes_the_path(alice_io):
+    seen: list[str] = []
+
+    def fake_run(cmd, **kw):
+        seen.extend(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    alice_io.run = fake_run
+    w = writer.bind_io(alice_io)
+    assert w.head_path_exists("o/r", "head#1", "docs/a b?#.md") is True
+    assert "repos/o/r/contents/docs/a%20b%3F%23.md" in seen
+    assert seen[-2:] == ["-f", "ref=head#1"]
+
+
+def test_drop_nonexistent_head_findings_honours_a_host_path_probe(alice_io):
+    alice_io.head_path_exists = lambda *_args: False
+    w = writer.bind_io(alice_io)
+    kept, dropped = w.drop_nonexistent_head_findings(
+        [
+            {"file": "src/gone.py", "body": "x"},
+            {"file": "", "body": "pr-level"},
+        ],
+        repo="o/r",
+        ref="abc",
+        known_existing_paths={"src/kept.py"},
+    )
+    assert [f["file"] for f in kept] == [""]
+    assert [f["file"] for f in dropped] == ["src/gone.py"]
+
+
+def test_unbound_render_refuses_instead_of_posting_as_bob():
+    with pytest.raises(RuntimeError, match="no host bound"):
+        writer.render(
+            [],
+            model="m",
+            engine="llm",
+            elapsed=1.0,
+            head_sha="abc",
+            full_sha="abc",
+            repo_slug="o/r",
+            anchored=set(),
+            history=[],
+        )
+
+
+def test_render_footer_uses_the_bound_identity(alice_io):
+    w = writer.bind_io(alice_io)
+    body = _render(w)
+    assert "`@alice-agent review`" in body
+    assert "`@alice-agent fix`" in body
+    assert "@TimeToBuildBob" not in body
+    assert "alice-ai-review" not in body or "<!--" not in body.split("Maintainer")[-1]
+
+
+def test_two_hosts_render_independent_footers():
+    a = writer.default_io(sweep_identity("alice-agent", "alice-ai-review"))
+    b = writer.default_io(sweep_identity("TimeToBuildBob", "bob-ai-review"))
+    wa, wb = writer.bind_io(a), writer.bind_io(b)
+    assert "`@alice-agent review`" in _render(wa)
+    assert "`@TimeToBuildBob review`" in _render(wb)
