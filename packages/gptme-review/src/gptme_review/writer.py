@@ -1837,7 +1837,8 @@ MAX_FILE_ROWS = 40
 #: Undescribed paths listed by name before collapsing to a count.
 MAX_UNDESCRIBED_NAMED = 12
 
-_CODE_SPAN_RE = re.compile(r"`[^`]*`")
+# Match whole delimiter runs; shorter/longer runs inside a span are literal.
+_CODE_SPAN_RE = re.compile(r"(?<!`)(`+)(?!`)(.*?)(?<!`)\1(?!`)", re.DOTALL)
 
 
 def md_text(text: str, *, escape_pipes: bool = False) -> str:

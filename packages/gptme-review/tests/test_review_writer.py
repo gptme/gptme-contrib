@@ -399,3 +399,20 @@ def test_two_hosts_render_independent_footers():
     wa, wb = writer.bind_io(a), writer.bind_io(b)
     assert "`@alice-agent review`" in _render(wa)
     assert "`@TimeToBuildBob review`" in _render(wb)
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("<outside> ``<inside>``", "&lt;outside&gt; ``<inside>``"),
+        ("``the tag `<x>` is literal``", "``the tag `<x>` is literal``"),
+        ("```a ``<x>`` b```", "```a ``<x>`` b```"),
+        ("``<a>\n<b>``", "``<a>\n<b>``"),
+        ("``<unclosed>`", "``&lt;unclosed&gt;`"),
+        ("``<a>``` <b>", "``&lt;a&gt;``` &lt;b&gt;"),
+        ("`<a>` and ``<b>`` <c>", "`<a>` and ``<b>`` &lt;c&gt;"),
+    ],
+)
+def test_md_text_preserves_equal_length_backtick_spans(text, expected):
+    assert writer.md_text(text) == expected
+    assert writer.md_text(text + "|", escape_pipes=True) == expected + "\\|"
