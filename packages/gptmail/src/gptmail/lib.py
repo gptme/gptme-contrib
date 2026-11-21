@@ -225,8 +225,54 @@ def fix_list_spacing(markdown_text: str) -> str:
     lines = markdown_text.split("\n")
     result = []
     prev_was_list = False
+    fence = ""  # opening fence marker while inside a code block
+    in_ordered_item = False  # previous line is an ordered item or its wrap
 
     for i, line in enumerate(lines):
+        marker = re.match(r"^\s*(`{3,}|~{3,})(.*)$", line)
+        if fence or marker:
+            # A fence closes only on the same character, at least as long as
+            # the opener, with nothing but whitespace after it; a "~~~" or
+            # "``` python" line inside a ``` block is code.
+            if not fence:
+                fence = marker.group(1)  # type: ignore[union-attr]
+            elif (
+                marker
+                and marker.group(1)[0] == fence[0]
+                and len(marker.group(1)) >= len(fence)
+                and not marker.group(2).strip()
+            ):
+                fence = ""
+            # An unindented fence is top-level code, which ends any ordered
+            # list; a fence indented under an item belongs to that item.
+            if not line[:1].isspace():
+                in_ordered_item = False
+            result.append(line)
+            prev_was_list = False
+            continue
+
+        # A hard-wrapped line that happens to start with "2023. " is not a
+        # list item. Python-Markdown would still parse it as one, swallowing
+        # the number (a sentence ending "11.4 in\n  2023. It was ..." rendered
+        # as "11.4 in" plus a new bullet "It was ..."). CommonMark only lets
+        # "1." interrupt a paragraph; do the same by escaping the dot unless
+        # it is "1." or the line above is an ordered item (or its wrapped
+        # continuation). Any blank line ends that, so a later paragraph inside
+        # or after the list is treated like any other paragraph.
+        ordinal = re.match(r"^(\s*)(\d+)\.(\s+)", line)
+        prev_nonblank = i > 0 and lines[i - 1].strip() != ""
+        if ordinal and prev_nonblank and ordinal.group(2) != "1" and not in_ordered_item:
+            line = (
+                f"{ordinal.group(1)}{ordinal.group(2)}\\.{ordinal.group(3)}{line[ordinal.end() :]}"
+            )
+
+        if re.match(r"^\s*\d+\.\s+", line):
+            in_ordered_item = True
+        elif not line.strip() or re.match(r"^[-*+]\s+", line):
+            in_ordered_item = False
+        # else: a wrapped (or lazy) continuation, or an indented sub-bullet
+        # of the current item, keeps the current state
+
         # Check if this line is a list item
         is_list_item = bool(
             re.match(r"^\s*[-*+]\s+", line)  # Unordered list
@@ -242,7 +288,13 @@ def fix_list_spacing(markdown_text: str) -> str:
             result.append("")  # Add blank line before first list item
 
         result.append(line)
-        prev_was_list = is_list_item
+        # An indented line right after a list item is that item's wrapped
+        # continuation; the list is still going. Without this, every wrapped
+        # bullet got a blank line before the next one, making the list loose.
+        is_continuation = (
+            prev_was_list and not prev_is_blank and line[:1].isspace() and line.strip() != ""
+        )
+        prev_was_list = is_list_item or is_continuation
 
     return "\n".join(result)
 
