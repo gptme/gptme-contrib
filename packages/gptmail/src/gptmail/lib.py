@@ -225,13 +225,18 @@ def fix_list_spacing(markdown_text: str) -> str:
     lines = markdown_text.split("\n")
     result = []
     prev_was_list = False
-    in_fence = False
-    in_ordered_list = False
+    fence = ""  # opening fence marker while inside a code block
+    in_ordered_item = False  # previous line is an ordered item or its wrap
 
     for i, line in enumerate(lines):
-        if re.match(r"^\s*(```|~~~)", line):
-            in_fence = not in_fence
-        if in_fence or line.lstrip().startswith(("```", "~~~")):
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if fence or marker:
+            # A fence closes only on the same character, at least as long as
+            # the opener; a "~~~" line inside a ``` block is code.
+            if not fence:
+                fence = marker.group(1)  # type: ignore[union-attr]
+            elif marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence):
+                fence = ""
             result.append(line)
             prev_was_list = False
             continue
@@ -241,20 +246,21 @@ def fix_list_spacing(markdown_text: str) -> str:
         # the number (a sentence ending "11.4 in\n  2023. It was ..." rendered
         # as "11.4 in" plus a new bullet "It was ..."). CommonMark only lets
         # "1." interrupt a paragraph; do the same by escaping the dot unless
-        # it is "1." or we are already inside an ordered list.
+        # it is "1." or the line above is an ordered item (or its wrapped
+        # continuation). Any blank line ends that, so a later paragraph inside
+        # or after the list is treated like any other paragraph.
         ordinal = re.match(r"^(\s*)(\d+)\.(\s+)", line)
         prev_nonblank = i > 0 and lines[i - 1].strip() != ""
-        if ordinal and prev_nonblank and ordinal.group(2) != "1" and not in_ordered_list:
+        if ordinal and prev_nonblank and ordinal.group(2) != "1" and not in_ordered_item:
             line = (
                 f"{ordinal.group(1)}{ordinal.group(2)}\\.{ordinal.group(3)}{line[ordinal.end() :]}"
             )
 
         if re.match(r"^\s*\d+\.\s+", line):
-            in_ordered_list = True
-        elif re.match(r"^\s*[-*+]\s+", line):
-            in_ordered_list = False
-        elif not prev_nonblank and line.strip() and not line[:1].isspace():
-            in_ordered_list = False  # new unindented paragraph ends the list
+            in_ordered_item = True
+        elif not line.strip() or re.match(r"^\s*[-*+]\s+", line):
+            in_ordered_item = False
+        # else: a wrapped (or lazy) continuation keeps the current state
 
         # Check if this line is a list item
         is_list_item = bool(

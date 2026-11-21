@@ -55,3 +55,38 @@ def test_wrapped_bullets_stay_tight():
     src = "Intro.\n\n- First bullet that\n  wraps.\n- Second.\n"
     assert fix_list_spacing(src) == src
     assert "<p>" not in render(src).split("</p>", 1)[1]
+
+
+def test_other_fence_marker_inside_code_block_is_code():
+    # A "~~~" line inside a ``` block must not close it.
+    src = "Text\n```\n~~~\n2023. not touched\n```\n"
+    assert fix_list_spacing(src) == src
+    src = "~~~~\n~~~\n2023. not touched\n~~~~\n"
+    assert fix_list_spacing(src) == src
+
+
+def test_text_after_code_block_is_processed():
+    src = "```\ncode\n```\nStrain was 11.4 in\n2023. Then it fell.\n"
+    assert "2023. Then it fell" in render(src)
+
+
+def test_wrapped_year_in_paragraph_after_ordered_list_is_kept():
+    # The ordered list ended at the blank line; the paragraph's wrapped year
+    # is not item 2023.
+    for indent in ("", "   ", "    "):
+        src = f"1. One\n2. Two\n\n{indent}Strain was 11.4 in\n{indent}2023. Then it fell.\n"
+        html = render(src)
+        assert "2023. Then it fell" in html, indent
+        assert 'start="2023"' not in html, indent
+
+
+def test_lazy_continuation_keeps_numbering():
+    html = render("1. First item\nlazily wrapped\n2. Second\n")
+    assert html.count("<li>") == 2
+
+
+def test_no_number_is_dropped_after_loose_item_paragraph():
+    # Ambiguous shape (no blank before "2."): it may render as text rather
+    # than a new item, but the number must survive.
+    html = render("1. a\n\n    para\n2. b\n")
+    assert "2. b" in html or 'start="2"' in html or html.count("<li>") == 2
