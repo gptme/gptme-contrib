@@ -2344,6 +2344,8 @@ def process_timeline_tweets(
                             )
                             if post_response.data:
                                 tweet_id = post_response.data["id"]
+                                draft.posted_id = tweet_id
+                                draft.posted_at = datetime.now()
                                 console.print(f"[green]✓ Auto-posted tweet: {tweet_id}")
 
                                 # Post thread follow-ups if present

@@ -837,8 +837,12 @@ def test_trusted_user_autopost_quarantines_permanent_reply_failure(
     assert "Permanent Twitter reply failure" in rejected.reject_reason
 
 
-def test_trusted_user_autopost_keeps_transient_failure_retryable(
-    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("post_succeeds", [False, True])
+def test_trusted_user_autopost_persists_posting_outcome(
+    workflow_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    post_succeeds: bool,
 ) -> None:
     _set_status_dirs(workflow_module, tmp_path)
 
@@ -871,6 +875,8 @@ def test_trusted_user_autopost_keeps_transient_failure_retryable(
 
     class PostingClient:
         def create_tweet(self, *args: Any, **kwargs: Any) -> Any:
+            if post_succeeds:
+                return SimpleNamespace(data={"id": "9001"})
             raise RuntimeError("503 Service Unavailable")
 
     monkeypatch.setattr(
@@ -913,10 +919,23 @@ def test_trusted_user_autopost_keeps_transient_failure_retryable(
         max_drafts=10,
     )
 
-    assert drafts_generated == 1
+    assert drafts_generated == (0 if post_succeeds else 1)
     new_paths = list(workflow_module.NEW_DIR.glob("*.yml"))
-    assert len(new_paths) == 1
-    assert workflow_module.TweetDraft.load(new_paths[0]).text == "A useful reply"
+    posted_paths = list(workflow_module.POSTED_DIR.glob("*.yml"))
+    if post_succeeds:
+        assert new_paths == []
+        assert len(posted_paths) == 1
+        saved = workflow_module.TweetDraft.load(posted_paths[0])
+        assert saved.posted_id == "9001"
+        assert isinstance(saved.posted_at, datetime)
+        assert saved.posted_at.date() == datetime.now().date()
+    else:
+        assert posted_paths == []
+        assert len(new_paths) == 1
+        saved = workflow_module.TweetDraft.load(new_paths[0])
+        assert saved.posted_id is None
+        assert saved.posted_at is None
+    assert saved.text == "A useful reply"
     assert list(workflow_module.REJECTED_DIR.glob("*.yml")) == []
 
 
