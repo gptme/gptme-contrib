@@ -2651,16 +2651,16 @@ def render(
         # instead is worse: it renders "**0 findings** ·  — no P0/P1 on this
         # head; the P2s here keep the score at 4/5", a sentence with an empty
         # severity split that describes P2s nobody raised.
-        if informational_findings:
-            lines += [
-                "✅ **No findings in this PR's changed files.** What follows is "
-                "outside them — not about this change, and not scored.",
-                "",
-            ]
-        elif advisory_findings:
+        if advisory_findings:
             lines += [
                 "✅ **No thread-worthy findings.** Advisory notes follow; they "
                 "are retained without opening review threads.",
+                "",
+            ]
+        elif informational_findings:
+            lines += [
+                "✅ **No findings in this PR's changed files.** What follows is "
+                "outside them — not about this change, and not scored.",
                 "",
             ]
         else:

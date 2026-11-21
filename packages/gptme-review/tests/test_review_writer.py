@@ -452,3 +452,16 @@ def test_render_locations_and_file_lists_quote_literal_paths(
     )
     assert f"- {code} — Touches &lt;tag&gt;." in files
     assert f"Also changed, not described above: {code}</sub>" in files
+
+
+def test_mixed_advisory_and_informational_notes_do_not_claim_all_are_outside(alice_io):
+    body = _render(
+        writer.bind_io(alice_io),
+        advisory_findings=[{"file": "changed.py", "line": 1, "body": "Advisory."}],
+        informational_findings=[
+            {"file": "untouched.py", "line": 2, "body": "Outside."}
+        ],
+    )
+    assert "No thread-worthy findings." in body
+    assert "What follows is outside them" not in body
+    assert "changed.py:1" in body and "untouched.py:2" in body
