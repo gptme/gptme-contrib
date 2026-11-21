@@ -65,6 +65,15 @@ def test_other_fence_marker_inside_code_block_is_code():
     assert fix_list_spacing(src) == src
 
 
+def test_fence_with_trailing_text_inside_code_block_is_code():
+    # A closing fence may only be followed by whitespace; "``` python" is code.
+    src = "```\ncode\n``` python\n2023. not touched\n```\n"
+    assert fix_list_spacing(src) == src
+    # Trailing whitespace still closes it.
+    src = "```\ncode\n```  \nStrain was 11.4 in\n2023. Then it fell.\n"
+    assert "2023\\. Then" in fix_list_spacing(src)
+
+
 def test_text_after_code_block_is_processed():
     src = "```\ncode\n```\nStrain was 11.4 in\n2023. Then it fell.\n"
     assert "2023. Then it fell" in render(src)

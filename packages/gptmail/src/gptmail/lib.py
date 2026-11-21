@@ -229,13 +229,19 @@ def fix_list_spacing(markdown_text: str) -> str:
     in_ordered_item = False  # previous line is an ordered item or its wrap
 
     for i, line in enumerate(lines):
-        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        marker = re.match(r"^\s*(`{3,}|~{3,})(.*)$", line)
         if fence or marker:
             # A fence closes only on the same character, at least as long as
-            # the opener; a "~~~" line inside a ``` block is code.
+            # the opener, with nothing but whitespace after it; a "~~~" or
+            # "``` python" line inside a ``` block is code.
             if not fence:
                 fence = marker.group(1)  # type: ignore[union-attr]
-            elif marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence):
+            elif (
+                marker
+                and marker.group(1)[0] == fence[0]
+                and len(marker.group(1)) >= len(fence)
+                and not marker.group(2).strip()
+            ):
                 fence = ""
             # An unindented fence is top-level code, which ends any ordered
             # list; a fence indented under an item belongs to that item.
