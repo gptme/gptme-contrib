@@ -822,8 +822,10 @@ def scan_tasks(workspace: Path) -> list[dict]:
             # Title lives in the markdown body, not in TaskInfo.
             # Read the file once to avoid a second parse_frontmatter call.
             content = t.path.read_text(errors="replace")
-            parts = content.split("---", 2)
-            body = parts[2] if len(parts) >= 3 else ""
+            try:
+                body = split_frontmatter(content)[1]
+            except ValueError:
+                body = ""
             title = extract_title(body, t.name.replace("-", " ").title())
             raw_tags = t.tags or []
             if isinstance(raw_tags, str):

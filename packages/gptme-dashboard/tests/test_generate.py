@@ -2246,6 +2246,20 @@ def test_scan_tasks_gptodo_path(tmp_path: Path):
     assert t["path"] == "tasks/my-task.md"
 
 
+def test_scan_tasks_gptodo_path_dashes_inside_value(tmp_path: Path):
+    """A `---` inside a frontmatter value must not leak into the gptodo-path body."""
+    pytest.importorskip("gptodo")
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "dashy.md").write_text(
+        "---\nnext_action: a---b\nstate: active\n---\n# Dashy Task\n\nBody text.\n"
+    )
+    tasks = scan_tasks(tmp_path)
+    assert len(tasks) == 1
+    assert tasks[0]["title"] == "Dashy Task"
+    assert "state: active" not in tasks[0]["body"]
+
+
 def test_generate_html_includes_tasks(workspace: Path, tmp_path: Path):
     """Generated HTML includes task section when tasks exist."""
     tasks_dir = workspace / "tasks"
