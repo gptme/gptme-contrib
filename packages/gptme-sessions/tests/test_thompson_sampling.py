@@ -1,5 +1,7 @@
 """Tests for Thompson sampling bandit engine."""
 
+import builtins
+import importlib
 import json
 import multiprocessing
 from datetime import datetime, timezone
@@ -520,6 +522,26 @@ def test_bandit_state_prune_stale_min_selections_boundary():
     assert pruned == 1, f"Expected 1 pruned, got {pruned}"
     assert "exact-threshold" not in state.arms, "Arm with exactly min_selections should be pruned"
     assert "above-threshold" in state.arms, "Arm above threshold should survive"
+
+
+def test_missing_posix_lock_support_preserves_reads_but_refuses_mutation(tmp_path, monkeypatch):
+    """Unsupported platforms must not silently persist an unserialized update."""
+    real_import = builtins.__import__
+
+    def without_fcntl(name, *args, **kwargs):
+        if name == "fcntl":
+            raise ImportError("fcntl unavailable")
+        return real_import(name, *args, **kwargs)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(builtins, "__import__", without_fcntl)
+        module = importlib.reload(importlib.import_module("gptme_sessions.thompson_sampling"))
+        bandit = module.Bandit(state_dir=tmp_path)
+        assert module.load_bandit_means(tmp_path, arm_ids=["code"]) == {"code": 0.5}
+        with pytest.raises(ImportError, match="fcntl unavailable"):
+            bandit.update(["code"], 1.0)
+        assert not bandit.state_file.exists()
+        assert bandit.state.total_sessions == 0
 
 
 # ── cross-process mutation locking ───────────────────────────────────────────
