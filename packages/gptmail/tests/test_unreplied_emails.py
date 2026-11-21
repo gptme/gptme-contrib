@@ -636,12 +636,17 @@ def test_quarantined_recipient_hit_matches_raw_plus_tag(
     assert quarantined_recipient_hit({"To": "Bob <bob@example.com>"}) is None
 
 
-def test_quarantined_recipient_hit_checks_envelope_headers(
+@pytest.mark.parametrize(
+    "header",
+    ["To", "Cc", "Bcc", "Delivered-To", "X-Original-To", "Envelope-To", "X-Envelope-To"],
+)
+def test_quarantined_recipient_hit_checks_recipient_headers(
     monkeypatch: pytest.MonkeyPatch,
+    header: str,
 ) -> None:
     monkeypatch.setenv("EMAIL_QUARANTINE_RECIPIENTS", "bob+canary@example.com")
     assert (
-        quarantined_recipient_hit({"Delivered-To": "bob+canary@example.com"})
+        quarantined_recipient_hit({header.lower(): "bob+canary@example.com"})
         == "bob+canary@example.com"
     )
 
@@ -657,7 +662,9 @@ def test_quarantined_message_is_not_an_unreplied_candidate(
     EMAIL_ALLOWLIST. The inbound forwarder sends the operator a header-only
     notice instead.
     """
-    monkeypatch.setenv("EMAIL_QUARANTINE_RECIPIENTS", "test+canary@example.com")
+    monkeypatch.delenv("EMAIL_QUARANTINE_RECIPIENTS", raising=False)
+    monkeypatch.setenv("AGENT_EMAIL_ALIASES", "test+canary@example.com")
+    agent = AgentEmail(str(agent.workspace), "test@example.com")
     inbox = agent.email_dir / "inbox"
     date = datetime(2026, 5, 16, 9, 0, tzinfo=timezone.utc)
 
@@ -678,6 +685,14 @@ def test_quarantined_message_is_not_an_unreplied_candidate(
         date=date,
     )
 
+    # Both messages must be candidates without quarantine; otherwise another
+    # filter could hide a regression in the quarantine branch.
+    assert [entry.message_id for entry in agent.get_unreplied_emails()] == [
+        "<canary@example.com>",
+        "<ordinary@example.com>",
+    ]
+
+    monkeypatch.setenv("EMAIL_QUARANTINE_RECIPIENTS", "test+canary@example.com")
     unreplied = agent.get_unreplied_emails()
 
     assert [entry.message_id for entry in unreplied] == ["<ordinary@example.com>"]
