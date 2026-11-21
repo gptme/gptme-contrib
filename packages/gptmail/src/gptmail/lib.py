@@ -214,7 +214,12 @@ def fix_list_spacing(markdown_text: str) -> str:
     Add blank lines before lists if missing.
 
     This ensures the markdown library recognizes lists properly.
-    Only adds blank line before the first item of each list.
+    Only adds a blank line before the first item of each list.
+
+    Indented content that belongs to the current item (wrapped text, a
+    fenced code block, ...) keeps the list context, so the next item is not
+    treated as the start of a new list. Inserting a blank line there would
+    make the list loose and wrap every ``<li>`` in ``<p>``.
 
     Args:
         markdown_text: The markdown text to process
@@ -226,6 +231,7 @@ def fix_list_spacing(markdown_text: str) -> str:
     result = []
     prev_was_list = False
     fence = ""  # opening fence marker while inside a code block
+    fence_indented = False  # opener was indented, so it belongs to an item
     in_ordered_item = False  # previous line is an ordered item or its wrap
 
     for i, line in enumerate(lines):
@@ -236,6 +242,7 @@ def fix_list_spacing(markdown_text: str) -> str:
             # "``` python" line inside a ``` block is code.
             if not fence:
                 fence = marker.group(1)  # type: ignore[union-attr]
+                fence_indented = bool(line[:1].isspace())
             elif (
                 marker
                 and marker.group(1)[0] == fence[0]
@@ -243,12 +250,16 @@ def fix_list_spacing(markdown_text: str) -> str:
                 and not marker.group(2).strip()
             ):
                 fence = ""
-            # An unindented fence is top-level code, which ends any ordered
-            # list; a fence indented under an item belongs to that item.
-            if not line[:1].isspace():
-                in_ordered_item = False
+                # An unindented fence is top-level code, which ends any list;
+                # a fence indented under an item belongs to that item, so the
+                # list context survives it. Blank and code lines *inside* the
+                # block must not touch the list state either — an indented
+                # block containing a blank line otherwise ended the list and
+                # got the next item's ordinal escaped (#2264).
+                if not fence_indented:
+                    in_ordered_item = False
+                    prev_was_list = False
             result.append(line)
-            prev_was_list = False
             continue
 
         # A hard-wrapped line that happens to start with "2023. " is not a
@@ -289,8 +300,9 @@ def fix_list_spacing(markdown_text: str) -> str:
 
         result.append(line)
         # An indented line right after a list item is that item's wrapped
-        # continuation; the list is still going. Without this, every wrapped
-        # bullet got a blank line before the next one, making the list loose.
+        # continuation (including an indented fence or its code); the list is
+        # still going. Without this, every such item got a blank line before
+        # the next one, making the list loose.
         is_continuation = (
             prev_was_list and not prev_is_blank and line[:1].isspace() and line.strip() != ""
         )
