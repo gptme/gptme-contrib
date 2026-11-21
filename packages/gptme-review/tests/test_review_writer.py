@@ -272,6 +272,44 @@ def test_generated_files_are_elided_unless_the_diff_is_only_them():
     assert touched == {"uv.lock"}
 
 
+@pytest.mark.parametrize(
+    "path", ["src/é.py", "src/a\tb.py", 'src/a"b.py', "src/a b.py"]
+)
+@pytest.mark.parametrize("delete", [False, True])
+def test_diff_paths_decode_real_git_quoting(tmp_path, path, delete):
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), *args],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+
+    git("init", "-q")
+    source = tmp_path / path
+    source.parent.mkdir(parents=True)
+    source.write_text("before\n")
+    git("add", ".")
+    base = git("write-tree").strip()
+    if delete:
+        source.unlink()
+    else:
+        source.write_text("after\n")
+    lock = tmp_path / "déps" / "uv.lock"
+    lock.parent.mkdir()
+    lock.write_text("generated\n")
+    git("add", "-A")
+    diff = git("-c", "core.quotePath=true", "diff", "--cached", base)
+    touched, reviewable, size, elided = (
+        writer.extract_touched_files_and_reviewable_diff(diff)
+    )
+    assert touched == {path}
+    assert [e["path"] for e in elided] == ["déps/uv.lock"]
+    assert size == len(reviewable.encode())
+    finding = {"file": path, "body": "in scope"}
+    assert writer.drop_out_of_scope_findings([finding], touched) == ([finding], [])
+
+
 def test_elision_note_names_the_skipped_file():
     assert writer.elision_note(None) == ""
     note = writer.elision_note(

@@ -2061,44 +2061,15 @@ def extract_touched_files_and_reviewable_diff(
     the one it had before: reviewed if it fits, `diff_too_large` if it does not.
     """
     touched: set[str] = set()
-    sections: list[tuple[list[str], str | None]] = []
-    current_section: list[str] = []
-    current_path: str | None = None
-    current_preimage_path: str | None = None
-
-    for line in (diff or "").splitlines(keepends=True):
-        if line.startswith("diff --git"):
-            if current_section:
-                sections.append((current_section, current_path))
-            current_section = [line]
-            current_path = None
-            current_preimage_path = None
-            continue
-
-        current_section.append(line)
-        if line.startswith("--- "):
-            target = line[4:].rstrip("\r\n").split("\t", 1)[0]
-            if target != "/dev/null":
-                current_preimage_path = target.removeprefix("a/")
-        elif line.startswith("+++ "):
-            # Unlike a ``diff --git`` header, an image marker has only one
-            # path. This stays unambiguous when the path itself contains the
-            # header-like substring `` b/``. Git may append a tab-separated
-            # timestamp in non-native diff dialects. Pure deletions identify
-            # their path through the pre-image marker instead.
-            target = line[4:].rstrip("\r\n").split("\t", 1)[0]
-            current_path = (
-                current_preimage_path
-                if target == "/dev/null"
-                else target.removeprefix("b/")
-            )
-
-    if current_section:
-        sections.append((current_section, current_path))
-
+    # Share the sharding parser: it decodes Git's C-quoted UTF-8 paths,
+    # prefers image markers (pre-image for deletions), and handles sections
+    # without hunks, including binary changes and pure renames.
+    sections = split_file_sections(diff)
     reviewable_lines: list[str] = []
     excluded: dict[str, list[str]] = {}
-    for lines, path in sections:
+    for section in sections:
+        lines = section.text.splitlines(keepends=True)
+        path = section.path
         if path is None:
             # Keep malformed preambles reviewable rather than guessing a path
             # and risking a fail-open exclusion.
