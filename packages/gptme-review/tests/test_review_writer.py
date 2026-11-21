@@ -416,3 +416,39 @@ def test_two_hosts_render_independent_footers():
 def test_md_text_preserves_equal_length_backtick_spans(text, expected):
     assert writer.md_text(text) == expected
     assert writer.md_text(text + "|", escape_pipes=True) == expected + "\\|"
+
+
+@pytest.mark.parametrize(
+    "path, code, encoded",
+    [
+        ("src/lib(1).py", "`src/lib(1).py`", "src/lib%281%29.py"),
+        ("src/a)b].py", "`src/a)b].py`", "src/a%29b%5D.py"),
+        ("src/a`b.py", "``src/a`b.py``", "src/a%60b.py"),
+        ("`src/a``.py`", "``` `src/a``.py` ```", "%60src/a%60%60.py%60"),
+        ("src/<x>&#?.py", "`src/<x>&#?.py`", "src/%3Cx%3E%26%23%3F.py"),
+        ("src/a b.py", "`src/a b.py`", "src/a%20b.py"),
+    ],
+)
+def test_render_locations_and_file_lists_quote_literal_paths(
+    alice_io, path, code, encoded
+):
+    w = writer.bind_io(alice_io)
+    finding = {"file": path, "line": 10, "severity": "P2", "body": "Bug."}
+    # Unanchored findings get a permalink; anchored ones use a plain code span.
+    with_line = code.replace(path, path + ":10")
+    body = _render(w, [finding])
+    assert (
+        f"[{with_line}](https://github.com/o/r/blob/abc1234deadbeef/{encoded}#L10)"
+        in body
+    )
+    anchored = _render(w, [finding], anchored={id(finding)})
+    assert f" — {with_line}\n" in anchored
+    no_line = _render(w, [{**finding, "line": None}])
+    assert f" — {code}\n" in no_line
+    files = "\n".join(
+        w.render_files_changed(
+            {"files": [{"path": path, "description": "Touches <tag>."}]}, [path]
+        )
+    )
+    assert f"- {code} — Touches &lt;tag&gt;." in files
+    assert f"Also changed, not described above: {code}</sub>" in files

@@ -1874,6 +1874,14 @@ def md_text(text: str, *, escape_pipes: bool = False) -> str:
     return "".join(out)
 
 
+def _md_code(text: str) -> str:
+    """Quote literal labels with a delimiter longer than any embedded run."""
+    longest = max((len(m.group()) for m in re.finditer(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    padding = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{padding}{text}{padding}{fence}"
+
+
 #: Public, linkable explanation of what this comment is and how to drive it.
 #: ErikBjare/bob#1122 was the old link; that repo is private, so it told an
 #: outside maintainer nothing.
@@ -1943,7 +1951,7 @@ def render_files_changed(
         desc = " ".join(str(row.get("description") or "").split())
         # No pipe escaping: nothing here is a table cell any more, and a
         # `\|` would render as a literal backslash in flowing prose.
-        lines.append(f"- `{md_text(path)}` — {md_text(desc) or '_(no description)_'}")
+        lines.append(f"- {_md_code(path)} — {md_text(desc) or '_(no description)_'}")
     if len(files) > MAX_FILE_ROWS:
         lines.append(f"- _{len(files) - MAX_FILE_ROWS} more changed file(s) not shown_")
     lines.append("")
@@ -1951,7 +1959,7 @@ def render_files_changed(
     # Naming the gap matters: silence here would read as "the reviewer covered
     # everything", which is the assurance this section exists to avoid faking.
     if undescribed:
-        named = ", ".join(f"`{p}`" for p in undescribed[:MAX_UNDESCRIBED_NAMED])
+        named = ", ".join(_md_code(p) for p in undescribed[:MAX_UNDESCRIBED_NAMED])
         extra = (
             f" (+{len(undescribed) - MAX_UNDESCRIBED_NAMED} more)"
             if len(undescribed) > MAX_UNDESCRIBED_NAMED
@@ -2537,15 +2545,15 @@ def render(
             label += " · ℹ️ non-blocking"
         loc = "_PR-level_"
         if f.get("file") and f.get("line"):
-            loc = f"`{f['file']}:{f['line']}`"
+            loc = _md_code(f"{f['file']}:{f['line']}")
             if permalink and repo_slug:
                 url = (
                     f"https://github.com/{repo_slug}/blob/"
-                    f"{full_sha}/{f['file']}#L{f['line']}"
+                    f"{full_sha}/{quote(str(f['file']), safe='/')}#L{f['line']}"
                 )
-                loc = f"[`{f['file']}:{f['line']}`]({url})"
+                loc = f"[{loc}]({url})"
         elif f.get("file"):
-            loc = f"`{f['file']}`"
+            loc = _md_code(str(f["file"]))
         # A bold line, not an `###` heading. Each finding used to open a
         # section heading, which on a 6-finding review turned the comment
         # into a table of contents for itself — and rendered as headings
