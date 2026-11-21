@@ -291,6 +291,18 @@ def test_tweet_draft_round_trips_posting_evidence(workflow_module: Any) -> None:
     assert restored.posted_at == datetime(2026, 11, 21, 9, 30, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize("posted_at", [None, ""])
+def test_tweet_draft_loads_unset_posting_timestamp(
+    workflow_module: Any, posted_at: str | None
+) -> None:
+    draft = workflow_module.TweetDraft.from_dict(
+        {"text": "Not posted yet", "posted_at": posted_at}
+    )
+
+    assert draft.posted_at is None
+    assert "posted_at" not in draft.to_dict()
+
+
 def test_duplicate_reply_detection_reads_markdown_drafts(
     workflow_module: Any, tmp_path: Path
 ) -> None:

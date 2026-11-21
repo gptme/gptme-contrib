@@ -364,8 +364,8 @@ class TweetDraft:
             posted_id=data.get("posted_id"),
             posted_at=(
                 datetime.fromisoformat(data["posted_at"])
-                if isinstance(data.get("posted_at"), str)
-                else data.get("posted_at")
+                if isinstance(data.get("posted_at"), str) and data["posted_at"]
+                else data.get("posted_at") or None
             ),
         )
         created_at = data.get("created_at", data.get("created"))
