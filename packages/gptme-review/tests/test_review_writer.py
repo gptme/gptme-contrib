@@ -97,3 +97,74 @@ def test_two_hosts_resolve_independently_and_at_call_time():
     assert wb.marker_body("x", {}).endswith("<!-- b {} -->")
     a.MARKER_PREFIX = "<!-- a2"  # a host patching its namespace is seen next call
     assert wa.marker_body("x", {}).endswith("<!-- a2 {} -->")
+
+
+# --- writer-port slice 2b: threads, suppression and dispositions ---------------
+
+
+def _stamp(ns: str, fp: str) -> str:
+    return f'Settled.\n\n<!-- {ns}-disposition {{"fp": "{fp}"}} -->'
+
+
+def test_unbound_disposition_helpers_refuse():
+    with pytest.raises(RuntimeError, match="no host bound"):
+        writer.disposition_prefix()
+
+
+def test_disposition_markers_use_the_bound_identity(alice_io):
+    w = writer.bind_io(alice_io)
+    assert w.disposition_prefix() == "<!-- alice-ai-review-disposition "
+    assert w.inline_finding_marker() == "<!-- alice-ai-review-finding -->"
+    assert w.disposition_note_markers() == (
+        "<!-- alice-ai-review-dispositions -->",
+        "<!-- /alice-ai-review-dispositions -->",
+    )
+
+
+def test_dispositions_read_only_the_bound_namespace(alice_io):
+    w = writer.bind_io(alice_io)
+    comments = [
+        {"id": 1, "in_reply_to_id": 10, "body": _stamp("alice-ai-review", "a1")},
+        {"id": 2, "in_reply_to_id": 11, "body": _stamp("bob-ai-review", "b1")},
+        # a finding root is never its own disposition
+        {"id": 3, "body": _stamp("alice-ai-review", "root")},
+    ]
+    assert w.disposed_fingerprints(comments) == {"a1"}
+
+
+def test_machine_comment_is_keyed_on_the_bound_marker(alice_io):
+    w = writer.bind_io(alice_io)
+    assert w._is_machine_comment("<!-- alice-ai-review {} -->\nbody")
+    assert not w._is_machine_comment("<!-- bob-ai-review {} -->\nbody")
+    assert not w._is_machine_comment("> <!-- alice-ai-review {} -->")
+
+
+def test_disposition_note_splices_idempotently(alice_io):
+    w = writer.bind_io(alice_io)
+    body = "## 🤖 AI code review\n\nfindings"
+    first = w.render_disposed_body(body, w.disposition_note("5/5", "| t |"))
+    second = w.render_disposed_body(first, w.disposition_note("4/5", "| u |"))
+    start, end = w.disposition_note_markers()
+    assert second.count(start) == 1 and second.count(end) == 1
+    assert "| u |" in second and "| t |" not in second
+
+
+def test_host_seams_reach_calls_inside_the_writer(alice_io):
+    calls: list[tuple] = []
+
+    def fake_run(cmd, **kw):
+        calls.append((cmd, kw.get("env")))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def fake_comments(repo, number):
+        calls.append(("comments", repo, number))
+        return []
+
+    ns = SimpleNamespace(
+        **{**vars(alice_io), "run": fake_run, "fetch_review_comments": fake_comments}
+    )
+    w = writer.bind_io(ns)
+    assert w.resolve_review_thread("T_1", repo="o/r") is True
+    assert calls[0][1]["BOB_GRAPHQL_MUTATION_REPO"] == "o/r"
+    assert w.dismissed_findings("o/r", 7, threads=[]) == []
+    assert ("comments", "o/r", 7) in calls
