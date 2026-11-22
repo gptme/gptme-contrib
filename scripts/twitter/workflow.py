@@ -1429,10 +1429,11 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
         # Get LLM review
         approved, review_result = verify_draft(draft.to_dict())
 
-        # Compute and save quality score
+        # A preview must not mark the draft reviewed for later cycles.
         quality_score = compute_quality_score(review_result)
-        draft.quality_score = quality_score
-        draft.save(path)  # Persist quality_score to file
+        if not dry_run:
+            draft.quality_score = quality_score
+            draft.save(path)  # Persist quality_score to file
 
         # Display review results
         stars = "★" * quality_score + "☆" * (3 - quality_score)
@@ -1448,7 +1449,7 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
                 console.print(f"• {improvement}")
 
         # Handle auto-approve or ask for action
-        if auto_approve and approved:
+        if auto_approve and approved and not dry_run:
             move_draft(path, "approved")
             console.print("[green]Draft automatically approved")
         elif dry_run:
@@ -1482,6 +1483,9 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
                 new_text = Prompt.ask("Edit tweet", default=draft.text)
                 if new_text != draft.text:
                     draft.text = new_text
+                    # The saved score describes the old text; clearing it is
+                    # what makes auto() review the edited draft again.
+                    draft.quality_score = None
                     draft.save(path)
                     console.print("[blue]Draft updated, will need another review")
             else:
@@ -1539,6 +1543,9 @@ def edit(draft_id: str, new_text: str) -> None:
     draft = TweetDraft.load(draft_path)
     console.print(f"[cyan]Original text: {draft.text}")
     draft.text = new_text
+    # The saved score describes the old text; clearing it is what makes
+    # auto() review the edited draft again.
+    draft.quality_score = None
     draft.save(draft_path)
     console.print(f"[green]Draft updated: {draft_path.name}")
     console.print(f"[cyan]New text: {draft.text}")
@@ -2772,6 +2779,8 @@ def auto(
 
     approved_count = 0
     needs_review_count = 0
+    reviewed_count = 0
+    already_reviewed_count = 0
 
     if not drafts:
         console.print("[yellow]No new drafts to review")
@@ -2785,13 +2794,35 @@ def auto(
                 console.print(f"[cyan]Reply to: {draft.in_reply_to}")
             console.print(f"[white]{draft.text}")
 
+            # Reuse the completed review rather than paying for it every cycle.
+            # Three stars requires all criteria passed and an approve recommendation.
+            if draft.quality_score is not None:
+                if auto_approve and draft.quality_score == 3:
+                    if not dry_run:
+                        move_draft(path, "approved")
+                        console.print("[green]Draft approved using its saved review")
+                    else:
+                        console.print("[yellow]Would approve draft (dry run)")
+                    approved_count += 1
+                    continue
+                console.print(
+                    "[yellow]Already reviewed (quality_score "
+                    f"{draft.quality_score}/3); awaiting human review"
+                )
+                already_reviewed_count += 1
+                needs_review_count += 1
+                continue
+
+            reviewed_count += 1
+
             # Get LLM review
             approved_by_llm, review_result = verify_draft(draft.to_dict())
 
-            # Compute and save quality score
+            # A preview must not mark the draft reviewed for later cycles.
             quality_score = compute_quality_score(review_result)
-            draft.quality_score = quality_score
-            draft.save(path)  # Persist quality_score to file
+            if not dry_run:
+                draft.quality_score = quality_score
+                draft.save(path)  # Persist quality_score to file
 
             # Display review results
             stars = "★" * quality_score + "☆" * (3 - quality_score)
@@ -2949,9 +2980,14 @@ def auto(
     # Summary
     console.print("\n[bold]Automation Cycle Summary:[/bold]")
     console.print(f"Tweets processed: {total_tweets_processed}")
-    console.print(f"Drafts reviewed: {len(drafts)}")
+    console.print(f"Drafts reviewed: {reviewed_count}")
     console.print(f"Auto-approved: {approved_count}")
     console.print(f"Needs human review: {needs_review_count}")
+    if already_reviewed_count:
+        console.print(
+            f"Already reviewed, awaiting human action: {already_reviewed_count} "
+            "(run 'workflow review' to act on them)"
+        )
 
     if needs_review_count > 0:
         console.print(

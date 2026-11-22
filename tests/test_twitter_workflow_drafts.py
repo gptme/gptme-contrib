@@ -717,6 +717,201 @@ def test_auto_blocks_same_cycle_secret_before_twitter_api_call(
     assert (workflow_module.REJECTED_DIR / approved_path.name).exists()
 
 
+@pytest.mark.parametrize("quality_score", [0, 2, 3])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_auto_does_not_rereview_already_reviewed_draft(
+    workflow_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    quality_score: int,
+    dry_run: bool,
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    reviewed_path = workflow_module.NEW_DIR / "already-reviewed.yml"
+    workflow_module.TweetDraft(
+        text="reviewed earlier", quality_score=quality_score
+    ).save(reviewed_path)
+    reviews: list[Any] = []
+
+    def fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        reviews.append(args)
+        raise AssertionError("verify_draft must not run on a reviewed draft")
+
+    monkeypatch.setattr(workflow_module, "verify_draft", fail_if_called)
+    monkeypatch.setattr(
+        workflow_module,
+        "load_twitter_client",
+        lambda *a, **k: SimpleNamespace(
+            get_home_timeline=lambda *a, **k: SimpleNamespace(data=None)
+        ),
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="me", username="bob")),
+    )
+
+    workflow_module.auto(
+        list_id=None,
+        auto_approve=True,
+        post_approved=False,
+        dry_run=dry_run,
+        max_tweets=1,
+        max_drafts=1,
+        skip_mentions=True,
+        skip_timeline=False,
+    )
+
+    assert reviews == []
+    if quality_score == 3 and not dry_run:
+        assert not reviewed_path.exists()
+        assert (workflow_module.APPROVED_DIR / reviewed_path.name).exists()
+    else:
+        assert reviewed_path.exists()
+        assert list(workflow_module.APPROVED_DIR.iterdir()) == []
+
+
+def test_auto_dry_run_does_not_prevent_later_auto_approval(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    draft_path = workflow_module.NEW_DIR / "passing-draft.yml"
+    workflow_module.TweetDraft(text="ready for approval").save(draft_path)
+    original_bytes = draft_path.read_bytes()
+    reviews: list[Any] = []
+
+    def record_review(draft: Any) -> Any:
+        reviews.append(draft)
+        return True, SimpleNamespace(
+            criteria_results={
+                "clarity": SimpleNamespace(passed=True, notes="clear"),
+            },
+            recommendation="approve",
+            improvements=[],
+        )
+
+    monkeypatch.setattr(workflow_module, "verify_draft", record_review)
+    monkeypatch.setattr(
+        workflow_module,
+        "load_twitter_client",
+        lambda *a, **k: SimpleNamespace(
+            get_home_timeline=lambda *a, **k: SimpleNamespace(data=None)
+        ),
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="me", username="bob")),
+    )
+
+    for dry_run in (True, False):
+        workflow_module.auto(
+            list_id=None,
+            auto_approve=True,
+            post_approved=False,
+            dry_run=dry_run,
+            max_tweets=1,
+            max_drafts=1,
+            skip_mentions=True,
+            skip_timeline=False,
+        )
+        if dry_run:
+            assert draft_path.read_bytes() == original_bytes
+            assert list(workflow_module.APPROVED_DIR.iterdir()) == []
+
+    assert len(reviews) == 2
+    assert not draft_path.exists()
+    approved_path = workflow_module.APPROVED_DIR / draft_path.name
+    assert workflow_module.TweetDraft.load(approved_path).quality_score == 3
+
+
+@pytest.mark.parametrize("auto_approve", [False, True])
+def test_review_dry_run_leaves_draft_unchanged(
+    workflow_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    auto_approve: bool,
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    draft_path = workflow_module.NEW_DIR / "preview.yml"
+    workflow_module.TweetDraft(text="preview only").save(draft_path)
+    original_bytes = draft_path.read_bytes()
+    monkeypatch.setattr(
+        workflow_module,
+        "verify_draft",
+        lambda draft: (
+            True,
+            SimpleNamespace(
+                criteria_results={
+                    "clarity": SimpleNamespace(passed=True, notes="clear"),
+                },
+                recommendation="approve",
+                improvements=[],
+            ),
+        ),
+    )
+
+    workflow_module.review(auto_approve=auto_approve, show_context=False, dry_run=True)
+
+    assert draft_path.exists()
+    assert draft_path.read_bytes() == original_bytes
+    assert list(workflow_module.APPROVED_DIR.iterdir()) == []
+
+
+def test_edit_clears_quality_score_so_auto_reviews_again(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    reviewed_path = workflow_module.NEW_DIR / "already-reviewed.yml"
+    workflow_module.TweetDraft(text="rejected earlier", quality_score=2).save(
+        reviewed_path
+    )
+
+    workflow_module.edit("already-reviewed", "revised text")
+
+    assert workflow_module.TweetDraft.load(reviewed_path).quality_score is None
+
+    reviews: list[Any] = []
+
+    def record_review(draft: Any) -> Any:
+        reviews.append(draft)
+        review_result = SimpleNamespace(
+            criteria_results={
+                "clarity": SimpleNamespace(passed=False, notes="rejected"),
+            },
+            recommendation="reject",
+            improvements=[],
+        )
+        return False, review_result
+
+    monkeypatch.setattr(workflow_module, "verify_draft", record_review)
+    monkeypatch.setattr(
+        workflow_module,
+        "load_twitter_client",
+        lambda *a, **k: SimpleNamespace(
+            get_home_timeline=lambda *a, **k: SimpleNamespace(data=None)
+        ),
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="me", username="bob")),
+    )
+
+    workflow_module.auto(
+        list_id=None,
+        auto_approve=True,
+        post_approved=False,
+        dry_run=False,
+        max_tweets=1,
+        max_drafts=1,
+        skip_mentions=True,
+        skip_timeline=False,
+    )
+
+    assert [draft["text"] for draft in reviews] == ["revised text"]
+
+
 def test_outbound_gate_scans_thread_segments(
     workflow_module: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
