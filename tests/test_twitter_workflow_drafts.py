@@ -717,6 +717,49 @@ def test_auto_blocks_same_cycle_secret_before_twitter_api_call(
     assert (workflow_module.REJECTED_DIR / approved_path.name).exists()
 
 
+def test_auto_does_not_rereview_already_reviewed_draft(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    reviewed_path = workflow_module.NEW_DIR / "already-reviewed.yml"
+    workflow_module.TweetDraft(text="rejected earlier", quality_score=2).save(
+        reviewed_path
+    )
+    reviews: list[Any] = []
+
+    def fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        reviews.append(args)
+        raise AssertionError("verify_draft must not run on a reviewed draft")
+
+    monkeypatch.setattr(workflow_module, "verify_draft", fail_if_called)
+    monkeypatch.setattr(
+        workflow_module,
+        "load_twitter_client",
+        lambda *a, **k: SimpleNamespace(
+            get_home_timeline=lambda *a, **k: SimpleNamespace(data=None)
+        ),
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "cached_get_me",
+        lambda *a, **k: SimpleNamespace(data=SimpleNamespace(id="me", username="bob")),
+    )
+
+    workflow_module.auto(
+        list_id=None,
+        auto_approve=True,
+        post_approved=False,
+        dry_run=False,
+        max_tweets=1,
+        max_drafts=1,
+        skip_mentions=True,
+        skip_timeline=False,
+    )
+
+    assert reviews == []
+    assert reviewed_path.exists()
+
+
 def test_outbound_gate_scans_thread_segments(
     workflow_module: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -2772,6 +2772,7 @@ def auto(
 
     approved_count = 0
     needs_review_count = 0
+    reviewed_count = 0
 
     if not drafts:
         console.print("[yellow]No new drafts to review")
@@ -2784,6 +2785,19 @@ def auto(
             if draft.in_reply_to:
                 console.print(f"[cyan]Reply to: {draft.in_reply_to}")
             console.print(f"[white]{draft.text}")
+
+            # A saved quality_score means a completed LLM review already
+            # left this draft in new/ awaiting a human. Re-reviewing the
+            # unchanged draft every cycle only burns LLM calls.
+            if draft.quality_score is not None:
+                console.print(
+                    "[yellow]Already reviewed (quality_score "
+                    f"{draft.quality_score}/3); awaiting human review"
+                )
+                needs_review_count += 1
+                continue
+
+            reviewed_count += 1
 
             # Get LLM review
             approved_by_llm, review_result = verify_draft(draft.to_dict())
@@ -2949,7 +2963,7 @@ def auto(
     # Summary
     console.print("\n[bold]Automation Cycle Summary:[/bold]")
     console.print(f"Tweets processed: {total_tweets_processed}")
-    console.print(f"Drafts reviewed: {len(drafts)}")
+    console.print(f"Drafts reviewed: {reviewed_count}")
     console.print(f"Auto-approved: {approved_count}")
     console.print(f"Needs human review: {needs_review_count}")
 
