@@ -815,6 +815,34 @@ def test_cited_sha_requires_a_word_boundary_before_the_trigger(alice_io):
     assert calls == []
 
 
+@pytest.mark.parametrize("patched", [False, True])
+def test_preload_files_minimal_host_does_not_need_private_sentinel(patched):
+    calls = []
+    contents = {"a.py": "source"}
+    coverage = {"files_in_diff": 2, "files_preloaded": 1, "files_truncated": 1}
+
+    def fake_contents(*args):
+        calls.append(("contents", args))
+        return contents
+
+    def fake_preload(*args):
+        calls.append(("preload", args))
+        return SimpleNamespace(
+            contents=contents, fully_preloaded={"a.py"}, coverage=coverage
+        )
+
+    io = SimpleNamespace(
+        fetch_file_contents=fake_contents if patched else writer.fetch_file_contents,
+        fetch_file_preload=fake_preload,
+    )
+    w = writer.bind_io(io)
+    paths = ["a.py", "b.py"]
+    assert w.preload_files(
+        _engine_args(no_preload=False), {"headRefOid": "abc"}, paths
+    ) == (contents, {"a.py"}, coverage)
+    assert calls == [("contents" if patched else "preload", ("o/r", "abc", paths))]
+
+
 class _RecordingHost(writer.DefaultWriterHost):
     def __init__(self) -> None:
         self.runs: list[dict] = []
@@ -847,6 +875,39 @@ def test_llm_review_call_logs_the_run_through_the_peer_host():
     assert [(r["repo"], r["number"], r["sha"], r["model"]) for r in host.runs] == [
         ("o/r", 7, "abc", "m")
     ]
+
+
+def test_llm_review_call_logs_errors_through_the_peer_host():
+    host = _RecordingHost()
+    io = writer.default_io(sweep_identity("alice-agent", "alice-ai-review"), host)
+    error = ReviewError("provider unavailable")
+
+    def fail(*args, **kwargs):
+        raise error
+
+    io._openrouter_review_call = fail
+    with pytest.raises(ReviewError) as caught:
+        writer.bind_io(io).llm_review_call(
+            _engine_args(),
+            {"headRefOid": "abc"},
+            model="openrouter/m",
+            key="k",
+            diff="d",
+            contents={},
+            preload_coverage=None,
+            note="",
+        )
+    assert caught.value is error
+    assert len(host.runs) == 1
+    run = host.runs[0]
+    assert (run["repo"], run["number"], run["sha"], run["model"]) == (
+        "o/r",
+        7,
+        "abc",
+        "m",
+    )
+    assert run["usage"] == {} and run["findings"] == []
+    assert run["error"] == "provider unavailable" and run["wall_s"] >= 0
 
 
 def test_subscription_engine_is_unavailable_on_a_default_peer_host(alice_io):

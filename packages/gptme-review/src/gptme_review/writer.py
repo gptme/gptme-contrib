@@ -3757,7 +3757,8 @@ def preload_files(
         )
     # Preserve the legacy ``fetch_file_contents`` patch seam while production
     # uses the coverage-aware preload result.
-    if _io.fetch_file_contents is not _io._ORIGINAL_FETCH_FILE_CONTENTS:
+    original = getattr(_io, "_ORIGINAL_FETCH_FILE_CONTENTS", fetch_file_contents)
+    if _io.fetch_file_contents is not original:
         contents = _io.fetch_file_contents(
             args.repo, str(pr.get("headRefOid")), ranked_paths
         )
