@@ -736,7 +736,12 @@ def move_draft(path: Path, new_status: str) -> Path:
     # Preserve the filename when possible, but never overwrite an older draft.
     # Repeated failures can legitimately produce the same generated filename.
     new_path = status_dirs[new_status] / path.name
-    if new_path.exists() and new_path != path:
+    if new_path == path:
+        # Already in the target directory (e.g. `review --status approved`
+        # followed by approve). Falling through would save over the source and
+        # then unlink it, deleting the only copy of the draft.
+        return path
+    if new_path.exists():
         counter = 2
         while True:
             candidate = new_path.with_name(

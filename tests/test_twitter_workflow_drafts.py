@@ -1200,6 +1200,45 @@ def test_review_edit_moves_parked_draft_back_to_new(
     assert edited.quality_score is None
 
 
+def test_review_status_approved_auto_approve_keeps_the_draft(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    parked = workflow_module.APPROVED_DIR / "already-approved.yml"
+    workflow_module.TweetDraft(text="fine", quality_score=3).save(parked)
+
+    monkeypatch.setattr(
+        workflow_module,
+        "verify_draft",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must reuse score")),
+    )
+
+    workflow_module.review(
+        auto_approve=True, show_context=False, dry_run=False, status="approved"
+    )
+
+    assert parked.exists()
+
+
+def test_move_draft_to_same_directory_keeps_the_draft(
+    workflow_module: Any, tmp_path: Path
+) -> None:
+    """Moving to the directory a draft is already in must not delete it.
+
+    `review --status approved` can approve a draft that already sits in
+    approved/; a self-move used to save over the source and then unlink it.
+    """
+    _set_status_dirs(workflow_module, tmp_path)
+    path = workflow_module.APPROVED_DIR / "already-approved.yml"
+    workflow_module.TweetDraft(text="keep me").save(path)
+
+    moved = workflow_module.move_draft(path, "approved")
+
+    assert moved == path
+    assert path.exists()
+    assert workflow_module.TweetDraft.load(path).text == "keep me"
+
+
 def test_outbound_gate_scans_thread_segments(
     workflow_module: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
