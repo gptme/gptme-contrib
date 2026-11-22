@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from gptme_bob_status.provider import BobStatusProvider, make_provider
 
 _TASK_JSON = {
@@ -140,6 +141,127 @@ def test_collect_keys_use_bob_prefix(monkeypatch):
     result = provider.collect()
     for key in result:
         assert key.startswith("bob_"), f"Key {key!r} does not use bob_ prefix"
+
+
+def test_pr_queue_delegates_to_upstream_helper_and_maps_cap(monkeypatch):
+    """One implementation of the gh loop: gptme's generic helper.
+
+    Upstream calls the watermark ``cap``; the provider renders it as
+    ``watermark`` so the display keeps treating depth as rot-attention.
+    """
+    import gptme_bob_status.provider as mod
+
+    cmd_status = pytest.importorskip("gptme.cli.cmd_status")
+
+    seen: dict = {}
+
+    def fake_upstream(repos):
+        seen["repos"] = repos
+        return [{"repo": "gptme/gptme", "count": 4, "cap": 10}]
+
+    monkeypatch.setattr(cmd_status, "_pr_queue", fake_upstream, raising=False)
+    assert mod._pr_queue() == [{"repo": "gptme/gptme", "count": 4, "watermark": 10}]
+    assert seen["repos"] == mod._TRACKED_REPOS
+
+
+def test_upstream_pr_queue_accepts_a_single_repos_argument():
+    """The provider calls upstream with only the repo list.
+
+    Upstream's ``author`` parameter is optional; pin that so a future signature
+    change cannot turn the delegation into a TypeError at status time.
+    """
+    import inspect
+
+    cmd_status = pytest.importorskip("gptme.cli.cmd_status")
+
+    if not hasattr(cmd_status, "_pr_queue"):
+        pytest.skip("Installed gptme predates the upstream helper")
+    params = list(inspect.signature(cmd_status._pr_queue).parameters.values())
+    assert params and params[0].name == "repos"
+    required = [
+        p.name
+        for p in params[1:]
+        if p.default is inspect.Parameter.empty
+        and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+    ]
+    assert required == []
+
+
+def test_pr_queue_upstream_matches_local_author_filter_and_watermarks(monkeypatch):
+    """Exercise the real helper, not a fake with assumed author semantics."""
+    import gptme_bob_status.provider as mod
+
+    cmd_status = pytest.importorskip("gptme.cli.cmd_status")
+
+    if not hasattr(cmd_status, "_pr_queue"):
+        pytest.skip("Installed gptme predates the upstream helper")
+    calls = []
+
+    def fake_run(cmd, *, timeout=10):
+        calls.append((cmd, timeout))
+        if cmd == ["gh", "api", "user", "--jq", ".login"]:
+            return "example-author"
+        assert cmd[cmd.index("--author") + 1] == "example-author"
+        return '[{"number": 1, "title": "Test PR"}]'
+
+    monkeypatch.setattr(cmd_status, "_run", fake_run)
+    monkeypatch.setattr(mod, "_run", fake_run)
+    delegated = mod._pr_queue()
+    upstream_calls = calls.copy()
+    calls.clear()
+    assert delegated == mod._pr_queue_local()
+    assert delegated == [
+        {"repo": repo, "count": 1, "watermark": watermark}
+        for repo, watermark in mod._TRACKED_REPOS
+    ]
+    assert calls == upstream_calls
+
+
+def test_pr_queue_falls_back_when_upstream_helper_missing(monkeypatch):
+    """Cover versions with cmd_status but without its _pr_queue helper."""
+    import sys
+    from types import ModuleType
+
+    import gptme_bob_status.provider as mod
+
+    # Provide the module even on gptme 0.29, where cli is not yet a package.
+    # This specifically exercises missing-attribute ImportError, not a missing
+    # module's ModuleNotFoundError.
+    monkeypatch.setitem(sys.modules, "gptme.cli.cmd_status", ModuleType("cmd_status"))
+    monkeypatch.setattr(
+        mod, "_pr_queue_local", lambda: [{"repo": "r", "count": 1, "watermark": None}]
+    )
+    assert mod._pr_queue() == [{"repo": "r", "count": 1, "watermark": None}]
+
+
+def test_pr_queue_falls_back_when_upstream_module_missing(monkeypatch):
+    """gptme 0.29 predates the cmd_status module altogether."""
+    import sys
+
+    import gptme_bob_status.provider as mod
+
+    monkeypatch.setitem(sys.modules, "gptme.cli.cmd_status", None)
+    monkeypatch.setattr(
+        mod, "_pr_queue_local", lambda: [{"repo": "r", "count": 1, "watermark": None}]
+    )
+    assert mod._pr_queue() == [{"repo": "r", "count": 1, "watermark": None}]
+
+
+def test_pr_queue_falls_back_when_upstream_helper_raises(monkeypatch, caplog):
+    """A raising upstream helper degrades to the local loop, not a crash."""
+    import gptme_bob_status.provider as mod
+
+    cmd_status = pytest.importorskip("gptme.cli.cmd_status")
+
+    def broken(repos):
+        raise RuntimeError("upstream private helper drifted")
+
+    monkeypatch.setattr(cmd_status, "_pr_queue", broken, raising=False)
+    monkeypatch.setattr(
+        mod, "_pr_queue_local", lambda: [{"repo": "r", "count": 2, "watermark": 5}]
+    )
+    assert mod._pr_queue() == [{"repo": "r", "count": 2, "watermark": 5}]
+    assert "upstream private helper drifted" in caplog.text
 
 
 def test_pr_queue_display_marks_watermark_for_triage_not_blocking():
