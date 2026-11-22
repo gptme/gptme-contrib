@@ -244,10 +244,13 @@ tmux send-keys -t "$SESSION_NAME" "/usage"
 sleep 2
 tmux send-keys -t "$SESSION_NAME" Enter
 
-# Wait for the /usage TUI to load (CC v2.1.168 tab-based layout)
+# Wait for the /usage TUI to load (CC v2.1.168 tab-based layout).
+# CC 2.1.330's footer reads "d to show day · w to show week · Esc to close";
+# matching only the older "d to day"/"Esc to cancel" wording made every
+# scrape sit out the full TIMEOUT (~25 s) here. A rendered bar also counts.
 for _ in $(seq 1 "$TIMEOUT"); do
     content=$(tmux capture-pane -t "$SESSION_NAME" -p -S -80 2>/dev/null || true)
-    if grep -qiE '(Esc to cancel|d to day|w to week|Nothing over 10%)' <<< "$content"; then
+    if grep -qiE '(Esc to (cancel|close)|d to (show )?day|w to (show )?week|Nothing over 10%|[0-9]+% used)' <<< "$content"; then
         break
     fi
     sleep 1

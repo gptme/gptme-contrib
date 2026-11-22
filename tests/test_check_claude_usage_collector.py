@@ -95,6 +95,8 @@ def _fake_home(tmp_path: Path, payload: str, *, delayed_payload: str = "") -> Pa
     delayed_file.write_text(delayed_payload)
     counter_file = tmp_path / "capture-count.txt"
     right_file = tmp_path / "right-count.txt"
+    first_right_file = tmp_path / "captures-before-first-right.txt"
+    first_right_file.unlink(missing_ok=True)
     counter_file.write_text("0")
     right_file.write_text("0")
 
@@ -119,6 +121,8 @@ def _fake_home(tmp_path: Path, payload: str, *, delayed_payload: str = "") -> Pa
                 send-keys)
                     for arg in "$@"; do
                         if [ "$arg" = "Right" ]; then
+                            [ -f {shlex.quote(str(first_right_file))} ] \\
+                                || cp "$counter_file" {shlex.quote(str(first_right_file))}
                             n=0
                             [ -f "$right_file" ] && n=$(cat "$right_file")
                             printf '%s' "$((n + 1))" > "$right_file"
@@ -178,6 +182,10 @@ def _run_collector(
         env=env,
         timeout=timeout,
     )
+
+
+def _captures_before_first_right(tmp_path: Path) -> int:
+    return int((tmp_path / "captures-before-first-right.txt").read_text())
 
 
 def _right_count(tmp_path: Path) -> int:
@@ -272,3 +280,37 @@ def test_cached_human_render_shows_fable_window(
     # _fake_home resets this counter before each invocation. A fresh scrape
     # prints Fable too, so the label alone cannot prove either cache path ran.
     assert (tmp_path / "capture-count.txt").read_text() == "0"
+
+
+CC_2_1_330_PANE = textwrap.dedent(
+    """\
+    Session
+
+    Current week (all models)
+    █                                                  2% used
+    Resets Nov 24, 3:59pm (UTC)
+
+    Current week (Fable)
+                                                       0% used
+    Resets Nov 24, 4pm (UTC)
+
+    Approximate · sessions on this computer only
+    ←/→ to switch · d to show day · w to show week · Esc to close
+    """
+)
+
+
+def test_load_wait_recognizes_cc_2_1_330_footer(tmp_path: Path) -> None:
+    """The /usage load wait must not run out its TIMEOUT on the 2.1.330 footer.
+
+    The pane says "d to show day · w to show week · Esc to close"; the old
+    pattern only knew "d to day"/"Esc to cancel", so each live scrape spent
+    ~25 s here (alice-vm, 2026-11-22: 37 s per scrape instead of ~13 s).
+    Captures before the first Right key: init (1) + trust check (1) + load
+    wait. An exhausted wait would be 2 + TIMEOUT (25).
+    """
+    result = _run_collector(tmp_path, CC_2_1_330_PANE, "--json", "--no-cache")
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["seven_day"]["utilization"] == pytest.approx(0.02)
+    assert _captures_before_first_right(tmp_path) <= 3
