@@ -117,10 +117,16 @@ def _pr_queue() -> list[dict]:
         from gptme.cli.cmd_status import _pr_queue as _upstream_pr_queue
     except ImportError:
         return _pr_queue_local()
-    return [
-        {"repo": row["repo"], "count": row["count"], "watermark": row["cap"]}
-        for row in _upstream_pr_queue(_TRACKED_REPOS)
-    ]
+    try:
+        rows = _upstream_pr_queue(_TRACKED_REPOS)
+        return [
+            {"repo": row["repo"], "count": row["count"], "watermark": row["cap"]}
+            for row in rows
+        ]
+    except Exception:
+        # Upstream is a private helper: if it raises or changes shape, degrade to
+        # the local loop instead of aborting status collection entirely.
+        return _pr_queue_local()
 
 
 def _pr_queue_local() -> list[dict]:

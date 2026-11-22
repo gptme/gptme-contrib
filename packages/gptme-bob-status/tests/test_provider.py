@@ -153,7 +153,7 @@ def test_pr_queue_delegates_to_upstream_helper_and_maps_cap(monkeypatch):
 
     seen: dict = {}
 
-    def fake_upstream(repos, author=None):
+    def fake_upstream(repos):
         seen["repos"] = repos
         return [{"repo": "gptme/gptme", "count": 4, "cap": 10}]
 
@@ -162,17 +162,54 @@ def test_pr_queue_delegates_to_upstream_helper_and_maps_cap(monkeypatch):
     assert seen["repos"] == mod._TRACKED_REPOS
 
 
-def test_pr_queue_falls_back_when_upstream_helper_missing(monkeypatch):
-    """Older gptme (>=0.29 floor) has no cmd_status._pr_queue."""
-    import sys
+def test_upstream_pr_queue_accepts_a_single_repos_argument():
+    """The provider calls upstream with only the repo list.
 
+    Upstream's ``author`` parameter is optional; pin that so a future signature
+    change cannot turn the delegation into a TypeError at status time.
+    """
+    import inspect
+
+    import gptme.cli.cmd_status as cmd_status
+
+    params = list(inspect.signature(cmd_status._pr_queue).parameters.values())
+    assert params and params[0].name == "repos"
+    required = [
+        p.name
+        for p in params[1:]
+        if p.default is inspect.Parameter.empty
+        and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+    ]
+    assert required == []
+
+
+def test_pr_queue_falls_back_when_upstream_helper_missing(monkeypatch):
+    """Older gptme (>=0.29 floor) has the module but not the helper."""
+    import gptme.cli.cmd_status as cmd_status
     import gptme_bob_status.provider as mod
 
-    monkeypatch.setitem(sys.modules, "gptme.cli.cmd_status", None)
+    # The real older-gptme failure is ``ImportError: cannot import name
+    # '_pr_queue'``, not a missing module.
+    monkeypatch.delattr(cmd_status, "_pr_queue")
     monkeypatch.setattr(
         mod, "_pr_queue_local", lambda: [{"repo": "r", "count": 1, "watermark": None}]
     )
     assert mod._pr_queue() == [{"repo": "r", "count": 1, "watermark": None}]
+
+
+def test_pr_queue_falls_back_when_upstream_helper_raises(monkeypatch):
+    """A raising upstream helper degrades to the local loop, not a crash."""
+    import gptme.cli.cmd_status as cmd_status
+    import gptme_bob_status.provider as mod
+
+    def broken(repos):
+        raise RuntimeError("upstream private helper drifted")
+
+    monkeypatch.setattr(cmd_status, "_pr_queue", broken)
+    monkeypatch.setattr(
+        mod, "_pr_queue_local", lambda: [{"repo": "r", "count": 2, "watermark": 5}]
+    )
+    assert mod._pr_queue() == [{"repo": "r", "count": 2, "watermark": 5}]
 
 
 def test_pr_queue_display_marks_watermark_for_triage_not_blocking():
