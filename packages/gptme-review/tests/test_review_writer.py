@@ -606,6 +606,39 @@ def test_cited_sha_lookup_goes_through_the_bound_run(alice_io):
     assert calls == [["gh", "api", "repos/o/r/commits/abc1234", "--jq", ".sha"]]
 
 
+def test_cited_sha_does_not_truncate_a_full_ref(alice_io):
+    """A 40-char SHA is a full ref: it must not be looked up as a prefix.
+
+    Truncating it to 12 hex chars produced a false P1 when the real commit
+    lived in a submodule or another repo (gptme-cloud#902/#912 class).
+    """
+    fake_run, calls = _scripted_run({("gh",): (0, "abc1234\n")})
+    w = _bound_with(alice_io, run=fake_run)
+    full = "abcdef0123456789abcdef0123456789abcdef01"
+    assert w._check_cited_shas(f"fixed in {full}", "o/r", ["src/a.py"]) == []
+    assert calls == []
+    # Uppercase hex is normalized before the lookup, since git only resolves
+    # lowercase.
+    assert w._check_cited_shas("fixed in ABC1234", "o/r", ["src/a.py"]) == []
+    assert calls == [["gh", "api", "repos/o/r/commits/abc1234", "--jq", ".sha"]]
+
+
+@pytest.mark.parametrize(
+    "path,is_test",
+    [
+        ("tests/test_a.py", True),
+        ("web/src/components/A.test.tsx", True),
+        ("web/src/components/A.spec.ts", True),
+        ("src/test_render_helpers.tsx", True),
+        # `test_` as a substring of a production filename is not a test file.
+        ("src/latest_compile.py", False),
+        ("src/contest_config.py", False),
+    ],
+)
+def test_test_file_regex_is_segment_anchored(alice_io, path, is_test):
+    assert bool(writer._TEST_FILE_RE.search(path)) is is_test
+
+
 def test_unrelated_ci_claim_reads_checks_through_the_bound_gh_json(alice_io):
     seen: list[list[str]] = []
 

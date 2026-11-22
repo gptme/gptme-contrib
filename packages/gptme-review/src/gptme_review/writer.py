@@ -3230,12 +3230,17 @@ def _check_cited_shas(
     # to avoid flagging 40-char SHAs that are clearly full refs or part of prose.
     # `(?<![\w-])` so `squash-merged <40-char sha>` does not match `merged`
     # (gptme-cloud#902: hyphen is a non-word char, so `\\bmerged` still fired).
+    # `(?![0-9a-f])` keeps a 40-char SHA from being truncated to its first 12
+    # hex chars: the lookup then ran on a prefix that 404s when the real SHA
+    # belongs to a submodule or another repo — the exact false P1 the gitlink
+    # exemption below was added for.
+    _sha = r"`?([0-9a-f]{7,12})`?(?![0-9a-f])"
     pattern = re.compile(
         r"(?:"
-        r"fixed\s+in\s+`?([0-9a-f]{7,12})`?"
-        r"|(?<![\w-])merged\s+(?:as\s+)?`?([0-9a-f]{7,12})`?"
-        r"|(?:commit|sha)\s*:?\s*`?([0-9a-f]{7,12})`?"
-        r"|follow.up\s+commit\s+`?([0-9a-f]{7,12})`?"
+        r"fixed\s+in\s+" + _sha + r""
+        r"|(?<![\w-])merged\s+(?:as\s+)?" + _sha + r""
+        r"|(?:commit|sha)\s*:?\s*" + _sha + r""
+        r"|follow.up\s+commit\s+" + _sha + r""
         r")",
         re.IGNORECASE,
     )
@@ -3244,7 +3249,8 @@ def _check_cited_shas(
     results: list[dict] = []
     seen: set[str] = set()
     for m in pattern.finditer(pr_body):
-        sha = next(g for g in m.groups() if g)
+        # `re.IGNORECASE` admits A-F; git only resolves lowercase hex.
+        sha = next(g for g in m.groups() if g).lower()
         if sha in seen:
             continue
         seen.add(sha)
@@ -3364,8 +3370,13 @@ def _check_unrelated_ci_claim(
     ]
 
 
+# Every alternative is anchored to a path segment. An unanchored
+# ``test_[^/]+$`` matched the *substring* `test_` anywhere in a path, so a
+# production file like ``src/latest_compile.py`` counted as a test file and
+# silently excused both rule 7 (no regression test) and rule 1c (visual diff
+# needs a screenshot).
 _TEST_FILE_RE = re.compile(
-    r"^tests?/|/tests?/|test_[^/]+$|[^/]+_test\.[^/]+$|[^/]+\.test\.[^/]+$|[^/]+\.spec\.[^/]+$",
+    r"^tests?/|/tests?/|(?:^|/)test_[^/]+$|[^/]+_test\.[^/]+$|[^/]+\.test\.[^/]+$|[^/]+\.spec\.[^/]+$",
     re.IGNORECASE,
 )
 
