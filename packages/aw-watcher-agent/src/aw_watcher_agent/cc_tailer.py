@@ -273,7 +273,10 @@ def _emit_file_locked(
     # already have a complete successor establishing their idle boundary.
     candidates = blocks[:-1] if incomplete else blocks
     finished = [b for b in candidates if (now - b.end).total_seconds() > gap_s]
-    prefix_digests = _prefix_digests(finished)
+    # Eligibility can shrink while an appended row is incomplete, but already
+    # emitted blocks must still be verified against the complete parsed prefix.
+    # Only posting new blocks depends on the idle/partial-row guards above.
+    prefix_digests = _prefix_digests(blocks)
     emitted = _read_emitted(
         path, gap_s, server=client.server, hostname=hostname, prefix_digests=prefix_digests
     )

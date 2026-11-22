@@ -518,6 +518,36 @@ def test_partial_copied_trailing_row_does_not_hold_back_the_owned_block(tmp_path
     assert [e.data["session_id"] for _, e in client.posted] == ["new"]
 
 
+@pytest.mark.parametrize("owner", [None, "new"])
+@pytest.mark.parametrize("fragment", ['{"type":"user",', '{"sessionId":"new",'])
+def test_partial_append_preserves_checkpoint_and_resumes(tmp_path, monkeypatch, owner, fragment):
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    transcript = tmp_path / "new.jsonl"
+    prefix = _row("2026-11-10T09:00:00Z", sid="new") + "\n"
+    transcript.write_text(prefix, encoding="utf-8")
+    client = _Client()
+    now = _dt("2026-11-10T12:00:00Z")
+    assert cc_tailer.emit_file(client, "host", transcript, now=now, owner=owner) == 1
+    cursor = cc_tailer._cursor_path(transcript, client.server, "host")
+    checkpoint = cursor.read_bytes()
+
+    # The held last block is already emitted; the partial successor must not
+    # make its unchanged checkpoint look truncated, or replay it.
+    transcript.write_text(prefix + fragment, encoding="utf-8")
+    assert cc_tailer.emit_file(client, "host", transcript, now=now, owner=owner) == 0
+    assert cursor.read_bytes() == checkpoint
+    assert len(client.posted) == 1
+
+    # Once the successor is complete, emit just the new block and checkpoint it.
+    transcript.write_text(prefix + _row("2026-11-10T11:00:00Z", sid="new") + "\n")
+    assert cc_tailer.emit_file(client, "host", transcript, now=now, owner=owner) == 1
+    assert cc_tailer.emit_file(client, "host", transcript, now=now, owner=owner) == 0
+    assert [e.timestamp for _, e in client.posted] == [
+        _dt("2026-11-10T09:00:00Z").isoformat(),
+        _dt("2026-11-10T11:00:00Z").isoformat(),
+    ]
+
+
 def test_explicit_file_keeps_rows_from_another_session_id(tmp_path, monkeypatch):
     # ``--file`` names a transcript the caller chose; its stem is not a session id,
     # so no owner is passed and the rows must not be silently dropped.
