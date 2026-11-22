@@ -732,6 +732,39 @@ def test_visual_rule_keys_sections_by_new_path_not_header_split(alice_io):
     assert len(findings) == 1 and findings[0]["severity"] == "P1"
 
 
+def test_visual_rule_does_not_skip_a_css_universal_selector(alice_io):
+    """A bare ``*`` rule is markup, not a block-comment continuation (rule 1c).
+
+    ``_COMMENT_LINE_RE`` used to swallow any line starting with ``*``, so
+    ``* { color: red }`` in a stylesheet was filtered before the visual-change
+    scan and a real UI change passed without a screenshot.
+    """
+    w = writer.bind_io(alice_io)
+    path = "web/src/static/dark.css"
+    diff = (
+        f"diff --git a/{path} b/{path}\n"
+        f"--- a/{path}\n+++ b/{path}\n"
+        "@@ -1 +1 @@\n-* { color: blue }\n+* { color: red }\n"
+    )
+    findings = w._check_visual_screenshot("", diff, [path])
+    assert len(findings) == 1 and findings[0]["severity"] == "P1"
+    assert w._check_visual_screenshot("![After](u)", diff, [path]) == []
+
+
+def test_visual_rule_still_skips_block_comment_continuations(alice_io):
+    """Prose in a ``*``-prefixed comment line still renders nothing."""
+    w = writer.bind_io(alice_io)
+    path = "web/src/components/A.tsx"
+    diff = (
+        f"diff --git a/{path} b/{path}\n"
+        f"--- a/{path}\n+++ b/{path}\n"
+        "@@ -1 +1 @@\n"
+        "- * old comment mentioning color\n"
+        "+ * new comment mentioning border\n"
+    )
+    assert w._check_visual_screenshot("", diff, [path]) == []
+
+
 def test_visual_rule_ignores_generics_and_whole_file_deletions(alice_io):
     w = writer.bind_io(alice_io)
     generic = (

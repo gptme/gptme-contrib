@@ -3407,7 +3407,13 @@ _VISUAL_CHANGE_RE = re.compile(
     re.IGNORECASE,
 )
 
-_COMMENT_LINE_RE = re.compile(r"^\s*(?://|/\*|\*|\{/\*)")
+_COMMENT_LINE_RE = re.compile(r"^\s*(?://|/\*|\{/\*)")
+
+# A block-comment continuation line starts with `*`, but so does a CSS
+# universal-selector rule. `* { color: red }` is a real visual change and
+# `_VISUAL_CHANGE_RE` would flag it, so the bare-`*` skip must not swallow it:
+# a continuation line is prose and carries no rule body (`{`), a CSS rule does.
+_COMMENT_CONTINUATION_RE = re.compile(r"^\s*\*(?:\s|$)")
 
 # a11y-only props are not screenshotable. Measured FP: gptme/gptme-cloud#946 —
 # an aria-label / aria-hidden hamburger-toggle change raised a blocking P1
@@ -3436,6 +3442,19 @@ def _normalize_visual_payload(lines: list[str]) -> str:
     return text.strip()
 
 
+def _is_comment_line(line: str) -> bool:
+    """True for a source line that renders nothing (a comment).
+
+    `*` is ambiguous: it starts a block-comment continuation (`* prose`) and
+    also a CSS universal-selector rule (`* { color: red }`). Only treat it as
+    a comment when the line carries no rule body, so a universal-selector
+    change is not silently exempted from the rule 1c screenshot requirement.
+    """
+    if _COMMENT_LINE_RE.match(line):
+        return True
+    return bool(_COMMENT_CONTINUATION_RE.match(line)) and "{" not in line
+
+
 def _diff_changes_rendering(file_diff: str) -> bool:
     """True when a visual file's hunk has any rendering-affecting change.
 
@@ -3457,7 +3476,7 @@ def _diff_changes_rendering(file_diff: str) -> bool:
             continue
         # Comment lines render nothing; prose like `// Legend <Computed>` must
         # not be mistaken for markup.
-        if _COMMENT_LINE_RE.match(raw[1:]):
+        if _is_comment_line(raw[1:]):
             continue
         bucket.append(raw)
     if added or removed:
