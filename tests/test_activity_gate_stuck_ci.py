@@ -293,6 +293,59 @@ def test_ci_state_classification(label: str, rollup: list[dict], expected: str) 
     assert _classify(rollup) == expected, label
 
 
+@pytest.mark.parametrize(
+    ("cancelled_at", "replacement_at", "expected"),
+    [
+        ("2026-11-22T22:04:07Z", "2026-11-22T22:04:07.5Z", "green"),
+        ("2026-11-22T22:04:07.5Z", "2026-11-22T22:04:07Z", "bad"),
+        ("2026-11-22T22:04:07.50Z", "2026-11-22T22:04:07.5Z", "bad"),
+        (None, "2026-11-22T22:04:08Z", "bad"),
+        ("2026-11-22T22:04:07Z", None, "bad"),
+        ("invalid", "2026-11-22T22:04:08Z", "bad"),
+    ],
+)
+def test_supersession_requires_comparable_completion_times(
+    cancelled_at: str | None, replacement_at: str | None, expected: str
+) -> None:
+    def entry(conclusion: str, completed_at: str | None) -> dict:
+        return {
+            "name": "test",
+            "status": "COMPLETED",
+            "conclusion": conclusion,
+            "completedAt": completed_at,
+            # A start time is not a substitute for a missing completion time.
+            "startedAt": "2026-11-22T22:00:00Z",
+            "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+        }
+
+    assert (
+        _classify([entry("CANCELLED", cancelled_at), entry("SUCCESS", replacement_at)])
+        == expected
+    )
+
+
+def test_unknown_workflows_do_not_prove_supersession() -> None:
+    assert (
+        _classify(
+            [
+                {
+                    "name": "test",
+                    "status": "COMPLETED",
+                    "conclusion": "CANCELLED",
+                    "completedAt": "2026-11-22T22:04:07Z",
+                },
+                {
+                    "name": "test",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "completedAt": "2026-11-22T22:04:08Z",
+                },
+            ]
+        )
+        == "bad"
+    )
+
+
 def test_pr_3472_shape_is_inflight_not_green() -> None:
     """The real stranded PR: mostly green, one CANCELLED, three QUEUED for hours.
 

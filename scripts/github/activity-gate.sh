@@ -971,6 +971,13 @@ check_ci_failures() {
         # not-yet-started shape this function exists to catch.
         local ci_state
         ci_state=$(echo "$pr_data" | jq -r '
+            # Only comparable completion times establish a later result. Keep
+            # fractional seconds; lexical ISO ordering misorders .5Z versus Z.
+            def completed_epoch:
+                (try ((.completedAt
+                       | capture("^(?<whole>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<fraction>\\.[0-9]+)?Z$"))
+                      | ((.whole + "Z" | fromdateiso8601)
+                         + (("0" + (.fraction // "")) | tonumber))) catch null) // null;
             select(.statusCheckRollup != null) | .statusCheckRollup
             # Drop a CANCELLED check-run that the SAME workflow later replaced
             # with a completed non-cancelled result for the SAME check name on
@@ -988,13 +995,14 @@ check_ci_failures() {
             | ([ .[]
                  | { e: ., n: (.name // .context // ""),
                      w: (.checkSuite.workflowRun.workflow.name // ""),
-                     t: (.completedAt // .startedAt // .createdAt // ""),
+                     t: completed_epoch,
                      c: ((.conclusion // .state // "") | ascii_upcase) } ]) as $tagged
             | [ $tagged[]
                 | . as $x
                 | select(($x.c != "CANCELLED")
                          or (any($tagged[];
-                                 .n == $x.n and .w == $x.w and .t > $x.t
+                                 .n == $x.n and .w == $x.w and .w != ""
+                                 and .t != null and $x.t != null and .t > $x.t
                                  and .c != "" and .c != "CANCELLED") | not))
                 | .e ]
             | (any(.[]; ((.conclusion // .state // "") | ascii_upcase) == "FAILURE")) as $hard
