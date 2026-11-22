@@ -450,6 +450,30 @@ class Bandit:
         """Last known-good copy of the state file, kept by ``save()``."""
         return self.state_file.with_name(self.state_file.name + ".bak")
 
+    @staticmethod
+    def _decode_state(text: str) -> BanditState:
+        """Deserialize a state document for both loading and backup validation."""
+        data = json.loads(text)
+        state = BanditState(
+            total_sessions=data.get("total_sessions", 0),
+            created=data.get("created", ""),
+            last_updated=data.get("last_updated", ""),
+        )
+        for arm_id, arm_data in data.get("arms", {}).items():
+            # Support old format where key was 'lesson_path'
+            arm_data = dict(arm_data)
+            if "lesson_path" in arm_data and "arm_id" not in arm_data:
+                arm_data["arm_id"] = arm_data.pop("lesson_path")
+            state.arms[arm_id] = BanditArm(**arm_data)
+        for arm_id, contexts in data.get("contextual_arms", {}).items():
+            state.contextual_arms[arm_id] = {}
+            for ctx_key, arm_data in contexts.items():
+                arm_data = dict(arm_data)
+                if "lesson_path" in arm_data and "arm_id" not in arm_data:
+                    arm_data["arm_id"] = arm_data.pop("lesson_path")
+                state.contextual_arms[arm_id][ctx_key] = BanditArm(**arm_data)
+        return state
+
     def _load_state(self) -> BanditState:
         """Load bandit state from disk.
 
@@ -460,25 +484,7 @@ class Bandit:
             if not path.exists():
                 continue
             try:
-                data = json.loads(path.read_text())
-                state = BanditState(
-                    total_sessions=data.get("total_sessions", 0),
-                    created=data.get("created", ""),
-                    last_updated=data.get("last_updated", ""),
-                )
-                for arm_id, arm_data in data.get("arms", {}).items():
-                    # Support old format where key was 'lesson_path'
-                    arm_data = dict(arm_data)
-                    if "lesson_path" in arm_data and "arm_id" not in arm_data:
-                        arm_data["arm_id"] = arm_data.pop("lesson_path")
-                    state.arms[arm_id] = BanditArm(**arm_data)
-                for arm_id, contexts in data.get("contextual_arms", {}).items():
-                    state.contextual_arms[arm_id] = {}
-                    for ctx_key, arm_data in contexts.items():
-                        arm_data = dict(arm_data)
-                        if "lesson_path" in arm_data and "arm_id" not in arm_data:
-                            arm_data["arm_id"] = arm_data.pop("lesson_path")
-                        state.contextual_arms[arm_id][ctx_key] = BanditArm(**arm_data)
+                state = self._decode_state(path.read_text())
                 if path != self.state_file:
                     print(
                         f"Warning: loaded bandit state from backup {path.name} "
@@ -486,7 +492,7 @@ class Bandit:
                         file=sys.stderr,
                     )
                 return state
-            except (json.JSONDecodeError, TypeError, KeyError) as e:
+            except (ValueError, TypeError, KeyError, AttributeError) as e:
                 print(f"Warning: corrupted bandit state in {path.name}: {e}", file=sys.stderr)
         return BanditState()
 
@@ -508,15 +514,15 @@ class Bandit:
         _atomic_write_text(self.state_file, json.dumps(data, indent=2) + "\n")
 
     def _backup_current(self) -> None:
-        """Copy the current state file to ``.bak`` if it is valid JSON.
+        """Copy the current state file to ``.bak`` if it can be loaded.
 
-        A file that does not parse is never backed up: copying it would
+        A file that cannot be deserialized is never backed up: copying it would
         replace the good backup that ``_load_state()`` just recovered from.
         """
         try:
             current = self.state_file.read_text()
-            json.loads(current)
-        except (OSError, ValueError):
+            self._decode_state(current)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
             return
         _atomic_write_text(self.backup_file, current)
 

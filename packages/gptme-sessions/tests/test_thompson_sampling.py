@@ -747,6 +747,46 @@ def test_save_never_backs_up_a_corrupt_state_file(tmp_path: Path):
     assert "c" in Bandit(state_dir=tmp_path).state.arms
 
 
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        "[]",
+        '"corrupt"',
+        "null",
+        '{"arms": [1]}',
+        '{"arms": null}',
+        '{"arms": {"a": 1}}',
+        '{"arms": {"a": {}}}',
+        '{"contextual_arms": [1]}',
+        '{"contextual_arms": {"a": [1]}}',
+        '{"contextual_arms": {"a": {"null": 1}}}',
+        '{"contextual_arms": {"a": {"null": {}}}}',
+    ],
+)
+@pytest.mark.parametrize("has_backup", [True, False])
+def test_malformed_json_state_recovers_without_poisoning_backup(tmp_path, corrupt, has_backup):
+    """Load and backup rotation must agree on which state documents are usable."""
+    bandit = _saved_bandit(tmp_path)
+    bandit.update(["b"], outcome=1.0)
+    good_backup = bandit.backup_file.read_text()
+    if not has_backup:
+        bandit.backup_file.unlink()
+    bandit.state_file.write_text(corrupt)
+
+    recovered = Bandit(state_dir=tmp_path)
+    assert recovered.state.total_sessions == (1 if has_backup else 0)
+    assert set(recovered.state.arms) == ({"a"} if has_backup else set())
+    recovered.update(["c"], outcome=1.0)
+
+    if has_backup:
+        assert recovered.backup_file.read_text() == good_backup
+    else:
+        assert not recovered.backup_file.exists()
+    reloaded = Bandit(state_dir=tmp_path)
+    assert reloaded.state.total_sessions == (2 if has_backup else 1)
+    assert set(reloaded.state.arms) == ({"a", "c"} if has_backup else {"c"})
+
+
 def test_failed_backup_does_not_advance_state(tmp_path: Path, monkeypatch):
     bandit = _saved_bandit(tmp_path)
     bandit.update(["b"], outcome=1.0)
