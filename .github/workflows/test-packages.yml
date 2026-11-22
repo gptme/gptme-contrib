@@ -314,8 +314,11 @@ jobs:
       # Metric only (see `make typecheck-coverage`); the gate is the step above.
       # Default `success()` condition on purpose: a typecheck failure must not
       # publish a report from that commit, or the Codecov baseline for
-      # subsequent PRs would move to a broken tree.
+      # subsequent PRs would move to a broken tree. `continue-on-error` keeps a
+      # broken metric (e.g. a mypy crash that writes no report) a loud warning
+      # instead of a red check on an unrelated PR.
       - name: Generate type coverage report
+        continue-on-error: true
         run: make typecheck-coverage
 
       - name: Upload type coverage to Codecov

@@ -18,6 +18,11 @@ coverage:
         # Don't require coverage for new code in PRs
         informational: true
         flags: [packages, plugins]
+      # Type precision on the changed lines, kept out of the test-coverage
+      # patch number for the same reason as the project status above.
+      type-coverage:
+        informational: true
+        flags: [type-coverage]
 
 comment:
   layout: "reach,diff,flags"

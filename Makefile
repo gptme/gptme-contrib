@@ -80,6 +80,8 @@ typecheck-coverage:  ## Write a mypy type-precision report (.mypy_coverage_repor
 		--ignore-missing-imports --explicit-package-bases --namespace-packages \
 		--cobertura-xml-report .mypy_coverage_report --no-incremental > .mypy_coverage_report.log 2>&1 || true
 	@tail -1 .mypy_coverage_report.log
+	@# Fail loudly if mypy wrote no report, but never block: CI runs this step
+	@# with `continue-on-error`, so this is a warning signal, not a gate.
 	@test -f .mypy_coverage_report/cobertura.xml
 
 # ============================================================
