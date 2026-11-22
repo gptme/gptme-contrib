@@ -681,6 +681,24 @@ def test_static_preflight_adds_host_checks_only_when_a_host_supplies_them(alice_
     assert calls == []  # no cited SHA, no CI claim: no I/O
 
 
+def test_visual_rule_keys_sections_by_new_path_not_header_split(alice_io):
+    """A path containing `` b/ `` must still be keyed correctly (rule 1c).
+
+    Splitting ``diff --git a/<old> b/<new>`` on the first `` b/ `` lands
+    mid-path for such a file, so the per-file lookup missed and a visual
+    change was silently exempted from the screenshot requirement.
+    """
+    w = writer.bind_io(alice_io)
+    path = "web/src/components/foo b/Bar.tsx"
+    diff = (
+        f"diff --git a/{path} b/{path}\n"
+        f"--- a/{path}\n+++ b/{path}\n"
+        "@@ -1 +1 @@\n-<div className='a'/>\n+<div className='b'/>\n"
+    )
+    findings = w._check_visual_screenshot("", diff, [path])
+    assert len(findings) == 1 and findings[0]["severity"] == "P1"
+
+
 def test_visual_rule_ignores_generics_and_whole_file_deletions(alice_io):
     w = writer.bind_io(alice_io)
     generic = (

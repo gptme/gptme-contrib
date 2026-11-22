@@ -3472,6 +3472,35 @@ def _diff_deletes_whole_file(file_diff: list[str]) -> bool:
     return any(raw.rstrip() == "+++ /dev/null" for raw in file_diff)
 
 
+def _diff_section_path(section: list[str]) -> str | None:
+    """The repository-relative new-side path of one ``diff --git`` section.
+
+    Read from the section's ``+++ b/<path>`` line, not by splitting the
+    ``diff --git a/<old> b/<new>`` header. Git does not escape spaces in
+    paths, so a path that itself contains `` b/ `` (legal) makes that split
+    land mid-path; the section is then keyed under a name no caller looks up
+    and a genuinely visual change is silently exempted from rule 1c. Only the
+    header region is scanned — an added line whose content starts with
+    ``+ b/`` renders as ``+++ b/`` inside a hunk.
+
+    A deletion has ``+++ /dev/null``, so it falls back to the ``--- a/<path>``
+    name that `_diff_deletes_whole_file` expects.
+    """
+    new_path: str | None = None
+    old_path: str | None = None
+    for raw in section:
+        if raw.startswith("@@"):
+            break
+        if raw.startswith("+++ b/"):
+            new_path = raw[len("+++ b/") :]
+        elif raw.startswith("--- a/"):
+            old_path = raw[len("--- a/") :]
+    chosen = new_path if new_path is not None else old_path
+    if chosen is None:
+        return None
+    return chosen.split("\t", 1)[0].rstrip() or None
+
+
 def _check_visual_screenshot(
     pr_body: str, diff: str, touched_files: Collection[str]
 ) -> list[dict]:
@@ -3501,16 +3530,18 @@ def _check_visual_screenshot(
     # object literal, a renamed prop without any render impact). Those render
     # nothing a screenshot could show, so they are exempt the same way test
     # files are. Split the diff by file to check each visual file's own hunks.
-    file_diffs: dict[str, list[str]] = {}
-    current: str | None = None
+    sections: list[list[str]] = []
     for raw in diff.splitlines():
         if raw.startswith("diff --git"):
-            current = raw.split(" b/", 1)[-1] if " b/" in raw else None
-            if current is not None:
-                current = current.split("\t", 1)[0].rstrip()
-            file_diffs.setdefault(current or "", [])
-        elif current is not None:
-            file_diffs[current].append(raw)
+            sections.append([raw])
+        elif sections:
+            sections[-1].append(raw)
+
+    file_diffs: dict[str, list[str]] = {}
+    for section in sections:
+        path = _diff_section_path(section)
+        if path is not None:
+            file_diffs.setdefault(path, []).extend(section)
 
     visual_files = [
         f
