@@ -34,6 +34,7 @@ CLI:
 
 import contextlib
 import json
+import os
 import random
 import sys
 from dataclasses import asdict, dataclass, field
@@ -42,6 +43,24 @@ from pathlib import Path
 from typing import Iterator
 
 import click
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` so readers never see a partial file.
+
+    Writes a sibling temp file, fsyncs it and ``os.replace``s it over the
+    target, so a crash mid-write leaves the previous file intact.
+    """
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
 
 
 @dataclass
@@ -426,11 +445,22 @@ class Bandit:
             finally:
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
 
+    @property
+    def backup_file(self) -> Path:
+        """Last known-good copy of the state file, kept by ``save()``."""
+        return self.state_file.with_name(self.state_file.name + ".bak")
+
     def _load_state(self) -> BanditState:
-        """Load bandit state from disk."""
-        if self.state_file.exists():
+        """Load bandit state from disk.
+
+        A corrupt state file falls back to the ``.bak`` copy kept by
+        ``save()``, so one bad write cannot discard accumulated history.
+        """
+        for path in (self.state_file, self.backup_file):
+            if not path.exists():
+                continue
             try:
-                data = json.loads(self.state_file.read_text())
+                data = json.loads(path.read_text())
                 state = BanditState(
                     total_sessions=data.get("total_sessions", 0),
                     created=data.get("created", ""),
@@ -449,9 +479,15 @@ class Bandit:
                         if "lesson_path" in arm_data and "arm_id" not in arm_data:
                             arm_data["arm_id"] = arm_data.pop("lesson_path")
                         state.contextual_arms[arm_id][ctx_key] = BanditArm(**arm_data)
+                if path != self.state_file:
+                    print(
+                        f"Warning: loaded bandit state from backup {path.name} "
+                        f"({state.total_sessions} sessions recovered)",
+                        file=sys.stderr,
+                    )
                 return state
             except (json.JSONDecodeError, TypeError, KeyError) as e:
-                print(f"Warning: corrupted state file, starting fresh: {e}")
+                print(f"Warning: corrupted bandit state in {path.name}: {e}", file=sys.stderr)
         return BanditState()
 
     def save(self) -> None:
@@ -468,7 +504,22 @@ class Bandit:
                 arm_id: {ctx_key: asdict(arm) for ctx_key, arm in contexts.items()}
                 for arm_id, contexts in self.state.contextual_arms.items()
             }
-        self.state_file.write_text(json.dumps(data, indent=2) + "\n")
+        self._backup_current()
+        _atomic_write_text(self.state_file, json.dumps(data, indent=2) + "\n")
+
+    def _backup_current(self) -> None:
+        """Copy the current state file to ``.bak`` if it is valid JSON.
+
+        A file that does not parse is never backed up: copying it would
+        replace the good backup that ``_load_state()`` just recovered from.
+        """
+        try:
+            current = self.state_file.read_text()
+            json.loads(current)
+        except (OSError, ValueError):
+            return
+        with contextlib.suppress(OSError):
+            _atomic_write_text(self.backup_file, current)
 
     def sample(
         self,

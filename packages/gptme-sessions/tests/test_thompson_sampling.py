@@ -699,3 +699,58 @@ def test_concurrent_processes_do_not_lose_updates(tmp_path: Path):
             if process.is_alive():
                 process.terminate()
                 process.join(timeout=5)
+
+
+def _saved_bandit(tmp_path: Path, arm: str = "a") -> Bandit:
+    bandit = Bandit(state_dir=tmp_path)
+    bandit.update([arm], outcome=1.0)
+    return bandit
+
+
+def test_save_keeps_backup_of_previous_state(tmp_path: Path):
+    bandit = _saved_bandit(tmp_path)
+    first = bandit.state_file.read_text()
+    bandit.update(["b"], outcome=0.0)
+
+    assert bandit.backup_file.read_text() == first
+    assert "b" in json.loads(bandit.state_file.read_text())["arms"]
+
+
+def test_corrupt_state_recovers_from_backup(tmp_path: Path):
+    bandit = _saved_bandit(tmp_path)
+    bandit.update(["b"], outcome=1.0)
+    bandit.state_file.write_text('{"arms": {"a": ')  # truncated mid-write
+
+    recovered = Bandit(state_dir=tmp_path)
+
+    assert "a" in recovered.state.arms
+    assert recovered.state.total_sessions == 1
+
+
+def test_save_never_backs_up_a_corrupt_state_file(tmp_path: Path):
+    bandit = _saved_bandit(tmp_path)
+    bandit.update(["b"], outcome=1.0)
+    good_backup = bandit.backup_file.read_text()
+    bandit.state_file.write_text("not json")
+
+    recovered = Bandit(state_dir=tmp_path)
+    recovered.save()
+
+    assert recovered.backup_file.read_text() == good_backup
+    assert json.loads(recovered.state_file.read_text())["arms"]
+
+
+def test_failed_write_leaves_previous_state_intact(tmp_path: Path, monkeypatch):
+    bandit = _saved_bandit(tmp_path)
+    before = bandit.state_file.read_text()
+
+    def fail_replace(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("gptme_sessions.thompson_sampling.os.replace", fail_replace)
+    bandit.state.total_sessions = 99
+    with pytest.raises(OSError):
+        bandit.save()
+
+    assert bandit.state_file.read_text() == before
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")) == []
