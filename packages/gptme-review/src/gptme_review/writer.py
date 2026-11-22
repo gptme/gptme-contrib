@@ -30,6 +30,8 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from datetime import UTC, datetime
 from pathlib import Path
 from types import FunctionType, SimpleNamespace
@@ -38,9 +40,14 @@ from urllib.parse import quote
 
 from bobutils.shell import gh_json, gh_paginated_list
 
+from gptme_review import lifecycle
 from gptme_review.core import (
+    UNTIL_DRY_MAX_PASSES,
+    ReviewConfig,
     ReviewDeadline,
     ReviewError,
+    ReviewRoute,
+    ReviewTarget,
     agreement_dissent,
     blocking_shortfall,
     confidence_rationale,
@@ -48,6 +55,10 @@ from gptme_review.core import (
     consensus_degraded,
     consensus_lost_jobs,
     consensus_lost_passes,
+    drop_unverified_absence_findings,
+    fetch_file_contents,
+    fetch_file_preload,
+    fetch_submodule_context,
     filter_suppressed,
     is_summary_only_finding,
     matches_entry,
@@ -55,10 +66,21 @@ from gptme_review.core import (
     normalize_finding_class,
     normalize_severity,
     partition_posting_findings,
+    rank_changed_paths_by_hunks,
     repo_family,
+    review,
+    select_aspects,
     suppression_entry,
 )
-from gptme_review.shard import sharding_note, split_file_sections
+from gptme_review.shard import (
+    SHARD_CONCURRENCY,
+    Shard,
+    merge_shard_findings,
+    merge_shard_usage,
+    shard_context_note,
+    sharding_note,
+    split_file_sections,
+)
 from gptme_review.sweep import SweepIdentity, _is_reviewer_comment
 
 
@@ -121,11 +143,24 @@ def bind_io(namespace: object) -> SimpleNamespace:
     return SimpleNamespace(**bound)
 
 
-def default_io(identity: SweepIdentity) -> SimpleNamespace:
-    """A peer host's namespace: this module's I/O plus *identity*'s markers."""
+def default_io(
+    identity: SweepIdentity, host: DefaultWriterHost | None = None
+) -> SimpleNamespace:
+    """A peer host's namespace: this module's I/O plus *identity*'s markers.
+
+    *host* supplies the run ledger and subscription engine hooks used by the
+    engine call helpers; ``None`` means :class:`DefaultWriterHost`.
+    """
     ns = identity.marker_prefix
     return SimpleNamespace(
         REVIEWER_IDENTITY=identity,
+        WRITER_HOST=host if host is not None else DefaultWriterHost(),
+        review=review,
+        fetch_file_contents=fetch_file_contents,
+        _ORIGINAL_FETCH_FILE_CONTENTS=fetch_file_contents,
+        fetch_file_preload=fetch_file_preload,
+        fetch_submodule_context=fetch_submodule_context,
+        drop_unverified_absence_findings=drop_unverified_absence_findings,
         run=run,
         gh_json=gh_json,
         gh_paginated_list=gh_paginated_list,
@@ -652,6 +687,19 @@ class DefaultWriterHost:
     ) -> list[dict]:
         """Host-specific mechanical findings added to static preflight."""
         return []
+
+    def subscription_review_call(
+        self,
+        args: argparse.Namespace,
+        pr: Mapping[str, object],
+        *,
+        diff: str,
+        contents: dict[str, str],
+        note: str,
+        label: str = "",
+    ) -> tuple[list[dict], dict]:
+        """One subscription-panel review of ``diff``; unsupported by default."""
+        raise ReviewError("the subscription engine is not available on this host")
 
     def route_override(self, args: argparse.Namespace) -> tuple[str, str] | None:
         """Return ``(route, why)`` to override an auto-resolved llm route, or None."""
@@ -3680,3 +3728,361 @@ def static_preflight_findings(
     results.extend(_check_fix_without_test(pr_title, touched_files))
     results.extend(host.extra_static_checks(diff, touched_files))
     return results
+
+
+# ---------------------------------------------------------------------------
+# Engine call helpers (writer-port slice 3a)
+#
+# One review of a diff on the OpenRouter engine, its sharded fan-out and the
+# preload that feeds both. Calls between members, and the seams a host patches
+# (``review``, ``fetch_submodule_context``, ``fetch_file_preload``,
+# ``drop_unverified_absence_findings``), resolve through ``_io``. The
+# subscription engine and the run ledger are host hooks on ``_io.WRITER_HOST``.
+# ---------------------------------------------------------------------------
+
+
+def preload_files(
+    args: argparse.Namespace, pr: Mapping[str, object], ranked_paths: list[str]
+) -> tuple[dict[str, str], set[str], dict[str, int]]:
+    """Post-change contents for ``ranked_paths``: (contents, fully read, coverage)."""
+    if args.no_preload:
+        return (
+            {},
+            set(),
+            {
+                "files_in_diff": len(ranked_paths),
+                "files_preloaded": 0,
+                "files_truncated": len(ranked_paths),
+            },
+        )
+    # Preserve the legacy ``fetch_file_contents`` patch seam while production
+    # uses the coverage-aware preload result.
+    if _io.fetch_file_contents is not _io._ORIGINAL_FETCH_FILE_CONTENTS:
+        contents = _io.fetch_file_contents(
+            args.repo, str(pr.get("headRefOid")), ranked_paths
+        )
+        fully = set(contents)
+        return (
+            contents,
+            fully,
+            {
+                "files_in_diff": len(ranked_paths),
+                "files_preloaded": len(fully),
+                "files_truncated": len(ranked_paths) - len(fully),
+            },
+        )
+    preload = _io.fetch_file_preload(args.repo, str(pr.get("headRefOid")), ranked_paths)
+    return preload.contents, set(preload.fully_preloaded), dict(preload.coverage)
+
+
+def _stage_timeout(args: argparse.Namespace, requested: float, stage: str) -> float:
+    """Return this stage's share of the shared deadline, if configured."""
+    lifecycle.stage(stage)
+    deadline = getattr(args, "deadline", None)
+    if isinstance(deadline, ReviewDeadline):
+        return deadline.cap(requested, stage)
+    return float(requested)
+
+
+def llm_review_call(
+    args: argparse.Namespace,
+    pr: Mapping[str, object],
+    *,
+    model: str,
+    key: str,
+    diff: str,
+    contents: dict[str, str],
+    preload_coverage: Mapping[str, int] | None,
+    note: str,
+    label: str = "",
+) -> tuple[list[dict], dict]:
+    """One review of ``diff`` on the configured route, logged for measurement.
+
+    ``--engine subscription`` goes to the panel; everything else is the
+    OpenRouter path, wrapped so its wall time, cost and raw findings land in the
+    same ledger as the panel's (``state/ai-review-runs.jsonl``).
+    """
+    if args.engine == "subscription":
+        sub_result: tuple[list[dict], dict] = _io.WRITER_HOST.subscription_review_call(
+            args, pr, diff=diff, contents=contents, note=note, label=label
+        )
+        return sub_result
+    started = time.monotonic()
+    sha = str(pr.get("headRefOid") or "")
+    model_name = model.removeprefix("openrouter/")
+    try:
+        findings, usage = _io._openrouter_review_call(
+            args,
+            pr,
+            model=model,
+            key=key,
+            diff=diff,
+            contents=contents,
+            preload_coverage=preload_coverage,
+            note=note,
+            label=label,
+        )
+    except ReviewError as exc:
+        if not args.dry_run and not label:
+            _io.WRITER_HOST.log_run(
+                repo=args.repo,
+                number=args.number,
+                sha=sha,
+                model=model_name,
+                usage={},
+                wall_s=time.monotonic() - started,
+                findings=[],
+                error=str(exc),
+            )
+        raise
+    if not args.dry_run and not label:
+        _io.WRITER_HOST.log_run(
+            repo=args.repo,
+            number=args.number,
+            sha=sha,
+            model=model_name,
+            usage=usage,
+            wall_s=time.monotonic() - started,
+            findings=findings,
+        )
+    return findings, usage
+
+
+def _openrouter_review_call(
+    args: argparse.Namespace,
+    pr: Mapping[str, object],
+    *,
+    model: str,
+    key: str,
+    diff: str,
+    contents: dict[str, str],
+    preload_coverage: Mapping[str, int] | None,
+    note: str,
+    label: str = "",
+) -> tuple[list[dict], dict]:
+    """One llm-engine review of ``diff`` — the whole PR, or one shard of it.
+
+    The single place the review mode (single pass / consensus / fan-out /
+    until-dry) is turned into model calls, so a shard is reviewed with exactly
+    the prompts and consensus semantics an unsharded PR gets.
+    """
+    pr_owner, pr_repo_name = args.repo.split("/", 1)
+    reasoning_effort = (
+        None if args.reasoning_effort == "none" else args.reasoning_effort
+    )
+    # Consensus routes through fan-out because that is where the threading
+    # already lives — repeats are extra threads in the same wave, never a
+    # second round-trip. Without --fanout the repeated "aspect" is the plain
+    # unnarrowed prompt (empty instruction), so consensus and aspect fan-out
+    # compose instead of competing.
+    n_passes = max(1, int(args.passes))
+    until_dry = bool(getattr(args, "until_dry", False))
+    until_dry_max = max(1, int(getattr(args, "until_dry_max", UNTIL_DRY_MAX_PASSES)))
+    target = ReviewTarget(
+        repo=args.repo,
+        diff=diff,
+        number=args.number,
+        title=str(pr.get("title") or ""),
+        body=str(pr.get("body") or ""),
+        file_contents={} if args.no_preload else contents,
+        extra_context=note or None,
+    )
+    config = ReviewConfig(
+        passes=n_passes,
+        min_agreement=max(1, int(args.min_agreement)),
+        until_dry=until_dry,
+        until_dry_max=until_dry_max,
+        route=ReviewRoute(
+            name="review",
+            # review() requires an OpenRouter-prefixed route model and strips it
+            # before the transport call, so both prefixed and bare ids work.
+            primary=model if model.startswith("openrouter/") else f"openrouter/{model}",
+            fallback=model,
+            data_policy="",
+            cost_tier="",
+        ),
+    )
+    if args.fanout or n_passes > 1 or until_dry:
+        # `select_aspects` returns the always-on lenses plus any conditional
+        # one whose evidence is present in THIS diff (e.g. `ui_style` only when
+        # the diff touches front-end files). Jobs are one per (pass, aspect),
+        # so gating on evidence is what keeps the lens catalogue from costing a
+        # request per lens on every review — and stops a UI reviewer guessing
+        # at a Python-only diff.
+        aspects = (
+            select_aspects(diff, repo=args.repo) if args.fanout else {"general": ""}
+        )
+        mode = (
+            f"until-dry (max {until_dry_max} waves, stop on zero new groups)"
+            if until_dry
+            else (
+                f"{n_passes} consensus pass(es) = "
+                f"{len(aspects) * n_passes} parallel calls; "
+                f"reporting findings seen by >= {args.min_agreement}"
+            )
+        )
+        print(
+            f"{label}fan-out: {len(aspects)} aspect pass(es) "
+            f"({', '.join(aspects)}) x {mode}"
+        )
+    else:
+        print(f"{label}prompt: {len(target.build_prompt())} chars")
+    result = _io.review(
+        target,
+        config,
+        api_key=key,
+        timeout=args.timeout,
+        max_tokens=args.max_tokens,
+        structured=not args.no_structured,
+        reasoning_effort=reasoning_effort,
+        fanout=args.fanout,
+        usage_context={
+            "consumer": "sweep",
+            "repo_pr": f"{pr_owner}/{pr_repo_name}#{args.number}",
+            "mode": "review",
+            **(preload_coverage or {}),
+        },
+        deadline=getattr(args, "deadline", None),
+    )
+    # The engine partitions earlier than this caller's render step; recombine so
+    # summary-only advisories still reach render()/the artifact.
+    return [*result.findings, *result.summary_only_findings], result.usage
+
+
+def _run_shards(
+    plan: Sequence[Shard], review_one: Callable[[Shard], tuple[list[dict], dict]]
+) -> list[tuple[list[dict], dict]]:
+    """Run ``review_one`` over the shards, ``SHARD_CONCURRENCY`` at a time.
+
+    Fail closed and fast: the first shard that fails fails the whole review (a
+    PR reviewed in three of four shards must not post a score for all four),
+    and shards that have not started yet are cancelled so no more is spent.
+    The failure keeps its original type so the caller's handling — and the
+    sweep's quota/provider attribution, which parses the message — still work.
+    """
+    results: dict[int, tuple[list[dict], dict]] = {}
+    with ThreadPoolExecutor(max_workers=SHARD_CONCURRENCY) as pool:
+        futures = {
+            pool.submit(copy_context().run, review_one, shard): shard for shard in plan
+        }
+        for fut in as_completed(futures):
+            shard = futures[fut]
+            try:
+                results[shard.index] = fut.result()
+            except ReviewError as exc:
+                for other in futures:
+                    other.cancel()
+                raise ReviewError(
+                    f"shard {shard.index}/{len(plan)} failed: {exc}"
+                ) from exc
+            except BaseException:
+                for other in futures:
+                    other.cancel()
+                raise
+    return [results[shard.index] for shard in plan]
+
+
+def _drop_unverified_absence_in_shard(
+    findings: list[dict], fully_preloaded: set[str], label: str
+) -> list[dict]:
+    """The absence guard, applied against what THIS shard actually read.
+
+    Run again later against the union of every shard's preload, that guard
+    would let a shard's "X is never called" pass on files only another shard
+    had in front of it.
+    """
+    kept: list[dict]
+    kept, dropped = _io.drop_unverified_absence_findings(findings, fully_preloaded)
+    for finding in dropped:
+        print(
+            f"  {label}dropped (unverified absence claim; incomplete files: "
+            f"{', '.join(finding.get('preload_missing_files') or [])}): "
+            f"{str(finding.get('title') or finding.get('file'))[:60]}",
+            file=sys.stderr,
+        )
+    return kept
+
+
+def run_sharded_llm(
+    args: argparse.Namespace,
+    pr: Mapping[str, object],
+    plan: Sequence[Shard],
+    *,
+    reviewable_diff: str,
+    model: str,
+    key: str,
+    base_note: str,
+) -> tuple[list[dict], dict, dict[str, str], set[str], dict[str, int]]:
+    """Review each shard with :func:`llm_review_call` and merge the results.
+
+    Returns ``(findings, usage, contents, fully_preloaded, preload_coverage)``
+    shaped exactly like the unsharded path's, so every filter, the renderer
+    and the marker downstream run unchanged.
+    """
+    n = len(plan)
+    # Preloads are GitHub calls: run them sequentially, up front, so the
+    # concurrent part below is model calls only.
+    preloads: dict[int, tuple[dict[str, str], set[str], dict[str, int]]] = {}
+    for shard in plan:
+        preloads[shard.index] = _io.preload_files(
+            args, pr, rank_changed_paths_by_hunks(shard.diff)
+        )
+    contents: dict[str, str] = {}
+    fully_preloaded: set[str] = set()
+    for c, fully, _cov in preloads.values():
+        contents.update(c)
+        fully_preloaded |= fully
+    all_paths = rank_changed_paths_by_hunks(reviewable_diff)
+    read = len(fully_preloaded & set(all_paths))
+    preload_coverage = {
+        "files_in_diff": len(all_paths),
+        "files_preloaded": read,
+        "files_truncated": len(all_paths) - read,
+    }
+    print(
+        f"preloaded {read} of {len(all_paths)} file(s) across {n} shard(s); "
+        f"{len(all_paths) - read} not fully read"
+    )
+    note = base_note
+    submodule_ctx = _io.fetch_submodule_context(
+        contents,
+        reviewable_diff,
+        args.repo,
+        head_sha=str(pr.get("headRefOid") or ""),
+        mention_text=f"{pr.get('title') or ''}\n{pr.get('body') or ''}",
+    )
+    if submodule_ctx:
+        print("submodule: fetched cross-submodule import context")
+        note = (note + "\n\n" + submodule_ctx).strip() if note else submodule_ctx
+
+    def review_one(shard: Shard) -> tuple[list[dict], dict]:
+        label = f"[shard {shard.index}/{n}] "
+        lifecycle.stage("shard", shard=shard.index)
+        shard_contents, shard_fully, shard_cov = preloads[shard.index]
+        shard_note = "\n\n".join(
+            part for part in (note, shard_context_note(shard, plan)) if part
+        )
+        started = time.monotonic()
+        findings, usage = _io.llm_review_call(
+            args,
+            pr,
+            model=model,
+            key=key,
+            diff=shard.diff,
+            contents=shard_contents,
+            preload_coverage=shard_cov,
+            note=shard_note,
+            label=label,
+        )
+        print(
+            f"{label}{len(findings)} finding(s) in {time.monotonic() - started:.0f}s, "
+            f"cost=${(usage.get('cost') or 0):.4f}"
+        )
+        return _io._drop_unverified_absence_in_shard(
+            findings, shard_fully, label
+        ), usage
+
+    results = _io._run_shards(plan, review_one)
+    findings = merge_shard_findings([r[0] for r in results])
+    usage = merge_shard_usage([r[1] for r in results], plan)
+    return findings, usage, contents, fully_preloaded, preload_coverage
