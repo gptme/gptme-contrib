@@ -424,6 +424,17 @@ class BanditState:
         return pruned
 
 
+class UpdateHookError(RuntimeError):
+    """A hook failed *after* the posterior was already persisted.
+
+    Raised from :meth:`Bandit.update` when ``saved`` or ``complete`` raises.
+    Unlike an exception from ``prepare``, this does **not** mean the update was
+    rolled back: the state file and the in-memory state already reflect it.
+    Callers must not retry ``update()`` on this error (that would apply the
+    reward twice); reconcile the external ledger against the posterior instead.
+    """
+
+
 @dataclass(frozen=True)
 class UpdatePlan:
     """What a :meth:`Bandit.update` call is about to apply, handed to an :class:`UpdateHook`."""
@@ -452,6 +463,11 @@ class UpdateHook(Protocol):
     A ``prepare`` with no matching ``complete`` therefore means "no state write
     happened, or the process died between save and completion"; the ledger owner
     reconciles that against the posterior.
+
+    Failure semantics differ per phase: an exception from ``prepare`` aborts
+    before anything is mutated or saved, but an exception from ``saved`` or
+    ``complete`` propagates as :class:`UpdateHookError` with the update already
+    persisted. Callers must not retry ``update()`` in that case.
     """
 
     def prepare(self, plan: UpdatePlan, state: "BanditState") -> Any: ...
@@ -681,6 +697,12 @@ class Bandit:
                 keep pulling the unselected ones back toward the prior.
             hook: Optional :class:`UpdateHook` notified before the mutation, after the
                 save and after the lock is released (see its docstring).
+
+        Raises:
+            UpdateHookError: A post-save hook phase (``saved``/``complete``) failed.
+                The posterior is already persisted; do **not** retry ``update()``
+                (that would apply the reward twice). A ``prepare`` failure raises
+                the hook's own exception and leaves the state untouched.
         """
         token: Any = None
         with self._state_lock():
@@ -708,9 +730,21 @@ class Bandit:
             )
             self.save()
             if hook is not None:
-                hook.saved(token)
+                try:
+                    hook.saved(token)
+                except Exception as exc:
+                    raise UpdateHookError(
+                        "post-save hook failed; the posterior update was already "
+                        "persisted — do not retry update(), reconcile the ledger"
+                    ) from exc
         if hook is not None:
-            hook.complete(token)
+            try:
+                hook.complete(token)
+            except Exception as exc:
+                raise UpdateHookError(
+                    "completion hook failed; the posterior update was already "
+                    "persisted — do not retry update(), reconcile the ledger"
+                ) from exc
         return result
 
     def decay(self, gamma: float) -> int:

@@ -98,6 +98,7 @@ from .thompson_sampling import (
     BanditArm,
     BanditState,
     UpdateHook,
+    UpdateHookError,
     UpdatePlan,
     load_bandit_means,
 )
@@ -168,6 +169,7 @@ __all__ = [
     "BanditArm",
     "BanditState",
     "UpdateHook",
+    "UpdateHookError",
     "UpdatePlan",
     "load_bandit_means",
     "post_session",
