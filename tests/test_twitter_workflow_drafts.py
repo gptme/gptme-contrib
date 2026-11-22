@@ -814,6 +814,39 @@ def test_auto_dry_run_does_not_prevent_later_auto_approval(
     assert workflow_module.TweetDraft.load(approved_path).quality_score == 3
 
 
+@pytest.mark.parametrize("auto_approve", [False, True])
+def test_review_dry_run_leaves_draft_unchanged(
+    workflow_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    auto_approve: bool,
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    draft_path = workflow_module.NEW_DIR / "preview.yml"
+    workflow_module.TweetDraft(text="preview only").save(draft_path)
+    original_bytes = draft_path.read_bytes()
+    monkeypatch.setattr(
+        workflow_module,
+        "verify_draft",
+        lambda draft: (
+            True,
+            SimpleNamespace(
+                criteria_results={
+                    "clarity": SimpleNamespace(passed=True, notes="clear"),
+                },
+                recommendation="approve",
+                improvements=[],
+            ),
+        ),
+    )
+
+    workflow_module.review(auto_approve=auto_approve, show_context=False, dry_run=True)
+
+    assert draft_path.exists()
+    assert draft_path.read_bytes() == original_bytes
+    assert list(workflow_module.APPROVED_DIR.iterdir()) == []
+
+
 def test_edit_clears_quality_score_so_auto_reviews_again(
     workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

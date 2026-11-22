@@ -1429,10 +1429,11 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
         # Get LLM review
         approved, review_result = verify_draft(draft.to_dict())
 
-        # Compute and save quality score
+        # A preview must not mark the draft reviewed for later cycles.
         quality_score = compute_quality_score(review_result)
-        draft.quality_score = quality_score
-        draft.save(path)  # Persist quality_score to file
+        if not dry_run:
+            draft.quality_score = quality_score
+            draft.save(path)  # Persist quality_score to file
 
         # Display review results
         stars = "★" * quality_score + "☆" * (3 - quality_score)
@@ -1448,7 +1449,7 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
                 console.print(f"• {improvement}")
 
         # Handle auto-approve or ask for action
-        if auto_approve and approved:
+        if auto_approve and approved and not dry_run:
             move_draft(path, "approved")
             console.print("[green]Draft automatically approved")
         elif dry_run:
