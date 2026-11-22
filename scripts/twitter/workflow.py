@@ -1482,6 +1482,9 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
                 new_text = Prompt.ask("Edit tweet", default=draft.text)
                 if new_text != draft.text:
                     draft.text = new_text
+                    # The saved score describes the old text; clearing it is
+                    # what makes auto() review the edited draft again.
+                    draft.quality_score = None
                     draft.save(path)
                     console.print("[blue]Draft updated, will need another review")
             else:
@@ -1539,6 +1542,9 @@ def edit(draft_id: str, new_text: str) -> None:
     draft = TweetDraft.load(draft_path)
     console.print(f"[cyan]Original text: {draft.text}")
     draft.text = new_text
+    # The saved score describes the old text; clearing it is what makes
+    # auto() review the edited draft again.
+    draft.quality_score = None
     draft.save(draft_path)
     console.print(f"[green]Draft updated: {draft_path.name}")
     console.print(f"[cyan]New text: {draft.text}")
