@@ -1010,6 +1010,39 @@ def test_review_status_review_reuses_saved_score(
     assert workflow_module.TweetDraft.load(parked).quality_score == 2
 
 
+def test_review_processes_every_draft_in_a_batch(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Standalone drafts share one reply-target group; review() must act on
+    every draft in it, not just the last one."""
+    _set_status_dirs(workflow_module, tmp_path)
+    for name in ("first", "second"):
+        workflow_module.TweetDraft(text=f"draft {name}").save(
+            workflow_module.NEW_DIR / f"{name}.yml"
+        )
+
+    reviewed: list[str] = []
+
+    def record_review(draft: Any) -> Any:
+        reviewed.append(draft["text"])
+        return True, SimpleNamespace(
+            criteria_results={"clarity": SimpleNamespace(passed=True, notes="clear")},
+            recommendation="approve",
+            improvements=[],
+        )
+
+    monkeypatch.setattr(workflow_module, "verify_draft", record_review)
+    monkeypatch.setattr(
+        workflow_module,
+        "Prompt",
+        SimpleNamespace(ask=lambda *args, **kwargs: "skip"),
+    )
+
+    workflow_module.review(auto_approve=False, show_context=False, dry_run=True)
+
+    assert sorted(reviewed) == ["draft first", "draft second"]
+
+
 def test_review_status_new_still_reviews_a_saved_score(
     workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

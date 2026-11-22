@@ -1422,105 +1422,109 @@ def review(
                     console.print(
                         "[yellow]Consider rejecting this duplicate or editing to make it distinct\n"
                     )
-        if draft.scheduled_time:
-            console.print(f"[cyan]Scheduled: {draft.scheduled_time}")
-        console.print(f"[white]{draft.text}")
+            if draft.scheduled_time:
+                console.print(f"[cyan]Scheduled: {draft.scheduled_time}")
+            console.print(f"[white]{draft.text}")
 
-        # Show context if requested
-        if show_context and draft.context:
-            console.print("\n[bold]Context:[/bold]")
-            if "original_tweet" in draft.context:
-                orig = draft.context["original_tweet"]
-                console.print(f"[blue]Original tweet by @{orig['author']}:[/blue]")
-                console.print(f"[white]{orig['text']}[/white]")
-            if "evaluation" in draft.context:
-                eval_data = draft.context["evaluation"]
-                console.print("[blue]Evaluation:[/blue]")
-                console.print(f"Relevance: {eval_data['relevance']}/100")
-                console.print(f"Priority: {eval_data['priority']}/100")
-                console.print(f"Reasoning: {eval_data['reasoning']}")
+            # Show context if requested
+            if show_context and draft.context:
+                console.print("\n[bold]Context:[/bold]")
+                if "original_tweet" in draft.context:
+                    orig = draft.context["original_tweet"]
+                    console.print(f"[blue]Original tweet by @{orig['author']}:[/blue]")
+                    console.print(f"[white]{orig['text']}[/white]")
+                if "evaluation" in draft.context:
+                    eval_data = draft.context["evaluation"]
+                    console.print("[blue]Evaluation:[/blue]")
+                    console.print(f"Relevance: {eval_data['relevance']}/100")
+                    console.print(f"Priority: {eval_data['priority']}/100")
+                    console.print(f"Reasoning: {eval_data['reasoning']}")
 
-        # Reuse a saved review when the draft already carries its score (drafts
-        # auto() parked in review/ or approved/). Re-running the LLM would pay
-        # twice and can flip the verdict on unchanged text. Drafts in new/ keep
-        # the historical behaviour: their score can be stale (a skip after a
-        # review leaves it behind), so they are always reviewed afresh.
-        review_result = None
-        if draft.quality_score is not None and status != "new":
-            quality_score = draft.quality_score
-            approved = quality_score == 3
-        else:
-            approved, review_result = verify_draft(draft.to_dict())
-
-            # A preview must not mark the draft reviewed for later cycles.
-            quality_score = compute_quality_score(review_result)
-            if not dry_run:
-                draft.quality_score = quality_score
-                draft.save(path)  # Persist quality_score to file
-
-        # Display review results
-        stars = "★" * quality_score + "☆" * (3 - quality_score)
-        console.print(f"\n[bold]Quality Score: {stars} ({quality_score}/3)[/bold]")
-        if review_result is None:
-            console.print("[blue]Using the saved review score (no new LLM call)[/blue]")
-        else:
-            console.print("\n[bold]Review Results:[/bold]")
-            for criterion, result in review_result.criteria_results.items():
-                mark = "✅" if result.passed else "❌"
-                console.print(f"{mark} {criterion}: {result.notes}")
-
-            if review_result.improvements:
-                console.print("\n[yellow]Suggested improvements:[/yellow]")
-                for improvement in review_result.improvements:
-                    console.print(f"• {improvement}")
-
-        # Handle auto-approve or ask for action
-        if auto_approve and approved and not dry_run:
-            move_draft(path, "approved")
-            console.print("[green]Draft automatically approved")
-        elif dry_run:
-            # Just show review results, don't prompt for action
-            console.print("[yellow]Dry run - no action taken")
-            console.print(f"[blue]Draft ID: {path.stem}[/blue]")
-            console.print(
-                "[blue]Use 'workflow approve/reject/edit <id>' to process this draft[/blue]"
-            )
-        else:
-            action = Prompt.ask(
-                "Action", choices=["approve", "reject", "skip", "edit"], default="skip"
-            )
-
-            if action == "approve":
-                move_draft(path, "approved")
-                console.print("[green]Draft approved")
-            elif action == "reject":
-                # Prompt for rejection reason
-                reason = Prompt.ask(
-                    "Rejection reason (optional)",
-                    default="",
-                )
-                if reason:
-                    draft.reject_reason = reason
-                    draft.save(path)  # Save with reject_reason before moving
-                move_draft(path, "rejected")
-                console.print("[red]Draft rejected")
-            elif action == "edit":
-                # Allow editing the draft
-                new_text = Prompt.ask("Edit tweet", default=draft.text)
-                if new_text != draft.text:
-                    draft.text = new_text
-                    # The saved score describes the old text; clearing it is
-                    # what makes auto() review the edited draft again.
-                    draft.quality_score = None
-                    draft.save(path)
-                    # Mirror the standalone `edit` command: a draft parked in
-                    # review/ or approved/ goes back to new/, or post() would
-                    # publish the edited text with no fresh review.
-                    if path.parent in (REVIEW_DIR, APPROVED_DIR):
-                        path = move_draft(path, "new")
-                    console.print("[blue]Draft updated, will need another review")
+            # Reuse a saved review when the draft already carries its score (drafts
+            # auto() parked in review/ or approved/). Re-running the LLM would pay
+            # twice and can flip the verdict on unchanged text. Drafts in new/ keep
+            # the historical behaviour: their score can be stale (a skip after a
+            # review leaves it behind), so they are always reviewed afresh.
+            review_result = None
+            if draft.quality_score is not None and status != "new":
+                quality_score = draft.quality_score
+                approved = quality_score == 3
             else:
-                console.print("[yellow]Draft skipped")
+                approved, review_result = verify_draft(draft.to_dict())
+
+                # A preview must not mark the draft reviewed for later cycles.
+                quality_score = compute_quality_score(review_result)
+                if not dry_run:
+                    draft.quality_score = quality_score
+                    draft.save(path)  # Persist quality_score to file
+
+            # Display review results
+            stars = "★" * quality_score + "☆" * (3 - quality_score)
+            console.print(f"\n[bold]Quality Score: {stars} ({quality_score}/3)[/bold]")
+            if review_result is None:
+                console.print(
+                    "[blue]Using the saved review score (no new LLM call)[/blue]"
+                )
+            else:
+                console.print("\n[bold]Review Results:[/bold]")
+                for criterion, result in review_result.criteria_results.items():
+                    mark = "✅" if result.passed else "❌"
+                    console.print(f"{mark} {criterion}: {result.notes}")
+
+                if review_result.improvements:
+                    console.print("\n[yellow]Suggested improvements:[/yellow]")
+                    for improvement in review_result.improvements:
+                        console.print(f"• {improvement}")
+
+            # Handle auto-approve or ask for action
+            if auto_approve and approved and not dry_run:
+                move_draft(path, "approved")
+                console.print("[green]Draft automatically approved")
+            elif dry_run:
+                # Just show review results, don't prompt for action
+                console.print("[yellow]Dry run - no action taken")
+                console.print(f"[blue]Draft ID: {path.stem}[/blue]")
+                console.print(
+                    "[blue]Use 'workflow approve/reject/edit <id>' to process this draft[/blue]"
+                )
+            else:
+                action = Prompt.ask(
+                    "Action",
+                    choices=["approve", "reject", "skip", "edit"],
+                    default="skip",
+                )
+
+                if action == "approve":
+                    move_draft(path, "approved")
+                    console.print("[green]Draft approved")
+                elif action == "reject":
+                    # Prompt for rejection reason
+                    reason = Prompt.ask(
+                        "Rejection reason (optional)",
+                        default="",
+                    )
+                    if reason:
+                        draft.reject_reason = reason
+                        draft.save(path)  # Save with reject_reason before moving
+                    move_draft(path, "rejected")
+                    console.print("[red]Draft rejected")
+                elif action == "edit":
+                    # Allow editing the draft
+                    new_text = Prompt.ask("Edit tweet", default=draft.text)
+                    if new_text != draft.text:
+                        draft.text = new_text
+                        # The saved score describes the old text; clearing it is
+                        # what makes auto() review the edited draft again.
+                        draft.quality_score = None
+                        draft.save(path)
+                        # Mirror the standalone `edit` command: a draft parked in
+                        # review/ or approved/ goes back to new/, or post() would
+                        # publish the edited text with no fresh review.
+                        if path.parent in (REVIEW_DIR, APPROVED_DIR):
+                            path = move_draft(path, "new")
+                        console.print("[blue]Draft updated, will need another review")
+                else:
+                    console.print("[yellow]Draft skipped")
 
 
 @cli.command("list")
