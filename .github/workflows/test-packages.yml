@@ -312,12 +312,14 @@ jobs:
           make typecheck-scripts
 
       # Metric only (see `make typecheck-coverage`); the gate is the step above.
+      # Default `success()` condition on purpose: a typecheck failure must not
+      # publish a report from that commit, or the Codecov baseline for
+      # subsequent PRs would move to a broken tree.
       - name: Generate type coverage report
-        if: ${{ !cancelled() }}
         run: make typecheck-coverage
 
       - name: Upload type coverage to Codecov
-        if: ${{ !cancelled() && hashFiles('.mypy_coverage_report/cobertura.xml') != '' }}
+        if: ${{ hashFiles('.mypy_coverage_report/cobertura.xml') != '' }}
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

@@ -68,6 +68,10 @@ typecheck-scripts:  ## Run mypy for harness hook scripts
 # a metric, not a gate: the per-package `typecheck-packages` target stays the
 # gate, so errors here (a package whose deps aren't importable in this single
 # environment) do not fail the target; only a missing report does.
+# Read the number as a trend, not an absolute: `--ignore-missing-imports` turns
+# an unimportable optional dep into `Any`, and those lines still count as
+# checked, so a dependency-resolution change can move the number without any
+# annotation change.
 typecheck-coverage:  ## Write a mypy type-precision report (.mypy_coverage_report/cobertura.xml)
 	@echo "Generating type coverage report..."
 	@rm -rf .mypy_coverage_report
