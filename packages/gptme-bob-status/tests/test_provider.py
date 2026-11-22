@@ -149,8 +149,9 @@ def test_pr_queue_delegates_to_upstream_helper_and_maps_cap(monkeypatch):
     Upstream calls the watermark ``cap``; the provider renders it as
     ``watermark`` so the display keeps treating depth as rot-attention.
     """
-    import gptme.cli.cmd_status as cmd_status
     import gptme_bob_status.provider as mod
+
+    cmd_status = pytest.importorskip("gptme.cli.cmd_status")
 
     seen: dict = {}
 
@@ -171,7 +172,7 @@ def test_upstream_pr_queue_accepts_a_single_repos_argument():
     """
     import inspect
 
-    import gptme.cli.cmd_status as cmd_status
+    cmd_status = pytest.importorskip("gptme.cli.cmd_status")
 
     if not hasattr(cmd_status, "_pr_queue"):
         pytest.skip("Installed gptme predates the upstream helper")
@@ -188,8 +189,9 @@ def test_upstream_pr_queue_accepts_a_single_repos_argument():
 
 def test_pr_queue_upstream_matches_local_author_filter_and_watermarks(monkeypatch):
     """Exercise the real helper, not a fake with assumed author semantics."""
-    import gptme.cli.cmd_status as cmd_status
     import gptme_bob_status.provider as mod
+
+    cmd_status = pytest.importorskip("gptme.cli.cmd_status")
 
     if not hasattr(cmd_status, "_pr_queue"):
         pytest.skip("Installed gptme predates the upstream helper")
@@ -216,13 +218,29 @@ def test_pr_queue_upstream_matches_local_author_filter_and_watermarks(monkeypatc
 
 
 def test_pr_queue_falls_back_when_upstream_helper_missing(monkeypatch):
-    """Older gptme (>=0.29 floor) has the module but not the helper."""
-    import gptme.cli.cmd_status as cmd_status
+    """Cover versions with cmd_status but without its _pr_queue helper."""
+    import sys
+    from types import ModuleType
+
     import gptme_bob_status.provider as mod
 
-    # The real older-gptme failure is ``ImportError: cannot import name
-    # '_pr_queue'``, not a missing module.
-    monkeypatch.delattr(cmd_status, "_pr_queue", raising=False)
+    # Provide the module even on gptme 0.29, where cli is not yet a package.
+    # This specifically exercises missing-attribute ImportError, not a missing
+    # module's ModuleNotFoundError.
+    monkeypatch.setitem(sys.modules, "gptme.cli.cmd_status", ModuleType("cmd_status"))
+    monkeypatch.setattr(
+        mod, "_pr_queue_local", lambda: [{"repo": "r", "count": 1, "watermark": None}]
+    )
+    assert mod._pr_queue() == [{"repo": "r", "count": 1, "watermark": None}]
+
+
+def test_pr_queue_falls_back_when_upstream_module_missing(monkeypatch):
+    """gptme 0.29 predates the cmd_status module altogether."""
+    import sys
+
+    import gptme_bob_status.provider as mod
+
+    monkeypatch.setitem(sys.modules, "gptme.cli.cmd_status", None)
     monkeypatch.setattr(
         mod, "_pr_queue_local", lambda: [{"repo": "r", "count": 1, "watermark": None}]
     )
@@ -231,8 +249,9 @@ def test_pr_queue_falls_back_when_upstream_helper_missing(monkeypatch):
 
 def test_pr_queue_falls_back_when_upstream_helper_raises(monkeypatch, caplog):
     """A raising upstream helper degrades to the local loop, not a crash."""
-    import gptme.cli.cmd_status as cmd_status
     import gptme_bob_status.provider as mod
+
+    cmd_status = pytest.importorskip("gptme.cli.cmd_status")
 
     def broken(repos):
         raise RuntimeError("upstream private helper drifted")
