@@ -108,14 +108,22 @@ def _extract_classifier() -> str:
                     "status": "COMPLETED",
                     "conclusion": "CANCELLED",
                     "completedAt": "2026-11-18T18:12:17Z",
-                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                    "checkSuite": {
+                        "workflowRun": {
+                            "workflow": {"id": "build-workflow", "name": "Build"}
+                        }
+                    },
                 },
                 {
                     "name": "Test on macOS-latest",
                     "status": "COMPLETED",
                     "conclusion": "SUCCESS",
                     "completedAt": "2026-11-22T22:04:07Z",
-                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                    "checkSuite": {
+                        "workflowRun": {
+                            "workflow": {"id": "build-workflow", "name": "Build"}
+                        }
+                    },
                 },
             ],
             "green",
@@ -128,14 +136,22 @@ def _extract_classifier() -> str:
                     "status": "COMPLETED",
                     "conclusion": "SUCCESS",
                     "completedAt": "2026-11-18T18:12:17Z",
-                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                    "checkSuite": {
+                        "workflowRun": {
+                            "workflow": {"id": "build-workflow", "name": "Build"}
+                        }
+                    },
                 },
                 {
                     "name": "Test on macOS-latest",
                     "status": "COMPLETED",
                     "conclusion": "CANCELLED",
                     "completedAt": "2026-11-22T22:04:07Z",
-                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                    "checkSuite": {
+                        "workflowRun": {
+                            "workflow": {"id": "build-workflow", "name": "Build"}
+                        }
+                    },
                 },
             ],
             "bad",
@@ -148,14 +164,22 @@ def _extract_classifier() -> str:
                     "status": "COMPLETED",
                     "conclusion": "CANCELLED",
                     "completedAt": "2026-11-18T18:12:17Z",
-                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                    "checkSuite": {
+                        "workflowRun": {
+                            "workflow": {"id": "build-workflow", "name": "Build"}
+                        }
+                    },
                 },
                 {
                     "name": "Test on macOS-latest",
                     "status": "COMPLETED",
                     "conclusion": "SUCCESS",
                     "completedAt": "2026-11-22T22:04:07Z",
-                    "checkSuite": {"workflowRun": {"workflow": {"name": "CodeQL"}}},
+                    "checkSuite": {
+                        "workflowRun": {
+                            "workflow": {"id": "codeql-workflow", "name": "CodeQL"}
+                        }
+                    },
                 },
             ],
             "bad",
@@ -168,14 +192,22 @@ def _extract_classifier() -> str:
                     "status": "COMPLETED",
                     "conclusion": "CANCELLED",
                     "completedAt": "2026-11-18T18:12:17Z",
-                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                    "checkSuite": {
+                        "workflowRun": {
+                            "workflow": {"id": "build-workflow", "name": "Build"}
+                        }
+                    },
                 },
                 {
                     "name": "Test on ubuntu-24.04",
                     "status": "COMPLETED",
                     "conclusion": "SUCCESS",
                     "completedAt": "2026-11-22T22:04:07Z",
-                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                    "checkSuite": {
+                        "workflowRun": {
+                            "workflow": {"id": "build-workflow", "name": "Build"}
+                        }
+                    },
                 },
             ],
             "bad",
@@ -188,14 +220,22 @@ def _extract_classifier() -> str:
                     "status": "COMPLETED",
                     "conclusion": "CANCELLED",
                     "completedAt": "2026-11-18T18:12:17Z",
-                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                    "checkSuite": {
+                        "workflowRun": {
+                            "workflow": {"id": "build-workflow", "name": "Build"}
+                        }
+                    },
                 },
                 {
                     "name": "Test on macOS-latest",
                     "status": "COMPLETED",
                     "conclusion": "SUCCESS",
                     "completedAt": "2026-11-22T22:04:07Z",
-                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                    "checkSuite": {
+                        "workflowRun": {
+                            "workflow": {"id": "build-workflow", "name": "Build"}
+                        }
+                    },
                 },
                 {"name": "lint", "status": "COMPLETED", "conclusion": "FAILURE"},
             ],
@@ -315,12 +355,38 @@ def test_supersession_requires_comparable_completion_times(
             "completedAt": completed_at,
             # A start time is not a substitute for a missing completion time.
             "startedAt": "2026-11-22T22:00:00Z",
-            "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+            "checkSuite": {
+                "workflowRun": {"workflow": {"id": "build-workflow", "name": "Build"}}
+            },
         }
 
     assert (
         _classify([entry("CANCELLED", cancelled_at), entry("SUCCESS", replacement_at)])
         == expected
+    )
+
+
+@pytest.mark.parametrize("replacement_id", ["other-workflow", None])
+def test_same_display_name_is_not_workflow_identity(replacement_id: str | None) -> None:
+    def entry(conclusion: str, completed_at: str, workflow_id: str | None) -> dict:
+        return {
+            "name": "test",
+            "status": "COMPLETED",
+            "conclusion": conclusion,
+            "completedAt": completed_at,
+            "checkSuite": {
+                "workflowRun": {"workflow": {"name": "Build", "id": workflow_id}}
+            },
+        }
+
+    assert (
+        _classify(
+            [
+                entry("CANCELLED", "2026-11-22T22:04:07Z", "build-workflow"),
+                entry("SUCCESS", "2026-11-22T22:04:08Z", replacement_id),
+            ]
+        )
+        == "bad"
     )
 
 

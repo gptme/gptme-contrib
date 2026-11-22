@@ -445,7 +445,7 @@ gh_cache_get_or_fetch() {
 # only spends additional points on repos that actually exceed a page.
 PR_SEARCH_PAGE_SIZE=30
 PR_SEARCH_GRAPHQL_QUERY='
-fragment pr on PullRequest{number,title,updatedAt,comments(first: 100) {nodes {id,author{__typename,login,...on User{id,name}},authorAssociation,body,createdAt,includesCreatedEdit,isMinimized,minimizedReason,reactionGroups{content,users{totalCount}},url,viewerDidAuthor},pageInfo{hasNextPage,endCursor},totalCount},latestReviews(first: 100) {nodes {author{__typename,login},authorAssociation,submittedAt,body,state}},mergeable,mergeStateStatus,headRefOid,isDraft,statusCheckRollup{contexts(first:100){nodes{... on CheckRun{name,status,conclusion,startedAt,completedAt,detailsUrl,checkSuite{workflowRun{workflow{name}}}} ... on StatusContext{context,state,description,targetUrl,createdAt}}}}}
+fragment pr on PullRequest{number,title,updatedAt,comments(first: 100) {nodes {id,author{__typename,login,...on User{id,name}},authorAssociation,body,createdAt,includesCreatedEdit,isMinimized,minimizedReason,reactionGroups{content,users{totalCount}},url,viewerDidAuthor},pageInfo{hasNextPage,endCursor},totalCount},latestReviews(first: 100) {nodes {author{__typename,login},authorAssociation,submittedAt,body,state}},mergeable,mergeStateStatus,headRefOid,isDraft,statusCheckRollup{contexts(first:100){nodes{... on CheckRun{name,status,conclusion,startedAt,completedAt,detailsUrl,checkSuite{workflowRun{workflow{id,name}}}} ... on StatusContext{context,state,description,targetUrl,createdAt}}}}}
 query PullRequestSearch($q: String!, $type: SearchType!, $limit: Int!, $endCursor: String) {
   search(query: $q, type: $type, first: $limit, after: $endCursor) {
     issueCount
@@ -994,7 +994,7 @@ check_ci_failures() {
             # workflow stays actionable (see tests/test_activity_gate_stuck_ci.py).
             | ([ .[]
                  | { e: ., n: (.name // .context // ""),
-                     w: (.checkSuite.workflowRun.workflow.name // ""),
+                     w: (.checkSuite.workflowRun.workflow.id // ""),
                      t: completed_epoch,
                      c: ((.conclusion // .state // "") | ascii_upcase) } ]) as $tagged
             | [ $tagged[]
