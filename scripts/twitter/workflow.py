@@ -1355,10 +1355,19 @@ def group_drafts_by_reply_target(drafts: list[Path]) -> dict[str | None, list[Pa
 @click.option(
     "--dry-run", is_flag=True, help="Don't actually approve/reject, just show analysis"
 )
-def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
+@click.option(
+    "--status",
+    type=click.Choice(["new", "review", "approved"]),
+    default="new",
+    show_default=True,
+    help="Directory to review drafts from (auto() parks scored drafts in review/)",
+)
+def review(
+    auto_approve: bool, show_context: bool, dry_run: bool, status: str = "new"
+) -> None:
     """Review pending tweet drafts with LLM assistance"""
 
-    drafts = list_drafts("new")
+    drafts = list_drafts(status)
 
     if not drafts:
         console.print("[yellow]No drafts to review")
@@ -1380,7 +1389,7 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
         for path in group_paths:
             draft = TweetDraft.load(path)
 
-            console.print("\n[bold]Reviewing draft:[/bold]")
+            console.print(f"\n[bold]Reviewing draft:[/bold] {path.stem}")
             console.print(f"[cyan]Type: {draft.type}")
             if draft.in_reply_to:
                 console.print(f"[cyan]Reply to: {draft.in_reply_to}")
@@ -1426,27 +1435,37 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
                 console.print(f"Priority: {eval_data['priority']}/100")
                 console.print(f"Reasoning: {eval_data['reasoning']}")
 
-        # Get LLM review
-        approved, review_result = verify_draft(draft.to_dict())
+        # Reuse a saved review when the draft already carries its score (drafts
+        # auto() parked in review/). Re-running the LLM would pay twice and can
+        # flip the verdict on unchanged text.
+        review_result = None
+        if draft.quality_score is not None:
+            quality_score = draft.quality_score
+            approved = quality_score == 3
+        else:
+            approved, review_result = verify_draft(draft.to_dict())
 
-        # A preview must not mark the draft reviewed for later cycles.
-        quality_score = compute_quality_score(review_result)
-        if not dry_run:
-            draft.quality_score = quality_score
-            draft.save(path)  # Persist quality_score to file
+            # A preview must not mark the draft reviewed for later cycles.
+            quality_score = compute_quality_score(review_result)
+            if not dry_run:
+                draft.quality_score = quality_score
+                draft.save(path)  # Persist quality_score to file
 
         # Display review results
         stars = "★" * quality_score + "☆" * (3 - quality_score)
         console.print(f"\n[bold]Quality Score: {stars} ({quality_score}/3)[/bold]")
-        console.print("\n[bold]Review Results:[/bold]")
-        for criterion, result in review_result.criteria_results.items():
-            status = "✅" if result.passed else "❌"
-            console.print(f"{status} {criterion}: {result.notes}")
+        if review_result is None:
+            console.print("[blue]Using the saved review score (no new LLM call)[/blue]")
+        else:
+            console.print("\n[bold]Review Results:[/bold]")
+            for criterion, result in review_result.criteria_results.items():
+                mark = "✅" if result.passed else "❌"
+                console.print(f"{mark} {criterion}: {result.notes}")
 
-        if review_result.improvements:
-            console.print("\n[yellow]Suggested improvements:[/yellow]")
-            for improvement in review_result.improvements:
-                console.print(f"• {improvement}")
+            if review_result.improvements:
+                console.print("\n[yellow]Suggested improvements:[/yellow]")
+                for improvement in review_result.improvements:
+                    console.print(f"• {improvement}")
 
         # Handle auto-approve or ask for action
         if auto_approve and approved and not dry_run:
@@ -1490,6 +1509,32 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
                     console.print("[blue]Draft updated, will need another review")
             else:
                 console.print("[yellow]Draft skipped")
+
+
+@cli.command("list")
+@click.option(
+    "--status",
+    type=click.Choice(["new", "review", "approved", "posted", "rejected"]),
+    default="review",
+    show_default=True,
+    help="Directory to list drafts from",
+)
+def list_command(status: str) -> None:
+    """List drafts with the IDs that approve/reject/edit accept"""
+    drafts = list_drafts(status)
+
+    if not drafts:
+        console.print(f"[yellow]No drafts in {status}/")
+        return
+
+    console.print(f"[bold]{len(drafts)} draft(s) in {status}/:[/bold]")
+    for path in drafts:
+        draft = TweetDraft.load(path)
+        score = "—" if draft.quality_score is None else f"{draft.quality_score}/3"
+        preview = " ".join(draft.text.split())[:70]
+        console.print(f"  [cyan]{path.stem}[/cyan]  [{draft.type}] {score}  {preview}")
+
+    console.print(f"\n[blue]Act with: {sys.argv[0]} approve/reject/edit <id>[/blue]")
 
 
 @cli.command()
@@ -2816,7 +2861,7 @@ def auto(
                     console.print(
                         "[yellow]Already reviewed (quality_score "
                         f"{draft.quality_score}/3); moved to {moved.parent.name}/ "
-                        "for human review"
+                        f"for human review (id: {moved.stem})"
                     )
                 else:
                     console.print(
@@ -2868,7 +2913,8 @@ def auto(
                 if not dry_run:
                     moved = move_draft(path, "review")
                     console.print(
-                        f"[blue]Moved to {moved.parent.name}/ for human action"
+                        f"[blue]Moved to {moved.parent.name}/ for human action "
+                        f"(id: {moved.stem})"
                     )
                 needs_review_count += 1
 
@@ -3010,7 +3056,8 @@ def auto(
         else:
             console.print(
                 f"Already reviewed, moved to review/: {already_reviewed_count} "
-                "(run 'workflow approve/reject <id>' to act on them)"
+                "(run 'workflow list' to list them, then 'workflow approve/reject "
+                "<id>' to act)"
             )
 
     if needs_review_count > 0:
@@ -3021,10 +3068,12 @@ def auto(
             console.print(f"[blue]{sys.argv[0]} review[/blue]")
         else:
             console.print(
-                "\n[yellow]Scored drafts are in tweets/review/. Act with:[/yellow]"
+                "\n[yellow]Scored drafts are in tweets/review/. List and act with:[/yellow]"
             )
+            console.print(f"[blue]{sys.argv[0]} list[/blue]")
             console.print(f"[blue]{sys.argv[0]} approve <id>[/blue]")
             console.print(f"[blue]{sys.argv[0]} reject <id>[/blue]")
+            console.print(f"[blue]{sys.argv[0]} review --status review[/blue]")
 
 
 if __name__ == "__main__":

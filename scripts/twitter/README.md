@@ -105,6 +105,12 @@ publication is required to run the recording-client tests.
 # Review drafts
 ./workflow.py review
 
+# List drafts auto() parked in review/ (prints the ids approve/reject take)
+./workflow.py list
+
+# Review the parked drafts interactively (reuses their saved score)
+./workflow.py review --status review
+
 # Post approved tweets
 ./workflow.py post
 ```

@@ -987,6 +987,123 @@ def test_review_dry_run_leaves_draft_unchanged(
     assert list(workflow_module.APPROVED_DIR.iterdir()) == []
 
 
+def test_review_status_review_reuses_saved_score(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """auto() parks scored drafts in review/; `review --status review` must still
+    present them, without paying for a second LLM review of unchanged text."""
+    _set_status_dirs(workflow_module, tmp_path)
+    parked = workflow_module.REVIEW_DIR / "needs-human.yml"
+    workflow_module.TweetDraft(text="needs a human", quality_score=2).save(parked)
+
+    def fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("verify_draft must not run on an already-scored draft")
+
+    monkeypatch.setattr(workflow_module, "verify_draft", fail_if_called)
+
+    workflow_module.review(
+        auto_approve=False, show_context=False, dry_run=False, status="review"
+    )
+
+    # The stubbed prompt answers "", which skips the draft.
+    assert parked.exists()
+    assert workflow_module.TweetDraft.load(parked).quality_score == 2
+
+
+def test_review_status_review_auto_approves_three_star(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    parked = workflow_module.REVIEW_DIR / "three-star.yml"
+    workflow_module.TweetDraft(text="good enough", quality_score=3).save(parked)
+
+    monkeypatch.setattr(
+        workflow_module,
+        "verify_draft",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must reuse score")),
+    )
+
+    workflow_module.review(
+        auto_approve=True, show_context=False, dry_run=False, status="review"
+    )
+
+    assert not parked.exists()
+    assert (workflow_module.APPROVED_DIR / parked.name).exists()
+
+
+def test_list_command_lists_review_drafts_with_ids(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_status_dirs(workflow_module, tmp_path)
+    workflow_module.TweetDraft(text="first draft", quality_score=2).save(
+        workflow_module.REVIEW_DIR / "first-draft.yml"
+    )
+    workflow_module.TweetDraft(text="second draft", quality_score=1).save(
+        workflow_module.REVIEW_DIR / "second-draft.yml"
+    )
+
+    printed: list[str] = []
+    monkeypatch.setattr(
+        workflow_module.console,
+        "print",
+        lambda *args, **kwargs: printed.append(" ".join(str(a) for a in args)),
+    )
+
+    workflow_module.list_command(status="review")
+
+    output = "\n".join(printed)
+    assert "first-draft" in output
+    assert "second-draft" in output
+    assert "2/3" in output
+
+
+def test_auto_reports_draft_id_when_parking_for_review(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The summary tells the user to run `approve <id>`, so the id must be printed."""
+    _set_status_dirs(workflow_module, tmp_path)
+    draft_path = workflow_module.NEW_DIR / "needs-human.yml"
+    workflow_module.TweetDraft(text="needs a human").save(draft_path)
+    monkeypatch.setattr(
+        workflow_module,
+        "verify_draft",
+        lambda draft: (
+            False,
+            SimpleNamespace(
+                criteria_results={
+                    "clarity": SimpleNamespace(passed=False, notes="unclear"),
+                },
+                recommendation="revise",
+                improvements=[],
+            ),
+        ),
+    )
+    _stub_auto_client(workflow_module, monkeypatch)
+
+    printed: list[str] = []
+    monkeypatch.setattr(
+        workflow_module.console,
+        "print",
+        lambda *args, **kwargs: printed.append(" ".join(str(a) for a in args)),
+    )
+
+    workflow_module.auto(
+        list_id=None,
+        auto_approve=False,
+        post_approved=False,
+        dry_run=False,
+        max_tweets=1,
+        max_drafts=1,
+        skip_mentions=True,
+        skip_timeline=False,
+    )
+
+    assert (workflow_module.REVIEW_DIR / draft_path.name).exists()
+    output = "\n".join(printed)
+    assert "id: needs-human" in output
+    assert "list" in output
+
+
 @pytest.mark.parametrize("status", ["new", "review", "approved"])
 def test_edit_clears_quality_score_so_auto_reviews_again(
     workflow_module: Any,
