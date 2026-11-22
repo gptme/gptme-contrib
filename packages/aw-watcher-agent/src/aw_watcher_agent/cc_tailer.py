@@ -13,6 +13,9 @@ the lifecycle hooks write to, so hook users and tailer users see the same lane.
 This is the no-hook path: run it from a timer and Claude Code work appears on
 the Timeline without editing any harness configuration.
 
+Rows copied into a resumed session's transcript keep the earlier ``sessionId``;
+they are skipped, since the transcript named after that id already emitted them.
+
 A cursor per transcript records how many blocks were emitted. The trailing
 block is held back until it is older than ``gap_s``, so it is emitted once,
 complete, instead of growing under repeated runs.
@@ -84,11 +87,18 @@ def _parse_ts(ts: Any) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def parse_session(lines: Iterable[str], *, gap_s: float = DEFAULT_GAP_S) -> list[WorkBlock]:
+def parse_session(
+    lines: Iterable[str], *, gap_s: float = DEFAULT_GAP_S, owner: str | None = None
+) -> list[WorkBlock]:
     """Split one transcript into working blocks separated by gaps > ``gap_s``.
 
     Sidechain rows (subagent turns inlined in the parent log) are ignored; they
     overlap the parent's own rows and would only blur block boundaries.
+
+    When ``owner`` (the transcript's session id, i.e. its file stem) is given,
+    rows carrying a different ``sessionId`` are dropped. A resumed session starts
+    its new transcript with copies of the earlier session's rows; those belong to
+    the earlier transcript, which already emitted them.
     """
     rows: list[tuple[datetime, str, str]] = []
     for line in lines:
@@ -106,6 +116,8 @@ def parse_session(lines: Iterable[str], *, gap_s: float = DEFAULT_GAP_S) -> list
         ts = _parse_ts(rec.get("timestamp"))
         sid = rec.get("sessionId")
         if ts is None or not isinstance(sid, str) or not sid:
+            continue
+        if owner is not None and sid != owner:
             continue
         cwd = rec.get("cwd")
         rows.append((ts, sid, cwd if isinstance(cwd, str) else ""))
@@ -233,7 +245,7 @@ def _emit_file_locked(
             json.loads(lines[-1])
         except json.JSONDecodeError:
             incomplete = True
-    blocks = parse_session(lines, gap_s=gap_s)
+    blocks = parse_session(lines, gap_s=gap_s, owner=path.stem)
     # A partially written row may extend the last parsed block. Earlier blocks
     # already have a complete successor establishing their idle boundary.
     candidates = blocks[:-1] if incomplete else blocks

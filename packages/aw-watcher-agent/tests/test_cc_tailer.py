@@ -177,7 +177,7 @@ def test_long_transcript_path_has_bounded_collision_resistant_cursor(tmp_path, m
     project = tmp_path / ("p" * 180)
     project.mkdir()
     transcript = project / "12345678-1234-1234-1234-123456789abc.jsonl"
-    transcript.write_text(_row("2026-11-10T09:00:00Z"), encoding="utf-8")
+    transcript.write_text(_row("2026-11-10T09:00:00Z", sid=transcript.stem), encoding="utf-8")
     client = _Client()
     now = _dt("2026-11-10T10:00:00Z")
     assert cc_tailer.emit_file(client, "host", transcript, now=now) == 1
@@ -382,3 +382,59 @@ def test_scan_continues_after_transcript_failure(tmp_path, monkeypatch, capsys, 
     assert str(first) in output.err
     assert str(error) in output.err
     assert "events=2" in output.out
+
+
+def test_parse_owner_drops_rows_copied_from_another_session():
+    lines = [
+        _row("2026-11-10T09:00:00Z", sid="old"),
+        _row("2026-11-10T09:10:00Z", sid="old"),
+        _row("2026-11-10T12:00:00Z", sid="new"),
+    ]
+    assert [b.session_id for b in cc_tailer.parse_session(lines)] == ["old", "new"]
+    blocks = cc_tailer.parse_session(lines, owner="new")
+    assert [(b.session_id, b.start, b.end) for b in blocks] == [
+        ("new", _dt("2026-11-10T12:00:00Z"), _dt("2026-11-10T12:00:00Z"))
+    ]
+
+
+def test_resumed_session_does_not_repost_copied_blocks(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    original = tmp_path / "old.jsonl"
+    original.write_text(
+        "\n".join(
+            [
+                _row("2026-11-10T09:00:00Z", sid="old"),
+                _row("2026-11-10T09:10:00Z", sid="old"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    # Resume: new transcript starts with copies of the old rows, then its own.
+    resumed = tmp_path / "new.jsonl"
+    resumed.write_text(
+        "\n".join(
+            [
+                _row("2026-11-10T09:00:00Z", sid="old"),
+                _row("2026-11-10T09:10:00Z", sid="old"),
+                _row("2026-11-10T12:00:00Z", sid="new"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    client = _Client()
+    now = _dt("2026-11-10T13:00:00Z")
+    assert cc_tailer.emit_file(client, "host", original, now=now) == 1
+    assert cc_tailer.emit_file(client, "host", resumed, now=now) == 1
+    assert cc_tailer.emit_file(client, "host", resumed, now=now) == 0
+    keys = [(e.timestamp, e.duration, e.data["session_id"]) for _, e in client.posted]
+    assert len(keys) == len(set(keys)) == 2
+    assert {k[2] for k in keys} == {"old", "new"}
+
+
+def test_transcript_holding_only_copied_rows_emits_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    transcript = tmp_path / "new.jsonl"
+    transcript.write_text(_row("2026-11-10T09:00:00Z", sid="old"), encoding="utf-8")
+    client = _Client()
+    assert cc_tailer.emit_file(client, "host", transcript, now=_dt("2026-11-10T13:00:00Z")) == 0
+    assert client.posted == []
