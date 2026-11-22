@@ -1496,7 +1496,9 @@ def review(auto_approve: bool, show_context: bool, dry_run: bool) -> None:
 @click.argument("draft_id")
 def approve(draft_id: str) -> None:
     """Approve a draft tweet by ID or path"""
-    draft_path = find_draft(draft_id, "new")
+    draft_path = find_draft(draft_id, "new", show_error=False) or find_draft(
+        draft_id, "review"
+    )
     if not draft_path:
         return
 
@@ -1508,10 +1510,11 @@ def approve(draft_id: str) -> None:
 @click.argument("draft_id")
 @click.option("--reason", "-r", help="Reason for rejection", default=None)
 def reject(draft_id: str, reason: str | None) -> None:
-    """Reject a draft tweet by ID (works on both new and approved drafts)"""
-    # Try to find draft in either new or approved directories
-    draft_path = find_draft(draft_id, "new", show_error=False) or find_draft(
-        draft_id, "approved"
+    """Reject a draft tweet by ID (works on new, review, and approved drafts)"""
+    draft_path = (
+        find_draft(draft_id, "new", show_error=False)
+        or find_draft(draft_id, "review", show_error=False)
+        or find_draft(draft_id, "approved")
     )
     if not draft_path:
         return
@@ -1532,10 +1535,11 @@ def reject(draft_id: str, reason: str | None) -> None:
 @click.argument("draft_id")
 @click.argument("new_text")
 def edit(draft_id: str, new_text: str) -> None:
-    """Edit a draft tweet by ID (works on both new and approved drafts)"""
-    # Try to find draft in either new or approved directories
-    draft_path = find_draft(draft_id, "new", show_error=False) or find_draft(
-        draft_id, "approved"
+    """Edit a draft tweet by ID (works on new, review, and approved drafts)"""
+    draft_path = (
+        find_draft(draft_id, "new", show_error=False)
+        or find_draft(draft_id, "review", show_error=False)
+        or find_draft(draft_id, "approved")
     )
     if not draft_path:
         return
@@ -2805,12 +2809,19 @@ def auto(
                         console.print("[yellow]Would approve draft (dry run)")
                     approved_count += 1
                     continue
-                console.print(
-                    "[yellow]Already reviewed (quality_score "
-                    f"{draft.quality_score}/3); awaiting human review"
-                )
+                if not dry_run:
+                    moved = move_draft(path, "review")
+                    console.print(
+                        "[yellow]Already reviewed (quality_score "
+                        f"{draft.quality_score}/3); moved to {moved.parent.name}/ "
+                        "for human review"
+                    )
+                else:
+                    console.print(
+                        "[yellow]Already reviewed (quality_score "
+                        f"{draft.quality_score}/3); awaiting human review"
+                    )
                 already_reviewed_count += 1
-                needs_review_count += 1
                 continue
 
             reviewed_count += 1
@@ -2852,6 +2863,11 @@ def auto(
                     )
                 else:
                     console.print("[yellow]Draft needs improvements and human review")
+                if not dry_run:
+                    moved = move_draft(path, "review")
+                    console.print(
+                        f"[blue]Moved to {moved.parent.name}/ for human action"
+                    )
                 needs_review_count += 1
 
     # Step 3: Post approved tweets if requested
@@ -2984,16 +3000,29 @@ def auto(
     console.print(f"Auto-approved: {approved_count}")
     console.print(f"Needs human review: {needs_review_count}")
     if already_reviewed_count:
-        console.print(
-            f"Already reviewed, awaiting human action: {already_reviewed_count} "
-            "(run 'workflow review' to act on them)"
-        )
+        if dry_run:
+            console.print(
+                f"Already reviewed, awaiting human action: {already_reviewed_count} "
+                "(dry run; would move to tweets/review/)"
+            )
+        else:
+            console.print(
+                f"Already reviewed, moved to review/: {already_reviewed_count} "
+                "(run 'workflow approve/reject <id>' to act on them)"
+            )
 
     if needs_review_count > 0:
-        console.print(
-            "\n[yellow]Run the following command to review pending drafts:[/yellow]"
-        )
-        console.print(f"[blue]{sys.argv[0]} review[/blue]")
+        if dry_run:
+            console.print(
+                "\n[yellow]Run the following command to review pending drafts:[/yellow]"
+            )
+            console.print(f"[blue]{sys.argv[0]} review[/blue]")
+        else:
+            console.print(
+                "\n[yellow]Scored drafts are in tweets/review/. Act with:[/yellow]"
+            )
+            console.print(f"[blue]{sys.argv[0]} approve <id>[/blue]")
+            console.print(f"[blue]{sys.argv[0]} reject <id>[/blue]")
 
 
 if __name__ == "__main__":
