@@ -311,6 +311,21 @@ jobs:
           make typecheck-packages
           make typecheck-scripts
 
+      # Metric only (see `make typecheck-coverage`); the gate is the step above.
+      - name: Generate type coverage report
+        if: ${{ !cancelled() }}
+        run: make typecheck-coverage
+
+      - name: Upload type coverage to Codecov
+        if: ${{ !cancelled() && hashFiles('.mypy_coverage_report/cobertura.xml') != '' }}
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: .mypy_coverage_report/cobertura.xml
+          flags: type-coverage
+          name: codecov-type-coverage
+          fail_ci_if_error: false
+
   # Check install sizes don't exceed budgets (prevents silent regressions like #1416)
   install-size:
     needs: changes

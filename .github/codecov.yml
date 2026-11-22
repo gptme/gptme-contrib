@@ -5,10 +5,19 @@ coverage:
         # Informational only — don't block PRs on coverage regressions
         # This is a contrib repo with lenient standards
         informational: true
+        # Test coverage only. The mypy type-precision report (flag
+        # `type-coverage`, uploaded from the typecheck job) lands in the same
+        # merged line report, so without a flag filter it would blend into
+        # this number.
+        flags: [packages, plugins]
+      type-coverage:
+        informational: true
+        flags: [type-coverage]
     patch:
       default:
         # Don't require coverage for new code in PRs
         informational: true
+        flags: [packages, plugins]
 
 comment:
   layout: "reach,diff,flags"
