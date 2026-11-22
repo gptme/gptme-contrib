@@ -333,6 +333,122 @@ class TestDecideRespawn:
         )
         assert (suppress, state) == (True, "OPEN")
 
+    @pytest.mark.parametrize("stale_verdict", [PRODUCTIVE, AUTH_DEATH])
+    @pytest.mark.parametrize("probe_verdict", [PRODUCTIVE, AUTH_DEATH])
+    def test_only_post_probe_attempt_can_settle_half_open(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        stale_verdict: str,
+        probe_verdict: str,
+    ) -> None:
+        sf = tmp_path / "cb.json"
+        clock = [100.0]
+        monkeypatch.setattr(time, "time", lambda: clock[0])
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=AUTH_DEATH,
+            threshold=3,
+        ) == (False, "CLOSED")
+        for _ in range(2):
+            decide_respawn(state_file=sf, slot="bob", verdict=AUTH_DEATH, threshold=3)
+        clock[0] = 401.0
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=stale_verdict,
+            verdict_started_at=90.0,
+        ) == (False, "HALF_OPEN")
+        # Another retry carries old evidence, even if it FINISHED after the grant.
+        clock[0] = 402.0
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=stale_verdict,
+            verdict_started_at=99.0,
+        ) == (True, "HALF_OPEN")
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=NEUTRAL,
+        ) == (True, "HALF_OPEN")
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=PRODUCTIVE,
+        ) == (True, "HALF_OPEN")  # missing evidence cannot downgrade a tagged probe
+        clock[0] = 403.0
+        expected = (False, "CLOSED") if probe_verdict == PRODUCTIVE else (True, "OPEN")
+        assert (
+            decide_respawn(
+                state_file=sf,
+                slot="bob",
+                verdict=probe_verdict,
+                verdict_started_at=401.5,
+            )
+            == expected
+        )
+
+    def test_neutral_grant_and_next_cooldown_keep_timestamp_protection(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        sf = tmp_path / "cb.json"
+        clock = [100.0]
+        monkeypatch.setattr(time, "time", lambda: clock[0])
+        decide_respawn(state_file=sf, slot="bob", verdict=AUTH_DEATH, threshold=1)
+        clock[0] = 401.0
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=NEUTRAL,
+            verdict_started_at=401.0,
+        ) == (False, "HALF_OPEN")
+        clock[0] = 402.0
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=AUTH_DEATH,
+            verdict_started_at=401.0,
+        ) == (True, "OPEN")
+        clock[0] = 703.0
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=AUTH_DEATH,
+            verdict_started_at=401.0,
+        ) == (False, "HALF_OPEN")
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=PRODUCTIVE,
+            verdict_started_at=401.0,
+        ) == (True, "HALF_OPEN")
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=PRODUCTIVE,
+            verdict_started_at=703.0,
+        ) == (False, "CLOSED")
+
+    @pytest.mark.parametrize("started_at", [float("nan"), float("inf"), 101.0])
+    def test_invalid_verdict_timestamp_rejected(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        started_at: float,
+    ) -> None:
+        monkeypatch.setattr(time, "time", lambda: 100.0)
+        with pytest.raises(ValueError, match="verdict_started_at"):
+            decide_respawn(
+                state_file=tmp_path / "cb.json",
+                slot="bob",
+                verdict=PRODUCTIVE,
+                verdict_started_at=started_at,
+            )
+
     def test_cooldown_allows_half_open_probe(self, tmp_path: Path) -> None:
         sf = tmp_path / "cb.json"
         # Trip the breaker

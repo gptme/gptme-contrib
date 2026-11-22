@@ -22,8 +22,12 @@ While the breaker is OPEN (or half-open with no probe sent yet) an
 :data:`AUTH_DEATH` / :data:`PRODUCTIVE` verdict predates the breaker and is
 treated as stale: it is check-only like :data:`NEUTRAL` — it never closes or
 re-opens the breaker, and once the cooldown has elapsed the call itself is the
-single half-open probe.  The *next* verdict then decides (PRODUCTIVE closes,
-AUTH_DEATH re-opens).
+single half-open probe. Its outcome decides (PRODUCTIVE closes, AUTH_DEATH
+re-opens). Callers with multiple queued/in-flight attempts must supply
+``verdict_started_at`` (the attempt's wall-clock start, not its completion or
+file modification time) so another retry's stale evidence cannot settle the
+probe. Omitting it retains the legacy serialized-caller contract: the next
+non-neutral verdict MUST be the granted probe's outcome.
 
 **Why NEUTRAL matters**: without it, every brand-new work item (with no prior
 attempt) looks like a successful run that resets the consecutive-failure count
@@ -50,6 +54,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import math
 import os
 import tempfile
 import time
@@ -109,6 +114,8 @@ class _SlotBreaker:
         self._failure_count: int = 0
         self._opened_at: float | None = None
         self._probe_pending: bool = False
+        self._probe_started_at: float | None = None
+        self._probe_requires_timestamp: bool = False
 
     @property
     def state(self) -> CircuitState:
@@ -131,6 +138,7 @@ class _SlotBreaker:
         # HALF_OPEN: exactly one probe allowed — consume the slot on first call
         if self._probe_pending:
             self._probe_pending = False
+            self._probe_started_at = now
             return False
         return True
 
@@ -150,6 +158,8 @@ class _SlotBreaker:
         self._failure_count = 0
         self._opened_at = None
         self._probe_pending = False
+        self._probe_started_at = None
+        self._probe_requires_timestamp = False
 
 
 # ---------------------------------------------------------------------------
@@ -231,11 +241,21 @@ def _load_breaker(
         if not isinstance(probe_pending, bool):
             raise ValueError(f"non-bool probe_pending: {probe_pending!r}")
         b._probe_pending = probe_pending
+        probe_started_at = slot_state.get("probe_started_at")
+        b._probe_started_at = (
+            float(probe_started_at) if probe_started_at is not None else None
+        )
+        requires_timestamp = slot_state.get("probe_requires_timestamp", False)
+        if not isinstance(requires_timestamp, bool):
+            raise ValueError("non-bool probe_requires_timestamp")
+        b._probe_requires_timestamp = requires_timestamp
     except Exception:
         b._state = CircuitState.CLOSED
         b._failure_count = 0
         b._opened_at = None
         b._probe_pending = False
+        b._probe_started_at = None
+        b._probe_requires_timestamp = False
     return b
 
 
@@ -246,6 +266,8 @@ def _save_breaker(b: _SlotBreaker) -> dict[str, Any]:
         "state": b._state.name,
         "opened_at": b._opened_at,
         "probe_pending": b._probe_pending,
+        "probe_started_at": b._probe_started_at,
+        "probe_requires_timestamp": b._probe_requires_timestamp,
     }
     return out
 
@@ -260,6 +282,7 @@ def decide_respawn(
     state_file: Path,
     slot: str,
     verdict: str = NEUTRAL,
+    verdict_started_at: float | None = None,
     threshold: int = DEFAULT_THRESHOLD,
     cooldown: float = DEFAULT_COOLDOWN,
 ) -> tuple[bool, str]:
@@ -277,6 +300,13 @@ def decide_respawn(
         The previous attempt's three-way outcome — :data:`AUTH_DEATH`,
         :data:`PRODUCTIVE`, or :data:`NEUTRAL`.  Default is ``NEUTRAL`` (safe
         for new work items that have no prior signal).
+    verdict_started_at:
+        Wall-clock start of the attempt producing the verdict. Supply for every
+        non-neutral verdict when retry items or workers overlap. A verdict from
+        before the probe grant is check-only. Once a timestamped call grants a
+        probe, missing timestamps cannot settle it either. Without timestamps,
+        callers must serialize attempts and submit only the probe's outcome
+        while HALF_OPEN; the library cannot infer attempt identity.
     threshold:
         Consecutive auth-deaths before the breaker opens.
     cooldown:
@@ -293,21 +323,49 @@ def decide_respawn(
         raise ValueError(f"unknown verdict {verdict!r}; expected one of {_VERDICTS}")
 
     now = time.time()
+    if verdict_started_at is not None and (
+        not math.isfinite(verdict_started_at) or verdict_started_at > now
+    ):
+        raise ValueError("verdict_started_at must be finite and not in the future")
     with _locked_state(state_file) as data:
         slot_state = data.get(slot, {})
         b = _load_breaker(slot_state, threshold, cooldown)
 
-        suppress = _apply_verdict(b, verdict, now)
+        suppress = _apply_verdict(b, verdict, now, verdict_started_at)
 
         data[slot] = _save_breaker(b)
         return suppress, b._state.name
 
 
-def _apply_verdict(b: _SlotBreaker, verdict: str, now: float) -> bool:
+def _apply_verdict(
+    b: _SlotBreaker,
+    verdict: str,
+    now: float,
+    verdict_started_at: float | None = None,
+) -> bool:
     """Feed *verdict* to *b*, return whether to suppress the respawn."""
+
+    def check_only() -> bool:
+        suppress = b.is_open(now)
+        if not suppress and b.state == CircuitState.HALF_OPEN:
+            b._probe_requires_timestamp = verdict_started_at is not None
+        return suppress
+
     if verdict == NEUTRAL:
         # Check-only: advance the cooldown clock but record nothing.
-        return b.is_open(now)
+        return check_only()
+
+    if b.state == CircuitState.HALF_OPEN and (
+        (b._probe_requires_timestamp and verdict_started_at is None)
+        or (
+            verdict_started_at is not None
+            and (
+                b._probe_started_at is None or verdict_started_at < b._probe_started_at
+            )
+        )
+    ):
+        # Another queued retry or pre-probe worker cannot settle the probe.
+        return check_only()
 
     # Capture state *before* any side effects — is_open() transitions
     # OPEN→HALF_OPEN as a side effect, which must not influence verdict routing.
@@ -324,7 +382,7 @@ def _apply_verdict(b: _SlotBreaker, verdict: str, now: float) -> bool:
         # unconditionally here would leave the breaker open forever whenever
         # every queued item is a retry carrying a prior verdict (only a
         # brand-new NEUTRAL item could advance it).
-        return b.is_open(now)
+        return check_only()
 
     if verdict == AUTH_DEATH:
         if state == CircuitState.HALF_OPEN:
