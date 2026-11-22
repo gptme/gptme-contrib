@@ -2779,6 +2779,7 @@ def auto(
     approved_count = 0
     needs_review_count = 0
     reviewed_count = 0
+    already_reviewed_count = 0
 
     if not drafts:
         console.print("[yellow]No new drafts to review")
@@ -2800,6 +2801,7 @@ def auto(
                     "[yellow]Already reviewed (quality_score "
                     f"{draft.quality_score}/3); awaiting human review"
                 )
+                already_reviewed_count += 1
                 needs_review_count += 1
                 continue
 
@@ -2972,6 +2974,11 @@ def auto(
     console.print(f"Drafts reviewed: {reviewed_count}")
     console.print(f"Auto-approved: {approved_count}")
     console.print(f"Needs human review: {needs_review_count}")
+    if already_reviewed_count:
+        console.print(
+            f"Already reviewed, awaiting human action: {already_reviewed_count} "
+            "(run 'workflow review' to act on them)"
+        )
 
     if needs_review_count > 0:
         console.print(
