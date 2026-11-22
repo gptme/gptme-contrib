@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import time
 from pathlib import Path
@@ -76,6 +77,8 @@ class TestSlotBreaker:
         b.is_open(now + 11.0)  # → HALF_OPEN
         b.record_failure(now + 12.0)
         assert b.state == CircuitState.OPEN
+        assert b._probe_started_at is None
+        assert b._probe_requires_timestamp is False
 
     def test_successful_run_closes_breaker(self) -> None:
         b = self._breaker(threshold=2)
@@ -152,6 +155,24 @@ class TestPersistence:
         # opened_at parse error is silently reset to None; state is preserved
         assert b.state == CircuitState.OPEN
         assert b._opened_at is None
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+    def test_nonfinite_probe_timestamp_cannot_accept_stale_outcome(
+        self,
+        value: float,
+    ) -> None:
+        b = _load_breaker(
+            {
+                "state": "HALF_OPEN",
+                "probe_started_at": value,
+                "probe_requires_timestamp": True,
+            },
+            3,
+            300.0,
+        )
+        assert b._probe_started_at is None
+        assert _apply_verdict(b, PRODUCTIVE, 402.0, 90.0) is True
+        assert b.state == CircuitState.HALF_OPEN
 
     def test_non_bool_probe_pending_resets_to_closed(self) -> None:
         """A string like "false" is truthy under bool(); the field must be
@@ -256,15 +277,30 @@ class TestApplyVerdict:
         assert suppress is True
         assert b.state == CircuitState.OPEN
 
-    def test_productive_while_open_cooldown_elapsed_does_not_close(self) -> None:
-        """PRODUCTIVE arriving after cooldown elapsed must not close without a probe."""
+    def test_stale_productive_after_cooldown_probes_without_closing(self) -> None:
+        """A stale PRODUCTIVE after cooldown is the probe, not proof of recovery."""
         b = _SlotBreaker(failure_threshold=1, cooldown=0.0)
         b.record_failure(0.0)
-        # Cooldown elapsed — next NEUTRAL would allow a probe, but a stale
-        # PRODUCTIVE from before the breaker opened must still suppress.
         suppress = _apply_verdict(b, PRODUCTIVE, time.time())
-        assert suppress is True
-        assert b.state == CircuitState.OPEN  # must not close without a probe
+        assert suppress is False  # the call itself is the single probe
+        assert b.state == CircuitState.HALF_OPEN  # must not close without a probe
+        assert not b._probe_pending
+        # The probe's own (fresh) outcome decides: PRODUCTIVE now closes.
+        assert _apply_verdict(b, PRODUCTIVE, time.time()) is False
+        assert b.state == CircuitState.CLOSED
+
+    def test_stale_auth_death_after_cooldown_probes_without_recording(self) -> None:
+        """A stale AUTH_DEATH after cooldown consumes the probe, records nothing."""
+        b = _SlotBreaker(failure_threshold=1, cooldown=0.0)
+        b.record_failure(0.0)
+        count = b.failure_count
+        suppress = _apply_verdict(b, AUTH_DEATH, time.time())
+        assert suppress is False
+        assert b.state == CircuitState.HALF_OPEN
+        assert b.failure_count == count
+        # Probe is now sent, so the next PRODUCTIVE is its outcome and closes.
+        assert _apply_verdict(b, PRODUCTIVE, time.time()) is False
+        assert b.state == CircuitState.CLOSED
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +335,172 @@ class TestDecideRespawn:
             state_file=sf, slot="bob", verdict=PRODUCTIVE, threshold=3
         )
         assert suppress is True
+
+    def test_retry_only_queue_recovers_after_cooldown(self, tmp_path: Path) -> None:
+        """Every item carries a prior verdict (no NEUTRAL): cooldown must still probe."""
+        sf = tmp_path / "cb.json"
+        for _ in range(2):
+            decide_respawn(state_file=sf, slot="bob", verdict=AUTH_DEATH, threshold=2)
+        data = json.loads(sf.read_text())
+        data["bob"]["opened_at"] = time.time() - 999.0
+        sf.write_text(json.dumps(data))
+        suppress, state = decide_respawn(
+            state_file=sf, slot="bob", verdict=PRODUCTIVE, threshold=2
+        )
+        assert (suppress, state) == (False, "HALF_OPEN")
+        # Probe outcome arrives as the item's next verdict.
+        suppress, state = decide_respawn(
+            state_file=sf, slot="bob", verdict=AUTH_DEATH, threshold=2
+        )
+        assert (suppress, state) == (True, "OPEN")
+
+    @pytest.mark.parametrize("stale_verdict", [PRODUCTIVE, AUTH_DEATH])
+    @pytest.mark.parametrize("probe_verdict", [PRODUCTIVE, AUTH_DEATH])
+    def test_only_post_probe_attempt_can_settle_half_open(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        stale_verdict: str,
+        probe_verdict: str,
+    ) -> None:
+        sf = tmp_path / "cb.json"
+        clock = [100.0]
+        monkeypatch.setattr(time, "time", lambda: clock[0])
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=AUTH_DEATH,
+            threshold=3,
+        ) == (False, "CLOSED")
+        for _ in range(2):
+            decide_respawn(state_file=sf, slot="bob", verdict=AUTH_DEATH, threshold=3)
+        clock[0] = 401.0
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=stale_verdict,
+            verdict_started_at=90.0,
+        ) == (False, "HALF_OPEN")
+        # Another retry carries old evidence, even if it FINISHED after the grant.
+        clock[0] = 402.0
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=stale_verdict,
+            verdict_started_at=99.0,
+        ) == (True, "HALF_OPEN")
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=NEUTRAL,
+        ) == (True, "HALF_OPEN")
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=PRODUCTIVE,
+        ) == (True, "HALF_OPEN")  # missing evidence cannot downgrade a tagged probe
+        clock[0] = 403.0
+        expected = (False, "CLOSED") if probe_verdict == PRODUCTIVE else (True, "OPEN")
+        assert (
+            decide_respawn(
+                state_file=sf,
+                slot="bob",
+                verdict=probe_verdict,
+                verdict_started_at=401.5,
+            )
+            == expected
+        )
+
+    def test_neutral_grant_and_next_cooldown_keep_timestamp_protection(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        sf = tmp_path / "cb.json"
+        clock = [100.0]
+        monkeypatch.setattr(time, "time", lambda: clock[0])
+        decide_respawn(state_file=sf, slot="bob", verdict=AUTH_DEATH, threshold=1)
+        clock[0] = 401.0
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=NEUTRAL,
+            verdict_started_at=401.0,
+        ) == (False, "HALF_OPEN")
+        clock[0] = 402.0
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=AUTH_DEATH,
+            verdict_started_at=401.0,
+        ) == (True, "OPEN")
+        clock[0] = 703.0
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=AUTH_DEATH,
+            verdict_started_at=401.0,
+        ) == (False, "HALF_OPEN")
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=PRODUCTIVE,
+            verdict_started_at=401.0,
+        ) == (True, "HALF_OPEN")
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=PRODUCTIVE,
+            verdict_started_at=703.0,
+        ) == (False, "CLOSED")
+
+    def test_probe_grant_clock_is_sampled_after_lock_acquisition(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        sf = tmp_path / "cb.json"
+        clock = [100.0]
+        monkeypatch.setattr(time, "time", lambda: clock[0])
+        decide_respawn(state_file=sf, slot="bob", verdict=AUTH_DEATH, threshold=1)
+        real_flock = fcntl.flock
+
+        def delayed_lock(fd: int, operation: int) -> None:
+            real_flock(fd, operation)
+            if operation == fcntl.LOCK_EX:
+                clock[0] = 402.0  # time spent waiting for the exclusive lock
+
+        monkeypatch.setattr(fcntl, "flock", delayed_lock)
+        clock[0] = 401.0
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=PRODUCTIVE,
+            verdict_started_at=90.0,
+        ) == (False, "HALF_OPEN")
+        assert json.loads(sf.read_text())["bob"]["probe_started_at"] == 402.0
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=PRODUCTIVE,
+            verdict_started_at=401.5,
+        ) == (True, "HALF_OPEN")
+
+    @pytest.mark.parametrize("started_at", [float("nan"), float("inf"), 101.0])
+    def test_invalid_verdict_timestamp_rejected(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        started_at: float,
+    ) -> None:
+        monkeypatch.setattr(time, "time", lambda: 100.0)
+        with pytest.raises(ValueError, match="verdict_started_at"):
+            decide_respawn(
+                state_file=tmp_path / "cb.json",
+                slot="bob",
+                verdict=PRODUCTIVE,
+                verdict_started_at=started_at,
+            )
 
     def test_cooldown_allows_half_open_probe(self, tmp_path: Path) -> None:
         sf = tmp_path / "cb.json"

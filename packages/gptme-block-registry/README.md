@@ -148,6 +148,17 @@ if decision:
   allows a half-open probe after `cooldown` seconds (default 300).
 - Pass `NEUTRAL` for new work with no prior attempt — it checks state without
   resetting the failure count.
+- With queued retries or concurrent workers, supply `verdict_started_at` on
+  every outcome: the **attempt's start time** from the same wall clock, not
+  its completion time or output-file mtime. The probe grant time is persisted;
+  older outcomes cannot settle HALF_OPEN. A timestamped probe also rejects
+  untagged outcomes. New items can pass `NEUTRAL` and `verdict_started_at=time.time()`
+  to grant a timestamp-protected probe without recording a verdict.
+- Omitting timestamps retains the legacy serialized contract: after the
+  half-open grant the next non-neutral verdict must come from that probe,
+  not another queued item's prior attempt. The file lock serializes decisions,
+  not worker lifetimes. Callers must actually launch the granted probe and
+  report its outcome; abandoned probes have no automatic lease expiry.
 - The fallback fires only when the breaker is `OPEN` (not during a half-open
   probe) and an arm is configured.
 
