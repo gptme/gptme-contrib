@@ -1168,6 +1168,38 @@ def test_edit_clears_quality_score_so_auto_reviews_again(
     assert [draft["text"] for draft in reviews] == ["revised text"]
 
 
+@pytest.mark.parametrize("status", ["review", "approved"])
+def test_review_edit_moves_parked_draft_back_to_new(
+    workflow_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    """Editing inside `review --status <parked>` must requeue, not leave the
+    edited draft in a status directory that post() publishes without review."""
+    _set_status_dirs(workflow_module, tmp_path)
+    parked = workflow_module.TWEETS_DIR / status / "edited.yml"
+    workflow_module.TweetDraft(text="original", quality_score=4).save(parked)
+
+    answers = iter(["edit", "revised text"])
+    monkeypatch.setattr(
+        workflow_module,
+        "Prompt",
+        SimpleNamespace(ask=lambda *args, **kwargs: next(answers)),
+    )
+
+    workflow_module.review(
+        auto_approve=False, show_context=False, dry_run=False, status=status
+    )
+
+    queued = workflow_module.NEW_DIR / parked.name
+    assert queued.exists()
+    assert not parked.exists()
+    edited = workflow_module.TweetDraft.load(queued)
+    assert edited.text == "revised text"
+    assert edited.quality_score is None
+
+
 def test_outbound_gate_scans_thread_segments(
     workflow_module: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

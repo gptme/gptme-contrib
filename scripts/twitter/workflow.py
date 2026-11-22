@@ -1506,6 +1506,11 @@ def review(
                     # what makes auto() review the edited draft again.
                     draft.quality_score = None
                     draft.save(path)
+                    # Mirror the standalone `edit` command: a draft parked in
+                    # review/ or approved/ goes back to new/, or post() would
+                    # publish the edited text with no fresh review.
+                    if path.parent in (REVIEW_DIR, APPROVED_DIR):
+                        path = move_draft(path, "new")
                     console.print("[blue]Draft updated, will need another review")
             else:
                 console.print("[yellow]Draft skipped")
