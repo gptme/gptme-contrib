@@ -65,6 +65,36 @@ def _atomic_write_text(path: Path, text: str) -> None:
             tmp.unlink()
 
 
+# An arm selected more than this many times carries real posterior evidence.
+MATURE_ARM_MIN_SELECTIONS = 10
+
+
+def removed_mature_arms(
+    previous: dict,
+    updated: dict,
+    *,
+    min_selections: int = MATURE_ARM_MIN_SELECTIONS,
+) -> dict[str, int]:
+    """Return arms present in ``previous`` but not ``updated`` with real evidence.
+
+    Only top-level ``arms`` with ``total_selections > min_selections`` count:
+    dropping a fresh arm is cheap, dropping a mature one erases history that
+    cannot be rebuilt.  Missing or malformed ``arms`` maps yield ``{}``.
+    """
+    previous_arms = previous.get("arms")
+    updated_arms = updated.get("arms")
+    if not isinstance(previous_arms, dict) or not isinstance(updated_arms, dict):
+        return {}
+    removed: dict[str, int] = {}
+    for arm_id, arm in previous_arms.items():
+        if arm_id in updated_arms or not isinstance(arm, dict):
+            continue
+        selections = arm.get("total_selections", 0)
+        if isinstance(selections, (int, float)) and selections > min_selections:
+            removed[arm_id] = int(selections)
+    return removed
+
+
 @dataclass
 class BanditArm:
     """A single arm modeled as a Beta-Bernoulli bandit.
@@ -498,8 +528,18 @@ class Bandit:
                 print(f"Warning: corrupted bandit state in {path.name}: {e}", file=sys.stderr)
         return BanditState()
 
-    def save(self) -> None:
-        """Persist bandit state to disk."""
+    def save(self, *, allow_arm_deletion: bool = False) -> None:
+        """Persist bandit state to disk.
+
+        Refuses to drop a mature arm (see :func:`removed_mature_arms`) that the
+        persisted state still holds, so a caller that rebuilt or filtered
+        ``state.arms`` cannot silently erase accumulated evidence.  Pass
+        ``allow_arm_deletion=True`` only for deliberate removals such as
+        :meth:`prune`.
+
+        Raises:
+            ValueError: if mature arms would be removed without the override.
+        """
         self.state_dir.mkdir(parents=True, exist_ok=True)
         data: dict = {
             "arms": {arm_id: asdict(arm) for arm_id, arm in self.state.arms.items()},
@@ -512,8 +552,36 @@ class Bandit:
                 arm_id: {ctx_key: asdict(arm) for ctx_key, arm in contexts.items()}
                 for arm_id, contexts in self.state.contextual_arms.items()
             }
+        if not allow_arm_deletion:
+            self._refuse_mature_arm_removal(data)
         self._backup_current()
         _atomic_write_text(self.state_file, json.dumps(data, indent=2) + "\n")
+
+    def _persisted_document(self) -> dict:
+        """Return the first loadable persisted state document, or ``{}``.
+
+        Mirrors ``_load_state()``: a corrupt state file falls back to the
+        backup, so the guard compares against the evidence that was recovered.
+        """
+        for path in (self.state_file, self.backup_file):
+            try:
+                text = path.read_text()
+                self._decode_state(text)
+                data = json.loads(text)
+            except (OSError, ValueError, TypeError, KeyError, AttributeError):
+                continue
+            if isinstance(data, dict):
+                return data
+        return {}
+
+    def _refuse_mature_arm_removal(self, data: dict) -> None:
+        removed = removed_mature_arms(self._persisted_document(), data)
+        if removed:
+            details = ", ".join(f"{arm_id} (n={n})" for arm_id, n in sorted(removed.items()))
+            raise ValueError(
+                f"refusing to delete mature bandit arm(s): {details}; "
+                "pass allow_arm_deletion=True only for a deliberate removal"
+            )
 
     def _backup_current(self) -> None:
         """Copy the current state file to ``.bak`` if it can be loaded.
@@ -602,7 +670,8 @@ class Bandit:
         with self._state_lock():
             self.state = self._load_state()
             count = self.state.prune_stale(min_selections=min_selections, max_age_days=max_age_days)
-            self.save()
+            # Pruning is the explicit, caller-requested way to delete arms.
+            self.save(allow_arm_deletion=True)
         return count
 
     def status_report(self) -> str:

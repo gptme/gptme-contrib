@@ -850,3 +850,76 @@ def test_overlapping_atomic_writes_use_distinct_temporary_files(tmp_path, monkey
     assert len(set(sources)) == 2
     assert json.loads(target.read_text()) == {"writer": "outer"}
     assert not list(tmp_path.glob("*.tmp"))
+
+
+# ── Mature-arm deletion guard ────────────────────────────────────────────────
+
+
+def _mature_bandit(tmp_path: Path, selections: int = 11) -> Bandit:
+    """A persisted bandit with one mature arm ``a`` and one fresh arm ``b``."""
+    bandit = Bandit(state_dir=tmp_path)
+    for _ in range(selections):
+        bandit.update(["a"], outcome=1.0)
+    bandit.update(["b"], outcome=0.0)
+    return bandit
+
+
+def test_save_refuses_to_drop_mature_arm(tmp_path: Path):
+    bandit = _mature_bandit(tmp_path)
+    before = bandit.state_file.read_text()
+    del bandit.state.arms["a"]
+
+    with pytest.raises(ValueError, match=r"a \(n=11\)"):
+        bandit.save()
+
+    assert bandit.state_file.read_text() == before
+
+
+def test_save_allows_dropping_fresh_arm(tmp_path: Path):
+    """The threshold is strictly greater than MATURE_ARM_MIN_SELECTIONS."""
+    bandit = _mature_bandit(tmp_path, selections=10)
+    del bandit.state.arms["a"]
+    del bandit.state.arms["b"]
+
+    bandit.save()
+
+    assert json.loads(bandit.state_file.read_text())["arms"] == {}
+
+
+def test_save_allows_explicit_mature_arm_deletion(tmp_path: Path):
+    bandit = _mature_bandit(tmp_path)
+    del bandit.state.arms["a"]
+
+    bandit.save(allow_arm_deletion=True)
+
+    assert "a" not in json.loads(bandit.state_file.read_text())["arms"]
+
+
+def test_fresh_instance_cannot_overwrite_mature_history(tmp_path: Path):
+    """A caller that builds state from scratch must not erase persisted evidence."""
+    _mature_bandit(tmp_path)
+    rebuilt = Bandit(state_dir=tmp_path)
+    rebuilt.state = BanditState()
+    rebuilt.state.get_or_create_arm("c")
+
+    with pytest.raises(ValueError, match="refusing to delete mature bandit arm"):
+        rebuilt.save()
+
+
+def test_guard_compares_against_backup_when_state_is_corrupt(tmp_path: Path):
+    bandit = _mature_bandit(tmp_path)
+    bandit.state_file.write_text('{"arms": {"a": ')  # truncated mid-write
+    bandit.state = BanditState()
+
+    with pytest.raises(ValueError, match=r"a \(n=11\)"):
+        bandit.save()
+
+
+def test_prune_may_delete_mature_arms(tmp_path: Path):
+    """prune() is the explicit deletion path, so the guard does not block it."""
+    bandit = _mature_bandit(tmp_path)
+
+    pruned = bandit.prune(min_selections=100)
+
+    assert pruned == 2
+    assert json.loads(bandit.state_file.read_text())["arms"] == {}
