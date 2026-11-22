@@ -963,3 +963,73 @@ def test_prune_may_delete_mature_arms(tmp_path: Path):
 
     assert pruned == 2
     assert json.loads(bandit.state_file.read_text())["arms"] == {}
+
+
+class _RecordingHook:
+    """UpdateHook that records phase order and what state each phase saw."""
+
+    def __init__(self, state_file: Path, fail_prepare: bool = False):
+        self.state_file = state_file
+        self.fail_prepare = fail_prepare
+        self.events: list[str] = []
+        self.plan = None
+        self.arms_at_prepare: dict[str, float] = {}
+        self.on_disk_at_saved: dict[str, float] = {}
+
+    def prepare(self, plan, state):
+        if self.fail_prepare:
+            raise RuntimeError("ledger unavailable")
+        self.events.append("prepare")
+        self.plan = plan
+        self.arms_at_prepare = {k: a.alpha for k, a in state.arms.items()}
+        return "tok"
+
+    def saved(self, token):
+        assert token == "tok"
+        self.events.append("saved")
+        data = json.loads(self.state_file.read_text())
+        self.on_disk_at_saved = {k: v["alpha"] for k, v in data["arms"].items()}
+
+    def complete(self, token):
+        assert token == "tok"
+        self.events.append("complete")
+
+
+def test_bandit_update_hook_phases_bracket_the_write(tmp_path: Path):
+    """prepare sees the pre-update state, saved sees it persisted, complete follows."""
+    bandit = Bandit(state_dir=tmp_path)
+    bandit.update(["code"], outcome=1.0)
+    before = bandit.state.arms["code"].alpha
+    hook = _RecordingHook(bandit.state_file)
+
+    bandit.update(["code"], outcome=1.0, context=("a",), decay_rate=0.9, hook=hook)
+
+    assert hook.events == ["prepare", "saved", "complete"]
+    assert hook.arms_at_prepare["code"] == before  # unmodified at prepare time
+    assert hook.on_disk_at_saved["code"] == bandit.state.arms["code"].alpha != before
+    assert hook.plan.active_arms == ("code",)
+    assert hook.plan.context == ("a",)
+    assert hook.plan.decay_rate == 0.9
+    assert hook.plan.per_arm_decay is False
+    assert hook.plan.state_file == bandit.state_file
+
+
+def test_bandit_update_hook_prepare_failure_leaves_state_untouched(tmp_path: Path):
+    """A prepare that raises aborts before any mutation or save."""
+    bandit = Bandit(state_dir=tmp_path)
+    bandit.update(["code"], outcome=1.0)
+    on_disk = bandit.state_file.read_text()
+    hook = _RecordingHook(bandit.state_file, fail_prepare=True)
+
+    with pytest.raises(RuntimeError, match="ledger unavailable"):
+        bandit.update(["code"], outcome=0.0, hook=hook)
+
+    assert bandit.state_file.read_text() == on_disk
+    assert hook.events == []
+
+
+def test_bandit_update_without_hook_unchanged(tmp_path: Path):
+    """hook is optional; omitting it keeps the previous behaviour."""
+    bandit = Bandit(state_dir=tmp_path)
+    result = bandit.update(["code"], outcome=1.0)
+    assert result == {"code": True}

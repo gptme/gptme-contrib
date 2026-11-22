@@ -93,7 +93,14 @@ from .harm_detect import (
     extract_commit_shas,
 )
 from .store import SessionStore
-from .thompson_sampling import Bandit, BanditArm, BanditState, load_bandit_means
+from .thompson_sampling import (
+    Bandit,
+    BanditArm,
+    BanditState,
+    UpdateHook,
+    UpdatePlan,
+    load_bandit_means,
+)
 from .transcript import (
     NormalizedMessage,
     SessionTranscript,
@@ -160,6 +167,8 @@ __all__ = [
     "Bandit",
     "BanditArm",
     "BanditState",
+    "UpdateHook",
+    "UpdatePlan",
     "load_bandit_means",
     "post_session",
     "PostSessionResult",

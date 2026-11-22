@@ -41,7 +41,7 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator, Protocol
 
 import click
 
@@ -424,6 +424,43 @@ class BanditState:
         return pruned
 
 
+@dataclass(frozen=True)
+class UpdatePlan:
+    """What a :meth:`Bandit.update` call is about to apply, handed to an :class:`UpdateHook`."""
+
+    active_arms: tuple[str, ...]
+    outcome: str | float
+    context: tuple[str, ...] | None
+    decay_rate: float | None
+    per_arm_decay: bool
+    per_arm_rewards: dict[str, float] | None
+    state_file: Path
+
+
+class UpdateHook(Protocol):
+    """Observer for the write-ahead / write-complete phases of :meth:`Bandit.update`.
+
+    Lets a caller keep an external provenance ledger (receipts) coupled to the
+    posterior write without the engine knowing the ledger's schema. Phases:
+
+    1. ``prepare`` runs under the state lock, after state is re-loaded and before
+       any mutation. It receives the plan and the loaded (unmodified) state and
+       returns an opaque token. If it raises, nothing is mutated or saved.
+    2. ``saved`` runs under the lock right after the atomic state save.
+    3. ``complete`` runs after the lock is released.
+
+    A ``prepare`` with no matching ``complete`` therefore means "no state write
+    happened, or the process died between save and completion"; the ledger owner
+    reconciles that against the posterior.
+    """
+
+    def prepare(self, plan: UpdatePlan, state: "BanditState") -> Any: ...
+
+    def saved(self, token: Any) -> None: ...
+
+    def complete(self, token: Any) -> None: ...
+
+
 class Bandit:
     """Manager for a Thompson sampling bandit system.
 
@@ -627,6 +664,7 @@ class Bandit:
         decay_rate: float | None = None,
         per_arm_rewards: dict[str, float] | None = None,
         per_arm_decay: bool = False,
+        hook: UpdateHook | None = None,
     ) -> dict[str, bool]:
         """Update after a session and save state.
 
@@ -641,9 +679,25 @@ class Bandit:
                 (global and every contextual sub-arm of each) instead of every arm.
                 Use it when arms are only sometimes selected, so global decay would
                 keep pulling the unselected ones back toward the prior.
+            hook: Optional :class:`UpdateHook` notified before the mutation, after the
+                save and after the lock is released (see its docstring).
         """
+        token: Any = None
         with self._state_lock():
             self.state = self._load_state()
+            if hook is not None:
+                token = hook.prepare(
+                    UpdatePlan(
+                        active_arms=tuple(active_arms),
+                        outcome=outcome,
+                        context=context,
+                        decay_rate=decay_rate,
+                        per_arm_decay=per_arm_decay,
+                        per_arm_rewards=per_arm_rewards,
+                        state_file=self.state_file,
+                    ),
+                    self.state,
+                )
             if decay_rate is not None:
                 if per_arm_decay:
                     self.state.apply_decay(decay_rate, only=set(active_arms))
@@ -653,6 +707,10 @@ class Bandit:
                 active_arms, outcome, context=context, per_arm_rewards=per_arm_rewards
             )
             self.save()
+            if hook is not None:
+                hook.saved(token)
+        if hook is not None:
+            hook.complete(token)
         return result
 
     def decay(self, gamma: float) -> int:
