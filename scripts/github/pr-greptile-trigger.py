@@ -71,7 +71,11 @@ ACTIONABLE_STATES = {"stale", "needs-re-review"}
 # every unreviewed PR forever, so a repo-wide auto-review outage left PRs
 # unreviewed until a human noticed (2026-11-21: 4 PRs sat 17h in
 # gptme/gptme-contrib while the darkness check fired for 20 hours).
-INITIAL_REVIEW_GRACE_MINUTES = int(os.environ.get("GREPTILE_INITIAL_GRACE_MINS", "45"))
+_initial_grace = os.environ.get("GREPTILE_INITIAL_GRACE_MINS", "45")
+# Match the helper's non-negative ASCII-integer setting, including its fallback.
+if not (_initial_grace.isascii() and _initial_grace.isdigit()):
+    _initial_grace = "45"
+INITIAL_REVIEW_GRACE_MINUTES = int(_initial_grace)
 
 SAFE_HELPER = Path(__file__).with_name("greptile-helper.sh")
 
@@ -354,7 +358,11 @@ def _run(args: argparse.Namespace) -> int:
             elif state == "in-progress":
                 status = "⏳ trigger in progress"
             elif state == "awaiting-initial-review":
-                status = "⏳ awaiting Greptile auto-review"
+                status = (
+                    "🆕 initial review due"
+                    if is_actionable(pr, now)
+                    else "⏳ awaiting Greptile auto-review"
+                )
             elif state == "stale":
                 status = "⚠️ stale trigger"
             elif state == "none":

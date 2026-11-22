@@ -307,6 +307,79 @@ def test_main_partial_fetch_with_prs_warns_stderr(
 # --- initial-review fallback ---
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, 45),
+        ("", 45),
+        ("abc", 45),
+        ("45.5", 45),
+        ("-1", 45),
+        ("+1", 45),
+        (" 1 ", 45),
+        ("٤٥", 45),
+        ("0", 0),
+        ("60", 60),
+        ("045", 45),
+    ],
+)
+def test_grace_setting_matches_helper(value: str | None, expected: int) -> None:
+    """Import must survive invalid settings and accept only ASCII digit strings."""
+    env = {k: v for k, v in os.environ.items() if k != "GREPTILE_INITIAL_GRACE_MINS"}
+    if value is not None:
+        env["GREPTILE_INITIAL_GRACE_MINS"] = value
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import runpy, sys; "
+            "print(runpy.run_path(sys.argv[1])['INITIAL_REVIEW_GRACE_MINUTES'])",
+            str(MODULE_PATH),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(expected)
+
+
+def test_status_distinguishes_initial_review_due_from_waiting(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    recent = pr_greptile_trigger.datetime.now(
+        pr_greptile_trigger.timezone.utc
+    ).isoformat()
+    monkeypatch.setattr(pr_greptile_trigger, "INITIAL_REVIEW_GRACE_MINUTES", 45)
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "fetch_prs",
+        lambda repo, author: [
+            {"number": i, "title": "t", "url": "u", "createdAt": created}
+            for i, created in enumerate(["2020-01-01T00:00:00Z", recent, None], 1)
+        ],
+    )
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "review_state_for_pr",
+        lambda repo, num: "awaiting-initial-review",
+    )
+    trigger = MagicMock()
+    monkeypatch.setattr(pr_greptile_trigger, "trigger_greptile", trigger)
+    args = pr_greptile_trigger._parse_args(
+        ["--status", "--author", "bot", "--repo", "o/r"]
+    )
+    assert pr_greptile_trigger._run(args) == 0
+    output = capsys.readouterr().out
+    assert "Actionable: 1" in output
+    assert "Awaiting initial: 2" in output
+    assert "o/r#1: 🆕 initial review due" in output
+    for number in (2, 3):
+        assert f"o/r#{number}: ⏳ awaiting Greptile auto-review" in output
+    trigger.assert_not_called()
+
+
 def _pr(state: str, created_at: str | None) -> object:
     return pr_greptile_trigger.PRInfo(
         repo="gptme/gptme-contrib",
