@@ -460,14 +460,23 @@ class UpdateHook(Protocol):
     2. ``saved`` runs under the lock right after the atomic state save.
     3. ``complete`` runs after the lock is released.
 
-    A ``prepare`` with no matching ``complete`` therefore means "no state write
-    happened, or the process died between save and completion"; the ledger owner
-    reconciles that against the posterior.
+    A ``prepare`` with no matching ``complete`` is **ambiguous**: either nothing
+    was written (``prepare`` succeeded, then the caller or process aborted
+    before the mutation) or the posterior was written and the process died
+    before ``complete``. Never read it as "no write happened" — resolve it by
+    comparing the ledger's prepared record against the posterior, which is the
+    only evidence that distinguishes the two.
 
     Failure semantics differ per phase: an exception from ``prepare`` aborts
     before anything is mutated or saved, but an exception from ``saved`` or
     ``complete`` propagates as :class:`UpdateHookError` with the update already
     persisted. Callers must not retry ``update()`` in that case.
+
+    ``prepare`` and ``saved`` run while the state lock is held, and that lock is
+    a non-reentrant ``flock`` on a separate descriptor. A hook that calls a
+    locked :class:`Bandit` method (``update``, ``decay``, ``prune``, ``save``)
+    from either phase deadlocks the caller. Read the state passed to
+    ``prepare`` instead; do not re-enter the bandit.
     """
 
     def prepare(self, plan: UpdatePlan, state: "BanditState") -> Any: ...
