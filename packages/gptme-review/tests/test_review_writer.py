@@ -1,4 +1,4 @@
-"""Peer-host contract for gptme_review.writer (writer-port slice 2a)."""
+"""Peer-host contract for gptme_review.writer (writer-port slices 2a–2d)."""
 
 from __future__ import annotations
 
@@ -465,3 +465,349 @@ def test_mixed_advisory_and_informational_notes_do_not_claim_all_are_outside(ali
     assert "No thread-worthy findings." in body
     assert "What follows is outside them" not in body
     assert "changed.py:1" in body and "untouched.py:2" in body
+
+
+# --- writer-port slice 2d: checkout helpers and static preflight ---------------
+
+
+def _bound_with(alice_io, **overrides):
+    return writer.bind_io(SimpleNamespace(**{**vars(alice_io), **overrides}))
+
+
+def _scripted_run(responses):
+    """A fake ``run`` answering each command by its leading argv words."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        for prefix, (code, out) in responses.items():
+            if tuple(cmd[: len(prefix)]) == prefix:
+                return subprocess.CompletedProcess(cmd, code, out, "err")
+        raise AssertionError(f"unexpected command {cmd}")
+
+    return fake_run, calls
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "git@github.com:Owner/Repo.git",
+        "https://github.com/owner/repo",
+        "ssh://git@github.com/owner/repo.git",
+        "https://token@github.com/owner/repo.git",
+    ],
+)
+def test_slug_from_remote_url_shapes(alice_io, url):
+    assert writer.bind_io(alice_io)._slug_from_remote_url(url) == "owner/repo"
+
+
+def test_review_checkout_root_is_per_host(alice_io, tmp_path, monkeypatch):
+    monkeypatch.delenv("GPTME_REVIEW_CHECKOUT", raising=False)
+    a = _bound_with(alice_io, CHECKOUT_ROOT=tmp_path / "a")
+    b = _bound_with(alice_io, CHECKOUT_ROOT=tmp_path / "b")
+    assert a.review_checkout_for("o/r") == tmp_path / "a" / "o-r-review"
+    # A traversal owner collapses to a safe component, never escapes the root.
+    assert b.review_checkout_for("../x/y") == tmp_path / "b" / "unknown-x-y-review"
+    monkeypatch.setenv("GPTME_REVIEW_CHECKOUT", str(tmp_path / "pinned"))
+    assert a.review_checkout_for("o/r") == tmp_path / "pinned"
+
+
+def test_default_io_supplies_a_checkout_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("GPTME_REVIEW_CHECKOUT_ROOT", str(tmp_path))
+    ns = writer.default_io(sweep_identity("alice-agent", "alice-ai-review"))
+    assert ns.CHECKOUT_ROOT == tmp_path
+
+
+def test_sibling_note_lists_only_siblings_under_the_bound_root(alice_io, tmp_path):
+    w = _bound_with(alice_io, CHECKOUT_ROOT=tmp_path)
+    assert w.build_cross_repo_sibling_note("gptme/gptme-contrib") == ""
+    (tmp_path / "gptme-gptme-review").mkdir()
+    (tmp_path / "gptme-gptme-contrib-review").mkdir()  # the reviewed repo itself
+    note = w.build_cross_repo_sibling_note("gptme/gptme-contrib")
+    assert "`gptme/gptme`" in note and "shared-tooling" in note
+    assert "`gptme/gptme-contrib`" not in note
+
+
+def test_prepare_agent_checkout_refuses_a_remote_that_does_not_own_the_repo(
+    alice_io, tmp_path
+):
+    (tmp_path / ".git").mkdir()
+    fake_run, calls = _scripted_run(
+        {
+            ("git", "status"): (0, ""),
+            ("git", "remote"): (0, "origin\tgit@github.com:other/repo.git (fetch)\n"),
+        }
+    )
+    w = _bound_with(alice_io, run=fake_run)
+    with pytest.raises(writer.ReviewError, match="no remote pointing at o/r"):
+        w.prepare_agent_checkout("o/r", "a" * 40, tmp_path)
+    assert not any(c[:2] == ["git", "fetch"] for c in calls)
+
+
+def test_prepare_agent_checkout_verifies_the_checked_out_head(alice_io, tmp_path):
+    (tmp_path / ".git").mkdir()
+    sha = "b" * 40
+    remotes = "fork\thttps://github.com/o/r (fetch)\norigin\tgit@github.com:o/r.git\n"
+    responses = {
+        ("git", "status"): (0, ""),
+        ("git", "remote"): (0, remotes),
+        ("git", "fetch"): (0, ""),
+        ("git", "checkout"): (0, ""),
+        ("git", "rev-parse"): (0, sha + "\n"),
+    }
+    fake_run, calls = _scripted_run(responses)
+    _bound_with(alice_io, run=fake_run).prepare_agent_checkout("o/r", sha, tmp_path)
+    assert ["git", "fetch", "--quiet", "origin", sha] in calls  # origin wins
+
+    responses[("git", "rev-parse")] = (0, "c" * 40 + "\n")
+    fake_run, _ = _scripted_run(responses)
+    with pytest.raises(writer.ReviewError, match="checkout mismatch"):
+        _bound_with(alice_io, run=fake_run).prepare_agent_checkout("o/r", sha, tmp_path)
+
+
+def test_prepare_agent_checkout_refuses_a_dirty_tree(alice_io, tmp_path):
+    (tmp_path / ".git").mkdir()
+    fake_run, _ = _scripted_run({("git", "status"): (0, " M a.py\n")})
+    with pytest.raises(writer.ReviewError, match="dirty"):
+        _bound_with(alice_io, run=fake_run).prepare_agent_checkout(
+            "o/r", "a" * 40, tmp_path
+        )
+
+
+def test_checkout_lock_refuses_a_held_lock_without_hanging(alice_io, tmp_path):
+    w = writer.bind_io(alice_io)
+    checkout = tmp_path / "o-r-review"
+    held = w.acquire_agent_checkout_lock(checkout, wait_secs=0)
+    try:
+        with pytest.raises(writer.ReviewError, match="stayed locked"):
+            w.acquire_agent_checkout_lock(checkout, wait_secs=0)
+    finally:
+        held.close()
+    w.acquire_agent_checkout_lock(checkout, wait_secs=0).close()
+
+
+def test_read_checkout_file_refuses_paths_outside_the_checkout(alice_io, tmp_path):
+    w = writer.bind_io(alice_io)
+    (tmp_path / "co").mkdir()
+    (tmp_path / "co" / "a.txt").write_text("ok")
+    (tmp_path / "secret").write_text("no")
+    assert w.read_checkout_file(tmp_path / "co", "a.txt") == "ok"
+    assert w.read_checkout_file(tmp_path / "co", "../secret") is None
+
+
+def test_cited_sha_lookup_goes_through_the_bound_run(alice_io):
+    fake_run, calls = _scripted_run({("gh", "api"): (1, "")})
+    w = _bound_with(alice_io, run=fake_run)
+    body = "Fixed in `abc1234`. Also bumps the pin, commit 2222222."
+    findings = w._check_cited_shas(body, "o/r", ["src/a.py"], _SUBMODULE_DIFF)
+    assert [f["title"] for f in findings] == ["Cited commit `abc1234` not found in o/r"]
+    assert findings[0]["severity"] == "P1" and findings[0]["static"] is True
+    # The gitlink SHA the PR moves is accepted without a lookup.
+    assert calls == [["gh", "api", "repos/o/r/commits/abc1234", "--jq", ".sha"]]
+
+
+def test_cited_sha_does_not_truncate_a_full_ref(alice_io):
+    """A 40-char SHA is a full ref: it must not be looked up as a prefix.
+
+    Truncating it to 12 hex chars produced a false P1 when the real commit
+    lived in a submodule or another repo (gptme-cloud#902/#912 class).
+    """
+    fake_run, calls = _scripted_run({("gh",): (0, "abc1234\n")})
+    w = _bound_with(alice_io, run=fake_run)
+    full = "abcdef0123456789abcdef0123456789abcdef01"
+    assert w._check_cited_shas(f"fixed in {full}", "o/r", ["src/a.py"]) == []
+    assert calls == []
+    # Uppercase hex is normalized before the lookup, since git only resolves
+    # lowercase.
+    assert w._check_cited_shas("fixed in ABC1234", "o/r", ["src/a.py"]) == []
+    assert calls == [["gh", "api", "repos/o/r/commits/abc1234", "--jq", ".sha"]]
+
+
+@pytest.mark.parametrize(
+    "path,is_test",
+    [
+        ("tests/test_a.py", True),
+        ("web/src/components/A.test.tsx", True),
+        ("web/src/components/A.spec.ts", True),
+        ("src/test_render_helpers.tsx", True),
+        # `test_` as a substring of a production filename is not a test file.
+        ("src/latest_compile.py", False),
+        ("src/contest_config.py", False),
+    ],
+)
+def test_test_file_regex_is_segment_anchored(alice_io, path, is_test):
+    assert bool(writer._TEST_FILE_RE.search(path)) is is_test
+
+
+def test_unrelated_ci_claim_reads_checks_through_the_bound_gh_json(alice_io):
+    seen: list[list[str]] = []
+
+    def fake_gh_json(cmd):
+        seen.append(cmd)
+        return [
+            {"name": "Test", "state": "FAILURE"},
+            {"name": "Lint", "state": "SUCCESS"},
+        ]
+
+    w = _bound_with(alice_io, gh_json=fake_gh_json)
+    assert (
+        w._check_unrelated_ci_claim("unrelated to the version bump", "o/r", 5, []) == []
+    )
+    assert seen == []  # prose without a CI term is not a claim
+    findings = w._check_unrelated_ci_claim(
+        "The CI failure is unrelated.", "o/r", 5, ["a"]
+    )
+    assert seen == [["pr", "checks", "5", "--repo", "o/r", "--json", "name,state"]]
+    assert len(findings) == 1 and "`Test`" in findings[0]["body"]
+
+
+@pytest.mark.parametrize("response", [None, {}, "invalid", [None], [{}]])
+def test_unrelated_ci_claim_refuses_unknown_check_state(alice_io, response):
+    w = _bound_with(alice_io, gh_json=lambda cmd: response)
+    with pytest.raises(writer.ReviewError, match="cannot verify CI checks"):
+        w._check_unrelated_ci_claim("The CI failure is unrelated.", "o/r", 5, ["a"])
+
+
+@pytest.mark.parametrize("response", [[], [{"name": "Test", "state": "SUCCESS"}]])
+def test_unrelated_ci_claim_accepts_known_nonfailing_checks(alice_io, response):
+    w = _bound_with(alice_io, gh_json=lambda cmd: response)
+    assert w._check_unrelated_ci_claim("Flaky test.", "o/r", 5, ["a"]) == []
+
+
+def test_visual_rule_checks_renamed_component_using_extracted_new_path(alice_io):
+    w = writer.bind_io(alice_io)
+    diff = (
+        "diff --git a/web/Old.tsx b/web/New.tsx\n"
+        "similarity index 80%\nrename from web/Old.tsx\nrename to web/New.tsx\n"
+        "--- a/web/Old.tsx\n+++ b/web/New.tsx\n"
+        "@@ -1 +1 @@\n-<div className='old'/>\n+<div className='new'/>\n"
+    )
+    touched, reviewable, _, _ = w.extract_touched_files_and_reviewable_diff(diff)
+    assert touched == {"web/New.tsx"}
+    findings = w._check_visual_screenshot("", reviewable, touched)
+    assert len(findings) == 1 and findings[0]["severity"] == "P1"
+
+
+class _JournalHost(writer.DefaultWriterHost):
+    def extra_static_checks(self, diff, touched_files):
+        return [{"title": "host rule", "static": True}]
+
+
+def test_static_preflight_adds_host_checks_only_when_a_host_supplies_them(alice_io):
+    fake_run, calls = _scripted_run({})
+    w = _bound_with(alice_io, run=fake_run)
+    kwargs = dict(
+        pr_title="fix(x): y",
+        pr_body="",
+        diff=_CODE_DIFF,
+        touched_files=["src/a.py"],
+        repo="o/r",
+        number=1,
+    )
+    default = w.static_preflight_findings(**kwargs)
+    assert [f["title"] for f in default] == ["fix PR has no regression test"]
+    hosted = w.static_preflight_findings(**kwargs, host=_JournalHost())
+    assert [f["title"] for f in hosted] == [
+        "fix PR has no regression test",
+        "host rule",
+    ]
+    assert calls == []  # no cited SHA, no CI claim: no I/O
+
+
+def test_visual_rule_keys_sections_by_new_path_not_header_split(alice_io):
+    """A path containing `` b/ `` must still be keyed correctly (rule 1c).
+
+    Splitting ``diff --git a/<old> b/<new>`` on the first `` b/ `` lands
+    mid-path for such a file, so the per-file lookup missed and a visual
+    change was silently exempted from the screenshot requirement.
+    """
+    w = writer.bind_io(alice_io)
+    path = "web/src/components/foo b/Bar.tsx"
+    diff = (
+        f"diff --git a/{path} b/{path}\n"
+        f"--- a/{path}\n+++ b/{path}\n"
+        "@@ -1 +1 @@\n-<div className='a'/>\n+<div className='b'/>\n"
+    )
+    findings = w._check_visual_screenshot("", diff, [path])
+    assert len(findings) == 1 and findings[0]["severity"] == "P1"
+
+
+def test_visual_rule_does_not_skip_a_css_universal_selector(alice_io):
+    """A bare ``*`` rule is markup, not a block-comment continuation (rule 1c).
+
+    ``_COMMENT_LINE_RE`` used to swallow any line starting with ``*``, so
+    ``* { color: red }`` in a stylesheet was filtered before the visual-change
+    scan and a real UI change passed without a screenshot.
+    """
+    w = writer.bind_io(alice_io)
+    path = "web/src/static/dark.css"
+    diff = (
+        f"diff --git a/{path} b/{path}\n"
+        f"--- a/{path}\n+++ b/{path}\n"
+        "@@ -1 +1 @@\n-* { color: blue }\n+* { color: red }\n"
+    )
+    findings = w._check_visual_screenshot("", diff, [path])
+    assert len(findings) == 1 and findings[0]["severity"] == "P1"
+    assert w._check_visual_screenshot("![After](u)", diff, [path]) == []
+
+
+def test_visual_rule_reads_a_hunk_line_that_starts_with_double_dash(alice_io):
+    """Only pre-hunk ``+++``/``---`` are headers; hunk content is inspected."""
+    w = writer.bind_io(alice_io)
+    path = "web/src/static/dark.css"
+    diff = (
+        f"diff --git a/{path} b/{path}\n"
+        f"--- a/{path}\n+++ b/{path}\n"
+        "@@ -1 +1 @@\n---border: 1px\n+++border: 2px\n"
+    )
+    findings = w._check_visual_screenshot("", diff, [path])
+    assert len(findings) == 1 and findings[0]["severity"] == "P1"
+
+
+def test_visual_rule_still_skips_block_comment_continuations(alice_io):
+    """Prose in a ``*``-prefixed comment line still renders nothing."""
+    w = writer.bind_io(alice_io)
+    path = "web/src/components/A.tsx"
+    diff = (
+        f"diff --git a/{path} b/{path}\n"
+        f"--- a/{path}\n+++ b/{path}\n"
+        "@@ -1 +1 @@\n"
+        "- * old comment mentioning color\n"
+        "+ * new comment mentioning border\n"
+    )
+    assert w._check_visual_screenshot("", diff, [path]) == []
+
+
+def test_visual_rule_ignores_generics_and_whole_file_deletions(alice_io):
+    w = writer.bind_io(alice_io)
+    generic = (
+        "diff --git a/web/src/components/A.tsx b/web/src/components/A.tsx\n"
+        "--- a/web/src/components/A.tsx\n+++ b/web/src/components/A.tsx\n"
+        "@@ -1 +1 @@\n-const x: Promise<void> = f()\n+const y: Promise<void> = f()\n"
+    )
+    assert w._check_visual_screenshot("", generic, ["web/src/components/A.tsx"]) == []
+    markup = generic.replace("Promise<void> = f()", "<div className='a'/>")
+    found = w._check_visual_screenshot("", markup, ["web/src/components/A.tsx"])
+    assert found and found[0]["severity"] == "P1"
+    assert (
+        w._check_visual_screenshot("![After](u)", markup, ["web/src/components/A.tsx"])
+        == []
+    )
+
+
+def test_cited_sha_requires_a_word_boundary_before_the_trigger(alice_io):
+    """Prose that merely contains a trigger word is not a citation.
+
+    ``unfixed in <sha>`` / ``prefixcommit <sha>`` must not fire a lookup: the
+    same hyphen/word-boundary misfire the ``merged`` alternative already guards
+    against (gptme-cloud#902).
+    """
+    fake_run, calls = _scripted_run({("gh",): (0, "")})
+    w = _bound_with(alice_io, run=fake_run)
+    for body in (
+        "the bug is unfixed in abc1234",
+        "prefixcommit abc1234",
+        "xfollow-up-commit abc1234",
+    ):
+        assert w._check_cited_shas(body, "o/r", ["src/a.py"]) == []
+    assert calls == []
