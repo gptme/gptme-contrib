@@ -3322,11 +3322,19 @@ def _check_unrelated_ci_claim(
     ci_raw = _io.gh_json(
         ["pr", "checks", str(number), "--repo", repo, "--json", "name,state"]
     )
+    if not isinstance(ci_raw, list) or any(
+        not isinstance(c, dict)
+        or not isinstance(c.get("name"), str)
+        or not c["name"]
+        or not isinstance(c.get("state"), str)
+        or not c["state"]
+        for c in ci_raw
+    ):
+        raise ReviewError(f"cannot verify CI checks for {repo}#{number} (rule 1b)")
     failing = [
         c
-        for c in (ci_raw if isinstance(ci_raw, list) else [])
-        if isinstance(c, dict)
-        and c.get("state") in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED")
+        for c in ci_raw
+        if c["state"] in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED")
     ]
     if not failing:
         return []  # Claim is moot — no failing checks

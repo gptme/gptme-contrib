@@ -628,6 +628,33 @@ def test_unrelated_ci_claim_reads_checks_through_the_bound_gh_json(alice_io):
     assert len(findings) == 1 and "`Test`" in findings[0]["body"]
 
 
+@pytest.mark.parametrize("response", [None, {}, "invalid", [None], [{}]])
+def test_unrelated_ci_claim_refuses_unknown_check_state(alice_io, response):
+    w = _bound_with(alice_io, gh_json=lambda cmd: response)
+    with pytest.raises(writer.ReviewError, match="cannot verify CI checks"):
+        w._check_unrelated_ci_claim("The CI failure is unrelated.", "o/r", 5, ["a"])
+
+
+@pytest.mark.parametrize("response", [[], [{"name": "Test", "state": "SUCCESS"}]])
+def test_unrelated_ci_claim_accepts_known_nonfailing_checks(alice_io, response):
+    w = _bound_with(alice_io, gh_json=lambda cmd: response)
+    assert w._check_unrelated_ci_claim("Flaky test.", "o/r", 5, ["a"]) == []
+
+
+def test_visual_rule_checks_renamed_component_using_extracted_new_path(alice_io):
+    w = writer.bind_io(alice_io)
+    diff = (
+        "diff --git a/web/Old.tsx b/web/New.tsx\n"
+        "similarity index 80%\nrename from web/Old.tsx\nrename to web/New.tsx\n"
+        "--- a/web/Old.tsx\n+++ b/web/New.tsx\n"
+        "@@ -1 +1 @@\n-<div className='old'/>\n+<div className='new'/>\n"
+    )
+    touched, reviewable, _, _ = w.extract_touched_files_and_reviewable_diff(diff)
+    assert touched == {"web/New.tsx"}
+    findings = w._check_visual_screenshot("", reviewable, touched)
+    assert len(findings) == 1 and findings[0]["severity"] == "P1"
+
+
 class _JournalHost(writer.DefaultWriterHost):
     def extra_static_checks(self, diff, touched_files):
         return [{"title": "host rule", "static": True}]
