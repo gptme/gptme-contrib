@@ -21,7 +21,8 @@ This package is that shared seam: zero runtime dependencies, stdlib only. The
   the body to the controller. Mutual proof is a later protocol.
 - stable controller and command IDs (command results must repeat `command_id`);
 - command TTLs (`ttl_ms`, default 2000) and a send timestamp (`sent_at_ms`);
-- `status`, relative `move`, relative `turn`, preemptive `stop`, and `interact`;
+- `status`, relative `move`, relative `turn`, preemptive `stop`, `interact`, and
+  `sensor_frame` (a read-only request for the node's latest sensor frame);
 - newline-framed JSON encoding for the current native-local transport.
 
 The package defines DTOs and framing only. Controller leases, idempotency,

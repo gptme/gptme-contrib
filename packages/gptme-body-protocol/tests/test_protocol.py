@@ -74,3 +74,9 @@ def test_require_command_result_allows_omitted_protocol() -> None:
         {"type": "command_result", "command_id": "remote-0001"},
         "remote-0001",
     )
+
+
+def test_sensor_frame_command_roundtrips() -> None:
+    command = Command("sf-1", "voice", "sensor_frame")
+    assert command.command == "sensor_frame"
+    assert json.loads(encode_message(command))["command"] == "sensor_frame"

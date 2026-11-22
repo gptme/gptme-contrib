@@ -31,7 +31,7 @@ class Command:
 
     command_id: str
     controller_id: str
-    command: Literal["status", "move", "turn", "stop", "interact"]
+    command: Literal["status", "move", "turn", "stop", "interact", "sensor_frame"]
     args: dict[str, Any] = field(default_factory=dict)
     ttl_ms: int = 2_000
     sent_at_ms: int = field(default_factory=lambda: int(time.time() * 1_000))
