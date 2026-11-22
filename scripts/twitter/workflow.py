@@ -2794,10 +2794,17 @@ def auto(
                 console.print(f"[cyan]Reply to: {draft.in_reply_to}")
             console.print(f"[white]{draft.text}")
 
-            # A saved quality_score means a completed LLM review already
-            # left this draft in new/ awaiting a human. Re-reviewing the
-            # unchanged draft every cycle only burns LLM calls.
+            # Reuse the completed review rather than paying for it every cycle.
+            # Three stars requires all criteria passed and an approve recommendation.
             if draft.quality_score is not None:
+                if auto_approve and draft.quality_score == 3:
+                    if not dry_run:
+                        move_draft(path, "approved")
+                        console.print("[green]Draft approved using its saved review")
+                    else:
+                        console.print("[yellow]Would approve draft (dry run)")
+                    approved_count += 1
+                    continue
                 console.print(
                     "[yellow]Already reviewed (quality_score "
                     f"{draft.quality_score}/3); awaiting human review"

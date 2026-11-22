@@ -717,14 +717,20 @@ def test_auto_blocks_same_cycle_secret_before_twitter_api_call(
     assert (workflow_module.REJECTED_DIR / approved_path.name).exists()
 
 
+@pytest.mark.parametrize("quality_score", [0, 2, 3])
+@pytest.mark.parametrize("dry_run", [False, True])
 def test_auto_does_not_rereview_already_reviewed_draft(
-    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    workflow_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    quality_score: int,
+    dry_run: bool,
 ) -> None:
     _set_status_dirs(workflow_module, tmp_path)
     reviewed_path = workflow_module.NEW_DIR / "already-reviewed.yml"
-    workflow_module.TweetDraft(text="rejected earlier", quality_score=2).save(
-        reviewed_path
-    )
+    workflow_module.TweetDraft(
+        text="reviewed earlier", quality_score=quality_score
+    ).save(reviewed_path)
     reviews: list[Any] = []
 
     def fail_if_called(*args: Any, **kwargs: Any) -> Any:
@@ -749,7 +755,7 @@ def test_auto_does_not_rereview_already_reviewed_draft(
         list_id=None,
         auto_approve=True,
         post_approved=False,
-        dry_run=False,
+        dry_run=dry_run,
         max_tweets=1,
         max_drafts=1,
         skip_mentions=True,
@@ -757,7 +763,12 @@ def test_auto_does_not_rereview_already_reviewed_draft(
     )
 
     assert reviews == []
-    assert reviewed_path.exists()
+    if quality_score == 3 and not dry_run:
+        assert not reviewed_path.exists()
+        assert (workflow_module.APPROVED_DIR / reviewed_path.name).exists()
+    else:
+        assert reviewed_path.exists()
+        assert list(workflow_module.APPROVED_DIR.iterdir()) == []
 
 
 def test_auto_dry_run_does_not_prevent_later_auto_approval(
