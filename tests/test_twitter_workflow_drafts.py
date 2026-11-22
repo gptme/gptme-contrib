@@ -1010,6 +1010,32 @@ def test_review_status_review_reuses_saved_score(
     assert workflow_module.TweetDraft.load(parked).quality_score == 2
 
 
+def test_review_status_new_still_reviews_a_saved_score(
+    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A score left on a new/ draft can be stale (skip after review), so new/
+    drafts are always reviewed afresh rather than reusing it."""
+    _set_status_dirs(workflow_module, tmp_path)
+    draft_path = workflow_module.NEW_DIR / "stale-score.yml"
+    workflow_module.TweetDraft(text="unreviewed text", quality_score=3).save(draft_path)
+
+    calls: list[Any] = []
+
+    def record_review(draft: Any) -> Any:
+        calls.append(draft)
+        return True, SimpleNamespace(
+            criteria_results={"clarity": SimpleNamespace(passed=True, notes="clear")},
+            recommendation="approve",
+            improvements=[],
+        )
+
+    monkeypatch.setattr(workflow_module, "verify_draft", record_review)
+
+    workflow_module.review(auto_approve=False, show_context=False, dry_run=True)
+
+    assert calls
+
+
 def test_review_status_review_auto_approves_three_star(
     workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

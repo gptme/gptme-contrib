@@ -1441,10 +1441,12 @@ def review(
                 console.print(f"Reasoning: {eval_data['reasoning']}")
 
         # Reuse a saved review when the draft already carries its score (drafts
-        # auto() parked in review/). Re-running the LLM would pay twice and can
-        # flip the verdict on unchanged text.
+        # auto() parked in review/ or approved/). Re-running the LLM would pay
+        # twice and can flip the verdict on unchanged text. Drafts in new/ keep
+        # the historical behaviour: their score can be stale (a skip after a
+        # review leaves it behind), so they are always reviewed afresh.
         review_result = None
-        if draft.quality_score is not None:
+        if draft.quality_score is not None and status != "new":
             quality_score = draft.quality_score
             approved = quality_score == 3
         else:
