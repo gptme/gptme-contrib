@@ -18,6 +18,13 @@ previous attempt's verdict:
   state to decide suppression but record neither success nor failure, so a
   consecutive-death run survives unrelated spawns.
 
+While the breaker is OPEN (or half-open with no probe sent yet) an
+:data:`AUTH_DEATH` / :data:`PRODUCTIVE` verdict predates the breaker and is
+treated as stale: it is check-only like :data:`NEUTRAL` — it never closes or
+re-opens the breaker, and once the cooldown has elapsed the call itself is the
+single half-open probe.  The *next* verdict then decides (PRODUCTIVE closes,
+AUTH_DEATH re-opens).
+
 **Why NEUTRAL matters**: without it, every brand-new work item (with no prior
 attempt) looks like a successful run that resets the consecutive-failure count
 to zero, neutering the breaker mid-storm.
@@ -306,15 +313,21 @@ def _apply_verdict(b: _SlotBreaker, verdict: str, now: float) -> bool:
     # OPEN→HALF_OPEN as a side effect, which must not influence verdict routing.
     state = b._state
 
+    if state == CircuitState.OPEN or (
+        state == CircuitState.HALF_OPEN and b._probe_pending
+    ):
+        # No probe has been sent since the breaker opened, so an AUTH_DEATH or
+        # PRODUCTIVE verdict describes an attempt from before it opened: stale
+        # evidence that must neither close nor re-open the breaker. Treat it as
+        # check-only (like NEUTRAL): suppress within the cooldown; once the
+        # cooldown has elapsed the call itself becomes the probe. Suppressing
+        # unconditionally here would leave the breaker open forever whenever
+        # every queued item is a retry carrying a prior verdict (only a
+        # brand-new NEUTRAL item could advance it).
+        return b.is_open(now)
+
     if verdict == AUTH_DEATH:
-        if state == CircuitState.OPEN:
-            # Already / still open — suppress without recording.
-            return True
         if state == CircuitState.HALF_OPEN:
-            if b._probe_pending:
-                # No probe sent yet; auth-death is from before the breaker
-                # opened — suppress.
-                return True
             # Probe was sent and returned AUTH_DEATH → re-open.
             b.record_failure(now)
             return True
@@ -323,16 +336,7 @@ def _apply_verdict(b: _SlotBreaker, verdict: str, now: float) -> bool:
         return b.is_open(now)
 
     # PRODUCTIVE
-    if state == CircuitState.OPEN:
-        # Breaker open — suppress without closing (closing without a confirmed
-        # probe would be premature; the productive run happened before the
-        # breaker opened or while it was suppressing).
-        return True
     if state == CircuitState.HALF_OPEN:
-        if b._probe_pending:
-            # No probe sent yet; productive run is from before the breaker
-            # opened — suppress.
-            return True
         # Probe was sent and returned PRODUCTIVE → close.
         b.record_success()
         return False
