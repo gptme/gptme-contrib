@@ -30,11 +30,11 @@
 #
 # NOTE: `check` and `status` still encode the older never-trigger policy — `check` exits 1
 # and `status` prints 'awaiting-initial-review' for ALL unreviewed PRs regardless of age.
-# Callers that gate on them therefore never reach the fallback: pr-greptile-trigger.py
-# (ACTIONABLE_STATES = {"stale", "needs-re-review"}) and project-monitoring-lib.sh's
-# cross-repo `none|stale` case both skip. The fallback is reached via the self-merge path,
-# which calls `trigger` directly when self-merge-check.py reports "Greptile review not
-# found", and via direct manual invocation.
+# The fallback is reached via the self-merge path, which calls `trigger` directly when
+# self-merge-check.py reports "Greptile review not found"; via direct manual invocation;
+# and since 2026-11-22 via pr-greptile-trigger.py, which treats an unreviewed PR older
+# than GREPTILE_INITIAL_GRACE_MINS as actionable instead of skipping it forever.
+# project-monitoring-lib.sh's cross-repo `none|stale` case still skips.
 #
 # Root cause of spam incidents:
 #   Multiple concurrent sessions each check "any trigger comments?" → all see 0

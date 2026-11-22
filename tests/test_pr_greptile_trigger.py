@@ -25,6 +25,12 @@ sys.modules[spec.name] = pr_greptile_trigger
 spec.loader.exec_module(pr_greptile_trigger)
 
 
+@pytest.fixture(autouse=True)
+def default_initial_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Behavior tests use the default; setting-parser tests run in subprocesses."""
+    monkeypatch.setattr(pr_greptile_trigger, "INITIAL_REVIEW_GRACE_MINUTES", 45)
+
+
 def test_review_state_for_pr_timeout_returns_error() -> None:
     mock_helper = MagicMock(spec=Path)
     mock_helper.exists.return_value = True
@@ -302,3 +308,201 @@ def test_main_partial_fetch_with_prs_warns_stderr(
     assert rc == 0
     assert "warn" in captured.err.lower() or "missed" in captured.err.lower()
     assert "1/2" in captured.err
+
+
+def test_helper_skip_is_not_reported_as_posted_review(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "fetch_prs",
+        lambda repo, author: [
+            {"number": 1, "title": "t", "url": "u", "createdAt": "2020-01-01T00:00:00Z"}
+        ],
+    )
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "review_state_for_pr",
+        lambda repo, num: "awaiting-initial-review",
+    )
+    detail = "Initial-review trigger already attempted. Not triggering again."
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "_helper_cmd",
+        lambda *args: subprocess.CompletedProcess(args, 0, detail, ""),
+    )
+    args = pr_greptile_trigger._parse_args(
+        ["--execute", "--author", "bot", "--repo", "o/r"]
+    )
+    assert pr_greptile_trigger._run(args) == 0
+    output = capsys.readouterr().out
+    assert detail in output
+    assert "1/1 helper requests handled without error" in output
+    assert "1/1 re-reviews triggered" not in output
+
+
+# --- initial-review fallback ---
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, 45),
+        ("", 45),
+        ("abc", 45),
+        ("45.5", 45),
+        ("-1", 45),
+        ("+1", 45),
+        (" 1 ", 45),
+        ("٤٥", 45),
+        ("0", 0),
+        ("60", 60),
+        ("045", 45),
+    ],
+)
+def test_grace_setting_matches_helper(value: str | None, expected: int) -> None:
+    """Import must survive invalid settings and accept only ASCII digit strings."""
+    env = {k: v for k, v in os.environ.items() if k != "GREPTILE_INITIAL_GRACE_MINS"}
+    if value is not None:
+        env["GREPTILE_INITIAL_GRACE_MINS"] = value
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import runpy, sys; "
+            "print(runpy.run_path(sys.argv[1])['INITIAL_REVIEW_GRACE_MINUTES'])",
+            str(MODULE_PATH),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(expected)
+
+
+def test_status_distinguishes_initial_review_due_from_waiting(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    recent = pr_greptile_trigger.datetime.now(
+        pr_greptile_trigger.timezone.utc
+    ).isoformat()
+    monkeypatch.setattr(pr_greptile_trigger, "INITIAL_REVIEW_GRACE_MINUTES", 45)
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "fetch_prs",
+        lambda repo, author: [
+            {"number": i, "title": "t", "url": "u", "createdAt": created}
+            for i, created in enumerate(["2020-01-01T00:00:00Z", recent, None], 1)
+        ],
+    )
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "review_state_for_pr",
+        lambda repo, num: "awaiting-initial-review",
+    )
+    trigger = MagicMock()
+    monkeypatch.setattr(pr_greptile_trigger, "trigger_greptile", trigger)
+    args = pr_greptile_trigger._parse_args(
+        ["--status", "--author", "bot", "--repo", "o/r"]
+    )
+    assert pr_greptile_trigger._run(args) == 0
+    output = capsys.readouterr().out
+    assert "Actionable: 1" in output
+    assert "Awaiting initial: 2" in output
+    assert "o/r#1: 🆕 initial review due" in output
+    for number in (2, 3):
+        assert f"o/r#{number}: ⏳ awaiting Greptile auto-review" in output
+    trigger.assert_not_called()
+
+
+def _pr(state: str, created_at: str | None) -> object:
+    return pr_greptile_trigger.PRInfo(
+        repo="gptme/gptme-contrib",
+        number=1,
+        title="t",
+        url="u",
+        review_state=state,
+        created_at=created_at,
+    )
+
+
+def test_re_review_states_are_always_actionable() -> None:
+    for state in ("stale", "needs-re-review"):
+        assert pr_greptile_trigger.is_actionable(_pr(state, None)) is True
+
+
+def test_awaiting_initial_within_grace_is_not_actionable() -> None:
+    recent = "2026-11-22T00:30:00Z"
+    now = pr_greptile_trigger.datetime(
+        2026, 11, 22, 0, 40, tzinfo=pr_greptile_trigger.timezone.utc
+    )
+    assert (
+        pr_greptile_trigger.is_actionable(_pr("awaiting-initial-review", recent), now)
+        is False
+    )
+
+
+def test_awaiting_initial_past_grace_is_actionable() -> None:
+    old = "2026-11-21T08:04:44Z"
+    now = pr_greptile_trigger.datetime(
+        2026, 11, 22, 0, 53, tzinfo=pr_greptile_trigger.timezone.utc
+    )
+    assert (
+        pr_greptile_trigger.is_actionable(_pr("awaiting-initial-review", old), now)
+        is True
+    )
+
+
+def test_awaiting_initial_without_timestamp_is_not_actionable() -> None:
+    """Fail safe against spam when the PR age is unknown."""
+    assert (
+        pr_greptile_trigger.is_actionable(_pr("awaiting-initial-review", None)) is False
+    )
+
+
+def test_none_state_is_never_actionable() -> None:
+    old = "2026-11-21T08:04:44Z"
+    now = pr_greptile_trigger.datetime(
+        2026, 11, 22, 0, 53, tzinfo=pr_greptile_trigger.timezone.utc
+    )
+    assert pr_greptile_trigger.is_actionable(_pr("none", old), now) is False
+
+
+def test_main_triggers_stale_initial_review(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unreviewed PR past the grace window is triggered by the batch caller."""
+    triggered: list[int] = []
+
+    monkeypatch.setattr(pr_greptile_trigger, "get_gh_user", lambda: "bot")
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "fetch_prs",
+        lambda repo, author: [
+            {
+                "number": 2262,
+                "title": "old unreviewed",
+                "url": "u",
+                "repo": repo,
+                "createdAt": "2020-01-01T00:00:00Z",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "review_state_for_pr",
+        lambda repo, num: "awaiting-initial-review",
+    )
+
+    def _trigger(repo: str, num: int) -> tuple[bool, str]:
+        triggered.append(num)
+        return True, "ok"
+
+    monkeypatch.setattr(pr_greptile_trigger, "trigger_greptile", _trigger)
+    monkeypatch.setattr(
+        pr_greptile_trigger, "resolve_repos", lambda arg: ["gptme/gptme-contrib"]
+    )
+
+    args = pr_greptile_trigger._parse_args(["--execute"])
+    assert pr_greptile_trigger._run(args) == 0
+    assert triggered == [2262]

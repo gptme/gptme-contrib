@@ -7,7 +7,10 @@ Designed to pre-populate re-reviews without reintroducing review-spam regression
 
 Only triggers re-reviews on repos where Greptile is likely installed. Initial
 reviews are auto-triggered by Greptile when a PR is opened — this script handles
-re-reviews after new commits land on a previously-reviewed PR.
+re-reviews after new commits land on a previously-reviewed PR, plus a bounded
+fallback: an unreviewed PR older than ``GREPTILE_INITIAL_GRACE_MINS`` (default
+45) gets the helper's single initial-review request, so a repo-wide auto-review
+outage does not leave PRs unreviewed indefinitely.
 
 Usage:
     python3 scripts/github/pr-greptile-trigger.py              # Dry-run (show what would trigger)
@@ -21,9 +24,9 @@ Environment:
                     GREPTILE_REPOS=gptme/gptme,gptme/gptme-contrib python3 ...
 
 Exit codes:
-    0  All actionable re-reviews triggered successfully (or nothing to do).
-    1  Partial failure — at least one trigger succeeded, at least one failed.
-    2  Total failure — all trigger attempts failed, or unrecoverable error
+    0  All helper requests handled without error (including safe skips), or nothing to do.
+    1  Partial failure — at least one helper request succeeded, at least one failed.
+    2  Total failure — all helper requests failed, or unrecoverable error
        (auth failure, helper unavailable).
 """
 
@@ -36,6 +39,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +61,22 @@ DEFAULT_GREPTILE_REPOS = [
 # auto-triggered by Greptile.
 ACTIONABLE_STATES = {"stale", "needs-re-review"}
 
+# `awaiting-initial-review` becomes actionable only after this grace window.
+# Greptile auto-reviews new PRs in 1-9 min; greptile-helper.sh posts exactly one
+# initial-review request after its own GREPTILE_INITIAL_GRACE_MINS (default 45).
+# Before this, the caller must stay hands-off or it races the vendor.
+#
+# Why this exists: the helper's fallback (PR #1385) is only reachable from the
+# self-merge path or a manual invocation. This batch caller previously skipped
+# every unreviewed PR forever, so a repo-wide auto-review outage left PRs
+# unreviewed until a human noticed (2026-11-21: 4 PRs sat 17h in
+# gptme/gptme-contrib while the darkness check fired for 20 hours).
+_initial_grace = os.environ.get("GREPTILE_INITIAL_GRACE_MINS", "45")
+# Match the helper's non-negative ASCII-integer setting, including its fallback.
+if not (_initial_grace.isascii() and _initial_grace.isdigit()):
+    _initial_grace = "45"
+INITIAL_REVIEW_GRACE_MINUTES = int(_initial_grace)
+
 SAFE_HELPER = Path(__file__).with_name("greptile-helper.sh")
 
 
@@ -67,6 +87,46 @@ class PRInfo:
     title: str
     url: str
     review_state: str
+    created_at: str | None = None
+
+
+def _parse_created_at(created_at: str | None) -> datetime | None:
+    """Parse a GitHub ISO-8601 timestamp, returning None if unusable."""
+    if not created_at:
+        return None
+    try:
+        return datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _pr_age_minutes(pr: PRInfo, now: datetime | None = None) -> float | None:
+    """Age of a PR in minutes, or None when the timestamp is missing/unparseable."""
+    created = _parse_created_at(pr.created_at)
+    if created is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return (now - created).total_seconds() / 60.0
+
+
+def is_actionable(pr: PRInfo, now: datetime | None = None) -> bool:
+    """Whether this caller should trigger Greptile for *pr*.
+
+    Re-reviews are always actionable. An initial review is actionable only once
+    the PR has outlived the grace window, because the helper posts at most one
+    initial-review request and the caller must not race Greptile's auto-review.
+
+    A PR with no parseable ``created_at`` is NOT actionable: fail safe against
+    spam rather than guessing that an unreviewed PR is old.
+    """
+    if pr.review_state in ACTIONABLE_STATES:
+        return True
+    if pr.review_state != "awaiting-initial-review":
+        return False
+    age = _pr_age_minutes(pr, now)
+    return age is not None and age >= INITIAL_REVIEW_GRACE_MINUTES
 
 
 def run_gh(args: list[str], timeout: int = 30) -> str:
@@ -110,7 +170,7 @@ def fetch_prs(repo: str, author: str) -> list[dict[str, Any]] | None:
             "--state",
             "open",
             "--json",
-            "number,title,url",
+            "number,title,url,createdAt",
         ]
     )
     if not raw:
@@ -163,7 +223,7 @@ def review_state_for_pr(repo: str, pr_number: int) -> str:
 
 
 def trigger_greptile(repo: str, pr_number: int) -> tuple[bool, str]:
-    """Trigger Greptile re-review through the safe helper."""
+    """Request a review; True means the helper handled it, possibly by safely skipping."""
     if not SAFE_HELPER.exists():
         return False, "helper-missing"
     result = _helper_cmd("trigger", repo, pr_number)
@@ -235,6 +295,7 @@ def _run(args: argparse.Namespace) -> int:
                     title=str(raw_pr["title"]),
                     url=str(raw_pr["url"]),
                     review_state=review_state,
+                    created_at=raw_pr.get("createdAt"),
                 )
             )
 
@@ -264,10 +325,15 @@ def _run(args: argparse.Namespace) -> int:
         )
 
     # Categorize
+    now = datetime.now(timezone.utc)
     reviewed = [p for p in all_prs if p.review_state == "already-reviewed"]
-    actionable = [p for p in all_prs if p.review_state in ACTIONABLE_STATES]
+    actionable = [p for p in all_prs if is_actionable(p, now)]
     in_progress = [p for p in all_prs if p.review_state == "in-progress"]
-    awaiting = [p for p in all_prs if p.review_state == "awaiting-initial-review"]
+    awaiting = [
+        p
+        for p in all_prs
+        if p.review_state == "awaiting-initial-review" and not is_actionable(p, now)
+    ]
     none_state = [p for p in all_prs if p.review_state == "none"]
     errors = [p for p in all_prs if p.review_state == "error"]
 
@@ -292,7 +358,11 @@ def _run(args: argparse.Namespace) -> int:
             elif state == "in-progress":
                 status = "⏳ trigger in progress"
             elif state == "awaiting-initial-review":
-                status = "⏳ awaiting Greptile auto-review"
+                status = (
+                    "🆕 initial review due"
+                    if is_actionable(pr, now)
+                    else "⏳ awaiting Greptile auto-review"
+                )
             elif state == "stale":
                 status = "⚠️ stale trigger"
             elif state == "none":
@@ -328,24 +398,30 @@ def _run(args: argparse.Namespace) -> int:
             )
         return 0
 
-    print(f"PRs needing Greptile re-review: {len(actionable)}\n")
+    print(f"PRs eligible for a Greptile review request: {len(actionable)}\n")
     for pr in actionable:
-        label = {"stale": "⚠️", "needs-re-review": "🔄"}.get(pr.review_state, "•")
+        label = {
+            "stale": "⚠️",
+            "needs-re-review": "🔄",
+            "awaiting-initial-review": "🆕",
+        }.get(pr.review_state, "•")
         print(f"  {label} {pr.repo}#{pr.number}: {pr.title[:60]}")
 
     if not args.execute:
-        print(f"\nDry run — pass --execute to trigger {len(actionable)} re-reviews.")
+        print(f"\nDry run — pass --execute to request {len(actionable)} reviews.")
         return 0
 
-    # Trigger re-reviews
-    print(f"\nTriggering {len(actionable)} Greptile re-reviews...\n")
-    triggered = 0
+    # The helper owns duplicate/backoff guards; exit 0 includes deliberate skips.
+    print(
+        f"\nRequesting {len(actionable)} Greptile reviews through the safe helper...\n"
+    )
+    handled = 0
     for i, pr in enumerate(actionable):
-        print(f"  Triggering {pr.repo}#{pr.number}...", end=" ", flush=True)
+        print(f"  Requesting {pr.repo}#{pr.number}...", end=" ", flush=True)
         success, detail = trigger_greptile(pr.repo, pr.number)
         if success:
-            print("✅")
-            triggered += 1
+            print("✅ handled (may be safely skipped)")
+            handled += 1
         else:
             print("❌")
         if detail:
@@ -354,10 +430,10 @@ def _run(args: argparse.Namespace) -> int:
         if i < len(actionable) - 1:
             time.sleep(1)
 
-    print(f"\nDone: {triggered}/{len(actionable)} re-reviews triggered.")
-    if triggered == 0:
+    print(f"\nDone: {handled}/{len(actionable)} helper requests handled without error.")
+    if handled == 0:
         return 2  # All failed
-    if triggered < len(actionable):
+    if handled < len(actionable):
         return 1  # Partial failure — some triggers succeeded, some failed
     return 0  # All succeeded
 
