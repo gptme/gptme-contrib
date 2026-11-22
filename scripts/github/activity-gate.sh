@@ -972,6 +972,31 @@ check_ci_failures() {
         local ci_state
         ci_state=$(echo "$pr_data" | jq -r '
             select(.statusCheckRollup != null) | .statusCheckRollup
+            # Drop a CANCELLED check-run that the SAME workflow later replaced
+            # with a completed non-cancelled result for the SAME check name on
+            # this head. A close/reopen retrigger (or a manual rerun) leaves the
+            # abandoned attempt in the rollup forever, so without this a PR whose
+            # every selected check is green still classifies as `bad` and re-emits
+            # `ci_failure` on an unchanged head indefinitely —
+            # ActivityWatch/aw-server#206 looped for hours this way on 2026-11-22
+            # (macOS CANCELLED 11-18, macOS SUCCESS 11-22, same workflow "Build").
+            # Conservative on purpose: only CANCELLED is suppressed, only with
+            # same-workflow provenance, only against a *later* result, and only
+            # when that result is itself non-cancelled. A lone cancellation, a
+            # later cancellation, or a same-name result from a different
+            # workflow stays actionable (see tests/test_activity_gate_stuck_ci.py).
+            | ([ .[]
+                 | { e: ., n: (.name // .context // ""),
+                     w: (.checkSuite.workflowRun.workflow.name // ""),
+                     t: (.completedAt // .startedAt // .createdAt // ""),
+                     c: ((.conclusion // .state // "") | ascii_upcase) } ]) as $tagged
+            | [ $tagged[]
+                | . as $x
+                | select(($x.c != "CANCELLED")
+                         or (any($tagged[];
+                                 .n == $x.n and .w == $x.w and .t > $x.t
+                                 and .c != "" and .c != "CANCELLED") | not))
+                | .e ]
             | (any(.[]; ((.conclusion // .state // "") | ascii_upcase) == "FAILURE")) as $hard
             | (any(.[]; ((.status // "") | ascii_upcase) as $s
                    | $s == "QUEUED" or $s == "IN_PROGRESS" or $s == "WAITING"

@@ -96,6 +96,111 @@ def _extract_classifier() -> str:
             [{"status": "COMPLETED", "conclusion": "CANCELLED"}],
             "bad",
         ),
+        # A close/reopen retrigger (or a manual rerun) leaves the abandoned
+        # attempt in the rollup forever. ActivityWatch/aw-server#206 looped
+        # `ci_failure` for hours on 2026-11-22 with every selected check green
+        # because an old macOS CANCELLED sat beside the new macOS SUCCESS.
+        (
+            "superseded cancellation is not a failure once the same workflow re-ran",
+            [
+                {
+                    "name": "Test on macOS-latest",
+                    "status": "COMPLETED",
+                    "conclusion": "CANCELLED",
+                    "completedAt": "2026-11-18T18:12:17Z",
+                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                },
+                {
+                    "name": "Test on macOS-latest",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "completedAt": "2026-11-22T22:04:07Z",
+                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                },
+            ],
+            "green",
+        ),
+        (
+            "a later cancellation is not suppressed by an earlier success",
+            [
+                {
+                    "name": "Test on macOS-latest",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "completedAt": "2026-11-18T18:12:17Z",
+                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                },
+                {
+                    "name": "Test on macOS-latest",
+                    "status": "COMPLETED",
+                    "conclusion": "CANCELLED",
+                    "completedAt": "2026-11-22T22:04:07Z",
+                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                },
+            ],
+            "bad",
+        ),
+        (
+            "another workflow's success does not suppress a cancellation",
+            [
+                {
+                    "name": "Test on macOS-latest",
+                    "status": "COMPLETED",
+                    "conclusion": "CANCELLED",
+                    "completedAt": "2026-11-18T18:12:17Z",
+                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                },
+                {
+                    "name": "Test on macOS-latest",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "completedAt": "2026-11-22T22:04:07Z",
+                    "checkSuite": {"workflowRun": {"workflow": {"name": "CodeQL"}}},
+                },
+            ],
+            "bad",
+        ),
+        (
+            "a cancelled matrix sibling with a different name stays actionable",
+            [
+                {
+                    "name": "Test on macOS-latest",
+                    "status": "COMPLETED",
+                    "conclusion": "CANCELLED",
+                    "completedAt": "2026-11-18T18:12:17Z",
+                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                },
+                {
+                    "name": "Test on ubuntu-24.04",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "completedAt": "2026-11-22T22:04:07Z",
+                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                },
+            ],
+            "bad",
+        ),
+        (
+            "a superseded cancellation does not hide a real failure",
+            [
+                {
+                    "name": "Test on macOS-latest",
+                    "status": "COMPLETED",
+                    "conclusion": "CANCELLED",
+                    "completedAt": "2026-11-18T18:12:17Z",
+                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                },
+                {
+                    "name": "Test on macOS-latest",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "completedAt": "2026-11-22T22:04:07Z",
+                    "checkSuite": {"workflowRun": {"workflow": {"name": "Build"}}},
+                },
+                {"name": "lint", "status": "COMPLETED", "conclusion": "FAILURE"},
+            ],
+            "bad",
+        ),
         (
             "cancel-in-progress supersede must NOT fire: new run still going",
             [
