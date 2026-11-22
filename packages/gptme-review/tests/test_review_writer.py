@@ -1,4 +1,4 @@
-"""Peer-host contract for gptme_review.writer (writer-port slice 2a)."""
+"""Peer-host contract for gptme_review.writer (writer-port slices 2a–2d)."""
 
 from __future__ import annotations
 
@@ -465,3 +465,207 @@ def test_mixed_advisory_and_informational_notes_do_not_claim_all_are_outside(ali
     assert "No thread-worthy findings." in body
     assert "What follows is outside them" not in body
     assert "changed.py:1" in body and "untouched.py:2" in body
+
+
+# --- writer-port slice 2d: checkout helpers and static preflight ---------------
+
+
+def _bound_with(alice_io, **overrides):
+    return writer.bind_io(SimpleNamespace(**{**vars(alice_io), **overrides}))
+
+
+def _scripted_run(responses):
+    """A fake ``run`` answering each command by its leading argv words."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        for prefix, (code, out) in responses.items():
+            if tuple(cmd[: len(prefix)]) == prefix:
+                return subprocess.CompletedProcess(cmd, code, out, "err")
+        raise AssertionError(f"unexpected command {cmd}")
+
+    return fake_run, calls
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "git@github.com:Owner/Repo.git",
+        "https://github.com/owner/repo",
+        "ssh://git@github.com/owner/repo.git",
+        "https://token@github.com/owner/repo.git",
+    ],
+)
+def test_slug_from_remote_url_shapes(alice_io, url):
+    assert writer.bind_io(alice_io)._slug_from_remote_url(url) == "owner/repo"
+
+
+def test_review_checkout_root_is_per_host(alice_io, tmp_path, monkeypatch):
+    monkeypatch.delenv("GPTME_REVIEW_CHECKOUT", raising=False)
+    a = _bound_with(alice_io, CHECKOUT_ROOT=tmp_path / "a")
+    b = _bound_with(alice_io, CHECKOUT_ROOT=tmp_path / "b")
+    assert a.review_checkout_for("o/r") == tmp_path / "a" / "o-r-review"
+    # A traversal owner collapses to a safe component, never escapes the root.
+    assert b.review_checkout_for("../x/y") == tmp_path / "b" / "unknown-x-y-review"
+    monkeypatch.setenv("GPTME_REVIEW_CHECKOUT", str(tmp_path / "pinned"))
+    assert a.review_checkout_for("o/r") == tmp_path / "pinned"
+
+
+def test_default_io_supplies_a_checkout_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("GPTME_REVIEW_CHECKOUT_ROOT", str(tmp_path))
+    ns = writer.default_io(sweep_identity("alice-agent", "alice-ai-review"))
+    assert ns.CHECKOUT_ROOT == tmp_path
+
+
+def test_sibling_note_lists_only_siblings_under_the_bound_root(alice_io, tmp_path):
+    w = _bound_with(alice_io, CHECKOUT_ROOT=tmp_path)
+    assert w.build_cross_repo_sibling_note("gptme/gptme-contrib") == ""
+    (tmp_path / "gptme-gptme-review").mkdir()
+    (tmp_path / "gptme-gptme-contrib-review").mkdir()  # the reviewed repo itself
+    note = w.build_cross_repo_sibling_note("gptme/gptme-contrib")
+    assert "`gptme/gptme`" in note and "shared-tooling" in note
+    assert "`gptme/gptme-contrib`" not in note
+
+
+def test_prepare_agent_checkout_refuses_a_remote_that_does_not_own_the_repo(
+    alice_io, tmp_path
+):
+    (tmp_path / ".git").mkdir()
+    fake_run, calls = _scripted_run(
+        {
+            ("git", "status"): (0, ""),
+            ("git", "remote"): (0, "origin\tgit@github.com:other/repo.git (fetch)\n"),
+        }
+    )
+    w = _bound_with(alice_io, run=fake_run)
+    with pytest.raises(writer.ReviewError, match="no remote pointing at o/r"):
+        w.prepare_agent_checkout("o/r", "a" * 40, tmp_path)
+    assert not any(c[:2] == ["git", "fetch"] for c in calls)
+
+
+def test_prepare_agent_checkout_verifies_the_checked_out_head(alice_io, tmp_path):
+    (tmp_path / ".git").mkdir()
+    sha = "b" * 40
+    remotes = "fork\thttps://github.com/o/r (fetch)\norigin\tgit@github.com:o/r.git\n"
+    responses = {
+        ("git", "status"): (0, ""),
+        ("git", "remote"): (0, remotes),
+        ("git", "fetch"): (0, ""),
+        ("git", "checkout"): (0, ""),
+        ("git", "rev-parse"): (0, sha + "\n"),
+    }
+    fake_run, calls = _scripted_run(responses)
+    _bound_with(alice_io, run=fake_run).prepare_agent_checkout("o/r", sha, tmp_path)
+    assert ["git", "fetch", "--quiet", "origin", sha] in calls  # origin wins
+
+    responses[("git", "rev-parse")] = (0, "c" * 40 + "\n")
+    fake_run, _ = _scripted_run(responses)
+    with pytest.raises(writer.ReviewError, match="checkout mismatch"):
+        _bound_with(alice_io, run=fake_run).prepare_agent_checkout("o/r", sha, tmp_path)
+
+
+def test_prepare_agent_checkout_refuses_a_dirty_tree(alice_io, tmp_path):
+    (tmp_path / ".git").mkdir()
+    fake_run, _ = _scripted_run({("git", "status"): (0, " M a.py\n")})
+    with pytest.raises(writer.ReviewError, match="dirty"):
+        _bound_with(alice_io, run=fake_run).prepare_agent_checkout(
+            "o/r", "a" * 40, tmp_path
+        )
+
+
+def test_checkout_lock_refuses_a_held_lock_without_hanging(alice_io, tmp_path):
+    w = writer.bind_io(alice_io)
+    checkout = tmp_path / "o-r-review"
+    held = w.acquire_agent_checkout_lock(checkout, wait_secs=0)
+    try:
+        with pytest.raises(writer.ReviewError, match="stayed locked"):
+            w.acquire_agent_checkout_lock(checkout, wait_secs=0)
+    finally:
+        held.close()
+    w.acquire_agent_checkout_lock(checkout, wait_secs=0).close()
+
+
+def test_read_checkout_file_refuses_paths_outside_the_checkout(alice_io, tmp_path):
+    w = writer.bind_io(alice_io)
+    (tmp_path / "co").mkdir()
+    (tmp_path / "co" / "a.txt").write_text("ok")
+    (tmp_path / "secret").write_text("no")
+    assert w.read_checkout_file(tmp_path / "co", "a.txt") == "ok"
+    assert w.read_checkout_file(tmp_path / "co", "../secret") is None
+
+
+def test_cited_sha_lookup_goes_through_the_bound_run(alice_io):
+    fake_run, calls = _scripted_run({("gh", "api"): (1, "")})
+    w = _bound_with(alice_io, run=fake_run)
+    body = "Fixed in `abc1234`. Also bumps the pin, commit 2222222."
+    findings = w._check_cited_shas(body, "o/r", ["src/a.py"], _SUBMODULE_DIFF)
+    assert [f["title"] for f in findings] == ["Cited commit `abc1234` not found in o/r"]
+    assert findings[0]["severity"] == "P1" and findings[0]["static"] is True
+    # The gitlink SHA the PR moves is accepted without a lookup.
+    assert calls == [["gh", "api", "repos/o/r/commits/abc1234", "--jq", ".sha"]]
+
+
+def test_unrelated_ci_claim_reads_checks_through_the_bound_gh_json(alice_io):
+    seen: list[list[str]] = []
+
+    def fake_gh_json(cmd):
+        seen.append(cmd)
+        return [
+            {"name": "Test", "state": "FAILURE"},
+            {"name": "Lint", "state": "SUCCESS"},
+        ]
+
+    w = _bound_with(alice_io, gh_json=fake_gh_json)
+    assert (
+        w._check_unrelated_ci_claim("unrelated to the version bump", "o/r", 5, []) == []
+    )
+    assert seen == []  # prose without a CI term is not a claim
+    findings = w._check_unrelated_ci_claim(
+        "The CI failure is unrelated.", "o/r", 5, ["a"]
+    )
+    assert seen == [["pr", "checks", "5", "--repo", "o/r", "--json", "name,state"]]
+    assert len(findings) == 1 and "`Test`" in findings[0]["body"]
+
+
+class _JournalHost(writer.DefaultWriterHost):
+    def extra_static_checks(self, diff, touched_files):
+        return [{"title": "host rule", "static": True}]
+
+
+def test_static_preflight_adds_host_checks_only_when_a_host_supplies_them(alice_io):
+    fake_run, calls = _scripted_run({})
+    w = _bound_with(alice_io, run=fake_run)
+    kwargs = dict(
+        pr_title="fix(x): y",
+        pr_body="",
+        diff=_CODE_DIFF,
+        touched_files=["src/a.py"],
+        repo="o/r",
+        number=1,
+    )
+    default = w.static_preflight_findings(**kwargs)
+    assert [f["title"] for f in default] == ["fix PR has no regression test"]
+    hosted = w.static_preflight_findings(**kwargs, host=_JournalHost())
+    assert [f["title"] for f in hosted] == [
+        "fix PR has no regression test",
+        "host rule",
+    ]
+    assert calls == []  # no cited SHA, no CI claim: no I/O
+
+
+def test_visual_rule_ignores_generics_and_whole_file_deletions(alice_io):
+    w = writer.bind_io(alice_io)
+    generic = (
+        "diff --git a/web/src/components/A.tsx b/web/src/components/A.tsx\n"
+        "--- a/web/src/components/A.tsx\n+++ b/web/src/components/A.tsx\n"
+        "@@ -1 +1 @@\n-const x: Promise<void> = f()\n+const y: Promise<void> = f()\n"
+    )
+    assert w._check_visual_screenshot("", generic, ["web/src/components/A.tsx"]) == []
+    markup = generic.replace("Promise<void> = f()", "<div className='a'/>")
+    found = w._check_visual_screenshot("", markup, ["web/src/components/A.tsx"])
+    assert found and found[0]["severity"] == "P1"
+    assert (
+        w._check_visual_screenshot("![After](u)", markup, ["web/src/components/A.tsx"])
+        == []
+    )

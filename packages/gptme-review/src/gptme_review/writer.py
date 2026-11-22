@@ -1,6 +1,6 @@
-"""Per-PR review writer: marker, publish, thread, disposition and render helpers.
+"""Per-PR review writer: marker, publish, thread, disposition, render, checkout and preflight helpers.
 
-Writer-port slices 2a–2c (Bob's knowledge/technical-designs/2026-11-20-ai-review-writer-port.md).
+Writer-port slices 2a–2d (Bob's knowledge/technical-designs/2026-11-20-ai-review-writer-port.md).
 Code moved as-is from Bob's ``scripts/github/ai-review.py``; review behaviour is
 unchanged.
 
@@ -40,6 +40,7 @@ from bobutils.shell import gh_json, gh_paginated_list
 
 from gptme_review.core import (
     ReviewDeadline,
+    ReviewError,
     agreement_dissent,
     blocking_shortfall,
     confidence_rationale,
@@ -54,6 +55,7 @@ from gptme_review.core import (
     normalize_finding_class,
     normalize_severity,
     partition_posting_findings,
+    repo_family,
     suppression_entry,
 )
 from gptme_review.shard import sharding_note, split_file_sections
@@ -130,6 +132,9 @@ def default_io(identity: SweepIdentity) -> SimpleNamespace:
         MARKER_NAMESPACE=ns,
         MARKER_PREFIX=f"<!-- {ns}",
         PROVISIONAL_MARKER_PREFIX=f"<!-- {ns}-publishing",
+        CHECKOUT_ROOT=Path(
+            os.environ.get("GPTME_REVIEW_CHECKOUT_ROOT", "/tmp/worktrees")
+        ),
     )
 
 
@@ -2860,3 +2865,741 @@ def render(
         "</details>",
     ]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Checkout helpers (writer-port slice 2d; the agent engine stays host-side)
+#
+# ``run`` and ``CHECKOUT_ROOT`` resolve through ``_io`` so a host's patches and
+# checkout root reach calls made in here. ``GPTME_REVIEW_CHECKOUT`` still
+# overrides the per-repo path; ownership is verified either way.
+# ---------------------------------------------------------------------------
+
+
+def read_checkout_file(checkout: Path, path: str) -> str | None:
+    try:
+        full = (checkout / path).resolve()
+        if not full.is_relative_to(checkout.resolve()):
+            return None
+        return full.read_text(errors="replace")
+    except (OSError, RuntimeError):
+        return None
+
+
+def _slug_from_remote_url(url: str) -> str | None:
+    """Reduce a git remote URL to a lowercased ``owner/name`` slug.
+
+    Handles the three shapes git remotes actually take here: scp-style
+    (``git@github.com:owner/name.git``), URL-style (``https://host/owner/name``,
+    ``ssh://git@host/owner/name.git``), and bare paths. Returns None when the URL
+    does not carry at least two path segments.
+    """
+    text = url.strip()
+    if text.endswith(".git"):
+        text = text[: -len(".git")]
+    if not text:
+        return None
+
+    if "://" in text:
+        rest = text.split("://", 1)[1]
+        rest = rest.rsplit("@", 1)[-1]  # strip any userinfo
+        parts = rest.split("/")[1:]  # drop host
+    elif ":" in text and not text.startswith("/"):
+        parts = text.partition(":")[2].split("/")
+    else:
+        parts = text.split("/")
+
+    parts = [p for p in parts if p]
+    if len(parts) < 2:
+        return None
+    return "/".join(parts[-2:]).lower()
+
+
+def remote_owning_repo(checkout: Path, repo: str) -> str | None:
+    """Name of the remote in ``checkout`` that points at ``repo``, if any.
+
+    ``origin`` wins when several remotes match; otherwise the first in git's
+    listing order. Returns None when no remote owns the repo — the caller must
+    refuse rather than fall back to a remote that does not have the SHA.
+    """
+    listing = _io.run(["git", "remote", "-v"], cwd=checkout)
+    if listing.returncode != 0:
+        return None
+
+    want = repo.strip().lower()
+    matches: list[str] = []
+    for line in listing.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        name, url = fields[0], fields[1]
+        if _slug_from_remote_url(url) == want and name not in matches:
+            matches.append(name)
+
+    if not matches:
+        return None
+    return "origin" if "origin" in matches else matches[0]
+
+
+def _path_component(text: str) -> str:
+    """Make one path-safe component out of a repo owner/name."""
+    return (
+        "".join(c if (c.isalnum() or c in "._-") else "-" for c in text).strip("-.")
+        or "unknown"
+    )
+
+
+def review_checkout_for(repo: str) -> Path:
+    """Path of the agent-engine review checkout dedicated to ``repo``.
+
+    ``GPTME_REVIEW_CHECKOUT`` still overrides the path, but it is no longer a
+    licence to review the wrong repository: prepare_agent_checkout() verifies
+    that whatever checkout it is handed actually has a remote owning ``repo``.
+    """
+    override = os.environ.get("GPTME_REVIEW_CHECKOUT")
+    if override:
+        return Path(override)
+    owner, _, name = repo.partition("/")
+    slug = (
+        f"{_path_component(owner)}-{_path_component(name)}"
+        if owner and name
+        else _path_component(repo)
+    )
+    root: Path = _io.CHECKOUT_ROOT
+    return root / f"{slug}-review"
+
+
+def build_cross_repo_sibling_note(repo: str) -> str:
+    """Generate a context note about available sibling repo checkouts.
+
+    For agent-engine reviews, this tells the session where the sibling repos
+    live on disk so it can use its read tools to check for duplication (T2c-i)
+    or contract drift (T2c-ii).  Returns an empty string when *repo* is not in
+    a known family or no sibling checkouts are present.
+    """
+    family_entry = repo_family(repo)
+    if family_entry is None:
+        return ""
+    family_name, family_type, sibling_repos = family_entry
+    siblings_on_disk: list[tuple[str, Path]] = []
+    for sibling in sorted(sibling_repos):
+        if sibling == repo:
+            continue
+        path = review_checkout_for(sibling)
+        if path.exists():
+            siblings_on_disk.append((sibling, path))
+    if not siblings_on_disk:
+        return ""
+    if family_type == "shared-tooling":
+        header = (
+            f"## Cross-repo context — {family_name} shared-tooling family (T2c-i)\n\n"
+            "This PR is in a shared-tooling family.  Use your read tools to search "
+            "the sibling checkouts below when checking for duplication or wrong-repo "
+            "placement.  Generic helpers belong in gptme-contrib, not in an agent "
+            "brain repo (bob, alice).\n"
+        )
+    else:
+        header = (
+            f"## Cross-repo context — {family_name} component-split system (T2c-ii)\n\n"
+            "This PR is in a component-split system.  Use your read tools to search "
+            "the sibling checkouts below when checking for API contract drift.  "
+            "aw-server and aw-server-rust implement the same REST API; a contract "
+            "change in one must be mirrored in the other.\n"
+        )
+    lines = [header, "Available sibling checkouts:\n"]
+    for sibling, path in siblings_on_disk:
+        lines.append(f"- `{sibling}` → `{path}`")
+    return "\n".join(lines)
+
+
+def acquire_agent_checkout_lock(checkout: Path, *, wait_secs: float = 2700.0):
+    """Take the exclusive host-local lock on one agent-review checkout.
+
+    The agent engine reads files from ONE shared per-repo checkout and
+    ``prepare_agent_checkout`` moves its HEAD, so two reviews of the same repo
+    (two PRs in one sweep, or a sweep plus a PM slot) must not overlap: the
+    second ``git checkout`` rewrites files under the first session's read tool,
+    and two first-time ``gh repo clone``s into the same path collide
+    (``failed to run git: exit status 128``). Both happened on 2026-10-02 in the
+    bounded subscription-overflow path (gptme-cloud#1105 clone race;
+    gptme-cloud#1103 lost its tree to a PM review of #1061 mid-session).
+
+    Hold the returned file open for the whole prepare + review; closing it
+    releases the lock. Polls rather than blocking forever so a wedged holder
+    surfaces as a ReviewError instead of a hung sweep slot.
+    """
+    lock_path = checkout.parent / f"{checkout.name}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+")
+    deadline = time.monotonic() + wait_secs
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                handle.close()
+                raise ReviewError(
+                    f"agent review checkout {checkout} stayed locked for "
+                    f"{wait_secs:.0f}s — another review of this repo is wedged"
+                ) from None
+            time.sleep(2.0)
+
+
+def prepare_agent_checkout(repo: str, head_sha: str, checkout: Path) -> None:
+    """Put ``repo``'s dedicated review worktree at the exact commit reviewed.
+
+    A missing checkout is cloned, not refused. The engine lives under
+    ``/tmp/worktrees`` and nothing else creates that path, so "clone it there
+    first" was a manual step that never happened: the 2026-09-07 live probe
+    found the engine dead at this line, three weeks after its revive task
+    closed. A path that self-creates cannot rot the same way.
+    """
+    if not (checkout / ".git").exists():
+        clone = _io.run(
+            ["gh", "repo", "clone", repo, str(checkout), "--", "--quiet"],
+            timeout=600,
+        )
+        if clone.returncode != 0:
+            raise ReviewError(
+                f"agent review checkout for {repo} does not exist and cloning "
+                f"it to {checkout} failed: {clone.stderr[-300:]}"
+            )
+    status = _io.run(["git", "status", "--porcelain"], cwd=checkout)
+    if status.returncode != 0:
+        raise ReviewError(
+            f"cannot inspect agent review checkout: {status.stderr[-300:]}"
+        )
+    if status.stdout.strip():
+        raise ReviewError(f"agent review checkout is dirty: {checkout}")
+    # Never fetch a SHA from a remote that does not own the repo being reviewed.
+    # A wrong-repo review is undetectable downstream — the quotes match the files
+    # they were read from — so this refuses rather than warning.
+    remote = remote_owning_repo(checkout, repo)
+    if remote is None:
+        raise ReviewError(
+            f"agent review checkout {checkout} has no remote pointing at {repo}; "
+            "refusing to review one repo against another's objects"
+        )
+    fetch = _io.run(
+        ["git", "fetch", "--quiet", remote, head_sha],
+        cwd=checkout,
+        timeout=120,
+    )
+    if fetch.returncode != 0:
+        raise ReviewError(f"cannot fetch review head {head_sha}: {fetch.stderr[-300:]}")
+    switch = _io.run(
+        ["git", "checkout", "--quiet", "--detach", head_sha],
+        cwd=checkout,
+        timeout=60,
+    )
+    if switch.returncode != 0:
+        raise ReviewError(
+            f"cannot check out review head {head_sha}: {switch.stderr[-300:]}"
+        )
+    actual = _io.run(["git", "rev-parse", "HEAD"], cwd=checkout)
+    if actual.returncode != 0 or actual.stdout.strip() != head_sha:
+        raise ReviewError(
+            f"agent review checkout mismatch: expected {head_sha}, "
+            f"got {actual.stdout.strip() or 'unknown'}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Static pre-flight finding generators (rules 1a, 1b, 1c, 7; writer-port 2d)
+# ---------------------------------------------------------------------------
+# Mechanical checks that run on every PR regardless of engine. They carry one
+# sentence of Erik's rationale so the knowledge lives in the tool.
+#
+# Severity policy:
+#   P1 (hard block) — rules 1a, 1b, 1c: things Erik explicitly called out
+#   P2 (advisory)   — rule 7: Erik merged all such PRs but asked for tests
+#
+# Host-specific checks (Bob's rule 8, journal append-only) come from
+# ``WriterHost.extra_static_checks``. Results are injected into the main
+# findings list AFTER the scope filter and BEFORE suppression.
+
+
+def _static_finding(
+    *,
+    title: str,
+    body: str,
+    file: str,
+    severity: str,
+    quote: str = "",
+    verification: str,
+    finding_class: str = "bug",
+    suggestion: str = "",
+    line: int | None = None,
+) -> dict:
+    """Canonical shape for a static preflight finding."""
+    f: dict = {
+        "title": title,
+        "body": body,
+        "file": file,
+        "security": False,
+        "quote": quote,
+        "verification": verification,
+        "class": normalize_finding_class(finding_class),
+        "severity": severity,
+        "suggestion": suggestion,
+        "aspect": "preflight",
+        "static": True,  # identifies static findings in tests and logs
+    }
+    if line is not None:
+        f["line"] = line
+    return f
+
+
+_SUBPROJECT_COMMIT_RE = re.compile(
+    r"^[+-]Subproject commit ([0-9a-f]{7,40})\s*$", re.MULTILINE
+)
+_GITLINK_INDEX_RE = re.compile(
+    r"^index ([0-9a-f]{7,40})\.\.([0-9a-f]{7,40}) 160000$", re.MULTILINE
+)
+# `owner/repo#123` and markdown links to github.com/owner/repo/...
+_BODY_REPO_REF_RE = re.compile(
+    r"(?:github\.com/|https://github\.com/)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)"
+    r"|(\b[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#\d+"
+)
+
+
+def _gitlink_shas_from_diff(diff: str) -> set[str]:
+    """SHAs this PR actually moves as submodule gitlinks."""
+    shas: set[str] = set()
+    for m in _SUBPROJECT_COMMIT_RE.finditer(diff or ""):
+        shas.add(m.group(1).lower())
+    for m in _GITLINK_INDEX_RE.finditer(diff or ""):
+        shas.add(m.group(1).lower())
+        shas.add(m.group(2).lower())
+    return shas
+
+
+def _sha_matches_any(cited: str, candidates: set[str]) -> bool:
+    """True when `cited` is a prefix or extension of a candidate (min 7 chars)."""
+    cited = cited.lower()
+    if len(cited) < 7:
+        return False
+    for candidate in candidates:
+        overlap = min(len(cited), len(candidate))
+        if overlap >= 7 and (
+            candidate.startswith(cited) or cited.startswith(candidate)
+        ):
+            return True
+    return False
+
+
+def _repos_cited_in_body(pr_body: str, parent_repo: str) -> list[str]:
+    """GitHub owner/repo refs mentioned in the PR body, excluding the parent."""
+    found: list[str] = []
+    seen: set[str] = {parent_repo.lower()}
+    for m in _BODY_REPO_REF_RE.finditer(pr_body or ""):
+        repo = next(g for g in m.groups() if g)
+        key = repo.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(repo)
+    return found
+
+
+def _commit_exists(repo: str, sha: str) -> bool:
+    check: subprocess.CompletedProcess = _io.run(
+        ["gh", "api", f"repos/{repo}/commits/{sha}", "--jq", ".sha"]
+    )
+    return check.returncode == 0
+
+
+def _check_cited_shas(
+    pr_body: str,
+    repo: str,
+    touched_files: Collection[str],
+    diff: str = "",
+) -> list[dict]:
+    """Rule 1a — every SHA cited in the PR body must exist.
+
+    Erik: 'I don't actually see the follow-up commit you claimed' (gptme#2851).
+
+    Superproject-only lookup false-P1'd submodule pins (gptme-cloud#902, #912):
+    the cited SHA is the gitlink target in gptme/gptme, not a commit of
+    gptme-cloud. Accept a citation when it is the gitlink this PR moves, or
+    when it exists in a repo the body explicitly names (`owner/repo#N`).
+    """
+    # Match "fixed in <sha>", "merged <sha>", "commit <sha>", or bare sha in backticks.
+    # Only scan short/medium SHAs (7-12 chars) in "fixed in"/"see"/"commit" context
+    # to avoid flagging 40-char SHAs that are clearly full refs or part of prose.
+    # `(?<![\w-])` so `squash-merged <40-char sha>` does not match `merged`
+    # (gptme-cloud#902: hyphen is a non-word char, so `\\bmerged` still fired).
+    pattern = re.compile(
+        r"(?:"
+        r"fixed\s+in\s+`?([0-9a-f]{7,12})`?"
+        r"|(?<![\w-])merged\s+(?:as\s+)?`?([0-9a-f]{7,12})`?"
+        r"|(?:commit|sha)\s*:?\s*`?([0-9a-f]{7,12})`?"
+        r"|follow.up\s+commit\s+`?([0-9a-f]{7,12})`?"
+        r")",
+        re.IGNORECASE,
+    )
+    gitlinks = _gitlink_shas_from_diff(diff)
+    extra_repos = _repos_cited_in_body(pr_body, repo)
+    results: list[dict] = []
+    seen: set[str] = set()
+    for m in pattern.finditer(pr_body):
+        sha = next(g for g in m.groups() if g)
+        if sha in seen:
+            continue
+        seen.add(sha)
+        if _sha_matches_any(sha, gitlinks):
+            continue
+        if _commit_exists(repo, sha):
+            continue
+        if any(_commit_exists(other, sha) for other in extra_repos):
+            continue
+        anchor = next(iter(touched_files), "")
+        results.append(
+            _static_finding(
+                title=f"Cited commit `{sha}` not found in {repo}",
+                body=(
+                    f"The PR body references commit `{sha}` but that SHA was not found "
+                    f"in `{repo}`"
+                    + (
+                        f", its gitlink targets, or cited remotes {extra_repos}"
+                        if extra_repos
+                        else ""
+                    )
+                    + ". "
+                    "Erik's feedback: \"I don't actually see the follow-up commit you "
+                    'claimed" (gptme#2851). '
+                    "Verify the SHA is reachable on the head branch, is the gitlink "
+                    "this PR moves, or correct the reference."
+                ),
+                file=anchor,
+                severity="P1",
+                quote=m.group(0)[:80],
+                verification="static preflight: GitHub API commit lookup (rule 1a)",
+                suggestion=(
+                    f"Run `gh api repos/{repo}/commits/{sha}` to verify, "
+                    "or remove/correct the reference."
+                ),
+            )
+        )
+    return results
+
+
+def _check_unrelated_ci_claim(
+    pr_body: str,
+    repo: str,
+    number: int,
+    touched_files: Collection[str],
+) -> list[dict]:
+    """Rule 1b — 'unrelated CI failure' claims require proof of a disjoint path filter.
+
+    Erik: '"unrelated to these changes"? I don't think so' (gptme#3169).
+    """
+    # Detect phrases like "unrelated CI", "flaky test", "known flake".
+    #
+    # A bare "unrelated" is NOT a CI claim — prose like "unrelated to the version
+    # bump" matched the old catch-all and produced a false P1 on a PR whose
+    # checks were green (ActivityWatch/activitywatch#1472, 2026-09-27). Require
+    # the word to be tied to CI context: an explicit flake phrase, an
+    # "unrelated to (these) changes" claim, or "unrelated" within a short span
+    # of a CI term.
+    _ci_term = (
+        r"(?:ci|test|tests|failure|failures|check|checks|job|jobs|workflow|"
+        r"build|flake|flakiness|timeout)"
+    )
+    claim_re = re.compile(
+        r"\b(?:known\s+flak(?:e|y)|flaky\s+(?:test|tests|ci)|"
+        r"intermittent\s+(?:test|tests|ci|fail(?:ure)?s?))\b"
+        rf"|\bunrelated\b[^.\n]{{0,40}}?\b{_ci_term}\b"
+        rf"|\b{_ci_term}\b[^.\n]{{0,40}}?\bunrelated\b"
+        r"|\bunrelated\s+to\s+(?:these|the|this|my|our)\s+(?:changes|change|pr|diff|commit|commits)\b",
+        re.IGNORECASE,
+    )
+    if not claim_re.search(pr_body):
+        return []
+
+    # Check if there are actually failing CI checks
+    ci_raw = _io.gh_json(
+        ["pr", "checks", str(number), "--repo", repo, "--json", "name,state"]
+    )
+    failing = [
+        c
+        for c in (ci_raw if isinstance(ci_raw, list) else [])
+        if isinstance(c, dict)
+        and c.get("state") in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED")
+    ]
+    if not failing:
+        return []  # Claim is moot — no failing checks
+
+    check_names = ", ".join(f"`{c['name']}`" for c in failing[:3])
+    anchor = next(iter(touched_files), "")
+    return [
+        _static_finding(
+            title="Unverified 'unrelated CI failure' claim",
+            body=(
+                f"The PR body claims a CI failure is unrelated or flaky, but "
+                f"{len(failing)} check(s) are currently failing: {check_names}. "
+                "Erik's feedback: '\"unrelated to these changes\"? I don't think so' "
+                "(gptme#3169). "
+                "A 'flaky' or 'unrelated' claim is accepted only when the failing "
+                "job's path filter is demonstrably disjoint from this diff. "
+                "State the disjoint filter explicitly, or fix the CI."
+            ),
+            file=anchor,
+            severity="P1",
+            verification="static preflight: CI status + unrelated-claim scan (rule 1b)",
+            suggestion=(
+                "List the failing job's `paths:` / `paths-ignore:` filter and show "
+                "it does not overlap with the changed files in this diff."
+            ),
+        )
+    ]
+
+
+_TEST_FILE_RE = re.compile(
+    r"^tests?/|/tests?/|test_[^/]+$|[^/]+_test\.[^/]+$|[^/]+\.test\.[^/]+$|[^/]+\.spec\.[^/]+$",
+    re.IGNORECASE,
+)
+
+
+_VISUAL_PATH_RE = re.compile(
+    r"\.(tsx|css|scss|less|svelte)$|/(tui|webui|ui|frontend|components)/",
+    re.IGNORECASE,
+)
+_SCREENSHOT_RE = re.compile(r"!\[|<img\s|screenshot|before.{0,10}after", re.IGNORECASE)
+
+
+# A diff line that actually changes rendering. A component file can be touched
+# by a data-only change (an extra field on an object literal) that renders
+# nothing a screenshot could show, so the path alone is not proof of a visual
+# change. Measured FP: gptme/gptme-cloud#930 — a single `organization_id: null`
+# line in `Instances.tsx` demanded an impossible screenshot for 8 review rounds.
+# Session 49dc predicted this sibling of the gptme#3741 test-file exemption.
+_VISUAL_CHANGE_RE = re.compile(
+    # `<[A-Za-z/]` must not fire on TypeScript generics/type annotations.
+    # Measured FP: gptme/gptme#4428 — a data-flow-only change to
+    # ConversationItem.tsx matched `Pick<ConversationSummary, ...>`,
+    # `Promise<void>` and a `<Computed>` mention inside a comment, so rule 1c
+    # demanded a screenshot of a diff that renders nothing. A JSX tag is never
+    # glued to a preceding identifier character; a generic always is.
+    r"(?<![A-Za-z0-9_$])<[A-Za-z/]|className=|class=|style=|color|bg-|background|"
+    r"width:|height:|margin|padding|font|border|z-|display:|opacity|justify|"
+    r"align-|gap-|grid-|flex|shadow|rounded",
+    re.IGNORECASE,
+)
+
+_COMMENT_LINE_RE = re.compile(r"^\s*(?://|/\*|\*|\{/\*)")
+
+# a11y-only props are not screenshotable. Measured FP: gptme/gptme-cloud#946 —
+# an aria-label / aria-hidden hamburger-toggle change raised a blocking P1
+# because `<Button` / `className=` still matched `_VISUAL_CHANGE_RE`.
+_A11Y_ATTR_RE = re.compile(
+    r"""
+    \s+
+    (?:aria-[\w-]+|role|tabIndex|tabindex)
+    =
+    (?:\{[^{}]*\}|"[^"]*"|'[^']*')
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _normalize_visual_payload(lines: list[str]) -> str:
+    """Join +/- lines into a whitespace-stable string with a11y attrs removed.
+
+    Lets an aria-label-only reformat of the same JSX compare equal to the
+    pre-change markup, so rule 1c does not demand an impossible screenshot.
+    """
+    text = "\n".join(raw[1:] for raw in lines)
+    text = _A11Y_ATTR_RE.sub("", text)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s+(/?>)", r"\1", text)
+    return text.strip()
+
+
+def _diff_changes_rendering(file_diff: str) -> bool:
+    """True when a visual file's hunk has any rendering-affecting change.
+
+    Walks only the added/removed lines of one file's diff section. A hunk that
+    only adds files, fields, or non-visual props is data, not UI — nothing a
+    screenshot could show. A11y-attribute-only edits (aria-*, role, tabIndex)
+    of the same markup are treated the same way.
+    """
+    added: list[str] = []
+    removed: list[str] = []
+    for raw in file_diff.splitlines():
+        if raw.startswith(("+++", "---")):
+            continue
+        if raw.startswith("+"):
+            bucket = added
+        elif raw.startswith("-"):
+            bucket = removed
+        else:
+            continue
+        # Comment lines render nothing; prose like `// Legend <Computed>` must
+        # not be mistaken for markup.
+        if _COMMENT_LINE_RE.match(raw[1:]):
+            continue
+        bucket.append(raw)
+    if added or removed:
+        if _normalize_visual_payload(added) == _normalize_visual_payload(removed):
+            return False
+    for raw in added + removed:
+        if _VISUAL_CHANGE_RE.search(raw):
+            return True
+    return False
+
+
+def _diff_deletes_whole_file(file_diff: list[str]) -> bool:
+    """True when this file's diff section deletes the file entirely.
+
+    A deleted file renders nothing, so a screenshot cannot show its removal.
+    Any real UI impact from deleting a component appears in the files that stop
+    importing it, which are checked separately. Measured FP: gptme/gptme#4290 —
+    19 unused shadcn wrappers deleted and rule 1c demanded a screenshot of a
+    deletion, producing a P1 that could not even be anchored (the deleted
+    file's line 1 is not in the new side of the diff), so it was undisposable
+    by construction and deadlocked the self-merge gate.
+    """
+    return any(raw.rstrip() == "+++ /dev/null" for raw in file_diff)
+
+
+def _check_visual_screenshot(
+    pr_body: str, diff: str, touched_files: Collection[str]
+) -> list[dict]:
+    """Rule 1c — visual diffs need a before/after screenshot.
+
+    Erik: 'I merged it, but it's STILL gray bg!' (gptme#3321, #3334, #3461).
+    """
+    # Test files match the visual patterns (e.g. `Foo.test.tsx`) but render
+    # nothing a screenshot could show, so they never satisfy this rule.
+    # Python sources match `/(tui|...)/` (gptme/tui/app.py) the same way, but
+    # they do not render a screenshotable page. Measured FP: gptme/gptme#3750
+    # (metadata-only TUI drain) blocked self-merge on an unsatisfiable P1.
+    # Session 49dc predicted this sibling and left it until it showed up.
+    visual_files = [
+        f
+        for f in touched_files
+        if _VISUAL_PATH_RE.search(f)
+        and not _TEST_FILE_RE.search(f)
+        and not f.endswith(".py")
+    ]
+    if not visual_files:
+        return []
+    if _SCREENSHOT_RE.search(pr_body):
+        return []
+
+    # Some component files are touched only by data changes (a new field on an
+    # object literal, a renamed prop without any render impact). Those render
+    # nothing a screenshot could show, so they are exempt the same way test
+    # files are. Split the diff by file to check each visual file's own hunks.
+    file_diffs: dict[str, list[str]] = {}
+    current: str | None = None
+    for raw in diff.splitlines():
+        if raw.startswith("diff --git"):
+            current = raw.split(" b/", 1)[-1] if " b/" in raw else None
+            if current is not None:
+                current = current.split("\t", 1)[0].rstrip()
+            file_diffs.setdefault(current or "", [])
+        elif current is not None:
+            file_diffs[current].append(raw)
+
+    visual_files = [
+        f
+        for f in visual_files
+        if not _diff_deletes_whole_file(file_diffs.get(f, []))
+        and _diff_changes_rendering("\n".join(file_diffs.get(f, [])))
+    ]
+    if not visual_files:
+        return []
+
+    sample = ", ".join(f"`{f}`" for f in visual_files[:3])
+    extra = f" (+ {len(visual_files) - 3} more)" if len(visual_files) > 3 else ""
+    return [
+        _static_finding(
+            title="Visual changes need a before/after screenshot",
+            body=(
+                f"This PR modifies visual/UI files ({sample}{extra}) "
+                "but the PR body contains no screenshot or before/after image. "
+                "Erik's feedback: 'I merged it, but it's STILL gray bg!' "
+                "(gptme#3321) and 'Add a before/after screenshot' (gptme#3334, #3461). "
+                "Attach a screenshot showing the rendered change."
+            ),
+            file=visual_files[0],
+            severity="P1",
+            line=1,
+            verification="static preflight: visual-file diff check (rule 1c)",
+            suggestion="Add a Markdown image to the PR body: `![Before](url) ![After](url)`",
+        )
+    ]
+
+
+def _check_fix_without_test(
+    pr_title: str, touched_files: Collection[str]
+) -> list[dict]:
+    """Rule 7 — fix(...) PR with zero test files is advisory P2.
+
+    Erik: 'where is the repro & fixes they are supposed to catch' (gptme#3441),
+    'that measurement should come with a regression test' (gptme#3446).
+    Advisory because Erik merged every such PR, but asked for tests each time.
+    """
+    if not re.match(r"^fix(\(.*?\))?:", pr_title.strip(), re.IGNORECASE):
+        return []
+    if any(_TEST_FILE_RE.search(f) for f in touched_files):
+        return []
+    anchor = next(iter(touched_files), "")
+    return [
+        _static_finding(
+            title="fix PR has no regression test",
+            body=(
+                "This is a `fix(...)` PR but no test files are included in the diff. "
+                "Erik's feedback: 'where is the repro & fixes they are supposed to catch' "
+                "(gptme#3441), 'that measurement should come with a regression test' (gptme#3446). "
+                "Add a test that would have caught this bug. "
+                "(Advisory: Erik merged all such PRs but consistently requested tests.)"
+            ),
+            file=anchor,
+            severity="P2",
+            finding_class="guard",
+            verification="static preflight: fix-commit + touched-files scan (rule 7)",
+            suggestion=(
+                "Add a test file that reproduces the bug before the fix and "
+                "passes after it."
+            ),
+        )
+    ]
+
+
+def static_preflight_findings(
+    *,
+    pr_title: str,
+    pr_body: str,
+    diff: str,
+    touched_files: Collection[str],
+    repo: str,
+    number: int,
+    host: DefaultWriterHost | None = None,
+) -> list[dict]:
+    """Collect all mechanical P1/P2 findings that don't require LLM judgment.
+
+    Implements rules 1a, 1b, 1c and 7 (plus host checks) from the 90-day merge-path census
+    (knowledge/strategic/2026-09-07-auto-merge-analysis.md §3).
+
+    Rules 1a, 1b, 1c → P1 hard block
+    Rule 7              → P2 advisory
+
+    Each finding carries one sentence of Erik's rationale so the block reason
+    is self-explanatory in the PR comment without requiring a lookup.
+
+    ``host.extra_static_checks`` adds host policy (Bob's journal append-only
+    rule 8); ``None`` means :class:`DefaultWriterHost`, which adds none.
+    """
+    if host is None:
+        host = DefaultWriterHost()
+    results: list[dict] = []
+    results.extend(_check_cited_shas(pr_body, repo, touched_files, diff))
+    results.extend(_check_unrelated_ci_claim(pr_body, repo, number, touched_files))
+    results.extend(_check_visual_screenshot(pr_body, diff, touched_files))
+    results.extend(_check_fix_without_test(pr_title, touched_files))
+    results.extend(host.extra_static_checks(diff, touched_files))
+    return results
