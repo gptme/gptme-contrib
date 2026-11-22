@@ -147,6 +147,8 @@ class _SlotBreaker:
             # Probe failed → re-open and reset cooldown
             self._state = CircuitState.OPEN
             self._opened_at = now
+            self._probe_started_at = None
+            self._probe_requires_timestamp = False
         else:
             self._failure_count += 1
             if self._failure_count >= self.failure_threshold:
@@ -245,6 +247,8 @@ def _load_breaker(
         b._probe_started_at = (
             float(probe_started_at) if probe_started_at is not None else None
         )
+        if b._probe_started_at is not None and not math.isfinite(b._probe_started_at):
+            b._probe_started_at = None
         requires_timestamp = slot_state.get("probe_requires_timestamp", False)
         if not isinstance(requires_timestamp, bool):
             raise ValueError("non-bool probe_requires_timestamp")
@@ -322,12 +326,14 @@ def decide_respawn(
     if verdict not in _VERDICTS:
         raise ValueError(f"unknown verdict {verdict!r}; expected one of {_VERDICTS}")
 
-    now = time.time()
-    if verdict_started_at is not None and (
-        not math.isfinite(verdict_started_at) or verdict_started_at > now
-    ):
-        raise ValueError("verdict_started_at must be finite and not in the future")
     with _locked_state(state_file) as data:
+        # Sample after acquiring the lock: a pre-lock timestamp could accept
+        # evidence from an attempt that started while we waited for the grant.
+        now = time.time()
+        if verdict_started_at is not None and (
+            not math.isfinite(verdict_started_at) or verdict_started_at > now
+        ):
+            raise ValueError("verdict_started_at must be finite and not in the future")
         slot_state = data.get(slot, {})
         b = _load_breaker(slot_state, threshold, cooldown)
 

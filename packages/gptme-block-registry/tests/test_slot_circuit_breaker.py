@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import time
 from pathlib import Path
@@ -76,6 +77,8 @@ class TestSlotBreaker:
         b.is_open(now + 11.0)  # → HALF_OPEN
         b.record_failure(now + 12.0)
         assert b.state == CircuitState.OPEN
+        assert b._probe_started_at is None
+        assert b._probe_requires_timestamp is False
 
     def test_successful_run_closes_breaker(self) -> None:
         b = self._breaker(threshold=2)
@@ -152,6 +155,24 @@ class TestPersistence:
         # opened_at parse error is silently reset to None; state is preserved
         assert b.state == CircuitState.OPEN
         assert b._opened_at is None
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+    def test_nonfinite_probe_timestamp_cannot_accept_stale_outcome(
+        self,
+        value: float,
+    ) -> None:
+        b = _load_breaker(
+            {
+                "state": "HALF_OPEN",
+                "probe_started_at": value,
+                "probe_requires_timestamp": True,
+            },
+            3,
+            300.0,
+        )
+        assert b._probe_started_at is None
+        assert _apply_verdict(b, PRODUCTIVE, 402.0, 90.0) is True
+        assert b.state == CircuitState.HALF_OPEN
 
     def test_non_bool_probe_pending_resets_to_closed(self) -> None:
         """A string like "false" is truthy under bool(); the field must be
@@ -432,6 +453,38 @@ class TestDecideRespawn:
             verdict=PRODUCTIVE,
             verdict_started_at=703.0,
         ) == (False, "CLOSED")
+
+    def test_probe_grant_clock_is_sampled_after_lock_acquisition(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        sf = tmp_path / "cb.json"
+        clock = [100.0]
+        monkeypatch.setattr(time, "time", lambda: clock[0])
+        decide_respawn(state_file=sf, slot="bob", verdict=AUTH_DEATH, threshold=1)
+        real_flock = fcntl.flock
+
+        def delayed_lock(fd: int, operation: int) -> None:
+            real_flock(fd, operation)
+            if operation == fcntl.LOCK_EX:
+                clock[0] = 402.0  # time spent waiting for the exclusive lock
+
+        monkeypatch.setattr(fcntl, "flock", delayed_lock)
+        clock[0] = 401.0
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=PRODUCTIVE,
+            verdict_started_at=90.0,
+        ) == (False, "HALF_OPEN")
+        assert json.loads(sf.read_text())["bob"]["probe_started_at"] == 402.0
+        assert decide_respawn(
+            state_file=sf,
+            slot="bob",
+            verdict=PRODUCTIVE,
+            verdict_started_at=401.5,
+        ) == (True, "HALF_OPEN")
 
     @pytest.mark.parametrize("started_at", [float("nan"), float("inf"), 101.0])
     def test_invalid_verdict_timestamp_rejected(
