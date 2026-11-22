@@ -452,6 +452,16 @@ def test_cli_scan_filters_but_explicit_file_does_not(tmp_path, monkeypatch, caps
 
     monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
     monkeypatch.setattr(cli, "AWClient", lambda *args, **kwargs: _Client())
+    # The CLI has no clock injection, so fix the tailer's clock instead of relying
+    # on the fixture timestamps already being in the past.
+    fixed = _dt("2026-11-10T13:00:00Z")
+
+    class _FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+
+    monkeypatch.setattr(cc_tailer, "datetime", _FixedDatetime)
     resumed = tmp_path / "new.jsonl"
     resumed.write_text(
         "\n".join(
@@ -472,6 +482,32 @@ def test_cli_scan_filters_but_explicit_file_does_not(tmp_path, monkeypatch, caps
     renamed.write_text(resumed.read_text(encoding="utf-8"), encoding="utf-8")
     assert cli.main(["tail-claude-code", "--file", str(renamed)]) == 0
     assert "events=2" in capsys.readouterr().out
+
+
+def test_partial_copied_trailing_row_does_not_hold_back_the_owned_block(tmp_path, monkeypatch):
+    # A resumed transcript can end in a half-written row copied from the earlier
+    # session. It is filtered out of the parse, so it must not also drop the last
+    # block this transcript owns.
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    transcript = tmp_path / "new.jsonl"
+    transcript.write_text(
+        "\n".join(
+            [
+                _row("2026-11-10T09:00:00Z", sid="old"),
+                _row("2026-11-10T12:00:00Z", sid="new"),
+                '{"type":"user","timestamp":"2026-11-10T12:30:00Z","sessionId":"old"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    client = _Client()
+    assert (
+        cc_tailer.emit_file(
+            client, "host", transcript, now=_dt("2026-11-10T13:00:00Z"), owner="new"
+        )
+        == 1
+    )
+    assert [e.data["session_id"] for _, e in client.posted] == ["new"]
 
 
 def test_explicit_file_keeps_rows_from_another_session_id(tmp_path, monkeypatch):

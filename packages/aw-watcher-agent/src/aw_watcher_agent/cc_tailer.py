@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -235,6 +236,20 @@ def emit_file(
         lock.close()
 
 
+def _trailing_row_is_ours(line: str, owner: str | None) -> bool:
+    """Whether a partially written trailing row can extend this transcript's blocks.
+
+    A resumed transcript can end in a half-written row copied from the earlier
+    session. That row is filtered out of the parse anyway, so it must not hold
+    back the last block this transcript owns. When the session id cannot be read
+    from the fragment, assume it is ours and keep the block held.
+    """
+    if owner is None:
+        return True
+    match = re.search(r'"sessionId"\s*:\s*"([^"]+)"', line)
+    return match is None or match.group(1) == owner
+
+
 def _emit_file_locked(
     client: AWClient,
     hostname: str,
@@ -252,7 +267,7 @@ def _emit_file_locked(
         try:
             json.loads(lines[-1])
         except json.JSONDecodeError:
-            incomplete = True
+            incomplete = _trailing_row_is_ours(lines[-1], owner)
     blocks = parse_session(lines, gap_s=gap_s, owner=owner)
     # A partially written row may extend the last parsed block. Earlier blocks
     # already have a complete successor establishing their idle boundary.

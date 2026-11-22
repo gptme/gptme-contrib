@@ -111,9 +111,10 @@ its name is not a session id and filtering by it would drop every row.
 
 A cursor written by an older version for such a transcript recorded the copied rows;
 it now fails the checkpointed-prefix check. Delete that one cursor to let the
-transcript be re-imported. The re-import posts every row of the transcript, so
-reconcile the events that transcript already posted — both the copied rows and its
-own — before deleting it, e.g. by `timestamp`, `duration` and `session_id`.
+transcript be re-imported. The re-import posts every row the transcript owns (the
+copied rows stay filtered), so reconcile the events it already posted — both the
+copied ones and its own — before deleting it, e.g. by `timestamp`, `duration` and
+`session_id`.
 
 ### Wiring into Claude Code (or any harness with lifecycle hooks)
 
