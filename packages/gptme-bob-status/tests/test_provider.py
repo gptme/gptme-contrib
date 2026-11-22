@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from gptme_bob_status.provider import BobStatusProvider, make_provider
 
 _TASK_JSON = {
@@ -157,7 +158,7 @@ def test_pr_queue_delegates_to_upstream_helper_and_maps_cap(monkeypatch):
         seen["repos"] = repos
         return [{"repo": "gptme/gptme", "count": 4, "cap": 10}]
 
-    monkeypatch.setattr(cmd_status, "_pr_queue", fake_upstream)
+    monkeypatch.setattr(cmd_status, "_pr_queue", fake_upstream, raising=False)
     assert mod._pr_queue() == [{"repo": "gptme/gptme", "count": 4, "watermark": 10}]
     assert seen["repos"] == mod._TRACKED_REPOS
 
@@ -172,6 +173,8 @@ def test_upstream_pr_queue_accepts_a_single_repos_argument():
 
     import gptme.cli.cmd_status as cmd_status
 
+    if not hasattr(cmd_status, "_pr_queue"):
+        pytest.skip("Installed gptme predates the upstream helper")
     params = list(inspect.signature(cmd_status._pr_queue).parameters.values())
     assert params and params[0].name == "repos"
     required = [
@@ -183,6 +186,35 @@ def test_upstream_pr_queue_accepts_a_single_repos_argument():
     assert required == []
 
 
+def test_pr_queue_upstream_matches_local_author_filter_and_watermarks(monkeypatch):
+    """Exercise the real helper, not a fake with assumed author semantics."""
+    import gptme.cli.cmd_status as cmd_status
+    import gptme_bob_status.provider as mod
+
+    if not hasattr(cmd_status, "_pr_queue"):
+        pytest.skip("Installed gptme predates the upstream helper")
+    calls = []
+
+    def fake_run(cmd, *, timeout=10):
+        calls.append((cmd, timeout))
+        if cmd == ["gh", "api", "user", "--jq", ".login"]:
+            return "example-author"
+        assert cmd[cmd.index("--author") + 1] == "example-author"
+        return '[{"number": 1, "title": "Test PR"}]'
+
+    monkeypatch.setattr(cmd_status, "_run", fake_run)
+    monkeypatch.setattr(mod, "_run", fake_run)
+    delegated = mod._pr_queue()
+    upstream_calls = calls.copy()
+    calls.clear()
+    assert delegated == mod._pr_queue_local()
+    assert delegated == [
+        {"repo": repo, "count": 1, "watermark": watermark}
+        for repo, watermark in mod._TRACKED_REPOS
+    ]
+    assert calls == upstream_calls
+
+
 def test_pr_queue_falls_back_when_upstream_helper_missing(monkeypatch):
     """Older gptme (>=0.29 floor) has the module but not the helper."""
     import gptme.cli.cmd_status as cmd_status
@@ -190,14 +222,14 @@ def test_pr_queue_falls_back_when_upstream_helper_missing(monkeypatch):
 
     # The real older-gptme failure is ``ImportError: cannot import name
     # '_pr_queue'``, not a missing module.
-    monkeypatch.delattr(cmd_status, "_pr_queue")
+    monkeypatch.delattr(cmd_status, "_pr_queue", raising=False)
     monkeypatch.setattr(
         mod, "_pr_queue_local", lambda: [{"repo": "r", "count": 1, "watermark": None}]
     )
     assert mod._pr_queue() == [{"repo": "r", "count": 1, "watermark": None}]
 
 
-def test_pr_queue_falls_back_when_upstream_helper_raises(monkeypatch):
+def test_pr_queue_falls_back_when_upstream_helper_raises(monkeypatch, caplog):
     """A raising upstream helper degrades to the local loop, not a crash."""
     import gptme.cli.cmd_status as cmd_status
     import gptme_bob_status.provider as mod
@@ -205,11 +237,12 @@ def test_pr_queue_falls_back_when_upstream_helper_raises(monkeypatch):
     def broken(repos):
         raise RuntimeError("upstream private helper drifted")
 
-    monkeypatch.setattr(cmd_status, "_pr_queue", broken)
+    monkeypatch.setattr(cmd_status, "_pr_queue", broken, raising=False)
     monkeypatch.setattr(
         mod, "_pr_queue_local", lambda: [{"repo": "r", "count": 2, "watermark": 5}]
     )
     assert mod._pr_queue() == [{"repo": "r", "count": 2, "watermark": 5}]
+    assert "upstream private helper drifted" in caplog.text
 
 
 def test_pr_queue_display_marks_watermark_for_triage_not_blocking():

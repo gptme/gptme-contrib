@@ -126,6 +126,7 @@ def _pr_queue() -> list[dict]:
     except Exception:
         # Upstream is a private helper: if it raises or changes shape, degrade to
         # the local loop instead of aborting status collection entirely.
+        logger.warning("Upstream PR queue failed; using local fallback", exc_info=True)
         return _pr_queue_local()
 
 
