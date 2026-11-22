@@ -747,3 +747,21 @@ def test_visual_rule_ignores_generics_and_whole_file_deletions(alice_io):
         w._check_visual_screenshot("![After](u)", markup, ["web/src/components/A.tsx"])
         == []
     )
+
+
+def test_cited_sha_requires_a_word_boundary_before_the_trigger(alice_io):
+    """Prose that merely contains a trigger word is not a citation.
+
+    ``unfixed in <sha>`` / ``prefixcommit <sha>`` must not fire a lookup: the
+    same hyphen/word-boundary misfire the ``merged`` alternative already guards
+    against (gptme-cloud#902).
+    """
+    fake_run, calls = _scripted_run({("gh",): (0, "")})
+    w = _bound_with(alice_io, run=fake_run)
+    for body in (
+        "the bug is unfixed in abc1234",
+        "prefixcommit abc1234",
+        "xfollow-up-commit abc1234",
+    ):
+        assert w._check_cited_shas(body, "o/r", ["src/a.py"]) == []
+    assert calls == []

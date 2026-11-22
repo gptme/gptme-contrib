@@ -3237,10 +3237,10 @@ def _check_cited_shas(
     _sha = r"`?([0-9a-f]{7,12})`?(?![0-9a-f])"
     pattern = re.compile(
         r"(?:"
-        r"fixed\s+in\s+" + _sha + r""
+        r"(?<![\w-])fixed\s+in\s+" + _sha + r""
         r"|(?<![\w-])merged\s+(?:as\s+)?" + _sha + r""
-        r"|(?:commit|sha)\s*:?\s*" + _sha + r""
-        r"|follow.up\s+commit\s+" + _sha + r""
+        r"|(?<![\w-])(?:commit|sha)\s*:?\s*" + _sha + r""
+        r"|(?<![\w-])follow.up\s+commit\s+" + _sha + r""
         r")",
         re.IGNORECASE,
     )
