@@ -354,20 +354,25 @@ class BanditState:
             reverse=True,
         )
 
-    def apply_decay(self, gamma: float) -> int:
-        """Apply exponential decay to all arms (global + contextual).
+    def apply_decay(self, gamma: float, only: set[str] | None = None) -> int:
+        """Apply exponential decay to arms (global + contextual).
 
         Args:
             gamma: Decay rate in (0, 1). Higher = slower decay.
+            only: If given, decay just these arm IDs (their global arm and all
+                contextual sub-arms); unknown IDs are ignored.
 
         Returns:
             Number of arms decayed.
         """
         count = 0
-        for arm in self.arms.values():
-            arm.apply_decay(gamma)
-            count += 1
-        for contexts in self.contextual_arms.values():
+        for arm_id, arm in self.arms.items():
+            if only is None or arm_id in only:
+                arm.apply_decay(gamma)
+                count += 1
+        for arm_id, contexts in self.contextual_arms.items():
+            if only is not None and arm_id not in only:
+                continue
             for arm in contexts.values():
                 arm.apply_decay(gamma)
                 count += 1
@@ -621,6 +626,7 @@ class Bandit:
         context: tuple[str, ...] | None = None,
         decay_rate: float | None = None,
         per_arm_rewards: dict[str, float] | None = None,
+        per_arm_decay: bool = False,
     ) -> dict[str, bool]:
         """Update after a session and save state.
 
@@ -631,11 +637,18 @@ class Bandit:
             context: Optional context tuple for contextual arms.
             decay_rate: If set, apply exponential decay before updating.
             per_arm_rewards: Optional per-arm rewards for salience-weighted credit.
+            per_arm_decay: If True, ``decay_rate`` decays only ``active_arms``
+                (global and every contextual sub-arm of each) instead of every arm.
+                Use it when arms are only sometimes selected, so global decay would
+                keep pulling the unselected ones back toward the prior.
         """
         with self._state_lock():
             self.state = self._load_state()
             if decay_rate is not None:
-                self.state.apply_decay(decay_rate)
+                if per_arm_decay:
+                    self.state.apply_decay(decay_rate, only=set(active_arms))
+                else:
+                    self.state.apply_decay(decay_rate)
             result = self.state.update_session(
                 active_arms, outcome, context=context, per_arm_rewards=per_arm_rewards
             )

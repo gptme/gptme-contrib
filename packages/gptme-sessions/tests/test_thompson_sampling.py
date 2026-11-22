@@ -362,6 +362,46 @@ def test_bandit_update_with_decay(tmp_path: Path):
     assert bandit.state.arms["code"].alpha == pytest.approx(expected)
 
 
+def test_bandit_update_per_arm_decay_spares_unselected_arms(tmp_path: Path):
+    """per_arm_decay decays only the arms in active_arms, not the whole state."""
+    bandit = Bandit(state_dir=tmp_path)
+    bandit.update(["code"], outcome=1.0)
+    bandit.update(["docs"], outcome=1.0)
+    docs_before = (bandit.state.arms["docs"].alpha, bandit.state.arms["docs"].beta)
+    code_alpha = bandit.state.arms["code"].alpha
+
+    bandit.update(["code"], outcome=1.0, decay_rate=0.5, per_arm_decay=True)
+
+    assert bandit.state.arms["code"].alpha == pytest.approx(1.0 + 0.5 * (code_alpha - 1.0) + 1.0)
+    assert (bandit.state.arms["docs"].alpha, bandit.state.arms["docs"].beta) == docs_before
+    # Global decay (the default) still decays the unselected arm.
+    bandit.update(["code"], outcome=1.0, decay_rate=0.5)
+    assert bandit.state.arms["docs"].alpha < docs_before[0]
+
+
+def test_bandit_update_per_arm_decay_covers_contextual_subarms(tmp_path: Path):
+    """An active arm's sub-arms in every context decay; other arms' sub-arms do not."""
+    bandit = Bandit(state_dir=tmp_path)
+    bandit.update(["code"], outcome=1.0, context=("a",))
+    bandit.update(["code"], outcome=1.0, context=("b",))
+    bandit.update(["docs"], outcome=1.0, context=("a",))
+    ctx_a = '["a"]'
+    code_b_before = bandit.state.contextual_arms["code"]['["b"]'].alpha
+    docs_before = bandit.state.contextual_arms["docs"][ctx_a].alpha
+
+    bandit.update(["code"], outcome=1.0, context=("a",), decay_rate=0.5, per_arm_decay=True)
+
+    assert bandit.state.contextual_arms["code"]['["b"]'].alpha < code_b_before
+    assert bandit.state.contextual_arms["docs"][ctx_a].alpha == docs_before
+
+
+def test_apply_decay_only_ignores_unknown_ids_and_counts(tmp_path: Path):
+    state = BanditState()
+    state.update_session(["code", "docs"], 1.0)
+    assert state.apply_decay(0.5, only={"code", "missing"}) == 1
+    assert state.apply_decay(0.5) == 2
+
+
 def test_bandit_context_isolation(tmp_path: Path):
     """Context-specific posteriors don't pollute each other."""
     bandit = Bandit(state_dir=tmp_path)
