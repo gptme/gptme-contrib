@@ -168,3 +168,300 @@ def test_host_seams_reach_calls_inside_the_writer(alice_io):
     assert calls[0][1]["BOB_GRAPHQL_MUTATION_REPO"] == "o/r"
     assert w.dismissed_findings("o/r", 7, threads=[]) == []
     assert ("comments", "o/r", 7) in calls
+
+
+# --- writer-port slice 2c: diff shaping, notes and render ---------------------
+
+_SUBMODULE_DIFF = (
+    "diff --git a/gptme-contrib b/gptme-contrib\n"
+    "index 1111111..2222222 160000\n"
+    "--- a/gptme-contrib\n"
+    "+++ b/gptme-contrib\n"
+    "@@ -1 +1 @@\n"
+    "-Subproject commit 1111111111111111111111111111111111111111\n"
+    "+Subproject commit 2222222222222222222222222222222222222222\n"
+)
+_LOCK_DIFF = (
+    "diff --git a/uv.lock b/uv.lock\n"
+    "--- a/uv.lock\n"
+    "+++ b/uv.lock\n"
+    "@@ -1 +1 @@\n"
+    "-old\n"
+    "+new\n"
+)
+_CODE_DIFF = (
+    "diff --git a/src/a.py b/src/a.py\n"
+    "--- a/src/a.py\n"
+    "+++ b/src/a.py\n"
+    "@@ -1 +1 @@\n"
+    "-old\n"
+    "+new\n"
+)
+
+
+def _render(w, findings=None, **kwargs):
+    defaults = dict(
+        model="m",
+        engine="llm",
+        elapsed=1.0,
+        head_sha="abc1234",
+        full_sha="abc1234deadbeef",
+        repo_slug="o/r",
+        anchored=set(),
+        history=[],
+    )
+    defaults.update(kwargs)
+    return w.render(findings or [], **defaults)
+
+
+def test_submodule_only_diff_is_pure():
+    assert writer.is_submodule_only_diff(_SUBMODULE_DIFF) is True
+    assert writer.is_submodule_only_diff(_CODE_DIFF) is False
+    assert writer.is_submodule_only_diff(_SUBMODULE_DIFF + _CODE_DIFF) is False
+    assert writer.is_submodule_only_diff("") is False
+
+
+@pytest.mark.parametrize(
+    "diff",
+    [
+        _SUBMODULE_DIFF.replace("160000", "100644"),
+        _SUBMODULE_DIFF.replace("index 1111111..2222222 160000\n", ""),
+        _SUBMODULE_DIFF + "diff --git a/a.png b/a.png\nBinary files differ\n",
+        _SUBMODULE_DIFF
+        + "diff --git a/a b/b\nsimilarity index 100%\nrename from a\nrename to b\n",
+        _SUBMODULE_DIFF + "diff --git a/a b/a\nold mode 100644\nnew mode 100755\n",
+        _SUBMODULE_DIFF.replace(
+            "+Subproject commit", "+source mentions Subproject commit"
+        ),
+    ],
+)
+def test_submodule_detection_requires_gitlink_metadata_in_every_section(diff):
+    assert writer.is_submodule_only_diff(diff) is False
+
+
+@pytest.mark.parametrize("adding", [True, False])
+def test_submodule_addition_and_deletion_are_pointer_only(adding):
+    diff = (
+        "diff --git a/sub b/sub\n"
+        + ("new file mode 160000\n" if adding else "deleted file mode 160000\n")
+        + "index 0000000..1111111\n"
+        + ("--- /dev/null\n+++ b/sub\n" if adding else "--- a/sub\n+++ /dev/null\n")
+        + "@@ -0,0 +1 @@\n"
+        + ("+" if adding else "-")
+        + "Subproject commit "
+        + "1" * 40
+        + "\n"
+    )
+    assert writer.is_submodule_only_diff(diff) is True
+
+
+def test_generated_files_are_elided_unless_the_diff_is_only_them():
+    mixed = _CODE_DIFF + _LOCK_DIFF
+    touched, reviewable, _, elided = writer.extract_touched_files_and_reviewable_diff(
+        mixed
+    )
+    assert touched == {"src/a.py"}
+    assert "uv.lock" not in reviewable
+    assert [e["path"] for e in elided] == ["uv.lock"]
+    # lockfile-only stays whole so a 5/5 cannot launder an unexamined change
+    touched, reviewable, _, elided = writer.extract_touched_files_and_reviewable_diff(
+        _LOCK_DIFF
+    )
+    assert elided == []
+    assert "uv.lock" in reviewable
+    assert touched == {"uv.lock"}
+
+
+@pytest.mark.parametrize(
+    "path", ["src/é.py", "src/a\tb.py", 'src/a"b.py', "src/a b.py"]
+)
+@pytest.mark.parametrize("delete", [False, True])
+def test_diff_paths_decode_real_git_quoting(tmp_path, path, delete):
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), *args],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+
+    git("init", "-q")
+    source = tmp_path / path
+    source.parent.mkdir(parents=True)
+    source.write_text("before\n")
+    git("add", ".")
+    base = git("write-tree").strip()
+    if delete:
+        source.unlink()
+    else:
+        source.write_text("after\n")
+    lock = tmp_path / "déps" / "uv.lock"
+    lock.parent.mkdir()
+    lock.write_text("generated\n")
+    git("add", "-A")
+    diff = git("-c", "core.quotePath=true", "diff", "--cached", base)
+    touched, reviewable, size, elided = (
+        writer.extract_touched_files_and_reviewable_diff(diff)
+    )
+    assert touched == {path}
+    assert [e["path"] for e in elided] == ["déps/uv.lock"]
+    assert size == len(reviewable.encode())
+    finding = {"file": path, "body": "in scope"}
+    assert writer.drop_out_of_scope_findings([finding], touched) == ([finding], [])
+
+
+def test_elision_note_names_the_skipped_file():
+    assert writer.elision_note(None) == ""
+    note = writer.elision_note(
+        [{"path": "uv.lock", "added": 1, "removed": 1, "bytes": 2048}]
+    )
+    assert "uv.lock" in note and "NOT reviewed" in note
+
+
+def test_drop_out_of_scope_splits_on_touched_files():
+    findings = [
+        {"file": "src/a.py", "body": "in"},
+        {"file": "src/old.py", "body": "out"},
+        {"file": "", "body": "pr-level"},
+    ]
+    in_scope, out = writer.drop_out_of_scope_findings(findings, {"src/a.py"})
+    assert in_scope == [findings[0]]
+    assert out == [findings[1], findings[2]]
+
+
+@pytest.mark.parametrize("paths", [["old.py"], [""], ["old.py", ""]])
+def test_suppression_note_covers_unanchored_and_untouched_findings(paths):
+    suppressed = [{"file": path, "suppressed_reason": "out_of_scope"} for path in paths]
+    note = writer.suppression_note(suppressed)
+    assert f"{len(paths)} finding" in note
+    assert "not anchored to a file this PR changed" in note
+    assert "on files this PR did not touch" not in note
+    assert writer.suppression_note([{"suppressed_reason": "consensus_rejected"}]) == ""
+
+
+def test_head_path_exists_uses_bound_run_and_encodes_the_path(alice_io):
+    seen: list[str] = []
+
+    def fake_run(cmd, **kw):
+        seen.extend(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    alice_io.run = fake_run
+    w = writer.bind_io(alice_io)
+    assert w.head_path_exists("o/r", "head#1", "docs/a b?#.md") is True
+    assert "repos/o/r/contents/docs/a%20b%3F%23.md" in seen
+    assert seen[-2:] == ["-f", "ref=head#1"]
+
+
+def test_drop_nonexistent_head_findings_honours_a_host_path_probe(alice_io):
+    alice_io.head_path_exists = lambda *_args: False
+    w = writer.bind_io(alice_io)
+    kept, dropped = w.drop_nonexistent_head_findings(
+        [
+            {"file": "src/gone.py", "body": "x"},
+            {"file": "", "body": "pr-level"},
+        ],
+        repo="o/r",
+        ref="abc",
+        known_existing_paths={"src/kept.py"},
+    )
+    assert [f["file"] for f in kept] == [""]
+    assert [f["file"] for f in dropped] == ["src/gone.py"]
+
+
+def test_unbound_render_refuses_instead_of_posting_as_bob():
+    with pytest.raises(RuntimeError, match="no host bound"):
+        writer.render(
+            [],
+            model="m",
+            engine="llm",
+            elapsed=1.0,
+            head_sha="abc",
+            full_sha="abc",
+            repo_slug="o/r",
+            anchored=set(),
+            history=[],
+        )
+
+
+def test_render_footer_uses_the_bound_identity(alice_io):
+    w = writer.bind_io(alice_io)
+    body = _render(w)
+    assert "`@alice-agent review`" in body
+    assert "`@alice-agent fix`" in body
+    assert "@TimeToBuildBob" not in body
+    assert "alice-ai-review" not in body or "<!--" not in body.split("Maintainer")[-1]
+
+
+def test_two_hosts_render_independent_footers():
+    a = writer.default_io(sweep_identity("alice-agent", "alice-ai-review"))
+    b = writer.default_io(sweep_identity("TimeToBuildBob", "bob-ai-review"))
+    wa, wb = writer.bind_io(a), writer.bind_io(b)
+    assert "`@alice-agent review`" in _render(wa)
+    assert "`@TimeToBuildBob review`" in _render(wb)
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("<outside> ``<inside>``", "&lt;outside&gt; ``<inside>``"),
+        ("``the tag `<x>` is literal``", "``the tag `<x>` is literal``"),
+        ("```a ``<x>`` b```", "```a ``<x>`` b```"),
+        ("``<a>\n<b>``", "``<a>\n<b>``"),
+        ("``<unclosed>`", "``&lt;unclosed&gt;`"),
+        ("``<a>``` <b>", "``&lt;a&gt;``` &lt;b&gt;"),
+        ("`<a>` and ``<b>`` <c>", "`<a>` and ``<b>`` &lt;c&gt;"),
+    ],
+)
+def test_md_text_preserves_equal_length_backtick_spans(text, expected):
+    assert writer.md_text(text) == expected
+    assert writer.md_text(text + "|", escape_pipes=True) == expected + "\\|"
+
+
+@pytest.mark.parametrize(
+    "path, code, encoded",
+    [
+        ("src/lib(1).py", "`src/lib(1).py`", "src/lib%281%29.py"),
+        ("src/a)b].py", "`src/a)b].py`", "src/a%29b%5D.py"),
+        ("src/a`b.py", "``src/a`b.py``", "src/a%60b.py"),
+        ("`src/a``.py`", "``` `src/a``.py` ```", "%60src/a%60%60.py%60"),
+        ("src/<x>&#?.py", "`src/<x>&#?.py`", "src/%3Cx%3E%26%23%3F.py"),
+        ("src/a b.py", "`src/a b.py`", "src/a%20b.py"),
+    ],
+)
+def test_render_locations_and_file_lists_quote_literal_paths(
+    alice_io, path, code, encoded
+):
+    w = writer.bind_io(alice_io)
+    finding = {"file": path, "line": 10, "severity": "P2", "body": "Bug."}
+    # Unanchored findings get a permalink; anchored ones use a plain code span.
+    with_line = code.replace(path, path + ":10")
+    body = _render(w, [finding])
+    assert (
+        f"[{with_line}](https://github.com/o/r/blob/abc1234deadbeef/{encoded}#L10)"
+        in body
+    )
+    anchored = _render(w, [finding], anchored={id(finding)})
+    assert f" — {with_line}\n" in anchored
+    no_line = _render(w, [{**finding, "line": None}])
+    assert f" — {code}\n" in no_line
+    files = "\n".join(
+        w.render_files_changed(
+            {"files": [{"path": path, "description": "Touches <tag>."}]}, [path]
+        )
+    )
+    assert f"- {code} — Touches &lt;tag&gt;." in files
+    assert f"Also changed, not described above: {code}</sub>" in files
+
+
+def test_mixed_advisory_and_informational_notes_do_not_claim_all_are_outside(alice_io):
+    body = _render(
+        writer.bind_io(alice_io),
+        advisory_findings=[{"file": "changed.py", "line": 1, "body": "Advisory."}],
+        informational_findings=[
+            {"file": "untouched.py", "line": 2, "body": "Outside."}
+        ],
+    )
+    assert "No thread-worthy findings." in body
+    assert "What follows is outside them" not in body
+    assert "changed.py:1" in body and "untouched.py:2" in body
