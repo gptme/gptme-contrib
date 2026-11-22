@@ -751,6 +751,19 @@ def test_visual_rule_does_not_skip_a_css_universal_selector(alice_io):
     assert w._check_visual_screenshot("![After](u)", diff, [path]) == []
 
 
+def test_visual_rule_reads_a_hunk_line_that_starts_with_double_dash(alice_io):
+    """Only pre-hunk ``+++``/``---`` are headers; hunk content is inspected."""
+    w = writer.bind_io(alice_io)
+    path = "web/src/static/dark.css"
+    diff = (
+        f"diff --git a/{path} b/{path}\n"
+        f"--- a/{path}\n+++ b/{path}\n"
+        "@@ -1 +1 @@\n---border: 1px\n+++border: 2px\n"
+    )
+    findings = w._check_visual_screenshot("", diff, [path])
+    assert len(findings) == 1 and findings[0]["severity"] == "P1"
+
+
 def test_visual_rule_still_skips_block_comment_continuations(alice_io):
     """Prose in a ``*``-prefixed comment line still renders nothing."""
     w = writer.bind_io(alice_io)

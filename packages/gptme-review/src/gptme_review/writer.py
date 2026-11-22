@@ -3465,8 +3465,16 @@ def _diff_changes_rendering(file_diff: str) -> bool:
     """
     added: list[str] = []
     removed: list[str] = []
+    in_hunk = False
     for raw in file_diff.splitlines():
-        if raw.startswith(("+++", "---")):
+        if raw.startswith("@@"):
+            in_hunk = True
+            continue
+        # `+++`/`---` before the first hunk are file headers. Inside a hunk the
+        # same prefix is hunk content: an added line starting with `++` (e.g.
+        # the CSS custom property `++my-var: 1px`) renders as `+++my-var`, and
+        # skipping it would exempt a real visual change from rule 1c.
+        if not in_hunk and raw.startswith(("+++", "---")):
             continue
         if raw.startswith("+"):
             bucket = added
