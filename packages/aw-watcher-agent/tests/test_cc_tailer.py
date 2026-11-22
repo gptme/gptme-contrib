@@ -451,7 +451,13 @@ def test_cli_scan_filters_but_explicit_file_does_not(tmp_path, monkeypatch, caps
     from aw_watcher_agent import cli
 
     monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
-    monkeypatch.setattr(cli, "AWClient", lambda *args, **kwargs: _Client())
+    clients: list[_Client] = []
+
+    def _make_client(*args, **kwargs):
+        clients.append(_Client())
+        return clients[-1]
+
+    monkeypatch.setattr(cli, "AWClient", _make_client)
     # The CLI has no clock injection, so fix the tailer's clock instead of relying
     # on the fixture timestamps already being in the past.
     fixed = _dt("2026-11-10T13:00:00Z")
@@ -476,12 +482,14 @@ def test_cli_scan_filters_but_explicit_file_does_not(tmp_path, monkeypatch, caps
     monkeypatch.setattr(cc_tailer, "transcripts", lambda: [resumed])
     assert cli.main(["tail-claude-code"]) == 0
     assert "events=1" in capsys.readouterr().out
+    assert [e.data["session_id"] for _, e in clients[0].posted] == ["new"]
 
     # --file on the same transcript processes it as given, so its copied rows post.
     renamed = tmp_path / "renamed.jsonl"
     renamed.write_text(resumed.read_text(encoding="utf-8"), encoding="utf-8")
     assert cli.main(["tail-claude-code", "--file", str(renamed)]) == 0
     assert "events=2" in capsys.readouterr().out
+    assert sorted(e.data["session_id"] for _, e in clients[1].posted) == ["new", "old"]
 
 
 def test_partial_copied_trailing_row_does_not_hold_back_the_owned_block(tmp_path, monkeypatch):
