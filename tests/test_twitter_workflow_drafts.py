@@ -987,18 +987,28 @@ def test_review_dry_run_leaves_draft_unchanged(
     assert list(workflow_module.APPROVED_DIR.iterdir()) == []
 
 
+@pytest.mark.parametrize("status", ["new", "review"])
 def test_edit_clears_quality_score_so_auto_reviews_again(
-    workflow_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    workflow_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
 ) -> None:
     _set_status_dirs(workflow_module, tmp_path)
-    reviewed_path = workflow_module.NEW_DIR / "already-reviewed.yml"
+    reviewed_path = workflow_module.TWEETS_DIR / status / "already-reviewed.yml"
     workflow_module.TweetDraft(text="rejected earlier", quality_score=2).save(
         reviewed_path
     )
 
     workflow_module.edit("already-reviewed", "revised text")
 
-    assert workflow_module.TweetDraft.load(reviewed_path).quality_score is None
+    queued_path = workflow_module.NEW_DIR / reviewed_path.name
+    assert queued_path.exists()
+    if status == "review":
+        assert not reviewed_path.exists()
+    edited = workflow_module.TweetDraft.load(queued_path)
+    assert edited.quality_score is None
+    assert edited.text == "revised text"
 
     reviews: list[Any] = []
 
