@@ -2810,10 +2810,11 @@ def auto(
             # Get LLM review
             approved_by_llm, review_result = verify_draft(draft.to_dict())
 
-            # Compute and save quality score
+            # A preview must not mark the draft reviewed for later cycles.
             quality_score = compute_quality_score(review_result)
-            draft.quality_score = quality_score
-            draft.save(path)  # Persist quality_score to file
+            if not dry_run:
+                draft.quality_score = quality_score
+                draft.save(path)  # Persist quality_score to file
 
             # Display review results
             stars = "★" * quality_score + "☆" * (3 - quality_score)
