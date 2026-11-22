@@ -24,9 +24,9 @@ Environment:
                     GREPTILE_REPOS=gptme/gptme,gptme/gptme-contrib python3 ...
 
 Exit codes:
-    0  All actionable re-reviews triggered successfully (or nothing to do).
-    1  Partial failure — at least one trigger succeeded, at least one failed.
-    2  Total failure — all trigger attempts failed, or unrecoverable error
+    0  All helper requests handled without error (including safe skips), or nothing to do.
+    1  Partial failure — at least one helper request succeeded, at least one failed.
+    2  Total failure — all helper requests failed, or unrecoverable error
        (auth failure, helper unavailable).
 """
 
@@ -223,7 +223,7 @@ def review_state_for_pr(repo: str, pr_number: int) -> str:
 
 
 def trigger_greptile(repo: str, pr_number: int) -> tuple[bool, str]:
-    """Trigger Greptile re-review through the safe helper."""
+    """Request a review; True means the helper handled it, possibly by safely skipping."""
     if not SAFE_HELPER.exists():
         return False, "helper-missing"
     result = _helper_cmd("trigger", repo, pr_number)
@@ -398,7 +398,7 @@ def _run(args: argparse.Namespace) -> int:
             )
         return 0
 
-    print(f"PRs needing Greptile re-review: {len(actionable)}\n")
+    print(f"PRs eligible for a Greptile review request: {len(actionable)}\n")
     for pr in actionable:
         label = {
             "stale": "⚠️",
@@ -408,18 +408,20 @@ def _run(args: argparse.Namespace) -> int:
         print(f"  {label} {pr.repo}#{pr.number}: {pr.title[:60]}")
 
     if not args.execute:
-        print(f"\nDry run — pass --execute to trigger {len(actionable)} re-reviews.")
+        print(f"\nDry run — pass --execute to request {len(actionable)} reviews.")
         return 0
 
-    # Trigger re-reviews
-    print(f"\nTriggering {len(actionable)} Greptile re-reviews...\n")
-    triggered = 0
+    # The helper owns duplicate/backoff guards; exit 0 includes deliberate skips.
+    print(
+        f"\nRequesting {len(actionable)} Greptile reviews through the safe helper...\n"
+    )
+    handled = 0
     for i, pr in enumerate(actionable):
-        print(f"  Triggering {pr.repo}#{pr.number}...", end=" ", flush=True)
+        print(f"  Requesting {pr.repo}#{pr.number}...", end=" ", flush=True)
         success, detail = trigger_greptile(pr.repo, pr.number)
         if success:
-            print("✅")
-            triggered += 1
+            print("✅ handled (may be safely skipped)")
+            handled += 1
         else:
             print("❌")
         if detail:
@@ -428,10 +430,10 @@ def _run(args: argparse.Namespace) -> int:
         if i < len(actionable) - 1:
             time.sleep(1)
 
-    print(f"\nDone: {triggered}/{len(actionable)} re-reviews triggered.")
-    if triggered == 0:
+    print(f"\nDone: {handled}/{len(actionable)} helper requests handled without error.")
+    if handled == 0:
         return 2  # All failed
-    if triggered < len(actionable):
+    if handled < len(actionable):
         return 1  # Partial failure — some triggers succeeded, some failed
     return 0  # All succeeded
 

@@ -25,6 +25,12 @@ sys.modules[spec.name] = pr_greptile_trigger
 spec.loader.exec_module(pr_greptile_trigger)
 
 
+@pytest.fixture(autouse=True)
+def default_initial_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Behavior tests use the default; setting-parser tests run in subprocesses."""
+    monkeypatch.setattr(pr_greptile_trigger, "INITIAL_REVIEW_GRACE_MINUTES", 45)
+
+
 def test_review_state_for_pr_timeout_returns_error() -> None:
     mock_helper = MagicMock(spec=Path)
     mock_helper.exists.return_value = True
@@ -302,6 +308,37 @@ def test_main_partial_fetch_with_prs_warns_stderr(
     assert rc == 0
     assert "warn" in captured.err.lower() or "missed" in captured.err.lower()
     assert "1/2" in captured.err
+
+
+def test_helper_skip_is_not_reported_as_posted_review(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "fetch_prs",
+        lambda repo, author: [
+            {"number": 1, "title": "t", "url": "u", "createdAt": "2020-01-01T00:00:00Z"}
+        ],
+    )
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "review_state_for_pr",
+        lambda repo, num: "awaiting-initial-review",
+    )
+    detail = "Initial-review trigger already attempted. Not triggering again."
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "_helper_cmd",
+        lambda *args: subprocess.CompletedProcess(args, 0, detail, ""),
+    )
+    args = pr_greptile_trigger._parse_args(
+        ["--execute", "--author", "bot", "--repo", "o/r"]
+    )
+    assert pr_greptile_trigger._run(args) == 0
+    output = capsys.readouterr().out
+    assert detail in output
+    assert "1/1 helper requests handled without error" in output
+    assert "1/1 re-reviews triggered" not in output
 
 
 # --- initial-review fallback ---
