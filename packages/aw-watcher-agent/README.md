@@ -104,12 +104,16 @@ as the hooks below, with `harness=claude-code` and `workspace` set to the projec
 directory. Use either the tailer or lifecycle hooks for a session, not both.
 
 A resumed Claude Code session writes a new transcript that begins with copies of the
-earlier session's rows. Rows whose `sessionId` differs from the transcript's file name
-are skipped, so each block is posted once, from the transcript that owns it. A cursor
-written by an older version for such a transcript recorded the copied rows; it now
-fails the checkpointed-prefix check. Delete that one cursor to let the transcript be
-re-imported from its own rows (the copied events already in the bucket are exact
-duplicates and can be dropped by `timestamp`, `duration` and `session_id`).
+earlier session's rows. In the scan path, rows whose `sessionId` differs from the
+transcript's file name are skipped, so each block is posted once, from the transcript
+that owns it. `--file` is exempt: a file you name yourself is processed as-is, because
+its name is not a session id and filtering by it would drop every row.
+
+A cursor written by an older version for such a transcript recorded the copied rows;
+it now fails the checkpointed-prefix check. Delete that one cursor to let the
+transcript be re-imported. The re-import posts every row of the transcript, so
+reconcile the events that transcript already posted — both the copied rows and its
+own — before deleting it, e.g. by `timestamp`, `duration` and `session_id`.
 
 ### Wiring into Claude Code (or any harness with lifecycle hooks)
 

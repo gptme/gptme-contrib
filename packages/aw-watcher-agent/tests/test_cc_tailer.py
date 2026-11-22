@@ -423,9 +423,11 @@ def test_resumed_session_does_not_repost_copied_blocks(tmp_path, monkeypatch):
     )
     client = _Client()
     now = _dt("2026-11-10T13:00:00Z")
-    assert cc_tailer.emit_file(client, "host", original, now=now) == 1
-    assert cc_tailer.emit_file(client, "host", resumed, now=now) == 1
-    assert cc_tailer.emit_file(client, "host", resumed, now=now) == 0
+    # The scan path passes the file stem as the owner, which is how a session
+    # transcript is named.
+    assert cc_tailer.emit_file(client, "host", original, now=now, owner=original.stem) == 1
+    assert cc_tailer.emit_file(client, "host", resumed, now=now, owner=resumed.stem) == 1
+    assert cc_tailer.emit_file(client, "host", resumed, now=now, owner=resumed.stem) == 0
     keys = [(e.timestamp, e.duration, e.data["session_id"]) for _, e in client.posted]
     assert len(keys) == len(set(keys)) == 2
     assert {k[2] for k in keys} == {"old", "new"}
@@ -436,5 +438,48 @@ def test_transcript_holding_only_copied_rows_emits_nothing(tmp_path, monkeypatch
     transcript = tmp_path / "new.jsonl"
     transcript.write_text(_row("2026-11-10T09:00:00Z", sid="old"), encoding="utf-8")
     client = _Client()
-    assert cc_tailer.emit_file(client, "host", transcript, now=_dt("2026-11-10T13:00:00Z")) == 0
+    assert (
+        cc_tailer.emit_file(
+            client, "host", transcript, now=_dt("2026-11-10T13:00:00Z"), owner="new"
+        )
+        == 0
+    )
     assert client.posted == []
+
+
+def test_cli_scan_filters_but_explicit_file_does_not(tmp_path, monkeypatch, capsys):
+    from aw_watcher_agent import cli
+
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    monkeypatch.setattr(cli, "AWClient", lambda *args, **kwargs: _Client())
+    resumed = tmp_path / "new.jsonl"
+    resumed.write_text(
+        "\n".join(
+            [
+                _row("2026-11-10T09:00:00Z", sid="old"),
+                _row("2026-11-10T09:10:00Z", sid="old"),
+                _row("2026-11-10T12:00:00Z", sid="new"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cc_tailer, "transcripts", lambda: [resumed])
+    assert cli.main(["tail-claude-code"]) == 0
+    assert "events=1" in capsys.readouterr().out
+
+    # --file on the same transcript processes it as given, so its copied rows post.
+    renamed = tmp_path / "renamed.jsonl"
+    renamed.write_text(resumed.read_text(encoding="utf-8"), encoding="utf-8")
+    assert cli.main(["tail-claude-code", "--file", str(renamed)]) == 0
+    assert "events=2" in capsys.readouterr().out
+
+
+def test_explicit_file_keeps_rows_from_another_session_id(tmp_path, monkeypatch):
+    # ``--file`` names a transcript the caller chose; its stem is not a session id,
+    # so no owner is passed and the rows must not be silently dropped.
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(_row("2026-11-10T09:00:00Z", sid="abc"), encoding="utf-8")
+    client = _Client()
+    assert cc_tailer.emit_file(client, "host", transcript, now=_dt("2026-11-10T13:00:00Z")) == 1
+    assert [e.data["session_id"] for _, e in client.posted] == ["abc"]

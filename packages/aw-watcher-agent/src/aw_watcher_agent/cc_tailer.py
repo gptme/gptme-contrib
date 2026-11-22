@@ -204,12 +204,19 @@ def emit_file(
     *,
     gap_s: float = DEFAULT_GAP_S,
     now: datetime | None = None,
+    owner: str | None = None,
 ) -> int:
     """Emit the finished, not-yet-emitted blocks of one transcript.
 
     Returns the number of events posted. A block is finished once its last row
     is more than ``gap_s`` old; the in-progress trailing block waits. If another
     invocation owns this transcript, skip it until the next run.
+
+    ``owner`` is the session id the transcript belongs to; callers that know the
+    transcript is a session log (the scan path, where the file is named after its
+    session) pass ``path.stem`` so rows copied in from an earlier session are
+    skipped. Leave it ``None`` for a user-supplied file, whose name carries no
+    such meaning: filtering there would silently drop every row.
     """
     lock_path = _cursor_path(path, client.server, hostname).with_suffix(".lock.sqlite3")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -223,7 +230,7 @@ def emit_file(
             if str(exc) == "database is locked":
                 return 0
             raise
-        return _emit_file_locked(client, hostname, path, gap_s=gap_s, now=now)
+        return _emit_file_locked(client, hostname, path, gap_s=gap_s, now=now, owner=owner)
     finally:
         lock.close()
 
@@ -235,6 +242,7 @@ def _emit_file_locked(
     *,
     gap_s: float,
     now: datetime | None,
+    owner: str | None,
 ) -> int:
     now = now or datetime.now(timezone.utc)
     text = path.read_text(encoding="utf-8", errors="replace")
@@ -245,7 +253,7 @@ def _emit_file_locked(
             json.loads(lines[-1])
         except json.JSONDecodeError:
             incomplete = True
-    blocks = parse_session(lines, gap_s=gap_s, owner=path.stem)
+    blocks = parse_session(lines, gap_s=gap_s, owner=owner)
     # A partially written row may extend the last parsed block. Earlier blocks
     # already have a complete successor establishing their idle boundary.
     candidates = blocks[:-1] if incomplete else blocks
