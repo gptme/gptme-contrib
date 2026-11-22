@@ -302,3 +302,97 @@ def test_main_partial_fetch_with_prs_warns_stderr(
     assert rc == 0
     assert "warn" in captured.err.lower() or "missed" in captured.err.lower()
     assert "1/2" in captured.err
+
+
+# --- initial-review fallback ---
+
+
+def _pr(state: str, created_at: str | None) -> object:
+    return pr_greptile_trigger.PRInfo(
+        repo="gptme/gptme-contrib",
+        number=1,
+        title="t",
+        url="u",
+        review_state=state,
+        created_at=created_at,
+    )
+
+
+def test_re_review_states_are_always_actionable() -> None:
+    for state in ("stale", "needs-re-review"):
+        assert pr_greptile_trigger.is_actionable(_pr(state, None)) is True
+
+
+def test_awaiting_initial_within_grace_is_not_actionable() -> None:
+    recent = "2026-11-22T00:30:00Z"
+    now = pr_greptile_trigger.datetime(
+        2026, 11, 22, 0, 40, tzinfo=pr_greptile_trigger.timezone.utc
+    )
+    assert (
+        pr_greptile_trigger.is_actionable(_pr("awaiting-initial-review", recent), now)
+        is False
+    )
+
+
+def test_awaiting_initial_past_grace_is_actionable() -> None:
+    old = "2026-11-21T08:04:44Z"
+    now = pr_greptile_trigger.datetime(
+        2026, 11, 22, 0, 53, tzinfo=pr_greptile_trigger.timezone.utc
+    )
+    assert (
+        pr_greptile_trigger.is_actionable(_pr("awaiting-initial-review", old), now)
+        is True
+    )
+
+
+def test_awaiting_initial_without_timestamp_is_not_actionable() -> None:
+    """Fail safe against spam when the PR age is unknown."""
+    assert (
+        pr_greptile_trigger.is_actionable(_pr("awaiting-initial-review", None)) is False
+    )
+
+
+def test_none_state_is_never_actionable() -> None:
+    old = "2026-11-21T08:04:44Z"
+    now = pr_greptile_trigger.datetime(
+        2026, 11, 22, 0, 53, tzinfo=pr_greptile_trigger.timezone.utc
+    )
+    assert pr_greptile_trigger.is_actionable(_pr("none", old), now) is False
+
+
+def test_main_triggers_stale_initial_review(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unreviewed PR past the grace window is triggered by the batch caller."""
+    triggered: list[int] = []
+
+    monkeypatch.setattr(pr_greptile_trigger, "get_gh_user", lambda: "bot")
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "fetch_prs",
+        lambda repo, author: [
+            {
+                "number": 2262,
+                "title": "old unreviewed",
+                "url": "u",
+                "repo": repo,
+                "createdAt": "2020-01-01T00:00:00Z",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        pr_greptile_trigger,
+        "review_state_for_pr",
+        lambda repo, num: "awaiting-initial-review",
+    )
+
+    def _trigger(repo: str, num: int) -> tuple[bool, str]:
+        triggered.append(num)
+        return True, "ok"
+
+    monkeypatch.setattr(pr_greptile_trigger, "trigger_greptile", _trigger)
+    monkeypatch.setattr(
+        pr_greptile_trigger, "resolve_repos", lambda arg: ["gptme/gptme-contrib"]
+    )
+
+    args = pr_greptile_trigger._parse_args(["--execute"])
+    assert pr_greptile_trigger._run(args) == 0
+    assert triggered == [2262]
