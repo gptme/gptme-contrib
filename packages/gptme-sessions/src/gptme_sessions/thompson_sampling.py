@@ -37,6 +37,7 @@ import json
 import os
 import random
 import sys
+import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,9 +52,10 @@ def _atomic_write_text(path: Path, text: str) -> None:
     Writes a sibling temp file, fsyncs it and ``os.replace``s it over the
     target, so a crash mid-write leaves the previous file intact.
     """
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(name)
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())

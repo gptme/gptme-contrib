@@ -829,3 +829,24 @@ def test_failed_write_leaves_previous_state_intact(tmp_path: Path, monkeypatch):
 
     assert bandit.state_file.read_text() == before
     assert sorted(p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")) == []
+
+
+def test_overlapping_atomic_writes_use_distinct_temporary_files(tmp_path, monkeypatch):
+    """Another write in the same process cannot consume the first writer's temp."""
+    module = importlib.import_module("gptme_sessions.thompson_sampling")
+    real_replace = module.os.replace
+    target = tmp_path / "state.json"
+    sources = []
+
+    def overlapping_replace(src, dst):
+        sources.append(src)
+        if len(sources) == 1:
+            module._atomic_write_text(target, '{"writer": "inner"}\n')
+        real_replace(src, dst)
+
+    monkeypatch.setattr(module.os, "replace", overlapping_replace)
+    module._atomic_write_text(target, '{"writer": "outer"}\n')
+
+    assert len(set(sources)) == 2
+    assert json.loads(target.read_text()) == {"writer": "outer"}
+    assert not list(tmp_path.glob("*.tmp"))
