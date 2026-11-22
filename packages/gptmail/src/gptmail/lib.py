@@ -209,6 +209,30 @@ def inbound_recipient_role(headers: dict[str, str], own_emails: tuple[str, ...])
     return None
 
 
+def quarantined_recipient_hit(headers: dict[str, str]) -> str | None:
+    """Return the quarantined recipient this message was addressed to, if any.
+
+    Quarantine is **recipient**-scoped and matches the raw address, so plus-tags
+    are significant. It is deliberately independent of the sender allowlist: a
+    notice from an allowlisted or machine sender still may not be ingested,
+    because allowlisting a sender is not consent to pull a bearer credential
+    (e.g. a managed canary's per-token management URL) into a model's context.
+
+    Configured with ``EMAIL_QUARANTINE_RECIPIENTS``; unset means no quarantine,
+    which keeps this a strict no-op for every existing deployment.
+    """
+    raw = os.getenv("EMAIL_QUARANTINE_RECIPIENTS", "")
+    quarantine = {entry.strip().lower() for entry in raw.split(",") if "@" in entry}
+    if not quarantine:
+        return None
+    names = ("To", "Cc", "Bcc") + _ENVELOPE_RECIPIENT_HEADERS
+    for _name, address in getaddresses(_header_values_ci(headers, names)):
+        normalized = address.strip().lower()
+        if normalized in quarantine:
+            return normalized
+    return None
+
+
 def fix_list_spacing(markdown_text: str) -> str:
     """
     Add blank lines before lists if missing.
@@ -566,6 +590,12 @@ class AgentEmail:
                     if message_id in seen_message_ids:
                         continue
                     seen_message_ids.add(message_id)
+
+                    # Recipient-scoped quarantine outranks sender trust: the
+                    # forwarder announces these messages to the operator, so
+                    # skipping here is not a silent loss.
+                    if quarantined_recipient_hit(headers):
+                        continue
 
                     date_header = headers.get("Date", "")
                     role = inbound_recipient_role(headers, self.own_emails)
