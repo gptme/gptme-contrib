@@ -699,3 +699,154 @@ def test_concurrent_processes_do_not_lose_updates(tmp_path: Path):
             if process.is_alive():
                 process.terminate()
                 process.join(timeout=5)
+
+
+def _saved_bandit(tmp_path: Path, arm: str = "a") -> Bandit:
+    bandit = Bandit(state_dir=tmp_path)
+    bandit.update([arm], outcome=1.0)
+    return bandit
+
+
+def test_save_keeps_backup_of_previous_state(tmp_path: Path):
+    bandit = _saved_bandit(tmp_path)
+    first = bandit.state_file.read_text()
+    bandit.update(["b"], outcome=0.0)
+
+    assert bandit.backup_file.read_text() == first
+    assert "b" in json.loads(bandit.state_file.read_text())["arms"]
+
+
+def test_corrupt_state_recovers_from_backup(tmp_path: Path):
+    bandit = _saved_bandit(tmp_path)
+    bandit.update(["b"], outcome=1.0)
+    bandit.state_file.write_text('{"arms": {"a": ')  # truncated mid-write
+
+    recovered = Bandit(state_dir=tmp_path)
+
+    assert "a" in recovered.state.arms
+    assert recovered.state.total_sessions == 1
+
+
+def test_save_never_backs_up_a_corrupt_state_file(tmp_path: Path):
+    bandit = _saved_bandit(tmp_path)
+    bandit.update(["b"], outcome=1.0)
+    good_backup = bandit.backup_file.read_text()
+    bandit.state_file.write_text("not json")
+
+    recovered = Bandit(state_dir=tmp_path)
+    recovered.save()
+
+    assert recovered.backup_file.read_text() == good_backup
+    assert json.loads(recovered.state_file.read_text())["arms"]
+
+    # Once repaired, the next save rotates the repaired primary into the backup.
+    recovered.update(["c"], outcome=1.0)
+    repaired = recovered.state_file.read_text()
+    recovered.update(["d"], outcome=1.0)
+    assert recovered.backup_file.read_text() == repaired
+    assert "c" in Bandit(state_dir=tmp_path).state.arms
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        "[]",
+        '"corrupt"',
+        "null",
+        '{"arms": [1]}',
+        '{"arms": null}',
+        '{"arms": {"a": 1}}',
+        '{"arms": {"a": {}}}',
+        '{"contextual_arms": [1]}',
+        '{"contextual_arms": {"a": [1]}}',
+        '{"contextual_arms": {"a": {"null": 1}}}',
+        '{"contextual_arms": {"a": {"null": {}}}}',
+    ],
+)
+@pytest.mark.parametrize("has_backup", [True, False])
+def test_malformed_json_state_recovers_without_poisoning_backup(tmp_path, corrupt, has_backup):
+    """Load and backup rotation must agree on which state documents are usable."""
+    bandit = _saved_bandit(tmp_path)
+    bandit.update(["b"], outcome=1.0)
+    good_backup = bandit.backup_file.read_text()
+    if not has_backup:
+        bandit.backup_file.unlink()
+    bandit.state_file.write_text(corrupt)
+
+    recovered = Bandit(state_dir=tmp_path)
+    assert recovered.state.total_sessions == (1 if has_backup else 0)
+    assert set(recovered.state.arms) == ({"a"} if has_backup else set())
+    recovered.update(["c"], outcome=1.0)
+
+    if has_backup:
+        assert recovered.backup_file.read_text() == good_backup
+    else:
+        assert not recovered.backup_file.exists()
+    reloaded = Bandit(state_dir=tmp_path)
+    assert reloaded.state.total_sessions == (2 if has_backup else 1)
+    assert set(reloaded.state.arms) == ({"a", "c"} if has_backup else {"c"})
+
+
+def test_failed_backup_does_not_advance_state(tmp_path: Path, monkeypatch):
+    bandit = _saved_bandit(tmp_path)
+    bandit.update(["b"], outcome=1.0)
+    before = bandit.state_file.read_text()
+    backup_before = bandit.backup_file.read_text()
+    module = importlib.import_module("gptme_sessions.thompson_sampling")
+    real_replace = module.os.replace
+
+    def fail_backup_replace(src, dst):
+        if dst == bandit.backup_file:
+            raise OSError("backup disk full")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(module.os, "replace", fail_backup_replace)
+    bandit.state.total_sessions = 99
+    with pytest.raises(OSError, match="backup disk full"):
+        bandit.save()
+
+    assert bandit.state_file.read_text() == before
+    assert bandit.backup_file.read_text() == backup_before
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_failed_write_leaves_previous_state_intact(tmp_path: Path, monkeypatch):
+    bandit = _saved_bandit(tmp_path)
+    before = bandit.state_file.read_text()
+
+    module = importlib.import_module("gptme_sessions.thompson_sampling")
+    real_replace = module.os.replace
+
+    def fail_replace(src, dst):
+        if dst == bandit.state_file:
+            raise OSError("disk full")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(module.os, "replace", fail_replace)
+    bandit.state.total_sessions = 99
+    with pytest.raises(OSError):
+        bandit.save()
+
+    assert bandit.state_file.read_text() == before
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")) == []
+
+
+def test_overlapping_atomic_writes_use_distinct_temporary_files(tmp_path, monkeypatch):
+    """Another write in the same process cannot consume the first writer's temp."""
+    module = importlib.import_module("gptme_sessions.thompson_sampling")
+    real_replace = module.os.replace
+    target = tmp_path / "state.json"
+    sources = []
+
+    def overlapping_replace(src, dst):
+        sources.append(src)
+        if len(sources) == 1:
+            module._atomic_write_text(target, '{"writer": "inner"}\n')
+        real_replace(src, dst)
+
+    monkeypatch.setattr(module.os, "replace", overlapping_replace)
+    module._atomic_write_text(target, '{"writer": "outer"}\n')
+
+    assert len(set(sources)) == 2
+    assert json.loads(target.read_text()) == {"writer": "outer"}
+    assert not list(tmp_path.glob("*.tmp"))

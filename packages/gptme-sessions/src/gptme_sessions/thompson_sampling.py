@@ -34,14 +34,35 @@ CLI:
 
 import contextlib
 import json
+import os
 import random
 import sys
+import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
 import click
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` so readers never see a partial file.
+
+    Writes a sibling temp file, fsyncs it and ``os.replace``s it over the
+    target, so a crash mid-write leaves the previous file intact.
+    """
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
 
 
 @dataclass
@@ -426,32 +447,55 @@ class Bandit:
             finally:
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
 
+    @property
+    def backup_file(self) -> Path:
+        """Last known-good copy of the state file, kept by ``save()``."""
+        return self.state_file.with_name(self.state_file.name + ".bak")
+
+    @staticmethod
+    def _decode_state(text: str) -> BanditState:
+        """Deserialize a state document for both loading and backup validation."""
+        data = json.loads(text)
+        state = BanditState(
+            total_sessions=data.get("total_sessions", 0),
+            created=data.get("created", ""),
+            last_updated=data.get("last_updated", ""),
+        )
+        for arm_id, arm_data in data.get("arms", {}).items():
+            # Support old format where key was 'lesson_path'
+            arm_data = dict(arm_data)
+            if "lesson_path" in arm_data and "arm_id" not in arm_data:
+                arm_data["arm_id"] = arm_data.pop("lesson_path")
+            state.arms[arm_id] = BanditArm(**arm_data)
+        for arm_id, contexts in data.get("contextual_arms", {}).items():
+            state.contextual_arms[arm_id] = {}
+            for ctx_key, arm_data in contexts.items():
+                arm_data = dict(arm_data)
+                if "lesson_path" in arm_data and "arm_id" not in arm_data:
+                    arm_data["arm_id"] = arm_data.pop("lesson_path")
+                state.contextual_arms[arm_id][ctx_key] = BanditArm(**arm_data)
+        return state
+
     def _load_state(self) -> BanditState:
-        """Load bandit state from disk."""
-        if self.state_file.exists():
+        """Load bandit state from disk.
+
+        A corrupt state file falls back to the ``.bak`` copy kept by
+        ``save()``, so one bad write cannot discard accumulated history.
+        """
+        for path in (self.state_file, self.backup_file):
+            if not path.exists():
+                continue
             try:
-                data = json.loads(self.state_file.read_text())
-                state = BanditState(
-                    total_sessions=data.get("total_sessions", 0),
-                    created=data.get("created", ""),
-                    last_updated=data.get("last_updated", ""),
-                )
-                for arm_id, arm_data in data.get("arms", {}).items():
-                    # Support old format where key was 'lesson_path'
-                    arm_data = dict(arm_data)
-                    if "lesson_path" in arm_data and "arm_id" not in arm_data:
-                        arm_data["arm_id"] = arm_data.pop("lesson_path")
-                    state.arms[arm_id] = BanditArm(**arm_data)
-                for arm_id, contexts in data.get("contextual_arms", {}).items():
-                    state.contextual_arms[arm_id] = {}
-                    for ctx_key, arm_data in contexts.items():
-                        arm_data = dict(arm_data)
-                        if "lesson_path" in arm_data and "arm_id" not in arm_data:
-                            arm_data["arm_id"] = arm_data.pop("lesson_path")
-                        state.contextual_arms[arm_id][ctx_key] = BanditArm(**arm_data)
+                state = self._decode_state(path.read_text())
+                if path != self.state_file:
+                    print(
+                        f"Warning: loaded bandit state from backup {path.name} "
+                        f"({state.total_sessions} sessions recovered)",
+                        file=sys.stderr,
+                    )
                 return state
-            except (json.JSONDecodeError, TypeError, KeyError) as e:
-                print(f"Warning: corrupted state file, starting fresh: {e}")
+            except (ValueError, TypeError, KeyError, AttributeError) as e:
+                print(f"Warning: corrupted bandit state in {path.name}: {e}", file=sys.stderr)
         return BanditState()
 
     def save(self) -> None:
@@ -468,7 +512,21 @@ class Bandit:
                 arm_id: {ctx_key: asdict(arm) for ctx_key, arm in contexts.items()}
                 for arm_id, contexts in self.state.contextual_arms.items()
             }
-        self.state_file.write_text(json.dumps(data, indent=2) + "\n")
+        self._backup_current()
+        _atomic_write_text(self.state_file, json.dumps(data, indent=2) + "\n")
+
+    def _backup_current(self) -> None:
+        """Copy the current state file to ``.bak`` if it can be loaded.
+
+        A file that cannot be deserialized is never backed up: copying it would
+        replace the good backup that ``_load_state()`` just recovered from.
+        """
+        try:
+            current = self.state_file.read_text()
+            self._decode_state(current)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            return
+        _atomic_write_text(self.backup_file, current)
 
     def sample(
         self,
