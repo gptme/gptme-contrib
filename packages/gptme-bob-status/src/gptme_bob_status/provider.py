@@ -105,6 +105,25 @@ def _active_tasks(lines: int = 3) -> list[dict]:
 
 
 def _pr_queue() -> list[dict]:
+    """Open-PR depth per tracked repo.
+
+    Delegates to gptme's generic ``cmd_status._pr_queue`` when available (it is
+    exposed for StatusProvider implementations); the local copy below is only a
+    fallback for gptme versions that predate it.  Upstream names the watermark
+    ``cap``; we surface it as ``watermark`` because queue depth is a
+    rot-attention signal here, never a cap.
+    """
+    try:
+        from gptme.cli.cmd_status import _pr_queue as _upstream_pr_queue
+    except ImportError:
+        return _pr_queue_local()
+    return [
+        {"repo": row["repo"], "count": row["count"], "watermark": row["cap"]}
+        for row in _upstream_pr_queue(_TRACKED_REPOS)
+    ]
+
+
+def _pr_queue_local() -> list[dict]:
     author = _run(["gh", "api", "user", "--jq", ".login"], timeout=10)
     if not author:
         return []

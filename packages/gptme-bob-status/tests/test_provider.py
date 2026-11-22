@@ -142,6 +142,39 @@ def test_collect_keys_use_bob_prefix(monkeypatch):
         assert key.startswith("bob_"), f"Key {key!r} does not use bob_ prefix"
 
 
+def test_pr_queue_delegates_to_upstream_helper_and_maps_cap(monkeypatch):
+    """One implementation of the gh loop: gptme's generic helper.
+
+    Upstream calls the watermark ``cap``; the provider renders it as
+    ``watermark`` so the display keeps treating depth as rot-attention.
+    """
+    import gptme.cli.cmd_status as cmd_status
+    import gptme_bob_status.provider as mod
+
+    seen: dict = {}
+
+    def fake_upstream(repos, author=None):
+        seen["repos"] = repos
+        return [{"repo": "gptme/gptme", "count": 4, "cap": 10}]
+
+    monkeypatch.setattr(cmd_status, "_pr_queue", fake_upstream)
+    assert mod._pr_queue() == [{"repo": "gptme/gptme", "count": 4, "watermark": 10}]
+    assert seen["repos"] == mod._TRACKED_REPOS
+
+
+def test_pr_queue_falls_back_when_upstream_helper_missing(monkeypatch):
+    """Older gptme (>=0.29 floor) has no cmd_status._pr_queue."""
+    import sys
+
+    import gptme_bob_status.provider as mod
+
+    monkeypatch.setitem(sys.modules, "gptme.cli.cmd_status", None)
+    monkeypatch.setattr(
+        mod, "_pr_queue_local", lambda: [{"repo": "r", "count": 1, "watermark": None}]
+    )
+    assert mod._pr_queue() == [{"repo": "r", "count": 1, "watermark": None}]
+
+
 def test_pr_queue_display_marks_watermark_for_triage_not_blocking():
     """Crossing the watermark reads as triage pressure, never as a cap.
 
