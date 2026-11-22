@@ -1551,7 +1551,7 @@ def edit(draft_id: str, new_text: str) -> None:
     # auto() review the edited draft again.
     draft.quality_score = None
     draft.save(draft_path)
-    if draft_path.parent == REVIEW_DIR:
+    if draft_path.parent in (REVIEW_DIR, APPROVED_DIR):
         draft_path = move_draft(draft_path, "new")
     console.print(f"[green]Draft updated: {draft_path.name}")
     console.print(f"[cyan]New text: {draft.text}")

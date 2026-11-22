@@ -987,7 +987,7 @@ def test_review_dry_run_leaves_draft_unchanged(
     assert list(workflow_module.APPROVED_DIR.iterdir()) == []
 
 
-@pytest.mark.parametrize("status", ["new", "review"])
+@pytest.mark.parametrize("status", ["new", "review", "approved"])
 def test_edit_clears_quality_score_so_auto_reviews_again(
     workflow_module: Any,
     tmp_path: Path,
@@ -1004,7 +1004,7 @@ def test_edit_clears_quality_score_so_auto_reviews_again(
 
     queued_path = workflow_module.NEW_DIR / reviewed_path.name
     assert queued_path.exists()
-    if status == "review":
+    if status != "new":
         assert not reviewed_path.exists()
     edited = workflow_module.TweetDraft.load(queued_path)
     assert edited.quality_score is None
