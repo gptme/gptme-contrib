@@ -170,15 +170,20 @@ def cmd_tail_claude_code(args: argparse.Namespace) -> int:
 
     client = AWClient(args.server)
     host = _hostname(args.hostname)
-    files = [Path(args.file)] if args.file else cc_tailer.transcripts()
+    # A scanned transcript is named after its session, so its file stem is the
+    # owner to filter copied rows by. An explicit --file has no such guarantee:
+    # filtering it by name would drop every row of a renamed or copied file.
+    explicit = Path(args.file) if args.file else None
+    files = [explicit] if explicit else cc_tailer.transcripts()
     if not files:
         print("no Claude Code transcripts found", file=sys.stderr)
         return 0
     total = 0
     failed = False
     for path in files:
+        owner = None if explicit else path.stem
         try:
-            total += cc_tailer.emit_file(client, host, path, gap_s=args.gap)
+            total += cc_tailer.emit_file(client, host, path, gap_s=args.gap, owner=owner)
         except (AWClientError, OSError, ValueError, sqlite3.Error) as exc:
             failed = True
             print(f"aw-watcher-agent: {path}: {exc}", file=sys.stderr)

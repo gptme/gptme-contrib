@@ -423,9 +423,11 @@ def test_resumed_session_does_not_repost_copied_blocks(tmp_path, monkeypatch):
     )
     client = _Client()
     now = _dt("2026-11-10T13:00:00Z")
-    assert cc_tailer.emit_file(client, "host", original, now=now) == 1
-    assert cc_tailer.emit_file(client, "host", resumed, now=now) == 1
-    assert cc_tailer.emit_file(client, "host", resumed, now=now) == 0
+    # The scan path passes the file stem as the owner, which is how a session
+    # transcript is named.
+    assert cc_tailer.emit_file(client, "host", original, now=now, owner=original.stem) == 1
+    assert cc_tailer.emit_file(client, "host", resumed, now=now, owner=resumed.stem) == 1
+    assert cc_tailer.emit_file(client, "host", resumed, now=now, owner=resumed.stem) == 0
     keys = [(e.timestamp, e.duration, e.data["session_id"]) for _, e in client.posted]
     assert len(keys) == len(set(keys)) == 2
     assert {k[2] for k in keys} == {"old", "new"}
@@ -436,5 +438,122 @@ def test_transcript_holding_only_copied_rows_emits_nothing(tmp_path, monkeypatch
     transcript = tmp_path / "new.jsonl"
     transcript.write_text(_row("2026-11-10T09:00:00Z", sid="old"), encoding="utf-8")
     client = _Client()
-    assert cc_tailer.emit_file(client, "host", transcript, now=_dt("2026-11-10T13:00:00Z")) == 0
+    assert (
+        cc_tailer.emit_file(
+            client, "host", transcript, now=_dt("2026-11-10T13:00:00Z"), owner="new"
+        )
+        == 0
+    )
     assert client.posted == []
+
+
+def test_cli_scan_filters_but_explicit_file_does_not(tmp_path, monkeypatch, capsys):
+    from aw_watcher_agent import cli
+
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    clients: list[_Client] = []
+
+    def _make_client(*args, **kwargs):
+        clients.append(_Client())
+        return clients[-1]
+
+    monkeypatch.setattr(cli, "AWClient", _make_client)
+    # The CLI has no clock injection, so fix the tailer's clock instead of relying
+    # on the fixture timestamps already being in the past.
+    fixed = _dt("2026-11-10T13:00:00Z")
+
+    class _FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+
+    monkeypatch.setattr(cc_tailer, "datetime", _FixedDatetime)
+    resumed = tmp_path / "new.jsonl"
+    resumed.write_text(
+        "\n".join(
+            [
+                _row("2026-11-10T09:00:00Z", sid="old"),
+                _row("2026-11-10T09:10:00Z", sid="old"),
+                _row("2026-11-10T12:00:00Z", sid="new"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cc_tailer, "transcripts", lambda: [resumed])
+    assert cli.main(["tail-claude-code"]) == 0
+    assert "events=1" in capsys.readouterr().out
+    assert [e.data["session_id"] for _, e in clients[0].posted] == ["new"]
+
+    # --file on the same transcript processes it as given, so its copied rows post.
+    renamed = tmp_path / "renamed.jsonl"
+    renamed.write_text(resumed.read_text(encoding="utf-8"), encoding="utf-8")
+    assert cli.main(["tail-claude-code", "--file", str(renamed)]) == 0
+    assert "events=2" in capsys.readouterr().out
+    assert sorted(e.data["session_id"] for _, e in clients[1].posted) == ["new", "old"]
+
+
+def test_partial_copied_trailing_row_does_not_hold_back_the_owned_block(tmp_path, monkeypatch):
+    # A resumed transcript can end in a half-written row copied from the earlier
+    # session. It is filtered out of the parse, so it must not also drop the last
+    # block this transcript owns.
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    transcript = tmp_path / "new.jsonl"
+    transcript.write_text(
+        "\n".join(
+            [
+                _row("2026-11-10T09:00:00Z", sid="old"),
+                _row("2026-11-10T12:00:00Z", sid="new"),
+                '{"type":"user","timestamp":"2026-11-10T12:30:00Z","sessionId":"old"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    client = _Client()
+    assert (
+        cc_tailer.emit_file(
+            client, "host", transcript, now=_dt("2026-11-10T13:00:00Z"), owner="new"
+        )
+        == 1
+    )
+    assert [e.data["session_id"] for _, e in client.posted] == ["new"]
+
+
+@pytest.mark.parametrize("owner", [None, "new"])
+@pytest.mark.parametrize("fragment", ['{"type":"user",', '{"sessionId":"new",'])
+def test_partial_append_preserves_checkpoint_and_resumes(tmp_path, monkeypatch, owner, fragment):
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    transcript = tmp_path / "new.jsonl"
+    prefix = _row("2026-11-10T09:00:00Z", sid="new") + "\n"
+    transcript.write_text(prefix, encoding="utf-8")
+    client = _Client()
+    now = _dt("2026-11-10T12:00:00Z")
+    assert cc_tailer.emit_file(client, "host", transcript, now=now, owner=owner) == 1
+    cursor = cc_tailer._cursor_path(transcript, client.server, "host")
+    checkpoint = cursor.read_bytes()
+
+    # The held last block is already emitted; the partial successor must not
+    # make its unchanged checkpoint look truncated, or replay it.
+    transcript.write_text(prefix + fragment, encoding="utf-8")
+    assert cc_tailer.emit_file(client, "host", transcript, now=now, owner=owner) == 0
+    assert cursor.read_bytes() == checkpoint
+    assert len(client.posted) == 1
+
+    # Once the successor is complete, emit just the new block and checkpoint it.
+    transcript.write_text(prefix + _row("2026-11-10T11:00:00Z", sid="new") + "\n")
+    assert cc_tailer.emit_file(client, "host", transcript, now=now, owner=owner) == 1
+    assert cc_tailer.emit_file(client, "host", transcript, now=now, owner=owner) == 0
+    assert [e.timestamp for _, e in client.posted] == [
+        _dt("2026-11-10T09:00:00Z").isoformat(),
+        _dt("2026-11-10T11:00:00Z").isoformat(),
+    ]
+
+
+def test_explicit_file_keeps_rows_from_another_session_id(tmp_path, monkeypatch):
+    # ``--file`` names a transcript the caller chose; its stem is not a session id,
+    # so no owner is passed and the rows must not be silently dropped.
+    monkeypatch.setattr(core, "state_dir", lambda: tmp_path / "state")
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(_row("2026-11-10T09:00:00Z", sid="abc"), encoding="utf-8")
+    client = _Client()
+    assert cc_tailer.emit_file(client, "host", transcript, now=_dt("2026-11-10T13:00:00Z")) == 1
+    assert [e.data["session_id"] for _, e in client.posted] == ["abc"]

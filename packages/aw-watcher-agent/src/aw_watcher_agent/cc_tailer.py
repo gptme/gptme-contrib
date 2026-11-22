@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -204,12 +205,19 @@ def emit_file(
     *,
     gap_s: float = DEFAULT_GAP_S,
     now: datetime | None = None,
+    owner: str | None = None,
 ) -> int:
     """Emit the finished, not-yet-emitted blocks of one transcript.
 
     Returns the number of events posted. A block is finished once its last row
     is more than ``gap_s`` old; the in-progress trailing block waits. If another
     invocation owns this transcript, skip it until the next run.
+
+    ``owner`` is the session id the transcript belongs to; callers that know the
+    transcript is a session log (the scan path, where the file is named after its
+    session) pass ``path.stem`` so rows copied in from an earlier session are
+    skipped. Leave it ``None`` for a user-supplied file, whose name carries no
+    such meaning: filtering there would silently drop every row.
     """
     lock_path = _cursor_path(path, client.server, hostname).with_suffix(".lock.sqlite3")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -223,9 +231,23 @@ def emit_file(
             if str(exc) == "database is locked":
                 return 0
             raise
-        return _emit_file_locked(client, hostname, path, gap_s=gap_s, now=now)
+        return _emit_file_locked(client, hostname, path, gap_s=gap_s, now=now, owner=owner)
     finally:
         lock.close()
+
+
+def _trailing_row_is_ours(line: str, owner: str | None) -> bool:
+    """Whether a partially written trailing row can extend this transcript's blocks.
+
+    A resumed transcript can end in a half-written row copied from the earlier
+    session. That row is filtered out of the parse anyway, so it must not hold
+    back the last block this transcript owns. When the session id cannot be read
+    from the fragment, assume it is ours and keep the block held.
+    """
+    if owner is None:
+        return True
+    match = re.search(r'"sessionId"\s*:\s*"([^"]+)"', line)
+    return match is None or match.group(1) == owner
 
 
 def _emit_file_locked(
@@ -235,6 +257,7 @@ def _emit_file_locked(
     *,
     gap_s: float,
     now: datetime | None,
+    owner: str | None,
 ) -> int:
     now = now or datetime.now(timezone.utc)
     text = path.read_text(encoding="utf-8", errors="replace")
@@ -244,13 +267,16 @@ def _emit_file_locked(
         try:
             json.loads(lines[-1])
         except json.JSONDecodeError:
-            incomplete = True
-    blocks = parse_session(lines, gap_s=gap_s, owner=path.stem)
+            incomplete = _trailing_row_is_ours(lines[-1], owner)
+    blocks = parse_session(lines, gap_s=gap_s, owner=owner)
     # A partially written row may extend the last parsed block. Earlier blocks
     # already have a complete successor establishing their idle boundary.
     candidates = blocks[:-1] if incomplete else blocks
     finished = [b for b in candidates if (now - b.end).total_seconds() > gap_s]
-    prefix_digests = _prefix_digests(finished)
+    # Eligibility can shrink while an appended row is incomplete, but already
+    # emitted blocks must still be verified against the complete parsed prefix.
+    # Only posting new blocks depends on the idle/partial-row guards above.
+    prefix_digests = _prefix_digests(blocks)
     emitted = _read_emitted(
         path, gap_s, server=client.server, hostname=hostname, prefix_digests=prefix_digests
     )
