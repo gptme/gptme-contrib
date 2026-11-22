@@ -739,15 +739,50 @@ def test_save_never_backs_up_a_corrupt_state_file(tmp_path: Path):
     assert recovered.backup_file.read_text() == good_backup
     assert json.loads(recovered.state_file.read_text())["arms"]
 
+    # Once repaired, the next save rotates the repaired primary into the backup.
+    recovered.update(["c"], outcome=1.0)
+    repaired = recovered.state_file.read_text()
+    recovered.update(["d"], outcome=1.0)
+    assert recovered.backup_file.read_text() == repaired
+    assert "c" in Bandit(state_dir=tmp_path).state.arms
+
+
+def test_failed_backup_does_not_advance_state(tmp_path: Path, monkeypatch):
+    bandit = _saved_bandit(tmp_path)
+    bandit.update(["b"], outcome=1.0)
+    before = bandit.state_file.read_text()
+    backup_before = bandit.backup_file.read_text()
+    module = importlib.import_module("gptme_sessions.thompson_sampling")
+    real_replace = module.os.replace
+
+    def fail_backup_replace(src, dst):
+        if dst == bandit.backup_file:
+            raise OSError("backup disk full")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(module.os, "replace", fail_backup_replace)
+    bandit.state.total_sessions = 99
+    with pytest.raises(OSError, match="backup disk full"):
+        bandit.save()
+
+    assert bandit.state_file.read_text() == before
+    assert bandit.backup_file.read_text() == backup_before
+    assert not list(tmp_path.glob("*.tmp"))
+
 
 def test_failed_write_leaves_previous_state_intact(tmp_path: Path, monkeypatch):
     bandit = _saved_bandit(tmp_path)
     before = bandit.state_file.read_text()
 
-    def fail_replace(src, dst):
-        raise OSError("disk full")
+    module = importlib.import_module("gptme_sessions.thompson_sampling")
+    real_replace = module.os.replace
 
-    monkeypatch.setattr("gptme_sessions.thompson_sampling.os.replace", fail_replace)
+    def fail_replace(src, dst):
+        if dst == bandit.state_file:
+            raise OSError("disk full")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(module.os, "replace", fail_replace)
     bandit.state.total_sessions = 99
     with pytest.raises(OSError):
         bandit.save()

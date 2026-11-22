@@ -518,8 +518,7 @@ class Bandit:
             json.loads(current)
         except (OSError, ValueError):
             return
-        with contextlib.suppress(OSError):
-            _atomic_write_text(self.backup_file, current)
+        _atomic_write_text(self.backup_file, current)
 
     def sample(
         self,
