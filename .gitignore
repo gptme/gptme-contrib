@@ -41,3 +41,5 @@ packages/tasks/
 
 # Dashboard build output
 _site/
+.mypy_coverage_report/
+.mypy_coverage_report.log

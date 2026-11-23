@@ -1,4 +1,4 @@
-.PHONY: help test typecheck typecheck-scripts test-packages test-changed-packages typecheck-packages test-plugins test-integration test-unit check-names list-packages list-plugins
+.PHONY: help test typecheck typecheck-coverage typecheck-scripts test-packages test-changed-packages typecheck-packages test-plugins test-integration test-unit check-names list-packages list-plugins
 
 # Plugins not yet CI-ready (tests exist but weren't validated before dynamic discovery)
 # TODO: Fix these tests and remove from exclude list - see GitHub issue tracking
@@ -62,6 +62,27 @@ typecheck-scripts:  ## Run mypy for harness hook scripts
 	@# that import too. Do not suppress missing imports globally: unresolved
 	@# gptme_rag/gptme must fail rather than silently skip signature checking.
 	@uv run --no-sync --with mypy --with tomli python -m mypy --config-file scripts/claude-code-hooks/mypy.ini scripts/claude-code-hooks/ --no-incremental
+
+# One mypy pass over every package's src/ to produce a type-precision report
+# (cobertura XML, uploaded to Codecov with the `type-coverage` flag). This is
+# a metric, not a gate: the per-package `typecheck-packages` target stays the
+# gate, so errors here (a package whose deps aren't importable in this single
+# environment) do not fail the target; only a missing report does.
+# Read the number as a trend, not an absolute: `--ignore-missing-imports` turns
+# an unimportable optional dep into `Any`, and those lines still count as
+# checked, so a dependency-resolution change can move the number without any
+# annotation change.
+typecheck-coverage:  ## Write a mypy type-precision report (.mypy_coverage_report/cobertura.xml)
+	@echo "Generating type coverage report..."
+	@rm -rf .mypy_coverage_report
+	@MYPYPATH="$$(ls -d packages/*/src | tr '\n' ':')" \
+		uv run --no-sync --with mypy --with lxml --with types-PyYAML --with types-requests mypy $$(ls -d packages/*/src) \
+		--ignore-missing-imports --explicit-package-bases --namespace-packages \
+		--cobertura-xml-report .mypy_coverage_report --no-incremental > .mypy_coverage_report.log 2>&1 || true
+	@tail -1 .mypy_coverage_report.log
+	@# Fail loudly if mypy wrote no report, but never block: CI runs this step
+	@# with `continue-on-error`, so this is a warning signal, not a gate.
+	@test -f .mypy_coverage_report/cobertura.xml
 
 # ============================================================
 # Package targets (dynamically discovered)
