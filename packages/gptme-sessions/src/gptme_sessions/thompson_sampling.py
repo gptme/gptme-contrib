@@ -41,7 +41,7 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator, Protocol
 
 import click
 
@@ -424,6 +424,68 @@ class BanditState:
         return pruned
 
 
+class UpdateHookError(RuntimeError):
+    """A hook failed *after* the posterior was already persisted.
+
+    Raised from :meth:`Bandit.update` when ``saved`` or ``complete`` raises.
+    Unlike an exception from ``prepare``, this does **not** mean the update was
+    rolled back: the state file and the in-memory state already reflect it.
+    Callers must not retry ``update()`` on this error (that would apply the
+    reward twice); reconcile the external ledger against the posterior instead.
+    """
+
+
+@dataclass(frozen=True)
+class UpdatePlan:
+    """What a :meth:`Bandit.update` call is about to apply, handed to an :class:`UpdateHook`."""
+
+    active_arms: tuple[str, ...]
+    outcome: str | float
+    context: tuple[str, ...] | None
+    decay_rate: float | None
+    per_arm_decay: bool
+    per_arm_rewards: dict[str, float] | None
+    state_file: Path
+
+
+class UpdateHook(Protocol):
+    """Observer for the write-ahead / write-complete phases of :meth:`Bandit.update`.
+
+    Lets a caller keep an external provenance ledger (receipts) coupled to the
+    posterior write without the engine knowing the ledger's schema. Phases:
+
+    1. ``prepare`` runs under the state lock, after state is re-loaded and before
+       any mutation. It receives the plan and the loaded (unmodified) state and
+       returns an opaque token. If it raises, nothing is mutated or saved.
+    2. ``saved`` runs under the lock right after the atomic state save.
+    3. ``complete`` runs after the lock is released.
+
+    A ``prepare`` with no matching ``complete`` is **ambiguous**: either nothing
+    was written (``prepare`` succeeded, then the caller or process aborted
+    before the mutation) or the posterior was written and the process died
+    before ``complete``. Never read it as "no write happened" — resolve it by
+    comparing the ledger's prepared record against the posterior, which is the
+    only evidence that distinguishes the two.
+
+    Failure semantics differ per phase: an exception from ``prepare`` aborts
+    before anything is mutated or saved, but an exception from ``saved`` or
+    ``complete`` propagates as :class:`UpdateHookError` with the update already
+    persisted. Callers must not retry ``update()`` in that case.
+
+    ``prepare`` and ``saved`` run while the state lock is held, and that lock is
+    a non-reentrant ``flock`` on a separate descriptor. A hook that calls a
+    locked :class:`Bandit` method (``update``, ``decay``, ``prune``, ``save``)
+    from either phase deadlocks the caller. Read the state passed to
+    ``prepare`` instead; do not re-enter the bandit.
+    """
+
+    def prepare(self, plan: UpdatePlan, state: "BanditState") -> Any: ...
+
+    def saved(self, token: Any) -> None: ...
+
+    def complete(self, token: Any) -> None: ...
+
+
 class Bandit:
     """Manager for a Thompson sampling bandit system.
 
@@ -627,6 +689,7 @@ class Bandit:
         decay_rate: float | None = None,
         per_arm_rewards: dict[str, float] | None = None,
         per_arm_decay: bool = False,
+        hook: UpdateHook | None = None,
     ) -> dict[str, bool]:
         """Update after a session and save state.
 
@@ -641,9 +704,31 @@ class Bandit:
                 (global and every contextual sub-arm of each) instead of every arm.
                 Use it when arms are only sometimes selected, so global decay would
                 keep pulling the unselected ones back toward the prior.
+            hook: Optional :class:`UpdateHook` notified before the mutation, after the
+                save and after the lock is released (see its docstring).
+
+        Raises:
+            UpdateHookError: A post-save hook phase (``saved``/``complete``) failed.
+                The posterior is already persisted; do **not** retry ``update()``
+                (that would apply the reward twice). A ``prepare`` failure raises
+                the hook's own exception and leaves the state untouched.
         """
+        token: Any = None
         with self._state_lock():
             self.state = self._load_state()
+            if hook is not None:
+                token = hook.prepare(
+                    UpdatePlan(
+                        active_arms=tuple(active_arms),
+                        outcome=outcome,
+                        context=context,
+                        decay_rate=decay_rate,
+                        per_arm_decay=per_arm_decay,
+                        per_arm_rewards=per_arm_rewards,
+                        state_file=self.state_file,
+                    ),
+                    self.state,
+                )
             if decay_rate is not None:
                 if per_arm_decay:
                     self.state.apply_decay(decay_rate, only=set(active_arms))
@@ -653,6 +738,22 @@ class Bandit:
                 active_arms, outcome, context=context, per_arm_rewards=per_arm_rewards
             )
             self.save()
+            if hook is not None:
+                try:
+                    hook.saved(token)
+                except Exception as exc:
+                    raise UpdateHookError(
+                        "post-save hook failed; the posterior update was already "
+                        "persisted — do not retry update(), reconcile the ledger"
+                    ) from exc
+        if hook is not None:
+            try:
+                hook.complete(token)
+            except Exception as exc:
+                raise UpdateHookError(
+                    "completion hook failed; the posterior update was already "
+                    "persisted — do not retry update(), reconcile the ledger"
+                ) from exc
         return result
 
     def decay(self, gamma: float) -> int:

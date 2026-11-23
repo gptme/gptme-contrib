@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from gptme_sessions import Bandit, BanditArm, BanditState, SessionRecord
+import gptme_sessions.thompson_sampling as ts_module
 from gptme_sessions.thompson_sampling import load_bandit_means
 
 
@@ -963,3 +964,119 @@ def test_prune_may_delete_mature_arms(tmp_path: Path):
 
     assert pruned == 2
     assert json.loads(bandit.state_file.read_text())["arms"] == {}
+
+
+class _RecordingHook:
+    """UpdateHook that records phase order and what state each phase saw."""
+
+    def __init__(
+        self,
+        state_file: Path,
+        fail_prepare: bool = False,
+        fail_saved: bool = False,
+        fail_complete: bool = False,
+    ):
+        self.state_file = state_file
+        self.fail_prepare = fail_prepare
+        self.fail_saved = fail_saved
+        self.fail_complete = fail_complete
+        self.events: list[str] = []
+        self.plan = None
+        self.arms_at_prepare: dict[str, float] = {}
+        self.on_disk_at_saved: dict[str, float] = {}
+
+    def prepare(self, plan, state):
+        if self.fail_prepare:
+            raise RuntimeError("ledger unavailable")
+        self.events.append("prepare")
+        self.plan = plan
+        self.arms_at_prepare = {k: a.alpha for k, a in state.arms.items()}
+        return "tok"
+
+    def saved(self, token):
+        assert token == "tok"
+        self.events.append("saved")
+        data = json.loads(self.state_file.read_text())
+        self.on_disk_at_saved = {k: v["alpha"] for k, v in data["arms"].items()}
+        if self.fail_saved:
+            raise RuntimeError("ledger fsync failed")
+
+    def complete(self, token):
+        assert token == "tok"
+        self.events.append("complete")
+        if self.fail_complete:
+            raise RuntimeError("ledger close failed")
+
+
+def test_bandit_update_hook_phases_bracket_the_write(tmp_path: Path):
+    """prepare sees the pre-update state, saved sees it persisted, complete follows."""
+    bandit = Bandit(state_dir=tmp_path)
+    bandit.update(["code"], outcome=1.0)
+    before = bandit.state.arms["code"].alpha
+    hook = _RecordingHook(bandit.state_file)
+
+    bandit.update(["code"], outcome=1.0, context=("a",), decay_rate=0.9, hook=hook)
+
+    assert hook.events == ["prepare", "saved", "complete"]
+    assert hook.arms_at_prepare["code"] == before  # unmodified at prepare time
+    assert hook.on_disk_at_saved["code"] == bandit.state.arms["code"].alpha != before
+    assert hook.plan.active_arms == ("code",)
+    assert hook.plan.context == ("a",)
+    assert hook.plan.decay_rate == 0.9
+    assert hook.plan.per_arm_decay is False
+    assert hook.plan.state_file == bandit.state_file
+
+
+def test_bandit_update_hook_prepare_failure_leaves_state_untouched(tmp_path: Path):
+    """A prepare that raises aborts before any mutation or save."""
+    bandit = Bandit(state_dir=tmp_path)
+    bandit.update(["code"], outcome=1.0)
+    on_disk = bandit.state_file.read_text()
+    hook = _RecordingHook(bandit.state_file, fail_prepare=True)
+
+    with pytest.raises(RuntimeError, match="ledger unavailable"):
+        bandit.update(["code"], outcome=0.0, hook=hook)
+
+    assert bandit.state_file.read_text() == on_disk
+    assert hook.events == []
+
+
+def test_bandit_update_hook_saved_failure_reports_persisted_update(tmp_path: Path):
+    """A failing ``saved`` raises UpdateHookError but the update is already on disk.
+
+    Callers must not treat this as "nothing happened": retrying would apply the
+    reward twice.
+    """
+    bandit = Bandit(state_dir=tmp_path)
+    bandit.update(["code"], outcome=1.0)
+    alpha_before = bandit.state.arms["code"].alpha
+    hook = _RecordingHook(bandit.state_file, fail_saved=True)
+
+    with pytest.raises(ts_module.UpdateHookError, match="already persisted"):
+        bandit.update(["code"], outcome=1.0, hook=hook)
+
+    on_disk = json.loads(bandit.state_file.read_text())
+    assert on_disk["arms"]["code"]["alpha"] == pytest.approx(alpha_before + 1.0)
+    assert hook.events == ["prepare", "saved"]
+
+
+def test_bandit_update_hook_complete_failure_reports_persisted_update(tmp_path: Path):
+    """A failing ``complete`` also raises UpdateHookError after the save landed."""
+    bandit = Bandit(state_dir=tmp_path)
+    bandit.update(["code"], outcome=1.0)
+    alpha_before = bandit.state.arms["code"].alpha
+    hook = _RecordingHook(bandit.state_file, fail_complete=True)
+
+    with pytest.raises(ts_module.UpdateHookError, match="already persisted"):
+        bandit.update(["code"], outcome=1.0, hook=hook)
+
+    on_disk = json.loads(bandit.state_file.read_text())
+    assert on_disk["arms"]["code"]["alpha"] == pytest.approx(alpha_before + 1.0)
+    assert hook.events == ["prepare", "saved", "complete"]
+
+
+def test_bandit_update_without_hook_unchanged(tmp_path: Path):
+    """hook is optional; omitting it keeps the previous behaviour."""
+    bandit = Bandit(state_dir=tmp_path)
+    result = bandit.update(["code"], outcome=1.0)
+    assert result == {"code": True}
