@@ -3339,6 +3339,27 @@ def _check_cited_shas(
     return results
 
 
+#: ``gh pr checks --json state`` values (check-run conclusions/statuses and
+#: commit-status states). Every state is classified; anything else is unknown.
+_FAILED_CHECK_STATES = frozenset(
+    {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+)
+_NONFAILING_CHECK_STATES = frozenset(
+    {
+        "SUCCESS",
+        "NEUTRAL",
+        "SKIPPED",
+        "STALE",
+        "PENDING",
+        "QUEUED",
+        "IN_PROGRESS",
+        "WAITING",
+        "REQUESTED",
+        "EXPECTED",
+    }
+)
+
+
 def _check_unrelated_ci_claim(
     pr_body: str,
     repo: str,
@@ -3385,11 +3406,16 @@ def _check_unrelated_ci_claim(
         for c in ci_raw
     ):
         raise ReviewError(f"cannot verify CI checks for {repo}#{number} (rule 1b)")
-    failing = [
-        c
-        for c in ci_raw
-        if c["state"] in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED")
-    ]
+    unknown = sorted(
+        {c["state"] for c in ci_raw} - _FAILED_CHECK_STATES - _NONFAILING_CHECK_STATES
+    )
+    if unknown:
+        # An unrecognised state is not evidence of a passing check.
+        raise ReviewError(
+            f"cannot verify CI checks for {repo}#{number} (rule 1b): "
+            f"unknown check state(s) {', '.join(unknown)}"
+        )
+    failing = [c for c in ci_raw if c["state"] in _FAILED_CHECK_STATES]
     if not failing:
         return []  # Claim is moot — no failing checks
 

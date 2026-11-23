@@ -676,6 +676,29 @@ def test_unrelated_ci_claim_accepts_known_nonfailing_checks(alice_io, response):
     assert w._check_unrelated_ci_claim("Flaky test.", "o/r", 5, ["a"]) == []
 
 
+@pytest.mark.parametrize(
+    "state", ["PENDING", "IN_PROGRESS", "QUEUED", "NEUTRAL", "SKIPPED", "STALE"]
+)
+def test_unrelated_ci_claim_pending_or_neutral_checks_are_not_failures(alice_io, state):
+    w = _bound_with(alice_io, gh_json=lambda cmd: [{"name": "Test", "state": state}])
+    assert w._check_unrelated_ci_claim("Flaky test.", "o/r", 5, ["a"]) == []
+
+
+@pytest.mark.parametrize("state", ["ACTION_REQUIRED", "STARTUP_FAILURE"])
+def test_unrelated_ci_claim_counts_action_required_and_startup_failure(alice_io, state):
+    w = _bound_with(alice_io, gh_json=lambda cmd: [{"name": "Test", "state": state}])
+    findings = w._check_unrelated_ci_claim("Flaky test.", "o/r", 5, ["a"])
+    assert len(findings) == 1 and "`Test`" in findings[0]["body"]
+
+
+def test_unrelated_ci_claim_refuses_an_unrecognised_state(alice_io):
+    w = _bound_with(
+        alice_io, gh_json=lambda cmd: [{"name": "Test", "state": "SOMETHING_NEW"}]
+    )
+    with pytest.raises(writer.ReviewError, match="unknown check state.*SOMETHING_NEW"):
+        w._check_unrelated_ci_claim("Flaky test.", "o/r", 5, ["a"])
+
+
 def test_visual_rule_checks_renamed_component_using_extracted_new_path(alice_io):
     w = writer.bind_io(alice_io)
     diff = (
