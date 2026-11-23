@@ -749,3 +749,31 @@ def test_latest_thread_entry_is_not_necessarily_reply_parent(
 
     assert "addressed TO us" not in prompt
     assert "possible automatic reply prefix" in prompt
+
+
+def test_leading_mention_without_actual_parent_prefix_is_direct(
+    llm_module: types.ModuleType,
+    eval_config: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TWITTER_HANDLE", "TimeToBuildBob")
+    tweet = {
+        "id": "target",
+        "text": "@TimeToBuildBob should we ship?",
+        "author": "someone",
+        "thread_context": [
+            {"id": "root", "author": "ErikBjare", "text": "Release?"},
+            {"id": "earlier", "author": "TimeToBuildBob", "text": "My review"},
+            {
+                "id": "target",
+                "author": "someone",
+                "text": "@TimeToBuildBob should we ship?",
+                "replied_to_id": "root",
+            },
+        ],
+    }
+
+    prompt = llm_module.create_tweet_eval_prompt(tweet, eval_config)
+
+    assert "addressed TO us" in prompt
+    assert "automatic reply prefix" not in prompt

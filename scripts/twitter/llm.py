@@ -288,18 +288,6 @@ def create_tweet_eval_prompt(tweet: Dict, config: Dict) -> str:
     tweet_text = tweet.get("text", "")
     handle_re = re.compile(rf"(?<![\w@])@{re.escape(handle_lower)}(?!\w)", re.I)
     is_reply = bool(tweet.get("thread_context"))
-    prefix_end = 0
-    if is_reply:
-        remaining_authors = {
-            str(t.get("author", "")).lower() for t in tweet["thread_context"]
-        }
-        while match := _REPLY_HANDLE_RE.match(tweet_text, prefix_end):
-            author = match.group(1).lower()
-            if author not in remaining_authors:
-                break
-            remaining_authors.remove(author)
-            prefix_end = match.end()
-    body = tweet_text[prefix_end:]
     # Context contains the whole conversation, including siblings and the
     # target itself. Only an identified parent proves this is a reply to us.
     entries = tweet.get("thread_context") or []
@@ -313,6 +301,30 @@ def create_tweet_eval_prompt(tweet: Dict, config: Dict) -> str:
         {},
     )
     parent_id = target.get("replied_to_id")
+    parent_author = next(
+        (
+            str(t.get("author", "")).lower()
+            for t in entries
+            if parent_id is not None and str(t.get("id")) == str(parent_id)
+        ),
+        "",
+    )
+    prefix_end = 0
+    first_handle = _REPLY_HANDLE_RE.match(tweet_text)
+    # When the parent is known, an inherited prefix must start with its
+    # author. A different leading participant can be a freshly typed mention.
+    if is_reply and (
+        not parent_author
+        or (first_handle and first_handle.group(1).lower() == parent_author)
+    ):
+        remaining_authors = {str(t.get("author", "")).lower() for t in entries}
+        while match := _REPLY_HANDLE_RE.match(tweet_text, prefix_end):
+            author = match.group(1).lower()
+            if author not in remaining_authors:
+                break
+            remaining_authors.remove(author)
+            prefix_end = match.end()
+    body = tweet_text[prefix_end:]
     replies_to_us = parent_id is not None and any(
         str(t.get("id")) == str(parent_id)
         and str(t.get("author", "")).lower() == handle_lower
