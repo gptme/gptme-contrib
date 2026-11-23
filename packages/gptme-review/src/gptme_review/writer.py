@@ -716,6 +716,44 @@ class DefaultWriterHost:
 # ---------------------------------------------------------------------------
 
 
+def _native_review_published(
+    repo: str, number: int, full_sha: str, review_body: str
+) -> bool:
+    """Read GitHub's durable POST receipt before retrying a publication.
+
+    Do not use ``gh_paginated_list`` here: it returns [] on errors, which would
+    turn an unreadable receipt into permission to duplicate inline threads.
+    """
+    result = _io.run(
+        [
+            "gh",
+            "api",
+            f"repos/{repo}/pulls/{number}/reviews",
+            "--paginate",
+            "--slurp",
+        ],
+        env={**os.environ, "GH_API_CACHE_TTL": "0"},
+    )
+    if result.returncode != 0:
+        raise ReviewError(f"cannot check prior native review: {result.stderr[-300:]}")
+    try:
+        pages = json.loads(result.stdout)
+    except (ValueError, TypeError) as exc:
+        raise ReviewError("cannot decode prior native reviews") from exc
+    if not isinstance(pages, list) or not all(isinstance(p, list) for p in pages):
+        raise ReviewError("unexpected prior native reviews response")
+    reviews = [review for page in pages for review in page]
+    if not all(isinstance(review, dict) for review in reviews):
+        raise ReviewError("unexpected prior native review entry")
+    return any(
+        str(review.get("body") or "").strip() == review_body
+        and review.get("commit_id") == full_sha
+        and review.get("state") in {"COMMENTED", "DISMISSED"}
+        and _is_reviewer_comment(review, _io.REVIEWER_IDENTITY)
+        for review in reviews
+    )
+
+
 def publish_review(
     *,
     repo: str,
@@ -889,6 +927,16 @@ def publish_review(
             )
             print(f"resolved {resolved} superseded inline finding thread(s)")
 
+        native_posted = False
+        if recovering and inline:
+            try:
+                native_posted = _native_review_published(
+                    repo, number, full_sha, review_body
+                )
+            except ReviewError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return False
+
         if not inline:
             # Nothing to attach. A marker-only COMMENT review renders in the PR
             # timeline as a review event with no visible content and no threads
@@ -898,6 +946,8 @@ def publish_review(
             # also the retry seam: a run whose final PATCH failed re-publishes
             # nothing here, so no duplicate event can appear.
             print("no inline comments; skipping empty native review event")
+        elif native_posted:
+            print("native review already published; skipping duplicate inline threads")
         else:
             payload = {
                 "commit_id": full_sha,

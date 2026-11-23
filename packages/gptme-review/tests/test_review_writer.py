@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from types import SimpleNamespace
 
@@ -1033,6 +1034,140 @@ def test_publish_review_failed_native_review_leaves_the_provisional_marker(alice
     assert w.publish_review(**_publish_kwargs(), host=host) is False
     assert len(calls) == 2  # no final PATCH: the sweep retries, consumers fail closed
     assert host.rows == [] and lock.closed
+
+
+@pytest.mark.parametrize("failure", ["final_patch", "review_response"])
+def test_publish_review_retry_does_not_duplicate_native_threads(alice_io, failure):
+    w = writer.bind_io(alice_io)
+    current = None
+    reviews = []
+    native_posts = 0
+    lookups = []
+    locks = []
+    fail_once = True
+
+    def fake_lock(repo, number):
+        lock = _Lock()
+        locks.append(lock)
+        return lock
+
+    def fake_run(cmd, **kw):
+        nonlocal current, native_posts, fail_once
+        if "--input" in cmd:
+            native_posts += 1
+            payload = json.loads(kw["input"])
+            reviews.append(
+                {
+                    "body": payload["body"],
+                    "commit_id": payload["commit_id"],
+                    "user": {"login": "Alice-Agent"},
+                    "state": "COMMENTED",
+                }
+            )
+            if failure == "review_response" and fail_once:
+                fail_once = False
+                return subprocess.CompletedProcess(cmd, 1, "", "response lost")
+        elif "--paginate" in cmd:
+            lookups.append(cmd)
+            # The matching review need not be on the first API page.
+            return subprocess.CompletedProcess(cmd, 0, json.dumps([[], reviews]), "")
+        else:
+            body = next(arg[5:] for arg in cmd if arg.startswith("body="))
+            if "--method" in cmd and "-publishing " not in body and fail_once:
+                fail_once = False
+                return subprocess.CompletedProcess(cmd, 1, "", "PATCH failed")
+            current = {"id": 123, "body": body}
+        return subprocess.CompletedProcess(cmd, 0, "123\n", "")
+
+    alice_io.run = fake_run
+    alice_io._publication_lock = fake_lock
+    alice_io.find_marker_comment = lambda repo, number: current
+    host = _AdvisoryHost()
+    assert w.publish_review(**_publish_kwargs(), host=host) is False
+    assert current is not None
+    previous = w.marker_state(current["body"])
+    assert previous["publishing_sha"] == "a" * 12
+    assert "sha" not in previous and host.rows == []
+    assert (
+        w.publish_review(
+            **_publish_kwargs(existing=current, previous_state=previous), host=host
+        )
+        is True
+    )
+    assert native_posts == 1
+    assert len(lookups) == 1 and "--slurp" in lookups[0]
+    assert w.marker_state(current["body"])["sha"] == "a" * 12
+    assert len(host.rows) == 1
+    assert all(lock.closed for lock in locks)
+
+
+@pytest.mark.parametrize(
+    "lookup",
+    [
+        (1, "", "network error"),
+        (0, "invalid json", ""),
+        (0, '{"message": "API error"}', ""),
+        (0, '[{"body": "not slurped"}]', ""),
+        (0, "[[null]]", ""),
+    ],
+)
+def test_publish_review_retry_fails_closed_on_unreadable_receipt(alice_io, lookup):
+    w = writer.bind_io(alice_io)
+    previous = {"publication_id": "retry-id", "publishing_sha": "a" * 12}
+    current = {"id": 123, "body": w.provisional_marker_body("pending", previous)}
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if "--paginate" in cmd:
+            assert kw["env"]["GH_API_CACHE_TTL"] == "0"
+            return subprocess.CompletedProcess(cmd, *lookup)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    w, lock = _publish_io(alice_io, fake_run, current=current)
+    assert not w.publish_review(
+        **_publish_kwargs(existing=current, previous_state=previous)
+    )
+    assert len(calls) == 2  # provisional PATCH and lookup only; no POST/final PATCH
+    assert "--input" not in calls[1] and lock.closed
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        {},  # an interrupted publication that never reached the POST
+        {"body": None},  # unrelated reviews can have no body
+        {"user": {"login": "mallory"}},  # copied receipt is not ours
+        {"commit_id": "b" * 40},
+        {"body": "<!-- automated-ai-review-publication:other-id -->"},
+        {"state": "PENDING"},
+    ],
+)
+def test_publish_review_retry_posts_when_no_matching_receipt(alice_io, receipt):
+    w = writer.bind_io(alice_io)
+    previous = {"publication_id": "retry-id", "publishing_sha": "a" * 12}
+    current = {"id": 123, "body": w.provisional_marker_body("pending", previous)}
+    review = {
+        "body": w.render_review_event_body("retry-id"),
+        "user": {"login": "alice-agent"},
+        "commit_id": "a" * 40,
+        "state": "COMMENTED",
+    }
+    review.update(receipt)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, 0, json.dumps([[review]] if receipt else [[]]), ""
+        )
+
+    w, lock = _publish_io(alice_io, fake_run, current=current)
+    assert w.publish_review(
+        **_publish_kwargs(existing=current, previous_state=previous)
+    )
+    assert sum("--input" in cmd for cmd in calls) == 1
+    assert len(calls) == 4 and lock.closed
 
 
 def test_publish_review_yields_to_a_marker_that_appeared_while_analysing(alice_io):
