@@ -716,6 +716,26 @@ def test_static_preflight_adds_host_checks_only_when_a_host_supplies_them(alice_
     assert calls == []  # no cited SHA, no CI claim: no I/O
 
 
+@pytest.mark.parametrize(
+    "title, flagged",
+    [
+        ("fix: plain", True),
+        ("fix(review): scoped", True),
+        ("fix!: breaking", True),
+        ("fix(review)!: scoped breaking", True),
+        ("feat!: not a fix", False),
+        ("fixup: not a fix type", False),
+    ],
+)
+def test_rule_7_recognises_breaking_change_fix_titles(alice_io, title, flagged):
+    w = writer.bind_io(alice_io)
+    findings = w._check_fix_without_test(title, ["src/a.py"])
+    assert [f["title"] for f in findings] == (
+        ["fix PR has no regression test"] if flagged else []
+    )
+    assert w._check_fix_without_test(title, ["src/a.py", "tests/test_a.py"]) == []
+
+
 def test_visual_rule_keys_sections_by_new_path_not_header_split(alice_io):
     """A path containing `` b/ `` must still be keyed correctly (rule 1c).
 
@@ -939,23 +959,3 @@ def test_run_shards_fails_closed_and_keeps_the_error_type(alice_io):
     assert w._run_shards([Shard(index=1)], lambda s: ([{"a": 1}], {})) == [
         ([{"a": 1}], {})
     ]
-
-
-@pytest.mark.parametrize(
-    "title, flagged",
-    [
-        ("fix: plain", True),
-        ("fix(review): scoped", True),
-        ("fix!: breaking", True),
-        ("fix(review)!: scoped breaking", True),
-        ("feat!: not a fix", False),
-        ("fixup: not a fix type", False),
-    ],
-)
-def test_rule_7_recognises_breaking_change_fix_titles(alice_io, title, flagged):
-    w = writer.bind_io(alice_io)
-    findings = w._check_fix_without_test(title, ["src/a.py"])
-    assert [f["title"] for f in findings] == (
-        ["fix PR has no regression test"] if flagged else []
-    )
-    assert w._check_fix_without_test(title, ["src/a.py", "tests/test_a.py"]) == []
