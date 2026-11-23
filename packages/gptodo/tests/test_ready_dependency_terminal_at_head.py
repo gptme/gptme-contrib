@@ -79,7 +79,27 @@ def test_dirty_but_terminal_at_head_releases(tmp_path):
     assert _ready(tasks_dir)
 
 
-def test_uncommitted_new_done_dependency_blocks(tmp_path):
+@pytest.mark.parametrize("operation", ["diff", "show"])
+@pytest.mark.parametrize("failure", ["timeout", "error", "exit"])
+def test_git_check_failure_does_not_release_dependency(tmp_path, monkeypatch, operation, failure):
+    tasks_dir = _repo(tmp_path, "active")
+    (tasks_dir / "prereq.md").write_text(_prereq("done"))
+    run = subprocess.run
+
+    def failing_run(args, **kwargs):
+        if args[3] == operation:
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(args, 10)
+            if failure == "error":
+                raise OSError("git unavailable")
+            return subprocess.CompletedProcess(args, 128, "", "fatal: cannot read repository")
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(utils.subprocess, "run", failing_run)
+    assert not _ready(tasks_dir)
+
+
+def test_untracked_done_dependency_keeps_disk_semantics(tmp_path):
     tasks_dir = _repo(tmp_path, "done")
     (tasks_dir / "prereq.md").unlink()
     _git(tmp_path, "rm", "-q", "--cached", "tasks/prereq.md")

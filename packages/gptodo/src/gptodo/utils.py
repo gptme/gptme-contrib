@@ -1844,7 +1844,7 @@ _dirty_task_cache: Dict[Path, Tuple[float, frozenset[str] | None]] = {}
 
 
 def _dirty_task_names(tasks_dir: Path) -> frozenset[str] | None:
-    """File names under ``tasks_dir`` that differ from HEAD (None: not a git checkout).
+    """Dirty file names (empty outside git; None when the git check fails).
 
     One ``git diff`` per directory per 30 s, so readiness over a large task
     tree costs one subprocess, not one per dependency.
@@ -1863,11 +1863,28 @@ def _dirty_task_names(tasks_dir: Path) -> frozenset[str] | None:
             timeout=10,
             check=False,
         )
-        names = (
-            frozenset(line for line in result.stdout.splitlines() if line)
-            if result.returncode == 0
-            else None
-        )
+        if result.returncode == 0:
+            names: frozenset[str] | None = frozenset(
+                line for line in result.stdout.splitlines() if line
+            )
+        else:
+            # A diff failure is not proof that this is a non-git directory.
+            # Only the repository probe's explicit non-git diagnostic permits
+            # disk semantics; timeouts, corrupt repositories and missing HEAD
+            # must not release uncommitted dependencies.
+            probe = subprocess.run(
+                ["git", "-C", str(tasks_dir), "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+                env={**os.environ, "LC_ALL": "C"},
+            )
+            names = (
+                frozenset()
+                if probe.returncode != 0 and "not a git repository" in probe.stderr
+                else None
+            )
     except (OSError, subprocess.TimeoutExpired):
         names = None
     _dirty_task_cache[tasks_dir] = (now, names)
@@ -1882,7 +1899,9 @@ def _terminal_at_head(path: Path) -> bool:
     ready on that. Outside git, or when the file is clean, disk state stands.
     """
     dirty = _dirty_task_names(path.parent)
-    if not dirty or path.name not in dirty:
+    if dirty is None:
+        return False
+    if path.name not in dirty:
         return True
     try:
         shown = subprocess.run(
@@ -1942,7 +1961,7 @@ def _terminal_at_head(path: Path) -> bool:
                         )
                         break
     except (OSError, subprocess.TimeoutExpired):
-        return True
+        return False
     if shown.returncode != 0:
         return False  # new task file, not committed yet
     match = re.search(r"(?m)^state:\s*['\"]?([a-z_]+)", shown.stdout.split("\n---", 1)[0])
