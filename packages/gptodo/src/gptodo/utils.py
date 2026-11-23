@@ -1839,22 +1839,12 @@ def build_dependency_universe(
     )
 
 
-_DIRTY_TASK_CACHE_TTL_SECONDS = 30.0
-_dirty_task_cache: Dict[Path, Tuple[float, frozenset[str] | None]] = {}
-
-
 def _dirty_task_names(tasks_dir: Path) -> frozenset[str] | None:
     """Dirty file names (empty outside git; None when the git check fails).
 
-    One ``git diff`` per directory per 30 s, so readiness over a large task
-    tree costs one subprocess, not one per dependency.
+    Do not cache this across readiness checks: another session can change a
+    previously clean dependency to terminal without committing it.
     """
-    from time import monotonic
-
-    now = monotonic()
-    cached = _dirty_task_cache.get(tasks_dir)
-    if cached is not None and now - cached[0] < _DIRTY_TASK_CACHE_TTL_SECONDS:
-        return cached[1]
     try:
         result = subprocess.run(
             ["git", "-C", str(tasks_dir), "diff", "--name-only", "--relative", "HEAD", "--", "."],
@@ -1887,7 +1877,6 @@ def _dirty_task_names(tasks_dir: Path) -> frozenset[str] | None:
             )
     except (OSError, subprocess.TimeoutExpired):
         names = None
-    _dirty_task_cache[tasks_dir] = (now, names)
     return names
 
 

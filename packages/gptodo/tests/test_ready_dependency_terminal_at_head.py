@@ -26,13 +26,6 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
 
 
-@pytest.fixture(autouse=True)
-def _fresh_cache():
-    utils._dirty_task_cache.clear()
-    yield
-    utils._dirty_task_cache.clear()
-
-
 def _ready(tasks_dir: Path) -> bool:
     tasks = {t.name: t for t in load_tasks(tasks_dir)}
     return is_task_ready(tasks["dependent"], tasks)
@@ -64,6 +57,13 @@ def _repo(tmp_path: Path, committed_state: str) -> Path:
 
 def test_done_only_in_working_tree_blocks(tmp_path):
     tasks_dir = _repo(tmp_path, "active")
+    (tasks_dir / "prereq.md").write_text(_prereq("done"))
+    assert not _ready(tasks_dir)
+
+
+def test_cached_clean_dependency_changed_to_done_still_blocks(tmp_path):
+    tasks_dir = _repo(tmp_path, "active")
+    assert utils._dirty_task_names(tasks_dir) == frozenset()
     (tasks_dir / "prereq.md").write_text(_prereq("done"))
     assert not _ready(tasks_dir)
 
