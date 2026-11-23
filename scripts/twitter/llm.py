@@ -21,6 +21,7 @@ This module handles:
 import json
 import logging
 import os
+import re
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
@@ -252,6 +253,10 @@ def load_config() -> Dict[Any, Any]:
         return cast(Dict[Any, Any], yaml.safe_load(f))
 
 
+# Leading run of handles that X prepends to a reply's text.
+_REPLY_PREFIX_RE = re.compile(r"^(?:\s*@\w+)+\s*")
+
+
 def create_tweet_eval_prompt(tweet: Dict, config: Dict) -> str:
     """Create prompt for tweet evaluation"""
     twitter_handle = os.environ.get("TWITTER_HANDLE")
@@ -276,19 +281,45 @@ def create_tweet_eval_prompt(tweet: Dict, config: Dict) -> str:
             marker = " (US — our prior message)" if is_us else ""
             thread_context += f"Tweet {i + 1} - @{author}{marker}: {t['text']}\n"
 
-    # Direct mention detection: handle appears in the tweet body itself.
+    # Direct mention detection. On a reply the API text starts with an
+    # automatic prefix of the thread's handles, so our handle there is
+    # inherited, not typed (ErikBjare/bob#1519). Only a handle in the body
+    # counts as addressed to us; without thread context we cannot tell them apart.
     tweet_text = tweet.get("text", "")
-    is_direct_mention = f"@{handle_lower}" in tweet_text.lower()
+    handle_re = re.compile(rf"(?<![\w@])@{re.escape(handle_lower)}(?!\w)", re.I)
+    is_reply = bool(tweet.get("thread_context"))
+    prefix_match = _REPLY_PREFIX_RE.match(tweet_text) if is_reply else None
+    body = tweet_text[prefix_match.end() :] if prefix_match else tweet_text
+    # A reply to our own latest message is addressed to us even without a
+    # typed handle (thread_context is chronological; its last entry is the parent).
+    replies_to_us = is_reply and (
+        str(tweet["thread_context"][-1].get("author", "")).lower() == handle_lower
+    )
+    is_direct_mention = bool(handle_re.search(body)) or replies_to_us
+    is_inherited_mention = bool(
+        prefix_match
+        and not is_direct_mention
+        and handle_re.search(prefix_match.group())
+    )
 
     # Build identity context. Fire for direct mentions OR when we're in the
     # thread — both cases need explicit identity to prevent confusion.
     mention_note = ""
-    if is_direct_mention or in_thread:
+    if is_direct_mention or is_inherited_mention or in_thread:
         mention_note = (
             f"\nIMPORTANT: @{twitter_handle} IS our account — we are @{twitter_handle}."
         )
         if is_direct_mention:
             mention_note += " This tweet is addressed TO us. Evaluate it as relevant to us personally."
+        elif is_inherited_mention:
+            mention_note += (
+                f" @{twitter_handle} appears only in the automatic reply prefix"
+                " inherited from the thread; the author did not type it."
+                " Respond only if the message asks us something, corrects us, or a"
+                " reply would add a new useful fact. Ignore praise or commentary"
+                " addressed to someone else, and do not repeat a point our earlier"
+                " reply in this thread already made."
+            )
         if in_thread:
             mention_note += (
                 f" Any prior @{twitter_handle} messages in the thread are OUR own replies;"
