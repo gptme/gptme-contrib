@@ -3339,6 +3339,27 @@ def _check_cited_shas(
     return results
 
 
+#: ``gh pr checks --json state`` values (check-run conclusions/statuses and
+#: commit-status states). Every state is classified; anything else is unknown.
+_FAILED_CHECK_STATES = frozenset(
+    {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+)
+_NONFAILING_CHECK_STATES = frozenset(
+    {
+        "SUCCESS",
+        "NEUTRAL",
+        "SKIPPED",
+        "STALE",
+        "PENDING",
+        "QUEUED",
+        "IN_PROGRESS",
+        "WAITING",
+        "REQUESTED",
+        "EXPECTED",
+    }
+)
+
+
 def _check_unrelated_ci_claim(
     pr_body: str,
     repo: str,
@@ -3385,15 +3406,29 @@ def _check_unrelated_ci_claim(
         for c in ci_raw
     ):
         raise ReviewError(f"cannot verify CI checks for {repo}#{number} (rule 1b)")
-    failing = [
-        c
-        for c in ci_raw
-        if c["state"] in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED")
-    ]
+    failing = [c for c in ci_raw if c["state"] in _FAILED_CHECK_STATES]
+    unknown = sorted(
+        {c["state"] for c in ci_raw} - _FAILED_CHECK_STATES - _NONFAILING_CHECK_STATES
+    )
+    if unknown and not failing:
+        # An unrecognised state cannot establish that the claim is moot, so fail
+        # closed. It does not, however, invalidate positive evidence from a known
+        # failing check — that path still reports the failure below (and names the
+        # unknown states there) instead of aborting an otherwise-usable check.
+        raise ReviewError(
+            f"cannot verify CI checks for {repo}#{number} (rule 1b): "
+            f"unknown check state(s) {', '.join(unknown)}"
+        )
     if not failing:
         return []  # Claim is moot — no failing checks
 
     check_names = ", ".join(f"`{c['name']}`" for c in failing[:3])
+    unknown_note = (
+        f" Unrecognised check state(s) {', '.join(unknown)} are also present and "
+        "could not be classified; they are surfaced here rather than dropped."
+        if unknown
+        else ""
+    )
     anchor = next(iter(touched_files), "")
     return [
         _static_finding(
@@ -3406,6 +3441,7 @@ def _check_unrelated_ci_claim(
                 "A 'flaky' or 'unrelated' claim is accepted only when the failing "
                 "job's path filter is demonstrably disjoint from this diff. "
                 "State the disjoint filter explicitly, or fix the CI."
+                f"{unknown_note}"
             ),
             file=anchor,
             severity="P1",
