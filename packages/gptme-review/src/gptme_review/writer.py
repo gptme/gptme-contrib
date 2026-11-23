@@ -3668,7 +3668,8 @@ def _check_fix_without_test(
     'that measurement should come with a regression test' (gptme#3446).
     Advisory because Erik merged every such PR, but asked for tests each time.
     """
-    if not re.match(r"^fix(\(.*?\))?:", pr_title.strip(), re.IGNORECASE):
+    # ``!`` marks a breaking change (Conventional Commits); it is still a fix.
+    if not re.match(r"^fix(\(.*?\))?!?:", pr_title.strip(), re.IGNORECASE):
         return []
     if any(_TEST_FILE_RE.search(f) for f in touched_files):
         return []
