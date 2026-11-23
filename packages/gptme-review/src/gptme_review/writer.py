@@ -3406,16 +3406,17 @@ def _check_unrelated_ci_claim(
         for c in ci_raw
     ):
         raise ReviewError(f"cannot verify CI checks for {repo}#{number} (rule 1b)")
+    failing = [c for c in ci_raw if c["state"] in _FAILED_CHECK_STATES]
     unknown = sorted(
         {c["state"] for c in ci_raw} - _FAILED_CHECK_STATES - _NONFAILING_CHECK_STATES
     )
-    if unknown:
-        # An unrecognised state is not evidence of a passing check.
+    if unknown and not failing:
+        # An unrecognised state cannot establish that the claim is moot, but
+        # it does not invalidate positive evidence from a known failing check.
         raise ReviewError(
             f"cannot verify CI checks for {repo}#{number} (rule 1b): "
             f"unknown check state(s) {', '.join(unknown)}"
         )
-    failing = [c for c in ci_raw if c["state"] in _FAILED_CHECK_STATES]
     if not failing:
         return []  # Claim is moot — no failing checks
 

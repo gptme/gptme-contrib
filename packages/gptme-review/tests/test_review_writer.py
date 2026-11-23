@@ -699,6 +699,31 @@ def test_unrelated_ci_claim_refuses_an_unrecognised_state(alice_io):
         w._check_unrelated_ci_claim("Flaky test.", "o/r", 5, ["a"])
 
 
+@pytest.mark.parametrize("unknown_state", ["SOMETHING_NEW", "COMPLETED"])
+def test_unrelated_ci_claim_known_failure_survives_unknown_peer(
+    alice_io, unknown_state
+):
+    w = _bound_with(
+        alice_io,
+        gh_json=lambda cmd: [
+            {"name": "Test", "state": "FAILURE"},
+            {"name": "Other", "state": unknown_state},
+        ],
+    )
+    findings = w._check_unrelated_ci_claim("Flaky test.", "o/r", 5, ["a"])
+    assert len(findings) == 1
+    assert "1 check(s)" in findings[0]["body"]
+    assert "`Test`" in findings[0]["body"]
+    assert "`Other`" not in findings[0]["body"]
+
+
+@pytest.mark.parametrize("state", ["", None])
+def test_unrelated_ci_claim_missing_state_is_unverifiable(alice_io, state):
+    w = _bound_with(alice_io, gh_json=lambda cmd: [{"name": "Test", "state": state}])
+    with pytest.raises(writer.ReviewError, match="cannot verify CI checks"):
+        w._check_unrelated_ci_claim("Flaky test.", "o/r", 5, ["a"])
+
+
 def test_visual_rule_checks_renamed_component_using_extracted_new_path(alice_io):
     w = writer.bind_io(alice_io)
     diff = (
