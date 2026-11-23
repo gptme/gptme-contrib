@@ -1839,6 +1839,67 @@ def build_dependency_universe(
     )
 
 
+_DIRTY_TASK_CACHE_TTL_SECONDS = 30.0
+_dirty_task_cache: Dict[Path, Tuple[float, frozenset[str] | None]] = {}
+
+
+def _dirty_task_names(tasks_dir: Path) -> frozenset[str] | None:
+    """File names under ``tasks_dir`` that differ from HEAD (None: not a git checkout).
+
+    One ``git diff`` per directory per 30 s, so readiness over a large task
+    tree costs one subprocess, not one per dependency.
+    """
+    from time import monotonic
+
+    now = monotonic()
+    cached = _dirty_task_cache.get(tasks_dir)
+    if cached is not None and now - cached[0] < _DIRTY_TASK_CACHE_TTL_SECONDS:
+        return cached[1]
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(tasks_dir), "diff", "--name-only", "--relative", "HEAD", "--", "."],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        names = (
+            frozenset(line for line in result.stdout.splitlines() if line)
+            if result.returncode == 0
+            else None
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        names = None
+    _dirty_task_cache[tasks_dir] = (now, names)
+    return names
+
+
+def _terminal_at_head(path: Path) -> bool:
+    """False only when a task file is terminal on disk but not at HEAD.
+
+    A session that times out can leave ``state: done`` uncommitted in a shared
+    working tree next to its uncommitted work. A dependent task must not become
+    ready on that. Outside git, or when the file is clean, disk state stands.
+    """
+    dirty = _dirty_task_names(path.parent)
+    if not dirty or path.name not in dirty:
+        return True
+    try:
+        shown = subprocess.run(
+            ["git", "-C", str(path.parent), "show", f"HEAD:./{path.name}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    if shown.returncode != 0:
+        return False  # new task file, not committed yet
+    match = re.search(r"(?m)^state:\s*['\"]?([a-z_]+)", shown.stdout.split("\n---", 1)[0])
+    return match is not None and match.group(1) in ("done", "cancelled")
+
+
 def is_task_ready(
     task: TaskInfo,
     all_tasks: Dict[str, TaskInfo],
@@ -1848,7 +1909,8 @@ def is_task_ready(
 
     A task is ready if:
     - It has no required dependencies, OR
-    - All its required dependencies are in "done" or "cancelled" state
+    - All its required dependencies are in "done" or "cancelled" state, and
+      a dependency whose file is dirty in git is also terminal at HEAD
     - All URL-based requires are CLOSED (if cache provided)
 
     Uses task.requires (canonical) which includes both explicit requires
@@ -1891,6 +1953,9 @@ def is_task_ready(
             return False
         if dep_task.state not in ["done", "cancelled"]:
             # Dependency not completed = blocked
+            return False
+        if dep_task.path is not None and not _terminal_at_head(Path(dep_task.path)):
+            # Terminal only in the working tree, not committed = blocked
             return False
 
     # Check URL-based requires if cache provided
