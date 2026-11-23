@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import logging
 import sys
@@ -103,6 +104,15 @@ def _load_workflow_module() -> tuple[Any, dict[str, Any]]:
     )
     twitter_api_stub.load_twitter_client = lambda *args, **kwargs: None
     twitter_api_stub._find_placeholder_in_text = lambda *args, **kwargs: None
+    twitter_api_stub.POST_DEDUP_TTL = 24 * 60 * 60
+    twitter_api_stub.current_account = lambda: ""
+    twitter_api_stub._post_dedup_key = lambda *args: "|".join(map(str, args))
+
+    @contextlib.contextmanager
+    def _open_post_gate(key: str, force: bool) -> Any:
+        yield lambda: None
+
+    twitter_api_stub._post_dedup_gate = _open_post_gate
 
     stubbed_modules: dict[str, Any] = {
         "gptmail": gptmail_stub,
