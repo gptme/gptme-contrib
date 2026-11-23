@@ -643,6 +643,7 @@ def test_batched_commit_times_match_per_file_log(
     tasks = repo / "tasks"
     _write(tasks, "first", "done")
     _write(tasks, "second", "done")
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2029-01-01T00:00:00+00:00")
     _commit_all(repo)
     (tasks / "second.md").write_text((tasks / "second.md").read_text() + "\nedit\n")
     monkeypatch.setenv("GIT_COMMITTER_DATE", "2030-01-01T00:00:00+00:00")
@@ -653,3 +654,55 @@ def test_batched_commit_times_match_per_file_log(
         per_file = _git(tasks, "log", "-1", "--format=%ct", "--", name).strip()
         assert times[name] == int(per_file)
     assert times["first.md"] < times["second.md"]
+
+
+def test_batched_commit_times_merge_resolution_and_nested_names(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Merge resolutions stay recent; archived names never shadow live names."""
+    from gptodo.archive import _git_commit_times
+
+    tasks = repo / "tasks"
+    task = _write(tasks, "same", "done")
+    _write(tasks, "other", "done")
+    (tasks / "archive").mkdir()
+    _write(tasks / "archive", "same", "done")
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2020-01-01T00:00:00+00:00")
+    _commit_all(repo)
+    main = _git(repo, "branch", "--show-current").strip()
+    _git(repo, "checkout", "-qb", "side")
+    task.write_text(task.read_text() + "side\n")
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2021-01-01T00:00:00+00:00")
+    _commit_all(repo)
+    _git(repo, "checkout", "-q", main)
+    task.write_text(task.read_text() + "main\n")
+    (tasks / "other.md").write_text((tasks / "other.md").read_text() + "main\n")
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2022-01-01T00:00:00+00:00")
+    _commit_all(repo)
+    merge = subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "merge",
+            "--no-commit",
+            "side",
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert merge.returncode == 1
+    task.write_text("resolved\n")
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2023-01-01T00:00:00+00:00")
+    _commit_all(repo)
+    times = _git_commit_times(tasks)
+    assert times is not None
+    for name in ("same.md", "archive/same.md"):
+        assert times[name] == int(_git(tasks, "log", "-1", "--format=%ct", "--", name))
+    assert times["same.md"] == int(_git(repo, "show", "-s", "--format=%ct", "HEAD"))
+    # A change against either parent may conservatively delay archiving.
+    assert times["other.md"] >= int(_git(tasks, "log", "-1", "--format=%ct", "--", "other.md"))
+    assert times["same.md"] > times["archive/same.md"]

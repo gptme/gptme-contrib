@@ -130,9 +130,10 @@ def _git(cwd: Path, *args: str) -> Optional[str]:
 def _git_commit_times(directory: Path) -> Optional[Dict[str, int]]:
     """Last commit time (unix) per file in ``directory``, from one ``git log`` pass.
 
-    Keys are paths relative to ``directory``. Equivalent to running
-    ``git log -1 --format=%ct -- <file>`` per file, without one subprocess each
-    (that costs ~0.7 s per file on an 18k-commit repo).
+    Keys are paths relative to ``directory``. Avoids one subprocess per file
+    (that costs ~0.7 s per file on an 18k-commit repo). Merge diffs are included
+    so resolution edits cannot look older than they are; files changed against
+    either parent conservatively receive the merge time.
     """
     out = _git(
         directory,
@@ -141,6 +142,7 @@ def _git_commit_times(directory: Path) -> Optional[Dict[str, int]]:
         "log",
         "--format=%x00%ct",
         "--name-only",
+        "-m",
         "--relative",
         "--",
         ".",
