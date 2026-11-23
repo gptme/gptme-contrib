@@ -38,7 +38,7 @@ import os
 import random
 import sys
 import tempfile
-from dataclasses import asdict, dataclass, field, fields as dataclass_fields
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, ClassVar, Iterator, Protocol
@@ -599,16 +599,13 @@ class Bandit:
             last_updated=data.get("last_updated", ""),
         )
         arm_class = cls.state_class.arm_class
-        known = {f.name for f in dataclass_fields(arm_class)}
 
         def build(arm_data: dict) -> BanditArm:
             arm_data = dict(arm_data)
             # Support old format where key was 'lesson_path'
             if "lesson_path" in arm_data and "arm_id" not in arm_data:
                 arm_data["arm_id"] = arm_data.pop("lesson_path")
-            # Fields this engine does not know (written by another tool or a newer
-            # version) are ignored on load rather than corrupting the whole state.
-            return arm_class(**{k: v for k, v in arm_data.items() if k in known})
+            return arm_class(**arm_data)
 
         for arm_id, arm_data in data.get("arms", {}).items():
             state.arms[arm_id] = build(arm_data)

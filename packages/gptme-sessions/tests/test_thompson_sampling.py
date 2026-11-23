@@ -1230,19 +1230,34 @@ def test_backup_recovery_returns_subclass_state(tmp_path):
     assert isinstance(_LabelledBandit(state_dir=empty_dir).state, _LabelledState)
 
 
-def test_arm_fields_this_engine_does_not_know_are_ignored_on_load(tmp_path):
-    """A field written by another tool must not make the whole state unloadable."""
-    state_file = tmp_path / "bandit-state.json"
-    state_file.write_text(
-        json.dumps(
-            {
-                "arms": {"a": {"arm_id": "a", "alpha": 4.0, "beta": 2.0, "last_demoted": "x"}},
-                "contextual_arms": {"a": {"null": {"arm_id": "a", "alpha": 2.0, "note": "y"}}},
-                "total_sessions": 5,
-            }
-        )
+@pytest.mark.parametrize("contextual", [False, True])
+def test_unknown_arm_fields_recover_backup_without_overwriting_it(tmp_path, contextual):
+    """A schema mismatch must not silently reset history or replace the good backup."""
+    bandit = _LabelledBandit(state_dir=tmp_path)
+    for _ in range(20):
+        bandit.update(["a"], outcome=1.0, context=("ctx",))
+    backup = bandit.backup_file.read_text()
+    data = json.loads(bandit.state_file.read_text())
+    arm = (
+        data["contextual_arms"]["a"][ts_module._context_key(("ctx",))]
+        if contextual
+        else data["arms"]["a"]
     )
-    bandit = Bandit(state_dir=tmp_path)
-    assert bandit.state.total_sessions == 5
-    assert bandit.state.arms["a"].alpha == 4.0
-    assert bandit.state.contextual_arms["a"]["null"].alpha == 2.0
+    arm["selections"] = arm.pop("total_selections")
+    bandit.state_file.write_text(json.dumps(data))
+
+    recovered = _LabelledBandit(state_dir=tmp_path)
+    assert recovered.state.total_sessions == 19
+    assert recovered.state.arms["a"].total_selections == 19
+    assert isinstance(recovered.state.arms["a"], _LabelledArm)
+    ctx_arm = recovered.state.contextual_arms["a"][ts_module._context_key(("ctx",))]
+    assert ctx_arm.total_selections == 19
+    assert isinstance(ctx_arm, _LabelledArm)
+
+    recovered.save()
+    assert recovered.backup_file.read_text() == backup
+    saved = json.loads(recovered.state_file.read_text())
+    assert saved["arms"]["a"]["total_selections"] == 19
+    del recovered.state.arms["a"]
+    with pytest.raises(ValueError, match="refusing to delete mature bandit arm"):
+        recovered.save()
