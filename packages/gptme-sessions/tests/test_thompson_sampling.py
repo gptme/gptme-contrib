@@ -1168,3 +1168,63 @@ def test_load_bandit_means_applies_the_lag_gate(tmp_path):
     bandit.save()
     means = load_bandit_means(tmp_path, arm_ids=["x", "unknown"], context=("autonomous",))
     assert means == {"x": pytest.approx(2 / 3), "unknown": 0.5}
+
+
+# ── arm_class / state_class extension hooks ──────────────────────────────────
+
+
+class _LabelledArm(BanditArm):
+    """An arm subclass that keeps its own legacy attribute name."""
+
+    @property
+    def label(self) -> str:
+        return self.arm_id
+
+
+class _LabelledState(BanditState):
+    arm_class = _LabelledArm
+
+
+class _LabelledBandit(Bandit):
+    state_class = _LabelledState
+
+
+def test_default_classes_are_the_plain_engine_types():
+    assert BanditState.arm_class is BanditArm
+    assert Bandit.state_class is BanditState
+
+
+def test_state_builds_subclass_arms_everywhere(tmp_path):
+    bandit = _LabelledBandit(state_dir=tmp_path)
+    assert isinstance(bandit.state, _LabelledState)
+    bandit.update(["a"], outcome=1.0, context=("ctx",))
+    state = bandit.state
+    assert isinstance(state.arms["a"], _LabelledArm)
+    assert isinstance(state.contextual_arms["a"][ts_module._context_key(("ctx",))], _LabelledArm)
+    # Read-only sampling of an unknown arm hands back a subclass arm, uncreated.
+    temp = state._resolve_arm_for_sampling("unknown", None)
+    assert isinstance(temp, _LabelledArm) and "unknown" not in state.arms
+
+
+def test_loaded_state_uses_subclass_for_global_and_contextual_arms(tmp_path):
+    first = _LabelledBandit(state_dir=tmp_path)
+    first.update(["a"], outcome=1.0, context=("ctx",))
+    second = _LabelledBandit(state_dir=tmp_path)
+    assert isinstance(second.state, _LabelledState)
+    assert second.state.arms["a"].label == "a"
+    ctx_arm = second.state.contextual_arms["a"][ts_module._context_key(("ctx",))]
+    assert isinstance(ctx_arm, _LabelledArm)
+    # A plain Bandit still decodes the same file into plain arms.
+    plain = Bandit(state_dir=tmp_path)
+    assert type(plain.state.arms["a"]) is BanditArm
+
+
+def test_backup_recovery_returns_subclass_state(tmp_path):
+    bandit = _LabelledBandit(state_dir=tmp_path)
+    bandit.update(["a"], outcome=1.0)
+    bandit.update(["a"], outcome=1.0)  # second save makes a .bak
+    bandit.state_file.write_text("{not json")
+    recovered = _LabelledBandit(state_dir=tmp_path)
+    assert isinstance(recovered.state.arms["a"], _LabelledArm)
+    empty_dir = tmp_path / "empty"
+    assert isinstance(_LabelledBandit(state_dir=empty_dir).state, _LabelledState)
