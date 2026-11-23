@@ -634,7 +634,9 @@ def test_successive_runs_keep_links_from_archived_referrers(repo: Path, monkeypa
     assert check.exit_code == 0, check.output
 
 
-def test_batched_commit_times_match_per_file_log(repo: Path) -> None:
+def test_batched_commit_times_match_per_file_log(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """One `git log` pass gives each file the same time as `git log -1 -- <file>`."""
     from gptodo.archive import _git_commit_times
 
@@ -643,12 +645,8 @@ def test_batched_commit_times_match_per_file_log(repo: Path) -> None:
     _write(tasks, "second", "done")
     _commit_all(repo)
     (tasks / "second.md").write_text((tasks / "second.md").read_text() + "\nedit\n")
-    subprocess.run(
-        ["git", "commit", "--quiet", "-am", "edit", "--date", "2030-01-01T00:00:00"],
-        cwd=repo,
-        check=True,
-        env={**os.environ, "GIT_COMMITTER_DATE": "2030-01-01T00:00:00+00:00"},
-    )
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2030-01-01T00:00:00+00:00")
+    _git(repo, "commit", "--quiet", "-am", "edit", "--date", "2030-01-01T00:00:00")
     times = _git_commit_times(tasks)
     assert times is not None
     for name in ("first.md", "second.md"):
