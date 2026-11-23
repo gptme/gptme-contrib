@@ -41,7 +41,7 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator, Protocol
+from typing import Any, ClassVar, Iterator, Protocol
 
 import click
 
@@ -252,10 +252,25 @@ class BanditState:
     created: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     last_updated: str = ""
 
+    #: Arm type this state constructs.  A subclass that keeps a legacy arm API
+    #: (e.g. a renamed identity field) overrides it; the engine only ever builds
+    #: arms as ``self.arm_class(arm_id=...)``.
+    #:
+    #: Contract: ``arm_class`` is the *single* source of truth for the arm type.
+    #: :meth:`Bandit._decode_state` builds loaded arms from
+    #: ``state_class.arm_class`` and the state instance itself builds new arms
+    #: from ``self.arm_class``; both are the same class attribute, so a state
+    #: subclass can never disagree with the decoder.  To use a subclass arm, set
+    #: ``arm_class`` on a :class:`BanditState` subclass and point
+    #: ``Bandit.state_class`` at that subclass.  Overriding ``arm_class`` without
+    #: also setting ``state_class`` on the bandit is inert: a plain ``Bandit``
+    #: instantiates ``BanditState`` and never sees the override.
+    arm_class: ClassVar[type[BanditArm]] = BanditArm
+
     def get_or_create_arm(self, arm_id: str) -> BanditArm:
         """Get existing arm or create new one with uniform prior."""
         if arm_id not in self.arms:
-            self.arms[arm_id] = BanditArm(arm_id=arm_id)
+            self.arms[arm_id] = self.arm_class(arm_id=arm_id)
         return self.arms[arm_id]
 
     def get_or_create_contextual_arm(
@@ -266,7 +281,7 @@ class BanditState:
         if arm_id not in self.contextual_arms:
             self.contextual_arms[arm_id] = {}
         if key not in self.contextual_arms[arm_id]:
-            self.contextual_arms[arm_id][key] = BanditArm(arm_id=arm_id)
+            self.contextual_arms[arm_id][key] = self.arm_class(arm_id=arm_id)
         return self.contextual_arms[arm_id][key]
 
     def _resolve_arm_for_sampling(self, arm_id: str, context: tuple[str, ...] | None) -> BanditArm:
@@ -292,7 +307,7 @@ class BanditState:
         if existing is not None:
             return existing
         # Return a temporary arm with uninformative prior — not stored in state
-        return BanditArm(arm_id=arm_id)
+        return self.arm_class(arm_id=arm_id)
 
     def sample_scores(
         self,
@@ -540,6 +555,13 @@ class Bandit:
     DEFAULT_STATE_DIR = "state/bandit"
     DEFAULT_STATE_FILE = "bandit-state.json"
 
+    #: State type this bandit loads and persists.  This is the hook a subclass
+    #: overrides to change the arm type: the arm class is read from
+    #: ``state_class.arm_class`` when decoding and from the instantiated state
+    #: when creating arms, so both paths always agree.  Setting ``arm_class`` on
+    #: a state subclass without setting ``state_class`` here has no effect.
+    state_class: ClassVar[type[BanditState]] = BanditState
+
     def __init__(
         self,
         state_dir: str | Path | None = None,
@@ -581,28 +603,30 @@ class Bandit:
         """Last known-good copy of the state file, kept by ``save()``."""
         return self.state_file.with_name(self.state_file.name + ".bak")
 
-    @staticmethod
-    def _decode_state(text: str) -> BanditState:
+    @classmethod
+    def _decode_state(cls, text: str) -> BanditState:
         """Deserialize a state document for both loading and backup validation."""
         data = json.loads(text)
-        state = BanditState(
+        state = cls.state_class(
             total_sessions=data.get("total_sessions", 0),
             created=data.get("created", ""),
             last_updated=data.get("last_updated", ""),
         )
-        for arm_id, arm_data in data.get("arms", {}).items():
-            # Support old format where key was 'lesson_path'
+        arm_class = cls.state_class.arm_class
+
+        def build(arm_data: dict) -> BanditArm:
             arm_data = dict(arm_data)
+            # Support old format where key was 'lesson_path'
             if "lesson_path" in arm_data and "arm_id" not in arm_data:
                 arm_data["arm_id"] = arm_data.pop("lesson_path")
-            state.arms[arm_id] = BanditArm(**arm_data)
+            return arm_class(**arm_data)
+
+        for arm_id, arm_data in data.get("arms", {}).items():
+            state.arms[arm_id] = build(arm_data)
         for arm_id, contexts in data.get("contextual_arms", {}).items():
-            state.contextual_arms[arm_id] = {}
-            for ctx_key, arm_data in contexts.items():
-                arm_data = dict(arm_data)
-                if "lesson_path" in arm_data and "arm_id" not in arm_data:
-                    arm_data["arm_id"] = arm_data.pop("lesson_path")
-                state.contextual_arms[arm_id][ctx_key] = BanditArm(**arm_data)
+            state.contextual_arms[arm_id] = {
+                ctx_key: build(arm_data) for ctx_key, arm_data in contexts.items()
+            }
         return state
 
     def _load_state(self) -> BanditState:
@@ -625,7 +649,7 @@ class Bandit:
                 return state
             except (ValueError, TypeError, KeyError, AttributeError) as e:
                 print(f"Warning: corrupted bandit state in {path.name}: {e}", file=sys.stderr)
-        return BanditState()
+        return self.state_class()
 
     def save(self, *, allow_arm_deletion: bool = False) -> None:
         """Persist bandit state to disk.

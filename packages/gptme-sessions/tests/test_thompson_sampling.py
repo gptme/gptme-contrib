@@ -1168,3 +1168,136 @@ def test_load_bandit_means_applies_the_lag_gate(tmp_path):
     bandit.save()
     means = load_bandit_means(tmp_path, arm_ids=["x", "unknown"], context=("autonomous",))
     assert means == {"x": pytest.approx(2 / 3), "unknown": 0.5}
+
+
+# ── arm_class / state_class extension hooks ──────────────────────────────────
+
+
+class _LabelledArm(BanditArm):
+    """An arm subclass that keeps its own legacy attribute name."""
+
+    @property
+    def label(self) -> str:
+        return self.arm_id
+
+
+class _LabelledState(BanditState):
+    arm_class = _LabelledArm
+
+
+class _LabelledBandit(Bandit):
+    state_class = _LabelledState
+
+
+def test_default_classes_are_the_plain_engine_types():
+    assert BanditState.arm_class is BanditArm
+    assert Bandit.state_class is BanditState
+
+
+def test_state_class_alone_controls_the_arm_type(tmp_path):
+    """`state_class` is the only bandit-level hook; decode and create agree."""
+
+    class _OtherArm(BanditArm):
+        pass
+
+    class _OtherState(BanditState):
+        arm_class = _OtherArm
+
+    class _OtherBandit(Bandit):
+        state_class = _OtherState
+
+    bandit = _OtherBandit(state_dir=tmp_path)
+    bandit.update(["a"], outcome=1.0, context=("ctx",))
+    # Created arms come from the state instance.
+    assert type(bandit.state.arms["a"]) is _OtherArm
+    # ... and decoding the same file produces the same type, so a reload never
+    # downgrades a subclass arm to the base type.
+    reloaded = _OtherBandit(state_dir=tmp_path)
+    assert type(reloaded.state.arms["a"]) is _OtherArm
+    ctx_arm = reloaded.state.contextual_arms["a"][ts_module._context_key(("ctx",))]
+    assert type(ctx_arm) is _OtherArm
+
+
+def test_arm_class_without_state_class_is_inert(tmp_path):
+    """Documented behaviour: overriding `arm_class` alone does not reach the engine."""
+
+    class _IgnoredArm(BanditArm):
+        pass
+
+    class _IgnoredState(BanditState):
+        arm_class = _IgnoredArm
+
+    # No Bandit.state_class override: the base engine builds plain BanditState.
+    bandit = Bandit(state_dir=tmp_path)
+    bandit.update(["a"], outcome=1.0)
+    assert type(bandit.state.arms["a"]) is BanditArm
+    assert _IgnoredState.arm_class is _IgnoredArm  # the override exists, just unused
+
+
+def test_state_builds_subclass_arms_everywhere(tmp_path):
+    bandit = _LabelledBandit(state_dir=tmp_path)
+    assert isinstance(bandit.state, _LabelledState)
+    bandit.update(["a"], outcome=1.0, context=("ctx",))
+    state = bandit.state
+    assert isinstance(state.arms["a"], _LabelledArm)
+    assert isinstance(state.contextual_arms["a"][ts_module._context_key(("ctx",))], _LabelledArm)
+    # Read-only sampling of an unknown arm hands back a subclass arm, uncreated.
+    temp = state._resolve_arm_for_sampling("unknown", None)
+    assert isinstance(temp, _LabelledArm) and "unknown" not in state.arms
+
+
+def test_loaded_state_uses_subclass_for_global_and_contextual_arms(tmp_path):
+    first = _LabelledBandit(state_dir=tmp_path)
+    first.update(["a"], outcome=1.0, context=("ctx",))
+    second = _LabelledBandit(state_dir=tmp_path)
+    assert isinstance(second.state, _LabelledState)
+    assert second.state.arms["a"].label == "a"
+    ctx_arm = second.state.contextual_arms["a"][ts_module._context_key(("ctx",))]
+    assert isinstance(ctx_arm, _LabelledArm)
+    # A plain Bandit still decodes the same file into plain arms.
+    plain = Bandit(state_dir=tmp_path)
+    assert type(plain.state.arms["a"]) is BanditArm
+
+
+def test_backup_recovery_returns_subclass_state(tmp_path):
+    bandit = _LabelledBandit(state_dir=tmp_path)
+    bandit.update(["a"], outcome=1.0)
+    bandit.update(["a"], outcome=1.0)  # second save makes a .bak
+    bandit.state_file.write_text("{not json")
+    recovered = _LabelledBandit(state_dir=tmp_path)
+    assert isinstance(recovered.state.arms["a"], _LabelledArm)
+    empty_dir = tmp_path / "empty"
+    assert isinstance(_LabelledBandit(state_dir=empty_dir).state, _LabelledState)
+
+
+@pytest.mark.parametrize("contextual", [False, True])
+def test_unknown_arm_fields_recover_backup_without_overwriting_it(tmp_path, contextual):
+    """A schema mismatch must not silently reset history or replace the good backup."""
+    bandit = _LabelledBandit(state_dir=tmp_path)
+    for _ in range(20):
+        bandit.update(["a"], outcome=1.0, context=("ctx",))
+    backup = bandit.backup_file.read_text()
+    data = json.loads(bandit.state_file.read_text())
+    arm = (
+        data["contextual_arms"]["a"][ts_module._context_key(("ctx",))]
+        if contextual
+        else data["arms"]["a"]
+    )
+    arm["selections"] = arm.pop("total_selections")
+    bandit.state_file.write_text(json.dumps(data))
+
+    recovered = _LabelledBandit(state_dir=tmp_path)
+    assert recovered.state.total_sessions == 19
+    assert recovered.state.arms["a"].total_selections == 19
+    assert isinstance(recovered.state.arms["a"], _LabelledArm)
+    ctx_arm = recovered.state.contextual_arms["a"][ts_module._context_key(("ctx",))]
+    assert ctx_arm.total_selections == 19
+    assert isinstance(ctx_arm, _LabelledArm)
+
+    recovered.save()
+    assert recovered.backup_file.read_text() == backup
+    saved = json.loads(recovered.state_file.read_text())
+    assert saved["arms"]["a"]["total_selections"] == 19
+    del recovered.state.arms["a"]
+    with pytest.raises(ValueError, match="refusing to delete mature bandit arm"):
+        recovered.save()
